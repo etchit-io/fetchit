@@ -1,0 +1,85 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "io.etchit.fetchit"
+    compileSdk = 36
+
+    // Pin matches the etchit-android NDK rev so prebuilt .so files
+    // and the Rust toolchain stay aligned across the family.
+    ndkVersion = "27.0.12077973"
+
+    defaultConfig {
+        applicationId = "io.etchit.fetchit"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 1
+        versionName = "0.1.0-dev"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix = ".dev"
+        }
+        release {
+            isMinifyEnabled = false
+        }
+    }
+
+    buildFeatures {
+        viewBinding = true
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
+
+dependencies {
+    // uniffi-generated bindings call into JNA at runtime.
+    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("androidx.activity:activity-ktx:1.9.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
+    implementation("androidx.lifecycle:lifecycle-process:2.8.6")
+    implementation("androidx.fragment:fragment-ktx:1.8.4")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+
+    // Markwon — native markdown renderer for the text/markdown rendition.
+    // Code-block syntax highlighting via the syntax-highlight plugin
+    // requires Prism4j + an annotation-processor-generated grammar
+    // locator; deferring that wiring to a follow-up since the basic
+    // Markwon coverage already gives readable code blocks.
+    implementation("io.noties.markwon:core:4.6.2")
+
+    // Media3 — unified audio + video playback with built-in controls.
+    // Replaces the older MediaPlayer / SurfaceView pair. PlayerView
+    // ships play/pause, seek bar, time labels, ±15s skip out of the box.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
+    implementation("androidx.media3:media3-datasource:1.4.1")
+}

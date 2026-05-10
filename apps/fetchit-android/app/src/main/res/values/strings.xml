@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">fetch/it</string>
+    <string name="hint_address">Autonomi address</string>
+    <string name="action_fetch">fetch</string>
+    <string name="action_retry">retry</string>
+    <string name="action_close">close</string>
+    <!-- Success message shown for any binary that fetch/it can't
+         render natively. Open / Save buttons sit below it. -->
+    <string name="binary_success_size">✓ %1$s downloaded</string>
+    <string name="binary_success_help">fetch/it doesn\'t have a built-in viewer for this format yet.\nUse open with… or save below.</string>
+    <string name="pdf_page_description">PDF page</string>
+    <string name="action_open_with">open with…</string>
+    <string name="action_save">save…</string>
+    <string name="open_no_app">no app installed to open %1$s</string>
+    <string name="save_done">saved</string>
+    <string name="save_failed">save failed: %1$s</string>
+    <string name="action_play">play</string>
+    <string name="action_pause">pause</string>
+    <string name="audio_loading">loading audio…</string>
+    <string name="error_invalid_address">address must be 64 hex characters</string>
+    <string name="error_fetch_prefix">couldn\'t fetch: %1$s</string>
+    <string name="image_content_description">fetched image</string>
+
+    <!-- Bookmarks -->
+    <string name="bookmark_button_label">bookmarks</string>
+    <string name="bookmark_save_dialog_title">save bookmark</string>
+    <string name="bookmark_name_hint">name it…</string>
+    <string name="bookmark_save_current_with_addr">save current (%1$s…)</string>
+    <string name="bookmark_empty">no bookmarks yet — paste an address above, then tap the star to save it</string>
+    <string name="bookmark_export">export</string>
+    <string name="bookmark_import">import</string>
+    <string name="bookmark_share">share</string>
+    <string name="bookmark_delete">delete</string>
+    <string name="bookmark_rename">rename</string>
+    <string name="bookmark_export_done">bookmarks exported</string>
+    <string name="bookmark_export_failed">export failed: %1$s</string>
+    <string name="bookmark_import_done">imported %1$d bookmark(s)</string>
+    <string name="bookmark_import_failed">import failed: %1$s</string>
+
+    <!-- Settings sheet -->
+    <string name="settings_button_label">settings</string>
+    <string name="settings_peer_count_title">network</string>
+    <string name="settings_peer_count_value">%1$d peers</string>
+    <string name="settings_peer_count_unknown">— peers</string>
+    <string name="settings_peer_count_disconnected">not connected</string>
+    <string name="settings_peers_header_collapsed">bootstrap peers ▾</string>
+    <string name="settings_peers_header_expanded">bootstrap peers ▴</string>
+    <string name="settings_peers_help">one peer per line — `ip:port` or full multiaddr. leave empty to use bundled defaults.</string>
+    <string name="settings_save_peers">save</string>
+    <string name="settings_reset_peers">reset</string>
+    <string name="settings_saved">saved — next fetch will reconnect</string>
+    <string name="settings_reset">reset to defaults — next fetch will reconnect</string>
+</resources>

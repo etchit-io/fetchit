@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- FileProvider exposes only the app's cache subdirectory used
+         by BinaryActions for hand-off-to-other-app temp files. -->
+    <cache-path name="open_with" path="open_with/" />
+</paths>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="?android:attr/selectableItemBackground"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/bookmarkLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/bone"
+        android:fontFamily="monospace"
+        android:textSize="14sp"
+        android:singleLine="true"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/bookmarkAddress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textColor="@color/ash"
+        android:fontFamily="monospace"
+        android:textSize="11sp"
+        android:singleLine="true"
+        android:ellipsize="middle" />
+</LinearLayout>

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>fetch button</title>
+<style>
+  :root {
+    --ink:           #0a0a0a;
+    --ink-2:         #141414;
+    --copper:        #c9732b;
+    --copper-bright: #e58a3f;
+    --copper-dim:    #8a4e1d;
+    --bone:          #f5f2eb;
+    --bone-dim:      #d6cfc0;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: transparent;
+    color: var(--bone);
+    font-family: monospace;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .fetch-btn {
+    /* Scale with the host WebView via vmin so the same HTML works at
+       any container size — Android-side just sets layout_width/height. */
+    --size: 92vmin;
+    width: var(--size);
+    height: var(--size);
+    border-radius: 50%;
+    border: none;
+    background: var(--ink-2);
+    color: var(--bone);
+    position: relative;
+    cursor: pointer;
+    font-family: inherit;
+    transition: transform 0.4s cubic-bezier(.2,.7,.2,1), box-shadow 0.4s;
+    box-shadow: 0 24px 48px -20px rgba(0,0,0,0.6),
+                0 4px 12px -4px rgba(0,0,0,0.4);
+    -webkit-tap-highlight-color: transparent;
+    outline: none;
+  }
+  .fetch-btn:active { transform: translateY(0); }
+
+  /* ring */
+  .fetch-btn .ring {
+    position: absolute;
+    inset: -3vmin;
+    width: calc(var(--size) + 6vmin);
+    height: calc(var(--size) + 6vmin);
+    pointer-events: none;
+  }
+  .fetch-btn .ring circle {
+    fill: none;
+    stroke: var(--copper);
+    stroke-width: 2;
+    opacity: 0.35;
+    transition: opacity 0.3s, stroke-dasharray 0.4s;
+  }
+  .fetch-btn.fetching .ring circle {
+    opacity: 1;
+    stroke-width: 3;
+    stroke-dasharray: 240 720;
+    stroke-linecap: round;
+    transform-origin: center;
+    animation: ringSweep 1.4s linear infinite;
+  }
+  @keyframes ringSweep {
+    from { transform: rotate(-90deg); }
+    to   { transform: rotate(270deg); }
+  }
+
+  /* button text */
+  .fetch-btn .btn-text {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5vmin;
+    transition: opacity 0.25s ease, transform 0.35s cubic-bezier(.2,.7,.2,1);
+  }
+  .fetch-btn .btn-text .primary {
+    font-size: 14vmin;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .fetch-btn .btn-text .slash { color: var(--copper); padding: 0 0.3vmin; }
+  .fetch-btn .btn-text .callsign {
+    font-size: 4.8vmin;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    color: var(--bone-dim);
+    opacity: 0.6;
+  }
+  .fetch-btn.fetching .btn-text {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+
+  /* button spinner */
+  .fetch-btn .btn-spinner {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: scale(0.85);
+    transition: opacity 0.3s 0.15s ease, transform 0.45s cubic-bezier(.2,.7,.2,1) 0.1s;
+    pointer-events: none;
+  }
+  .fetch-btn.fetching .btn-spinner {
+    opacity: 1;
+    transform: scale(1);
+  }
+  .fetch-btn .btn-spinner svg {
+    width: 70%;
+    height: 70%;
+    overflow: visible;
+  }
+
+  /* [/] brand mark beneath the dog */
+  .fetch-btn .btn-brand {
+    position: absolute;
+    bottom: 17vmin;
+    left: 50%;
+    transform: translate(-50%, 4px);
+    width: 14vmin;
+    opacity: 0;
+    transition: opacity 0.3s 0.35s ease,
+                transform 0.5s 0.3s cubic-bezier(.2,.7,.2,1);
+    pointer-events: none;
+  }
+  .fetch-btn .btn-brand svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+  .fetch-btn .btn-brand path { fill: var(--copper); }
+  .fetch-btn.fetching .btn-brand {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  /* button gets the brighter copper for emphasis */
+  .fetch-btn .body,
+  .fetch-btn .head { fill: var(--copper-bright); }
+  .fetch-btn .leg.fl,
+  .fetch-btn .leg.bl { fill: var(--copper-bright); }
+  .fetch-btn .tail { stroke: var(--copper-bright); }
+  .fetch-btn .ground { stroke: var(--copper-dim); }
+
+  /* the dog animations */
+  .dog { animation: bob 0.26s ease-in-out infinite; }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0); }
+    25%      { transform: translateY(-5px); }
+    50%      { transform: translateY(0); }
+    75%      { transform: translateY(-5px); }
+  }
+
+  .leg { transform-box: fill-box; transform-origin: 50% 0%; }
+  .leg.fr, .leg.bl { animation: legA 0.26s linear infinite; }
+  .leg.fl, .leg.br { animation: legB 0.26s linear infinite; }
+  @keyframes legA {
+    0%   { transform: rotate(-55deg) translateY(-3px); }
+    25%  { transform: rotate(-10deg) translateY(0); }
+    50%  { transform: rotate(50deg)  translateY(0); }
+    75%  { transform: rotate(15deg)  translateY(0); }
+    100% { transform: rotate(-55deg) translateY(-3px); }
+  }
+  @keyframes legB {
+    0%   { transform: rotate(50deg)  translateY(0); }
+    25%  { transform: rotate(15deg)  translateY(0); }
+    50%  { transform: rotate(-55deg) translateY(-3px); }
+    75%  { transform: rotate(-10deg) translateY(0); }
+    100% { transform: rotate(50deg)  translateY(0); }
+  }
+
+  .tail {
+    fill: none;
+    stroke-linecap: round;
+    transform-box: fill-box;
+    transform-origin: 100% 100%;
+    animation: wag 0.16s ease-in-out infinite;
+  }
+  @keyframes wag {
+    0%, 100% { transform: rotate(-12deg); }
+    50%      { transform: rotate(22deg); }
+  }
+
+  .ear {
+    transform-box: fill-box;
+    transform-origin: 50% 0%;
+    animation: ear 0.26s ease-in-out infinite;
+  }
+  @keyframes ear {
+    0%, 100% { transform: rotate(2deg); }
+    50%      { transform: rotate(-20deg); }
+  }
+
+  /* dog SVG fills (default — overridden inside .fetch-btn) */
+  .body, .head { fill: var(--copper); }
+  .leg.fl, .leg.bl { fill: var(--copper); }
+  .leg.fr, .leg.br, .ear { fill: var(--copper-dim); }
+  .snout { fill: var(--copper-bright); }
+  .tail { stroke: var(--copper); stroke-linecap: round; fill: none; }
+  .nose, .eye { fill: var(--ink); }
+  .ground { stroke: var(--copper-dim); stroke-linecap: round; }
+
+  /* dust */
+  .dust { fill: var(--copper); opacity: 0; }
+  .dust.d1 { animation: dust 0.26s linear infinite; }
+  .dust.d2 { animation: dust 0.26s linear infinite; animation-delay: 0.09s; }
+  .dust.d3 { animation: dust 0.26s linear infinite; animation-delay: 0.17s; }
+  @keyframes dust {
+    0%   { transform: translate(0, 0) scale(0.4); opacity: 0.6; }
+    100% { transform: translate(-40px, -6px) scale(1.8); opacity: 0; }
+  }
+</style>
+</head>
+<body>
+  <button class="fetch-btn" id="fetchBtn" aria-label="fetch">
+    <svg class="ring" viewBox="0 0 320 320">
+      <circle cx="160" cy="160" r="156" />
+    </svg>
+    <span class="btn-text">
+      <span class="primary">fetch<span class="slash">/</span>it</span>
+      <span class="callsign">etchit</span>
+    </span>
+    <div class="btn-spinner" id="btnSpinner"></div>
+    <div class="btn-brand" aria-hidden="true">
+      <svg viewBox="0 0 32 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M 4 2 L 10 2 L 10 4 L 6 4 L 6 12 L 10 12 L 10 14 L 4 14 Z M 22 2 L 28 2 L 28 14 L 22 14 L 22 12 L 26 12 L 26 4 L 22 4 Z M 12 14 L 15 14 L 20 2 L 17 2 Z"></path>
+      </svg>
+    </div>
+  </button>
+
+  <script>
+    const beagle = `
+      <path class="tail" d="M 60 102 Q 42 90, 38 72" stroke-width="6"></path>
+      <rect class="leg bl" x="74" y="128" width="9" height="22" rx="3.5"></rect>
+      <rect class="leg br" x="86" y="128" width="9" height="22" rx="3.5"></rect>
+      <ellipse class="body" cx="100" cy="112" rx="44" ry="22"></ellipse>
+      <rect class="leg fl" x="118" y="128" width="9" height="22" rx="3.5"></rect>
+      <rect class="leg fr" x="130" y="128" width="9" height="22" rx="3.5"></rect>
+      <circle class="head" cx="150" cy="92" r="22"></circle>
+      <ellipse class="snout" cx="172" cy="98" rx="10" ry="7"></ellipse>
+      <circle class="nose" cx="180" cy="95" r="2.6"></circle>
+      <circle class="eye" cx="156" cy="86" r="2.2"></circle>
+      <path class="ear" d="M 142 78 Q 130 60, 144 56 Q 156 62, 154 82 Z"></path>
+    `;
+
+    const fullSVG = `
+      <svg viewBox="0 0 220 180" xmlns="http://www.w3.org/2000/svg">
+        <line class="ground" x1="20" y1="156" x2="200" y2="156" stroke-width="1.5" stroke-dasharray="4 6"></line>
+        <g transform="translate(70, 152)">
+          <circle class="dust d1" cx="0" cy="0" r="3"></circle>
+          <circle class="dust d2" cx="-6" cy="-2" r="2.5"></circle>
+          <circle class="dust d3" cx="-12" cy="0" r="2"></circle>
+        </g>
+        <g class="dog">${beagle}</g>
+      </svg>
+    `;
+    document.getElementById('btnSpinner').innerHTML = fullSVG;
+
+    const btn = document.getElementById('fetchBtn');
+    btn.addEventListener('click', () => {
+      if (window.Native && window.Native.onFetchTap) {
+        window.Native.onFetchTap();
+      }
+    });
+
+    /** Native bridge: call from Android via webView.evaluateJavascript. */
+    window.setFetching = (on) => {
+      if (on) btn.classList.add('fetching');
+      else btn.classList.remove('fetching');
+    };
+  </script>
+</body>
+</html>

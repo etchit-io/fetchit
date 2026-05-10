@@ -1,0 +1,31 @@
+[package]
+name = "fetchit-cli"
+description = "Command-line viewer for content stored on the Autonomi network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "fetchit"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fetchit-core = { path = "../fetchit-core" }
+fetchit-net = { path = "../fetchit-net" }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.13"

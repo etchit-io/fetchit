@@ -1,0 +1,28 @@
+[package]
+name = "fetchit-net"
+description = "Autonomi network backend for fetch/it. Implements fetchit_core::NetworkClient."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fetchit-core = { path = "../fetchit-core" }
+ant-core = { workspace = true }
+self_encryption = { workspace = true }
+xor_name = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

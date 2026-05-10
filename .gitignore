@@ -1,0 +1,33 @@
+# ── Rust ─────────────────────────────────────────────────
+**/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ── Android / Gradle / Kotlin ────────────────────────────
+**/build/
+**/.gradle/
+**/.kotlin/
+apps/fetchit-android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+# Compiled FFI libraries — rebuilt by `cargo ndk build` from fetchit-ffi
+apps/fetchit-android/app/src/main/jniLibs/**/*.so
+
+# ── Generated bindings (rebuild from source) ─────────────
+generated/
+
+# ── Embedded sibling project (its own git repo) ──────────
+/etchit/
+
+# ── Autonomi upload artifacts ────────────────────────────
+*.datamap
+
+# ── IDE / OS ─────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.log

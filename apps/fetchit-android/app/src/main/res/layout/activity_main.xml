@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootCoordinator"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ink">
+
+    <!-- Main content. SwipeRefreshLayout wraps the inner constraint
+         layout so pulling down from the top re-runs the last fetch. -->
+    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+        android:id="@+id/swipeRefresh"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="12dp">
+
+        <!-- Top bar: full-width address + ★ -->
+        <EditText
+            android:id="@+id/addressInput"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_address"
+            android:inputType="text"
+            android:imeOptions="actionGo"
+            android:maxLines="1"
+            android:textColor="@color/bone"
+            android:textColorHint="@color/ash"
+            android:fontFamily="monospace"
+            android:textSize="13sp"
+            app:layout_constraintEnd_toStartOf="@+id/bookmarkButton"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <Button
+            android:id="@+id/bookmarkButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="★"
+            android:textColor="@color/copper"
+            android:textSize="18sp"
+            android:backgroundTint="@color/ink_3"
+            android:contentDescription="@string/bookmark_button_label"
+            android:minWidth="48dp"
+            android:layout_marginStart="6dp"
+            app:layout_constraintBottom_toBottomOf="@+id/addressInput"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="@+id/addressInput" />
+
+        <!-- Dead-center animated fetch button (WebView-backed). The
+             button itself signals state: idle = static "fetch/it" face,
+             fetching = ring sweep + running beagle, success = gone
+             (content takes the centre, see RenditionRenderer). -->
+        <io.etchit.fetchit.FetchButton
+            android:id="@+id/fetchButton"
+            android:layout_width="150dp"
+            android:layout_height="150dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Rendition surfaces. When the renderer has content the
+             fetch button is hidden so these can use the full area. -->
+        <TextView
+            android:id="@+id/kindText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="@color/copper"
+            android:fontFamily="monospace"
+            android:textSize="12sp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/addressInput" />
+
+        <ScrollView
+            android:id="@+id/contentScroll"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="48dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/kindText">
+
+            <TextView
+                android:id="@+id/contentText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/bone"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:textIsSelectable="true"
+                android:padding="6dp" />
+        </ScrollView>
+
+        <io.etchit.fetchit.PdfView
+            android:id="@+id/pdfView"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="48dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/kindText" />
+
+        <io.etchit.fetchit.HtmlView
+            android:id="@+id/htmlView"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="48dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/kindText" />
+
+        <ImageView
+            android:id="@+id/imageView"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="48dp"
+            android:adjustViewBounds="true"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            android:contentDescription="@string/image_content_description"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/kindText" />
+
+        <!-- Media3 PlayerView: dead-centred when an audio (and later
+             video) rendition is active. Built-in controls render
+             play/pause, seek bar, time labels, and ±15s skip. -->
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/playerView"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:layout_marginEnd="12dp"
+            android:visibility="gone"
+            android:background="@color/ink_2"
+            app:show_buffering="when_playing"
+            app:auto_show="true"
+            app:resize_mode="fit"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Close ✕ — dismisses the rendition and brings the fetch
+             button back. Visible only while content is rendered. -->
+        <!-- OpaqueBinary actions: appear when the renderer can't
+             draw the content natively, give the user a path to
+             another app or to the file system. -->
+        <LinearLayout
+            android:id="@+id/binaryActions"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="48dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+
+            <Button
+                android:id="@+id/openWithButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/action_open_with"
+                android:backgroundTint="@color/copper"
+                android:textColor="@color/ink" />
+
+            <Button
+                android:id="@+id/saveButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:text="@string/action_save"
+                android:backgroundTint="@color/ink_3"
+                android:textColor="@color/copper" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/closeButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:text="✕"
+            android:textColor="@color/ash"
+            android:textSize="18sp"
+            android:backgroundTint="@android:color/transparent"
+            android:padding="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:insetLeft="0dp"
+            android:insetTop="0dp"
+            android:insetRight="0dp"
+            android:insetBottom="0dp"
+            android:visibility="gone"
+            android:contentDescription="@string/action_close"
+            android:layout_marginTop="6dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/addressInput" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+    <!-- Persistent settings sheet — peek shows just the drag handle. -->
+    <LinearLayout
+        android:id="@+id/settingsSheet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@color/ink_2"
+        app:layout_behavior="com.google.android.material.bottomsheet.BottomSheetBehavior"
+        app:behavior_peekHeight="36dp"
+        app:behavior_hideable="false">
+
+        <com.google.android.material.bottomsheet.BottomSheetDragHandleView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/settings_button_label" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:paddingTop="0dp">
+
+            <!-- Network — always visible, live count -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_peer_count_title"
+                android:textColor="@color/ash"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
+
+            <TextView
+                android:id="@+id/peerCountText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textColor="@color/ash"
+                android:fontFamily="monospace"
+                android:textSize="16sp" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="16dp"
+                android:background="@color/ink_3" />
+
+            <!-- Bootstrap peers — collapsible. Header tap toggles body. -->
+            <TextView
+                android:id="@+id/peersHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"
+                android:text="@string/settings_peers_header_collapsed"
+                android:textColor="@color/ash"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:background="?android:attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <LinearLayout
+                android:id="@+id/peersBody"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_peers_help"
+                    android:textColor="@color/ash"
+                    android:fontFamily="monospace"
+                    android:textSize="11sp" />
+
+                <EditText
+                    android:id="@+id/peersEdit"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minLines="6"
+                    android:gravity="top"
+                    android:inputType="textMultiLine"
+                    android:textColor="@color/bone"
+                    android:textColorHint="@color/ash"
+                    android:fontFamily="monospace"
+                    android:textSize="12sp"
+                    android:background="@color/ink_3"
+                    android:padding="8dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="10dp"
+                    android:layout_marginBottom="12dp">
+
+                    <Button
+                        android:id="@+id/resetPeersButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/settings_reset_peers"
+                        android:backgroundTint="@color/ink_3"
+                        android:textColor="@color/copper" />
+
+                    <Button
+                        android:id="@+id/savePeersButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="6dp"
+                        android:text="@string/settings_save_peers"
+                        android:backgroundTint="@color/copper"
+                        android:textColor="@color/ink" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

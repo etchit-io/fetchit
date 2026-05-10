@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#0a0a0a</color>
+    <color name="ink_2">#141414</color>
+    <color name="ink_3">#1a1a1a</color>
+    <color name="bone">#f5f2eb</color>
+    <color name="bone_dim">#d6cfc0</color>
+    <color name="ash">#8a8a8a</color>
+    <color name="copper">#c9732b</color>
+    <color name="copper_bright">#e58a3f</color>
+    <!-- Status colours match etchit exactly (Tokyo Night palette).
+         Used for "this thing is in a good state" (green) and "honest
+         transient failure surface" (red). -->
+    <color name="status_green">#9ece6a</color>
+    <color name="status_red">#f7768e</color>
+</resources>

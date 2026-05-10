@@ -1,0 +1,37 @@
+[package]
+name = "fetchit-ffi"
+description = "FFI bindings (uniffi 0.29.x) over fetchit-core + fetchit-net for Kotlin/Swift consumers."
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-3.0-only"
+homepage = "https://etchit.io"
+repository = "https://github.com/etchit-io/fetchit"
+authors = ["the fetch/it contributors"]
+
+# fetchit-ffi sits OUTSIDE the main workspace by deliberate choice.
+# `uniffi-bindgen` walks all transitive deps when run against a
+# workspace `.so` and fails the metadata lookup silently when the
+# tree is large. Etchit hits the same behaviour and uses the same
+# fix — keep the FFI crate in its own Cargo island, with path deps
+# back into the main workspace's library crates.
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+fetchit-core = { path = "../fetchit-core" }
+fetchit-net = { path = "../fetchit-net" }
+uniffi = { version = "=0.29.4", features = ["tokio"] }
+async-trait = "0.1"
+bytes = "1.7"
+log = "0.4"
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+
+[build-dependencies]
+uniffi = { version = "=0.29.4", features = ["build"] }
