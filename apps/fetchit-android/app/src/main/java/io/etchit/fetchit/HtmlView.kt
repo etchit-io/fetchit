@@ -1,14 +1,22 @@
 package io.etchit.fetchit
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.util.AttributeSet
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayInputStream
 import java.net.URLConnection
@@ -60,6 +68,15 @@ import java.net.URLConnection
  * ```js
  * const r = await fetch(`https://aut.local/${addr}`);
  * ```
+ *
+ * **Range requests** are supported (`Accept-Ranges: bytes` advertised,
+ * `RFC 7233` `Range` header honoured with 206 / 416 responses). The
+ * first lookup of any address still blocks on a full Autonomi fetch,
+ * but the bytes are then cached and any subsequent media seek or
+ * partial fetch is served from memory. Truly progressive streaming
+ * (feeding bytes to the browser as Autonomi chunks arrive) would
+ * require a streaming API on the underlying client and is not yet
+ * implemented.
  */
 @SuppressLint("SetJavaScriptEnabled")
 class HtmlView @JvmOverloads constructor(
@@ -83,6 +100,13 @@ class HtmlView @JvmOverloads constructor(
         onAutonomiNavigate = callback
     }
 
+    /** The fullscreen container view supplied by the WebView when an HTML
+     * video element enters fullscreen. While non-null, [`fullscreenBackCb`]
+     * is enabled so system back exits fullscreen first. */
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+    private var fullscreenBackCb: OnBackPressedCallback? = null
+
     private val webView: WebView = WebView(context).apply {
         settings.apply {
             javaScriptEnabled = true
@@ -93,6 +117,7 @@ class HtmlView @JvmOverloads constructor(
         }
         setBackgroundColor(0)
         webViewClient = AutonomiWebViewClient()
+        webChromeClient = AutonomiChromeClient()
     }
 
     init {
@@ -127,6 +152,12 @@ class HtmlView @JvmOverloads constructor(
 
     /** Stop loading and clear the page. Call from the host's clear path. */
     fun release() {
+        // If we're tearing down while a video is fullscreen, restore
+        // the layout + system UI before unloading. Otherwise the user
+        // would be left staring at hidden status bars.
+        if (fullscreenView != null) {
+            (webView.webChromeClient as? AutonomiChromeClient)?.onHideCustomView()
+        }
         webView.stopLoading()
         webView.loadUrl("about:blank")
         resourceCache.clear()
@@ -146,7 +177,7 @@ class HtmlView @JvmOverloads constructor(
         ): WebResourceResponse? {
             val url = request?.url?.toString() ?: return null
             val addr = extractAddr(url) ?: return null
-            return resolveAddr(addr)
+            return resolveAddr(addr, request.requestHeaders)
         }
 
         override fun shouldOverrideUrlLoading(
@@ -159,6 +190,72 @@ class HtmlView @JvmOverloads constructor(
             // bookmark + back-stack surfaces consistently.
             onAutonomiNavigate?.invoke(addr)
             return true
+        }
+    }
+
+    /**
+     * Handles HTML5 video / SPA fullscreen requests. When a `<video>`
+     * element calls `requestFullscreen()` (or the user taps the
+     * native fullscreen button on the platform's media controls) the
+     * WebView hands us a `View` to mount at the top of the activity
+     * window and a callback to invoke when the page exits fullscreen.
+     *
+     * We attach the view to the activity's decor view at full size,
+     * hide the system bars, and register a temporary back-press
+     * callback so the system back gesture exits fullscreen instead
+     * of running the host's autonomi:// back-stack navigation.
+     */
+    private inner class AutonomiChromeClient : WebChromeClient() {
+        override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+            // Reject overlapping fullscreen requests — should only have
+            // one video fullscreen at a time.
+            if (fullscreenView != null) {
+                callback.onCustomViewHidden()
+                return
+            }
+            val activity = context as? Activity ?: run {
+                callback.onCustomViewHidden()
+                return
+            }
+            fullscreenView = view
+            fullscreenCallback = callback
+
+            val decor = activity.window.decorView as ViewGroup
+            decor.addView(
+                view,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            WindowCompat.getInsetsController(activity.window, decor)
+                .hide(WindowInsetsCompat.Type.systemBars())
+
+            // Back exits fullscreen. Higher priority than the host's
+            // autonomi:// back-stack callback because this is the most
+            // recently registered enabled callback.
+            (activity as? ComponentActivity)?.let { ca ->
+                val cb = object : OnBackPressedCallback(true) {
+                    override fun handleOnBackPressed() {
+                        onHideCustomView()
+                    }
+                }
+                ca.onBackPressedDispatcher.addCallback(cb)
+                fullscreenBackCb = cb
+            }
+        }
+
+        override fun onHideCustomView() {
+            val activity = context as? Activity ?: return
+            val decor = activity.window.decorView as ViewGroup
+            fullscreenView?.let { decor.removeView(it) }
+            fullscreenView = null
+            fullscreenCallback?.onCustomViewHidden()
+            fullscreenCallback = null
+            fullscreenBackCb?.remove()
+            fullscreenBackCb = null
+            WindowCompat.getInsetsController(activity.window, decor)
+                .show(WindowInsetsCompat.Type.systemBars())
         }
     }
 
@@ -184,28 +281,107 @@ class HtmlView @JvmOverloads constructor(
         return if (isValidAutonomiAddress(addr)) addr else null
     }
 
-    /** Resolve a 64-hex Autonomi address into a [`WebResourceResponse`]. */
-    private fun resolveAddr(addr: String): WebResourceResponse {
-        resourceCache[addr]?.let { return it.toResponse() }
-
-        val app = context.applicationContext as FetchitApplication
-        val client = app.client() ?: return errorResponse(503, "no client connected")
-
-        val bytes = try {
-            // shouldInterceptRequest runs on a WebView network thread,
-            // not the main thread. runBlocking is safe here and the
-            // tokio runtime owned by the FFI handles the async fetch
-            // on its own threads.
-            runBlocking { client.fetch(addr) }
-        } catch (e: Exception) {
-            Log.w(TAG, "autonomi fetch failed for $addr", e)
-            return errorResponse(502, e.message ?: "fetch failed")
+    /**
+     * Resolve a 64-hex Autonomi address into a [`WebResourceResponse`],
+     * honouring any `Range` header on the request. The first lookup
+     * for an address blocks on the full Autonomi fetch (see streaming
+     * note in the class docstring); subsequent lookups (including
+     * range-narrowed ones from media-element seeks) are served from
+     * the in-memory cache and are essentially free.
+     */
+    private fun resolveAddr(
+        addr: String,
+        requestHeaders: Map<String, String>?,
+    ): WebResourceResponse {
+        val cached = resourceCache[addr] ?: run {
+            val app = context.applicationContext as FetchitApplication
+            val client = app.client()
+                ?: return errorResponse(503, "no client connected")
+            val bytes = try {
+                // shouldInterceptRequest runs on a WebView network thread,
+                // not the main thread. runBlocking is safe here and the
+                // tokio runtime owned by the FFI handles the async fetch
+                // on its own threads.
+                runBlocking { client.fetch(addr) }
+            } catch (e: Exception) {
+                Log.w(TAG, "autonomi fetch failed for $addr", e)
+                return errorResponse(502, e.message ?: "fetch failed")
+            }
+            val mime = sniffMime(bytes) ?: "application/octet-stream"
+            CachedResource(mime = mime, bytes = bytes)
+                .also { resourceCache[addr] = it }
         }
+        val range = parseRange(requestHeaders, cached.bytes.size)
+        return cached.toResponse(range)
+    }
 
-        val mime = sniffMime(bytes) ?: "application/octet-stream"
-        val cached = CachedResource(mime = mime, bytes = bytes)
-        resourceCache[addr] = cached
-        return cached.toResponse()
+    /**
+     * Parse an `RFC 7233` `Range: bytes=<start>-<end>` header into a
+     * concrete `[start, end]` byte index pair (inclusive). Supports:
+     *  - `bytes=0-499`   — explicit range
+     *  - `bytes=500-`    — open-ended ("from byte N to end")
+     *  - `bytes=-500`    — suffix length ("last N bytes")
+     *
+     * Multipart ranges (`bytes=0-99,200-299`) are treated as absent —
+     * we fall back to a 200 with the full body, which browsers handle
+     * fine. Returns `null` if the header is missing or unparseable.
+     */
+    @Suppress("ReturnCount")
+    private fun parseRange(
+        headers: Map<String, String>?,
+        totalSize: Int,
+    ): RangeSlice? {
+        val raw = headers?.entries
+            ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
+            ?.value
+            ?: return null
+        val match = RANGE_PATTERN.matchEntire(raw.trim()) ?: return null
+        val sStr = match.groupValues[1]
+        val eStr = match.groupValues[2]
+        if (sStr.isEmpty() && eStr.isEmpty()) return null
+
+        return when {
+            sStr.isEmpty() -> {
+                // Suffix form: bytes=-N → last N bytes.
+                val suffix = eStr.toLongOrNull()?.toInt() ?: return null
+                if (suffix <= 0) return null
+                RangeSlice(
+                    start = (totalSize - suffix).coerceAtLeast(0),
+                    end = totalSize - 1,
+                    total = totalSize,
+                )
+            }
+            eStr.isEmpty() -> {
+                val start = sStr.toLongOrNull()?.toInt() ?: return null
+                if (start >= totalSize) return RangeSlice.unsatisfiable(totalSize)
+                RangeSlice(start = start, end = totalSize - 1, total = totalSize)
+            }
+            else -> {
+                val start = sStr.toLongOrNull()?.toInt() ?: return null
+                val end = eStr.toLongOrNull()?.toInt() ?: return null
+                if (start >= totalSize || end < start) {
+                    return RangeSlice.unsatisfiable(totalSize)
+                }
+                RangeSlice(
+                    start = start,
+                    end = end.coerceAtMost(totalSize - 1),
+                    total = totalSize,
+                )
+            }
+        }
+    }
+
+    /**
+     * A resolved byte range to serve. `start == -1` flags an
+     * unsatisfiable request (out-of-bounds), which we render as a 416
+     * with a `Content-Range: bytes * /<total>` header.
+     */
+    private data class RangeSlice(val start: Int, val end: Int, val total: Int) {
+        val length: Int get() = end - start + 1
+        val unsatisfiable: Boolean get() = start < 0
+        companion object {
+            fun unsatisfiable(total: Int) = RangeSlice(-1, -1, total)
+        }
     }
 
     /**
@@ -270,23 +446,63 @@ class HtmlView @JvmOverloads constructor(
         )
 
     private data class CachedResource(val mime: String, val bytes: ByteArray) {
-        fun toResponse(): WebResourceResponse = WebResourceResponse(
-            mime,
-            null,
-            200,
-            "OK",
-            // Permissive CORS so SPA fetch() / XHR calls can read the
-            // response body. Cross-origin doesn't really exist on
-            // Autonomi — every address is content-addressed, no DNS
-            // origin to attack — but the browser still asks.
-            mapOf(
+        /**
+         * Render the cached bytes as a `WebResourceResponse`, honouring
+         * a `Range` slice if present.
+         *
+         *  - `range == null`            → 200 OK, full body, advertise
+         *                                  `Accept-Ranges: bytes` so the
+         *                                  browser knows to ask for ranges
+         *                                  on follow-up media requests.
+         *  - `range.unsatisfiable`      → 416 Range Not Satisfiable with
+         *                                  `Content-Range: bytes * /<total>`.
+         *  - otherwise                  → 206 Partial Content with the
+         *                                  requested bytes plus a proper
+         *                                  `Content-Range` header.
+         */
+        fun toResponse(range: RangeSlice?): WebResourceResponse {
+            // Permissive CORS — content-addressing makes origin-based
+            // attacks meaningless, but the browser still asks. Same
+            // permissive set on every response variant.
+            val baseHeaders = mapOf(
                 "Access-Control-Allow-Origin" to "*",
                 "Access-Control-Allow-Methods" to "GET",
                 "Access-Control-Allow-Headers" to "*",
                 "Cache-Control" to "public, max-age=31536000, immutable",
-            ),
-            ByteArrayInputStream(bytes),
-        )
+                "Accept-Ranges" to "bytes",
+            )
+            if (range == null) {
+                return WebResourceResponse(
+                    mime,
+                    null,
+                    200,
+                    "OK",
+                    baseHeaders + ("Content-Length" to "${bytes.size}"),
+                    ByteArrayInputStream(bytes),
+                )
+            }
+            if (range.unsatisfiable) {
+                return WebResourceResponse(
+                    "text/plain",
+                    "utf-8",
+                    416,
+                    "Range Not Satisfiable",
+                    baseHeaders + ("Content-Range" to "bytes */${range.total}"),
+                    ByteArrayInputStream(ByteArray(0)),
+                )
+            }
+            return WebResourceResponse(
+                mime,
+                null,
+                206,
+                "Partial Content",
+                baseHeaders + mapOf(
+                    "Content-Range" to "bytes ${range.start}-${range.end}/${range.total}",
+                    "Content-Length" to "${range.length}",
+                ),
+                ByteArrayInputStream(bytes, range.start, range.length),
+            )
+        }
     }
 
     private companion object {
@@ -309,6 +525,13 @@ class HtmlView @JvmOverloads constructor(
          * rewritten to the synthetic https form.
          */
         val ADDR_REWRITE = Regex("""autonomi://([0-9a-fA-F]{64})""")
+
+        /**
+         * `RFC 7233` Range header value for a single byte range.
+         * Captures `bytes=<start>-<end>` where either side may be
+         * empty (open-ended or suffix length).
+         */
+        val RANGE_PATTERN = Regex("""bytes=(\d*)-(\d*)""")
 
         const val TAG = "fetchit.html"
     }

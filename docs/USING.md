@@ -228,6 +228,22 @@ xhr.send();
 
 The host treats both as equivalent. End-user URLs (the address bar, bookmarks, share sheet, deep-link intents) always use the `autonomi://` form — that's the user-facing scheme.
 
+**Display gotcha.** The rewriter is a global string match on `autonomi://<64-hex>`, so if you put a literal `autonomi://<addr>` into display text or copy (rather than into an attribute or JS string), it gets rewritten to `https://aut.local/<addr>` for display too. Two ways around it:
+
+- Inject the scheme prefix via CSS `::before`:
+  ```html
+  <div class="addr">c2b0…ab61</div>
+  ```
+  ```css
+  .addr::before { content: "autonomi://"; }
+  ```
+- Split with an HTML tag so the literal isn't continuous in source:
+  ```html
+  <span>autonomi://</span><span>c2b0…ab61</span>
+  ```
+
+Abstract mentions of the scheme without a real address (`<code>autonomi://</code>` in a docs table) are left alone — the rewrite pattern is anchored to a 64-hex tail.
+
 For depth on what works inside the SPA sandbox + the protocol-level details, see [`AUTONOMI-WEB.md`](AUTONOMI-WEB.md).
 
 ---
