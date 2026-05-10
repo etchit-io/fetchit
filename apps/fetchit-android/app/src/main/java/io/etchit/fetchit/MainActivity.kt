@@ -17,6 +17,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.google.android.material.snackbar.Snackbar
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -85,6 +87,26 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri -> uri?.let(::onSavePicked) }
 
+    /**
+     * In-app QR scanner. Powered by `zxing-android-embedded` — opens its
+     * own scanner Activity, handles the camera permission prompt, returns
+     * the decoded text. We accept anything `parseAutonomiInput` accepts
+     * (raw 64-hex or `autonomi://<addr>` URL) and reject other QRs.
+     */
+    private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
+        val raw = result?.contents ?: return@registerForActivityResult
+        val addr = parseAutonomiInput(raw)
+        if (addr == null) {
+            Snackbar.make(
+                binding.rootCoordinator,
+                R.string.scan_qr_not_autonomi,
+                Snackbar.LENGTH_LONG,
+            ).show()
+            return@registerForActivityResult
+        }
+        loadAddress(addr)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -99,6 +121,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.bookmarkButton.setOnClickListener {
             BookmarkSheet().show(supportFragmentManager, "bookmarks")
         }
+        binding.scanButton.setOnClickListener { onScanClicked() }
         binding.closeButton.setOnClickListener { renderer.clear() }
         binding.shareButton.setOnClickListener { onShareCurrentClicked() }
         binding.openWithButton.setOnClickListener { onOpenWithClicked() }
@@ -428,6 +451,20 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             else -> R.string.error_generic
         }
         return getString(resId)
+    }
+
+    /**
+     * Launch the in-app QR scanner. ZXing handles the camera permission
+     * prompt + viewfinder UI; result lands in [`scanLauncher`].
+     */
+    private fun onScanClicked() {
+        val options = ScanOptions().apply {
+            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            setPrompt(getString(R.string.scan_qr_prompt))
+            setBeepEnabled(false)
+            setOrientationLocked(false)
+        }
+        scanLauncher.launch(options)
     }
 
     /**

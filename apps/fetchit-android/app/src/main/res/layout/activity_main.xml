@@ -19,7 +19,7 @@
         android:layout_height="match_parent"
         android:padding="12dp">
 
-        <!-- Top bar: full-width address + ★ -->
+        <!-- Top bar: full-width address + QR scan + ★ -->
         <EditText
             android:id="@+id/addressInput"
             android:layout_width="0dp"
@@ -32,9 +32,24 @@
             android:textColorHint="@color/ash"
             android:fontFamily="monospace"
             android:textSize="13sp"
-            app:layout_constraintEnd_toStartOf="@+id/bookmarkButton"
+            app:layout_constraintEnd_toStartOf="@+id/scanButton"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
+
+        <Button
+            android:id="@+id/scanButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="⌖"
+            android:textColor="@color/copper"
+            android:textSize="20sp"
+            android:backgroundTint="@color/ink_3"
+            android:contentDescription="@string/scan_qr_button_label"
+            android:minWidth="44dp"
+            android:layout_marginStart="6dp"
+            app:layout_constraintBottom_toBottomOf="@+id/addressInput"
+            app:layout_constraintEnd_toStartOf="@+id/bookmarkButton"
+            app:layout_constraintTop_toTopOf="@+id/addressInput" />
 
         <Button
             android:id="@+id/bookmarkButton"
@@ -45,7 +60,7 @@
             android:textSize="18sp"
             android:backgroundTint="@color/ink_3"
             android:contentDescription="@string/bookmark_button_label"
-            android:minWidth="48dp"
+            android:minWidth="44dp"
             android:layout_marginStart="6dp"
             app:layout_constraintBottom_toBottomOf="@+id/addressInput"
             app:layout_constraintEnd_toEndOf="parent"

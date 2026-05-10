@@ -14,6 +14,10 @@
     <string name="action_save">save…</string>
     <string name="action_share_current">share this address</string>
     <string name="action_share_label">share fetch&gt;it address</string>
+    <string name="scan_qr_button_label">scan QR</string>
+    <string name="scan_qr_prompt">point at an autonomi:// QR code</string>
+    <string name="scan_qr_not_autonomi">that QR didn\'t hold an Autonomi address</string>
+    <string name="scan_qr_camera_denied">camera permission needed to scan</string>
 
     <!-- Smart-paste chip: shown when the clipboard holds an Autonomi
          address and the user hasn\'t already typed something. -->

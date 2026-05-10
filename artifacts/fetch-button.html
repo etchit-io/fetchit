@@ -60,7 +60,7 @@
     margin-bottom: 88px;
   }
   .mark { font-weight: 800; font-size: 22px; letter-spacing: -0.05em; }
-  .mark .slash { color: var(--copper); }
+  .mark .chev { color: var(--copper); }
   .meta {
     font-size: 11px;
     letter-spacing: 0.18em;
@@ -145,7 +145,7 @@
     letter-spacing: -0.02em;
     line-height: 1;
   }
-  .fetch-btn .btn-text .slash { color: var(--copper); padding: 0 1px; }
+  .fetch-btn .btn-text .chev { color: var(--copper); padding: 0 1px; }
   .fetch-btn .btn-text .callsign {
     font-size: 12px;
     font-weight: 400;
@@ -181,7 +181,7 @@
     overflow: visible;
   }
 
-  /* [/] brand mark beneath the dog */
+  /* [>] brand mark beneath the dog */
   .fetch-btn .btn-brand {
     position: absolute;
     bottom: 52px;
@@ -378,6 +378,7 @@
     text-transform: uppercase;
     opacity: 0.55;
   }
+  footer .chev { color: var(--copper); }
 
   /* ----------- responsive ----------- */
   @media (max-width: 720px) {
@@ -393,7 +394,7 @@
 <body>
   <div class="page">
     <header>
-      <div class="mark">etch<span class="slash">/</span>it</div>
+      <div class="mark">fetch<span class="chev">&gt;</span>it</div>
       <div class="meta">fetch button · prototype</div>
     </header>
 
@@ -404,7 +405,7 @@
           <circle cx="160" cy="160" r="156" />
         </svg>
         <span class="btn-text">
-          <span class="primary">fetch<span class="slash">/</span>it</span>
+          <span class="primary">fetch<span class="chev">&gt;</span>it</span>
           <span class="callsign">etchit</span>
         </span>
         <div class="btn-spinner" id="btnSpinner">
@@ -412,7 +413,7 @@
         </div>
         <div class="btn-brand" aria-hidden="true">
           <svg viewBox="0 0 32 16" xmlns="http://www.w3.org/2000/svg">
-            <path d="M 4 2 L 10 2 L 10 4 L 6 4 L 6 12 L 10 12 L 10 14 L 4 14 Z M 22 2 L 28 2 L 28 14 L 22 14 L 22 12 L 26 12 L 26 4 L 22 4 Z M 12 14 L 15 14 L 20 2 L 17 2 Z"></path>
+            <path d="M 4 2 L 10 2 L 10 4 L 6 4 L 6 12 L 10 12 L 10 14 L 4 14 Z M 22 2 L 28 2 L 28 14 L 22 14 L 22 12 L 26 12 L 26 4 L 22 4 Z M 12 2 L 15 2 L 20 8 L 15 14 L 12 14 L 17 8 Z"></path>
           </svg>
         </div>
       </button>
@@ -428,7 +429,7 @@
           <div class="dl-spinner" data-preview="A"></div>
         </div>
         <div class="dl-meta">
-          <div class="dl-name">etchit-fetch-beagle.svg</div>
+          <div class="dl-name">fetchit-fetch-beagle.svg</div>
           <div class="dl-desc">Self-contained running beagle. CSS animations baked in. Drop into HTML, render in a browser, or open directly. ~3 KB.</div>
         </div>
       </div>
@@ -436,21 +437,21 @@
         <div class="dl-preview">
           <div class="dl-mark">
             <svg viewBox="0 0 32 16" xmlns="http://www.w3.org/2000/svg">
-              <path d="M 4 2 L 10 2 L 10 4 L 6 4 L 6 12 L 10 12 L 10 14 L 4 14 Z M 22 2 L 28 2 L 28 14 L 22 14 L 22 12 L 26 12 L 26 4 L 22 4 Z M 12 14 L 15 14 L 20 2 L 17 2 Z"
+              <path d="M 4 2 L 10 2 L 10 4 L 6 4 L 6 12 L 10 12 L 10 14 L 4 14 Z M 22 2 L 28 2 L 28 14 L 22 14 L 22 12 L 26 12 L 26 4 L 22 4 Z M 12 2 L 15 2 L 20 8 L 15 14 L 12 14 L 17 8 Z"
                     fill="var(--copper)"></path>
             </svg>
           </div>
         </div>
         <div class="dl-meta">
-          <div class="dl-name">etchit-mark.svg</div>
-          <div class="dl-desc">The bracket-slash mark. One path, three sub-paths. Stays crisp at any size. Use as favicon, app icon mask, watermark.</div>
+          <div class="dl-name">fetchit-mark.svg</div>
+          <div class="dl-desc">The bracket-chevron mark. One path, three sub-paths. Stays crisp at any size. Use as favicon, app icon mask, watermark.</div>
         </div>
       </div>
     </div>
 
     <footer>
-      <span>etch/it · components</span>
-      <span>fetch · v1</span>
+      <span>fetch<span class="chev">&gt;</span>it · components</span>
+      <span>fetch · v2</span>
     </footer>
   </div>
 

@@ -122,4 +122,10 @@ dependencies {
     // as scannable images, since traditional messengers don't
     // linkify custom URL schemes.
     implementation("com.google.zxing:core:3.5.3")
+
+    // ZXing Embedded — scanner Activity + ViewFinder. Fully self-
+    // contained, no Google Play services dependency. Powers the
+    // in-app "scan a QR" button so users can pull addresses off a
+    // printed page or another phone's screen without leaving fetch>it.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

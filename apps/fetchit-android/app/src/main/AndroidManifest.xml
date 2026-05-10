@@ -5,6 +5,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Optional: in-app QR scanner (ZXing). The CAMERA permission is
+         requested at runtime by the scanner Activity. Without it the
+         user can still paste an autonomi:// URL or tap a deep-link as
+         normal — only the scan-from-inside-the-app path needs it. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <application
         android:name=".FetchitApplication"
         android:allowBackup="false"
