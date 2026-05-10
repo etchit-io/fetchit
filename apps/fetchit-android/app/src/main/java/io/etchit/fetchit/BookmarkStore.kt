@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * encryption-at-rest cost (Keystore handshake on every read) isn't worth
  * the marginal threat-model improvement (spec §3a).
  *
- * Single-process — fetch/it has no service or background worker, so
+ * Single-process — fetch>it has no service or background worker, so
  * there's no inter-process synchronisation concern.
  */
 class BookmarkStore(context: Context) {

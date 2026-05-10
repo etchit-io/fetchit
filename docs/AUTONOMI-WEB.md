@@ -1,8 +1,8 @@
-# Autonomi-Native Web — fetch/it's design space
+# Autonomi-Native Web — fetch>it's design space
 
 Living document. Companion to [`USING.md`](USING.md) (end-user guide)
 and [`HANDLER-AUTHORS.md`](HANDLER-AUTHORS.md) (engine-extension guide).
-This file is the protocol-level treatment of **fetch/it as a browser
+This file is the protocol-level treatment of **fetch>it as a browser
 for the Autonomi network**: how an HTML document, a JS bundle, an
 image, or any other web content stored on Autonomi gets loaded and
 rendered with no DNS, no CDN, no traditional internet involved.
@@ -13,7 +13,7 @@ rendered with no DNS, no CDN, no traditional internet involved.
 
 A web that is **content-addressed, permanent, server-less, and
 DNS-free**. Upload an HTML document to the Autonomi network, get back
-a 64-hex address, and anyone with fetch/it (or any future Autonomi-
+a 64-hex address, and anyone with fetch>it (or any future Autonomi-
 aware client) can render it — including any JavaScript, any CSS, any
 images, any data fetches — **without the traditional web stack getting
 involved**.
@@ -23,7 +23,7 @@ no cloud, no name registrar**. Just IP packets to Autonomi peers.
 Anyone who has the bytes can serve the bytes; nobody can revoke an
 address; nobody can take it down.
 
-The end state: if you can run fetch/it (or its desktop / WASM siblings
+The end state: if you can run fetch>it (or its desktop / WASM siblings
 when those land), you can **author and consume the entire stack of a
 small webapp** without depending on any centralized service.
 
@@ -38,10 +38,10 @@ Verified on the Android shell against live Autonomi addresses.
 | Single self-contained HTML doc, rendered in a sandboxed WebView | ✓ |
 | Inline JS / CSS / SVG / `data:` URI assets | ✓ |
 | External `https://` CDN fetches (when device has traditional internet) | ✓ |
-| **`autonomi://<64-hex>` resource references** — `<img>`, `<audio>`, `<video>`, `<script>`, `<link>`, `<a>`, all resolve through the connected fetch/it client | ✓ |
-| **`fetch()` / `XMLHttpRequest` / Streams to `autonomi://` URLs** — works because fetch/it loads pages with a synthetic https origin (see § the synthetic-origin trick) | ✓ |
+| **`autonomi://<64-hex>` resource references** — `<img>`, `<audio>`, `<video>`, `<script>`, `<link>`, `<a>`, all resolve through the connected fetch>it client | ✓ |
+| **`fetch()` / `XMLHttpRequest` / Streams to `autonomi://` URLs** — works because fetch>it loads pages with a synthetic https origin (see § the synthetic-origin trick) | ✓ |
 | **Top-level `<a href="autonomi://addr">` navigation** — tap a link inside a rendered page, the new address loads. System back returns | ✓ |
-| **Deep-link intent-filter** — `autonomi://` URLs from any other app (QR scanner, messenger, mail client) route to fetch/it | ✓ |
+| **Deep-link intent-filter** — `autonomi://` URLs from any other app (QR scanner, messenger, mail client) route to fetch>it | ✓ |
 | **Range requests** for media seeking (`<video>` jumping to mid-file is instant after first fetch) | ✓ |
 | **HTML video fullscreen** (`requestFullscreen()` / native player chrome) | ✓ |
 | **Persistent disk cache** keyed by address — fetched bytes survive app restarts; offline replay of anything you've seen before | ✓ |
@@ -86,7 +86,7 @@ asset orchestration, or anything beyond inline tags.
 
 ### The fix
 
-Inside fetch/it's `HtmlView`, every HTML document is loaded into the
+Inside fetch>it's `HtmlView`, every HTML document is loaded into the
 WebView with a synthetic origin: `https://aut.local`. Before the
 document reaches the browser engine, every `autonomi://<64-hex>`
 reference in the source is rewritten to `https://aut.local/<64-hex>`
@@ -95,7 +95,7 @@ reference in the source is rewritten to `https://aut.local/<64-hex>`
 The engine sees standard https. Every request to that origin is
 caught by `WebViewClient.shouldInterceptRequest` inside the app, the
 64-hex path is extracted, and the bytes are pulled from the connected
-fetch/it client over the Autonomi P2P connection.
+fetch>it client over the Autonomi P2P connection.
 
 **Nothing about `aut.local` ever leaves the device.** No DNS query is
 made, no TLS handshake is performed, no server exists. The hostname
@@ -170,7 +170,7 @@ xhr.send();
 
 ### Resolution semantics
 
-1. fetch/it's `HtmlView` loads the document with `https://aut.local`
+1. fetch>it's `HtmlView` loads the document with `https://aut.local`
    as base URL. `autonomi://<64-hex>` literals in source are rewritten
    to `https://aut.local/<64-hex>` before the document is handed to
    the WebView.
@@ -189,8 +189,8 @@ xhr.send();
 ### What this is **not**
 
 - **Not** a network protocol — `autonomi://` is a URL scheme that the
-  WebView resolves through fetch/it's existing P2P client.
-- **Not** a routable URL outside fetch/it — pasting `autonomi://abc…`
+  WebView resolves through fetch>it's existing P2P client.
+- **Not** a routable URL outside fetch>it — pasting `autonomi://abc…`
   into Chrome won't work unless Chrome is taught the scheme.
 - **Not** authenticated — anyone with the address can read; no
   signature verification, no per-recipient keys (use etch/it for
@@ -237,7 +237,7 @@ today returns the same bytes forever.
     interceptor
 - **Third-party CDN refs** — when an SPA links to
   `https://cdn.example.com/lib.js`, that's a normal web call subject
-  to normal trust. fetch/it doesn't broker this.
+  to normal trust. fetch>it doesn't broker this.
 
 ---
 
@@ -248,7 +248,7 @@ today returns the same bytes forever.
    or equivalent to produce a self-contained bundle.
 2. **Or**: a small HTML shell that references other Autonomi addresses
    via `autonomi://<addr>` for assets. Each asset becomes its own
-   address upload, but lives forever in fetch/it's disk cache after
+   address upload, but lives forever in fetch>it's disk cache after
    first use.
 3. **No relative paths to disk** (`./style.css`) — won't resolve. Use
    `autonomi://<addr>`, `https://aut.local/<addr>` (the canonical

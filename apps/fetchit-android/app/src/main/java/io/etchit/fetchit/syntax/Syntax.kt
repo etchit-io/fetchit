@@ -8,7 +8,7 @@ import android.text.style.StyleSpan
 /**
  * Token-coloring framework. Ported from etchit-android's
  * `SyntaxHighlighters.kt` (single 653-line file there) and split per
- * language under this package per fetch/it's no-bloat rule.
+ * language under this package per fetch>it's no-bloat rule.
  *
  * Each language is a regex-based pass that walks the buffer, emits
  * tokens, and lets [`applyTokens`] stamp spans on the destination

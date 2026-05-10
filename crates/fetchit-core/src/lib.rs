@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// fetch/it core — universal read-only viewer engine for the Autonomi network.
-// Copyright (C) the fetch/it contributors.
+// fetch>it core — universal read-only viewer engine for the Autonomi network.
+// Copyright (C) the fetch>it contributors.
 
 //! # `fetchit-core`
 //!
-//! The engine half of fetch/it. Given an Autonomi [`Address`], a
+//! The engine half of fetch>it. Given an Autonomi [`Address`], a
 //! [`NetworkClient`] fetches the bytes and a [`HandlerRegistry`] turns
 //! them into a typed [`Rendition`] that UI shells can display.
 //!

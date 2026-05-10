@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- fetch/it talks to the Autonomi P2P network over QUIC. -->
+    <!-- fetch&gt;it talks to the Autonomi P2P network over QUIC. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -23,7 +23,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- autonomi://<64-hex> deep links: any app, QR scanner,
-                 or shared link can route a fetch/it URL through the
+                 or shared link can route a fetch&gt;it URL through the
                  system chooser into this activity. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

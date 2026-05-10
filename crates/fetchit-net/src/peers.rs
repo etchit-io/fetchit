@@ -4,7 +4,7 @@
 
 /// Bootstrap peers for the Autonomi production network, in `ip:port`
 /// shorthand. Mirrors the list shipped by etchit-android — keeping
-/// fetch/it on the same set means both clients reach the same network
+/// fetch>it on the same set means both clients reach the same network
 /// without a divergent peer story.
 ///
 /// Pass these (or a user-supplied override) to

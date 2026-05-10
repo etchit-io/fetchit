@@ -1,0 +1,2208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fetch&gt;it — brand system v1.0</title>
+<meta name="description" content="The fetchit brand system — sibling to etchit. Logo, name, color, typography, voice, chevron, motion, components, applications.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+
+<style>
+  /* =================================================================
+     CANONICAL BRAND TOKENS — inherited verbatim from etchit-brand v1.0.
+     fetchit is a sibling, not a fork. Tokens do not diverge.
+     ================================================================= */
+  :root {
+    --ink:         #0a0a0a;
+    --ink-2:       #141414;
+    --ink-3:       #1c1c1c;
+    --line:        #222222;
+    --line-2:      #2a2a2a;
+
+    --copper:        #c9732b;
+    --copper-bright: #e58a3f;
+    --copper-dim:    #8a4e1d;
+    --copper-glow:   rgba(201,115,43,0.15);
+
+    --bone:      #f5f2eb;
+    --bone-dim:  #d6cfc0;
+
+    --ash:       #8a8a8a;
+    --ash-dim:   #3a3a3a;
+
+    --signal-ok:   #6ab04c;
+    --signal-warn: #c0392b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--ink);
+    color: var(--bone);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-weight: 400;
+    line-height: 1.55;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    padding: 0;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 100;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' /%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  ::selection { background: var(--copper); color: var(--ink); }
+  a { color: inherit; text-decoration: none; }
+  code, kbd {
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--ink-3);
+    border: 1px solid var(--line);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.88em;
+    color: var(--copper);
+  }
+
+  /* =================================================================
+     LAYOUT PRIMITIVES
+     ================================================================= */
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
+  .wrap-narrow { max-width: 900px; margin: 0 auto; padding: 0 32px; }
+
+  .rail {
+    position: fixed;
+    top: 50%;
+    right: 24px;
+    transform: translateY(-50%);
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px 14px;
+    border: 1px solid var(--line);
+    background: rgba(10,10,10,0.7);
+    backdrop-filter: blur(10px);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+  }
+  .rail a {
+    color: var(--ash);
+    padding: 3px 4px;
+    transition: color 0.2s;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .rail a:hover { color: var(--copper); }
+  .rail .num { color: var(--copper); margin-right: 6px; }
+  @media (max-width: 1100px) { .rail { display: none; } }
+
+  /* =================================================================
+     COVER
+     ================================================================= */
+  .cover {
+    min-height: 100vh;
+    padding: 120px 32px 80px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '<';
+    position: absolute;
+    left: -80px; top: -40px;
+    font-size: clamp(500px, 110vh, 1200px);
+    line-height: 0.75;
+    color: var(--copper);
+    opacity: 0.035;
+    font-weight: 300;
+    pointer-events: none;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .cover::after {
+    content: '>';
+    position: absolute;
+    right: -80px; bottom: -120px;
+    font-size: clamp(500px, 110vh, 1200px);
+    line-height: 0.75;
+    color: var(--copper);
+    opacity: 0.035;
+    font-weight: 300;
+    pointer-events: none;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .cover-inner { max-width: 1200px; margin: 0 auto; width: 100%; position: relative; z-index: 2; }
+  .cover-meta {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ash);
+    margin-bottom: 40px;
+  }
+  .cover-meta .dot {
+    width: 6px; height: 6px;
+    background: var(--copper);
+    border-radius: 50%;
+  }
+  .cover-title {
+    font-size: clamp(60px, 12vw, 180px);
+    font-weight: 800;
+    line-height: 0.88;
+    letter-spacing: -0.05em;
+    margin-bottom: 28px;
+  }
+  .cover-title .chev { color: var(--copper); }
+  .cover-sub {
+    font-family: 'Instrument Serif', serif;
+    font-size: clamp(24px, 4vw, 44px);
+    font-style: italic;
+    line-height: 1.15;
+    margin-bottom: 40px;
+    max-width: 800px;
+  }
+  .cover-sub .sep { color: var(--copper); font-style: normal; }
+  .cover-lead {
+    max-width: 640px;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--ash);
+    margin-bottom: 48px;
+  }
+  .cover-lead strong { color: var(--bone); font-weight: 500; }
+  .cover-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0;
+    border: 1px solid var(--line);
+    max-width: 760px;
+  }
+  .cover-meta-grid > div {
+    padding: 18px 20px;
+    border-right: 1px solid var(--line);
+  }
+  .cover-meta-grid > div:last-child { border-right: none; }
+  .cmg-label {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ash);
+    margin-bottom: 8px;
+  }
+  .cmg-value {
+    font-size: 14px;
+    color: var(--bone);
+    font-weight: 500;
+  }
+
+  /* =================================================================
+     CHAPTER
+     ================================================================= */
+  .chapter { padding: 120px 32px; border-bottom: 1px solid var(--line); position: relative; }
+  .chapter-inner { max-width: 1200px; margin: 0 auto; }
+  .chapter-head {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 32px;
+    align-items: baseline;
+    margin-bottom: 80px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--line);
+  }
+  @media (max-width: 700px) { .chapter-head { grid-template-columns: 1fr; gap: 12px; margin-bottom: 56px; } }
+  .chapter-num {
+    font-size: 11px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--copper);
+    font-weight: 600;
+  }
+  .chapter-title {
+    font-size: clamp(40px, 6vw, 80px);
+    font-weight: 700;
+    line-height: 1.0;
+    letter-spacing: -0.04em;
+  }
+  .chapter-title em {
+    font-family: 'Instrument Serif', serif;
+    font-style: italic;
+    font-weight: 400;
+    color: var(--copper);
+  }
+  .chapter-lead {
+    max-width: 720px;
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--ash);
+    margin-top: 16px;
+  }
+  .chapter-lead strong { color: var(--bone); font-weight: 500; }
+
+  .sub { margin-top: 80px; }
+  .sub-label {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ash);
+    margin-bottom: 8px;
+  }
+  .sub-title {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin-bottom: 24px;
+    color: var(--bone);
+  }
+
+  /* =================================================================
+     01 — PRINCIPLES
+     ================================================================= */
+  .principles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    border: 1px solid var(--line);
+  }
+  .principle {
+    padding: 40px 32px;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    min-height: 320px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .principle:last-child { border-right: none; }
+  @media (max-width: 900px) {
+    .principle { border-right: none; }
+    .principle:last-child { border-bottom: none; }
+  }
+  .principle-num {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: var(--copper);
+    margin-bottom: 32px;
+  }
+  .principle-head {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    margin-bottom: 20px;
+  }
+  .principle-head em {
+    font-family: 'Instrument Serif', serif;
+    font-style: italic;
+    font-weight: 400;
+    color: var(--copper);
+  }
+  .principle-body {
+    font-size: 13px;
+    color: var(--ash);
+    line-height: 1.7;
+  }
+
+  /* =================================================================
+     02 — LOGO SYSTEM
+     ================================================================= */
+  .logo-hero {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 100px 48px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    align-items: center;
+    margin-bottom: 32px;
+  }
+  @media (max-width: 900px) { .logo-hero { grid-template-columns: 1fr; padding: 60px 32px; } }
+  .logo-wordmark-big {
+    font-size: clamp(72px, 12vw, 180px);
+    font-weight: 800;
+    letter-spacing: -0.05em;
+    line-height: 0.9;
+  }
+  .logo-wordmark-big .chev { color: var(--copper); }
+  .logo-meta {
+    font-size: 13px;
+    color: var(--ash);
+    line-height: 1.7;
+    max-width: 360px;
+  }
+  .logo-meta dl { display: grid; grid-template-columns: 110px 1fr; gap: 8px 16px; margin-top: 20px; }
+  .logo-meta dt { color: var(--ash); }
+  .logo-meta dd { color: var(--bone); }
+
+  .logo-variants {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .lv {
+    background: var(--ink);
+    padding: 40px 32px;
+    min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .lv.on-bone { background: var(--bone); color: var(--ink); }
+  .lv.on-bone .lv-label { color: #666; }
+  .lv-sample {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    padding: 24px 0;
+  }
+  .lv-label {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ash);
+  }
+  .lv-note {
+    font-size: 12px;
+    color: var(--ash);
+    margin-top: 8px;
+  }
+  .lv.on-bone .lv-note { color: #666; }
+
+  .mark-sample {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 48px;
+    color: var(--copper);
+    letter-spacing: -0.05em;
+  }
+  .mark-sample.ink { color: var(--ink); }
+  .wordmark-sample {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 44px;
+    letter-spacing: -0.04em;
+  }
+  .wordmark-sample .chev { color: var(--copper); }
+  .wordmark-sample.mono .chev { color: inherit; }
+
+  /* Construction diagram */
+  .construction {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 48px 32px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    min-height: 280px;
+  }
+  .construction-grid {
+    position: relative;
+    display: inline-block;
+  }
+  .construction-grid .letters {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 120px;
+    letter-spacing: -0.05em;
+    line-height: 1;
+    color: var(--bone);
+    position: relative;
+    z-index: 2;
+  }
+  .construction-grid .letters .chev { color: var(--copper); }
+  .construction-grid .gridline {
+    position: absolute;
+    background: var(--copper);
+    opacity: 0.3;
+    z-index: 1;
+  }
+  .construction-grid .gridline.h { left: -30px; right: -30px; height: 1px; }
+  .construction-grid .gridline.v { top: -30px; bottom: -30px; width: 1px; }
+  .construction-grid .tag {
+    position: absolute;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--copper);
+    letter-spacing: 0.1em;
+    background: var(--ink-2);
+    padding: 2px 6px;
+    z-index: 3;
+  }
+
+  /* Clear space */
+  .clear-space {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 60px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .clear-space-box {
+    border: 1px dashed var(--copper);
+    padding: 60px 80px;
+    position: relative;
+  }
+  .clear-space-box::before {
+    content: 'x';
+    position: absolute;
+    top: -10px; left: -10px;
+    background: var(--ink-2);
+    color: var(--copper);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 0 6px;
+  }
+  .clear-space-box .wordmark {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 64px;
+    letter-spacing: -0.04em;
+  }
+  .clear-space-box .wordmark .chev { color: var(--copper); }
+  .clear-space-note {
+    margin-top: 24px;
+    font-size: 13px;
+    color: var(--ash);
+    text-align: center;
+  }
+
+  /* Don'ts */
+  .donts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .dont {
+    background: var(--ink-2);
+    padding: 32px 24px;
+    position: relative;
+  }
+  .dont-sample {
+    min-height: 90px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 0;
+    margin-bottom: 16px;
+  }
+  .dont-x {
+    position: absolute;
+    top: 16px; right: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--signal-warn);
+    border: 1px solid var(--signal-warn);
+    width: 24px; height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+  }
+  .dont-label {
+    font-size: 12px;
+    color: var(--ash);
+    line-height: 1.5;
+    text-align: center;
+  }
+
+  /* Pair lockup */
+  .pair-hero {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 80px 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(24px, 6vw, 80px);
+    flex-wrap: wrap;
+  }
+  .pair-mark {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: clamp(48px, 8vw, 96px);
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+  .pair-mark .chev { color: var(--copper); }
+  .pair-mark .slash { color: var(--copper); }
+  .pair-divider {
+    width: 1px;
+    height: 80px;
+    background: var(--line-2);
+  }
+  .pair-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-top: 24px;
+  }
+  .pair-cell {
+    background: var(--ink);
+    padding: 32px 28px;
+  }
+  .pair-cell .pc-label {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--copper);
+    margin-bottom: 16px;
+  }
+  .pair-cell .pc-sample {
+    min-height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 16px;
+  }
+  .pair-cell .pc-note {
+    font-size: 12px;
+    color: var(--ash);
+    line-height: 1.6;
+  }
+
+  /* =================================================================
+     03 — NAME TREATMENTS
+     ================================================================= */
+  .option-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .option {
+    background: var(--ink);
+    padding: 32px 28px;
+    transition: background 0.2s;
+    display: flex;
+    flex-direction: column;
+  }
+  .option:hover { background: var(--ink-2); }
+  .option-name {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--copper);
+    margin-bottom: 18px;
+  }
+  .option-display {
+    font-weight: 800;
+    font-size: 40px;
+    letter-spacing: -0.03em;
+    margin-bottom: 20px;
+    line-height: 1;
+  }
+  .option-display .chev { color: var(--copper); }
+  .option-display .dim { color: var(--ash); font-weight: 500; }
+  .option-notes {
+    font-size: 13px;
+    color: var(--ash);
+    line-height: 1.7;
+    flex: 1;
+  }
+  .option-notes strong { color: var(--bone); font-weight: 500; }
+
+  /* Rules table */
+  .rules {
+    border: 1px solid var(--line);
+    margin-top: 32px;
+  }
+  .rule-row {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 24px;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
+  .rule-row:last-child { border-bottom: none; }
+  .rule-row.head {
+    background: var(--ink-2);
+    color: var(--copper);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .rule-context { color: var(--ash); }
+  .rule-form { color: var(--bone); font-weight: 500; }
+  .rule-form code { background: var(--ink-3); }
+  @media (max-width: 600px) {
+    .rule-row { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  /* =================================================================
+     04 — COLOR (lean, inherits from etchit)
+     ================================================================= */
+  .swatch-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .swatch {
+    background: var(--ink-2);
+    padding: 32px 24px;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .swatch-chip {
+    width: 56px; height: 56px;
+    border: 1px solid var(--line-2);
+    margin-bottom: 18px;
+  }
+  .swatch-name {
+    font-size: 13px;
+    color: var(--bone);
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+  .swatch-hex {
+    font-size: 11px;
+    color: var(--ash);
+    letter-spacing: 0.05em;
+  }
+  .swatch-role {
+    font-size: 11px;
+    color: var(--ash);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+
+  .inherit-card {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--copper);
+    padding: 28px 32px;
+    margin-bottom: 32px;
+  }
+  .inherit-card .ic-label {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--copper);
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .inherit-card .ic-body {
+    font-size: 14px;
+    color: var(--bone-dim);
+    line-height: 1.7;
+    max-width: 720px;
+  }
+  .inherit-card .ic-body strong { color: var(--bone); font-weight: 500; }
+  .inherit-card .ic-body code { background: var(--ink-3); }
+
+  /* =================================================================
+     06 — VOICE
+     ================================================================= */
+  .voice-table {
+    border: 1px solid var(--line);
+    margin-top: 24px;
+  }
+  .voice-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: 1px solid var(--line);
+  }
+  .voice-row:last-child { border-bottom: none; }
+  .voice-row.head {
+    background: var(--ink-2);
+  }
+  .voice-cell {
+    padding: 22px 24px;
+    border-right: 1px solid var(--line);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .voice-cell:last-child { border-right: none; }
+  .voice-cell.label {
+    color: var(--copper);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .voice-cell.do { color: var(--bone); }
+  .voice-cell.dont { color: var(--ash); text-decoration: line-through; text-decoration-color: var(--signal-warn); text-decoration-thickness: 1px; }
+
+  /* =================================================================
+     07 — CHEVRON
+     ================================================================= */
+  .chev-hero {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 80px 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 360px;
+  }
+  .chev-giant {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: clamp(180px, 32vw, 380px);
+    color: var(--copper);
+    line-height: 0.85;
+    letter-spacing: -0.05em;
+  }
+  .chev-label {
+    font-size: 12px;
+    color: var(--ash);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-top: 32px;
+  }
+
+  /* =================================================================
+     08 — MOTION
+     ================================================================= */
+  .motion-list { border: 1px solid var(--line); }
+  .motion-row {
+    display: grid;
+    grid-template-columns: 220px 220px 1fr;
+    gap: 24px;
+    padding: 24px 28px;
+    border-bottom: 1px solid var(--line);
+    align-items: baseline;
+  }
+  .motion-row:last-child { border-bottom: none; }
+  .m-name { color: var(--bone); font-weight: 500; font-size: 14px; }
+  .m-tech { color: var(--copper); font-size: 12px; }
+  .m-use { color: var(--ash); font-size: 13px; line-height: 1.6; }
+  @media (max-width: 800px) {
+    .motion-row { grid-template-columns: 1fr; gap: 8px; }
+  }
+
+  /* =================================================================
+     09 — COMPONENTS
+     ================================================================= */
+  .comp-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 24px;
+  }
+  .comp {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 28px 28px;
+  }
+  .comp-label {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--copper);
+    margin-bottom: 18px;
+    font-weight: 600;
+  }
+  .comp-stage {
+    background: var(--ink);
+    border: 1px solid var(--line);
+    padding: 28px 24px;
+    margin-bottom: 14px;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .comp-meta {
+    font-size: 11px;
+    color: var(--ash);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Address bar mock */
+  .addr-bar {
+    width: 100%;
+    background: var(--ink-2);
+    border: 1px solid var(--line-2);
+    border-radius: 4px;
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+  .addr-bar .prompt { color: var(--copper); font-weight: 700; }
+  .addr-bar .hash { color: var(--bone-dim); }
+  .addr-bar .cursor {
+    width: 7px; height: 14px;
+    background: var(--copper);
+    margin-left: 1px;
+    animation: blink 1.1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .reader {
+    width: 100%;
+    background: var(--ink);
+    border: 1px solid var(--line-2);
+    padding: 18px 18px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .reader-meta {
+    font-size: 10px;
+    color: var(--copper);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+  .reader-body {
+    font-size: 12px;
+    color: var(--bone-dim);
+    line-height: 1.7;
+    margin-bottom: 10px;
+  }
+  .reader-foot {
+    font-size: 10px;
+    color: var(--ash);
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .terminal {
+    background: var(--ink-3);
+    border: 1px solid var(--line-2);
+    border-radius: 8px;
+    overflow: hidden;
+    width: 100%;
+    max-width: 480px;
+  }
+  .terminal-bar {
+    background: var(--ink-2);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .terminal-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--ash-dim);
+  }
+  .terminal-title {
+    font-size: 11px;
+    color: var(--ash);
+    margin-left: 8px;
+  }
+  .terminal-body {
+    padding: 18px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .terminal-body .prompt { color: var(--copper); margin-right: 8px; }
+  .terminal-body .cmd { color: var(--bone); }
+  .terminal-body .out { color: var(--ash); display: block; }
+  .terminal-body .addr {
+    color: var(--copper);
+    font-size: 11px;
+  }
+
+  /* =================================================================
+     10 — APPLICATIONS
+     ================================================================= */
+  .apps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 24px;
+  }
+  .app {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    padding: 28px;
+    display: flex;
+    flex-direction: column;
+  }
+  .app-label {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--copper);
+    margin-bottom: 18px;
+    font-weight: 600;
+  }
+  .app-stage {
+    background: var(--ink);
+    border: 1px solid var(--line);
+    padding: 28px 24px;
+    margin-bottom: 14px;
+    min-height: 160px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .app-desc {
+    font-size: 12px;
+    color: var(--ash);
+    line-height: 1.6;
+  }
+  .app-desc strong { color: var(--bone); font-weight: 500; }
+
+  .merch-tee {
+    width: 200px; height: 180px;
+    background: var(--ink-3);
+    border: 1px solid var(--line-2);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .merch-tee-mark {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 28px;
+    letter-spacing: -0.04em;
+    color: var(--bone);
+  }
+  .merch-tee-mark .chev { color: var(--copper); }
+
+  .sticker {
+    background: var(--copper);
+    color: var(--ink);
+    padding: 14px 22px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 24px;
+    letter-spacing: -0.03em;
+    transform: rotate(-4deg);
+    box-shadow: 6px 6px 0 var(--copper-dim);
+    border-radius: 2px;
+  }
+
+  /* =================================================================
+     11 — ASSETS
+     ================================================================= */
+  .assets {
+    border: 1px solid var(--line);
+  }
+  .asset-row {
+    display: grid;
+    grid-template-columns: 280px 1fr 120px;
+    gap: 24px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    align-items: baseline;
+  }
+  .asset-row:last-child { border-bottom: none; }
+  .asset-row.head {
+    background: var(--ink-2);
+    color: var(--copper);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+  .asset-file {
+    color: var(--bone);
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .asset-purpose { color: var(--ash); line-height: 1.6; }
+  .asset-purpose code { background: var(--ink-3); font-size: 11px; }
+  .asset-size {
+    color: var(--copper);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  @media (max-width: 800px) {
+    .asset-row { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  /* =================================================================
+     FOOTER
+     ================================================================= */
+  footer {
+    padding: 80px 32px;
+    border-top: 1px solid var(--line);
+    background: var(--ink);
+  }
+  .foot-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 32px;
+    align-items: end;
+  }
+  .foot-mark {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: clamp(40px, 6vw, 72px);
+    letter-spacing: -0.04em;
+  }
+  .foot-mark .chev { color: var(--copper); }
+  .foot-meta {
+    font-size: 11px;
+    color: var(--ash);
+    letter-spacing: 0.1em;
+    line-height: 1.9;
+    text-align: right;
+  }
+  .foot-meta .v { color: var(--copper); }
+  @media (max-width: 700px) {
+    .foot-inner { grid-template-columns: 1fr; }
+    .foot-meta { text-align: left; }
+  }
+
+  /* Responsive padding adjustments */
+  @media (max-width: 700px) {
+    .chapter { padding: 80px 20px; }
+    .logo-hero, .clear-space, .construction, .pair-hero, .chev-hero { padding: 40px 20px; }
+  }
+
+</style>
+</head>
+<body>
+
+<!-- ================ SIDE RAIL ================ -->
+<div class="rail">
+  <a href="#cover"><span class="num">00</span>Cover</a>
+  <a href="#principles"><span class="num">01</span>Principles</a>
+  <a href="#logo"><span class="num">02</span>Logo</a>
+  <a href="#name"><span class="num">03</span>Name</a>
+  <a href="#color"><span class="num">04</span>Color</a>
+  <a href="#type"><span class="num">05</span>Type</a>
+  <a href="#voice"><span class="num">06</span>Voice</a>
+  <a href="#chevron"><span class="num">07</span>Chevron</a>
+  <a href="#motion"><span class="num">08</span>Motion</a>
+  <a href="#components"><span class="num">09</span>Comps</a>
+  <a href="#applications"><span class="num">10</span>Apps</a>
+  <a href="#assets"><span class="num">11</span>Assets</a>
+</div>
+
+
+<!-- ================ COVER ================ -->
+<section class="cover" id="cover">
+  <div class="cover-inner">
+    <div class="cover-meta">
+      <span class="dot"></span>
+      <span>Brand system · v1.0 · May 2026 · Sibling to etchit</span>
+    </div>
+    <h1 class="cover-title">fetch<span class="chev">&gt;</span>it</h1>
+    <p class="cover-sub">
+      The reader's companion.<span class="sep"> · </span>
+      <span style="font-style:normal;font-family:'JetBrains Mono',monospace;font-size:0.55em;letter-spacing:0.15em;text-transform:uppercase;color:var(--ash);">Built on the same system. Carries a different verb.</span>
+    </p>
+    <p class="cover-lead">
+      fetchit is the consumer companion to etchit — <strong>the browser, the
+      reader, the share target</strong>. Where etchit etches content into
+      Autonomi, fetchit retrieves it. The two ship as a pair: one verb writes,
+      the other returns. This document inherits the etchit visual system in
+      full; everything you read here is what changes when the verb does.
+      Tokens, type, color, and voice carry over verbatim. The mark, the
+      character, and the surfaces are fetchit's own.
+    </p>
+    <div class="cover-meta-grid">
+      <div>
+        <div class="cmg-label">Product</div>
+        <div class="cmg-value">fetchit</div>
+      </div>
+      <div>
+        <div class="cmg-label">Wordmark</div>
+        <div class="cmg-value">fetch<span style="color:var(--copper)">&gt;</span>it</div>
+      </div>
+      <div>
+        <div class="cmg-label">Tagline</div>
+        <div class="cmg-value">Fetch it. Read it.</div>
+      </div>
+      <div>
+        <div class="cmg-label">Sibling</div>
+        <div class="cmg-value">etchit · v1.0</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 01 — PRINCIPLES ================ -->
+<section class="chapter" id="principles">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">01 / Principles</div>
+      <div>
+        <h2 class="chapter-title">Five rules, <em>one direction</em>.</h2>
+        <p class="chapter-lead">
+          fetchit answers to etchit's principles, plus its own. When in doubt,
+          pick the one closest to <strong>retrieve</strong> and the one
+          furthest from <strong>perform</strong>.
+        </p>
+      </div>
+    </div>
+
+    <div class="principles">
+      <div class="principle">
+        <div>
+          <div class="principle-num">01</div>
+          <div class="principle-head">Companion <em>by design</em>.</div>
+        </div>
+        <p class="principle-body">
+          fetchit is never a standalone brand. It is the second word in a
+          sentence whose first word is etchit. Lockup, copy, and surface
+          treatments should always read like a sibling — never a sequel,
+          never a sub-brand, never a separate product story.
+        </p>
+      </div>
+      <div class="principle">
+        <div>
+          <div class="principle-num">02</div>
+          <div class="principle-head">Receive, <em>never perform</em>.</div>
+        </div>
+        <p class="principle-body">
+          fetchit's job is to render exactly what was etched — no recommendations,
+          no remixing, no "for you." If the writer chose monospace, you show
+          monospace. If the writer chose nothing, you show nothing. The reader
+          came for the content, not the chrome.
+        </p>
+      </div>
+      <div class="principle">
+        <div>
+          <div class="principle-num">03</div>
+          <div class="principle-head">Terminal, <em>not tech</em>.</div>
+        </div>
+        <p class="principle-body">
+          Inherited from etchit. We speak monospace, not marketing. A hash
+          looks like a hash. An address looks like an address. The interface
+          should feel like something a developer left running — not a thing
+          the marketing team styled.
+        </p>
+      </div>
+      <div class="principle">
+        <div>
+          <div class="principle-num">04</div>
+          <div class="principle-head">The chevron <em>is the brand</em>.</div>
+        </div>
+        <p class="principle-body">
+          <code>&gt;</code> is not a stylistic choice, it's the identity. It
+          appears in the wordmark, the mark, the favicon, the prompt, the
+          forward arrow. Treat it like a logomark: never flip it, never
+          color it anything but copper, never replace it with an angle bracket
+          or arrow glyph.
+        </p>
+      </div>
+      <div class="principle">
+        <div>
+          <div class="principle-num">05</div>
+          <div class="principle-head">Speed reads <em>as care</em>.</div>
+        </div>
+        <p class="principle-body">
+          fetchit ships one experience metric: time-to-first-character. Every
+          design decision either lowers it or it doesn't. No splash screens,
+          no progressive blur-ups, no skeleton states that pretend. Either the
+          content arrived or it didn't — show whichever is true.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 02 — LOGO ================ -->
+<section class="chapter" id="logo">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">02 / Logo</div>
+      <div>
+        <h2 class="chapter-title">The wordmark, <em>the mark, the pair</em>.</h2>
+        <p class="chapter-lead">
+          Two forms. One bone-on-ink, one ink-on-bone, plus the reductive
+          <code>[&gt;]</code> mark for anywhere the wordmark can't fit — and a
+          dedicated pair lockup for showing fetchit and etchit together.
+        </p>
+      </div>
+    </div>
+
+    <!-- primary wordmark -->
+    <div class="logo-hero">
+      <div class="logo-wordmark-big">fetch<span class="chev">&gt;</span>it</div>
+      <div class="logo-meta">
+        <div><strong style="color:var(--bone)">Primary wordmark.</strong> Use whenever you control the typography.</div>
+        <dl>
+          <dt>Face</dt><dd>JetBrains Mono 800</dd>
+          <dt>Tracking</dt><dd>−0.05em</dd>
+          <dt>Chevron</dt><dd>Copper (#c9732b)</dd>
+          <dt>Letters</dt><dd>Bone (#f5f2eb)</dd>
+          <dt>Case</dt><dd>Always lowercase</dd>
+        </dl>
+      </div>
+    </div>
+
+    <!-- variants grid -->
+    <div class="logo-variants">
+      <div class="lv">
+        <div class="lv-label">A / Primary</div>
+        <div class="lv-sample"><span class="wordmark-sample">fetch<span class="chev">&gt;</span>it</span></div>
+        <div class="lv-note">Bone letters, copper chevron, ink ground.</div>
+      </div>
+      <div class="lv on-bone">
+        <div class="lv-label">B / Inverted</div>
+        <div class="lv-sample"><span class="wordmark-sample" style="color:var(--ink)">fetch<span class="chev">&gt;</span>it</span></div>
+        <div class="lv-note">For bone/paper grounds. Keep copper.</div>
+      </div>
+      <div class="lv">
+        <div class="lv-label">C / Monochrome</div>
+        <div class="lv-sample"><span class="wordmark-sample mono" style="color:var(--bone)">fetch<span class="chev">&gt;</span>it</span></div>
+        <div class="lv-note">Engraving, embossing, single-color print only.</div>
+      </div>
+      <div class="lv">
+        <div class="lv-label">D / Mark</div>
+        <div class="lv-sample"><span class="mark-sample">[&gt;]</span></div>
+        <div class="lv-note">Favicon, app icon, avatar, in-text accent.</div>
+      </div>
+      <div class="lv on-bone">
+        <div class="lv-label">E / Mark (inverted)</div>
+        <div class="lv-sample"><span class="mark-sample ink">[&gt;]</span></div>
+        <div class="lv-note">Only when the ground is bone.</div>
+      </div>
+      <div class="lv">
+        <div class="lv-label">F / Chevron alone</div>
+        <div class="lv-sample"><span class="mark-sample" style="font-size:64px">&gt;</span></div>
+        <div class="lv-note">The atomic unit. Never as a standalone logo — only as ornament, prompt, or arrow.</div>
+      </div>
+    </div>
+
+    <!-- construction -->
+    <div class="sub">
+      <div class="sub-label">// construction</div>
+      <div class="sub-title">Proportions are fixed, not stylized.</div>
+      <div class="construction">
+        <div class="construction-grid">
+          <div class="gridline h" style="top: 0;"></div>
+          <div class="gridline h" style="bottom: 0;"></div>
+          <div class="gridline v" style="left: 0;"></div>
+          <div class="gridline v" style="right: 0;"></div>
+          <div class="gridline v" style="left: 56%;"></div>
+          <div class="tag" style="top:-22px;left:0;">cap-height</div>
+          <div class="tag" style="bottom:-22px;right:0;">baseline</div>
+          <div class="tag" style="top:-22px;left:56%;">optical center</div>
+          <div class="letters">fetch<span class="chev">&gt;</span>it</div>
+        </div>
+      </div>
+      <p style="margin-top:20px;max-width:720px;font-size:13px;color:var(--ash);line-height:1.7;">
+        The chevron sits slightly right of the mathematical midpoint — JetBrains
+        Mono's <code>&gt;</code> reads visually heavier on its left edge, so it
+        balances the longer "fetch" stem on the left of the wordmark. Do not
+        kern it out. Do not replace it with a right-arrow glyph (<code>→</code>),
+        an angle bracket (<code>›</code>), or two stacked carets.
+      </p>
+    </div>
+
+    <!-- clear space -->
+    <div class="sub">
+      <div class="sub-label">// clear space &amp; minimum size</div>
+      <div class="sub-title">Breathing room equal to one <code>x</code>-height.</div>
+      <div class="clear-space">
+        <div class="clear-space-box">
+          <div class="wordmark">fetch<span class="chev">&gt;</span>it</div>
+        </div>
+      </div>
+      <p class="clear-space-note">
+        Minimum reserve on all sides = the height of a lowercase <code>x</code> in the wordmark itself.<br>
+        Minimum legible size: <strong style="color:var(--bone)">14px</strong> digital · <strong style="color:var(--bone)">10mm</strong> print.
+        Below those, use the <code>[&gt;]</code> mark instead.
+      </p>
+    </div>
+
+    <!-- don'ts -->
+    <div class="sub">
+      <div class="sub-label">// don'ts</div>
+      <div class="sub-title">Six things that break the mark.</div>
+      <div class="donts">
+        <div class="dont">
+          <div class="dont-x">×</div>
+          <div class="dont-sample"><span class="wordmark-sample" style="font-size:32px;transform:skewX(-10deg);display:inline-block;">fetch<span class="chev">&gt;</span>it</span></div>
+          <div class="dont-label">Don't skew, italicize, or warp.</div>
+        </div>
+        <div class="dont">
+          <div class="dont-x">×</div>
+          <div class="dont-sample"><span class="wordmark-sample" style="font-size:32px"><span style="color:inherit">fetch</span><span style="color:#4a9dff">&gt;</span>it</span></div>
+          <div class="dont-label">Don't recolor the chevron. Copper only.</div>
+        </div>
+        <div class="dont">
+          <div class="dont-x">×</div>
+          <div class="dont-sample"><span class="wordmark-sample" style="font-size:32px;font-family:Georgia,serif;font-weight:700">fetch<span class="chev">&gt;</span>it</span></div>
+          <div class="dont-label">Don't substitute the typeface.</div>
+        </div>
+        <div class="dont">
+          <div class="dont-x">×</div>
+          <div class="dont-sample"><span class="wordmark-sample" style="font-size:32px;text-transform:uppercase">FETCH<span class="chev">&gt;</span>IT</span></div>
+          <div class="dont-label">Don't uppercase the wordmark.</div>
+        </div>
+        <div class="dont">
+          <div class="dont-x">×</div>
+          <div class="dont-sample"><span class="wordmark-sample" style="font-size:32px">fetch<span style="color:var(--copper)">→</span>it</span></div>
+          <div class="dont-label">Don't substitute an arrow, angle bracket, or caret.</div>
+        </div>
+        <div class="dont">
+          <div class="dont-x">×</div>
+          <div class="dont-sample"><span class="wordmark-sample" style="font-size:32px">fetch<span style="color:var(--copper)">&lt;</span>it</span></div>
+          <div class="dont-label">Don't reverse the chevron — it always points forward.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- pair lockup -->
+    <div class="sub">
+      <div class="sub-label">// pair lockup</div>
+      <div class="sub-title">When etchit and fetchit appear together.</div>
+      <div class="pair-hero">
+        <div class="pair-mark">etch<span class="slash">/</span>it</div>
+        <div class="pair-divider"></div>
+        <div class="pair-mark">fetch<span class="chev">&gt;</span>it</div>
+      </div>
+      <p style="margin-top:20px;max-width:720px;font-size:13px;color:var(--ash);line-height:1.7;">
+        etchit always sits on the left, fetchit on the right — they read as a
+        sentence: <em style="font-family:'Instrument Serif',serif;font-style:italic;">write, then retrieve</em>.
+        The two are separated by a single ink-2 hairline, never an ampersand,
+        slash, plus sign, or "and." Equal weight, equal size, no hierarchy.
+      </p>
+
+      <div class="pair-grid">
+        <div class="pair-cell">
+          <div class="pc-label">01 · horizontal</div>
+          <div class="pc-sample"><span style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:24px;letter-spacing:-0.04em;">etch<span style="color:var(--copper)">/</span>it<span style="color:var(--ash);font-weight:400;margin:0 14px;">|</span>fetch<span style="color:var(--copper)">&gt;</span>it</span></div>
+          <div class="pc-note">Default lockup. Use in footers, press kits, joint announcements.</div>
+        </div>
+        <div class="pair-cell">
+          <div class="pc-label">02 · marks only</div>
+          <div class="pc-sample"><span style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:36px;color:var(--copper);letter-spacing:-0.04em;">[/] [&gt;]</span></div>
+          <div class="pc-note">For tight surfaces — app drawer, share sheet, tab cluster.</div>
+        </div>
+        <div class="pair-cell">
+          <div class="pc-label">03 · stacked</div>
+          <div class="pc-sample"><div style="text-align:center;font-family:'JetBrains Mono',monospace;font-weight:800;font-size:18px;letter-spacing:-0.04em;line-height:1.3;">etch<span style="color:var(--copper)">/</span>it<br>fetch<span style="color:var(--copper)">&gt;</span>it</div></div>
+          <div class="pc-note">Vertical orientation — sidebar, narrow column, business card.</div>
+        </div>
+        <div class="pair-cell">
+          <div class="pc-label">04 · sentence form</div>
+          <div class="pc-sample"><span style="font-family:'Instrument Serif',serif;font-style:italic;font-size:22px;color:var(--bone-dim);">Etch it.<span style="color:var(--copper);font-style:normal"> · </span>Fetch it.</span></div>
+          <div class="pc-note">The shared tagline. Both products live inside it.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 03 — NAME ================ -->
+<section class="chapter" id="name">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">03 / Name</div>
+      <div>
+        <h2 class="chapter-title">One name, <em>four spellings</em>.</h2>
+        <p class="chapter-lead">
+          The product is <strong>fetchit</strong> — one word, lowercase. The
+          wordmark inserts a copper chevron. The name lives in four contexts;
+          each gets a fixed treatment.
+        </p>
+      </div>
+    </div>
+
+    <div class="option-grid">
+      <div class="option">
+        <div class="option-name">A · Wordmark</div>
+        <div class="option-display">fetch<span class="chev">&gt;</span>it</div>
+        <div class="option-notes">
+          <strong>Display use only.</strong> The chevron is decorative — it
+          replaces nothing in the name itself. Used in hero placements,
+          headers, the og-image, the app-icon mark <code>[&gt;]</code>.
+        </div>
+      </div>
+      <div class="option">
+        <div class="option-name">B · Logotype</div>
+        <div class="option-display">fetchit</div>
+        <div class="option-notes">
+          <strong>Set as one word.</strong> Used in body copy, code, package
+          names, CLI names, URL slugs. Lowercase always. No camelCase
+          (<span class="dim">~~FetchIt~~</span>), no hyphen
+          (<span class="dim">~~fetch-it~~</span>).
+        </div>
+      </div>
+      <div class="option">
+        <div class="option-name">C · Verb</div>
+        <div class="option-display">fetch it<span class="chev">.</span></div>
+        <div class="option-notes">
+          <strong>The action.</strong> Used in copy, taglines, calls to action.
+          Always with a period — it's an imperative, not a question. Pairs
+          with etchit's <code>etch it.</code> as a verb sentence.
+        </div>
+      </div>
+      <div class="option">
+        <div class="option-name">D · Domain</div>
+        <div class="option-display"><span class="dim">fetchit</span>.io</div>
+        <div class="option-notes">
+          <strong>Canonical URL form.</strong> Lowercase, no www, no trailing
+          slash. The TLD is part of the brand — never reduce to bare
+          <code>fetchit</code> in URLs.
+        </div>
+      </div>
+    </div>
+
+    <div class="rules">
+      <div class="rule-row head">
+        <div>Context</div>
+        <div>Form</div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">Headline / hero</div>
+        <div class="rule-form">fetch<span style="color:var(--copper)">&gt;</span>it</div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">Body copy, prose</div>
+        <div class="rule-form">fetchit</div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">App store listing</div>
+        <div class="rule-form">fetchit</div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">Verb / imperative</div>
+        <div class="rule-form">fetch it.</div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">CLI / package</div>
+        <div class="rule-form"><code>fetchit</code></div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">Domain / URL</div>
+        <div class="rule-form"><code>fetchit.io</code></div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">Social handle</div>
+        <div class="rule-form"><code>@fetchit</code></div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-context">Pair phrase</div>
+        <div class="rule-form">etchit and fetchit</div>
+      </div>
+    </div>
+
+    <div class="sub">
+      <div class="sub-label">// rules of speech</div>
+      <div class="sub-title">How fetchit refers to itself in copy.</div>
+      <p style="font-size:14px;color:var(--ash);line-height:1.8;max-width:720px;">
+        fetchit is always lowercase, even at the start of a sentence — same as
+        etchit. Brand names are pronouns of last resort: prefer <em
+        style="font-family:'Instrument Serif',serif;font-style:italic;">it</em>
+        once introduced. Never write "the fetchit app" or "Fetchit" — both
+        violate the lowercase rule. Inside copy, the chevron treatment
+        (<code>fetch&gt;it</code>) only appears in display contexts; in running
+        prose it's plain <code>fetchit</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 04 — COLOR ================ -->
+<section class="chapter" id="color">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">04 / Color</div>
+      <div>
+        <h2 class="chapter-title">Same copper. <em>Same ink. Same bone.</em></h2>
+        <p class="chapter-lead">
+          fetchit does not introduce a single new color. The token system is
+          inherited verbatim from <code>etchit-brand v1.0 · 04 / Color</code>.
+        </p>
+      </div>
+    </div>
+
+    <div class="inherit-card">
+      <div class="ic-label">// inherits from etchit</div>
+      <div class="ic-body">
+        <strong>The full token set is canonical.</strong> Copper
+        (<code>#c9732b</code>) remains the only chromatic. Ink, bone, ash,
+        and signal scales carry over without change. fetchit's UI surfaces
+        compose from the same five values as etchit's editor surfaces.
+        Anything you'd reach for in etchit's palette is the right answer here.
+      </div>
+    </div>
+
+    <div class="swatch-row">
+      <div class="swatch">
+        <div>
+          <div class="swatch-chip" style="background:var(--copper);"></div>
+          <div class="swatch-name">Copper</div>
+          <div class="swatch-hex">#c9732b</div>
+        </div>
+        <div class="swatch-role">Accent. The chevron, prompts, eyebrow labels, focus rings.</div>
+      </div>
+      <div class="swatch">
+        <div>
+          <div class="swatch-chip" style="background:var(--ink);"></div>
+          <div class="swatch-name">Ink</div>
+          <div class="swatch-hex">#0a0a0a</div>
+        </div>
+        <div class="swatch-role">Canvas. Primary background, app shell, terminal ground.</div>
+      </div>
+      <div class="swatch">
+        <div>
+          <div class="swatch-chip" style="background:var(--ink-2);"></div>
+          <div class="swatch-name">Ink 2</div>
+          <div class="swatch-hex">#141414</div>
+        </div>
+        <div class="swatch-role">Raised surface. Reader card, address bar, modal sheet.</div>
+      </div>
+      <div class="swatch">
+        <div>
+          <div class="swatch-chip" style="background:var(--bone);"></div>
+          <div class="swatch-name">Bone</div>
+          <div class="swatch-hex">#f5f2eb</div>
+        </div>
+        <div class="swatch-role">Primary text on ink. Body copy in dark mode reader.</div>
+      </div>
+      <div class="swatch">
+        <div>
+          <div class="swatch-chip" style="background:var(--ash);"></div>
+          <div class="swatch-name">Ash</div>
+          <div class="swatch-hex">#8a8a8a</div>
+        </div>
+        <div class="swatch-role">Tertiary. Metadata, timestamps, labels, hairlines.</div>
+      </div>
+    </div>
+
+    <p style="margin-top:32px;max-width:720px;font-size:13px;color:var(--ash);line-height:1.7;">
+      <strong style="color:var(--bone)">Note on light-mode reader.</strong>
+      fetchit's reader supports a bone-ground variant for daytime reading. In
+      that mode, ink and bone swap roles — text becomes ink (<code>#0a0a0a</code>)
+      on bone (<code>#f5f2eb</code>) — but copper does not shift. The chevron
+      is still copper, regardless of ground. Same hex, both modes.
+    </p>
+  </div>
+</section>
+
+<!-- ================ 05 — TYPE ================ -->
+<section class="chapter" id="type">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">05 / Type</div>
+      <div>
+        <h2 class="chapter-title">Same two faces. <em>That's the system.</em></h2>
+        <p class="chapter-lead">
+          JetBrains Mono carries the workload. Instrument Serif emphasizes,
+          rarely. The hierarchy is etchit's, unchanged.
+        </p>
+      </div>
+    </div>
+
+    <div class="inherit-card">
+      <div class="ic-label">// inherits from etchit</div>
+      <div class="ic-body">
+        <strong>Type system is canonical and shared.</strong> JetBrains Mono in
+        weights 400, 500, 600, 700, 800 covers UI, body, code, and display.
+        Instrument Serif italic appears only as accent — chapter emphasis,
+        pull quotes, the rare editorial flourish. Reader rendering follows
+        etchit's faces exactly so a document looks the same etched and fetched.
+      </div>
+    </div>
+
+    <div class="sub">
+      <div class="sub-label">// reader-specific guidance</div>
+      <div class="sub-title">Two adjustments unique to fetchit's surface.</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);">
+        <div style="background:var(--ink-2);padding:32px 28px;">
+          <div style="font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:var(--copper);margin-bottom:12px;font-weight:600;">Reader body</div>
+          <div style="font-size:15px;color:var(--bone);line-height:1.75;margin-bottom:14px;">JetBrains Mono · 400 · 15px · 1.75 line-height</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">
+            Slightly looser leading than etchit's editor (1.6) to favor sustained
+            reading over editing density.
+          </div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 28px;">
+          <div style="font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:var(--copper);margin-bottom:12px;font-weight:600;">Hash / address</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--copper);margin-bottom:14px;letter-spacing:0.02em;">a3f9·c2b1·8e07·4d2a</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">
+            Autonomi addresses always render in copper, monospace, with
+            middle-dot separators every 4 chars for legibility.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 06 — VOICE ================ -->
+<section class="chapter" id="voice">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">06 / Voice</div>
+      <div>
+        <h2 class="chapter-title">Verb first. <em>Always.</em></h2>
+        <p class="chapter-lead">
+          fetchit speaks etchit's voice with one tilt: it leads with the action.
+          Short. Imperative. Slightly impatient — as if the content has already
+          arrived and you're just catching up.
+        </p>
+      </div>
+    </div>
+
+    <div class="voice-table">
+      <div class="voice-row head">
+        <div class="voice-cell label">Do</div>
+        <div class="voice-cell label">Don't</div>
+      </div>
+      <div class="voice-row">
+        <div class="voice-cell do">Fetch a doc.</div>
+        <div class="voice-cell dont">Welcome to the future of permanent reading.</div>
+      </div>
+      <div class="voice-row">
+        <div class="voice-cell do">Paste an address. Read.</div>
+        <div class="voice-cell dont">Simply enter your unique content identifier.</div>
+      </div>
+      <div class="voice-row">
+        <div class="voice-cell do">Already there.</div>
+        <div class="voice-cell dont">Loading your content, please wait...</div>
+      </div>
+      <div class="voice-row">
+        <div class="voice-cell do">No login. No tracking. Just the doc.</div>
+        <div class="voice-cell dont">Your privacy is our top priority.</div>
+      </div>
+      <div class="voice-row">
+        <div class="voice-cell do">Bad address.</div>
+        <div class="voice-cell dont">We're sorry, but the requested resource could not be located.</div>
+      </div>
+      <div class="voice-row">
+        <div class="voice-cell do">Etched 2 minutes ago.</div>
+        <div class="voice-cell dont">This document was recently published by an anonymous user.</div>
+      </div>
+    </div>
+
+    <p style="margin-top:40px;max-width:720px;font-size:14px;color:var(--ash);line-height:1.7;">
+      <strong style="color:var(--bone)">Rule of thumb:</strong> every microcopy
+      string should fit in one breath. If you'd say it slowly, you're saying
+      too much. Verbs do most of the work
+      (<em style="font-family:'Instrument Serif',serif;">fetch, read, share, copy</em>).
+      Adjectives almost never appear; when they do, they earn it.
+    </p>
+  </div>
+</section>
+
+<!-- ================ 07 — CHEVRON ================ -->
+<section class="chapter" id="chevron">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">07 / Chevron</div>
+      <div>
+        <h2 class="chapter-title">The <em>character</em> that points the way.</h2>
+        <p class="chapter-lead">
+          The greater-than sign isn't ornament — it's the entire visual
+          identity compressed into one character. Where etchit's slash
+          inscribes, fetchit's chevron retrieves. Protect it.
+        </p>
+      </div>
+    </div>
+
+    <div class="chev-hero">
+      <div class="chev-giant">&gt;</div>
+      <div class="chev-label">JetBrains Mono · 800 · #c9732b</div>
+    </div>
+
+    <div class="sub">
+      <div class="sub-label">// where the chevron lives</div>
+      <div class="sub-title">Six roles, one glyph.</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);">
+        <div style="background:var(--ink-2);padding:32px 24px;">
+          <div style="font-size:13px;color:var(--copper);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;">01 · pivot</div>
+          <div style="font-size:28px;font-weight:800;letter-spacing:-0.03em;margin-bottom:12px;">fetch<span style="color:var(--copper)">&gt;</span>it</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">Inside the wordmark. Copper on bone. The identity itself.</div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 24px;">
+          <div style="font-size:13px;color:var(--copper);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;">02 · mark</div>
+          <div style="font-size:28px;font-weight:800;color:var(--copper);margin-bottom:12px;letter-spacing:-0.03em;">[&gt;]</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">Bracketed — the reductive mark. App icons, favicons, share targets.</div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 24px;">
+          <div style="font-size:13px;color:var(--copper);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;">03 · prompt</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;margin-bottom:12px;"><span style="color:var(--copper);font-weight:700;">&gt;</span> <span style="color:var(--bone-dim);">a3f9·c2b1...</span></div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">Address-bar prefix. The cursor that asks "where to."</div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 24px;">
+          <div style="font-size:13px;color:var(--copper);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;">04 · forward</div>
+          <div style="font-size:14px;color:var(--ash);line-height:1.7;margin-bottom:12px;">Read <span style="color:var(--copper);font-weight:800;margin:0 4px;">&gt;</span> Share <span style="color:var(--copper);font-weight:800;margin:0 4px;">&gt;</span> Copy</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">Step separator in flows, breadcrumbs, action sequences.</div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 24px;">
+          <div style="font-size:13px;color:var(--copper);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;">05 · bullet</div>
+          <div style="font-size:13px;color:var(--ash);line-height:1.7;margin-bottom:8px;"><span style="color:var(--copper);font-weight:800;margin-right:8px;">&gt;</span>Permanent links</div>
+          <div style="font-size:13px;color:var(--ash);line-height:1.7;margin-bottom:12px;"><span style="color:var(--copper);font-weight:800;margin-right:8px;">&gt;</span>No accounts</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">List-marker in feature lists. Replaces the disc/dash.</div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 24px;">
+          <div style="font-size:13px;color:var(--copper);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;">06 · ornament</div>
+          <div style="font-size:24px;color:var(--copper);letter-spacing:0.2em;font-weight:800;margin-bottom:12px;">&gt; &gt; &gt;</div>
+          <div style="font-size:12px;color:var(--ash);line-height:1.6;">Triple-chevron as section break, "continue reading" indicator. Never in UI.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sub">
+      <div class="sub-label">// the chevron vs. the slash</div>
+      <div class="sub-title">Two glyphs, two verbs, one system.</div>
+      <p style="font-size:14px;color:var(--ash);line-height:1.8;max-width:720px;margin-bottom:24px;">
+        etchit's slash and fetchit's chevron are deliberately the same weight,
+        same color, same family. Their visual difference is one stroke vs. two —
+        the direction of the verb made literal. The slash inscribes, the
+        chevron points. Together they read as the full motion of permanent
+        publishing: <em style="font-family:'Instrument Serif',serif;font-style:italic;">mark, retrieve</em>.
+      </p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);">
+        <div style="background:var(--ink-2);padding:32px 28px;text-align:center;">
+          <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:120px;color:var(--copper);line-height:1;">/</div>
+          <div style="font-size:11px;color:var(--ash);letter-spacing:0.2em;text-transform:uppercase;margin-top:18px;">etchit · etch</div>
+          <div style="font-size:12px;color:var(--ash);margin-top:10px;line-height:1.6;">A single inscribing stroke. The act of marking.</div>
+        </div>
+        <div style="background:var(--ink-2);padding:32px 28px;text-align:center;">
+          <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:120px;color:var(--copper);line-height:1;">&gt;</div>
+          <div style="font-size:11px;color:var(--ash);letter-spacing:0.2em;text-transform:uppercase;margin-top:18px;">fetchit · fetch</div>
+          <div style="font-size:12px;color:var(--ash);margin-top:10px;line-height:1.6;">Two converging strokes. The act of arriving.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 08 — MOTION ================ -->
+<section class="chapter" id="motion">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">08 / Motion</div>
+      <div>
+        <h2 class="chapter-title">Fetch in. <em>Settle.</em> Never load.</h2>
+        <p class="chapter-lead">
+          fetchit inherits etchit's mechanical motion philosophy — no springs,
+          no overshoots, no easing that smiles. One addition: the
+          <em style="font-family:'Instrument Serif',serif;">arrival</em>.
+        </p>
+      </div>
+    </div>
+
+    <div class="motion-list">
+      <div class="motion-row">
+        <div class="m-name">Arrival</div>
+        <div class="m-tech">0.2s · ease-out · opacity 0 → 1</div>
+        <div class="m-use">The moment content paints from the network. Single fade-in, no skeleton, no shimmer, no progress bar. Either it arrived or it didn't.</div>
+      </div>
+      <div class="motion-row">
+        <div class="m-name">Address focus</div>
+        <div class="m-tech">0.15s · ease · border-color</div>
+        <div class="m-use">Address bar gains a copper border on focus. Cursor blinks step-end (1.1s) — terminals don't fade.</div>
+      </div>
+      <div class="motion-row">
+        <div class="m-name">Cursor blink</div>
+        <div class="m-tech">1.1s · step-end · on/off</div>
+        <div class="m-use">Inherited from etchit. A single copper block cursor in the address bar prompt.</div>
+      </div>
+      <div class="motion-row">
+        <div class="m-name">Fade-up (scroll)</div>
+        <div class="m-tech">0.8s · ease-out · translateY(30 → 0)</div>
+        <div class="m-use">Inherited. Section reveal triggered by IntersectionObserver. One section at a time; no cascading.</div>
+      </div>
+      <div class="motion-row">
+        <div class="m-name">Pulse</div>
+        <div class="m-tech">2s · infinite · opacity + scale(1 → 1.3)</div>
+        <div class="m-use">Inherited. The status dot in the eyebrow. Slow, quiet — signal of life, not attention-grab.</div>
+      </div>
+      <div class="motion-row">
+        <div class="m-name">Hash copy</div>
+        <div class="m-tech">0.4s · ease · color flash</div>
+        <div class="m-use">Click-to-copy on an Autonomi address: brief flash to bone, instant return to copper. Confirms the action without a toast.</div>
+      </div>
+      <div class="motion-row">
+        <div class="m-name">Reader scroll</div>
+        <div class="m-tech">native</div>
+        <div class="m-use">No custom scroll, no parallax, no momentum tweaks. The reader scrolls like a document because it is one.</div>
+      </div>
+    </div>
+
+    <p style="margin-top:40px;max-width:720px;font-size:14px;color:var(--ash);line-height:1.7;">
+      <strong style="color:var(--bone)">Rule of thumb:</strong> the goal of
+      every animation is to vanish. If the user notices the motion, the motion
+      failed. Correct verbs:
+      <em style="font-family:'Instrument Serif',serif;">arrives, settles, blinks, paints</em>.
+      Wrong verbs:
+      <span style="text-decoration:line-through;text-decoration-color:var(--signal-warn);">loads, animates, transitions, builds</span>.
+    </p>
+  </div>
+</section>
+
+<!-- ================ 09 — COMPONENTS ================ -->
+<section class="chapter" id="components">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">09 / Components</div>
+      <div>
+        <h2 class="chapter-title">The parts that <em>ship</em>.</h2>
+        <p class="chapter-lead">
+          The address bar, the reader card, the share sheet, the terminal
+          banner. Four UI atoms — fetchit's surface is mostly the absence of
+          everything else.
+        </p>
+      </div>
+    </div>
+
+    <div class="comp-grid">
+      <div class="comp">
+        <div class="comp-label">.address-bar</div>
+        <div class="comp-stage">
+          <div class="addr-bar">
+            <span class="prompt">&gt;</span>
+            <span class="hash">a3f9·c2b1·8e07·4d2a</span>
+            <span class="cursor"></span>
+          </div>
+        </div>
+        <div class="comp-meta">copper prompt · ink-2 ground · 4-char dot grouping</div>
+      </div>
+
+      <div class="comp">
+        <div class="comp-label">.reader-card</div>
+        <div class="comp-stage" style="padding:0;">
+          <div class="reader">
+            <div class="reader-meta">// etched 2 minutes ago</div>
+            <div class="reader-body">
+              The first paragraph of the etched document<br>
+              renders here, unchanged. fetchit shows what<br>
+              etchit wrote. No more, no less.
+            </div>
+            <div class="reader-foot">
+              <span>a3f9·c2b1</span>
+              <span>1,247 chars · permanent</span>
+            </div>
+          </div>
+        </div>
+        <div class="comp-meta">.reader · ink-2 border · monospace body</div>
+      </div>
+
+      <div class="comp">
+        <div class="comp-label">.share-target</div>
+        <div class="comp-stage">
+          <div style="display:flex;align-items:center;gap:14px;padding:14px 18px;background:var(--ink-2);border:1px solid var(--line-2);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:13px;">
+            <span style="font-size:28px;font-weight:800;color:var(--copper);letter-spacing:-0.04em;line-height:1;">[&gt;]</span>
+            <div>
+              <div style="color:var(--bone);font-weight:500;">Open in fetchit</div>
+              <div style="color:var(--ash);font-size:11px;margin-top:2px;">a3f9·c2b1·8e07·4d2a</div>
+            </div>
+          </div>
+        </div>
+        <div class="comp-meta">share-sheet entry · mark + verb + truncated hash</div>
+      </div>
+
+      <div class="comp">
+        <div class="comp-label">.terminal · CLI banner</div>
+        <div class="comp-stage" style="padding:0;">
+          <div class="terminal" style="max-width:100%;">
+            <div class="terminal-bar">
+              <span class="terminal-dot"></span>
+              <span class="terminal-dot"></span>
+              <span class="terminal-dot"></span>
+              <span class="terminal-title">~/fetchit</span>
+            </div>
+            <div class="terminal-body">
+              <div><span class="prompt">&gt;</span><span class="cmd">fetchit a3f9c2b1</span></div>
+              <div class="out">arrived · 1,247 chars · 0.18s</div>
+              <div class="addr" style="margin-top:8px;">a3f9·c2b1·8e07·4d2a</div>
+            </div>
+          </div>
+        </div>
+        <div class="comp-meta">.terminal · 8px radius · ink-3 on ink</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 10 — APPLICATIONS ================ -->
+<section class="chapter" id="applications">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">10 / Applications</div>
+      <div>
+        <h2 class="chapter-title">Where it all <em>lands</em>.</h2>
+        <p class="chapter-lead">
+          The mark on a home screen, a tab, an avatar, a sticker, a tee. Same
+          rules as etchit — copper on ink, never the other way around — with
+          fetchit's own surfaces called out.
+        </p>
+      </div>
+    </div>
+
+    <div class="apps">
+      <!-- app icon -->
+      <div class="app">
+        <div class="app-label">App icon · iOS / Android · 1024px</div>
+        <div class="app-stage">
+          <div style="width:128px;height:128px;background:var(--ink);border-radius:28px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:800;font-size:64px;color:var(--copper);letter-spacing:-0.06em;">[&gt;]</div>
+        </div>
+        <div class="app-desc">
+          Bracketed mark, copper on ink. Same corner radius and grid as etchit's
+          icon. The two icons sit beside each other on a home screen and
+          read as a matched pair without any decoration.
+        </div>
+      </div>
+
+      <!-- favicon -->
+      <div class="app">
+        <div class="app-label">Favicon · 16 / 32 / 64</div>
+        <div class="app-stage">
+          <div style="display:flex;align-items:center;gap:18px;">
+            <div style="width:16px;height:16px;background:var(--copper);border-radius:2px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:800;color:var(--ink);font-size:11px;">&gt;</div>
+            <div style="width:32px;height:32px;background:var(--copper);border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:800;color:var(--ink);font-size:20px;">&gt;</div>
+            <div style="width:64px;height:64px;background:var(--copper);border-radius:8px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:800;color:var(--ink);font-size:40px;">&gt;</div>
+          </div>
+        </div>
+        <div class="app-desc">
+          Solid copper square, chevron reversed out in ink. Legible at 16px —
+          the <code>[&gt;]</code> brackets drop away at favicon scale. Mirrors
+          etchit's favicon construction exactly.
+        </div>
+      </div>
+
+      <!-- social avatar -->
+      <div class="app">
+        <div class="app-label">Social avatar</div>
+        <div class="app-stage">
+          <div style="width:96px;height:96px;border-radius:50%;background:var(--ink);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:800;font-size:40px;color:var(--copper);letter-spacing:-0.04em;">[&gt;]</div>
+        </div>
+        <div class="app-desc">
+          Display name: <strong>fetch&gt;it</strong>. Handle: <code>@fetchit</code>.
+          Same mark across X, Farcaster, GitHub, Discord. Posted alongside
+          <code>@etchit</code> in joint announcements.
+        </div>
+      </div>
+
+      <!-- social preview -->
+      <div class="app" style="grid-column:span 2;">
+        <div class="app-label">Social preview card · 1280×640</div>
+        <div class="app-stage">
+          <div style="background:var(--ink);border:1px solid var(--line);width:100%;aspect-ratio:2/1;display:flex;flex-direction:column;justify-content:space-between;padding:32px;position:relative;overflow:hidden;">
+            <div style="font-size:10px;color:var(--copper);letter-spacing:0.25em;text-transform:uppercase;font-weight:600;z-index:2;">// the reader's companion</div>
+            <div style="font-size:clamp(48px,8vw,88px);font-weight:800;letter-spacing:-0.05em;line-height:0.9;z-index:2;">fetch<span style="color:var(--copper)">&gt;</span>it</div>
+            <div style="font-family:'Instrument Serif',serif;font-style:italic;font-size:clamp(18px,2.4vw,24px);color:var(--bone-dim);z-index:2;">Fetch it.<span style="color:var(--copper);font-style:normal;"> · </span>Read it.</div>
+            <div style="position:absolute;right:-80px;bottom:-120px;font-size:400px;color:var(--copper);opacity:0.04;font-weight:300;line-height:0.75;font-family:'JetBrains Mono',monospace;">&gt;</div>
+          </div>
+        </div>
+        <div class="app-desc">
+          <strong>Og-image composition:</strong> eyebrow (top-left) · wordmark
+          (center-left) · tagline (bottom-left) · muted chevron in corner.
+          Mirrors etchit's preview card — when the two are shared together,
+          they read as a diptych.
+        </div>
+      </div>
+
+      <!-- merch -->
+      <div class="app">
+        <div class="app-label">Merch · t-shirt front</div>
+        <div class="app-stage">
+          <div class="merch-tee">
+            <div class="merch-tee-mark">fetch<span class="chev">&gt;</span>it</div>
+          </div>
+        </div>
+        <div class="app-desc">
+          Wordmark centered, chest height. Copper chevron on garment-dyed bone
+          or ink tee. Often sold as a paired set with the etchit tee — wear
+          one, gift the other.
+        </div>
+      </div>
+
+      <!-- sticker -->
+      <div class="app">
+        <div class="app-label">Sticker · conference drop</div>
+        <div class="app-stage">
+          <div class="sticker">fetch&gt;it</div>
+        </div>
+        <div class="app-desc">
+          Solid copper ground, ink wordmark, hard offset shadow. Always rotated
+          −4° — same angle as the etchit sticker, so the pair stack cleanly on
+          a laptop lid.
+        </div>
+      </div>
+
+      <!-- pair sticker -->
+      <div class="app" style="grid-column:span 2;">
+        <div class="app-label">Pair sticker · etchit + fetchit</div>
+        <div class="app-stage">
+          <div style="display:flex;gap:14px;align-items:center;">
+            <div class="sticker" style="transform:rotate(-4deg);">etch/it</div>
+            <div class="sticker" style="transform:rotate(4deg);">fetch&gt;it</div>
+          </div>
+        </div>
+        <div class="app-desc">
+          When the two stickers ship as a pair, etchit tilts left, fetchit
+          tilts right — they lean toward each other. Sold together, given
+          together, applied together.
+        </div>
+      </div>
+
+      <!-- cli -->
+      <div class="app" style="grid-column:span 2;">
+        <div class="app-label">CLI · terminal banner</div>
+        <div class="app-stage" style="display:block;padding:0;">
+          <div class="terminal" style="max-width:100%;">
+            <div class="terminal-body" style="font-size:12px;padding:18px 16px;">
+              <div style="color:var(--copper);line-height:1.3;white-space:pre;font-weight:700;"> ____  ____  ____  ___  _  _     ____  ____
+(  __)(  __)(_  _)/ __)/ )( \   (_  _)(_  _)
+ ) _)  ) _)   )(  ( (__ ) __ (     )(    )(
+(__)  (____) (__)  \___)\_)(_/    (__)  (__)</div>
+              <div style="color:var(--ash);margin-top:8px;font-size:11px;">fetchit v0.1 · fetch it. read it.</div>
+            </div>
+          </div>
+        </div>
+        <div class="app-desc">
+          ASCII logotype on first <code>fetchit</code> run. JetBrains Mono in
+          terminal, copper ANSI (31m or 38;5;173m). Companion to etchit's
+          ASCII banner — same render, different word.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================ 11 — ASSETS ================ -->
+<section class="chapter" id="assets">
+  <div class="chapter-inner">
+    <div class="chapter-head">
+      <div class="chapter-num">11 / Assets</div>
+      <div>
+        <h2 class="chapter-title">What lives in <em>/artifacts</em>.</h2>
+        <p class="chapter-lead">
+          Files to produce, what they're for, and what's still missing. Mirrors
+          etchit's asset list 1:1 — every file etchit ships, fetchit ships a
+          counterpart with the same naming convention.
+        </p>
+      </div>
+    </div>
+
+    <div class="assets">
+      <div class="asset-row head">
+        <div>File</div><div>Purpose</div><div>Status</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-favicon-32.png</div>
+        <div class="asset-purpose">Browser tab favicon — smallest size. Rendered on the chevron alone.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-favicon-64.png</div>
+        <div class="asset-purpose">Pinned tab / high-dpi favicon. Same mark, 2× assets.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-favicon-180.png</div>
+        <div class="asset-purpose">Apple touch icon for iOS home-screen bookmarks.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-app-icon-512.png</div>
+        <div class="asset-purpose">Play Store listing icon, low-density Android launcher.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-app-icon-1024.png</div>
+        <div class="asset-purpose">App Store listing icon, high-density Android launcher, press kit.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-avatar-500.png</div>
+        <div class="asset-purpose">Social avatar — Farcaster, Discord, small profile slots.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-avatar-1000.png</div>
+        <div class="asset-purpose">Social avatar — X, GitHub, higher-res profile slots.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-primary-dark.png</div>
+        <div class="asset-purpose">Primary lockup on ink ground — press kit, embed, slide template.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-wordmark-dark.png</div>
+        <div class="asset-purpose">Standalone wordmark, no lockup. Hero overrides, slide titles.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">fetchit-social-preview-1280.png</div>
+        <div class="asset-purpose">Open Graph / Twitter Card image, 1280×640.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">pair-lockup-dark.png</div>
+        <div class="asset-purpose">etchit + fetchit horizontal pair lockup. Joint press, partnership announcements.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row">
+        <div class="asset-file">pair-social-preview-1280.png</div>
+        <div class="asset-purpose">Joint og-image showing both wordmarks. For announcements that mention both products.</div>
+        <div class="asset-size">staged</div>
+      </div>
+      <div class="asset-row" style="background:var(--ink-2);">
+        <div class="asset-file" style="color:var(--signal-warn);">— missing —</div>
+        <div class="asset-purpose">SVG versions of wordmark + mark for scalable rendering in docs, presentations, embed.</div>
+        <div class="asset-size">todo</div>
+      </div>
+      <div class="asset-row" style="background:var(--ink-2);">
+        <div class="asset-file" style="color:var(--signal-warn);">— missing —</div>
+        <div class="asset-purpose">Light-ground variants (<code>-light.png</code>) for printed collateral.</div>
+        <div class="asset-size">todo</div>
+      </div>
+      <div class="asset-row" style="background:var(--ink-2);">
+        <div class="asset-file" style="color:var(--signal-warn);">— missing —</div>
+        <div class="asset-purpose">Favicon.ico bundled 16/32/48 for legacy browser caches.</div>
+        <div class="asset-size">todo</div>
+      </div>
+    </div>
+    <p style="margin-top:16px;max-width:720px;font-size:13px;color:var(--ash);line-height:1.7;">
+      <strong style="color:var(--bone)">Naming convention is canonical.</strong>
+      Every fetchit asset filename mirrors its etchit counterpart with
+      <code>etchit-</code> swapped for <code>fetchit-</code>. Pair assets use
+      the <code>pair-</code> prefix and live alongside both products' folders.
+      If a file in <code>/artifacts</code> disagrees with what's here, the
+      file is wrong.
+    </p>
+  </div>
+</section>
+
+<!-- ================ FOOTER ================ -->
+<footer>
+  <div class="foot-inner">
+    <div class="foot-mark">fetch<span class="chev">&gt;</span>it</div>
+    <div class="foot-meta">
+      Brand system <span class="v">v1.0</span><br>
+      May 2026<br>
+      Sibling to etchit · v1.0<br>
+      Source of truth
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

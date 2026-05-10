@@ -9,7 +9,7 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 
 /**
- * The animated centerpiece "fetch/it" button. Wraps a `WebView` that
+ * The animated centerpiece "fetch>it" button. Wraps a `WebView` that
  * loads `assets/fetch-button.html` and exposes a small bridge:
  *
  *   * tap on the button (HTML side) → [`setOnTapListener`] callback

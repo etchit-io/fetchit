@@ -9,7 +9,7 @@ import uniffi.fetchit_ffi.setDataHome
 import uniffi.fetchit_ffi.setupLogger
 
 /**
- * Bootstraps the FFI side of fetch/it and owns the process-scoped
+ * Bootstraps the FFI side of fetch>it and owns the process-scoped
  * [`Client`].
  *
  * Why the Client lives here, not in [`MainActivity`]: it's a heavy

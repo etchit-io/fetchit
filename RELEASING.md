@@ -1,4 +1,4 @@
-# Releasing fetch/it
+# Releasing fetch>it
 
 Release process for the Android APK. Other artifacts (CLI binaries,
 WASM viewer, Tauri desktop) get their own pipelines later.

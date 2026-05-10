@@ -7,7 +7,7 @@ rust-version = "1.82"
 license = "GPL-3.0-only"
 homepage = "https://github.com/etchit-io/fetchit"
 repository = "https://github.com/etchit-io/fetchit"
-authors = ["the fetch/it contributors"]
+authors = ["the fetch>it contributors"]
 
 # fetchit-ffi sits OUTSIDE the main workspace by deliberate choice.
 # `uniffi-bindgen` walks all transitive deps when run against a

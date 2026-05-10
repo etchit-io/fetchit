@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// fetch/it CLI — command-line driver over fetchit-core + fetchit-net.
-// Copyright (C) the fetch/it contributors.
+// fetch>it CLI — command-line driver over fetchit-core + fetchit-net.
+// Copyright (C) the fetch>it contributors.
 
 //! `fetchit` — command-line driver for `fetchit-core` + `fetchit-net`.
 //!
@@ -29,7 +29,7 @@ use fetchit_net::{set_data_home, AutonomiClient, DEFAULT_PEERS};
 #[command(
     name = "fetchit",
     version,
-    about = "fetch/it — read-only viewer for the Autonomi network.",
+    about = "fetch>it — read-only viewer for the Autonomi network.",
     long_about = None,
 )]
 struct Cli {

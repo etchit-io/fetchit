@@ -23,7 +23,7 @@ import uniffi.fetchit_ffi.RenditionFfi
 import uniffi.fetchit_ffi.detect
 
 /**
- * Single-Activity host for fetch/it.
+ * Single-Activity host for fetch>it.
  *
  * Orchestrates only — validation lives in [`isValidAutonomiAddress`],
  * rendering in [`RenditionRenderer`], audio + video in [`AudioPlayback`]

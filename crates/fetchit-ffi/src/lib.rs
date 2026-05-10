@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// fetch/it FFI — uniffi bindings over fetchit-core + fetchit-net.
-// Copyright (C) the fetch/it contributors.
+// fetch>it FFI — uniffi bindings over fetchit-core + fetchit-net.
+// Copyright (C) the fetch>it contributors.
 
-//! `fetchit-uniffi` — Kotlin/Swift surface for fetch/it.
+//! `fetchit-uniffi` — Kotlin/Swift surface for fetch>it.
 //!
 //! Mirrors etchit's FFI shape: proc-macro `setup_scaffolding!()`,
 //! `#[uniffi::export]` on free functions, `#[uniffi::Object]` on the
 //! [`Client`] handle, and an FFI-friendly [`RenditionFFI`] enum so
-//! Kotlin code can pattern-match on what fetch/it returned.
+//! Kotlin code can pattern-match on what fetch>it returned.
 //!
 //! The heavy lifting lives in [`fetchit_core`] (handler engine) and
 //! [`fetchit_net`] (Autonomi client). This crate is glue — adapter
@@ -59,7 +59,7 @@ pub fn setup_logger() {
 /// Required on Android, where neither variable is set by default —
 /// `ant-core`'s internal `data_dir()` resolution will otherwise panic.
 /// Pass `context.filesDir.absolutePath` from `Application.onCreate`
-/// before any other fetch/it call.
+/// before any other fetch>it call.
 #[uniffi::export]
 pub fn set_data_home(path: String) {
     set_data_home_inner(&PathBuf::from(path));

@@ -24,7 +24,7 @@ import java.net.URLConnection
 /**
  * Loads a self-contained HTML body into a sandboxed `WebView` and
  * resolves any `autonomi://<64-hex>` resource references through
- * fetch/it's [`Client`].
+ * fetch>it's [`Client`].
  *
  * **Synthetic-origin trick (load-bearing).** The WebView is told its
  * base URL is [`SYNTH_ORIGIN`] (`https://aut.local`). At load time the
@@ -39,7 +39,7 @@ import java.net.URLConnection
  * internet. There is no DNS query for `aut.local`, no TLS handshake.
  * Every request to it is caught by [`shouldInterceptRequest`] inside
  * the app, the 64-hex path component is extracted, and the bytes are
- * pulled from the connected fetch/it [`Client`] over the Autonomi P2P
+ * pulled from the connected fetch>it [`Client`] over the Autonomi P2P
  * connection. The browser engine sees https plumbing; the actual
  * pipeline stays content-addressed and traditional-internet-free.
  *
@@ -167,7 +167,7 @@ class HtmlView @JvmOverloads constructor(
      * Intercepts every resource request and top-level navigation.
      * Routes any URL that maps to an Autonomi address (synthetic-https
      * form after the load-time rewrite, or raw `autonomi://` for
-     * defence in depth) through fetch/it's connected [`Client`]. All
+     * defence in depth) through fetch>it's connected [`Client`]. All
      * other URLs flow through to the platform.
      */
     private inner class AutonomiWebViewClient : WebViewClient() {

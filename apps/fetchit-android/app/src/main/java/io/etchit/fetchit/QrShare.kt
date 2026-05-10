@@ -21,7 +21,7 @@ import java.io.FileOutputStream
  * auto-linkify a small whitelist of URL schemes (`http`, `https`,
  * `mailto`, `tel`). `autonomi://<addr>` arrives as plain text — the
  * recipient can't tap to open. A QR lets them point their phone's
- * camera and have the system intent flow route to fetch/it without
+ * camera and have the system intent flow route to fetch>it without
  * any messenger cooperation. Aligns with the no-DNS / no-traditional-
  * internet ethos.
  *
@@ -54,12 +54,12 @@ object QrShare {
             // Subject + text fall back gracefully on apps that don't
             // attach images (Gmail uses subject; SMS may show the
             // text; image-aware apps ignore both and show the QR).
-            val title = label?.ifBlank { null } ?: "fetch/it bookmark"
+            val title = label?.ifBlank { null } ?: "fetch>it bookmark"
             putExtra(Intent.EXTRA_SUBJECT, title)
             putExtra(
                 Intent.EXTRA_TEXT,
                 "$title\n\n$payload\n\n" +
-                    "Scan with the camera if you have fetch/it installed.",
+                    "Scan with the camera if you have fetch>it installed.",
             )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }

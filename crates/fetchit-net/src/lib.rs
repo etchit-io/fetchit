@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// fetch/it network backend — Autonomi-backed `NetworkClient`.
-// Copyright (C) the fetch/it contributors.
+// fetch>it network backend — Autonomi-backed `NetworkClient`.
+// Copyright (C) the fetch>it contributors.
 
 //! `fetchit-net` — production [`NetworkClient`](fetchit_core::NetworkClient)
 //! implementation backed by the Autonomi peer-to-peer network.

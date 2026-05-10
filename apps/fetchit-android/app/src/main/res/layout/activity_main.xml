@@ -52,7 +52,7 @@
             app:layout_constraintTop_toTopOf="@+id/addressInput" />
 
         <!-- Dead-center animated fetch button (WebView-backed). The
-             button itself signals state: idle = static "fetch/it" face,
+             button itself signals state: idle = static "fetch&gt;it" face,
              fetching = ring sweep + running beagle, success = gone
              (content takes the centre, see RenditionRenderer). -->
         <io.etchit.fetchit.FetchButton

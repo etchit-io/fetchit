@@ -16,7 +16,7 @@ import uniffi.fetchit_ffi.RenditionFfi
 /**
  * Binds a [`RenditionFfi`] into the views of [`ActivityMainBinding`].
  *
- * Per the spec, every kind of content fetch/it understands gets a
+ * Per the spec, every kind of content fetch>it understands gets a
  * dedicated rendering path. This class isolates that big `when` so
  * [`MainActivity`] can stay an orchestrator and so adding a new
  * variant (PDF, archive index, code-with-syntax) is a single edit

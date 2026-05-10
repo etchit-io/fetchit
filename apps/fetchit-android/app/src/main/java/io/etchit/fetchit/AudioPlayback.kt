@@ -15,7 +15,7 @@ import androidx.media3.ui.PlayerView
 /**
  * Owns a single [`ExoPlayer`] backed by an in-memory byte array.
  *
- * fetch/it never persists fetched content to disk (spec §3) — Media3's
+ * fetch>it never persists fetched content to disk (spec §3) — Media3's
  * [`ByteArrayDataSource`] reads straight from a `ByteArray`, so the
  * audio (or, in the future, video) bytes never touch storage.
  *

@@ -9,7 +9,7 @@ import java.io.File
 /**
  * Hand-off helpers for "open with…" and "save as…" on rendered bytes.
  *
- * fetch/it never persists fetched content to its own storage (spec §3),
+ * fetch>it never persists fetched content to its own storage (spec §3),
  * but to invoke another app via [`Intent.ACTION_VIEW`] we need a
  * `content://` URI. The temp file lives in the cache `open_with/`
  * subdirectory — Android reaps it under cache pressure, and we wipe

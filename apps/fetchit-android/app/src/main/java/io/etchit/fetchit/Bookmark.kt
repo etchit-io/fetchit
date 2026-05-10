@@ -3,7 +3,7 @@ package io.etchit.fetchit
 import java.util.UUID
 
 /**
- * The only persisted user data in fetch/it (spec §3a).
+ * The only persisted user data in fetch>it (spec §3a).
  *
  * Stays a plain data class — schema lives in [`BookmarkSerde`], storage
  * in [`BookmarkStore`], UI in [`BookmarkSheet`]. No network, no

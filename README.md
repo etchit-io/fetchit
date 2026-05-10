@@ -1,4 +1,4 @@
-# fetch/it
+# fetch>it
 
 > *etch it. **fetch it.** chain it.*
 
@@ -7,7 +7,7 @@ network. Paste a 64-hex address, see what is there — text, image, audio,
 video, PDF, archive, code with syntax highlighting, JSON, CSV, full HTML
 SPAs — without installing a wallet, signing a message, or running a node.
 
-fetch/it ships as a small Rust engine (`fetchit-core`), a CLI (`fetchit
+fetch>it ships as a small Rust engine (`fetchit-core`), a CLI (`fetchit
 get <addr>`), a uniffi FFI surface (`fetchit-ffi`), and a native Android
 shell that gives the engine a touch UI.
 
@@ -76,7 +76,7 @@ For signed release builds, see [`RELEASING.md`](RELEASING.md).
 
 ## License
 
-[`GPL-3.0-only`](LICENSE) across the workspace. fetch/it ships as
+[`GPL-3.0-only`](LICENSE) across the workspace. fetch>it ships as
 free software with strong copyleft. Embedding into closed-source
 applications via direct linking is not supported — use the CLI, the
 Android intent surface, or (when it lands) the WASM build via process-
@@ -84,7 +84,7 @@ boundary integration.
 
 ## Family
 
-fetch/it is the **reader** half of a pair: [etch/it](https://etchit.io)
-publishes content to Autonomi, fetch/it renders it. Same palette,
+fetch>it is the **reader** half of a pair: [etch/it](https://etchit.io)
+publishes content to Autonomi, fetch>it renders it. Same palette,
 same fonts, same panel grammar. Anyone with the bytes can read; only
 etch/it (or any compatible publisher) can write.

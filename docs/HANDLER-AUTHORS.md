@@ -1,6 +1,6 @@
-# Adding a content handler to fetch/it
+# Adding a content handler to fetch>it
 
-Every kind of content fetch/it understands is a `ContentHandler`
+Every kind of content fetch>it understands is a `ContentHandler`
 implementation registered on a `HandlerRegistry`. This page walks
 through adding one. The whole thing is one file plus one registration
 line plus byte-fixture tests.

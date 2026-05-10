@@ -1,14 +1,12 @@
-# Using fetch/it
+# Using fetch>it
 
-Single-page reference for **what fetch/it does, how to do each thing, and what its limits are**. Comprehensive on purpose — there's a lot of it now. Keep this open as a cheat sheet.
+Single-page reference for **what fetch>it does, how to do each thing, and what its limits are**. Comprehensive on purpose — there's a lot of it now. Keep this open as a cheat sheet.
 
 For protocol depth (the `autonomi://` scheme, SPA-author constraints, the synthetic-origin trick) see [`AUTONOMI-WEB.md`](AUTONOMI-WEB.md).
 
-For the original design decisions see [`../FETCHIT-SPEC.md`](../FETCHIT-SPEC.md).
-
 ---
 
-## What is fetch/it?
+## What is fetch>it?
 
 A read-only viewer for content stored on the [Autonomi](https://autonomi.com) network. Paste a 64-hex address, see what's there. Text, images, audio, video, PDF, archives, code with syntax highlighting, JSON, CSV, markdown, HTML — anything.
 
@@ -19,7 +17,7 @@ No wallet. No signing. No node to run. No DNS, no CDN, no traditional web server
 ## Quick start
 
 1. **Get the APK** onto your phone (`adb install` from the build output, or via GitHub Releases when those land)
-2. **Open fetch/it**
+2. **Open fetch>it**
 3. **Paste an Autonomi address** into the bar at the top. Either form works:
    - bare hex: `c2b0285930b0a2c3df3928d0a4706b4e6d71e84ebeb4f7805c83ffbb63d0ab61`
    - prefixed: `autonomi://c2b0285930b0a2c3df3928d0a4706b4e6d71e84ebeb4f7805c83ffbb63d0ab61`
@@ -45,14 +43,14 @@ No wallet. No signing. No node to run. No DNS, no CDN, no traditional web server
 
 ## What renders natively
 
-Engine inspects the bytes by magic-byte / content heuristics, picks a handler, hands it to the Android side. **You don't need to declare anything** — fetch/it figures out what kind of content the bytes are.
+Engine inspects the bytes by magic-byte / content heuristics, picks a handler, hands it to the Android side. **You don't need to declare anything** — fetch>it figures out what kind of content the bytes are.
 
-| Format | How fetch/it renders | Notes |
+| Format | How fetch>it renders | Notes |
 |---|---|---|
 | **etch/it envelope** (`{"v":1,"meta":{...},"content":"..."}`) | Title shown, content rendered honoring `meta.lang` | If `lang` is empty and content looks like markdown, renders as markdown automatically |
 | **Plain text** (UTF-8) | Monospace, full-screen scrollable | Auto-detects code language and applies syntax highlighting (Rust, Python, JS/TS, Kotlin, Go, Bash, HTML, CSS, YAML, SQL, JSON) |
 | **Markdown** | Rendered with proper formatting (headings, lists, links, code blocks) via Markwon | Detection heuristic — files that look markdown-shaped (headings, fences, multiple markers) qualify |
-| **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch/it. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
+| **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch>it. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
 | **JSON** | Pretty-printed in monospace | Tree-view comes later |
 | **CSV** | Column-padded monospace table | First row is headers; quoted fields with commas + doubled `""` escapes handled |
 | **Image** (PNG / JPEG / GIF / WEBP / BMP / HEIC) | Rendered fit-to-width, edge-to-edge | All decoded by Android's `BitmapFactory` |
@@ -113,7 +111,7 @@ Tap the **★** to open. The sheet shows:
 }
 ```
 
-Bookmarks are the **only persistent state fetch/it keeps locally**. Nothing else is cached. No history, no view counts, no thumbnails. All fetched bytes live in memory only and are gone when the rendition is dismissed or the app is killed.
+Bookmarks are the **only persistent state fetch>it keeps locally**. Nothing else is cached. No history, no view counts, no thumbnails. All fetched bytes live in memory only and are gone when the rendition is dismissed or the app is killed.
 
 ---
 
@@ -142,7 +140,7 @@ Drag the small handle at the bottom of the screen up.
 
 ## Battery behavior
 
-fetch/it keeps the Autonomi connection warm while you're using it, and **drops it after 60 seconds of being backgrounded** so the radio + DHT chatter stop. Coming back later → next fetch pays one ~10s bootstrap, then warm again.
+fetch>it keeps the Autonomi connection warm while you're using it, and **drops it after 60 seconds of being backgrounded** so the radio + DHT chatter stop. Coming back later → next fetch pays one ~10s bootstrap, then warm again.
 
 | State | Connection |
 |---|---|
@@ -158,14 +156,14 @@ Settings also lets you save a new peer list — saving forces the connection to 
 
 ## Open with… / Save…
 
-Any binary fetch/it doesn't render natively (DOCX, EPUB, niche formats, etc.) lands as a friendly success message:
+Any binary fetch>it doesn't render natively (DOCX, EPUB, niche formats, etc.) lands as a friendly success message:
 
 ```
 DOCX
 
 ✓ 47.3 KB downloaded
 
-fetch/it doesn't have a built-in viewer for this format yet.
+fetch>it doesn't have a built-in viewer for this format yet.
 Use open with… or save below.
 ```
 
@@ -182,15 +180,15 @@ The temp file used for Open with… lives in `cacheDir/open_with/`. Wiped on nex
 
 ### As an entry point
 
-Three ways to land on a fetch/it page via `autonomi://<addr>`:
+Three ways to land on a fetch>it page via `autonomi://<addr>`:
 
 1. **Paste it into the address bar.** The `autonomi://` is stripped automatically and the bare address is fetched.
-2. **Tap an `autonomi://` link in another app** (any messenger, mail client, QR scanner). Android shows the chooser; pick fetch/it. It opens with the address pre-loaded and fetches automatically.
+2. **Tap an `autonomi://` link in another app** (any messenger, mail client, QR scanner). Android shows the chooser; pick fetch>it. It opens with the address pre-loaded and fetches automatically.
 3. **`adb` deep-link**: `adb shell am start -W -a android.intent.action.VIEW -d "autonomi://c2b0…ab61" io.etchit.fetchit.dev`
 
 ### Inside a rendered SPA
 
-When fetch/it renders an HTML document, the page is loaded with `https://aut.local` as its base origin — a **synthetic, non-routable** origin. Any `autonomi://<64-hex>` URL in the document source is rewritten to `https://aut.local/<64-hex>` at load time. Every request to `aut.local` is intercepted inside the app: the 64-hex path is extracted, bytes are pulled from the connected fetch/it client over Autonomi, and handed back as if from a normal https response.
+When fetch>it renders an HTML document, the page is loaded with `https://aut.local` as its base origin — a **synthetic, non-routable** origin. Any `autonomi://<64-hex>` URL in the document source is rewritten to `https://aut.local/<64-hex>` at load time. Every request to `aut.local` is intercepted inside the app: the 64-hex path is extracted, bytes are pulled from the connected fetch>it client over Autonomi, and handed back as if from a normal https response.
 
 No DNS query for `aut.local` ever leaves the device. No TLS handshake. No server.
 
@@ -261,8 +259,8 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 | What | Why | Workaround |
 |---|---|---|
-| **No upload from inside fetch/it** | Read-only is a defining property (spec §3); writes are etchit's job | Use `ant file upload <file> --public` or etchit |
-| **No private / encrypted etch viewing** | Private etches need a wallet; fetch/it is permanently wallet-less | Use etchit |
+| **No upload from inside fetch>it** | Read-only is a defining property (spec §3); writes are etchit's job | Use `ant file upload <file> --public` or etchit |
+| **No private / encrypted etch viewing** | Private etches need a wallet; fetch>it is permanently wallet-less | Use etchit |
 | **Multi-file SPAs need inlining today** | ZIP-bundle WebView mount isn't wired yet | Use `vite-plugin-singlefile` or equivalent. Or upload each asset separately and reference via `autonomi://` |
 | **Filename is gone** for files uploaded via raw `ant file upload` | Filename is local-FS metadata, not network state | etchit envelopes preserve a title; bare uploads don't |
 | **No address book / discovery** | No central registry by design | Bookmarks + share. Spec says: addresses live in the user's hands |
@@ -277,8 +275,8 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 - **First fetch is always slow** (~10s) — it's the DHT bootstrap. Repeat fetches in the same session are fast.
 - **Connection drops after 60s in the background** to save battery. Fine. Just expect one re-bootstrap when you come back.
 - **The peer count in settings is a real-time honesty signal.** If it dips to 0 (red), the network is being weird; that's an honest report, not a glitch — it usually self-recovers within a poll cycle.
-- **For air-gapped use** (no traditional internet), as long as Autonomi peers are reachable somehow (LAN node, satellite link, whatever), fetch/it works. SPAs that inline everything also run fine.
-- **For QR codes / link sharing**: encode `autonomi://<addr>` directly. Anyone with fetch/it on Android can scan and land on the page.
+- **For air-gapped use** (no traditional internet), as long as Autonomi peers are reachable somehow (LAN node, satellite link, whatever), fetch>it works. SPAs that inline everything also run fine.
+- **For QR codes / link sharing**: encode `autonomi://<addr>` directly. Anyone with fetch>it on Android can scan and land on the page.
 - **Always paste the bare hex when in doubt.** It always works. The `autonomi://` prefix is a convenience.
 
 ---
@@ -287,7 +285,6 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 - **`AUTONOMI-WEB.md`** — the protocol depth: scheme spec, the synthetic-origin trick, SPA author constraints, trust model
 - **`HANDLER-AUTHORS.md`** — how to add a new content handler in `fetchit-core` (one file, one registration line, byte-fixture tests)
-- **`../FETCHIT-SPEC.md`** — the original design decisions and constraints
 - **`../README.md`** — five-second project description
 
 ---

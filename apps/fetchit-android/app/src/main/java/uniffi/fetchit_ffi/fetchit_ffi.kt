@@ -2413,7 +2413,7 @@ public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<Li
          * Required on Android, where neither variable is set by default —
          * `ant-core`'s internal `data_dir()` resolution will otherwise panic.
          * Pass `context.filesDir.absolutePath` from `Application.onCreate`
-         * before any other fetch/it call.
+         * before any other fetch>it call.
          */ fun `setDataHome`(`path`: kotlin.String)
         = 
     uniffiRustCall() { _status ->

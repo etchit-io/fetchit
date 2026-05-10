@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">fetch/it</string>
+    <string name="app_name">fetch&gt;it</string>
     <string name="hint_address">Autonomi address</string>
     <string name="action_fetch">fetch</string>
     <string name="action_retry">retry</string>
     <string name="action_close">close</string>
-    <!-- Success message shown for any binary that fetch/it can't
+    <!-- Success message shown for any binary that fetch&gt;it can't
          render natively. Open / Save buttons sit below it. -->
     <string name="binary_success_size">✓ %1$s downloaded</string>
-    <string name="binary_success_help">fetch/it doesn\'t have a built-in viewer for this format yet.\nUse open with… or save below.</string>
+    <string name="binary_success_help">fetch&gt;it doesn\'t have a built-in viewer for this format yet.\nUse open with… or save below.</string>
     <string name="pdf_page_description">PDF page</string>
     <string name="action_open_with">open with…</string>
     <string name="action_save">save…</string>
