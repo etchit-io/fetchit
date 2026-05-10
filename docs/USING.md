@@ -2,7 +2,7 @@
 
 Single-page reference for **what fetch/it does, how to do each thing, and what its limits are**. Comprehensive on purpose — there's a lot of it now. Keep this open as a cheat sheet.
 
-For protocol depth (the `autonomi://` scheme, SPA-author constraints, roadmap) see [`AUTONOMI-WEB.md`](AUTONOMI-WEB.md).
+For protocol depth (the `autonomi://` scheme, SPA-author constraints, the synthetic-origin trick) see [`AUTONOMI-WEB.md`](AUTONOMI-WEB.md).
 
 For the original design decisions see [`../FETCHIT-SPEC.md`](../FETCHIT-SPEC.md).
 
@@ -264,11 +264,11 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 | **No upload from inside fetch/it** | Read-only is a defining property (spec §3); writes are etchit's job | Use `ant file upload <file> --public` or etchit |
 | **No private / encrypted etch viewing** | Private etches need a wallet; fetch/it is permanently wallet-less | Use etchit |
 | **Multi-file SPAs need inlining today** | ZIP-bundle WebView mount isn't wired yet | Use `vite-plugin-singlefile` or equivalent. Or upload each asset separately and reference via `autonomi://` |
-| **Filename is gone** for files uploaded via raw `ant file upload` | Filename is local-FS metadata, not network state | etchit envelopes preserve a title; future fetch/it envelope v2 will preserve `name` + `mime` |
+| **Filename is gone** for files uploaded via raw `ant file upload` | Filename is local-FS metadata, not network state | etchit envelopes preserve a title; bare uploads don't |
 | **No address book / discovery** | No central registry by design | Bookmarks + share. Spec says: addresses live in the user's hands |
 | **localStorage / IndexedDB off in HTML** | Sandbox default | Inline state in the page; or wait for opt-in persistent storage (deferred) |
-| **Service Workers don't register** | SW state lives in IndexedDB, which is off; Chromium also blocks `blob:` URLs as SW scripts. The API surface is exposed but `register()` fails | Host-level disk caching by address (planned) covers the offline-replay use case without a SW |
-| **No syntax highlighting in markdown code blocks** | Markwon needs a Prism4j grammar generator we haven't wired | Code files render highlighted; markdown code blocks render plain. Tracked in roadmap |
+| **Service Workers don't register** | SW state lives in IndexedDB, which is off; Chromium also blocks `blob:` URLs as SW scripts. The API surface is exposed but `register()` fails | The host's built-in disk cache (keyed by address) gives you offline replay without a SW |
+| **No syntax highlighting in markdown code blocks** | Markwon needs a Prism4j grammar generator we haven't wired | Code files render highlighted; markdown code blocks render plain |
 
 ---
 
@@ -285,7 +285,7 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 ## Where to look next
 
-- **`AUTONOMI-WEB.md`** — the protocol depth: scheme spec, SPA author constraints, trust model, roadmap to close gaps with the traditional web
+- **`AUTONOMI-WEB.md`** — the protocol depth: scheme spec, the synthetic-origin trick, SPA author constraints, trust model
 - **`HANDLER-AUTHORS.md`** — how to add a new content handler in `fetchit-core` (one file, one registration line, byte-fixture tests)
 - **`../FETCHIT-SPEC.md`** — the original design decisions and constraints
 - **`../README.md`** — five-second project description
@@ -294,14 +294,10 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 ## What's not built yet
 
-A short, honest list:
+A short, honest list of things you'll notice are missing:
 
-- **ZIP bundle SPAs** — see Limitations
-- **Markdown code-block highlighting** — see Limitations
+- **ZIP bundle SPAs** — see Limitations above
+- **Markdown code-block highlighting** — see Limitations above
 - **Real launcher icon** — current is a placeholder vector
-- **CI for the Android build** — Rust workspace runs in CI, gradle build doesn't yet
-- **Signed release APK + GitHub Releases** — the apparatus exists in the spec, not yet wired
-- **Tauri desktop client** — 0.2.0
-- **WASM in-browser viewer** — 0.3.0
 
-When any of these land, this doc gets updated.
+This doc gets updated as things land.

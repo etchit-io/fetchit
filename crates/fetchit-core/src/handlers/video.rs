@@ -2,7 +2,7 @@
 //! EBML (WebM / MKV), and RIFF/AVI by their magic bytes. Emits
 //! [`Rendition::Video`] tagged with a MIME so UI shells can hand the
 //! bytes straight to a platform decoder (Android `MediaPlayer` /
-//! Media3 `ExoPlayer`, browser `<video>`, ffmpeg, etc.).
+//! Media3 `ExoPlayer`, browser `<video>` element, desktop player, etc.).
 //!
 //! Decoding is intentionally not done here — the platform players
 //! handle raw container bytes natively.

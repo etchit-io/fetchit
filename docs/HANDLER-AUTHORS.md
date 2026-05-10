@@ -40,8 +40,9 @@ fallback last.
 ## Adding a `Foo` handler
 
 1. **Create `crates/fetchit-core/src/handlers/foo.rs`.** Mirror the
-   shape of an existing handler such as `image_png.rs` (magic-byte
-   sniffer) or `etchit_envelope.rs` (structural parser).
+   shape of an existing handler such as `image.rs` (magic-byte
+   sniffer over multiple formats) or `etchit_envelope.rs` (structural
+   parser).
 
 2. **Pick a `kind`.** Use the IANA MIME if one exists
    (`application/zip`, `audio/wav`); otherwise a `fetchit/` pseudo-MIME
@@ -89,9 +90,9 @@ fallback last.
 
 If `Foo` decodes to something that fits an existing variant
 (`Text`, `Image`, `Audio`, `Video`, `Pdf`, `Json`, `Tabular`,
-`Archive`, `OpaqueBinary`), use it. Adding a new variant is allowed
-but means a coordinated bump in every UI surface — propose the change
-on the issue tracker first.
+`Archive`, `Html`, `EtchitEnvelope`, `OpaqueBinary`), use it. Adding a
+new variant is allowed but means a coordinated bump in every UI
+surface — propose the change on the issue tracker first.
 
 ## Forbidden in handler code
 
