@@ -31,8 +31,10 @@
     <string name="bookmark_export">export</string>
     <string name="bookmark_import">import</string>
     <string name="bookmark_share">share</string>
+    <string name="bookmark_share_qr">share as QR</string>
     <string name="bookmark_delete">delete</string>
     <string name="bookmark_rename">rename</string>
+    <string name="share_qr_title">Share QR code</string>
     <string name="bookmark_export_done">bookmarks exported</string>
     <string name="bookmark_export_failed">export failed: %1$s</string>
     <string name="bookmark_import_done">imported %1$d bookmark(s)</string>

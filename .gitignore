@@ -12,6 +12,8 @@ apps/fetchit-android/local.properties
 *.aab
 *.keystore
 *.jks
+# release-signing config (the .template version is committed)
+apps/fetchit-android/app/keystore.properties
 # Compiled FFI libraries — rebuilt by `cargo ndk build` from fetchit-ffi
 apps/fetchit-android/app/src/main/jniLibs/**/*.so
 

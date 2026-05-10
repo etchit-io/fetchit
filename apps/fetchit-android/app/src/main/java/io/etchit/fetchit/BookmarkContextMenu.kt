@@ -16,6 +16,7 @@ fun showBookmarkContextMenu(
     val items = arrayOf(
         context.getString(R.string.bookmark_rename),
         context.getString(R.string.bookmark_share),
+        context.getString(R.string.bookmark_share_qr),
         context.getString(R.string.bookmark_delete),
     )
     AlertDialog.Builder(context)
@@ -30,7 +31,8 @@ fun showBookmarkContextMenu(
                     store.update(bookmark.id) { it.copy(label = newLabel) }
                 }
                 1 -> BookmarkActions.shareAsLink(context, bookmark)
-                2 -> store.delete(bookmark.id)
+                2 -> QrShare.share(context, bookmark.address, bookmark.label)
+                3 -> store.delete(bookmark.id)
             }
         }
         .show()

@@ -1,7 +1,21 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Optional release-signing config. Populated from app/keystore.properties
+// (gitignored). If the file is missing, release builds fall back to
+// debug signing so contributors can still build without holding a
+// release keystore. See RELEASING.md for the one-time setup.
+val keystorePropsFile = file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) {
+        keystorePropsFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
 
 android {
     namespace = "io.etchit.fetchit"
@@ -19,7 +33,21 @@ android {
         versionName = "0.1.0-dev"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            // arm64 only — x86_64 is for emulators and bloats the APK
+            // by ~half. If we ever need emulator support back, add
+            // "x86_64" here and to scripts/build-jni-libs.sh.
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
         }
     }
 
@@ -29,6 +57,13 @@ android {
         }
         release {
             isMinifyEnabled = false
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                // Debug-signed fallback: contributors without a release
+                // keystore can still produce an installable APK.
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -82,4 +117,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("androidx.media3:media3-datasource:1.4.1")
+
+    // ZXing — QR-code encoder. Used for sharing autonomi:// addresses
+    // as scannable images, since traditional messengers don't
+    // linkify custom URL schemes.
+    implementation("com.google.zxing:core:3.5.3")
 }

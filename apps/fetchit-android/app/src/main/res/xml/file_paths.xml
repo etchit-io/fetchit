@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- FileProvider exposes only the app's cache subdirectory used
-         by BinaryActions for hand-off-to-other-app temp files. -->
+    <!-- FileProvider exposes the app's cache subdirectories used by
+         BinaryActions (open-with hand-off) and QrShare (share-as-QR
+         PNGs). Both are wiped on next use, so nothing accumulates. -->
     <cache-path name="open_with" path="open_with/" />
+    <cache-path name="qr" path="qr/" />
 </paths>
