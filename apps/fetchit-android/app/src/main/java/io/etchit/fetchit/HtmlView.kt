@@ -31,8 +31,8 @@ import java.net.URLConnection
  * raw `autonomi://<addr>` references in the document are rewritten to
  * `https://aut.local/<addr>` so that *every* web-platform API — the
  * Fetch spec's `fetch()`, `XMLHttpRequest`, `<img>` / `<audio>` /
- * `<video>` / `<script>` / `<link>` / `<a>`, Streams, Service Workers,
- * `Range` requests, CORS — sees what looks like a perfectly normal
+ * `<video>` / `<script>` / `<link>` / `<a>`, Streams, `Range`
+ * requests, CORS — sees what looks like a perfectly normal
  * https URL and just works.
  *
  * Nothing about that origin actually exists on the traditional

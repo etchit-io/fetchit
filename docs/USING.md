@@ -218,8 +218,9 @@ const xhr = new XMLHttpRequest();
 xhr.open("GET", "autonomi://c2b0…");
 xhr.send();
 
-// And Streams, Service Workers, range requests, CORS — anything the
-// Fetch spec allows for https — because the engine sees https.
+// And Streams, range requests, CORS — anything the Fetch spec
+// allows for https — because the engine sees https. (Service
+// Workers are not yet supported; see "Honest limitations" below.)
 ```
 
 **Two equivalent URL forms inside an SPA**:
@@ -266,6 +267,7 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 | **Filename is gone** for files uploaded via raw `ant file upload` | Filename is local-FS metadata, not network state | etchit envelopes preserve a title; future fetch/it envelope v2 will preserve `name` + `mime` |
 | **No address book / discovery** | No central registry by design | Bookmarks + share. Spec says: addresses live in the user's hands |
 | **localStorage / IndexedDB off in HTML** | Sandbox default | Inline state in the page; or wait for opt-in persistent storage (deferred) |
+| **Service Workers don't register** | SW state lives in IndexedDB, which is off; Chromium also blocks `blob:` URLs as SW scripts. The API surface is exposed but `register()` fails | Host-level disk caching by address (planned) covers the offline-replay use case without a SW |
 | **No syntax highlighting in markdown code blocks** | Markwon needs a Prism4j grammar generator we haven't wired | Code files render highlighted; markdown code blocks render plain. Tracked in roadmap |
 
 ---
