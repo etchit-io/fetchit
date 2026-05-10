@@ -3,6 +3,7 @@ package io.etchit.fetchit
 import android.app.Application
 import android.content.Context
 import androidx.lifecycle.ProcessLifecycleOwner
+import java.io.File
 import uniffi.fetchit_ffi.Client
 import uniffi.fetchit_ffi.setDataHome
 import uniffi.fetchit_ffi.setupLogger
@@ -29,6 +30,17 @@ class FetchitApplication : Application() {
 
     /** Live peer-count gauge. Polls every 15s once started. */
     val peerCountTracker: PeerCountTracker by lazy { PeerCountTracker { cached } }
+
+    /**
+     * Disk-backed cache of fetched bytes, keyed by address. Both
+     * top-level navigations (MainActivity) and SPA subresources
+     * (HtmlView) consult this before going to the Autonomi network.
+     * Lives in `filesDir` (persistent across app restarts) rather
+     * than `cacheDir` so we keep the offline-replay guarantee.
+     */
+    val bytesCache: BytesCache by lazy {
+        BytesCache(File(filesDir, "autonomi_cache"))
+    }
 
     override fun onCreate() {
         super.onCreate()

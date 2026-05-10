@@ -20,6 +20,7 @@ import kotlinx.coroutines.withContext
 import uniffi.fetchit_ffi.Client
 import uniffi.fetchit_ffi.FetchitException
 import uniffi.fetchit_ffi.RenditionFfi
+import uniffi.fetchit_ffi.detect
 
 /**
  * Single-Activity host for fetch/it.
@@ -183,8 +184,22 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer.clear()
         lastBinary = null
         try {
-            val client = ensureConnectedClient()
-            val rendition = withContext(Dispatchers.IO) { client.fetchAndRender(addr) }
+            val app = fetchitApp()
+            val rendition = withContext(Dispatchers.IO) {
+                // Disk cache first — Autonomi addresses are immutable,
+                // so a cache hit is always correct. Skips network
+                // entirely on subsequent fetches of the same address,
+                // including across app restarts.
+                val cached = app.bytesCache.get(addr)
+                if (cached != null) {
+                    detect(cached)
+                } else {
+                    val client = ensureConnectedClient()
+                    val bytes = client.fetch(addr)
+                    app.bytesCache.put(addr, bytes)
+                    detect(bytes)
+                }
+            }
             cacheBinaryHandle(rendition)
             renderer.render(rendition)
             lastFetchAddr = addr

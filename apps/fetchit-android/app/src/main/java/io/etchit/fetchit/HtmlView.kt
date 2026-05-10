@@ -283,29 +283,46 @@ class HtmlView @JvmOverloads constructor(
 
     /**
      * Resolve a 64-hex Autonomi address into a [`WebResourceResponse`],
-     * honouring any `Range` header on the request. The first lookup
-     * for an address blocks on the full Autonomi fetch (see streaming
-     * note in the class docstring); subsequent lookups (including
-     * range-narrowed ones from media-element seeks) are served from
-     * the in-memory cache and are essentially free.
+     * honouring any `Range` header on the request.
+     *
+     * Three-tier lookup:
+     *  1. **Per-page in-memory cache** ([`resourceCache`]) — fastest,
+     *     keeps mime alongside bytes so we don't re-sniff on each
+     *     request. Cleared on every new page load.
+     *  2. **App-level disk cache** ([`FetchitApplication.bytesCache`]) —
+     *     survives app restart, gives us offline replay. Mime is
+     *     re-sniffed when promoted into the in-memory tier.
+     *  3. **Autonomi network** — only on a true miss. Result is
+     *     written through both caches.
+     *
+     * Range-narrowed requests from media-element seeks always hit the
+     * in-memory tier and are essentially free.
      */
     private fun resolveAddr(
         addr: String,
         requestHeaders: Map<String, String>?,
     ): WebResourceResponse {
+        val app = context.applicationContext as FetchitApplication
         val cached = resourceCache[addr] ?: run {
-            val app = context.applicationContext as FetchitApplication
-            val client = app.client()
-                ?: return errorResponse(503, "no client connected")
-            val bytes = try {
-                // shouldInterceptRequest runs on a WebView network thread,
-                // not the main thread. runBlocking is safe here and the
-                // tokio runtime owned by the FFI handles the async fetch
-                // on its own threads.
-                runBlocking { client.fetch(addr) }
-            } catch (e: Exception) {
-                Log.w(TAG, "autonomi fetch failed for $addr", e)
-                return errorResponse(502, e.message ?: "fetch failed")
+            // Disk cache — survives across app restarts.
+            val diskBytes = app.bytesCache.get(addr)
+            val bytes = diskBytes ?: run {
+                val client = app.client()
+                    ?: return errorResponse(503, "no client connected")
+                val fetched = try {
+                    // shouldInterceptRequest runs on a WebView network
+                    // thread, not the main thread. runBlocking is safe
+                    // here and the tokio runtime owned by the FFI
+                    // handles the async fetch on its own threads.
+                    runBlocking { client.fetch(addr) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "autonomi fetch failed for $addr", e)
+                    return errorResponse(502, e.message ?: "fetch failed")
+                }
+                // Persist for next session before returning so a crash
+                // mid-render doesn't lose the bytes.
+                app.bytesCache.put(addr, fetched)
+                fetched
             }
             val mime = sniffMime(bytes) ?: "application/octet-stream"
             CachedResource(mime = mime, bytes = bytes)
