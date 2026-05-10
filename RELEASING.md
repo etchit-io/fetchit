@@ -10,7 +10,7 @@ WASM viewer, Tauri desktop) get their own pipelines later.
 $EDITOR apps/fetchit-android/app/build.gradle.kts   # versionCode + versionName
 git commit -am "release: v0.1.0"
 git tag v0.1.0
-git push origin main --tags
+git push --follow-tags origin main
 ```
 
 The `release.yml` workflow picks up the tag, builds a signed APK, and
@@ -82,6 +82,14 @@ Then `rm /tmp/fetchit-keystore.b64`.
    versionName = "0.1.0"    // semantic version (no `v` prefix)
    ```
 
+   **If you also publish the Rust crates** (not part of this APK
+   pipeline today, but for completeness): bump `version` in **both**
+   `Cargo.toml` (the `[workspace.package]` block) **and**
+   `crates/fetchit-ffi/Cargo.toml` (the `[package]` block). The FFI
+   crate sits outside the main workspace by design and can't inherit
+   `version.workspace = true`, so the value lives in two places that
+   must stay in sync.
+
 2. **Smoke-test the build locally** (catches signing-config issues
    before CI):
 
@@ -97,7 +105,7 @@ Then `rm /tmp/fetchit-keystore.b64`.
    ```
    git commit -am "release: v0.1.0"
    git tag v0.1.0
-   git push origin main --tags
+   git push --follow-tags origin main
    ```
 
 4. **Watch the workflow**: GitHub Actions → `release` → look for the
