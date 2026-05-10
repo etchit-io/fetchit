@@ -462,7 +462,11 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             setPrompt(getString(R.string.scan_qr_prompt))
             setBeepEnabled(false)
-            setOrientationLocked(false)
+            // ZXing's bundled CaptureActivity declares sensorLandscape
+            // in its manifest, which wins over setOrientationLocked.
+            // Use our portrait-locked subclass instead.
+            setCaptureActivity(PortraitCaptureActivity::class.java)
+            setOrientationLocked(true)
         }
         scanLauncher.launch(options)
     }

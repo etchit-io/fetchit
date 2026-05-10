@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- fetch&gt;it talks to the Autonomi P2P network over QUIC. -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -39,6 +40,17 @@
                 <data android:scheme="autonomi" />
             </intent-filter>
         </activity>
+
+        <!-- Portrait-locked QR scanner. Subclasses ZXing's bundled
+             CaptureActivity (which defaults to sensorLandscape) so
+             our manifest entry can force portrait. -->
+        <activity
+            android:name=".PortraitCaptureActivity"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:windowSoftInputMode="stateAlwaysHidden"
+            tools:ignore="LockedOrientationActivity" />
 
         <!-- Exposes cached bytes via content:// so Intent.ACTION_VIEW
              can hand them to other apps. The cache dir is always

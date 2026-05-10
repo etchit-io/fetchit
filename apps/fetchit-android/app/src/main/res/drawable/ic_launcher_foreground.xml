@@ -1,9 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Brand-spec launcher icon foreground (artifacts/fetchit-brand.html).
-    Renders the [>] mark in copper on the ink background supplied by
-    the adaptive-icon's background layer. The chevron is the identity:
-    never flip, never recolor.
+    Brand-spec [>] mark for the launcher icon foreground.
+
+    Paths copied verbatim from the brand SVG (private/brand-system.html
+    § "the chevron vs. the slash") and rescaled 2× from the source
+    viewBox (32×16) into our adaptive-icon viewport (108×108):
+
+        x' = x*2 + 22     y' = y*2 + 38
+
+    That centres the mark at (54, 54) and gives the bounding box
+    (30..78, 42..66). Maximum distance from centre is ~27, comfortably
+    inside the ~33-radius safe circle adaptive launchers crop to —
+    the mark won't get clipped on any standard mask shape.
+
+    Filled, not stroked. Copper #c9732b. Background layer is
+    @color/ink (#0a0a0a) via the adaptive-icon XML.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -11,31 +22,11 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- [ -->
     <path
-        android:strokeColor="#c9732b"
-        android:strokeWidth="7"
-        android:strokeLineCap="square"
-        android:strokeLineJoin="miter"
-        android:fillColor="#00000000"
-        android:pathData="M 36 22 L 22 22 L 22 86 L 36 86" />
-
-    <!-- > -->
-    <path
-        android:strokeColor="#c9732b"
-        android:strokeWidth="7"
-        android:strokeLineCap="square"
-        android:strokeLineJoin="miter"
-        android:fillColor="#00000000"
-        android:pathData="M 38 28 L 64 54 L 38 80" />
-
-    <!-- ] -->
-    <path
-        android:strokeColor="#c9732b"
-        android:strokeWidth="7"
-        android:strokeLineCap="square"
-        android:strokeLineJoin="miter"
-        android:fillColor="#00000000"
-        android:pathData="M 72 22 L 86 22 L 86 86 L 72 86" />
+        android:fillColor="#c9732b"
+        android:pathData="
+            M 30 42 L 42 42 L 42 46 L 34 46 L 34 62 L 42 62 L 42 66 L 30 66 Z
+            M 66 42 L 78 42 L 78 66 L 66 66 L 66 62 L 74 62 L 74 46 L 66 46 Z
+            M 46 42 L 52 42 L 62 54 L 52 66 L 46 66 L 56 54 Z" />
 
 </vector>
