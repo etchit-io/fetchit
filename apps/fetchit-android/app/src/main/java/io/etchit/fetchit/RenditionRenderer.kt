@@ -52,6 +52,7 @@ class RenditionRenderer(
         clear()
         binding.fetchButton.visibility = View.GONE
         binding.closeButton.visibility = View.VISIBLE
+        binding.shareButton.visibility = View.VISIBLE
         // Lock pull-to-refresh while content is on screen — accidentally
         // resetting in the middle of viewing a 5MB video is a real
         // data-loss UX failure.
@@ -96,6 +97,7 @@ class RenditionRenderer(
         binding.pdfView.release()
         binding.binaryActions.visibility = View.GONE
         binding.closeButton.visibility = View.GONE
+        binding.shareButton.visibility = View.GONE
         binding.fetchButton.visibility = View.VISIBLE
         // Re-arm pull-to-refresh now that we're back on the idle
         // screen — pulling on the empty fetch-button area is harmless.

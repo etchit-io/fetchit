@@ -1,7 +1,11 @@
 package io.etchit.fetchit
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.util.Log
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -15,6 +19,8 @@ import androidx.media3.common.util.UnstableApi
 import com.google.android.material.snackbar.Snackbar
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.fetchit_ffi.Client
@@ -72,6 +78,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         }
     }
 
+    /** Drives the timed status text under the fetch button. */
+    private var statusJob: Job? = null
+
     private val saveLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri -> uri?.let(::onSavePicked) }
@@ -91,6 +100,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             BookmarkSheet().show(supportFragmentManager, "bookmarks")
         }
         binding.closeButton.setOnClickListener { renderer.clear() }
+        binding.shareButton.setOnClickListener { onShareCurrentClicked() }
         binding.openWithButton.setOnClickListener { onOpenWithClicked() }
         binding.saveButton.setOnClickListener { onSaveClicked() }
         binding.addressInput.setOnEditorActionListener { _, actionId, _ ->
@@ -99,6 +109,17 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
                 true
             } else false
         }
+        // Hide the smart-paste chip the moment the user starts typing
+        // their own address — the chip would be stale at that point.
+        binding.addressInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (binding.pasteChip.visibility == View.VISIBLE) {
+                    binding.pasteChip.visibility = View.GONE
+                }
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
 
         // Show the PlayerView's built-in fullscreen button and define
         // what fullscreen means for our chrome (hide everything but
@@ -136,6 +157,41 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     override fun onDestroy() {
         audio.release()
         super.onDestroy()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Smart paste: every time we come to foreground, peek at the
+        // clipboard. If it holds an Autonomi-shaped string and the user
+        // hasn't already typed something / isn't in the middle of a
+        // rendition, surface a one-tap chip so they don't have to
+        // long-press → paste → tap-fetch.
+        maybeOfferClipboardPaste()
+    }
+
+    private fun maybeOfferClipboardPaste() {
+        // Only on the idle screen with an empty input.
+        if (binding.addressInput.text.isNotEmpty()) return
+        if (binding.fetchButton.visibility != View.VISIBLE) return
+
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: return
+        if (!cm.hasPrimaryClip()) return
+        val clip = cm.primaryClip ?: return
+        if (clip.itemCount == 0) return
+        val text = clip.getItemAt(0)?.coerceToText(this)?.toString() ?: return
+        val addr = parseAutonomiInput(text) ?: return
+
+        // Truncated display so the chip stays readable on phones.
+        val display = "autonomi://${addr.take(6)}…${addr.takeLast(4)}"
+        binding.pasteChip.text = getString(R.string.paste_chip_label, display)
+        binding.pasteChip.visibility = View.VISIBLE
+        binding.pasteChip.setOnClickListener {
+            binding.pasteChip.visibility = View.GONE
+            binding.addressInput.setText(addr)
+            binding.addressInput.setSelection(addr.length)
+            lifecycleScope.launch { doFetch(addr) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -240,6 +296,24 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
     private fun setFetchInFlight(inFlight: Boolean) {
         binding.fetchButton.setFetching(inFlight)
+        statusJob?.cancel()
+        if (inFlight) {
+            // Two-stage status: a short "connecting…" appears after a
+            // brief delay so quick cache hits don't flash text; the
+            // longer "first connection takes a moment…" replaces it
+            // if the bootstrap is dragging — sets honest expectations
+            // instead of leaving the user staring at a spinner.
+            statusJob = lifecycleScope.launch {
+                delay(STATUS_INITIAL_DELAY_MS)
+                binding.fetchStatus.setText(R.string.status_connecting)
+                binding.fetchStatus.visibility = View.VISIBLE
+                delay(STATUS_LONG_THRESHOLD_MS - STATUS_INITIAL_DELAY_MS)
+                binding.fetchStatus.setText(R.string.status_first_connection)
+            }
+        } else {
+            binding.fetchStatus.visibility = View.GONE
+            binding.fetchStatus.text = ""
+        }
     }
 
     private fun onAudioError(msg: String) {
@@ -322,21 +396,65 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer.clear()
     }
 
-    /** Network/decode error — Snackbar with retry. */
+    /**
+     * Network/decode error — Snackbar with retry. Maps the underlying
+     * (technical) `FetchitException` message to a human-friendly one
+     * by string-matching known patterns. The technical detail still
+     * lands in logcat for debugging.
+     */
     private fun showFetchError(addr: String, msg: String) {
         renderer.clear()
-        Snackbar.make(
-            binding.rootCoordinator,
-            getString(R.string.error_fetch_prefix, msg),
-            Snackbar.LENGTH_INDEFINITE,
-        )
+        Log.w(TAG, "fetch error for $addr: $msg")
+        val friendly = friendlyFetchError(msg)
+        Snackbar.make(binding.rootCoordinator, friendly, Snackbar.LENGTH_INDEFINITE)
             .setAction(R.string.action_retry) {
                 lifecycleScope.launch { doFetch(addr) }
             }
             .show()
     }
 
+    private fun friendlyFetchError(msg: String): String {
+        val lower = msg.lowercase()
+        val resId = when {
+            "no client connected" in lower || "503" in lower ->
+                R.string.error_no_client
+            "invalid autonomi address" in lower || "400" in lower ->
+                R.string.error_invalid_address
+            "chunk not found" in lower || "not found" in lower ||
+                "404" in lower || "data_map_fetch" in lower ->
+                R.string.error_not_found
+            "timed out" in lower || "timeout" in lower ->
+                R.string.error_timed_out
+            else -> R.string.error_generic
+        }
+        return getString(resId)
+    }
+
+    /**
+     * Share the address currently displayed via the Android share-sheet.
+     * Visible only while content is rendered (see [`RenditionRenderer`]).
+     */
+    private fun onShareCurrentClicked() {
+        val addr = lastFetchAddr ?: return
+        val url = "autonomi://$addr"
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, url)
+            putExtra(Intent.EXTRA_SUBJECT, "fetch>it · $addr")
+        }
+        startActivity(
+            Intent.createChooser(intent, getString(R.string.action_share_label)),
+        )
+    }
+
     private companion object {
         const val TAG = "fetchit"
+        /** Wait this long before flashing any status text — keeps fast
+         *  cache hits invisible (no flicker). */
+        const val STATUS_INITIAL_DELAY_MS = 1_500L
+        /** Switch from "connecting…" to the long-fetch reassurance after
+         *  this many ms. ~10s is the typical bootstrap, so we want the
+         *  user reassured a bit before that. */
+        const val STATUS_LONG_THRESHOLD_MS = 8_000L
     }
 }

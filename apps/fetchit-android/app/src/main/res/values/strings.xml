@@ -12,6 +12,23 @@
     <string name="pdf_page_description">PDF page</string>
     <string name="action_open_with">open with…</string>
     <string name="action_save">save…</string>
+    <string name="action_share_current">share this address</string>
+    <string name="action_share_label">share fetch&gt;it address</string>
+
+    <!-- Smart-paste chip: shown when the clipboard holds an Autonomi
+         address and the user hasn\'t already typed something. -->
+    <string name="paste_chip_label">📋 paste %1$s ?</string>
+
+    <!-- Network status during in-flight fetches. -->
+    <string name="status_connecting">connecting to Autonomi…</string>
+    <string name="status_first_connection">first connection takes a moment…</string>
+
+    <!-- Friendlier error variants. The technical FetchitException
+         message goes to logcat; the user sees something they can act on. -->
+    <string name="error_no_client">Couldn\'t reach the network. Check your connection?</string>
+    <string name="error_not_found">Couldn\'t find this content on Autonomi.</string>
+    <string name="error_timed_out">The network is slow right now. Try again?</string>
+    <string name="error_generic">Couldn\'t reach this content. Try again?</string>
     <string name="open_no_app">no app installed to open %1$s</string>
     <string name="save_done">saved</string>
     <string name="save_failed">save failed: %1$s</string>

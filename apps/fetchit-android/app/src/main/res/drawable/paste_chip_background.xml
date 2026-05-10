@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Background for the smart-paste chip — a rounded rectangle that
+    matches the family panel grammar (ink_3 on ink, 1px copper accent).
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="6dp" />
+    <solid android:color="@color/ink_3" />
+    <stroke
+        android:width="1dp"
+        android:color="@color/copper" />
+</shape>

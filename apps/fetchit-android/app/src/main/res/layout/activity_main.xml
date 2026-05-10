@@ -51,6 +51,28 @@
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintTop_toTopOf="@+id/addressInput" />
 
+        <!-- Smart-paste chip: surfaces when the clipboard holds an
+             Autonomi address and the user hasn't already typed
+             anything. One tap fills the input + fetches. Hidden in
+             every other state. -->
+        <TextView
+            android:id="@+id/pasteChip"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:padding="10dp"
+            android:textColor="@color/copper_bright"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:gravity="center"
+            android:background="@drawable/paste_chip_background"
+            android:clickable="true"
+            android:focusable="true"
+            android:visibility="gone"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/addressInput" />
+
         <!-- Dead-center animated fetch button (WebView-backed). The
              button itself signals state: idle = static "fetch&gt;it" face,
              fetching = ring sweep + running beagle, success = gone
@@ -63,6 +85,23 @@
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Status text below the centred fetch button during in-flight
+             fetches. Times its message: "connecting…" first, then
+             "first connection takes a moment…" if the bootstrap drags. -->
+        <TextView
+            android:id="@+id/fetchStatus"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="@color/ash"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:gravity="center"
+            android:visibility="gone"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/fetchButton" />
 
         <!-- Rendition surfaces. When the renderer has content the
              fetch button is hidden so these can use the full area. -->
@@ -195,6 +234,31 @@
                 android:backgroundTint="@color/ink_3"
                 android:textColor="@color/copper" />
         </LinearLayout>
+
+        <!-- Share-current-rendition (↗): visible only while content is
+             on screen. Tap → Android share sheet with the autonomi://
+             address as text. -->
+        <Button
+            android:id="@+id/shareButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:text="↗"
+            android:textColor="@color/ash"
+            android:textSize="18sp"
+            android:backgroundTint="@android:color/transparent"
+            android:padding="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:insetLeft="0dp"
+            android:insetTop="0dp"
+            android:insetRight="0dp"
+            android:insetBottom="0dp"
+            android:visibility="gone"
+            android:contentDescription="@string/action_share_current"
+            android:layout_marginTop="6dp"
+            android:layout_marginEnd="40dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/addressInput" />
 
         <Button
             android:id="@+id/closeButton"
