@@ -15,6 +15,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:   # manual fallback if a tag-push doesn't auto-fire
 
 permissions:
   contents: write  # create the GitHub Release + upload assets
