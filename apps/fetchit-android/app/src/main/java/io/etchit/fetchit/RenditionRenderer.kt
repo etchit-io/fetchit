@@ -93,6 +93,8 @@ class RenditionRenderer(
         binding.playerView.visibility = View.GONE
         binding.htmlView.visibility = View.GONE
         binding.htmlView.release()
+        binding.epubView.visibility = View.GONE
+        binding.epubView.release()
         binding.pdfView.visibility = View.GONE
         binding.pdfView.release()
         binding.binaryActions.visibility = View.GONE
@@ -167,6 +169,25 @@ class RenditionRenderer(
         audio.play(data, onError)
         audio.attachTo(binding.playerView)
         binding.playerView.visibility = View.VISIBLE
+    }
+
+    /**
+     * Render an EPUB (a ZIP carrying `META-INF/container.xml`) as a book
+     * in [EpubView]. If it looks like an EPUB but won't parse, fall back
+     * to the plain archive listing.
+     */
+    fun bindEpub(addr: String, bytes: ByteArray, archiveEntries: List<uniffi.fetchit_ffi.ArchiveEntryFfi>) {
+        clear()
+        binding.fetchButton.visibility = View.GONE
+        binding.closeButton.visibility = View.VISIBLE
+        binding.shareButton.visibility = View.VISIBLE
+        binding.swipeRefresh.isEnabled = false
+        if (binding.epubView.bind(addr, bytes)) {
+            binding.kindText.text = "application/epub+zip"
+            binding.epubView.visibility = View.VISIBLE
+        } else {
+            bindArchive(archiveEntries)
+        }
     }
 
     private fun bindHtml(body: String) {

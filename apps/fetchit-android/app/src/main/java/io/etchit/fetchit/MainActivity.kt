@@ -279,7 +279,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (cached != null) {
             try {
                 val rendition = withContext(Dispatchers.IO) { detect(cached) }
-                afterRender(addr, rendition)
+                afterRender(addr, rendition, cached)
                 binding.swipeRefresh.isRefreshing = false
                 return
             } catch (e: Exception) {
@@ -292,13 +292,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer.clear()
         lastBinary = null
         try {
-            val rendition = withContext(Dispatchers.IO) {
+            val (rendition, bytes) = withContext(Dispatchers.IO) {
                 val client = ensureConnectedClient()
-                val bytes = client.fetch(addr)
-                app.bytesCache.put(addr, bytes)
-                detect(bytes)
+                val b = client.fetch(addr)
+                app.bytesCache.put(addr, b)
+                detect(b) to b
             }
-            afterRender(addr, rendition)
+            afterRender(addr, rendition, bytes)
         } catch (e: FetchitException) {
             showFetchError(addr, e.message ?: e.toString())
         } catch (e: Exception) {
@@ -311,10 +311,14 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     /** Common tail of a successful fetch: bind the rendition and record nav state. */
-    private fun afterRender(addr: String, rendition: RenditionFfi) {
+    private fun afterRender(addr: String, rendition: RenditionFfi, bytes: ByteArray) {
         lastBinary = null
         cacheBinaryHandle(rendition)
-        renderer.render(rendition)
+        if (rendition is RenditionFfi.Archive && EpubBook.looksLikeEpub(rendition.entries.map { it.path })) {
+            renderer.bindEpub(addr, bytes, rendition.entries)
+        } else {
+            renderer.render(rendition)
+        }
         hasConnectedOnce = true
         lastFetchAddr = addr
         // Push onto the nav stack — but skip if we're already viewing
