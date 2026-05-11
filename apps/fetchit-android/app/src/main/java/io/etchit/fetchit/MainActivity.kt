@@ -83,6 +83,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     /** Drives the timed status text under the fetch button. */
     private var statusJob: Job? = null
 
+    /**
+     * True once any fetch has succeeded this session. Before that, the
+     * timed status text frames a slow fetch as "connecting / first
+     * connection takes a moment" (the bootstrap warmup is the likely
+     * culprit). After, it's just "fetching / still fetching" — saying
+     * "first connection" on every fetch is misleading.
+     */
+    private var hasConnectedOnce = false
+
     private val saveLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri -> uri?.let(::onSavePicked) }
@@ -154,6 +163,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         // In-page autonomi:// links: tapping <a href="autonomi://addr">
         // inside a rendered SPA loads that address as a fresh fetch.
         binding.htmlView.setOnAutonomiNavigate(::loadAddress)
+        binding.htmlView.setOnAutonomiBack(::navigateBack)
 
         // External entry: another app, a QR scanner, or a clicked link
         // routed an autonomi://<addr> intent at us — pick it up.
@@ -259,36 +269,36 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     private suspend fun doFetch(addr: String) {
+        val app = fetchitApp()
+        // Disk cache first — Autonomi addresses are immutable, so a hit
+        // is always correct, even across app restarts. On a hit we render
+        // straight over whatever's on screen, with no "fetching" chrome
+        // and no blank frame in between — so back-navigation and revisits
+        // feel instant instead of looking like the page is reloading.
+        val cached = withContext(Dispatchers.IO) { app.bytesCache.get(addr) }
+        if (cached != null) {
+            try {
+                val rendition = withContext(Dispatchers.IO) { detect(cached) }
+                afterRender(addr, rendition)
+                binding.swipeRefresh.isRefreshing = false
+                return
+            } catch (e: Exception) {
+                // Corrupt/unsupported cache entry — fall through and
+                // re-fetch from the network with the usual chrome.
+                Log.w(TAG, "render from cache failed; refetching", e)
+            }
+        }
         setFetchInFlight(true)
         renderer.clear()
         lastBinary = null
         try {
-            val app = fetchitApp()
             val rendition = withContext(Dispatchers.IO) {
-                // Disk cache first — Autonomi addresses are immutable,
-                // so a cache hit is always correct. Skips network
-                // entirely on subsequent fetches of the same address,
-                // including across app restarts.
-                val cached = app.bytesCache.get(addr)
-                if (cached != null) {
-                    detect(cached)
-                } else {
-                    val client = ensureConnectedClient()
-                    val bytes = client.fetch(addr)
-                    app.bytesCache.put(addr, bytes)
-                    detect(bytes)
-                }
+                val client = ensureConnectedClient()
+                val bytes = client.fetch(addr)
+                app.bytesCache.put(addr, bytes)
+                detect(bytes)
             }
-            cacheBinaryHandle(rendition)
-            renderer.render(rendition)
-            lastFetchAddr = addr
-            // Push onto the nav stack — but skip if we're already
-            // viewing this address (e.g. retry, swipe-down + same
-            // address, or an in-page link to the current page).
-            if (backStack.lastOrNull() != addr) {
-                backStack.addLast(addr)
-            }
-            backCallback.isEnabled = backStack.size >= 2
+            afterRender(addr, rendition)
         } catch (e: FetchitException) {
             showFetchError(addr, e.message ?: e.toString())
         } catch (e: Exception) {
@@ -298,6 +308,32 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             setFetchInFlight(false)
             binding.swipeRefresh.isRefreshing = false
         }
+    }
+
+    /** Common tail of a successful fetch: bind the rendition and record nav state. */
+    private fun afterRender(addr: String, rendition: RenditionFfi) {
+        lastBinary = null
+        cacheBinaryHandle(rendition)
+        renderer.render(rendition)
+        hasConnectedOnce = true
+        lastFetchAddr = addr
+        // Push onto the nav stack — but skip if we're already viewing
+        // this address (retry, swipe-down + same address, or an in-page
+        // link to the current page).
+        if (backStack.lastOrNull() != addr) {
+            backStack.addLast(addr)
+        }
+        backCallback.isEnabled = backStack.size >= 2
+    }
+
+    /**
+     * Handler for an in-page `autonomi://back` link: pop the nav stack,
+     * same as a system back press. If there's nothing below the current
+     * page (e.g. the user deep-linked straight to a spoke), it's a
+     * no-op rather than exiting the app.
+     */
+    private fun navigateBack() {
+        if (backStack.size >= 2) backCallback.handleOnBackPressed()
     }
 
     private fun resetToIdle() {
@@ -321,17 +357,20 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.fetchButton.setFetching(inFlight)
         statusJob?.cancel()
         if (inFlight) {
-            // Two-stage status: a short "connecting…" appears after a
-            // brief delay so quick cache hits don't flash text; the
-            // longer "first connection takes a moment…" replaces it
-            // if the bootstrap is dragging — sets honest expectations
-            // instead of leaving the user staring at a spinner.
+            // Two-stage status: a short line appears after a brief delay
+            // so quick cache hits don't flash text; a longer one
+            // replaces it if the fetch drags. Before the first
+            // successful fetch the wording leans on the bootstrap
+            // warmup ("connecting / first connection takes a moment");
+            // after, it's just "fetching / still fetching".
+            val short = if (hasConnectedOnce) R.string.status_fetching else R.string.status_connecting
+            val long = if (hasConnectedOnce) R.string.status_still_fetching else R.string.status_first_connection
             statusJob = lifecycleScope.launch {
                 delay(STATUS_INITIAL_DELAY_MS)
-                binding.fetchStatus.setText(R.string.status_connecting)
+                binding.fetchStatus.setText(short)
                 binding.fetchStatus.visibility = View.VISIBLE
                 delay(STATUS_LONG_THRESHOLD_MS - STATUS_INITIAL_DELAY_MS)
-                binding.fetchStatus.setText(R.string.status_first_connection)
+                binding.fetchStatus.setText(long)
             }
         } else {
             binding.fetchStatus.visibility = View.GONE
@@ -494,8 +533,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
          *  cache hits invisible (no flicker). */
         const val STATUS_INITIAL_DELAY_MS = 1_500L
         /** Switch from "connecting…" to the long-fetch reassurance after
-         *  this many ms. ~10s is the typical bootstrap, so we want the
-         *  user reassured a bit before that. */
+         *  this many ms. fetch>it's connect warmup runs up to ~10s
+         *  before it returns, so we reassure the user a couple of
+         *  seconds before that ceiling. */
         const val STATUS_LONG_THRESHOLD_MS = 8_000L
     }
 }

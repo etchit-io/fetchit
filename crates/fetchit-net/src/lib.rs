@@ -17,4 +17,4 @@ pub mod client;
 pub mod peers;
 
 pub use client::{set_data_home, AutonomiClient};
-pub use peers::{normalize_multiaddr, DEFAULT_PEERS};
+pub use peers::{parse_bootstrap_peer, DEFAULT_PEERS};

@@ -100,6 +100,19 @@ class HtmlView @JvmOverloads constructor(
         onAutonomiNavigate = callback
     }
 
+    /**
+     * Fired when a page links to the `autonomi://back` pseudo-target —
+     * an in-page "← back" / breadcrumb affordance that pops the host's
+     * navigation stack instead of hard-coding (and re-fetching) a
+     * specific address. The host should treat it like a back press.
+     */
+    private var onAutonomiBack: (() -> Unit)? = null
+
+    /** Wire a handler for the `autonomi://back` pseudo-link. */
+    fun setOnAutonomiBack(callback: () -> Unit) {
+        onAutonomiBack = callback
+    }
+
     /** The fullscreen container view supplied by the WebView when an HTML
      * video element enters fullscreen. While non-null, [`fullscreenBackCb`]
      * is enabled so system back exits fullscreen first. */
@@ -177,6 +190,7 @@ class HtmlView @JvmOverloads constructor(
         ): WebResourceResponse? {
             val url = request?.url?.toString() ?: return null
             val addr = extractAddr(url) ?: return null
+            Log.i(TAG, "intercept ${addr.take(10)}… range=${request.requestHeaders?.get("Range") ?: "-"}")
             return resolveAddr(addr, request.requestHeaders)
         }
 
@@ -185,6 +199,15 @@ class HtmlView @JvmOverloads constructor(
             request: WebResourceRequest?,
         ): Boolean {
             val url = request?.url?.toString() ?: return false
+            // `autonomi://back` — a "go back" pseudo-link. Lets in-page
+            // "← back" / breadcrumb affordances pop the host's nav stack
+            // (like system back) instead of hard-coding a specific
+            // address (which, for content-addressed pages, can never
+            // reference the index a visitor actually arrived through).
+            if (url.trimEnd('/').equals("autonomi://back", ignoreCase = true)) {
+                onAutonomiBack?.invoke()
+                return true
+            }
             val addr = extractAddr(url) ?: return false
             // Hand off to the host so it drives the address bar +
             // bookmark + back-stack surfaces consistently.
@@ -303,12 +326,24 @@ class HtmlView @JvmOverloads constructor(
         requestHeaders: Map<String, String>?,
     ): WebResourceResponse {
         val app = context.applicationContext as FetchitApplication
-        val cached = resourceCache[addr] ?: run {
-            // Disk cache — survives across app restarts.
+        val short = addr.take(10)
+
+        val memHit = resourceCache[addr]
+        val cached = if (memHit != null) {
+            Log.i(TAG, "resolve $short…: in-memory hit (${memHit.bytes.size}B)")
+            memHit
+        } else {
             val diskBytes = app.bytesCache.get(addr)
-            val bytes = diskBytes ?: run {
-                val client = app.client()
-                    ?: return errorResponse(503, "no client connected")
+            val bytes = if (diskBytes != null) {
+                Log.i(TAG, "resolve $short…: disk-cache hit (${diskBytes.size}B)")
+                diskBytes
+            } else {
+                val client = app.client() ?: run {
+                    Log.w(TAG, "resolve $short…: no client connected")
+                    return errorResponse(503, "no client connected")
+                }
+                Log.i(TAG, "resolve $short…: network fetch starting")
+                val t0 = System.currentTimeMillis()
                 val fetched = try {
                     // shouldInterceptRequest runs on a WebView network
                     // thread, not the main thread. runBlocking is safe
@@ -316,19 +351,28 @@ class HtmlView @JvmOverloads constructor(
                     // handles the async fetch on its own threads.
                     runBlocking { client.fetch(addr) }
                 } catch (e: Exception) {
-                    Log.w(TAG, "autonomi fetch failed for $addr", e)
+                    Log.w(TAG, "resolve $short…: fetch FAILED after ${System.currentTimeMillis() - t0}ms — ${e.message}")
                     return errorResponse(502, e.message ?: "fetch failed")
                 }
+                Log.i(TAG, "resolve $short…: fetched ${fetched.size}B in ${System.currentTimeMillis() - t0}ms")
                 // Persist for next session before returning so a crash
                 // mid-render doesn't lose the bytes.
                 app.bytesCache.put(addr, fetched)
                 fetched
             }
             val mime = sniffMime(bytes) ?: "application/octet-stream"
-            CachedResource(mime = mime, bytes = bytes)
-                .also { resourceCache[addr] = it }
+            Log.i(TAG, "resolve $short…: mime=$mime")
+            CachedResource(mime = mime, bytes = bytes).also { resourceCache[addr] = it }
         }
+
         val range = parseRange(requestHeaders, cached.bytes.size)
+        Log.i(
+            TAG,
+            "resolve $short…: -> " +
+                if (range == null) "200 OK (${cached.bytes.size}B, ${cached.mime})"
+                else if (range.unsatisfiable) "416 (total ${range.total})"
+                else "206 ${range.start}-${range.end}/${range.total}",
+        )
         return cached.toResponse(range)
     }
 
@@ -436,6 +480,12 @@ class HtmlView @JvmOverloads constructor(
         if (bytes.size >= 12 && bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() &&
             bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()) return "video/mp4"          // ...ftyp
         if (bytes.size >= 4 && bytes.startsWith(0x1A, 0x45, 0xDF, 0xA3)) return "video/webm"    // EBML
+
+        // WebAssembly: `\0asm` magic. Returning the right MIME lets a page
+        // use `WebAssembly.instantiateStreaming(fetch("autonomi://…"))`
+        // (which requires `Content-Type: application/wasm`) rather than
+        // having to round-trip through `arrayBuffer()`.
+        if (bytes.startsWith(0x00, 0x61, 0x73, 0x6D)) return "application/wasm"                  // \0asm
 
         // Try treating it as text + sniff content
         val asText = try { String(bytes.copyOfRange(0, bytes.size.coerceAtMost(512)), Charsets.UTF_8) }

@@ -2,19 +2,21 @@
 <!--
     Brand-spec [>] mark for the launcher icon foreground.
 
-    Paths copied verbatim from the brand SVG (private/brand-system.html
-    § "the chevron vs. the slash") and rescaled 2× from the source
-    viewBox (32×16) into our adaptive-icon viewport (108×108):
+    Sized to match etchit's launcher icon side-by-side: same scale,
+    same path-coord system, same viewport. The two apps read as a
+    matched pair on the home screen — only the centre glyph differs
+    (chevron here, slash for etchit). Scale 2× from the source viewBox
+    (32×16) into our adaptive-icon viewport (108×108):
 
-        x' = x*2 + 22     y' = y*2 + 38
+        x' = x*2 + 22    y' = y*2 + 38
 
-    That centres the mark at (54, 54) and gives the bounding box
-    (30..78, 42..66). Maximum distance from centre is ~27, comfortably
-    inside the ~33-radius safe circle adaptive launchers crop to —
-    the mark won't get clipped on any standard mask shape.
+    Mark bounding box: (30..78, 42..66). Max distance from centre
+    is ~27 — comfortably inside the ~33 safe-circle radius launchers
+    crop to.
 
-    Filled, not stroked. Copper #c9732b. Background layer is
-    @color/ink (#0a0a0a) via the adaptive-icon XML.
+    Filled paths from the canonical brand SVG (private/fetchit-brand.html
+    § "the chevron vs. the slash"). Copper #c9732b.
+    Background (ink #0a0a0a) supplied by the adaptive-icon XML.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"

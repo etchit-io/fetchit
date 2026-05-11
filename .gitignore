@@ -27,6 +27,11 @@ generated/
 # ── Embedded sibling project (its own git repo) ──────────
 /etchit/
 
+# ── Upstream Autonomi source (reference only, not ours) ──
+# Checked out locally to verify behavior against the real code —
+# we never guess, we confirm. Not part of this repo.
+/withAutonomi/
+
 # ── Autonomi upload artifacts ────────────────────────────
 *.datamap
 

@@ -22,7 +22,7 @@ No wallet. No signing. No node to run. No DNS, no CDN, no traditional web server
    - bare hex: `c2b0285930b0a2c3df3928d0a4706b4e6d71e84ebeb4f7805c83ffbb63d0ab61`
    - prefixed: `autonomi://c2b0285930b0a2c3df3928d0a4706b4e6d71e84ebeb4f7805c83ffbb63d0ab61`
 4. **Tap the big copper button.** Or hit Go on the keyboard.
-5. **Wait ~10 seconds for the first connection.** The dog inside the button runs while bootstrap completes; subsequent fetches are warm.
+5. **The first connection takes up to ~10 seconds.** fetch>it returns as soon as it sees a peer, or after a ~10s warmup window — whichever first; the DHT bootstrap then settles in the background. The dog inside the button runs while it warms up; subsequent fetches are warm.
 
 ---
 
@@ -111,7 +111,7 @@ Tap the **★** to open. The sheet shows:
 }
 ```
 
-Bookmarks are the **only persistent state fetch>it keeps locally**. Nothing else is cached. No history, no view counts, no thumbnails. All fetched bytes live in memory only and are gone when the rendition is dismissed or the app is killed.
+fetch>it keeps two things on the device: your **bookmarks** (saved addresses + labels, the JSON above) and a **local cache of fetched Autonomi bytes** (`filesDir/autonomi_cache/`, ~500 MB cap, evicted LRU by last access). The byte cache works exactly like a browser's HTTP cache — it's a private, on-device convenience so you don't re-download what you've already viewed, and it's what makes offline replay possible (content-addressed bytes are immutable, so a cached hit is always the right answer; no revalidation). fetch>it is a reader, not a host: it runs no server, serves nothing to anyone, and the cache only ever holds content *you* fetched, keyed by 64-hex address. Beyond those two stores: no browsing history, no view counts, no thumbnails, no analytics. Clearing the app's storage in Android settings empties the cache.
 
 ---
 
@@ -140,7 +140,7 @@ Drag the small handle at the bottom of the screen up.
 
 ## Battery behavior
 
-fetch>it keeps the Autonomi connection warm while you're using it, and **drops it after 60 seconds of being backgrounded** so the radio + DHT chatter stop. Coming back later → next fetch pays one ~10s bootstrap, then warm again.
+fetch>it keeps the Autonomi connection warm while you're using it, and **drops it after 60 seconds of being backgrounded** so the radio + DHT chatter stop. Coming back later → the next fetch pays one short re-warmup (up to ~10s), then it's warm again.
 
 | State | Connection |
 |---|---|
@@ -272,7 +272,7 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 ## Tips
 
-- **First fetch is always slow** (~10s) — it's the DHT bootstrap. Repeat fetches in the same session are fast.
+- **First fetch can take up to ~10s** — that's the initial DHT warmup. Repeat fetches in the same session are fast.
 - **Connection drops after 60s in the background** to save battery. Fine. Just expect one re-bootstrap when you come back.
 - **The peer count in settings is a real-time honesty signal.** If it dips to 0 (red), the network is being weird; that's an honest report, not a glitch — it usually self-recovers within a poll cycle.
 - **For air-gapped use** (no traditional internet), as long as Autonomi peers are reachable somehow (LAN node, satellite link, whatever), fetch>it works. SPAs that inline everything also run fine.

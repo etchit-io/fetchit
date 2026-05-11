@@ -44,6 +44,7 @@ Verified on the Android shell against live Autonomi addresses.
 | **Deep-link intent-filter** — `autonomi://` URLs from any other app (QR scanner, messenger, mail client) route to fetch>it | ✓ |
 | **Range requests** for media seeking (`<video>` jumping to mid-file is instant after first fetch) | ✓ |
 | **HTML video fullscreen** (`requestFullscreen()` / native player chrome) | ✓ |
+| **WebAssembly from `autonomi://`** — `.wasm` fetched by hash, compiled and run in-page | ✓ — verified on Android (`add(40,2)=42`). Both paths work: `WebAssembly.instantiateStreaming(fetch("autonomi://…"))` (the bytes are served `Content-Type: application/wasm`) and `WebAssembly.instantiate(arrayBuffer)` |
 | **Persistent disk cache** keyed by address — fetched bytes survive app restarts; offline replay of anything you've seen before | ✓ |
 | Permissive CORS on `autonomi://` (no DNS origin to attack) | ✓ |
 | Sandbox: JS on, network on, **file-system / content-provider access off**, **DOM storage off**, **no JS bridge to native** | ✓ |
@@ -61,7 +62,6 @@ as long as Autonomi peers are reachable.
 | **Service Workers** | API surface exposed but `register()` fails — SW state lives in IndexedDB which the sandbox disables. Host-level disk cache (already shipped) covers the offline-replay use case |
 | Discoverability of addresses | No address book, no search, no DNS-equivalent. Sharing is bookmarks, QR codes, and out-of-band copy |
 | Trust signals (is this address from someone I've seen before?) | None today; out of scope for 0.1.0 |
-| WASM modules served from `autonomi://` | Should work via the synthetic-origin path since `wasm` bytes go through the standard resource loader; not yet verified end-to-end |
 | Streaming during first fetch | Today the engine waits for the full Autonomi reassembly before serving; the cache makes second-load instant. Truly progressive streaming would need a streaming API on the underlying client |
 
 ---
@@ -211,9 +211,11 @@ Two paths work today:
   document load. Each referenced address fetches once and caches
   forever (immutable content-addressing).
 
-Mutable / updatable pointers don't exist on Autonomi by design — the
-network is content-addressed and immutable. An address you bookmark
-today returns the same bytes forever.
+The `autonomi://<64-hex>` addresses fetch>it resolves are
+content-addressed: the address is `BLAKE3(content)`, so the bytes at
+an address cannot change — fetch one today and it returns the same
+bytes forever. That immutability is what lets the on-device cache
+skip revalidation entirely and a bookmark never go stale.
 
 ---
 

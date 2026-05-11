@@ -15,9 +15,10 @@ import androidx.media3.ui.PlayerView
 /**
  * Owns a single [`ExoPlayer`] backed by an in-memory byte array.
  *
- * fetch>it never persists fetched content to disk (spec §3) — Media3's
- * [`ByteArrayDataSource`] reads straight from a `ByteArray`, so the
- * audio (or, in the future, video) bytes never touch storage.
+ * Playback reads straight from the in-memory `ByteArray` via Media3's
+ * [`ByteArrayDataSource`] — the audio path writes no temp file of its
+ * own. (The raw fetched bytes may already sit in the app's content
+ * cache from the fetch; the playback layer itself adds nothing.)
  *
  * Standard media controls (play/pause, seek, time, ±15s skip) are
  * rendered by Media3's [`PlayerView`]; this class doesn't draw any UI

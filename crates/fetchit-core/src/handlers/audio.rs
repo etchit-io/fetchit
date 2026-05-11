@@ -2,9 +2,10 @@
 //! emits [`Rendition::Audio`] tagged with the right MIME so UI shells
 //! can hand bytes straight to a platform decoder.
 //!
-//! Decoding to PCM is intentionally not done here — the Android
-//! `MediaPlayer`, the browser `<audio>` tag, and the `fetchit` CLI
-//! all accept the encoded bytes directly.
+//! Decoding to PCM is intentionally not done here — the platform's
+//! audio pipeline (Media3 / ExoPlayer on the Android app, the browser
+//! `<audio>` element for HTML renditions, whatever the `fetchit` CLI
+//! plays through) accepts the encoded bytes directly.
 
 use bytes::Bytes;
 

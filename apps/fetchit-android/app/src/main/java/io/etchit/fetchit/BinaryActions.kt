@@ -9,11 +9,12 @@ import java.io.File
 /**
  * Hand-off helpers for "open with…" and "save as…" on rendered bytes.
  *
- * fetch>it never persists fetched content to its own storage (spec §3),
- * but to invoke another app via [`Intent.ACTION_VIEW`] we need a
- * `content://` URI. The temp file lives in the cache `open_with/`
- * subdirectory — Android reaps it under cache pressure, and we wipe
- * the directory before each new write.
+ * Invoking another app via [`Intent.ACTION_VIEW`] needs a `content://`
+ * URI, so the bytes are written to a temp file in `cacheDir/open_with/`
+ * — scratch, not storage: wiped before each new write and reaped by
+ * Android under cache pressure. (Raw fetched bytes are cached
+ * separately by the fetch layer; "save as…" copies to a user-chosen
+ * location via the system picker — fetch>it keeps no copy of it.)
  */
 object BinaryActions {
 

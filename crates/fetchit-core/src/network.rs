@@ -16,11 +16,11 @@ use crate::{Address, Error, Result};
 /// Anything that can resolve an [`Address`] into bytes.
 ///
 /// Implementations are expected to handle hierarchical data-maps
-/// transparently — callers receive the concatenated payload, not the
-/// inner data-map chunk. The real `ant-core`-backed client (added in
-/// a follow-up commit) does this via
+/// transparently — callers receive the reassembled payload, not the
+/// inner data-map chunk. The production `ant-core`-backed client lives
+/// in the `fetchit-net` crate and resolves child data-maps via
 /// `self_encryption::get_root_data_map_parallel`; the [`MockClient`]
-/// returns whatever bytes the test inserted.
+/// here returns whatever bytes the test inserted.
 #[async_trait]
 pub trait NetworkClient: Send + Sync {
     /// Fetch the bytes addressed by `addr`.

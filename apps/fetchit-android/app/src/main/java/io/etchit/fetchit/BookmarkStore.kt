@@ -11,9 +11,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * key (`bookmarks_v1`).
  *
  * Plain `SharedPreferences`, not `EncryptedSharedPreferences` — Autonomi
- * addresses are public, the labels are user-chosen, and the
- * encryption-at-rest cost (Keystore handshake on every read) isn't worth
- * the marginal threat-model improvement (spec §3a).
+ * addresses are public and the labels are user-chosen, so the
+ * encryption-at-rest cost (a Keystore handshake on every read) buys no
+ * meaningful threat-model improvement here.
  *
  * Single-process — fetch>it has no service or background worker, so
  * there's no inter-process synchronisation concern.

@@ -45,9 +45,15 @@ pub fn setup_logger() {
         use std::sync::Once;
         static INIT: Once = Once::new();
         INIT.call_once(|| {
+            // Info, not Debug: `saorsa_transport` / `saorsa_core` emit a
+            // per-tick `connection: drive` debug line for every live QUIC
+            // connection — at a healthy peer count that floods logcat
+            // with thousands of lines a second and burns CPU formatting
+            // them. Info keeps the occasional DHT / peer events without
+            // the firehose.
             android_logger::init_once(
                 android_logger::Config::default()
-                    .with_max_level(log::LevelFilter::Debug)
+                    .with_max_level(log::LevelFilter::Info)
                     .with_tag("fetchit_ffi"),
             );
         });

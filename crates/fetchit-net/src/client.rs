@@ -13,13 +13,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use ant_core::data::{
-    Client as CoreClient, ClientConfig, CoreNodeConfig, MultiAddr, NodeMode, P2PNode,
+    Client as CoreClient, ClientConfig, CoreNodeConfig, IPDiversityConfig, NodeMode, P2PNode,
     MAX_WIRE_MESSAGE_SIZE,
 };
 
 use fetchit_core::{Address, Error as CoreError, NetworkClient, Result as CoreResult};
 
-use crate::normalize_multiaddr;
+use crate::parse_bootstrap_peer;
 
 /// Production network backend. Cheap to clone — wraps an `Arc`-shared
 /// `ant-core` client.
@@ -32,7 +32,7 @@ impl AutonomiClient {
     /// Connect to the network using the supplied bootstrap peers.
     ///
     /// `peers` accepts both full multiaddrs and `ip:port` shorthand —
-    /// each entry is run through [`normalize_multiaddr`].
+    /// each entry is parsed via [`parse_bootstrap_peer`].
     ///
     /// On platforms where `HOME` may be unset (notably Android),
     /// callers must invoke [`set_data_home`] before this
@@ -53,16 +53,20 @@ impl AutonomiClient {
             .max_message_size(MAX_WIRE_MESSAGE_SIZE);
 
         for raw in peers {
-            let normalised = normalize_multiaddr(raw);
-            let addr: MultiAddr = normalised
-                .parse()
-                .map_err(|e| net_err(format!("invalid peer address {raw}: {e}")))?;
+            let addr = parse_bootstrap_peer(raw).map_err(net_err)?;
             builder = builder.bootstrap_peer(addr);
         }
 
-        let config = builder
+        let mut config = builder
             .build()
             .map_err(|e| net_err(format!("config build failed: {e}")))?;
+
+        // Clients don't host data — the routing table only exists to
+        // find peers, not to be defended against Sybil clustering.
+        // Relax the per-IP / per-subnet diversity caps so legitimate
+        // bootstrap peers that share an IP or /24 (several of ours do)
+        // aren't silently dropped. Mirrors `ant-cli`'s client setup.
+        config.diversity_config = Some(IPDiversityConfig::permissive());
 
         let node = P2PNode::new(config)
             .await
@@ -154,11 +158,18 @@ fn resolve_data_map(
     Ok(resolved)
 }
 
-/// `ClientConfig` matching what `ant-cli` uses at default settings:
-/// 60-second per-peer chunk timeout. `ClientConfig::default()` ships
-/// 10 seconds, which is too aggressive on mobile or any path that
-/// crosses NAT traversal — etchit hit this in production and
-/// `ant-cli` itself overrides it. Everything else stays at stock.
+/// `ClientConfig` matching what `ant-cli` runs at default settings: a
+/// 60-second per-peer chunk timeout. (`ant-cli`'s `--store-timeout-secs`
+/// flag defaults to 60; `ClientConfig::default()` ships 10.)
+///
+/// Despite the field name, `store_timeout_secs` also governs chunk
+/// *retrieve* — `ant-core`'s `chunk_get_from_peer` uses it as the
+/// per-peer GET timeout (and `ant-cli`'s own flag doc reads "chunk
+/// store / retrieve operations") — so it is the right knob for a
+/// read-only client like fetch>it. The 10-second default is too
+/// aggressive on mobile or NAT-traversed paths, where a multi-MB
+/// chunk transfer plus QUIC slow-start runs well past it; etchit hit
+/// this in production. Everything else stays at stock.
 fn cli_style_client_config() -> ClientConfig {
     ClientConfig {
         store_timeout_secs: 60,
@@ -169,10 +180,13 @@ fn cli_style_client_config() -> ClientConfig {
 /// Spawn `node.start()` in the background and return as soon as we
 /// either see at least one connected peer **or** hit a short deadline.
 ///
-/// `P2PNode::start()` performs a full DHT bootstrap which takes 30+
-/// seconds on a cold connection. Blocking the caller for that long is
-/// unworkable for an interactive viewer, so we let the bootstrap finish
-/// in the background while returning a usable `Client` early.
+/// `P2PNode::start()` performs a full DHT bootstrap; on a cold
+/// connection that can take tens of seconds (it depends on how quickly
+/// bootstrap peers respond, NAT traversal, etc.). Blocking an
+/// interactive viewer for that is unworkable, so we let it finish in
+/// the background and return a usable `Client` as soon as we see one
+/// connected peer, or after the `START_DEADLINE` warmup window —
+/// whichever comes first.
 async fn start_node_with_warmup(node: Arc<P2PNode>) -> CoreResult<()> {
     const START_DEADLINE: Duration = Duration::from_secs(10);
     const WARMUP_POLL: Duration = Duration::from_millis(250);

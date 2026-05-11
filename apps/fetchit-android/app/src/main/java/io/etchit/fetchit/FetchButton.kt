@@ -19,9 +19,12 @@ import android.widget.FrameLayout
  * Why a `WebView`: the design ships as HTML/SVG/CSS animations, which
  * stay synchronised in one place. Re-implementing the leg-paired,
  * tail-wagging, dust-trailing beagle as Android `AnimatedVectorDrawable`
- * would multiply the maintenance surface for no gain. The WebView is
- * scoped tight (one instance, transparent body, JS disabled-by-default
- * for the rest of the page).
+ * would multiply the maintenance surface for no gain. JavaScript is
+ * enabled here (the button's state changes are driven from JS via a
+ * small `Native` bridge), but the WebView is otherwise scoped tight:
+ * one instance, transparent body, no DOM storage, no file or
+ * content-provider access, `LOAD_NO_CACHE`, and it loads only the
+ * one bundled asset — never remote content.
  */
 @SuppressLint("SetJavaScriptEnabled")
 class FetchButton @JvmOverloads constructor(

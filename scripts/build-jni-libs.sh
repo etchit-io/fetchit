@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Build fetchit-ffi for the Android ABIs the app supports and stage the
-# resulting .so libraries where the Android Gradle build expects them.
+# Build fetchit-ffi for the Android ABIs the app supports, stage the
+# resulting .so libraries where the Gradle build expects them, AND
+# regenerate the matching uniffi Kotlin bindings.
+#
+# The .so embeds uniffi API checksums; the generated `fetchit_ffi.kt`
+# verifies them at startup (`uniffiCheckApiChecksums`). If you rebuild
+# one without the other they go out of sync and the app crashes on
+# launch with "UniFFI API checksum mismatch". This script does both so
+# they can't drift.
 #
 # Used by:
 #   - local development (run once after editing fetchit-ffi)
@@ -10,6 +17,8 @@
 #   - rustup toolchain (rust-toolchain.toml at the workspace root pins
 #     the version)
 #   - cargo-ndk: `cargo install cargo-ndk`
+#   - uniffi-bindgen, matching `uniffi` in crates/fetchit-ffi/Cargo.toml:
+#     `cargo install uniffi-bindgen --version =0.29.4`
 #   - Android NDK r27 (matches `ndkVersion` in app/build.gradle.kts).
 #     Set ANDROID_NDK_HOME or ANDROID_NDK_ROOT to its install path.
 
@@ -21,6 +30,8 @@ WORKSPACE="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 JNI_DIR="$WORKSPACE/apps/fetchit-android/app/src/main/jniLibs"
 FFI_CRATE_DIR="$WORKSPACE/crates/fetchit-ffi"
+# uniffi writes <out-dir>/uniffi/fetchit_ffi/fetchit_ffi.kt under here:
+KOTLIN_SRC_DIR="$WORKSPACE/apps/fetchit-android/app/src/main/java"
 
 # Rust target triples → Android ABI directory names.
 # arm64 only — abiFilters in app/build.gradle.kts matches. x86_64 is
@@ -52,3 +63,24 @@ for abi in "${ABIS[@]}"; do
     exit 1
   fi
 done
+
+# ── regenerate the matching uniffi Kotlin bindings ───────────────────
+# Library mode: bindgen reads the uniffi metadata embedded in the .so
+# (cross-target is fine — it parses the object, doesn't execute it), so
+# the generated `fetchit_ffi.kt` carries exactly the checksums this .so
+# expects. This sidesteps the multi-crate-workspace metadata-lookup bug
+# that bites bindgen's source-tree mode.
+if ! command -v uniffi-bindgen >/dev/null 2>&1; then
+  echo "error: uniffi-bindgen not found." >&2
+  echo "       install it (version must match \`uniffi\` in crates/fetchit-ffi/Cargo.toml):" >&2
+  echo "         cargo install uniffi-bindgen --version =0.29.4" >&2
+  exit 1
+fi
+echo
+echo "Regenerating uniffi Kotlin bindings…"
+uniffi-bindgen generate \
+  --library "$JNI_DIR/arm64-v8a/libfetchit_ffi.so" \
+  --language kotlin \
+  --out-dir "$KOTLIN_SRC_DIR" \
+  --no-format
+echo "  -> $KOTLIN_SRC_DIR/uniffi/fetchit_ffi/fetchit_ffi.kt"

@@ -18,9 +18,10 @@ import java.io.File
  *
  * `PdfRenderer` requires a seekable file descriptor, so the bytes are
  * staged to a temp file in `cacheDir/pdf/`. The temp file is wiped on
- * each new [`load`] and on [`release`]. This is the same pattern
- * `BinaryActions.openWith` uses — keeps the spec §3 "no on-device
- * caching" rule honest by treating the temp as scratch, not storage.
+ * each new [`load`] and on [`release`] — scratch, not storage; the
+ * same `cacheDir` discipline `BinaryActions.openWith` uses. (The
+ * fetched bytes live in the app's content cache; this view just needs
+ * a seekable handle to them and discards it afterward.)
  *
  * Pages render lazily as the user scrolls — `PdfRenderer.openPage(i)`
  * is called per-row. Bitmaps are rendered at the view's pixel width

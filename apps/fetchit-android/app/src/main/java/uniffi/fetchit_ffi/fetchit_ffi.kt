@@ -969,7 +969,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_func_detect() != 20729.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_func_set_data_home() != 56295.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_func_set_data_home() != 29042.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_func_setup_logger() != 59301.toShort()) {

@@ -54,6 +54,9 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
+      - name: Install uniffi-bindgen (version must match crates/fetchit-ffi)
+        run: cargo install uniffi-bindgen --version =0.29.4
+
       - name: Set up Android NDK r27
         id: ndk
         uses: nttld/setup-ndk@v1
@@ -94,13 +97,16 @@ jobs:
           cd apps/fetchit-android
           ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Stage APK with stable name
+      - name: Stage APK (versioned + stable name)
         id: apk
         run: |
           src="apps/fetchit-android/app/build/outputs/apk/release/app-release.apk"
           dst="fetchit-${{ steps.ver.outputs.version }}.apk"
           cp "$src" "$dst"
           sha256sum "$dst" > "$dst.sha256"
+          # Stable name too, so `releases/latest/download/app-release.apk` always resolves
+          # (this is the URL the etchit.io site links).
+          cp "$src" app-release.apk
           echo "apk=$dst" >> "$GITHUB_OUTPUT"
           echo "sha=$dst.sha256" >> "$GITHUB_OUTPUT"
 
@@ -115,4 +121,5 @@ jobs:
           files: |
             ${{ steps.apk.outputs.apk }}
             ${{ steps.apk.outputs.sha }}
+            app-release.apk
           generate_release_notes: true

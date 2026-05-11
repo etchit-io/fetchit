@@ -73,6 +73,9 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      - name: Install uniffi-bindgen (version must match crates/fetchit-ffi)
+        run: cargo install uniffi-bindgen --version =0.29.4
+
       - name: Set up Android NDK r27
         id: ndk
         uses: nttld/setup-ndk@v1
