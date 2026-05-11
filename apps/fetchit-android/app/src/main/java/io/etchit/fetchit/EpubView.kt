@@ -3,6 +3,8 @@ package io.etchit.fetchit
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
 import android.util.AttributeSet
@@ -154,10 +156,14 @@ class EpubView @JvmOverloads constructor(
             val url = request?.url?.toString() ?: return null
             if (!url.startsWith(EPUB_PREFIX)) return null   // not an in-EPUB resource — let it through
             val path = EpubBook.normalize(url.removePrefix(EPUB_PREFIX).substringBefore('?').substringBefore('#'))
-            val data = book?.entry(path)
+            val raw = book?.entry(path)
                 ?: return notFound(path)
+            val mime = mimeFor(path, raw)
+            // A full-size cover/illustration JPEG decodes into a tile far bigger
+            // than the WebView's budget — downscale anything wide before serving.
+            val data = if (mime.startsWith("image/") && mime != "image/svg+xml") downscaleImage(raw) else raw
             return WebResourceResponse(
-                mimeFor(path, data), null, 200, "OK",
+                mime, null, 200, "OK",
                 mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-store"),
                 ByteArrayInputStream(data),
             )
@@ -213,6 +219,11 @@ class EpubView @JvmOverloads constructor(
               a{overflow-wrap:break-word;}
               pre{white-space:pre-wrap;overflow-wrap:break-word;}
               table{max-width:100%;}
+              /* A Gutenberg-style EPUB bundles several chapters per HTML file
+                 → a 20k-px scroll the WebView can't fully rasterize. Skip
+                 rendering off-screen blocks so it only paints what's visible. */
+              p,blockquote,ul,ol,dl,table,pre,figure,div,h1,h2,h3,h4,h5,h6,hr{
+                content-visibility:auto;contain-intrinsic-size:auto 1.4em;}
             </style>
         """.trimIndent()
         val headClose = Regex("</head\\s*>", RegexOption.IGNORE_CASE).find(html)
@@ -220,6 +231,26 @@ class EpubView @JvmOverloads constructor(
             html.substring(0, headClose.range.first) + css + html.substring(headClose.range.first)
         } else css + html
     }
+
+    /** If the image is wider/taller than ~1400 px, decode it down and re-encode (JPEG q82). Otherwise pass through. */
+    private fun downscaleImage(bytes: ByteArray): ByteArray = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val (w, h) = bounds.outWidth to bounds.outHeight
+        if (w <= 0 || h <= 0 || (w <= MAX_IMG_PX && h <= MAX_IMG_PX)) bytes else {
+            var sample = 1
+            while (w / (sample * 2) >= MAX_IMG_PX || h / (sample * 2) >= MAX_IMG_PX) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return bytes
+            val scale = (MAX_IMG_PX.toFloat() / maxOf(bmp.width, bmp.height)).coerceAtMost(1f)
+            val final = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt().coerceAtLeast(1), (bmp.height * scale).toInt().coerceAtLeast(1), true) else bmp
+            val out = java.io.ByteArrayOutputStream()
+            final.compress(Bitmap.CompressFormat.JPEG, 82, out)
+            if (final !== bmp) final.recycle()
+            bmp.recycle()
+            out.toByteArray()
+        }
+    } catch (_: Exception) { bytes }
 
     private fun mimeFor(path: String, bytes: ByteArray): String {
         val ext = path.substringAfterLast('.', "").lowercase()
@@ -254,7 +285,8 @@ class EpubView @JvmOverloads constructor(
     }
 
     private fun notFound(path: String): WebResourceResponse {
-        Log.w(TAG, "EPUB resource not in archive: $path")
+        // Browsers always probe /favicon.ico — not worth a warning every time.
+        if (!path.endsWith("favicon.ico")) Log.w(TAG, "EPUB resource not in archive: $path")
         return WebResourceResponse(
             "text/plain", "utf-8", 404, "Not Found",
             mapOf("Access-Control-Allow-Origin" to "*"),
@@ -294,6 +326,7 @@ class EpubView @JvmOverloads constructor(
         const val TAG = "fetchit.epub"
         const val EPUB_ORIGIN = "https://epub.local"
         const val EPUB_PREFIX = "$EPUB_ORIGIN/"
+        const val MAX_IMG_PX = 1400
         val INK = Color.parseColor("#0a0a0a")
         val BONE = Color.parseColor("#d6cfc0")
         val COPPER = Color.parseColor("#c9732b")
