@@ -47,6 +47,11 @@ class EpubView @JvmOverloads constructor(
     private var index = 0
     private var fontPct = loadFontPref()
 
+    /** Fired when the user taps ✕ or presses system back — the host clears the rendition. */
+    private var onExit: (() -> Unit)? = null
+    private var backCb: androidx.activity.OnBackPressedCallback? = null
+    fun setOnExit(cb: () -> Unit) { onExit = cb }
+
     private val titleView = TextView(context).apply {
         setTextColor(BONE); textSize = 12.5f; maxLines = 1
         ellipsize = android.text.TextUtils.TruncateAt.END
@@ -79,6 +84,7 @@ class EpubView @JvmOverloads constructor(
             setBackgroundColor(INK)
             setPadding(dp(4), dp(2), dp(4), dp(2))
         }
+        bar.addView(barButton("✕") { onExit?.invoke() })
         bar.addView(tocBtn)
         bar.addView(titleView, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         bar.addView(barButton("A−") { adjustFont(-10) })
@@ -97,11 +103,19 @@ class EpubView @JvmOverloads constructor(
         bookAddr = addr
         index = loadChapterPref(addr).coerceIn(0, parsed.chapters.lastIndex)
         loadChapter(index, null)
+        if (backCb == null) (context as? androidx.activity.ComponentActivity)?.let { ca ->
+            val cb = object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() { onExit?.invoke() }
+            }
+            ca.onBackPressedDispatcher.addCallback(cb)
+            backCb = cb
+        }
         return true
     }
 
     /** Free the in-memory EPUB and blank the WebView. Call from the host's clear path. */
     fun release() {
+        backCb?.remove(); backCb = null
         webView.stopLoading()
         webView.loadUrl("about:blank")
         book = null

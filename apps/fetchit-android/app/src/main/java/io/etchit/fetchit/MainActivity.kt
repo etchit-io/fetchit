@@ -132,6 +132,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         }
         binding.scanButton.setOnClickListener { onScanClicked() }
         binding.closeButton.setOnClickListener { renderer.clear() }
+        binding.epubView.setOnExit { renderer.clear() }
         binding.shareButton.setOnClickListener { onShareCurrentClicked() }
         binding.openWithButton.setOnClickListener { onOpenWithClicked() }
         binding.saveButton.setOnClickListener { onSaveClicked() }
