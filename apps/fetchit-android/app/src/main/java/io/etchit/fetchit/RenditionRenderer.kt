@@ -2,7 +2,6 @@ package io.etchit.fetchit
 
 import android.graphics.BitmapFactory
 import android.text.SpannableStringBuilder
-import android.text.method.LinkMovementMethod
 import android.view.Gravity
 import android.view.View
 import android.webkit.MimeTypeMap
@@ -57,7 +56,6 @@ class RenditionRenderer(
         // resetting in the middle of viewing a 5MB video is a real
         // data-loss UX failure.
         binding.swipeRefresh.isEnabled = false
-        binding.contentText.movementMethod = LinkMovementMethod.getInstance()
         when (r) {
             is RenditionFfi.Text -> bindText(
                 label = if (r.language == "markdown") "text/markdown" else "text/plain",

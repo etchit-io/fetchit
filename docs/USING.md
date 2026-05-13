@@ -50,7 +50,7 @@ Engine inspects the bytes by magic-byte / content heuristics, picks a handler, h
 | **etch/it envelope** (`{"v":1,"meta":{...},"content":"..."}`) | Title shown, content rendered honoring `meta.lang` | If `lang` is empty and content looks like markdown, renders as markdown automatically |
 | **Plain text** (UTF-8) | Monospace, full-screen scrollable | Auto-detects code language and applies syntax highlighting (Rust, Python, JS/TS, Kotlin, Go, Bash, HTML, CSS, YAML, SQL, JSON) |
 | **Markdown** | Rendered with proper formatting (headings, lists, links, code blocks) via Markwon | Detection heuristic — files that look markdown-shaped (headings, fences, multiple markers) qualify |
-| **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch>it. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
+| **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch>it; the page can reach **only** the Autonomi network — no traditional-internet requests. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
 | **JSON** | Pretty-printed in monospace | Tree-view comes later |
 | **CSV** | Column-padded monospace table | First row is headers; quoted fields with commas + doubled `""` escapes handled |
 | **Image** (PNG / JPEG / GIF / WEBP / BMP / HEIC) | Rendered fit-to-width, edge-to-edge | All decoded by Android's `BitmapFactory` |
@@ -220,6 +220,8 @@ xhr.send();
 // allows for https — because the engine sees https. (Service
 // Workers are not yet supported; see "Honest limitations" below.)
 ```
+
+**One hard limit:** the page reaches *only* the Autonomi network. A `fetch()`, `<script src>`, `<img src>`, etc. pointing at a non-Autonomi host (a CDN, an API, anything) is blocked — fetch>it renders Autonomi content, not the traditional web. SPAs must be fully self-contained: inline assets, or upload each to its own Autonomi address.
 
 **Two equivalent URL forms inside an SPA**:
 - `autonomi://<64-hex>` — rewritten to the synthetic form at document load. Use in static HTML and in JS string literals.

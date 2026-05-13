@@ -53,9 +53,10 @@ import java.net.URLConnection
  *
  * **Sandbox stance**:
  *  - JavaScript on (SPAs need it)
- *  - Network on (CDN-loaded https assets are real if the page reaches
- *    out beyond `aut.local`; SPAs that want zero traditional-internet
- *    dependency simply don't reference any other origin)
+ *  - Network sandboxed — only `autonomi://` / `aut.local` resources
+ *    resolve; every other host is a blocked request, never a real one.
+ *    SPAs must be fully self-contained (inline assets, or upload each
+ *    asset to its own Autonomi address)
  *  - File-system access OFF (no `file://` reads of the device)
  *  - Content-provider access OFF
  *  - DOM storage OFF (don't persist anything across fetches)
@@ -189,9 +190,19 @@ class HtmlView @JvmOverloads constructor(
             request: WebResourceRequest?,
         ): WebResourceResponse? {
             val url = request?.url?.toString() ?: return null
-            val addr = extractAddr(url) ?: return null
-            Log.i(TAG, "intercept ${addr.take(10)}… range=${request.requestHeaders?.get("Range") ?: "-"}")
-            return resolveAddr(addr, request.requestHeaders)
+            extractAddr(url)?.let { addr ->
+                Log.i(TAG, "intercept ${addr.take(10)}… range=${request.requestHeaders?.get("Range") ?: "-"}")
+                return resolveAddr(addr, request.requestHeaders)
+            }
+            // 100% Autonomi: rendered content reaches the Autonomi network
+            // and nothing else. data:/blob:/about: are page-internal.
+            return when (request.url?.scheme?.lowercase()) {
+                "data", "blob", "about" -> null
+                else -> {
+                    Log.w(TAG, "blocked non-Autonomi request: $url")
+                    errorResponse(403, "blocked: fetch>it loads Autonomi content only")
+                }
+            }
         }
 
         override fun shouldOverrideUrlLoading(
@@ -208,11 +219,19 @@ class HtmlView @JvmOverloads constructor(
                 onAutonomiBack?.invoke()
                 return true
             }
-            val addr = extractAddr(url) ?: return false
-            // Hand off to the host so it drives the address bar +
-            // bookmark + back-stack surfaces consistently.
-            onAutonomiNavigate?.invoke(addr)
-            return true
+            extractAddr(url)?.let { addr ->
+                // Hand off to the host so it drives the address bar +
+                // bookmark + back-stack surfaces consistently.
+                onAutonomiNavigate?.invoke(addr)
+                return true
+            }
+            // fetch>it shows Autonomi content only — a top-level navigation
+            // to any other URL is refused (not followed, not handed off).
+            val scheme = request?.url?.scheme?.lowercase()
+            if (request?.isForMainFrame == true && (scheme == "http" || scheme == "https")) {
+                return true
+            }
+            return false
         }
     }
 

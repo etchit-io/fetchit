@@ -60,6 +60,9 @@ class EpubBook private constructor(
         private const val TAG = "fetchit.epub"
         private const val CONTAINER = "META-INF/container.xml"
 
+        /** Refuse EPUBs whose total uncompressed size exceeds this — a zip-bomb guard. */
+        private const val MAX_EPUB_UNCOMPRESSED = 200L * 1024 * 1024
+
         /** True if these bytes look like an EPUB (a ZIP carrying `META-INF/container.xml`). */
         fun looksLikeEpub(entryNames: Collection<String>): Boolean = entryNames.contains(CONTAINER)
 
@@ -152,6 +155,7 @@ class EpubBook private constructor(
 
         private fun unzip(bytes: ByteArray): Map<String, ByteArray> {
             val out = LinkedHashMap<String, ByteArray>()
+            var total = 0L
             ZipInputStream(ByteArrayInputStream(bytes)).use { zin ->
                 var e = zin.nextEntry
                 val buf = ByteArray(16 * 1024)
@@ -159,7 +163,12 @@ class EpubBook private constructor(
                     if (!e.isDirectory) {
                         val baos = java.io.ByteArrayOutputStream()
                         var n = zin.read(buf)
-                        while (n >= 0) { baos.write(buf, 0, n); n = zin.read(buf) }
+                        while (n >= 0) {
+                            total += n
+                            if (total > MAX_EPUB_UNCOMPRESSED) error("EPUB exceeds the uncompressed-size limit")
+                            baos.write(buf, 0, n)
+                            n = zin.read(buf)
+                        }
                         out[normalize(e.name)] = baos.toByteArray()
                     }
                     zin.closeEntry()

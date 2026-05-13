@@ -2,11 +2,9 @@ package io.etchit.fetchit
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.net.Uri
 import android.util.AttributeSet
 import android.util.Log
 import android.util.TypedValue
@@ -168,7 +166,14 @@ class EpubView @JvmOverloads constructor(
     private inner class ReaderClient : WebViewClient() {
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
             val url = request?.url?.toString() ?: return null
-            if (!url.startsWith(EPUB_PREFIX)) return null   // not an in-EPUB resource — let it through
+            if (!url.startsWith(EPUB_PREFIX)) {
+                // 100% Autonomi: a rendered EPUB chapter reaches nothing
+                // off-device. data:/blob:/about: are page-internal.
+                return when (request?.url?.scheme?.lowercase()) {
+                    "data", "blob", "about" -> null
+                    else -> blocked()
+                }
+            }
             val path = EpubBook.normalize(url.removePrefix(EPUB_PREFIX).substringBefore('?').substringBefore('#'))
             val raw = book?.entry(path)
                 ?: return notFound(path)
@@ -197,11 +202,9 @@ class EpubView @JvmOverloads constructor(
                 if (target >= 0) loadChapter(target, anchor)
                 return true
             }
-            // External link → hand to the system browser; never navigate the reader away.
-            if (url.startsWith("http://") || url.startsWith("https://")) {
-                try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) {}
-                return true
-            }
+            // fetch>it shows Autonomi content only — a link out of an EPUB
+            // chapter to anything else is refused, not followed.
+            if (url.startsWith("http://") || url.startsWith("https://")) return true
             return false
         }
 
@@ -307,6 +310,12 @@ class EpubView @JvmOverloads constructor(
             ByteArrayInputStream(ByteArray(0)),
         )
     }
+
+    private fun blocked(): WebResourceResponse = WebResourceResponse(
+        "text/plain", "utf-8", 403, "Blocked",
+        mapOf("Access-Control-Allow-Origin" to "*"),
+        ByteArrayInputStream(ByteArray(0)),
+    )
 
     private fun barButton(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
         text = label

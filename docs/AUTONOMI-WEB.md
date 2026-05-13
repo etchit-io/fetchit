@@ -37,7 +37,7 @@ Verified on the Android shell against live Autonomi addresses.
 |---|---|
 | Single self-contained HTML doc, rendered in a sandboxed WebView | ✓ |
 | Inline JS / CSS / SVG / `data:` URI assets | ✓ |
-| External `https://` CDN fetches (when device has traditional internet) | ✓ |
+| **Air-gapped by design** — rendered content reaches *only* the Autonomi network; a request to any other host (a CDN, a tracker, an exfil endpoint) is blocked, never made | ✓ |
 | **`autonomi://<64-hex>` resource references** — `<img>`, `<audio>`, `<video>`, `<script>`, `<link>`, `<a>`, all resolve through the connected fetch>it client | ✓ |
 | **`fetch()` / `XMLHttpRequest` / Streams to `autonomi://` URLs** — works because fetch>it loads pages with a synthetic https origin (see § the synthetic-origin trick) | ✓ |
 | **Top-level `<a href="autonomi://addr">` navigation** — tap a link inside a rendered page, the new address loads. System back returns | ✓ |
@@ -47,7 +47,7 @@ Verified on the Android shell against live Autonomi addresses.
 | **WebAssembly from `autonomi://`** — `.wasm` fetched by hash, compiled and run in-page | ✓ — verified on Android (`add(40,2)=42`). Both paths work: `WebAssembly.instantiateStreaming(fetch("autonomi://…"))` (the bytes are served `Content-Type: application/wasm`) and `WebAssembly.instantiate(arrayBuffer)` |
 | **Persistent disk cache** keyed by address — fetched bytes survive app restarts; offline replay of anything you've seen before | ✓ |
 | Permissive CORS on `autonomi://` (no DNS origin to attack) | ✓ |
-| Sandbox: JS on, network on, **file-system / content-provider access off**, **DOM storage off**, **no JS bridge to native** | ✓ |
+| Sandbox: JS on, **network limited to the Autonomi network** (`autonomi://` / `aut.local` only — every other host blocked), **file-system / content-provider access off**, **DOM storage off**, **no JS bridge to native** | ✓ |
 
 A page that uses **only inlined assets and `autonomi://` references**
 renders correctly with the device's traditional internet disconnected,
@@ -237,9 +237,8 @@ skip revalidation entirely and a bookmark never go stale.
   - No JS bridge → can't call into native code
   - No Service Worker registration → can't install a background
     interceptor
-- **Third-party CDN refs** — when an SPA links to
-  `https://cdn.example.com/lib.js`, that's a normal web call subject
-  to normal trust. fetch>it doesn't broker this.
+  - No off-Autonomi network → can't phone home, exfiltrate, or pull in
+    third-party code; a request to any non-Autonomi host is blocked
 
 ---
 
@@ -253,8 +252,9 @@ skip revalidation entirely and a bookmark never go stale.
    address upload, but lives forever in fetch>it's disk cache after
    first use.
 3. **No relative paths to disk** (`./style.css`) — won't resolve. Use
-   `autonomi://<addr>`, `https://aut.local/<addr>` (the canonical
-   runtime form), absolute `https://`, or inline.
+   `autonomi://<addr>` / `https://aut.local/<addr>` (the canonical
+   runtime form), or inline. Absolute `https://` references to real
+   hosts are **blocked** — fetch>it loads Autonomi content only.
 4. **No `localStorage`, `IndexedDB`, Service Workers** — DOM storage
    is off in the sandbox. State must live in the page or be re-fetched.
 5. **Inline fonts** as base64 data URIs if you want truly internet-
