@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-core"
-version = "0.1.0-dev"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-ffi"
-version = "0.1.0-dev"
+version = "0.2.0"
 dependencies = [
  "android_logger",
  "async-trait",
@@ -2483,7 +2483,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-net"
-version = "0.1.0-dev"
+version = "0.2.0"
 dependencies = [
  "ant-core",
  "async-trait",

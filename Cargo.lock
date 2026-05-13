@@ -2360,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-cli"
-version = "0.1.0-dev"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2376,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-core"
-version = "0.1.0-dev"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-net"
-version = "0.1.0-dev"
+version = "0.2.0"
 dependencies = [
  "ant-core",
  "async-trait",

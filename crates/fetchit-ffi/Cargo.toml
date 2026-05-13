@@ -1,7 +1,7 @@
 [package]
 name = "fetchit-ffi"
 description = "FFI bindings (uniffi 0.29.x) over fetchit-core + fetchit-net for Kotlin/Swift consumers."
-version = "0.1.0-dev"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"

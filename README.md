@@ -20,9 +20,9 @@ makes the full Fetch API work over content-addressed URLs), see
 
 ## Status
 
-`0.1.0-dev`. Pre-release. The Android shell builds and runs end-to-end
-against the live Autonomi network — the [`docs/USING.md`](docs/USING.md)
-guide describes what it currently does. CLI compiles.
+`0.2.0`. The Android shell builds and runs end-to-end against the live
+Autonomi network — the [`docs/USING.md`](docs/USING.md) guide describes
+what it currently does. CLI compiles.
 
 ## Layout
 
