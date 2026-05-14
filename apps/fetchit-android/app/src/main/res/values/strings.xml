@@ -65,6 +65,15 @@
     <string name="bookmark_delete">delete</string>
     <string name="bookmark_rename">rename</string>
     <string name="share_qr_title">Share QR code</string>
+
+    <!-- QR preview dialog — in-app modal that mirrors the desktop one. -->
+    <string name="qr_preview_qr_alt">QR code for this address</string>
+    <string name="qr_preview_copy_address">Copy address</string>
+    <string name="qr_preview_copy_url">Copy autonomi://</string>
+    <string name="qr_preview_share_image">Share image</string>
+    <string name="qr_preview_share_text">Share text</string>
+    <string name="qr_preview_copied">Copied!</string>
+    <string name="qr_preview_footer">scan with fetch&gt;it on desktop · etchit.io</string>
     <string name="bookmark_export_done">bookmarks exported</string>
     <string name="bookmark_export_failed">export failed: %1$s</string>
     <string name="bookmark_import_done">imported %1$d bookmark(s)</string>

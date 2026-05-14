@@ -31,7 +31,7 @@ fun showBookmarkContextMenu(
                     store.update(bookmark.id) { it.copy(label = newLabel) }
                 }
                 1 -> BookmarkActions.shareAsLink(context, bookmark)
-                2 -> QrShare.share(context, bookmark.address, bookmark.label)
+                2 -> showQrPreviewDialog(context, bookmark.address, bookmark.label)
                 3 -> store.delete(bookmark.id)
             }
         }

@@ -516,20 +516,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     /**
-     * Share the address currently displayed via the Android share-sheet.
-     * Visible only while content is rendered (see [`RenditionRenderer`]).
+     * Share the address currently displayed. Opens the in-app QR preview
+     * modal (see `QrPreviewDialog.kt` / `docs/QR-SHARE.md`); from there the
+     * user can copy the address, copy the `autonomi://` URL, share the
+     * branded PNG card, or fall back to plain-text share. Visible only
+     * while content is rendered (see [`RenditionRenderer`]).
      */
     private fun onShareCurrentClicked() {
         val addr = lastFetchAddr ?: return
-        val url = "autonomi://$addr"
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, url)
-            putExtra(Intent.EXTRA_SUBJECT, "fetch>it · $addr")
-        }
-        startActivity(
-            Intent.createChooser(intent, getString(R.string.action_share_label)),
-        )
+        showQrPreviewDialog(this, addr)
     }
 
     private companion object {
