@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fetch&gt;it web</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <span class="mark">fetch&gt;it</span>
+    <span class="tag">web</span>
+  </header>
+
+  <p class="lede">
+    Routes <code>autonomi://&lt;address&gt;</code> links to fetch&gt;it desktop.
+    No network code in the browser — the desktop app does the fetching.
+  </p>
+
+  <section>
+    <h2>Address bar</h2>
+    <p>Type <kbd>fetchit</kbd> in the URL bar, press <kbd>Tab</kbd>, then paste a 64-hex address.</p>
+  </section>
+
+  <section>
+    <h2>Right-click</h2>
+    <p>Select any 64-hex address on a page → right-click → <em>Open in fetch&gt;it</em>.</p>
+  </section>
+
+  <section>
+    <h2>Don&rsquo;t have fetch&gt;it desktop yet?</h2>
+    <p>
+      <a id="install-link" href="https://github.com/etchit-io/fetchit/releases" target="_blank" rel="noopener noreferrer">Get fetch&gt;it desktop</a>
+      &mdash; without it, <code>autonomi://</code> links have nothing to open.
+    </p>
+  </section>
+
+  <footer>
+    <small>v<span id="ver">0.1.0</span> &middot; <a href="https://github.com/etchit-io/fetchit" target="_blank" rel="noopener noreferrer">source</a></small>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
