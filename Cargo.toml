@@ -4,7 +4,7 @@ members = [
     "crates/fetchit-net",
     "crates/fetchit-cli",
 ]
-exclude = ["crates/fetchit-ffi"]
+exclude = ["crates/fetchit-ffi", "apps/fetchit-desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]

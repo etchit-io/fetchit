@@ -1,0 +1,24 @@
+{
+  "name": "fetchit-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "jsdom": "^25.0.1",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}

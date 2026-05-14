@@ -267,5 +267,20 @@ skip revalidation entirely and a bookmark never go stale.
    to keep the user-facing form. See `USING.md` for examples.
 7. **Test air-gapped** — fetch the page once over Autonomi, then turn
    off Wi-Fi / cell. Reload — the disk cache should serve it.
+8. **Audio / video works declaratively.** Write the natural HTML —
+   `<audio src="autonomi://<addr>"></audio>` or
+   `<video src="autonomi://<addr>" controls></video>` (or
+   `<source src="autonomi://<addr>">` inside either). The reader
+   substitutes the `src` with a URL its WebView can decode before
+   the iframe loads. On Android the `HtmlView` rewrites to
+   `https://aut.local/<addr>` and intercepts the request; on
+   desktop fetch>it rewrites to `http://127.0.0.1:<media-port>/<addr>`
+   served by a localhost HTTP server inside the app. Same shape on
+   the wire that WebKit / Chromium / WebView2 expect; SPA authors
+   write one HTML and it plays everywhere a reader supports.
+
+   This is the same trick that lets `<img src="autonomi://…">` work
+   transparently — different mechanism per platform, identical
+   author experience.
 
 

@@ -1,0 +1,25 @@
+[package]
+name = "fetchit-desktop"
+version = "0.1.0"
+description = "Desktop reader for content stored on the Autonomi network."
+authors = ["the fetch>it contributors"]
+license = "GPL-3.0-only"
+edition = "2021"
+
+[lib]
+# `_lib` so the library name doesn't collide with the binary name (a Windows quirk).
+name = "fetchit_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+bytes = "1.7"
+infer = { version = "0.16", default-features = false }
+fetchit-core = { path = "../../../crates/fetchit-core" }
+fetchit-net = { path = "../../../crates/fetchit-net" }
