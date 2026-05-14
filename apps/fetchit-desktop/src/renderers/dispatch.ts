@@ -4,6 +4,7 @@ import { renderEtchitEnvelope } from "./etchitEnvelope";
 import { renderJson } from "./json";
 import { renderTabular } from "./tabular";
 import { renderArchive } from "./archive";
+import { archiveIsEpub, renderEpub } from "./epub";
 import { renderHtml } from "./html";
 import { renderImage } from "./image";
 import { renderAudio } from "./audio";
@@ -28,7 +29,12 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       renderTabular(r, into);
       return;
     case "archive":
-      renderArchive(r, into);
+      // EPUBs come back from core as Archive (a ZIP with the EPUB-spec
+      // entries). Sniff for the mandatory META-INF/container.xml and route
+      // to the book reader if present; otherwise fall through to the
+      // generic archive listing.
+      if (archiveIsEpub(r.entries)) renderEpub(r, into, address);
+      else renderArchive(r, into);
       return;
     case "html":
       renderHtml(r, into, address);
@@ -43,7 +49,7 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       renderVideo(r, into, src);
       return;
     case "pdf":
-      renderPdf(r, into);
+      renderPdf(r, into, src);
       return;
     case "binary":
       renderBinary(r, into);

@@ -45,7 +45,7 @@ Verified on the Android shell against live Autonomi addresses.
 | **Range requests** for media seeking (`<video>` jumping to mid-file is instant after first fetch) | ✓ |
 | **HTML video fullscreen** (`requestFullscreen()` / native player chrome) | ✓ |
 | **WebAssembly from `autonomi://`** — `.wasm` fetched by hash, compiled and run in-page | ✓ — verified on Android (`add(40,2)=42`). Both paths work: `WebAssembly.instantiateStreaming(fetch("autonomi://…"))` (the bytes are served `Content-Type: application/wasm`) and `WebAssembly.instantiate(arrayBuffer)` |
-| **Persistent disk cache** keyed by address — fetched bytes survive app restarts; offline replay of anything you've seen before | ✓ |
+| **On-disk byte cache** keyed by address — fetched bytes survive app restarts; offline replay of anything you've seen before | ✓ — **opt-in** (off by default; the install leaves zero on-disk trace until the user enables it). When on, the user picks one of *Persist / Clear on close / Clear after idle* |
 | Permissive CORS on `autonomi://` (no DNS origin to attack) | ✓ |
 | Sandbox: JS on, **network limited to the Autonomi network** (`autonomi://` / `aut.local` only — every other host blocked), **file-system / content-provider access off**, **DOM storage off**, **no JS bridge to native** | ✓ |
 
@@ -255,8 +255,31 @@ skip revalidation entirely and a bookmark never go stale.
    `autonomi://<addr>` / `https://aut.local/<addr>` (the canonical
    runtime form), or inline. Absolute `https://` references to real
    hosts are **blocked** — fetch>it loads Autonomi content only.
-4. **No `localStorage`, `IndexedDB`, Service Workers** — DOM storage
-   is off in the sandbox. State must live in the page or be re-fetched.
+4. **No `localStorage`, `sessionStorage`, `IndexedDB`, Service Workers** —
+   DOM storage is off in the sandbox (null origin on desktop;
+   `setDomStorageEnabled(false)` on Android). Both deliberate: no
+   cross-SPA leakage, no persistent fingerprinting via state.
+   **Reading or writing throws `SecurityError`**, so unguarded
+   `localStorage.getItem(...)` (or any storage call) at script start
+   will abort your `init()` before later code — including event
+   listeners — gets a chance to run, leaving the page rendered but
+   inert. **In WebKit's null-origin sandbox the property access
+   itself throws** — `window.localStorage` blows up before any
+   getItem/setItem runs. So if you wrap with a helper, look the
+   storage up by name *inside* the try block. Otherwise the argument
+   evaluation throws before your try-catch sees it:
+
+   ```js
+   // Correct — name resolved inside the try.
+   function safeStorageGet(name, k) { try { return window[name].getItem(k); } catch (e) { return null; } }
+   function safeStorageSet(name, k, v) { try { window[name].setItem(k, v); } catch (e) {} }
+
+   const id = safeStorageGet('localStorage', 'player_id');
+   ```
+
+   State that must survive within a single render lives in the page;
+   state that must persist across sessions has no place in this
+   sandbox.
 5. **Inline fonts** as base64 data URIs if you want truly internet-
    independent rendering.
 6. **Display gotcha** — the rewriter matches `autonomi://<64-hex>` in
@@ -265,8 +288,13 @@ skip revalidation entirely and a bookmark never go stale.
    an attribute or JS string), it'll show the synthetic form. Inject
    the prefix via CSS `::before` or split the literal across HTML tags
    to keep the user-facing form. See `USING.md` for examples.
-7. **Test air-gapped** — fetch the page once over Autonomi, then turn
-   off Wi-Fi / cell. Reload — the disk cache should serve it.
+7. **Test air-gapped** (disk cache must be enabled) — turn on the
+   on-disk byte cache in settings, fetch the page once over Autonomi,
+   then flip airplane mode. Reload — the cache should serve it. The
+   disk cache is **opt-in** by default; without it, fetch>it leaves
+   no on-disk trace and a reload after relaunch will go back to the
+   network. With it on, content survives until you clear it (or the
+   chosen *Clear on close / Clear after idle* mode wipes it).
 8. **Audio / video works declaratively.** Write the natural HTML —
    `<audio src="autonomi://<addr>"></audio>` or
    `<video src="autonomi://<addr>" controls></video>` (or

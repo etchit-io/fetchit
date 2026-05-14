@@ -12,7 +12,11 @@
     "test:run": "vitest run"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2"
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-deep-link": "^2.4.9",
+    "fflate": "^0.8.2",
+    "pdfjs-dist": "^5.6.205",
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

@@ -5,27 +5,19 @@ export function mountTabStrip(host: HTMLElement, store: TabStore, onNew: () => v
     host.replaceChildren();
     const tabs = store.list();
     const active = store.active();
-    if (tabs.length === 0) host.appendChild(buildHint());
     for (const t of tabs) host.appendChild(buildItem(t, active, store));
-    host.appendChild(buildNewButton(onNew));
+    host.appendChild(buildNewButton(onNew, tabs.length === 0));
     host.dataset.empty = tabs.length === 0 ? "true" : "false";
   };
   store.subscribe(render);
   render();
 }
 
-function buildHint(): HTMLElement {
-  const s = document.createElement("span");
-  s.className = "tabs-hint";
-  s.textContent = "no documents open — paste an address above";
-  return s;
-}
-
-function buildNewButton(onNew: () => void): HTMLElement {
+function buildNewButton(onNew: () => void, withText: boolean): HTMLElement {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "tab-new";
-  b.textContent = "+";
+  b.textContent = withText ? "new tab +" : "+";
   b.title = "new tab (Ctrl+T)";
   b.setAttribute("aria-label", "new tab");
   b.addEventListener("click", onNew);

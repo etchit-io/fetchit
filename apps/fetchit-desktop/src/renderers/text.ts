@@ -1,6 +1,9 @@
 import type { Rendition } from "../types";
-import { el } from "../format";
+import { highlightInto } from "./syntax";
 
 export function renderText(r: Extract<Rendition, { kind: "text" }>, into: HTMLElement): void {
-  into.appendChild(el("pre", r.body));
+  const pre = document.createElement("pre");
+  pre.className = "code-block";
+  highlightInto(pre, r.body, r.language);
+  into.appendChild(pre);
 }

@@ -72,10 +72,120 @@ function buildCsp(mediaBase: string): string {
 export function rewriteHtml(body: string, address: string, mediaBase: string): string {
   const doc = new DOMParser().parseFromString(body, "text/html");
   setBase(doc, `autonomi://${address}/`);
+  // Strip an incoming Content-Security-Policy meta tag *before* we add ours.
+  // Multiple CSP meta tags combine restrictively for fetches, but `report-uri`
+  // and `report-to` are additive — a malicious SPA could phone home via
+  // violation reports otherwise.
+  stripIncomingCsp(doc);
   injectCsp(doc, mediaBase);
+  stripResourceHints(doc);
+  stripMetaRefresh(doc);
+  stripAnchorPing(doc);
+  injectNeuterScript(doc);
   rewriteMediaSrc(doc, mediaBase);
   injectLinkInterceptor(doc);
   return `<!doctype html>\n${doc.documentElement.outerHTML}`;
+}
+
+// `<link rel="preconnect" | "dns-prefetch" | "prefetch" | "preload" | "modulepreload">`
+// are speed hints. WebKit / Chromium issue the TCP/TLS handshake (and a
+// preflight in some cases) *before* CSP gets a chance to block — so an SPA
+// referencing `https://fonts.gstatic.com` via preconnect still leaks the
+// connection even though the actual stylesheet fetch is CSP-blocked.
+// We drop them all: real stylesheets / scripts that the page actually needs
+// will still be requested when used, and those requests pass through CSP.
+function stripResourceHints(doc: Document): void {
+  const hintRels = new Set([
+    "preconnect", "dns-prefetch", "prefetch", "preload", "modulepreload",
+  ]);
+  for (const link of Array.from(doc.querySelectorAll("link[rel]"))) {
+    const rel = (link.getAttribute("rel") ?? "").toLowerCase().trim();
+    if (hintRels.has(rel)) link.remove();
+  }
+}
+
+// `<meta http-equiv="refresh" content="0;url=https://attacker">` is a
+// navigation, not a fetch — CSP `connect-src` doesn't cover it, and only
+// some browsers gate it on `navigate-to` (still proposed). Strip them.
+function stripMetaRefresh(doc: Document): void {
+  for (const m of Array.from(doc.querySelectorAll('meta[http-equiv]'))) {
+    if ((m.getAttribute("http-equiv") ?? "").trim().toLowerCase() === "refresh") {
+      m.remove();
+    }
+  }
+}
+
+// Strip any Content-Security-Policy meta tag authored by the SPA — multiple
+// CSPs combine restrictively for fetches but `report-uri` / `report-to` are
+// additive, so a malicious page could phone home via violation reports.
+function stripIncomingCsp(doc: Document): void {
+  for (const m of Array.from(doc.querySelectorAll('meta[http-equiv]'))) {
+    const eq = (m.getAttribute("http-equiv") ?? "").trim().toLowerCase();
+    if (eq === "content-security-policy" || eq === "content-security-policy-report-only") {
+      m.remove();
+    }
+  }
+}
+
+// `<a ping="https://tracker">` sends a background POST on click. CSP2+ covers
+// it via connect-src, but older WebKit may not — strip defensively.
+function stripAnchorPing(doc: Document): void {
+  for (const a of Array.from(doc.querySelectorAll("a[ping], area[ping]"))) {
+    a.removeAttribute("ping");
+  }
+}
+
+// Inline pre-script that neuters APIs which leak data despite CSP. Runs
+// before any SPA script because it's inserted as the first <script> in head.
+// Each property is replaced with `undefined` (non-writable, non-configurable)
+// so SPAs that re-assign or polyfill can't restore them.
+const NEUTER_SCRIPT = `
+(function () {
+  var lock = function (obj, names) {
+    for (var i = 0; i < names.length; i++) {
+      try {
+        Object.defineProperty(obj, names[i], {
+          value: undefined, writable: false, configurable: false,
+        });
+      } catch (e) {}
+    }
+  };
+  // WebRTC: ICE candidate gathering leaks local-network IPs even when no
+  // connection is established. CSP3 covers RTCPeerConnection via connect-src
+  // but WebKitGTK's coverage is uneven — locking the constructors out is
+  // the safe play.
+  lock(window, [
+    "RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection",
+    "RTCDataChannel", "MediaStream",
+    // Permission-prompting / sensor APIs.
+    "Notification", "SharedWorker",
+    // Networking that bypasses or partially bypasses fetch/connect-src.
+    "WebTransport", "PresentationRequest",
+  ]);
+  if (window.navigator) {
+    lock(navigator, [
+      "geolocation", "mediaDevices", "serviceWorker",
+      "share", "canShare",
+      "permissions", "credentials", "presentation",
+      "bluetooth", "usb", "hid", "serial",
+      "wakeLock", "contacts",
+      // sendBeacon: backup over CSP connect-src in case the spec/browser
+      // pair doesn't gate it.
+      "sendBeacon",
+    ]);
+  }
+})();
+`.trim();
+
+function injectNeuterScript(doc: Document): void {
+  const s = doc.createElement("script");
+  s.textContent = NEUTER_SCRIPT;
+  // After our CSP meta, before any SPA script. CSP is `head.firstChild` after
+  // injectCsp, so prepending here puts neuter at index 1 (before any SPA
+  // <script> that authors typically place later in <head> or in <body>).
+  const csp = doc.head.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  if (csp && csp.nextSibling) doc.head.insertBefore(s, csp.nextSibling);
+  else doc.head.insertBefore(s, doc.head.firstChild);
 }
 
 function setBase(doc: Document, href: string): void {

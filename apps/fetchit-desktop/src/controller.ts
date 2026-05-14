@@ -6,6 +6,12 @@ import { mountTabStrip } from "./ui/tabStrip";
 import { mountAddressBar, type AddressBarApi } from "./ui/addressBar";
 import { bindKeyboard } from "./ui/keyboard";
 import { initMediaBase } from "./mediaUrl";
+import { parseAutonomiInput } from "./address";
+import { mountSettings } from "./settings";
+import { mountQrModal } from "./ui/qrModal";
+import { addBookmark, deriveLabel, isBookmarked, removeBookmark } from "./bookmarks";
+import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { startIdleTracker } from "./idle";
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 
@@ -19,9 +25,61 @@ export async function init(): Promise<void> {
   }
   const input = need<HTMLInputElement>("addr");
   const button = need<HTMLButtonElement>("go");
+  const settingsBtn = need<HTMLButtonElement>("settings-toggle");
+  const settingsHost = need<HTMLElement>("settings");
+  const bookmarkBtn = need<HTMLButtonElement>("bookmark-toggle");
+  const shareBtn = need<HTMLButtonElement>("share-toggle");
+  const qrHost = need<HTMLElement>("qr-modal");
   const statusEl = need<HTMLElement>("status");
   const stripEl = need<HTMLElement>("tabs");
   const stageEl = need<HTMLElement>("stage");
+  const setBookmarkState = (on: boolean): void => {
+    bookmarkBtn.dataset.bookmarked = on ? "true" : "false";
+  };
+
+  // Idle tracker — drops the Autonomi client + clears caches after the
+  // user-configured timeout of no mouse / keyboard activity. The current
+  // policy is read from settings.json; the settings panel can update it live
+  // via `onIdleChanged`.
+  const idle = startIdleTracker();
+  void invoke<{ timeoutMinutes: number }>("idle_policy")
+    .then((p) => idle.setTimeoutMinutes(p.timeoutMinutes))
+    .catch(() => {});
+
+  const settings = mountSettings(settingsHost, {
+    onNavigate: (addr) => {
+      settings.close();
+      submit(addr, store, stageEl);
+    },
+    onIdleChanged: (m) => idle.setTimeoutMinutes(m),
+  });
+  settingsBtn.addEventListener("click", () => void settings.toggle());
+
+  const qrModal = mountQrModal(qrHost);
+  const openShare = (): void => {
+    const addr = store.active()?.address;
+    if (!addr) return;
+    qrModal.open(addr);
+  };
+  shareBtn.addEventListener("click", openShare);
+
+  const toggleBookmark = async (): Promise<void> => {
+    const active = store.active();
+    if (!active || !active.address) return;
+    if (active.status === "loading") return;
+    const addr = active.address;
+    const already = await isBookmarked(addr).catch(() => false);
+    if (already) {
+      await removeBookmark(addr).catch(() => {});
+      setBookmarkState(false);
+    } else {
+      const label = deriveLabel(active.rendition, addr);
+      await addBookmark(addr, label).catch(() => {});
+      setBookmarkState(true);
+    }
+    if (settings.isOpen()) await settings.refreshBookmarks();
+  };
+  bookmarkBtn.addEventListener("click", () => void toggleBookmark());
 
   const store = new TabStore();
 
@@ -39,9 +97,55 @@ export async function init(): Promise<void> {
     bar.focus();
   };
 
-  mountTabStrip(stripEl, store, newTab);
-  bindKeyboard(store, newTab);
+  const refresh = (): void => {
+    const active = store.active();
+    if (!active || !active.address) return;
+    startIn(active, active.address, store, false);
+  };
 
+  const smartPaste = (): void => {
+    void navigator.clipboard.readText().then((text) => {
+      const parsed = parseAutonomiInput(text);
+      if (!parsed) return;
+      bar.setValue(parsed);
+      submit(parsed, store, stageEl);
+    }).catch(() => {});
+  };
+
+  const smartCopy = (): void => {
+    const addr = store.active()?.address;
+    if (!addr) return;
+    void navigator.clipboard.writeText(addr).catch(() => {});
+    statusEl.textContent = "address copied to clipboard";
+    setTimeout(() => {
+      if (statusEl.textContent === "address copied to clipboard") statusEl.textContent = "";
+    }, 1200);
+  };
+
+  const blurFocused = (): void => {
+    if (settings.isOpen()) {
+      settings.close();
+      return;
+    }
+    const el = document.activeElement;
+    if (el instanceof HTMLElement) el.blur();
+  };
+
+  mountTabStrip(stripEl, store, newTab);
+  bindKeyboard(store, {
+    newTab,
+    refresh,
+    back: () => backNavigate(store),
+    focusAddress: () => bar.focus(),
+    blurFocused,
+    smartPaste,
+    smartCopy,
+    openSettings: () => void settings.open(),
+    openShare,
+    toggleBookmark: () => void toggleBookmark(),
+  });
+
+  let lastBookmarkAddr: string | null = null;
   store.subscribe(() => {
     const active = store.active();
     for (const t of store.list()) {
@@ -50,9 +154,43 @@ export async function init(): Promise<void> {
     if (!bar.isFocused()) bar.setValue(active && active.address ? active.address : "");
     statusEl.textContent = statusFor(active);
     button.disabled = active?.status === "loading";
+    bookmarkBtn.disabled = !active?.address || active.status === "loading";
+    shareBtn.disabled = !active?.address || active.status === "loading";
+    const addr = active?.address ?? null;
+    if (addr !== lastBookmarkAddr) {
+      lastBookmarkAddr = addr;
+      if (!addr) {
+        setBookmarkState(false);
+      } else {
+        void isBookmarked(addr).then((on) => {
+          if (lastBookmarkAddr === addr) setBookmarkState(on);
+        }).catch(() => setBookmarkState(false));
+      }
+    }
   });
 
   bindIframeMessages(store, stageEl);
+
+  // Deep-link handler — clicks on `autonomi://<addr>` (or `fetchit://<addr>`)
+  // in any other app (email, chat, browser, QR scanner) route to fetch>it via
+  // the OS scheme registration. `getCurrent` returns the URL the app was
+  // launched with (if any); `onOpenUrl` fires for subsequent links that come
+  // in while the app is running.
+  const handleDeepLink = (url: string): void => {
+    const addr = parseAutonomiInput(url);
+    if (!addr) return;
+    bar.setValue(addr);
+    submit(addr, store, stageEl);
+  };
+  void getCurrentDeepLink()
+    .then((urls) => {
+      if (urls) for (const u of urls) handleDeepLink(u);
+    })
+    .catch(() => {});
+  void onOpenUrl((urls) => {
+    for (const u of urls) handleDeepLink(u);
+  }).catch(() => {});
+
   bar.focus();
 }
 

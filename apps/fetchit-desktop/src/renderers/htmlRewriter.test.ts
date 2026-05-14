@@ -209,3 +209,134 @@ describe("rewriteHtml — link interceptor", () => {
     expect(interceptors.length).toBe(1);
   });
 });
+
+describe("rewriteHtml — strips resource hints to prevent preconnect leaks", () => {
+  it.each([
+    ["preconnect", "https://fonts.gstatic.com"],
+    ["dns-prefetch", "https://fonts.googleapis.com"],
+    ["prefetch", "https://cdn.example.com/asset.js"],
+    ["preload", "https://example.com/main.css"],
+    ["modulepreload", "https://example.com/module.js"],
+  ])("removes <link rel=%s> pointing at an external host", (rel, href) => {
+    const out = rewriteHtml(
+      `<html><head><link rel="${rel}" href="${href}"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain(href);
+    expect(out.toLowerCase()).not.toContain(`rel="${rel}"`);
+  });
+
+  it("removes hint links even when the href points at autonomi:// (preconnect is meaningless there)", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="preconnect" href="autonomi://${ADDR}"></head><body>x</body></html>`,
+    );
+    const links = parse(out).head.querySelectorAll('link[rel="preconnect"]');
+    expect(links.length).toBe(0);
+  });
+
+  it("matches rel case-insensitively and trims whitespace", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="  PRECONNECT  " href="https://x.example/"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("https://x.example/");
+  });
+
+  it("preserves <link rel=\"stylesheet\"> — CSP handles those at fetch time", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="autonomi://${ADDR}/style.css"></head><body>x</body></html>`,
+    );
+    const sheets = parse(out).head.querySelectorAll('link[rel="stylesheet"]');
+    expect(sheets.length).toBe(1);
+  });
+});
+
+describe("rewriteHtml — strips meta-refresh navigations", () => {
+  it("removes <meta http-equiv=\"refresh\">", () => {
+    const out = rewriteHtml(
+      `<html><head><meta http-equiv="refresh" content="0;url=https://attacker"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("https://attacker");
+    expect(parse(out).head.querySelectorAll('meta[http-equiv="refresh"]').length).toBe(0);
+  });
+
+  it("matches http-equiv case-insensitively", () => {
+    const out = rewriteHtml(
+      `<html><head><meta HTTP-EQUIV="Refresh" content="0;url=https://attacker"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("https://attacker");
+  });
+});
+
+describe("rewriteHtml — drops SPA-authored CSP meta tags", () => {
+  it("removes Content-Security-Policy meta — only our injected one remains", () => {
+    const out = rewriteHtml(
+      `<html><head>` +
+        `<meta http-equiv="Content-Security-Policy" content="default-src *; report-uri https://attacker">` +
+        `</head><body>x</body></html>`,
+    );
+    const csps = parse(out).head.querySelectorAll('meta[http-equiv="Content-Security-Policy"]');
+    // Exactly one — the one we inject.
+    expect(csps.length).toBe(1);
+    expect(csps[0].getAttribute("content") ?? "").not.toContain("report-uri");
+    expect(out).not.toContain("https://attacker");
+  });
+
+  it("removes Content-Security-Policy-Report-Only meta as well", () => {
+    const out = rewriteHtml(
+      `<html><head>` +
+        `<meta http-equiv="Content-Security-Policy-Report-Only" content="default-src *; report-uri https://x">` +
+        `</head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("https://x");
+    const reportOnly = parse(out).head.querySelectorAll(
+      'meta[http-equiv="Content-Security-Policy-Report-Only"]',
+    );
+    expect(reportOnly.length).toBe(0);
+  });
+});
+
+describe("rewriteHtml — strips anchor ping", () => {
+  it("removes ping attribute from <a> elements", () => {
+    const out = rewriteHtml(
+      `<html><body><a href="autonomi://${ADDR}" ping="https://tracker https://tracker2">x</a></body></html>`,
+    );
+    expect(out).not.toContain("https://tracker");
+    const a = parse(out).body.querySelector("a");
+    expect(a?.hasAttribute("ping")).toBe(false);
+    // The href itself is left intact.
+    expect(a?.getAttribute("href")).toBe(`autonomi://${ADDR}`);
+  });
+
+  it("removes ping attribute from <area> elements", () => {
+    const out = rewriteHtml(
+      `<html><body><map><area href="autonomi://${ADDR}" ping="https://tracker"></map></body></html>`,
+    );
+    expect(out).not.toContain("https://tracker");
+  });
+});
+
+describe("rewriteHtml — injects the neuter script", () => {
+  it("inserts a pre-script that locks RTCPeerConnection and friends", () => {
+    const out = rewriteHtml("<html><body>x</body></html>");
+    const scripts = Array.from(parse(out).head.querySelectorAll("script"));
+    const neuter = scripts.find((s) => s.textContent?.includes("RTCPeerConnection"));
+    expect(neuter).toBeTruthy();
+    const text = neuter?.textContent ?? "";
+    // The four big API-surface categories all show up in the lock list.
+    expect(text).toContain("RTCPeerConnection");
+    expect(text).toContain("geolocation");
+    expect(text).toContain("mediaDevices");
+    expect(text).toContain("sendBeacon");
+    expect(text).toContain("serviceWorker");
+  });
+
+  it("neuter script lands before SPA scripts in the head", () => {
+    const out = rewriteHtml(
+      `<html><head><script>window.spa = 1;</script></head><body>x</body></html>`,
+    );
+    const headScripts = Array.from(parse(out).head.querySelectorAll("script"));
+    // First script in head must be ours (contains RTCPeerConnection); the
+    // SPA's `window.spa = 1` script comes after.
+    expect(headScripts[0]?.textContent ?? "").toContain("RTCPeerConnection");
+    expect(headScripts[1]?.textContent ?? "").toContain("window.spa");
+  });
+});

@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "fetch>it",
+        "title": "[ > ]",
         "width": 1280,
         "height": 800,
         "maximized": true
@@ -33,5 +33,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["autonomi", "fetchit"]
+      }
+    }
   }
 }

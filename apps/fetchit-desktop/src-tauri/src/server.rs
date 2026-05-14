@@ -113,7 +113,7 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
         range.as_deref().unwrap_or("")
     );
 
-    let bytes = match state.cache.get(&addr) {
+    let bytes = match state.cached_bytes(&addr) {
         Some(b) => {
             diag!("[media-srv] cache-hit {} bytes", b.len());
             b
@@ -164,7 +164,7 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
 async fn fetch_into_cache(state: &AppState, addr: Address) -> Result<Bytes, String> {
     let client = crate::state::ensure_client(state, &default_peers()).await?;
     let bytes = client.fetch(&addr).await.map_err(|e| e.to_string())?;
-    state.cache.put(addr, bytes.clone());
+    state.cache_bytes(&addr, bytes.clone());
     Ok(bytes)
 }
 

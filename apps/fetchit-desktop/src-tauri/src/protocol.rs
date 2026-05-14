@@ -52,7 +52,7 @@ async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> Resp
     };
 
     let state = app.state::<AppState>();
-    let bytes = match state.cache.get(&addr) {
+    let bytes = match state.cached_bytes(&addr) {
         Some(b) => {
             diag!("[fetchit] cache-hit {} bytes", b.len());
             b
@@ -85,7 +85,7 @@ async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> Resp
 async fn fetch_into_cache(state: &AppState, addr: Address) -> Result<Bytes, String> {
     let client = ensure_client(state, &default_peers()).await?;
     let bytes = client.fetch(&addr).await.map_err(|e| e.to_string())?;
-    state.cache.put(addr, bytes.clone());
+    state.cache_bytes(&addr, bytes.clone());
     Ok(bytes)
 }
 

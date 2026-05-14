@@ -15,12 +15,17 @@
         type="text"
         spellcheck="false"
         autocomplete="off"
-        placeholder="Paste a 64-hex Autonomi address  ·  autonomi://… also works"
+        placeholder="Autonomi address"
       />
       <button id="go" type="button">fetch</button>
+      <button id="bookmark-toggle" type="button" title="Bookmark this address (Ctrl/Cmd+D)" aria-label="Bookmark" data-bookmarked="false">★</button>
+      <button id="share-toggle" type="button" title="Share QR (Ctrl/Cmd+Shift+S)" aria-label="Share QR">▦</button>
+      <button id="settings-toggle" type="button" title="Settings (Ctrl/Cmd+,)" aria-label="Settings">⚙</button>
     </header>
     <nav id="tabs" role="tablist" aria-label="Open documents" data-empty="true"></nav>
     <div id="status"></div>
     <main id="stage"></main>
+    <section id="settings" hidden aria-label="Settings"></section>
+    <section id="qr-modal" hidden></section>
   </body>
 </html>
