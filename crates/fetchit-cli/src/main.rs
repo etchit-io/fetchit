@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 // fetch>it CLI — command-line driver over fetchit-core + fetchit-net.
 // Copyright (C) the fetch>it contributors.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 // fetch>it core — universal read-only viewer engine for the Autonomi network.
 // Copyright (C) the fetch>it contributors.
