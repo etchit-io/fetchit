@@ -80,6 +80,33 @@ JBM/SCP are name-preferences (used when the user has them installed
 system-wide); the realistic fallback is Menlo/Consolas/system mono.
 Neither app ships an external mono font for the chrome.
 
+## Typography scale
+
+One canonical scale, used by chrome in **both** apps. Px units, not
+rem — the body base is `14px/1.5` and that's load-bearing for every
+other size below it. Don't introduce in-between sizes.
+
+| Surface                                   | Size | Weight | Notes                                                  |
+|-------------------------------------------|-----:|-------:|--------------------------------------------------------|
+| Page heading (`h1` — "Settings", "Etch")  | 22px |   600  | `letter-spacing: -0.01em`                              |
+| Section heading (`h2` — "Appearance")     | 15px |   600  | Mixed case                                             |
+| Subsection label (chip / "ABOUT" tag)     | 11px |   600  | `text-transform: uppercase`, `letter-spacing: 0.08em`  |
+| Body paragraph (default)                  | 14px |   400  | Body base; `line-height: 1.5`                          |
+| Compact body (row text, descriptions)     | 13px |   400  | `line-height: 1.55` when block-level                   |
+| Helper / meta                             | 12px |   400  | `color: var(--ash)`                                    |
+| Micro chip                                | 11px |   500  | Used for tag pills, counts                             |
+| Wordmark (logo)                           | 18px |   700  | Mono family                                            |
+| Tab label                                 | 13px |   500  | `letter-spacing: 0.02em`                               |
+| Icon button glyph (★ ▦ ⚙ ×)               | 18px |   400  | Unicode glyphs; sized via the button container         |
+| Address / data-map / hex code             | 13px |   400  | Mono                                                   |
+
+Headings use `color: var(--bone)`. Descriptions/help use
+`color: var(--ash)`. No theme override needed — the tokens carry it.
+
+When the design needs a size that's not in this list, add it to
+the table (in both repos) before using it. Drift here is what made
+the two apps fall out of sync in May 2026.
+
 ## Composer / canvas fonts (etch/it only)
 
 The etch/it Blogger and Website composers render template previews
