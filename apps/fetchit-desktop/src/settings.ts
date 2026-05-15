@@ -357,21 +357,23 @@ function buildPage(): HTMLElement {
       <div id="bookmarks-list"></div>
     </section>
     <section class="setting-group setting-group-about" id="group-about">
-      <h2>About</h2>
-      <p class="setting-desc">
-        <strong>fetch&gt;it &mdash; beta software.</strong>
-        Released under the
-        <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener noreferrer">AGPL-3.0-only</a>
-        license, with a commercial license available separately (see
-        <code>COMMERCIAL.md</code> in the source tree). Provided
-        <em>"AS IS" without warranty of any kind, express or implied</em>;
-        the authors and copyright holders accept no liability for any damages arising
-        from its use. See sections&nbsp;15&nbsp;&amp;&nbsp;16 of the AGPL for the full
-        disclaimer.
-      </p>
-      <p class="setting-desc setting-desc-muted">
-        Security model and threat scope: <code>docs/SECURITY.md</code> in the source tree.
-      </p>
+      <details class="setting-collapsible">
+        <summary><h2>About</h2></summary>
+        <p class="setting-desc">
+          <strong>fetch&gt;it &mdash; beta software.</strong>
+          Released under the
+          <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener noreferrer">AGPL-3.0-only</a>
+          license, with a commercial license available separately (see
+          <code>COMMERCIAL.md</code> in the source tree). Provided
+          <em>"AS IS" without warranty of any kind, express or implied</em>;
+          the authors and copyright holders accept no liability for any damages arising
+          from its use. See sections&nbsp;15&nbsp;&amp;&nbsp;16 of the AGPL for the full
+          disclaimer.
+        </p>
+        <p class="setting-desc setting-desc-muted">
+          Security model and threat scope: <code>docs/SECURITY.md</code> in the source tree.
+        </p>
+      </details>
     </section>
   `;
   return page;
