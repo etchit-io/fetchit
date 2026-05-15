@@ -1,4 +1,15 @@
-:root {
+/*
+ * Theme tokens. The variable names are inherited from the brand bible
+ * (etchit.io/brand.html) and play semantic roles:
+ *   --ink   canvas background           --bone     primary text
+ *   --ink-2 elevated surface            --bone-dim secondary text
+ *   --line  dividers / hairlines        --ash      labels / muted
+ *   --copper / --copper-bright accent + hover  --rust  error
+ *   --signal-ok status                  color-scheme matches surface
+ * Each theme redefines the same set so existing rules stay unchanged.
+ */
+
+:root, body[data-theme="dark"] {
   --ink: #0a0a0a;
   --ink-2: #141414;
   --line: #222;
@@ -9,6 +20,35 @@
   --ash: #8a8a8a;
   --rust: #ff8a7a;
   --signal-ok: #6ab04c;
+  color-scheme: dark;
+}
+
+body[data-theme="dim"] {
+  --ink: #1a1612;
+  --ink-2: #221d18;
+  --line: #2a2520;
+  --copper: #c9732b;
+  --copper-bright: #e58a3f;
+  --bone: #f5f2eb;
+  --bone-dim: #e6dfd0;
+  --ash: #a09a90;
+  --rust: #ff8a7a;
+  --signal-ok: #6ab04c;
+  color-scheme: dark;
+}
+
+body[data-theme="light"] {
+  --ink: #f5f2eb;
+  --ink-2: #faf7f2;
+  --line: #d6cfc0;
+  --copper: #c9732b;
+  --copper-bright: #b86420;
+  --bone: #0a0a0a;
+  --bone-dim: #1a1814;
+  --ash: #3a3a3a;
+  --rust: #c0392b;
+  --signal-ok: #3d7e2c;
+  color-scheme: light;
 }
 
 .code-block {
@@ -513,6 +553,64 @@ body:not([data-view="settings"]) #settings {
 .bookmark-delete:hover {
   background: color-mix(in srgb, var(--rust) 12%, transparent);
   color: var(--rust);
+}
+
+.settings-theme-options {
+  display: grid;
+  gap: 0.5rem;
+}
+.settings-theme-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--ink);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.settings-theme-option:hover { border-color: var(--copper); }
+.settings-theme-option:has(input:checked) {
+  border-color: var(--copper);
+  background: color-mix(in srgb, var(--copper) 8%, var(--ink));
+}
+.settings-theme-option input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ash);
+  background: transparent;
+  margin: 3px 0 0;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+.settings-theme-option input[type="radio"]:checked {
+  border-color: var(--copper);
+}
+.settings-theme-option input[type="radio"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  background: var(--copper);
+  border-radius: 50%;
+}
+.settings-theme-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-theme-label {
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--bone);
+}
+.settings-theme-desc {
+  font-size: 0.8rem;
+  color: var(--ash);
 }
 
 .setting-group-about {

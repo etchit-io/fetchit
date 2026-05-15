@@ -6,6 +6,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { fmtBytes } from "./format";
 import { addBookmark, listBookmarks, removeBookmark, type Bookmark } from "./bookmarks";
+import { applyTheme, loadTheme, type Theme } from "./theme/theme";
+
+interface ThemeOption {
+  id: Theme;
+  label: string;
+  description: string;
+}
+
+const THEME_OPTIONS: ThemeOption[] = [
+  { id: "dark", label: "Dark", description: "Brand default — ink canvas, copper accent." },
+  { id: "dim", label: "Dim", description: "Warm mid-tone for less contrast than full dark." },
+  { id: "light", label: "Light", description: "Bone canvas for the brightest reading surface." },
+];
 
 export type ClearMode = "persist" | "on-close" | "on-idle";
 
@@ -92,6 +105,8 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     opt.textContent = choice.label;
     idleSelect.appendChild(opt);
   }
+
+  mountAppearance(root);
 
   idleSelect.addEventListener("change", () => {
     const minutes = Math.max(0, Number(idleSelect.value) || 0);
@@ -235,6 +250,39 @@ function readPolicy(els: {
   };
 }
 
+function mountAppearance(root: HTMLElement): void {
+  const optionsHost = root.querySelector(".settings-theme-options");
+  if (!optionsHost) return;
+  const current = loadTheme();
+  for (const opt of THEME_OPTIONS) {
+    const label = document.createElement("label");
+    label.className = "settings-theme-option";
+    label.dataset.theme = opt.id;
+
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "theme";
+    input.value = opt.id;
+    input.checked = opt.id === current;
+    input.addEventListener("change", () => {
+      if (input.checked) applyTheme(opt.id);
+    });
+
+    const text = document.createElement("span");
+    text.className = "settings-theme-text";
+    const lbl = document.createElement("span");
+    lbl.className = "settings-theme-label";
+    lbl.textContent = opt.label;
+    const desc = document.createElement("span");
+    desc.className = "settings-theme-desc";
+    desc.textContent = opt.description;
+    text.append(lbl, desc);
+
+    label.append(input, text);
+    optionsHost.appendChild(label);
+  }
+}
+
 function buildPage(): HTMLElement {
   const page = document.createElement("div");
   page.className = "settings-page";
@@ -243,6 +291,13 @@ function buildPage(): HTMLElement {
       <h1>Settings</h1>
       <button type="button" class="settings-close" aria-label="Close settings">×</button>
     </header>
+    <section class="setting-group" id="group-appearance">
+      <h2>Appearance</h2>
+      <p class="setting-desc">
+        fetch&gt;it ships dark — pick a softer surface if dark isn&rsquo;t your thing.
+      </p>
+      <div class="settings-theme-options" role="radiogroup" aria-label="Theme"></div>
+    </section>
     <section class="setting-group" id="group-network">
       <h2>Network</h2>
       <p class="setting-desc">
