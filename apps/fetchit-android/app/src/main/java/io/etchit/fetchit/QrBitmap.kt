@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.util.Log
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -50,7 +51,11 @@ object QrBitmap {
                 pixels[row + x] = if (matrix.get(x, y)) INK else Color.WHITE
             }
         }
-        val bitmap = Bitmap.createBitmap(pixels, sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        // The IntArray overload of createBitmap returns an *immutable* bitmap
+        // — Canvas refuses to draw the centre `>` logo on it. Build a mutable
+        // bitmap and stamp the QR pixels in, then draw.
+        val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        bitmap.setPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
         val canvas = Canvas(bitmap)
 
         val cx = sizePx / 2f
@@ -73,7 +78,8 @@ object QrBitmap {
         val baseline = cy - (textPaint.descent() + textPaint.ascent()) / 2f
         canvas.drawText(">", cx, baseline, textPaint)
         bitmap
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Log.e("QrBitmap", "render failed for payload len=${payload.length}", e)
         null
     }
 }
