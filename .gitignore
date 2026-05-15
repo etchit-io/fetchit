@@ -16,7 +16,9 @@ apps/fetchit-android/local.properties
 apps/fetchit-android/app/keystore.properties
 
 # ── Local-only working drafts ────────────────────────────
-private/
+# Anchored — must NOT match `apps/*/src/private/` if that dir is
+# ever introduced as source code (mirrors the etch/it gitignore fix).
+/private/
 # Compiled FFI libraries — rebuilt by `cargo ndk build` from fetchit-ffi
 apps/fetchit-android/app/src/main/jniLibs/**/*.so
 
