@@ -42,6 +42,11 @@ pub struct Settings {
     pub cache: Policy,
     pub bookmarks: Vec<Bookmark>,
     pub idle: IdlePolicy,
+    /// User-supplied bootstrap peer list. Empty = fall back to the
+    /// bundled `DEFAULT_PEERS` (see `fetchit-net::peers`). Each entry is
+    /// either an `ip:port` shorthand or a full multiaddr — both parse
+    /// through `parse_bootstrap_peer`.
+    pub peers: Vec<String>,
 }
 
 impl Settings {
@@ -186,5 +191,26 @@ mod tests {
         fs::write(&p, r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#).unwrap();
         let s = Settings::load(&p);
         assert_eq!(s.idle.timeout_minutes, 30);
+    }
+
+    #[test]
+    fn peers_default_to_empty_and_round_trip() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        assert!(s.peers.is_empty());
+        s.peers = vec!["127.0.0.1:10000".into(), "203.0.113.4:10000".into()];
+        s.save(&p).unwrap();
+        let loaded = Settings::load(&p);
+        assert_eq!(loaded.peers, vec!["127.0.0.1:10000", "203.0.113.4:10000"]);
+    }
+
+    #[test]
+    fn missing_peers_field_in_file_defaults_to_empty() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        fs::write(&p, r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#).unwrap();
+        let s = Settings::load(&p);
+        assert!(s.peers.is_empty());
     }
 }

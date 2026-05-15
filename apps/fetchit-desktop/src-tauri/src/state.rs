@@ -65,3 +65,26 @@ pub async fn ensure_client(state: &AppState, peers: &[String]) -> Result<Autonom
 pub fn default_peers() -> Vec<String> {
     DEFAULT_PEERS.iter().map(|s| (*s).to_owned()).collect()
 }
+
+impl AppState {
+    /// Bootstrap peers to use for the next connection: the user override
+    /// from settings if any non-empty entries exist, otherwise the bundled
+    /// production defaults.
+    pub fn effective_peers(&self) -> Vec<String> {
+        let override_list = self
+            .settings
+            .lock()
+            .map(|s| s.peers.clone())
+            .unwrap_or_default();
+        let cleaned: Vec<String> = override_list
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if cleaned.is_empty() {
+            default_peers()
+        } else {
+            cleaned
+        }
+    }
+}

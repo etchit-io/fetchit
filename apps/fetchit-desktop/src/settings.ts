@@ -107,6 +107,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   }
 
   mountAppearance(root);
+  mountPeers(root);
 
   idleSelect.addEventListener("change", () => {
     const minutes = Math.max(0, Number(idleSelect.value) || 0);
@@ -283,6 +284,71 @@ function mountAppearance(root: HTMLElement): void {
   }
 }
 
+function mountPeers(root: HTMLElement): void {
+  const editor = root.querySelector<HTMLTextAreaElement>("#peers-editor");
+  const errorEl = root.querySelector<HTMLElement>("#peers-error");
+  const saveBtn = root.querySelector<HTMLButtonElement>("#peers-save");
+  const resetBtn = root.querySelector<HTMLButtonElement>("#peers-reset");
+  if (!editor || !errorEl || !saveBtn || !resetBtn) return;
+
+  const showError = (msg: string): void => {
+    errorEl.textContent = msg;
+    errorEl.hidden = false;
+  };
+  const clearError = (): void => {
+    errorEl.textContent = "";
+    errorEl.hidden = true;
+  };
+
+  // Prefill: user override if set, otherwise the bundled defaults so the
+  // user can see what they're replacing rather than starting blank.
+  const prefill = async (): Promise<void> => {
+    try {
+      const overrideList = await invoke<string[]>("peers_override");
+      if (overrideList.length > 0) {
+        editor.value = overrideList.join("\n");
+        return;
+      }
+      const defaults = await invoke<string[]>("default_peers");
+      editor.value = defaults.join("\n");
+    } catch {
+      editor.value = "";
+    }
+  };
+  void prefill();
+
+  editor.addEventListener("input", clearError);
+
+  saveBtn.addEventListener("click", () => {
+    clearError();
+    const peers = editor.value.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+    if (peers.length === 0) {
+      showError("at least one peer is required (or use Reset)");
+      return;
+    }
+    saveBtn.disabled = true;
+    void invoke<string[]>("set_peers_override", { peers })
+      .then((cleaned) => {
+        editor.value = cleaned.join("\n");
+      })
+      .catch((e: unknown) => showError(typeof e === "string" ? e : "save failed"))
+      .finally(() => {
+        saveBtn.disabled = false;
+      });
+  });
+
+  resetBtn.addEventListener("click", () => {
+    clearError();
+    resetBtn.disabled = true;
+    void invoke("reset_peers_override")
+      .then(() => prefill())
+      .catch((e: unknown) => showError(typeof e === "string" ? e : "reset failed"))
+      .finally(() => {
+        resetBtn.disabled = false;
+      });
+  });
+}
+
 function buildPage(): HTMLElement {
   const page = document.createElement("div");
   page.className = "settings-page";
@@ -320,6 +386,29 @@ function buildPage(): HTMLElement {
         on-disk cache mode below is set to <em>Clear after idle</em>, that
         gets wiped too.
       </p>
+    </section>
+    <section class="setting-group" id="group-peers">
+      <details class="setting-collapsible">
+        <summary><h2>Bootstrap peers</h2></summary>
+        <p class="setting-desc">
+          The list of Autonomi peers fetch&gt;it dials on the first fetch.
+          Defaults to the bundled production list; override only if you
+          know what you&rsquo;re doing (running a local node, joining a
+          test network, etc.). One peer per line — either an
+          <code>ip:port</code> shorthand or a full
+          <code>/ip4/&hellip;/udp/&hellip;/quic</code> multiaddr.
+        </p>
+        <textarea id="peers-editor" rows="6" spellcheck="false" aria-label="Bootstrap peers"></textarea>
+        <p class="setting-error" id="peers-error" role="alert" hidden></p>
+        <div class="setting-actions">
+          <button type="button" class="setting-action" id="peers-save">Save</button>
+          <button type="button" class="setting-action setting-action-ghost" id="peers-reset">Reset to defaults</button>
+        </div>
+        <p class="setting-desc setting-desc-muted">
+          Saving drops the current connection so the next fetch reconnects
+          using the new list.
+        </p>
+      </details>
     </section>
     <section class="setting-group" id="group-cache">
       <h2>On-disk byte cache</h2>

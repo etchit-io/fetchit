@@ -14,7 +14,7 @@
 //! `AutonomiClient` as the protocol handler — fetch-on-miss reuses the
 //! bytes a `fetch_and_render` may already have downloaded.
 
-use crate::state::{default_peers, AppState};
+use crate::state::AppState;
 use bytes::Bytes;
 use fetchit_core::{Address, NetworkClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -162,7 +162,7 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
 }
 
 async fn fetch_into_cache(state: &AppState, addr: Address) -> Result<Bytes, String> {
-    let client = crate::state::ensure_client(state, &default_peers()).await?;
+    let client = crate::state::ensure_client(state, &state.effective_peers()).await?;
     let bytes = client.fetch(&addr).await.map_err(|e| e.to_string())?;
     state.cache_bytes(&addr, bytes.clone());
     Ok(bytes)

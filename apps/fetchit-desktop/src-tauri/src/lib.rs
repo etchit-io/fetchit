@@ -19,7 +19,7 @@ use disk_cache::{ClearMode, DiskCache, Policy};
 use rendition::RenditionDto;
 use serde::Serialize;
 use settings::{Bookmark, IdlePolicy, Settings};
-use state::{default_peers as peer_list, ensure_client, AppState};
+use state::{default_peers as bundled_peers, ensure_client, AppState};
 
 /// Wall-clock seconds — cheap, durable, no time crate dep.
 fn now_secs() -> u64 {
@@ -33,9 +33,60 @@ fn now_secs() -> u64 {
 /// JS reads it via [`media_url_base`].
 static MEDIA_URL_BASE: OnceLock<String> = OnceLock::new();
 
+/// The bundled default peer list (production network). The frontend
+/// pre-fills the editor with this when the user hasn't saved an override.
 #[tauri::command]
 fn default_peers() -> Vec<String> {
-    peer_list()
+    bundled_peers()
+}
+
+/// User's current bootstrap-peer override, or empty if they're on the
+/// bundled defaults. Stored in `settings.json`.
+#[tauri::command]
+fn peers_override(state: tauri::State<'_, AppState>) -> Vec<String> {
+    state
+        .settings
+        .lock()
+        .map(|s| s.peers.clone())
+        .unwrap_or_default()
+}
+
+/// Save a user-supplied peer list (one entry per element). Each entry
+/// must parse via `parse_bootstrap_peer` — either an `ip:port`
+/// shorthand or a full multiaddr. Returns the cleaned list that was
+/// persisted (empty entries dropped, whitespace trimmed). Drops any
+/// active client so the next fetch reconnects with the new list.
+#[tauri::command]
+async fn set_peers_override(
+    state: tauri::State<'_, AppState>,
+    peers: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let cleaned: Vec<String> = peers
+        .into_iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for p in &cleaned {
+        fetchit_net::parse_bootstrap_peer(p)?;
+    }
+    if let Ok(mut s) = state.settings.lock() {
+        s.peers.clone_from(&cleaned);
+        let _ = s.save(&state.settings_path);
+    }
+    *state.client.lock().await = None;
+    Ok(cleaned)
+}
+
+/// Clear any saved peer override; next fetch will reconnect using the
+/// bundled defaults. Drops any active client.
+#[tauri::command]
+async fn reset_peers_override(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if let Ok(mut s) = state.settings.lock() {
+        s.peers.clear();
+        let _ = s.save(&state.settings_path);
+    }
+    *state.client.lock().await = None;
+    Ok(())
 }
 
 /// JS-side diagnostic forwarding: anything the frontend wants to land in the
@@ -70,7 +121,7 @@ fn media_url_base() -> Result<String, String> {
 
 #[tauri::command]
 async fn connect(state: tauri::State<'_, AppState>, peers: Vec<String>) -> Result<(), String> {
-    let peers = if peers.is_empty() { peer_list() } else { peers };
+    let peers = if peers.is_empty() { state.effective_peers() } else { peers };
     ensure_client(&state, &peers).await.map(|_| ())
 }
 
@@ -210,7 +261,7 @@ async fn fetch_and_render(
     let bytes = match state.cached_bytes(&parsed) {
         Some(b) => b,
         None => {
-            let client = ensure_client(&state, &peer_list()).await?;
+            let client = ensure_client(&state, &state.effective_peers()).await?;
             let b = client.fetch(&parsed).await.map_err(|e| e.to_string())?;
             state.cache_bytes(&parsed, b.clone());
             b
@@ -280,6 +331,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             default_peers,
+            peers_override,
+            set_peers_override,
+            reset_peers_override,
             connect,
             peer_count,
             disconnect,

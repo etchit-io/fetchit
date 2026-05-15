@@ -6,7 +6,7 @@
 //! never reaches the public internet for these URIs — the handler resolves the
 //! address against the in-process cache (or fetches over Autonomi on miss).
 
-use crate::state::{default_peers, ensure_client, AppState};
+use crate::state::{ensure_client, AppState};
 use bytes::Bytes;
 use fetchit_core::{Address, NetworkClient};
 use tauri::http::{header, Request, Response, StatusCode};
@@ -83,7 +83,7 @@ async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> Resp
 }
 
 async fn fetch_into_cache(state: &AppState, addr: Address) -> Result<Bytes, String> {
-    let client = ensure_client(state, &default_peers()).await?;
+    let client = ensure_client(state, &state.effective_peers()).await?;
     let bytes = client.fetch(&addr).await.map_err(|e| e.to_string())?;
     state.cache_bytes(&addr, bytes.clone());
     Ok(bytes)

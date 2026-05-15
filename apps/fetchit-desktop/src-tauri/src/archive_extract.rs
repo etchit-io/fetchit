@@ -22,7 +22,7 @@ use std::io::{Cursor, Read};
 use bytes::Bytes;
 use fetchit_core::{Address, NetworkClient};
 
-use crate::state::{default_peers, ensure_client, AppState};
+use crate::state::{ensure_client, AppState};
 
 /// Read a named entry from the archive at `addr`. Returns the bytes
 /// inside (post-decompression for Deflate entries; for Stored entries
@@ -42,7 +42,7 @@ async fn resolve_bytes(state: &AppState, addr: &Address) -> Result<Bytes, String
     if let Some(b) = state.cached_bytes(addr) {
         return Ok(b);
     }
-    let client = ensure_client(state, &default_peers()).await?;
+    let client = ensure_client(state, &state.effective_peers()).await?;
     let bytes = client.fetch(addr).await.map_err(|e| e.to_string())?;
     state.cache_bytes(addr, bytes.clone());
     Ok(bytes)
