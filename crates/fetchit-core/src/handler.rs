@@ -43,8 +43,9 @@ pub enum Confidence {
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Hint {
-    /// Filename, if the caller has one (rare on Autonomi — included
-    /// for completeness so handlers don't need a parallel API later).
+    /// Filename, if the caller has one. Rare on Autonomi — included so
+    /// handlers that already accept a filename hint elsewhere can reuse
+    /// the same shape.
     pub filename: Option<String>,
     /// Total fetched length in bytes, when known.
     pub size: Option<u64>,

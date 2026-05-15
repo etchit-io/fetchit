@@ -51,13 +51,13 @@ Engine inspects the bytes by magic-byte / content heuristics, picks a handler, h
 | **Plain text** (UTF-8) | Monospace, full-screen scrollable | Auto-detects code language and applies syntax highlighting (Rust, Python, JS/TS, Kotlin, Go, Bash, HTML, CSS, YAML, SQL, JSON) |
 | **Markdown** | Rendered with proper formatting (headings, lists, links, code blocks) via Markwon | Detection heuristic — files that look markdown-shaped (headings, fences, multiple markers) qualify |
 | **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch>it; the page can reach **only** the Autonomi network — no traditional-internet requests. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
-| **JSON** | Pretty-printed in monospace | Tree-view comes later |
+| **JSON** | Pretty-printed in monospace | Source-faithful — every key/value preserved as authored |
 | **CSV** | Column-padded monospace table | First row is headers; quoted fields with commas + doubled `""` escapes handled |
 | **Image** (PNG / JPEG / GIF / WEBP / BMP / HEIC) | Rendered fit-to-width, edge-to-edge | All decoded by Android's `BitmapFactory` |
 | **Audio** (MP3 / WAV / FLAC / OGG / M4A) | Media3 ExoPlayer, dead-centered with full controls — play / pause / seek / time labels / ±15s skip | In-memory playback (no temp files) |
 | **Video** (MP4 / MOV / WebM / MKV / AVI / M4V) | Same Media3 PlayerView with video frame; auto-hide controls; fullscreen button | Tap fullscreen → chrome and system bars hide |
 | **PDF** | Inline, page-by-page, scrollable | Uses Android's built-in `PdfRenderer` |
-| **ZIP archive** | Entry list (paths + sizes) | No extraction in-app yet — use Open with… for the whole archive |
+| **ZIP archive** | Entry list (paths + sizes) | Use Open with… to hand the archive to another app for extraction |
 | **Anything else** | Friendly success message + extension label + Open with… / Save… buttons | Hand off to whatever app you have installed for that MIME |
 
 ---
@@ -218,7 +218,8 @@ xhr.send();
 
 // And Streams, range requests, CORS — anything the Fetch spec
 // allows for https — because the engine sees https. (Service
-// Workers are not yet supported; see "Honest limitations" below.)
+// Worker registration fails in the null-origin sandbox; see
+// "Honest limitations" below.)
 ```
 
 **One hard limit:** the page reaches *only* the Autonomi network. A `fetch()`, `<script src>`, `<img src>`, etc. pointing at a non-Autonomi host (a CDN, an API, anything) is blocked — fetch>it renders Autonomi content, not the traditional web. SPAs must be fully self-contained: inline assets, or upload each to its own Autonomi address.
@@ -263,12 +264,12 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 |---|---|---|
 | **No upload from inside fetch>it** | Read-only is a defining property (spec §3); writes are etchit's job | Use `ant file upload <file> --public` or etchit |
 | **No private / encrypted etch viewing** | Private etches need a wallet; fetch>it is permanently wallet-less | Use etchit |
-| **Multi-file SPAs need inlining today** | ZIP-bundle WebView mount isn't wired yet | Use `vite-plugin-singlefile` or equivalent. Or upload each asset separately and reference via `autonomi://` |
+| **Multi-file SPAs need inlining** | Each top-level fetch resolves a single Autonomi address | Use `vite-plugin-singlefile` or equivalent. Or upload each asset separately and reference via `autonomi://` |
 | **Filename is gone** for files uploaded via raw `ant file upload` | Filename is local-FS metadata, not network state | etchit envelopes preserve a title; bare uploads don't |
 | **No address book / discovery** | No central registry by design | Bookmarks + share. Spec says: addresses live in the user's hands |
-| **localStorage / IndexedDB off in HTML** | Sandbox default | Inline state in the page; or wait for opt-in persistent storage (deferred) |
+| **localStorage / IndexedDB off in HTML** | Null-origin sandbox prevents cross-SPA leakage and persistent fingerprinting | Hold state in the page for the session; content-addressed pages don't need cross-session persistence |
 | **Service Workers don't register** | SW state lives in IndexedDB, which is off; Chromium also blocks `blob:` URLs as SW scripts. The API surface is exposed but `register()` fails | The host's built-in disk cache (keyed by address) gives you offline replay without a SW |
-| **No syntax highlighting in markdown code blocks** | Markwon needs a Prism4j grammar generator we haven't wired | Code files render highlighted; markdown code blocks render plain |
+| **No syntax highlighting in markdown code blocks** | Markdown renders through Markwon's core; code-file renditions use the engine's own highlighter | Code files render highlighted; markdown code blocks render plain |
 
 ---
 
@@ -289,14 +290,3 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 - **`HANDLER-AUTHORS.md`** — how to add a new content handler in `fetchit-core` (one file, one registration line, byte-fixture tests)
 - **`../README.md`** — five-second project description
 
----
-
-## What's not built yet
-
-A short, honest list of things you'll notice are missing:
-
-- **ZIP bundle SPAs** — see Limitations above
-- **Markdown code-block highlighting** — see Limitations above
-- **Real launcher icon** — current is a placeholder vector
-
-This doc gets updated as things land.

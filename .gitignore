@@ -15,8 +15,7 @@ apps/fetchit-android/local.properties
 # release-signing config (the .template version is committed)
 apps/fetchit-android/app/keystore.properties
 
-# ── Closed planning ──────────────────────────────────────
-# Strategy, roadmap, positioning, draft site pages — never pushed.
+# ── Local-only working drafts ────────────────────────────
 private/
 # Compiled FFI libraries — rebuilt by `cargo ndk build` from fetchit-ffi
 apps/fetchit-android/app/src/main/jniLibs/**/*.so
@@ -24,18 +23,14 @@ apps/fetchit-android/app/src/main/jniLibs/**/*.so
 # ── Generated bindings (rebuild from source) ─────────────
 generated/
 
-# ── Embedded sibling project (its own git repo) ──────────
+# ── Local sibling / upstream clones (separate repos) ─────
 /etchit/
-
-# ── Upstream Autonomi source (reference only, not ours) ──
-# Checked out locally to verify behavior against the real code —
-# we never guess, we confirm. Not part of this repo.
 /withAutonomi/
 
 # ── Autonomi upload artifacts ────────────────────────────
 *.datamap
 
-# ── Claude Code ──────────────────────────────────────────
+# ── Local agent tooling ──────────────────────────────────
 CLAUDE.md
 .claude/
 

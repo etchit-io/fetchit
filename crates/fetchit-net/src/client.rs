@@ -112,8 +112,7 @@ impl NetworkClient for AutonomiClient {
 /// (anything past the chunk-of-pointers threshold), the top-level
 /// addresses are intermediate child-map pointers, not content. Without
 /// this resolution step, downloads of large content silently return
-/// garbage. Mirrors etchit's FFI helper, which is the production-tested
-/// path against the same `ant-core` revision.
+/// garbage.
 ///
 /// Pure pass-through for flat maps (`is_child() == false`).
 fn resolve_data_map(
@@ -168,8 +167,8 @@ fn resolve_data_map(
 /// store / retrieve operations") — so it is the right knob for a
 /// read-only client like fetch>it. The 10-second default is too
 /// aggressive on mobile or NAT-traversed paths, where a multi-MB
-/// chunk transfer plus QUIC slow-start runs well past it; etchit hit
-/// this in production. Everything else stays at stock.
+/// chunk transfer plus QUIC slow-start runs well past it. Everything
+/// else stays at stock.
 fn cli_style_client_config() -> ClientConfig {
     ClientConfig {
         store_timeout_secs: 60,

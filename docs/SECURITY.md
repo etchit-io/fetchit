@@ -240,7 +240,7 @@ step and policy default is covered by a test.
 
 Please report security-impacting issues **privately** to the maintainer
 via GitHub's private security advisory flow at
-<https://github.com/josh-clsn/fetchit/security/advisories/new> rather
+<https://github.com/etchit-io/fetchit/security/advisories/new> rather
 than as a public issue. We'll acknowledge within a few days, agree on
 a disclosure timeline, and credit you in the fix's release notes.
 

@@ -23,7 +23,7 @@ makes the full Fetch API work over content-addressed URLs), see
 `0.2.0` — **beta**. The Android shell builds and runs end-to-end against
 the live Autonomi network — the [`docs/USING.md`](docs/USING.md) guide
 describes what it currently does. CLI compiles. Desktop (Tauri 2) is in
-active development on the `fetchit-desktop` branch.
+active development.
 
 **Dual-licensed.** Open-source under [`AGPL-3.0-only`](LICENSE);
 a commercial license is available for closed-source / proprietary use

@@ -53,16 +53,16 @@ A page that uses **only inlined assets and `autonomi://` references**
 renders correctly with the device's traditional internet disconnected,
 as long as Autonomi peers are reachable.
 
-## What doesn't work yet
+## Author constraints
 
-| Gap | Workaround / Path |
+| Constraint | Pattern |
 |---|---|
-| Multi-file SPA bundles (`bundle.js`, `style.css`, asset folders) | Inline everything into one HTML, or upload each asset to its own Autonomi address and reference via `autonomi://<addr>` |
-| `localStorage` / `sessionStorage` / `IndexedDB` | Off by default for sandbox isolation. Opt-in needed if a real use-case appears |
-| **Service Workers** | API surface exposed but `register()` fails — SW state lives in IndexedDB which the sandbox disables. Host-level disk cache (already shipped) covers the offline-replay use case |
-| Discoverability of addresses | No address book, no search, no DNS-equivalent. Sharing is bookmarks, QR codes, and out-of-band copy |
-| Trust signals (is this address from someone I've seen before?) | None today; out of scope for 0.1.0 |
-| Streaming during first fetch | Today the engine waits for the full Autonomi reassembly before serving; the cache makes second-load instant. Truly progressive streaming would need a streaming API on the underlying client |
+| One Autonomi address per top-level fetch | Inline everything into one HTML, or upload each asset to its own address and reference via `autonomi://<addr>` |
+| `localStorage` / `sessionStorage` / `IndexedDB` | Null-origin sandbox; access throws `SecurityError`. Hold state in the page for the session — content-addressed pages don't need cross-session persistence |
+| **Service Workers** | API surface exposed but `register()` fails — SW state lives in IndexedDB which the sandbox disables. The host's address-keyed disk cache covers the offline-replay use case |
+| Address discovery | No address book, no search, no DNS-equivalent. Addresses live in the user's hands — sharing is bookmarks, QR codes, and out-of-band copy |
+| Trust signals (is this address from someone I've seen before?) | Out of scope: content is addressed by hash, not by author identity |
+| First-fetch latency | The engine reassembles the full content before serving; the address-keyed cache makes second-load instant |
 
 ---
 

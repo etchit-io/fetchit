@@ -24,7 +24,7 @@ spreads the project.
 | Mode | Where it shows | Purpose |
 |---|---|---|
 | **In-app modal** | Both platforms | Preview the QR inside fetch>it — scan from a colocated phone, copy the address, or kick off the share-as-image flow. |
-| **Share-as-image card** | Android (mandatory), desktop (TBD) | A self-contained branded PNG fired through the OS share sheet. The artifact users actually receive in their inbox. |
+| **Share-as-image card** | Android | A self-contained branded PNG fired through the OS share sheet. The artifact users actually receive in their inbox. |
 
 The in-app modal is the primary affordance. The image card is for
 sharing into messengers that don't render `autonomi://` links.
@@ -140,7 +140,6 @@ the image *first*, the address second.
 - `src/qr.ts` exports `renderQrSvg(text, { errorCorrectionLevel, centerLogo })` — inline SVG, currentColor-aware foreground, optional center logo.
 - `src/ui/qrModal.ts` mounts the in-app modal at the `#qr-modal` host element.
 - Triggered by `▦` button in the header (between `★` and `⚙`) and `Ctrl/Cmd+Shift+S`.
-- Share-as-image (PNG export) — **not yet implemented**. Future work: serialize the SVG, paint onto an OffscreenCanvas at 2× DPR, hand the user a download or a clipboard image.
 
 ### Android (Kotlin)
 
@@ -165,7 +164,7 @@ the image *first*, the address second.
 ## Out of scope
 
 - QR scan-in on desktop. Camera permission flow is heavier than the
-  paste flow on desktop; deferred indefinitely.
+  paste flow already supported there.
 - A web-shareable URL (something like `etchit.io/qr/<addr>`). Adds DNS
   surface that fetch>it explicitly avoids. The QR + raw address are the
   authoritative artifacts.
