@@ -44,10 +44,22 @@
     cursor: pointer;
     font-family: inherit;
     transition: transform 0.4s cubic-bezier(.2,.7,.2,1), box-shadow 0.4s;
+    /* Default (dark) shadow — large, dark, depth-on-ink. Other themes
+       gate via body[data-theme] so the dark halo doesn't clip into the
+       WebView's square bounds on lighter backgrounds. */
     box-shadow: 0 24px 48px -20px rgba(0,0,0,0.6),
                 0 4px 12px -4px rgba(0,0,0,0.4);
     -webkit-tap-highlight-color: transparent;
     outline: none;
+  }
+  /* Dim: keep depth, smaller blur — never reaches the WebView corners. */
+  body[data-theme="dim"] .fetch-btn {
+    box-shadow: 0 12px 24px -14px rgba(0,0,0,0.55);
+  }
+  /* Light: even tighter, low-opacity warm shadow so the circle still
+     has lift but no clipped halo on the bone canvas. */
+  body[data-theme="light"] .fetch-btn {
+    box-shadow: 0 10px 20px -14px rgba(0,0,0,0.25);
   }
   .fetch-btn:active { transform: translateY(0); }
 
@@ -250,6 +262,15 @@
   </button>
 
   <script>
+    // Theme rides in on the URL fragment (#dark / #dim / #light). Falls
+    // back to "dark" if nothing's set, so existing themeless callers
+    // still get the canonical palette.
+    (function () {
+      const allowed = new Set(['dark', 'dim', 'light']);
+      const requested = (location.hash || '').replace(/^#/, '');
+      document.body.dataset.theme = allowed.has(requested) ? requested : 'dark';
+    })();
+
     const beagle = `
       <path class="tail" d="M 60 102 Q 42 90, 38 72" stroke-width="6"></path>
       <rect class="leg bl" x="74" y="128" width="9" height="22" rx="3.5"></rect>

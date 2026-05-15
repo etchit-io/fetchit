@@ -53,7 +53,11 @@ class FetchButton @JvmOverloads constructor(
             // Block long-press selection / context menus.
             setOnLongClickListener { true }
             isLongClickable = false
-            loadUrl("file:///android_asset/fetch-button.html")
+            // Theme passes via the URL fragment so the bundled HTML can
+            // pick palette-appropriate shadow / accent values on first paint.
+            // A new Activity instance (after recreate()) builds a new
+            // WebView, so the right theme always rides the URL.
+            loadUrl("file:///android_asset/fetch-button.html#${SettingsStore(context).theme().id}")
         }
         addView(
             webView,
