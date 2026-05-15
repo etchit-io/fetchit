@@ -555,6 +555,37 @@ body:not([data-view="settings"]) #settings {
   color: var(--rust);
 }
 
+.setting-collapsible > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+}
+.setting-collapsible > summary::-webkit-details-marker {
+  display: none;
+}
+.setting-collapsible > summary h2 {
+  margin: 0;
+}
+.setting-collapsible > summary::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-right: 1.5px solid var(--copper);
+  border-bottom: 1.5px solid var(--copper);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+  margin-left: auto;
+}
+.setting-collapsible[open] > summary::after {
+  transform: rotate(45deg);
+}
+.setting-collapsible[open] > summary {
+  margin-bottom: 8px;
+}
+
 .settings-theme-options {
   display: grid;
   gap: 0.5rem;

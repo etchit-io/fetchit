@@ -292,11 +292,13 @@ function buildPage(): HTMLElement {
       <button type="button" class="settings-close" aria-label="Close settings">×</button>
     </header>
     <section class="setting-group" id="group-appearance">
-      <h2>Appearance</h2>
-      <p class="setting-desc">
-        fetch&gt;it ships dark — pick a softer surface if dark isn&rsquo;t your thing.
-      </p>
-      <div class="settings-theme-options" role="radiogroup" aria-label="Theme"></div>
+      <details class="setting-collapsible">
+        <summary><h2>Appearance</h2></summary>
+        <p class="setting-desc">
+          fetch&gt;it ships dark — pick a softer surface if dark isn&rsquo;t your thing.
+        </p>
+        <div class="settings-theme-options" role="radiogroup" aria-label="Theme"></div>
+      </details>
     </section>
     <section class="setting-group" id="group-network">
       <h2>Network</h2>
