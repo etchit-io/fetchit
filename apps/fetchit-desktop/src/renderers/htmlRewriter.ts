@@ -6,10 +6,14 @@
 //      through our protocol handler regardless of any base the document
 //      tried to set (and authors' canonical scheme is autonomi://);
 //   3. injects a click interceptor + back-link handler that posts up to
-//      the parent window so it stays in sync with iframe nav.
-// We don't rewrite `autonomi://` references in attributes — the WebView
-// accepts the scheme directly because we registered it in lib.rs alongside
-// fetchit://. Both resolve to the same handler.
+//      the parent window so it stays in sync with iframe nav;
+//   4. rewrites <audio>/<video>/<source> autonomi:// srcs to the local
+//      media server URL and stashes them in data-fetchit-src so the WebView
+//      doesn't run the media resource-selection algorithm on element setup
+//      — src is hydrated on first user interaction with the element.
+// Non-media `autonomi://` references in other attributes are left alone:
+// the WebView accepts the scheme directly because we registered it in
+// lib.rs alongside fetchit://. Both resolve to the same handler.
 
 const LINK_INTERCEPTOR = `
 (function () {
@@ -83,6 +87,7 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripAnchorPing(doc);
   injectNeuterScript(doc);
   rewriteMediaSrc(doc, mediaBase);
+  injectMediaHydration(doc);
   injectLinkInterceptor(doc);
   return `<!doctype html>\n${doc.documentElement.outerHTML}`;
 }
@@ -211,14 +216,69 @@ function injectCsp(doc: Document, mediaBase: string): void {
 // `shouldInterceptRequest` makes `autonomi://` resolve there; this is the
 // desktop equivalent: SPA authors write the declarative form, the reader
 // hands the WebView a URL it can decode.
+//
+// We stash the rewritten URL in `data-fetchit-src` rather than `src` so the
+// media element's resource-selection algorithm doesn't run on element
+// setup — that algorithm fires `loadstart` even with `preload="none"`,
+// which produces spurious "fetching…" UI states in author scripts. The
+// hydration script (see injectMediaHydration) restores `src` on the first
+// user interaction with the element.
 function rewriteMediaSrc(doc: Document, mediaBase: string): void {
   const prefix = /^(?:fetchit|autonomi):\/\/([0-9a-fA-F]{64})/i;
   for (const el of Array.from(doc.querySelectorAll("audio[src], video[src], source[src]"))) {
     const src = el.getAttribute("src") ?? "";
     const m = prefix.exec(src);
     if (!m) continue;
-    el.setAttribute("src", `${mediaBase}/${m[1].toLowerCase()}`);
+    el.removeAttribute("src");
+    el.setAttribute("data-fetchit-src", `${mediaBase}/${m[1].toLowerCase()}`);
   }
+}
+
+// Lifts the deferred media src into place on first user interaction with the
+// element. Capture-phase listeners on the host element fire before the
+// in-shadow controls process the click, so play() has a real src by the time
+// it runs. Hydration is one-shot per element.
+const MEDIA_HYDRATION = `
+(function () {
+  function hydrate(media) {
+    if (media._fetchitHydrated) return;
+    media._fetchitHydrated = true;
+    var targets = [media].concat(Array.prototype.slice.call(media.querySelectorAll('source')));
+    var changed = false;
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      var src = el.getAttribute('data-fetchit-src');
+      if (!src) continue;
+      el.removeAttribute('data-fetchit-src');
+      el.setAttribute('src', src);
+      changed = true;
+    }
+    if (changed) {
+      try { media.load(); } catch (_) {}
+    }
+  }
+  function attach() {
+    var medias = document.querySelectorAll('audio, video');
+    for (var i = 0; i < medias.length; i++) {
+      var m = medias[i];
+      if (!m.hasAttribute('data-fetchit-src') && !m.querySelector('source[data-fetchit-src]')) continue;
+      var fire = (function (target) { return function () { hydrate(target); }; })(m);
+      m.addEventListener('pointerdown', fire, true);
+      m.addEventListener('keydown',     fire, true);
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+`.trim();
+
+function injectMediaHydration(doc: Document): void {
+  const s = doc.createElement("script");
+  s.textContent = MEDIA_HYDRATION;
+  doc.body.appendChild(s);
 }
 
 function injectLinkInterceptor(doc: Document): void {

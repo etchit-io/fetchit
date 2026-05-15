@@ -31,28 +31,32 @@ describe("rewriteHtml — preserves authored URLs", () => {
     expect(doc.querySelector("form")?.getAttribute("action")).toBe(`autonomi://${ADDR}/submit`);
   });
 
-  it("rewrites <audio>/<video>/<source> autonomi:// src to the local media-server URL", () => {
+  it("rewrites <audio>/<video>/<source> autonomi:// src into data-fetchit-src on the local media-server URL", () => {
     const out = rewriteHtml(
       `<audio src="autonomi://${ADDR}/track.mp3"></audio>` +
         `<video src="autonomi://${ADDR}/v.mp4"></video>` +
         `<video><source src="autonomi://${ADDR}"></video>`,
     );
     const doc = parse(out);
-    expect(doc.querySelector("audio")?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
-    expect(doc.querySelector("video[src]")?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
-    expect(doc.querySelector("source")?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+    for (const sel of ["audio", "video[data-fetchit-src]", "source"]) {
+      const el = doc.querySelector(sel);
+      expect(el?.getAttribute("data-fetchit-src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+      expect(el?.hasAttribute("src")).toBe(false);
+    }
   });
 
   it("matches the fetchit:// alias on media srcs too", () => {
     const out = rewriteHtml(`<audio src="fetchit://${ADDR}"></audio>`);
-    expect(parse(out).querySelector("audio")?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+    const audio = parse(out).querySelector("audio");
+    expect(audio?.getAttribute("data-fetchit-src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(audio?.hasAttribute("src")).toBe(false);
   });
 
   it("doesn't touch media src that isn't an Autonomi address", () => {
     const out = rewriteHtml(`<audio src="https://example.com/track.mp3"></audio>`);
-    expect(parse(out).querySelector("audio")?.getAttribute("src")).toBe(
-      "https://example.com/track.mp3",
-    );
+    const audio = parse(out).querySelector("audio");
+    expect(audio?.getAttribute("src")).toBe("https://example.com/track.mp3");
+    expect(audio?.hasAttribute("data-fetchit-src")).toBe(false);
   });
 
   it("leaves non-autonomi schemes untouched too", () => {
@@ -311,6 +315,46 @@ describe("rewriteHtml — strips anchor ping", () => {
       `<html><body><map><area href="autonomi://${ADDR}" ping="https://tracker"></map></body></html>`,
     );
     expect(out).not.toContain("https://tracker");
+  });
+});
+
+describe("rewriteHtml — injects the media hydration script", () => {
+  function hydrationScript(html: string): HTMLScriptElement | null {
+    const scripts = parse(html).body.querySelectorAll("script");
+    return (Array.from(scripts).find((s) => s.textContent?.includes("data-fetchit-src")) ??
+      null) as HTMLScriptElement | null;
+  }
+
+  it("appends a hydration script to <body>", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    expect(hydrationScript(out)).toBeTruthy();
+  });
+
+  it("the hydration script listens on capture-phase pointerdown and keydown", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/addEventListener\('pointerdown',\s*[^,]+,\s*true\)/);
+    expect(text).toMatch(/addEventListener\('keydown',\s*[^,]+,\s*true\)/);
+  });
+
+  it("the hydration script copies data-fetchit-src to src and calls load()", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/getAttribute\('data-fetchit-src'\)/);
+    expect(text).toMatch(/setAttribute\('src'/);
+    expect(text).toMatch(/\.load\(\)/);
+  });
+
+  it("the hydration script also walks <source> children", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/querySelectorAll\('source'\)/);
+  });
+
+  it("the hydration script is one-shot per element", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/_fetchitHydrated/);
   });
 });
 
