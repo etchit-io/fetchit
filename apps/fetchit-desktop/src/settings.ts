@@ -358,7 +358,7 @@ function buildPage(): HTMLElement {
     </section>
     <section class="setting-group setting-group-about" id="group-about">
       <details class="setting-collapsible">
-        <summary><h2>About</h2></summary>
+        <summary><h2>About &amp; License</h2></summary>
         <p class="setting-desc">
           <strong>fetch&gt;it &mdash; beta software.</strong>
           Released under the
