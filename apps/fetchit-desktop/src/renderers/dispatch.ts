@@ -34,7 +34,7 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       // to the book reader if present; otherwise fall through to the
       // generic archive listing.
       if (archiveIsEpub(r.entries)) renderEpub(r, into, address);
-      else renderArchive(r, into);
+      else renderArchive(r, into, address);
       return;
     case "html":
       renderHtml(r, into, address);

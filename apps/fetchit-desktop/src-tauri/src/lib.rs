@@ -1,6 +1,7 @@
 //! Tauri backend for fetch>it desktop — a thin shell over `fetchit-core`
 //! (the handler engine) and `fetchit-net` (the Autonomi client).
 
+mod archive_extract;
 mod cache;
 mod disk_cache;
 mod protocol;
@@ -283,6 +284,7 @@ pub fn run() {
             peer_count,
             disconnect,
             fetch_and_render,
+            archive_extract::extract_archive_entry,
             log,
             open_devtools,
             media_url_base,
