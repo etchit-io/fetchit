@@ -40,8 +40,21 @@ class SettingsStore(context: Context) {
     /** `true` if the user has overridden the defaults. */
     fun hasOverride(): Boolean = prefs.contains(KEY_PEERS)
 
+    /** Persisted theme choice. Defaults to [Theme.Dark] when unset. */
+    fun theme(): Theme {
+        val name = prefs.getString(KEY_THEME, null) ?: return Theme.Dark
+        return Theme.fromId(name) ?: Theme.Dark
+    }
+
+    /** Persist [theme]. Caller is responsible for triggering an
+     *  `Activity.recreate()` so the new style takes effect. */
+    fun saveTheme(theme: Theme) {
+        prefs.edit().putString(KEY_THEME, theme.id).apply()
+    }
+
     private companion object {
         const val PREFS_NAME = "fetchit_settings"
         const val KEY_PEERS = "bootstrap_peers"
+        const val KEY_THEME = "theme"
     }
 }

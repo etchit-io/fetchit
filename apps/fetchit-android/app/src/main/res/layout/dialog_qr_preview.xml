@@ -4,7 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:background="@color/bone"
+    android:background="?attr/fetchitBone"
     android:paddingLeft="20dp"
     android:paddingRight="20dp"
     android:paddingTop="20dp"
@@ -21,7 +21,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="fetch"
-            android:textColor="@color/ink"
+            android:textColor="?attr/fetchitInk"
             android:textStyle="bold"
             android:textSize="18sp"
             android:fontFamily="monospace" />
@@ -29,7 +29,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="&gt;"
-            android:textColor="@color/copper"
+            android:textColor="?attr/fetchitCopper"
             android:textStyle="bold"
             android:textSize="18sp"
             android:fontFamily="monospace" />
@@ -37,7 +37,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="it"
-            android:textColor="@color/ink"
+            android:textColor="?attr/fetchitInk"
             android:textStyle="bold"
             android:textSize="18sp"
             android:fontFamily="monospace" />
@@ -59,7 +59,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
         android:fontFamily="monospace"
-        android:textColor="@color/ash"
+        android:textColor="?attr/fetchitAsh"
         android:textSize="11sp"
         android:textIsSelectable="true"
         android:gravity="center"
@@ -115,7 +115,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
         android:text="@string/qr_preview_footer"
-        android:textColor="@color/ash"
+        android:textColor="?attr/fetchitAsh"
         android:textSize="11sp"
         android:gravity="center" />
 

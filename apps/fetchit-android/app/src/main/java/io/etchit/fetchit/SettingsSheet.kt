@@ -3,7 +3,6 @@ package io.etchit.fetchit
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.flow.collectLatest
@@ -32,7 +31,32 @@ class SettingsSheet(
         binding.savePeersButton.setOnClickListener { onSaveClicked() }
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
+        bindThemePicker()
         observePeerCount()
+    }
+
+    private fun bindThemePicker() {
+        val current = store.theme()
+        val buttons = mapOf(
+            Theme.Dark to binding.themeDarkButton,
+            Theme.Dim to binding.themeDimButton,
+            Theme.Light to binding.themeLightButton,
+        )
+        val copper = activity.themeColor(R.attr.fetchitCopper)
+        val ink = activity.themeColor(R.attr.fetchitInk)
+        val ink3 = activity.themeColor(R.attr.fetchitInk3)
+        val ash = activity.themeColor(R.attr.fetchitAsh)
+        buttons.forEach { (theme, btn) ->
+            val selected = theme == current
+            btn.backgroundTintList =
+                android.content.res.ColorStateList.valueOf(if (selected) copper else ink3)
+            btn.setTextColor(if (selected) ink else ash)
+            btn.setOnClickListener {
+                if (theme == store.theme()) return@setOnClickListener
+                store.saveTheme(theme)
+                activity.recreate()
+            }
+        }
     }
 
     /** Read the current saved peer list (delegates to the store). */
@@ -51,17 +75,17 @@ class SettingsSheet(
             count == null -> {
                 binding.peerCountText.text =
                     activity.getString(R.string.settings_peer_count_disconnected)
-                binding.peerCountText.setTextColor(color(R.color.ash))
+                binding.peerCountText.setTextColor(activity.themeColor(R.attr.fetchitAsh))
             }
             count == 0L -> {
                 binding.peerCountText.text =
                     activity.getString(R.string.settings_peer_count_value, 0L)
-                binding.peerCountText.setTextColor(color(R.color.status_red))
+                binding.peerCountText.setTextColor(activity.themeColor(R.attr.fetchitRust))
             }
             else -> {
                 binding.peerCountText.text =
                     activity.getString(R.string.settings_peer_count_value, count)
-                binding.peerCountText.setTextColor(color(R.color.status_green))
+                binding.peerCountText.setTextColor(activity.themeColor(R.attr.fetchitSignalOk))
             }
         }
     }
@@ -91,9 +115,6 @@ class SettingsSheet(
         activity.fetchitApp().disconnect()
         toast(R.string.settings_reset)
     }
-
-    private fun color(@androidx.annotation.ColorRes id: Int): Int =
-        ContextCompat.getColor(activity, id)
 
     private fun toast(@androidx.annotation.StringRes msg: Int) {
         Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()

@@ -117,6 +117,10 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Apply the persisted theme BEFORE setContentView; Android resolves
+        // theme attributes at inflation time, so a theme switch elsewhere
+        // calls Activity.recreate() and lands here on the new choice.
+        setTheme(SettingsStore(this).theme().styleRes)
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -173,8 +177,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         // Pull-down-from-top: full reset to the idle screen — clear
         // the address input, dismiss any rendition, restore the fetch
         // button. Lighter than ✕ + manual address-clear.
-        binding.swipeRefresh.setColorSchemeResources(R.color.copper)
-        binding.swipeRefresh.setProgressBackgroundColorSchemeResource(R.color.ink_3)
+        binding.swipeRefresh.setColorSchemeColors(themeColor(R.attr.fetchitCopper))
+        binding.swipeRefresh.setProgressBackgroundColorSchemeColor(themeColor(R.attr.fetchitInk3))
         binding.swipeRefresh.setOnRefreshListener { resetToIdle() }
 
         onBackPressedDispatcher.addCallback(this, backCallback)

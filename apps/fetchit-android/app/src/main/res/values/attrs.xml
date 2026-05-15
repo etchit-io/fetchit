@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Theme-bound color attributes. Each Theme.Fetchit.* style supplies a
+  per-theme value. Layouts and drawables reference these via ?attr/...
+  so a theme switch (Activity.recreate()) re-resolves to the new palette.
+  Names mirror the desktop CSS variables for cross-app readability;
+  see docs/BRAND.md for the canonical role/value mapping.
+-->
+<resources>
+    <attr name="fetchitInk"          format="color" />
+    <attr name="fetchitInk2"         format="color" />
+    <attr name="fetchitInk3"         format="color" />
+    <attr name="fetchitLine"         format="color" />
+    <attr name="fetchitBone"         format="color" />
+    <attr name="fetchitBoneDim"      format="color" />
+    <attr name="fetchitAsh"          format="color" />
+    <attr name="fetchitCopper"       format="color" />
+    <attr name="fetchitCopperBright" format="color" />
+    <attr name="fetchitRust"         format="color" />
+    <attr name="fetchitSignalOk"     format="color" />
+</resources>

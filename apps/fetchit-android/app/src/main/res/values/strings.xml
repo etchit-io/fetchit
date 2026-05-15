@@ -92,4 +92,10 @@
     <string name="settings_reset_peers">reset</string>
     <string name="settings_saved">saved — next fetch will reconnect</string>
     <string name="settings_reset">reset to defaults — next fetch will reconnect</string>
+
+    <!-- Appearance / theme picker (settings sheet) -->
+    <string name="settings_appearance_title">appearance</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_theme_dim">Dim</string>
+    <string name="settings_theme_light">Light</string>
 </resources>

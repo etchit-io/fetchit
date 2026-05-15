@@ -5,7 +5,7 @@
     android:id="@+id/rootCoordinator"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/ink">
+    android:background="?attr/fetchitInk">
 
     <!-- Main content. SwipeRefreshLayout wraps the inner constraint
          layout so pulling down from the top re-runs the last fetch. -->
@@ -28,8 +28,8 @@
             android:inputType="text"
             android:imeOptions="actionGo"
             android:maxLines="1"
-            android:textColor="@color/bone"
-            android:textColorHint="@color/ash"
+            android:textColor="?attr/fetchitBone"
+            android:textColorHint="?attr/fetchitAsh"
             android:fontFamily="monospace"
             android:textSize="13sp"
             app:layout_constraintEnd_toStartOf="@+id/scanButton"
@@ -41,9 +41,9 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="⌖"
-            android:textColor="@color/copper"
+            android:textColor="?attr/fetchitCopper"
             android:textSize="20sp"
-            android:backgroundTint="@color/ink_3"
+            android:backgroundTint="?attr/fetchitInk3"
             android:contentDescription="@string/scan_qr_button_label"
             android:minWidth="44dp"
             android:layout_marginStart="6dp"
@@ -56,9 +56,9 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="★"
-            android:textColor="@color/copper"
+            android:textColor="?attr/fetchitCopper"
             android:textSize="18sp"
-            android:backgroundTint="@color/ink_3"
+            android:backgroundTint="?attr/fetchitInk3"
             android:contentDescription="@string/bookmark_button_label"
             android:minWidth="44dp"
             android:layout_marginStart="6dp"
@@ -76,7 +76,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
             android:padding="10dp"
-            android:textColor="@color/copper_bright"
+            android:textColor="?attr/fetchitCopperBright"
             android:fontFamily="monospace"
             android:textSize="11sp"
             android:gravity="center"
@@ -109,7 +109,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:textColor="@color/ash"
+            android:textColor="?attr/fetchitAsh"
             android:fontFamily="monospace"
             android:textSize="11sp"
             android:gravity="center"
@@ -125,7 +125,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:textColor="@color/copper"
+            android:textColor="?attr/fetchitCopper"
             android:fontFamily="monospace"
             android:textSize="12sp"
             app:layout_constraintEnd_toEndOf="parent"
@@ -148,7 +148,7 @@
                 android:id="@+id/contentText"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textColor="@color/bone"
+                android:textColor="?attr/fetchitBone"
                 android:fontFamily="monospace"
                 android:textSize="12sp"
                 android:textIsSelectable="true"
@@ -216,7 +216,7 @@
             android:layout_marginStart="12dp"
             android:layout_marginEnd="12dp"
             android:visibility="gone"
-            android:background="@color/ink_2"
+            android:background="?attr/fetchitInk2"
             app:show_buffering="when_playing"
             app:auto_show="true"
             app:resize_mode="fit"
@@ -248,8 +248,8 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="@string/action_open_with"
-                android:backgroundTint="@color/copper"
-                android:textColor="@color/ink" />
+                android:backgroundTint="?attr/fetchitCopper"
+                android:textColor="?attr/fetchitInk" />
 
             <Button
                 android:id="@+id/saveButton"
@@ -258,8 +258,8 @@
                 android:layout_weight="1"
                 android:layout_marginStart="6dp"
                 android:text="@string/action_save"
-                android:backgroundTint="@color/ink_3"
-                android:textColor="@color/copper" />
+                android:backgroundTint="?attr/fetchitInk3"
+                android:textColor="?attr/fetchitCopper" />
         </LinearLayout>
 
         <!-- Share-current-rendition (↗): visible only while content is
@@ -270,7 +270,7 @@
             android:layout_width="40dp"
             android:layout_height="40dp"
             android:text="↗"
-            android:textColor="@color/ash"
+            android:textColor="?attr/fetchitAsh"
             android:textSize="18sp"
             android:backgroundTint="@android:color/transparent"
             android:padding="0dp"
@@ -292,7 +292,7 @@
             android:layout_width="40dp"
             android:layout_height="40dp"
             android:text="✕"
-            android:textColor="@color/ash"
+            android:textColor="?attr/fetchitAsh"
             android:textSize="18sp"
             android:backgroundTint="@android:color/transparent"
             android:padding="0dp"
@@ -317,7 +317,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:background="@color/ink_2"
+        android:background="?attr/fetchitInk2"
         app:layout_behavior="com.google.android.material.bottomsheet.BottomSheetBehavior"
         app:behavior_peekHeight="36dp"
         app:behavior_hideable="false">
@@ -334,12 +334,61 @@
             android:padding="16dp"
             android:paddingTop="0dp">
 
+            <!-- Appearance — three-theme picker, persists + recreates the
+                 Activity so the new style applies immediately. -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_appearance_title"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <Button
+                    android:id="@+id/themeDarkButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/settings_theme_dark" />
+
+                <Button
+                    android:id="@+id/themeDimButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:text="@string/settings_theme_dim" />
+
+                <Button
+                    android:id="@+id/themeLightButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:text="@string/settings_theme_light" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="16dp"
+                android:background="?attr/fetchitInk3" />
+
             <!-- Network — always visible, live count -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
                 android:text="@string/settings_peer_count_title"
-                android:textColor="@color/ash"
+                android:textColor="?attr/fetchitAsh"
                 android:fontFamily="monospace"
                 android:textSize="11sp"
                 android:textAllCaps="true"
@@ -350,7 +399,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:textColor="@color/ash"
+                android:textColor="?attr/fetchitAsh"
                 android:fontFamily="monospace"
                 android:textSize="16sp" />
 
@@ -358,7 +407,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
                 android:layout_marginTop="16dp"
-                android:background="@color/ink_3" />
+                android:background="?attr/fetchitInk3" />
 
             <!-- Bootstrap peers — collapsible. Header tap toggles body. -->
             <TextView
@@ -368,7 +417,7 @@
                 android:paddingTop="14dp"
                 android:paddingBottom="14dp"
                 android:text="@string/settings_peers_header_collapsed"
-                android:textColor="@color/ash"
+                android:textColor="?attr/fetchitAsh"
                 android:fontFamily="monospace"
                 android:textSize="11sp"
                 android:textAllCaps="true"
@@ -388,7 +437,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="@string/settings_peers_help"
-                    android:textColor="@color/ash"
+                    android:textColor="?attr/fetchitAsh"
                     android:fontFamily="monospace"
                     android:textSize="11sp" />
 
@@ -400,11 +449,11 @@
                     android:minLines="6"
                     android:gravity="top"
                     android:inputType="textMultiLine"
-                    android:textColor="@color/bone"
-                    android:textColorHint="@color/ash"
+                    android:textColor="?attr/fetchitBone"
+                    android:textColorHint="?attr/fetchitAsh"
                     android:fontFamily="monospace"
                     android:textSize="12sp"
-                    android:background="@color/ink_3"
+                    android:background="?attr/fetchitInk3"
                     android:padding="8dp" />
 
                 <LinearLayout
@@ -420,8 +469,8 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:text="@string/settings_reset_peers"
-                        android:backgroundTint="@color/ink_3"
-                        android:textColor="@color/copper" />
+                        android:backgroundTint="?attr/fetchitInk3"
+                        android:textColor="?attr/fetchitCopper" />
 
                     <Button
                         android:id="@+id/savePeersButton"
@@ -430,8 +479,8 @@
                         android:layout_weight="1"
                         android:layout_marginStart="6dp"
                         android:text="@string/settings_save_peers"
-                        android:backgroundTint="@color/copper"
-                        android:textColor="@color/ink" />
+                        android:backgroundTint="?attr/fetchitCopper"
+                        android:textColor="?attr/fetchitInk" />
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>

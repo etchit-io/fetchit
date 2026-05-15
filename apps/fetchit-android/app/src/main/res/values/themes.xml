@@ -1,12 +1,70 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Fetchit" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:statusBarColor">@color/ink</item>
-        <item name="android:navigationBarColor">@color/ink</item>
-        <item name="android:windowBackground">@color/ink</item>
-        <item name="colorPrimary">@color/copper</item>
-        <item name="colorOnPrimary">@color/ink</item>
-        <item name="colorSecondary">@color/copper_bright</item>
+    <!--
+      Base theme — shared style + attributes that don't change per palette.
+      Each concrete Theme.Fetchit.* descendant supplies the per-theme color
+      attribute values. MainActivity picks one in onCreate() before
+      setContentView based on the persisted user choice; switching theme at
+      runtime calls Activity.recreate() so a new Theme.Fetchit.* is applied.
+    -->
+    <style name="Theme.Fetchit.Base" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">?attr/fetchitCopper</item>
+        <item name="colorOnPrimary">?attr/fetchitInk</item>
+        <item name="colorSecondary">?attr/fetchitCopperBright</item>
+        <item name="android:statusBarColor">?attr/fetchitInk</item>
+        <item name="android:navigationBarColor">?attr/fetchitInk</item>
+        <item name="android:windowBackground">?attr/fetchitInk</item>
+    </style>
+
+    <!-- Theme 1 / Dark — brand-bible canonical. Default. -->
+    <style name="Theme.Fetchit.Dark" parent="Theme.Fetchit.Base">
+        <item name="fetchitInk">#0a0a0a</item>
+        <item name="fetchitInk2">#141414</item>
+        <item name="fetchitInk3">#1a1a1a</item>
+        <item name="fetchitLine">#222222</item>
+        <item name="fetchitBone">#f5f2eb</item>
+        <item name="fetchitBoneDim">#d6cfc0</item>
+        <item name="fetchitAsh">#8a8a8a</item>
+        <item name="fetchitCopper">#c9732b</item>
+        <item name="fetchitCopperBright">#e58a3f</item>
+        <item name="fetchitRust">#ff8a7a</item>
+        <item name="fetchitSignalOk">#6ab04c</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <!-- Theme 2 / Dim — warm-ink mid-tone; softer than full dark. -->
+    <style name="Theme.Fetchit.Dim" parent="Theme.Fetchit.Base">
+        <item name="fetchitInk">#1a1612</item>
+        <item name="fetchitInk2">#221d18</item>
+        <item name="fetchitInk3">#2a241e</item>
+        <item name="fetchitLine">#2a2520</item>
+        <item name="fetchitBone">#f5f2eb</item>
+        <item name="fetchitBoneDim">#e6dfd0</item>
+        <item name="fetchitAsh">#a09a90</item>
+        <item name="fetchitCopper">#c9732b</item>
+        <item name="fetchitCopperBright">#e58a3f</item>
+        <item name="fetchitRust">#ff8a7a</item>
+        <item name="fetchitSignalOk">#6ab04c</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- Theme 3 / Light — bone canvas, ink text (bible's inverted form). -->
+    <style name="Theme.Fetchit.Light" parent="Theme.Fetchit.Base">
+        <item name="fetchitInk">#f5f2eb</item>
+        <item name="fetchitInk2">#faf7f2</item>
+        <item name="fetchitInk3">#ffffff</item>
+        <item name="fetchitLine">#d6cfc0</item>
+        <item name="fetchitBone">#0a0a0a</item>
+        <item name="fetchitBoneDim">#1a1814</item>
+        <item name="fetchitAsh">#3a3a3a</item>
+        <item name="fetchitCopper">#c9732b</item>
+        <item name="fetchitCopperBright">#b86420</item>
+        <item name="fetchitRust">#c0392b</item>
+        <item name="fetchitSignalOk">#3d7e2c</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!-- Back-compat alias — AndroidManifest still points here at install
+         time; MainActivity overrides to the user's chosen theme on launch. -->
+    <style name="Theme.Fetchit" parent="Theme.Fetchit.Dark" />
 </resources>
