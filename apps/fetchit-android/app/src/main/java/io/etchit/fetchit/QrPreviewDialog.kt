@@ -1,5 +1,6 @@
 package io.etchit.fetchit
 
+import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -7,10 +8,11 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.view.LayoutInflater
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 
 /**
  * Show the in-app QR preview modal — the Android twin of the desktop
@@ -36,14 +38,20 @@ fun showQrPreviewDialog(context: Context, address: String, label: String? = null
     val copyUrl = view.findViewById<Button>(R.id.qr_copy_url)
     val shareImage = view.findViewById<Button>(R.id.qr_share_image)
     val shareText = view.findViewById<Button>(R.id.qr_share_text)
+    val closeBtn = view.findViewById<ImageButton>(R.id.qr_close)
 
     val payload = "autonomi://$address"
     qrImage.setImageBitmap(QrBitmap.renderQrWithLogo(payload, sizePx = 720))
     addrText.text = address
 
-    val dialog = AlertDialog.Builder(context)
-        .setView(view)
-        .create()
+    // Full-screen, brand-fixed cream surface — the share artifact reads
+    // identically regardless of which app theme is active, with no host
+    // background bleeding around it.
+    val dialog = Dialog(context, R.style.Theme_Fetchit_ShareDialog).apply {
+        setContentView(view)
+        window?.setLayout(MATCH_PARENT, MATCH_PARENT)
+    }
+    closeBtn.setOnClickListener { dialog.dismiss() }
 
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val copied = context.getString(R.string.qr_preview_copied)

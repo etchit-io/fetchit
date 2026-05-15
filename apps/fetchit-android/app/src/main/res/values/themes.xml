@@ -67,4 +67,19 @@
     <!-- Back-compat alias — AndroidManifest still points here at install
          time; MainActivity overrides to the user's chosen theme on launch. -->
     <style name="Theme.Fetchit" parent="Theme.Fetchit.Dark" />
+
+    <!-- Full-screen brand-fixed share dialog (cream / ink / copper). Used
+         for the QR share preview so the host activity's theme can't bleed
+         around the share artifact — the share screen always reads as a
+         printed card regardless of which app theme is active. -->
+    <style name="Theme.Fetchit.ShareDialog" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowBackground">#f5f2eb</item>
+        <item name="android:statusBarColor">#f5f2eb</item>
+        <item name="android:navigationBarColor">#f5f2eb</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:windowIsFloating">false</item>
+    </style>
 </resources>
