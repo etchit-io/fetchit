@@ -21,10 +21,11 @@ describe("renderHtml", () => {
     expect(into.querySelector(".rendered-html > iframe")).toBeTruthy();
   });
 
-  it("enables only allow-scripts and allow-forms in sandbox", () => {
+  it("enables only allow-scripts, allow-forms, and allow-fullscreen in sandbox", () => {
     const sandbox = setup("<p>x</p>").getAttribute("sandbox") ?? "";
     expect(sandbox).toContain("allow-scripts");
     expect(sandbox).toContain("allow-forms");
+    expect(sandbox).toContain("allow-fullscreen");
     expect(sandbox).not.toContain("allow-same-origin");
     expect(sandbox).not.toContain("allow-top-navigation");
     expect(sandbox).not.toContain("allow-popups");
@@ -33,6 +34,10 @@ describe("renderHtml", () => {
 
   it("sets referrerpolicy=no-referrer", () => {
     expect(setup("").getAttribute("referrerpolicy")).toBe("no-referrer");
+  });
+
+  it("sets allowfullscreen so <video> can enter fullscreen", () => {
+    expect(setup("").hasAttribute("allowfullscreen")).toBe(true);
   });
 
   it("populates srcdoc with the rewritten HTML", () => {
