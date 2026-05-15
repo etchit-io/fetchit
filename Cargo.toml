@@ -4,14 +4,14 @@ members = [
     "crates/fetchit-net",
     "crates/fetchit-cli",
 ]
-exclude = ["crates/fetchit-ffi"]
+exclude = ["crates/fetchit-ffi", "apps/fetchit-desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
-license = "GPL-3.0-only"
+license = "AGPL-3.0-only"
 homepage = "https://github.com/etchit-io/fetchit"
 repository = "https://github.com/etchit-io/fetchit"
 authors = ["the fetch>it contributors"]

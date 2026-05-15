@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>fetch&gt;it</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <header id="bar">
+      <span id="mark">fetch<span>&gt;</span>it</span>
+      <input
+        id="addr"
+        type="text"
+        spellcheck="false"
+        autocomplete="off"
+        placeholder="Autonomi address"
+      />
+      <button id="go" type="button">fetch</button>
+      <button id="bookmark-toggle" type="button" title="Bookmark this address (Ctrl/Cmd+D)" aria-label="Bookmark" data-bookmarked="false">★</button>
+      <button id="share-toggle" type="button" title="Share QR (Ctrl/Cmd+Shift+S)" aria-label="Share QR">▦</button>
+      <button id="settings-toggle" type="button" title="Settings (Ctrl/Cmd+,)" aria-label="Settings">⚙</button>
+    </header>
+    <nav id="tabs" role="tablist" aria-label="Open documents" data-empty="true"></nav>
+    <div id="status"></div>
+    <main id="stage"></main>
+    <section id="settings" hidden aria-label="Settings"></section>
+    <section id="qr-modal" hidden></section>
+  </body>
+</html>

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@color/bone"
+    android:paddingLeft="20dp"
+    android:paddingRight="20dp"
+    android:paddingTop="20dp"
+    android:paddingBottom="20dp"
+    android:gravity="center_horizontal">
+
+    <!-- Header: fetch>it wordmark — copper chevron between ink fetch / it. -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="14dp"
+        android:orientation="horizontal">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="fetch"
+            android:textColor="@color/ink"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:fontFamily="monospace" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="&gt;"
+            android:textColor="@color/copper"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:fontFamily="monospace" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="it"
+            android:textColor="@color/ink"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:fontFamily="monospace" />
+    </LinearLayout>
+
+    <!-- QR — rendered into the ImageView at runtime (QrBitmap.renderQrWithLogo). -->
+    <ImageView
+        android:id="@+id/qr_image"
+        android:layout_width="280dp"
+        android:layout_height="280dp"
+        android:background="@android:color/white"
+        android:padding="8dp"
+        android:contentDescription="@string/qr_preview_qr_alt" />
+
+    <!-- Full 64-hex address, monospace, selectable. -->
+    <TextView
+        android:id="@+id/qr_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:fontFamily="monospace"
+        android:textColor="@color/ash"
+        android:textSize="11sp"
+        android:textIsSelectable="true"
+        android:gravity="center"
+        tools:text="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" />
+
+    <!-- Copy buttons. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:orientation="horizontal">
+        <Button
+            android:id="@+id/qr_copy_hex"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:text="@string/qr_preview_copy_address" />
+        <Button
+            android:id="@+id/qr_copy_url"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:text="@string/qr_preview_copy_url" />
+    </LinearLayout>
+
+    <!-- Share buttons — image (branded PNG card via QrShare) or plain text. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+        <Button
+            android:id="@+id/qr_share_image"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:text="@string/qr_preview_share_image" />
+        <Button
+            android:id="@+id/qr_share_text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:text="@string/qr_preview_share_text" />
+    </LinearLayout>
+
+    <!-- Brand footer. Matches the desktop modal's etchit.io copper accent. -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:text="@string/qr_preview_footer"
+        android:textColor="@color/ash"
+        android:textSize="11sp"
+        android:gravity="center" />
+
+</LinearLayout>

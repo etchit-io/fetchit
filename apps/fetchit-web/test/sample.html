@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>fetch&gt;it web — extension test page</title>
+  <style>
+    body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1814; }
+    h1 { margin: 0 0 0.25rem; }
+    h2 { margin-top: 1.75rem; font-size: 1.05rem; color: #4a4640; }
+    .lede { color: #4a4640; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+           background: #f5f1ea; padding: 1px 6px; border-radius: 3px; font-size: 0.9em; }
+    .row { padding: 0.6rem 0; border-bottom: 1px solid #eee; }
+    .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
+             color: #8a857d; font-weight: 600; margin-right: 0.5rem; }
+    a[href^="autonomi"] { color: #b87333; }
+    .async-mount { margin-top: 1rem; padding: 0.6rem; border: 1px dashed #b87333;
+                   border-radius: 4px; background: #fafafa; }
+  </style>
+</head>
+<body>
+  <h1>fetch&gt;it web — extension test page</h1>
+  <p class="lede">
+    Open this file in Chrome with the unpacked extension loaded. Each row
+    exercises one feature; expected behaviour is described inline.
+  </p>
+
+  <h2>1 · Decorated links</h2>
+  <p>
+    Each <code>autonomi://</code> anchor below should grow a small copper
+    <code>fetch&gt;it</code> badge to its right. Clicking the link should
+    prompt Chrome to open fetch&gt;it desktop.
+  </p>
+
+  <div class="row">
+    <span class="label">a</span>
+    <a href="autonomi://865503b9956f46d29d14886e32699926190a4028fc2a625947a1560c64044d7e">865503b9…64044d7e</a>
+  </div>
+  <div class="row">
+    <span class="label">b</span>
+    <a href="autonomi://9fc7d6d17895c7ed6840e9613ac9e0bd77f66038db1b97e15756fc2f6821330c">9fc7d6d1…6821330c</a>
+  </div>
+  <div class="row">
+    <span class="label">c</span>
+    <a href="autonomi://a69961e8985180023a88763d30efede2cbbfc969f4503c38bca2f90f30bc962f">a69961e8…30bc962f</a>
+  </div>
+  <div class="row">
+    <span class="label">d (uppercase scheme)</span>
+    <a href="AUTONOMI://dcbbd3e5bdc16a36923fab41a2f67430949dbdc998bac500ce1d75d35a7226c1">dcbbd3e5…5a7226c1 — should still get a badge</a>
+  </div>
+
+  <h2>2 · Right-click on a bare address</h2>
+  <p>
+    No <code>autonomi://</code> prefix on the address below — the badge
+    will <em>not</em> appear. Instead, select the whole hex string,
+    right-click, and choose <em>Open in fetch&gt;it</em>.
+  </p>
+  <p>
+    Sample address: <code>1cc6ddfdc4a54606e70c16619fa7f5f0bff47ca94be6e26ef1d57d6c8f383ccc</code>
+  </p>
+
+  <h2>3 · Async-injected link (MutationObserver check)</h2>
+  <p>
+    The link below appears 1.2 s after page load — simulating reading-room.com&rsquo;s
+    React hydrate. The extension&rsquo;s observer should pick it up and decorate it
+    after it lands.
+  </p>
+  <div class="async-mount" id="late"></div>
+
+  <h2>4 · Omnibox</h2>
+  <p>
+    Type <code>fetchit</code> in the URL bar, press <kbd>Tab</kbd>, paste this
+    address, hit Enter:
+    <br>
+    <code>3f4e80fde66423592bb6e03e1de767fb3bd4fb6d9b75be104edabfab052ee56c</code>
+  </p>
+
+  <h2>5 · Negative — should not decorate</h2>
+  <p>The link below is <em>not</em> an Autonomi address. No badge expected.</p>
+  <div class="row">
+    <a href="https://example.com/">plain https link</a>
+  </div>
+  <div class="row">
+    <a href="autonomi://not-a-valid-address">autonomi:// with non-hex body — no badge expected</a>
+  </div>
+
+  <script>
+    // Mounts the row in section 3 after a short delay so the extension's
+    // MutationObserver has to pick it up post-load.
+    setTimeout(() => {
+      const wrap = document.getElementById("late");
+      if (!wrap) return;
+      wrap.innerHTML = `
+        <span class="label">async</span>
+        <a href="autonomi://f8da7d9d4514a2534e37198766f786862d5e4ba387780129e708311febfb793a">f8da7d9d…febfb793a — should grow a badge a moment after this paragraph renders</a>
+      `;
+    }, 1200);
+  </script>
+</body>
+</html>

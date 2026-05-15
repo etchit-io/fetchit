@@ -20,9 +20,15 @@ makes the full Fetch API work over content-addressed URLs), see
 
 ## Status
 
-`0.2.0`. The Android shell builds and runs end-to-end against the live
-Autonomi network — the [`docs/USING.md`](docs/USING.md) guide describes
-what it currently does. CLI compiles.
+`0.2.0` — **beta**. The Android shell builds and runs end-to-end against
+the live Autonomi network — the [`docs/USING.md`](docs/USING.md) guide
+describes what it currently does. CLI compiles. Desktop (Tauri 2) is in
+active development on the `fetchit-desktop` branch.
+
+**Dual-licensed.** Open-source under [`AGPL-3.0-only`](LICENSE);
+a commercial license is available for closed-source / proprietary use
+(see [`COMMERCIAL.md`](COMMERCIAL.md)). Provided *as-is*, no warranty,
+no liability — see sections 15 & 16 of the AGPL.
 
 ## Layout
 
@@ -45,7 +51,7 @@ fetchit/
 ├── .github/workflows/               # CI (fmt/clippy/test) + release (signed APK)
 ├── CONTRIBUTING.md                  # DCO, quality bar
 ├── RELEASING.md                     # one-time keystore setup + per-release flow
-└── LICENSE                          # GPL-3.0-only
+└── LICENSE                          # AGPL-3.0-only (+ commercial — see COMMERCIAL.md)
 ```
 
 `fetchit-ffi` lives outside the main Cargo workspace by deliberate choice
@@ -74,13 +80,29 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 For signed release builds, see [`RELEASING.md`](RELEASING.md).
 
+## Security
+
+Threat model, sandbox architecture, per-vector defenses, and pointers
+to what's worth reading if you want to verify any of it yourself live
+in [`docs/SECURITY.md`](docs/SECURITY.md). Vulnerabilities should be
+reported privately via GitHub security advisories (see that doc for
+the link), not as public issues.
+
 ## License
 
-[`GPL-3.0-only`](LICENSE) across the workspace. fetch>it ships as
-free software with strong copyleft. Embedding into closed-source
-applications via direct linking is not supported — use the CLI, the
-Android intent surface, or (when it lands) the WASM build via process-
-boundary integration.
+fetch>it is **dual-licensed**:
+
+- [`AGPL-3.0-only`](LICENSE) for open-source / community use. Strong
+  copyleft including the "network use" trigger — if you run a modified
+  version as a network service, the source must be available to its
+  users.
+- A separate **commercial license** for closed-source / proprietary
+  embedding. See [`COMMERCIAL.md`](COMMERCIAL.md) for the option and
+  contact path.
+
+Either license stands alone — you do not need both. Choose whichever
+fits your use. Contributions are accepted under terms that allow the
+project to offer both tracks; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Family
 

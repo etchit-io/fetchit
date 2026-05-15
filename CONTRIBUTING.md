@@ -3,17 +3,31 @@
 Thanks for taking the time. fetch>it is small and tries to stay that
 way; the handler trait is the seam where new work lands.
 
-## Sign-off (DCO)
+## Licensing of contributions
 
-Every commit must carry a `Signed-off-by:` trailer. This certifies you
-have the right to submit the change under the project's license
-(GPL-3.0-only). git does this automatically with `-s`:
+fetch>it is **dual-licensed** under [`AGPL-3.0-only`](LICENSE) and a
+separate commercial license (see [`COMMERCIAL.md`](COMMERCIAL.md)). To
+keep both tracks coherent, contributions must be licensable under both.
+
+### Sign-off (DCO)
+
+Every commit carries a `Signed-off-by:` trailer certifying you have the
+right to submit the change. git does this with `-s`:
 
 ```bash
 git commit -s -m "your message"
 ```
 
-There is no separate CLA. The DCO trailer is the agreement.
+### Contributor License Agreement (CLA)
+
+Before your first PR is merged, you'll be asked to confirm a short CLA:
+you keep copyright of your contribution, license it to the project
+under the AGPL, *and* grant the project the right to also offer it
+under the commercial track. The CLA does not transfer ownership; it
+just lets the project maintain both license offerings consistently.
+
+If the CLA is a hard no for you, that's understandable — please open an
+issue describing the change and a maintainer will pick it up.
 
 ## Quality bar
 

@@ -1,7 +1,8 @@
 # Third-Party Licenses
 
-fetch>it is GPL-3.0. It builds on, and ships, the following open-source
-work. This lists the significant components; the full transitive
+fetch>it is dual-licensed under AGPL-3.0-only and a separate commercial
+license (see `COMMERCIAL.md`). It builds on, and ships, the following
+open-source work. This lists the significant components; the full transitive
 dependency set and exact license texts are in `Cargo.lock` (Rust) and
 the resolved Gradle dependency tree (Android), and in each project's own
 LICENSE.
