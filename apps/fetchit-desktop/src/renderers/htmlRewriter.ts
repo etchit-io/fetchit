@@ -86,6 +86,7 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripMetaRefresh(doc);
   stripAnchorPing(doc);
   injectNeuterScript(doc);
+  injectUrlRewriter(doc, mediaBase);
   rewriteMediaSrc(doc, mediaBase);
   rewriteImageSrc(doc, mediaBase);
   injectMediaHydration(doc);
@@ -336,6 +337,135 @@ function injectMediaHydration(doc: Document): void {
   const s = doc.createElement("script");
   s.textContent = MEDIA_HYDRATION;
   doc.body.appendChild(s);
+}
+
+// Runtime URL rewriter for resources the parse-time pass can't reach.
+//
+// The parse-time `rewriteImageSrc` / `rewriteMediaSrc` only see DOM in
+// the initial HTML markup. SPAs that build elements at runtime —
+// `var img = new Image(); img.src = "autonomi://X"` is the canonical
+// case, used by demo-city's gallery — go around those rewriters and hit
+// the WebView with a raw `autonomi://` URL. WebKit (Mac, Linux) honours
+// our registered custom URI scheme handler for any subresource, so the
+// raw URL works. Chromium-based WebView2 (Windows) rejects custom
+// schemes as subresources with `ERR_UNKNOWN_URL_SCHEME`, so we need to
+// rewrite at the JS layer too.
+//
+// Strategy: monkeypatch the property setters and `setAttribute` paths
+// that load subresources. Each setter wraps the original so the
+// browser sees the localhost media-server URL instead of the
+// `autonomi://` one. Anchor `href` is deliberately NOT patched —
+// clicks on `<a href="autonomi://X">` must keep the scheme so the
+// top-level protocol handler / link interceptor takes them as a
+// navigation, not a subresource fetch.
+//
+// URL form `autonomi://A/B` (gallery sets relative `<hash>` and the
+// `<base href="autonomi://<page>/">` resolves it) takes the path as
+// the address when both look 64-hex — matches the desktop protocol
+// handler's resolution in `src-tauri/src/protocol.rs`.
+function buildUrlRewriter(mediaBase: string): string {
+  return `
+(function () {
+  var MEDIA = ${JSON.stringify(mediaBase)};
+  var ONE   = /^(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/i;
+  var MANY  = /\\b(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/gi;
+
+  function rewrite(url) {
+    if (typeof url !== 'string') return url;
+    var m = ONE.exec(url);
+    if (!m) return url;
+    return MEDIA + '/' + (m[2] || m[1]).toLowerCase();
+  }
+  function rewriteSrcset(srcset) {
+    if (typeof srcset !== 'string') return srcset;
+    return srcset.replace(MANY, function (_, host, path) {
+      return MEDIA + '/' + (path || host).toLowerCase();
+    });
+  }
+  function patch(proto, name, transform) {
+    if (!proto) return;
+    var desc = Object.getOwnPropertyDescriptor(proto, name);
+    if (!desc || !desc.set) return;
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: desc.get,
+      set: function (value) { desc.set.call(this, transform(value)); }
+    });
+  }
+
+  // Property setters — \`el.src = url\` and friends.
+  patch(window.HTMLImageElement  && HTMLImageElement.prototype,  'src',    rewrite);
+  patch(window.HTMLImageElement  && HTMLImageElement.prototype,  'srcset', rewriteSrcset);
+  patch(window.HTMLSourceElement && HTMLSourceElement.prototype, 'src',    rewrite);
+  patch(window.HTMLSourceElement && HTMLSourceElement.prototype, 'srcset', rewriteSrcset);
+  patch(window.HTMLScriptElement && HTMLScriptElement.prototype, 'src',    rewrite);
+  patch(window.HTMLLinkElement   && HTMLLinkElement.prototype,   'href',   rewrite);
+  patch(window.HTMLMediaElement  && HTMLMediaElement.prototype,  'src',    rewrite);
+
+  // Attribute API — \`el.setAttribute('src', url)\` and friends.
+  var origSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    var n = (name || '').toLowerCase();
+    if (n === 'src') {
+      value = rewrite(value);
+    } else if (n === 'srcset') {
+      value = rewriteSrcset(value);
+    } else if (n === 'href' && this.tagName === 'LINK') {
+      // <link rel="stylesheet" href="…"> et al. (NOT <a href> — those
+      // route through the link interceptor as top-level navigations.)
+      value = rewrite(value);
+    }
+    return origSetAttribute.call(this, name, value);
+  };
+
+  // fetch() — runtime data loads.
+  if (window.fetch) {
+    var origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      if (typeof input === 'string') {
+        return origFetch(rewrite(input), init);
+      }
+      if (input && typeof input.url === 'string') {
+        var nu = rewrite(input.url);
+        if (nu !== input.url) input = new Request(nu, input);
+      }
+      return origFetch(input, init);
+    };
+  }
+
+  // XMLHttpRequest — older-style data loads.
+  if (window.XMLHttpRequest) {
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      arguments[1] = rewrite(url);
+      return origOpen.apply(this, arguments);
+    };
+  }
+})();
+`.trim();
+}
+
+function injectUrlRewriter(doc: Document, mediaBase: string): void {
+  const s = doc.createElement("script");
+  s.textContent = buildUrlRewriter(mediaBase);
+  // Slot in directly after the neuter script. The two together must
+  // sit before any author script in the document so SPAs see patched
+  // globals + neutered APIs from the very first JS that runs.
+  // Identifying the neuter by its content marker avoids confusing it
+  // with author-side <script>s already present in the input head.
+  const neuter = Array.from(doc.head.querySelectorAll("script")).find((sc) =>
+    sc.textContent?.includes("RTCPeerConnection"),
+  );
+  if (neuter) {
+    if (neuter.nextSibling) doc.head.insertBefore(s, neuter.nextSibling);
+    else doc.head.appendChild(s);
+  } else {
+    // Defensive fallback — neuter should always be present, but if it
+    // isn't, anchoring to head's start still puts the rewriter ahead
+    // of any author scripts.
+    doc.head.insertBefore(s, doc.head.firstChild);
+  }
 }
 
 function injectLinkInterceptor(doc: Document): void {

@@ -414,6 +414,116 @@ describe("rewriteHtml — injects the media hydration script", () => {
   });
 });
 
+describe("rewriteHtml — runtime URL rewriter (dynamic resource loads)", () => {
+  // `rewriteSrcset` is unique to the URL rewriter; the neuter script
+  // also uses `Object.defineProperty` (to lock APIs) so we can't use
+  // that as the discriminator.
+  function rewriterScript(html: string): HTMLScriptElement | null {
+    const scripts = parse(html).head.querySelectorAll("script");
+    return (Array.from(scripts).find((s) =>
+      s.textContent?.includes("rewriteSrcset"),
+    ) ?? null) as HTMLScriptElement | null;
+  }
+
+  it("injects a rewriter script in <head> (runs before any author script)", () => {
+    const out = rewriteHtml(`<html><head></head><body></body></html>`);
+    expect(rewriterScript(out)).toBeTruthy();
+  });
+
+  it("the script names the configured media base", () => {
+    const out = rewriteHtml(`<html></html>`);
+    const text = rewriterScript(out)?.textContent ?? "";
+    expect(text).toContain(JSON.stringify(MEDIA_BASE));
+  });
+
+  it("patches HTMLImageElement.src so dynamic `img.src = autonomi://…` is rewritten", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLImageElement\.prototype.*'src'/s);
+  });
+
+  it("patches HTMLImageElement.srcset (responsive images set at runtime)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLImageElement\.prototype.*'srcset'/s);
+  });
+
+  it("patches HTMLMediaElement.src (dynamic audio.src / video.src — the lab-page exhibits)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLMediaElement\.prototype.*'src'/s);
+  });
+
+  it("patches HTMLLinkElement.href (dynamic stylesheet loads) but NOT anchor href", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLLinkElement\.prototype.*'href'/s);
+    expect(text).not.toMatch(/HTMLAnchorElement/);
+  });
+
+  it("wraps window.fetch so fetch('autonomi://…') (gallery, lab text, WASM) is rewritten", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/window\.fetch\s*=\s*function/);
+  });
+
+  it("wraps XMLHttpRequest.open for older code paths", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/XMLHttpRequest\.prototype\.open/);
+  });
+
+  it("intercepts setAttribute for 'src' and 'srcset' (attribute-API path)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/Element\.prototype\.setAttribute\s*=/);
+    expect(text).toMatch(/'src'/);
+    expect(text).toMatch(/'srcset'/);
+  });
+
+  it("only intercepts setAttribute('href', …) for <link>, NOT for <a> (navigation must stay autonomi://)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/tagName\s*===\s*'LINK'/);
+  });
+
+  // Behavioural — actually run the rewriter logic in jsdom and verify
+  // it rewrites correctly. We re-use the same regex/transform that the
+  // injected script uses so a regression in the URL parser would show
+  // up as a unit test failure here, not just an integration failure.
+  it("behavioural: rewrites autonomi://<addr> to media-base URL", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    // The script defines a `rewrite` function inside an IIFE; eval the
+    // body but expose `rewrite` for assertion.
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite, rewriteSrcset: rewriteSrcset };
+    `)();
+    expect(probe.rewrite(`autonomi://${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(probe.rewrite(`fetchit://${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(probe.rewrite("https://example.com")).toBe("https://example.com");
+    expect(probe.rewrite("autonomi://not-hex-not-64")).toBe("autonomi://not-hex-not-64");
+  });
+
+  it("behavioural: autonomi://<page>/<address> — path wins (matches protocol.rs)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite };
+    `)();
+    // Demo-city gallery case: base href is autonomi://<gallery>/, JS sets
+    // img.src = "<image-hash>" → resolves to autonomi://<gallery>/<image>.
+    // The image hash (path) is the address we actually want.
+    const PAGE = "a".repeat(64);
+    const IMG = "b".repeat(64);
+    expect(probe.rewrite(`autonomi://${PAGE}/${IMG}`)).toBe(`${MEDIA_BASE}/${IMG}`);
+  });
+
+  it("behavioural: srcset rewriter handles comma-separated entries", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewriteSrcset: rewriteSrcset };
+    `)();
+    const ADDR_B = "f".repeat(64);
+    expect(probe.rewriteSrcset(`autonomi://${ADDR} 1x, autonomi://${ADDR_B} 2x`)).toBe(
+      `${MEDIA_BASE}/${ADDR} 1x, ${MEDIA_BASE}/${ADDR_B} 2x`,
+    );
+  });
+});
+
 describe("rewriteHtml — injects the neuter script", () => {
   it("inserts a pre-script that locks RTCPeerConnection and friends", () => {
     const out = rewriteHtml("<html><body>x</body></html>");
@@ -434,9 +544,12 @@ describe("rewriteHtml — injects the neuter script", () => {
       `<html><head><script>window.spa = 1;</script></head><body>x</body></html>`,
     );
     const headScripts = Array.from(parse(out).head.querySelectorAll("script"));
-    // First script in head must be ours (contains RTCPeerConnection); the
-    // SPA's `window.spa = 1` script comes after.
+    // Order: neuter (API lockdown), then URL rewriter (subresource
+    // scheme normalisation), then any author scripts. Both injected
+    // scripts must run before `window.spa = 1` so the SPA sees the
+    // patched globals from the start.
     expect(headScripts[0]?.textContent ?? "").toContain("RTCPeerConnection");
-    expect(headScripts[1]?.textContent ?? "").toContain("window.spa");
+    expect(headScripts[1]?.textContent ?? "").toContain("rewriteSrcset");
+    expect(headScripts[2]?.textContent ?? "").toContain("window.spa");
   });
 });
