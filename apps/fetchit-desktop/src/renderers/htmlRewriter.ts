@@ -62,7 +62,7 @@ function buildCsp(mediaBase: string): string {
     "default-src 'self' fetchit: autonomi:",
     "script-src 'self' fetchit: autonomi: 'unsafe-inline' 'unsafe-eval'",
     "style-src 'self' fetchit: autonomi: 'unsafe-inline'",
-    "img-src 'self' fetchit: autonomi: data: blob:",
+    `img-src 'self' fetchit: autonomi: data: blob: ${mediaBase}`,
     `media-src 'self' fetchit: autonomi: data: blob: ${mediaBase}`,
     "font-src 'self' fetchit: autonomi: data:",
     `connect-src 'self' fetchit: autonomi: ${mediaBase}`,
@@ -87,6 +87,7 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripAnchorPing(doc);
   injectNeuterScript(doc);
   rewriteMediaSrc(doc, mediaBase);
+  rewriteImageSrc(doc, mediaBase);
   injectMediaHydration(doc);
   injectLinkInterceptor(doc);
   return `<!doctype html>\n${doc.documentElement.outerHTML}`;
@@ -234,10 +235,53 @@ function rewriteMediaSrc(doc: Document, mediaBase: string): void {
   }
 }
 
-// Lifts the deferred media src into place on first user interaction with the
-// element. Capture-phase listeners on the host element fire before the
-// in-shadow controls process the click, so play() has a real src by the time
-// it runs. Hydration is one-shot per element.
+// Same idea as `rewriteMediaSrc`, applied to `<img>` and `<picture><source>`.
+// WebKit (Mac, Linux) accepts `autonomi://` as an image subresource because
+// the registered custom URI scheme handler returns bytes with sniffed MIME.
+// Chromium-based WebView2 (Windows) rejects custom schemes for subresources
+// with `ERR_UNKNOWN_URL_SCHEME` — so we route images through the same
+// localhost HTTP media server already used for `<audio>` / `<video>`. The
+// server `infer::get`s the Content-Type (image/jpeg, image/png, …) so
+// rendering is identical to the protocol-handler path.
+//
+// `connect-src` and `img-src` both list `${mediaBase}` in `buildCsp` so
+// both `<img>` and `fetch()` paths are CSP-permitted.
+//
+// Note: this rewrites the DOM-visible `src` directly (not via a
+// `data-fetchit-src` stash like the media one). There's no equivalent of
+// the spurious-loadstart-spinner concern for `<img>` — images don't have
+// preload / play / loadstart UI surfaces in author scripts.
+function rewriteImageSrc(doc: Document, mediaBase: string): void {
+  const prefix = /^(?:fetchit|autonomi):\/\/([0-9a-fA-F]{64})/i;
+  for (const el of Array.from(doc.querySelectorAll("img[src]"))) {
+    const src = el.getAttribute("src") ?? "";
+    const m = prefix.exec(src);
+    if (!m) continue;
+    el.setAttribute("src", `${mediaBase}/${m[1].toLowerCase()}`);
+  }
+  // Responsive: <img srcset> + <picture><source srcset>. The query
+  // intentionally excludes `<audio>` / `<video>` <source>; those are
+  // covered above and srcset wouldn't apply to them anyway.
+  const srcsetRe = /\b(?:fetchit|autonomi):\/\/([0-9a-fA-F]{64})/gi;
+  for (const el of Array.from(doc.querySelectorAll("img[srcset], picture source[srcset]"))) {
+    const srcset = el.getAttribute("srcset") ?? "";
+    const rewritten = srcset.replace(srcsetRe, (_, addr) => `${mediaBase}/${addr.toLowerCase()}`);
+    if (rewritten !== srcset) el.setAttribute("srcset", rewritten);
+  }
+}
+
+// Lifts the deferred media src into place on first user interaction.
+// Two capture-phase listeners run in parallel:
+//
+//   1. Per-element on each <audio>/<video> — fires fine in WebKit
+//      (Mac, Linux), where the in-shadow controls let pointerdown
+//      bubble through to user-script handlers.
+//   2. Document-level — fires in Chromium-based WebView2 (Windows),
+//      where the native shadow-DOM controls consume the per-element
+//      pointerdown before any user-script listener sees it.
+//
+// Belt + braces: whichever fires first hydrates ALL pending media (it's
+// cheap, idempotent, and one-shot per element via `_fetchitHydrated`).
 const MEDIA_HYDRATION = `
 (function () {
   function hydrate(media) {
@@ -257,6 +301,17 @@ const MEDIA_HYDRATION = `
       try { media.load(); } catch (_) {}
     }
   }
+  function hydrateAll() {
+    var medias = document.querySelectorAll('audio, video');
+    for (var i = 0; i < medias.length; i++) {
+      var m = medias[i];
+      if (!m.hasAttribute('data-fetchit-src') && !m.querySelector('source[data-fetchit-src]')) continue;
+      hydrate(m);
+    }
+    // One-shot — detach after first fire to keep the document clean.
+    document.removeEventListener('pointerdown', hydrateAll, true);
+    document.removeEventListener('keydown',     hydrateAll, true);
+  }
   function attach() {
     var medias = document.querySelectorAll('audio, video');
     for (var i = 0; i < medias.length; i++) {
@@ -266,6 +321,8 @@ const MEDIA_HYDRATION = `
       m.addEventListener('pointerdown', fire, true);
       m.addEventListener('keydown',     fire, true);
     }
+    document.addEventListener('pointerdown', hydrateAll, true);
+    document.addEventListener('keydown',     hydrateAll, true);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attach);

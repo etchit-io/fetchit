@@ -13,17 +13,15 @@ function parse(html: string): Document {
 }
 
 describe("rewriteHtml — preserves authored URLs", () => {
-  it("leaves non-media autonomi:// references untouched (both schemes are registered with Tauri)", () => {
+  it("leaves non-resource autonomi:// references untouched (anchors, scripts, links, forms)", () => {
     const out = rewriteHtml(
       `<a href="autonomi://${ADDR}">a</a>` +
-        `<img src="autonomi://${ADDR}/img.png">` +
         `<script src="autonomi://${ADDR}/main.js"></script>` +
         `<link rel="stylesheet" href="autonomi://${ADDR}/style.css">` +
         `<form action="autonomi://${ADDR}/submit"></form>`,
     );
     const doc = parse(out);
     expect(doc.querySelector("a")?.getAttribute("href")).toBe(`autonomi://${ADDR}`);
-    expect(doc.querySelector("img")?.getAttribute("src")).toBe(`autonomi://${ADDR}/img.png`);
     expect(doc.querySelector("script[src]")?.getAttribute("src")).toBe(
       `autonomi://${ADDR}/main.js`,
     );
@@ -57,6 +55,45 @@ describe("rewriteHtml — preserves authored URLs", () => {
     const audio = parse(out).querySelector("audio");
     expect(audio?.getAttribute("src")).toBe("https://example.com/track.mp3");
     expect(audio?.hasAttribute("data-fetchit-src")).toBe(false);
+  });
+
+  it("rewrites <img src> autonomi:// to the localhost media-server URL (Windows WebView2 rejects custom schemes for subresources)", () => {
+    const out = rewriteHtml(`<img src="autonomi://${ADDR}">`);
+    const img = parse(out).querySelector("img");
+    expect(img?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("rewrites <img src> with the fetchit:// alias too", () => {
+    const out = rewriteHtml(`<img src="fetchit://${ADDR}">`);
+    const img = parse(out).querySelector("img");
+    expect(img?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("rewrites <img srcset> entries (responsive images)", () => {
+    const ADDR_B = "f".repeat(64);
+    const out = rewriteHtml(
+      `<img srcset="autonomi://${ADDR} 1x, fetchit://${ADDR_B} 2x">`,
+    );
+    const img = parse(out).querySelector("img");
+    expect(img?.getAttribute("srcset")).toBe(`${MEDIA_BASE}/${ADDR} 1x, ${MEDIA_BASE}/${ADDR_B} 2x`);
+  });
+
+  it("rewrites <picture><source srcset> entries", () => {
+    const out = rewriteHtml(
+      `<picture><source srcset="autonomi://${ADDR}" media="(min-width:800px)"><img></picture>`,
+    );
+    const source = parse(out).querySelector("picture source");
+    expect(source?.getAttribute("srcset")).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("doesn't touch <img> src that isn't an Autonomi address", () => {
+    const out = rewriteHtml(
+      `<img src="data:image/png;base64,iVBORw0KGgo=">` +
+        `<img src="https://example.com/logo.png">`,
+    );
+    const imgs = parse(out).querySelectorAll("img");
+    expect(imgs[0].getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+    expect(imgs[1].getAttribute("src")).toBe("https://example.com/logo.png");
   });
 
   it("leaves non-autonomi schemes untouched too", () => {
@@ -121,12 +158,13 @@ describe("rewriteHtml — security boundaries", () => {
     expect(content).not.toMatch(/\*\s/);
   });
 
-  it("the CSP names the configured media base for media-src and connect-src", () => {
+  it("the CSP names the configured media base for img-src, media-src, and connect-src", () => {
     const out = rewriteHtml(`<html></html>`);
     const content =
       parse(out)
         .querySelector("meta[http-equiv='Content-Security-Policy']")
         ?.getAttribute("content") ?? "";
+    expect(content).toContain(`img-src 'self' fetchit: autonomi: data: blob: ${MEDIA_BASE}`);
     expect(content).toContain(`media-src 'self' fetchit: autonomi: data: blob: ${MEDIA_BASE}`);
     expect(content).toContain(`connect-src 'self' fetchit: autonomi: ${MEDIA_BASE}`);
   });
@@ -355,6 +393,24 @@ describe("rewriteHtml — injects the media hydration script", () => {
     const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
     const text = hydrationScript(out)?.textContent ?? "";
     expect(text).toMatch(/_fetchitHydrated/);
+  });
+
+  it("the hydration script also attaches document-level capture listeners (Windows WebView2 path)", () => {
+    // Chromium-based WebView2 lets native <audio>/<video> shadow-DOM
+    // controls consume per-element pointerdown before any user-script
+    // listener fires, so the per-element listener is insufficient there.
+    // The document-level listener catches the same click one phase earlier.
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/document\.addEventListener\('pointerdown',\s*hydrateAll,\s*true\)/);
+    expect(text).toMatch(/document\.addEventListener\('keydown',\s*hydrateAll,\s*true\)/);
+  });
+
+  it("the document-level listener is also one-shot (removeEventListener after first fire)", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/document\.removeEventListener\('pointerdown',\s*hydrateAll,\s*true\)/);
+    expect(text).toMatch(/document\.removeEventListener\('keydown',\s*hydrateAll,\s*true\)/);
   });
 });
 
