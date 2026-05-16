@@ -178,6 +178,7 @@ body {
   cursor: default;
 }
 
+#back-toggle,
 #bookmark-toggle,
 #share-toggle,
 #settings-toggle {
@@ -195,12 +196,14 @@ body {
   align-items: center;
   justify-content: center;
 }
+#back-toggle:hover:not(:disabled),
 #bookmark-toggle:hover:not(:disabled),
 #share-toggle:hover:not(:disabled),
 #settings-toggle:hover {
   border-color: var(--copper);
   color: var(--copper-bright);
 }
+#back-toggle:disabled,
 #bookmark-toggle:disabled,
 #share-toggle:disabled {
   opacity: 0.4;
