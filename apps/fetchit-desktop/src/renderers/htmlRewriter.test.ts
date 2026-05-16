@@ -395,22 +395,33 @@ describe("rewriteHtml — injects the media hydration script", () => {
     expect(text).toMatch(/_fetchitHydrated/);
   });
 
-  it("the hydration script also attaches document-level capture listeners (Windows WebView2 path)", () => {
+  it("the hydration script also attaches document- and window-level capture listeners (WebView2 path)", () => {
     // Chromium-based WebView2 lets native <audio>/<video> shadow-DOM
     // controls consume per-element pointerdown before any user-script
-    // listener fires, so the per-element listener is insufficient there.
-    // The document-level listener catches the same click one phase earlier.
+    // listener fires, so per-element alone misses the play button's
+    // first click. We attach a wider net at document AND window for
+    // multiple event types so whichever the engine routes the event
+    // through first triggers hydration.
     const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
     const text = hydrationScript(out)?.textContent ?? "";
-    expect(text).toMatch(/document\.addEventListener\('pointerdown',\s*hydrateAll,\s*true\)/);
-    expect(text).toMatch(/document\.addEventListener\('keydown',\s*hydrateAll,\s*true\)/);
+    // List of event types covered.
+    expect(text).toMatch(/'pointerdown'/);
+    expect(text).toMatch(/'mousedown'/);
+    expect(text).toMatch(/'click'/);
+    expect(text).toMatch(/'keydown'/);
+    expect(text).toMatch(/'touchstart'/);
+    // Both targets present.
+    expect(text).toMatch(/document\.addEventListener\(/);
+    expect(text).toMatch(/window\.addEventListener\(/);
+    // Listeners are capture-phase (third arg true).
+    expect(text).toMatch(/addEventListener\([^)]+true\)/);
   });
 
-  it("the document-level listener is also one-shot (removeEventListener after first fire)", () => {
+  it("the document/window listeners are one-shot (removeEventListener after first fire)", () => {
     const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
     const text = hydrationScript(out)?.textContent ?? "";
-    expect(text).toMatch(/document\.removeEventListener\('pointerdown',\s*hydrateAll,\s*true\)/);
-    expect(text).toMatch(/document\.removeEventListener\('keydown',\s*hydrateAll,\s*true\)/);
+    expect(text).toMatch(/document\.removeEventListener\(/);
+    expect(text).toMatch(/window\.removeEventListener\(/);
   });
 });
 
@@ -495,6 +506,26 @@ describe("rewriteHtml — runtime URL rewriter (dynamic resource loads)", () => 
     expect(probe.rewrite(`fetchit://${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
     expect(probe.rewrite("https://example.com")).toBe("https://example.com");
     expect(probe.rewrite("autonomi://not-hex-not-64")).toBe("autonomi://not-hex-not-64");
+  });
+
+  it("behavioural: bare 64-hex (SPA passes relative URL → would resolve against base href)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite };
+    `)();
+    // demo-city gallery does \`img.src = "<hash>"\`; the property
+    // setter sees the raw hash before the browser resolves it against
+    // <base href="autonomi://<page>/">. Both forms must land at the
+    // same media-server URL.
+    expect(probe.rewrite(ADDR)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    // Mixed case → lowercase output.
+    const UPPER = ADDR.toUpperCase();
+    expect(probe.rewrite(UPPER)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    // Strings that LOOK hex-like but aren't 64 chars stay untouched.
+    expect(probe.rewrite("abc123")).toBe("abc123");
+    expect(probe.rewrite("a".repeat(63))).toBe("a".repeat(63));
+    expect(probe.rewrite("a".repeat(65))).toBe("a".repeat(65));
   });
 
   it("behavioural: autonomi://<page>/<address> — path wins (matches protocol.rs)", () => {

@@ -302,6 +302,13 @@ const MEDIA_HYDRATION = `
       try { media.load(); } catch (_) {}
     }
   }
+  // Multiple event types: WebView2's native <audio>/<video> shadow-DOM
+  // controls swallow pointerdown for the play button on first
+  // interaction, so the user had to click somewhere else first to
+  // hydrate, then click play. mousedown and click reach the document
+  // capture phase on the same play-button click, so adding them makes
+  // play-on-first-click work everywhere.
+  var DOC_EVENTS = ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'click'];
   function hydrateAll() {
     var medias = document.querySelectorAll('audio, video');
     for (var i = 0; i < medias.length; i++) {
@@ -309,9 +316,11 @@ const MEDIA_HYDRATION = `
       if (!m.hasAttribute('data-fetchit-src') && !m.querySelector('source[data-fetchit-src]')) continue;
       hydrate(m);
     }
-    // One-shot — detach after first fire to keep the document clean.
-    document.removeEventListener('pointerdown', hydrateAll, true);
-    document.removeEventListener('keydown',     hydrateAll, true);
+    // One-shot — detach all listeners after first fire.
+    for (var j = 0; j < DOC_EVENTS.length; j++) {
+      document.removeEventListener(DOC_EVENTS[j], hydrateAll, true);
+      window.removeEventListener(DOC_EVENTS[j], hydrateAll, true);
+    }
   }
   function attach() {
     var medias = document.querySelectorAll('audio, video');
@@ -322,8 +331,12 @@ const MEDIA_HYDRATION = `
       m.addEventListener('pointerdown', fire, true);
       m.addEventListener('keydown',     fire, true);
     }
-    document.addEventListener('pointerdown', hydrateAll, true);
-    document.addEventListener('keydown',     hydrateAll, true);
+    // Capture phase on both window and document — whichever the
+    // engine routes the event through first triggers hydration.
+    for (var j = 0; j < DOC_EVENTS.length; j++) {
+      document.addEventListener(DOC_EVENTS[j], hydrateAll, true);
+      window.addEventListener(DOC_EVENTS[j], hydrateAll, true);
+    }
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attach);
@@ -368,13 +381,23 @@ function buildUrlRewriter(mediaBase: string): string {
 (function () {
   var MEDIA = ${JSON.stringify(mediaBase)};
   var ONE   = /^(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/i;
+  var BARE  = /^([0-9a-fA-F]{64})$/i;
   var MANY  = /\\b(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/gi;
 
   function rewrite(url) {
     if (typeof url !== 'string') return url;
+    // \`autonomi://A\` or \`autonomi://A/B\` (path wins when both are 64-hex,
+    // matching the desktop protocol handler's resolution).
     var m = ONE.exec(url);
-    if (!m) return url;
-    return MEDIA + '/' + (m[2] || m[1]).toLowerCase();
+    if (m) return MEDIA + '/' + (m[2] || m[1]).toLowerCase();
+    // Bare 64-hex — a relative URL the SPA hands the browser, which
+    // would resolve it against \`<base href="autonomi://<page>/">\` into
+    // \`autonomi://<page>/<hash>\` and fail. Our patched setter sees the
+    // pre-resolution value, so we catch it here before the browser
+    // even tries.
+    m = BARE.exec(url);
+    if (m) return MEDIA + '/' + m[1].toLowerCase();
+    return url;
   }
   function rewriteSrcset(srcset) {
     if (typeof srcset !== 'string') return srcset;
