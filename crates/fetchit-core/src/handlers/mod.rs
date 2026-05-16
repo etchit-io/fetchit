@@ -26,7 +26,7 @@ pub use json::JsonHandler;
 pub use markdown::MarkdownHandler;
 pub use text::TextHandler;
 pub use video::VideoHandler;
-pub use zip::ZipHandler;
+pub use zip::{extract_entry, ZipHandler};
 
 use crate::HandlerRegistry;
 

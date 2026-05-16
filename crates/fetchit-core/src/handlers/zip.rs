@@ -20,6 +20,37 @@ const KIND: &str = "application/zip";
 const LFH_MAGIC: &[u8] = &[0x50, 0x4B, 0x03, 0x04]; // "PK\x03\x04" — local file header
 const EOCD_MAGIC: &[u8] = &[0x50, 0x4B, 0x05, 0x06]; // "PK\x05\x06" — end-of-central-directory
 
+/// Read one named entry's decompressed bytes out of a ZIP archive.
+///
+/// Pure extraction — given the archive bytes and an entry path (as
+/// reported by [`ZipHandler::render`]'s [`ArchiveEntry::path`]), returns
+/// the decompressed bytes for that entry. Supports Stored and Deflate
+/// entries; the surface decides what to do with the bytes (render
+/// inline, save to disk, hand off to another app).
+///
+/// # Errors
+///
+/// Returns [`Error::Render`] when the archive bytes don't parse, when
+/// the named entry is missing, or when decompression fails.
+pub fn extract_entry(archive_bytes: Bytes, entry_path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let cursor = Cursor::new(archive_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| Error::Render {
+        kind: KIND,
+        reason: format!("zip parse failed: {e}"),
+    })?;
+    let mut file = archive.by_name(entry_path).map_err(|e| Error::Render {
+        kind: KIND,
+        reason: format!("entry {entry_path:?}: {e}"),
+    })?;
+    let mut out = Vec::with_capacity(file.size() as usize);
+    file.read_to_end(&mut out).map_err(|e| Error::Render {
+        kind: KIND,
+        reason: format!("entry read failed: {e}"),
+    })?;
+    Ok(out)
+}
+
 impl ContentHandler for ZipHandler {
     fn kind(&self) -> &'static str {
         KIND
@@ -118,5 +149,33 @@ mod tests {
             }
             other => panic!("expected Archive, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extract_entry_returns_stored_bytes() {
+        let zip = build_zip(&[("hello.txt", b"world")]);
+        let out = extract_entry(Bytes::from(zip), "hello.txt").expect("extract");
+        assert_eq!(out, b"world");
+    }
+
+    #[test]
+    fn extract_entry_handles_nested_paths() {
+        let zip = build_zip(&[("dir/sub/asset.bin", &[1u8, 2, 3, 4, 5])]);
+        let out = extract_entry(Bytes::from(zip), "dir/sub/asset.bin").expect("extract");
+        assert_eq!(out, vec![1u8, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn extract_entry_reports_missing_entry() {
+        let zip = build_zip(&[("present.txt", b"x")]);
+        let err = extract_entry(Bytes::from(zip), "absent.bin").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("absent.bin"), "got: {msg}");
+    }
+
+    #[test]
+    fn extract_entry_rejects_non_zip_bytes() {
+        let not_zip = Bytes::from_static(b"not a zip file");
+        assert!(extract_entry(not_zip, "anything").is_err());
     }
 }
