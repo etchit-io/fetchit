@@ -101,6 +101,7 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripIncomingCsp(doc);
   injectCsp(doc, mediaBase);
   stripResourceHints(doc);
+  stripExternalStylesheets(doc);
   stripMetaRefresh(doc);
   stripAnchorPing(doc);
   injectNeuterScript(doc);
@@ -157,6 +158,23 @@ function stripIncomingCsp(doc: Document): void {
 function stripAnchorPing(doc: Document): void {
   for (const a of Array.from(doc.querySelectorAll("a[ping], area[ping]"))) {
     a.removeAttribute("ping");
+  }
+}
+
+// Drop `<link rel="stylesheet" href="http(s)://…">` at parse time. CSP
+// `style-src` already blocks them at load time, but Chromium emits a
+// loud `Loading the stylesheet '<URL>' violates the following Content
+// Security Policy directive:` message in the console for every one.
+// SPA authors auditing fetch>it through devtools read that as "fetchit
+// is hostile to my page" — it's better to silently drop the link
+// element so no fetch is even attempted. Same security outcome,
+// quieter console. Relative-path and autonomi:// / fetchit:// stylesheets
+// are NOT touched (those go through the protocol handler / media
+// server like every other in-network subresource).
+function stripExternalStylesheets(doc: Document): void {
+  for (const link of Array.from(doc.querySelectorAll('link[rel~="stylesheet"]'))) {
+    const href = link.getAttribute("href") ?? "";
+    if (/^https?:\/\//i.test(href)) link.remove();
   }
 }
 
@@ -399,7 +417,10 @@ function buildUrlRewriter(mediaBase: string): string {
 (function () {
   var MEDIA = ${JSON.stringify(mediaBase)};
   var ONE   = /^(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/i;
-  var BARE  = /^([0-9a-fA-F]{64})$/i;
+  // Bare 64-hex, optionally with a leading "/" (absolute path within
+  // the iframe's null origin) and optionally with a trailing query /
+  // fragment / extra path. All forms collapse to the same address.
+  var BARE  = /^\\/?([0-9a-fA-F]{64})(?:[\\/?#].*)?$/i;
   var MANY  = /\\b(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/gi;
 
   function rewrite(url) {
@@ -408,11 +429,11 @@ function buildUrlRewriter(mediaBase: string): string {
     // matching the desktop protocol handler's resolution).
     var m = ONE.exec(url);
     if (m) return MEDIA + '/' + (m[2] || m[1]).toLowerCase();
-    // Bare 64-hex — a relative URL the SPA hands the browser, which
-    // would resolve it against \`<base href="autonomi://<page>/">\` into
-    // \`autonomi://<page>/<hash>\` and fail. Our patched setter sees the
-    // pre-resolution value, so we catch it here before the browser
-    // even tries.
+    // Relative URLs: \`<hash>\` and \`/<hash>\` (demo-city's gallery uses
+    // the latter as \`img.src = '/' + addr\` to force absolute-path
+    // resolution against the base). The browser would otherwise
+    // resolve to \`autonomi://<page>/<hash>\` and WebView2 would reject
+    // the custom scheme. Catch it pre-resolution.
     m = BARE.exec(url);
     if (m) return MEDIA + '/' + m[1].toLowerCase();
     return url;
@@ -481,6 +502,39 @@ function buildUrlRewriter(mediaBase: string): string {
     XMLHttpRequest.prototype.open = function (method, url) {
       arguments[1] = rewrite(url);
       return origOpen.apply(this, arguments);
+    };
+  }
+
+  // Lazy media hydration — when native shadow-DOM controls invoke
+  // .play() on an audio/video that's still holding data-fetchit-src,
+  // copy the deferred src into place + .load() first. Catches the
+  // single-click play case on WebView2, where capture-phase pointer
+  // events on document/window are consumed by the native controls
+  // before they reach user-script listeners.
+  if (window.HTMLMediaElement) {
+    var origPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      var changed = false;
+      var deferred = this.getAttribute('data-fetchit-src');
+      if (deferred) {
+        this.removeAttribute('data-fetchit-src');
+        this.setAttribute('src', deferred);
+        changed = true;
+      }
+      var sources = this.querySelectorAll('source[data-fetchit-src]');
+      for (var i = 0; i < sources.length; i++) {
+        var s = sources[i];
+        var sd = s.getAttribute('data-fetchit-src');
+        if (sd) {
+          s.removeAttribute('data-fetchit-src');
+          s.setAttribute('src', sd);
+          changed = true;
+        }
+      }
+      if (changed) {
+        try { this.load(); } catch (_) {}
+      }
+      return origPlay.apply(this, arguments);
     };
   }
 })();

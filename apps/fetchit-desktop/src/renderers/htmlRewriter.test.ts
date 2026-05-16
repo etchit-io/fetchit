@@ -294,12 +294,40 @@ describe("rewriteHtml — strips resource hints to prevent preconnect leaks", ()
     expect(out).not.toContain("https://x.example/");
   });
 
-  it("preserves <link rel=\"stylesheet\"> — CSP handles those at fetch time", () => {
+  it("preserves <link rel=\"stylesheet\"> with autonomi:// href (rendered via the protocol handler)", () => {
     const out = rewriteHtml(
       `<html><head><link rel="stylesheet" href="autonomi://${ADDR}/style.css"></head><body>x</body></html>`,
     );
     const sheets = parse(out).head.querySelectorAll('link[rel="stylesheet"]');
     expect(sheets.length).toBe(1);
+  });
+
+  it("preserves <link rel=\"stylesheet\"> with a relative href (resolved against base)", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="/style.css"></head><body>x</body></html>`,
+    );
+    const sheets = parse(out).head.querySelectorAll('link[rel="stylesheet"]');
+    expect(sheets.length).toBe(1);
+  });
+
+  it("strips <link rel=\"stylesheet\"> with an external https:// href — avoids CSP-violation console spam", () => {
+    // CSP `style-src` already blocks it at fetch time, but Chromium
+    // emits a loud "Loading the stylesheet '<URL>' violates the
+    // following Content Security Policy directive" message per
+    // blocked link. Stripping at parse time silences the noise with
+    // the same end result.
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("fonts.googleapis.com");
+    expect(parse(out).head.querySelectorAll('link[rel="stylesheet"]').length).toBe(0);
+  });
+
+  it("strips http:// stylesheets too (defense in depth)", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="http://insecure.example/style.css"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("insecure.example");
   });
 });
 
@@ -538,6 +566,36 @@ describe("rewriteHtml — runtime URL rewriter (dynamic resource loads)", () => 
     expect(probe.rewrite("abc123")).toBe("abc123");
     expect(probe.rewrite("a".repeat(63))).toBe("a".repeat(63));
     expect(probe.rewrite("a".repeat(65))).toBe("a".repeat(65));
+  });
+
+  it("behavioural: absolute-path form /<hash> (gallery's `img.src = '/' + addr`)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite };
+    `)();
+    // The smoking gun from the v4 Windows log — demo-city's gallery
+    // does \`img.src = '/' + addr\` to force absolute-path resolution
+    // against <base href>. Without leading-slash support, browser
+    // resolves to autonomi://<page>/<hash> and WebView2 rejects.
+    expect(probe.rewrite(`/${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    // Trailing query / fragment / extra path is stripped (we only
+    // need the address; the media server doesn't honour query params).
+    expect(probe.rewrite(`/${ADDR}?x=1`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(probe.rewrite(`/${ADDR}#frag`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("patches HTMLMediaElement.play to lazy-hydrate before native controls fire", () => {
+    // WebView2 native shadow-DOM media controls intercept pointer
+    // events before document/window capture-phase listeners can fire,
+    // so our document-level hydration listener was being bypassed and
+    // the user had to click outside the player first. Patching .play()
+    // (which the native controls call internally) lets the first
+    // click-on-play work everywhere.
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLMediaElement\.prototype\.play\s*=/);
+    expect(text).toMatch(/data-fetchit-src/);
+    expect(text).toMatch(/this\.load\(\)/);
   });
 
   it("behavioural: autonomi://<page>/<address> — path wins (matches protocol.rs)", () => {
