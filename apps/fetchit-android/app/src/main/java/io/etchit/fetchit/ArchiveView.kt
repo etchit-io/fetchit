@@ -6,8 +6,9 @@ import io.etchit.fetchit.databinding.ActivityMainBinding
 import uniffi.fetchit_ffi.ArchiveEntryFfi
 
 /**
- * Drives the archive surface: a tappable list of entries inside the
- * `archiveView` ScrollView from `activity_main.xml`. Tapping an entry
+ * Drives the archive surface: a summary header, a scrolling list of
+ * tappable entries, and a bottom-pinned "save archive" button — laid out
+ * in `archiveView` from `activity_main.xml`. Tapping an entry
  * hands the activity the entry's bytes so it can detect-and-render the
  * inner content with the existing rendition machinery (image / audio /
  * video / pdf / text / …). fetch>it is the viewer — there's no

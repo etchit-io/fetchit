@@ -225,13 +225,15 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
 
-        <!-- Archive view: ZIP entry list with tap-to-save / long-press
-             open-with, plus a "save archive" header button. The whole
-             surface is populated by RenditionRenderer.bindArchive. -->
-        <ScrollView
+        <!-- Archive view: summary header at top, scrolling entry list in
+             the middle, "save archive" button pinned at the bottom of the
+             surface (thumb-reachable on mobile regardless of list length).
+             Populated by RenditionRenderer.bindArchive via ArchiveView. -->
+        <LinearLayout
             android:id="@+id/archiveView"
             android:layout_width="0dp"
             android:layout_height="0dp"
+            android:orientation="vertical"
             android:layout_marginTop="6dp"
             android:layout_marginBottom="48dp"
             android:visibility="gone"
@@ -241,47 +243,41 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@+id/kindText">
 
-            <LinearLayout
+            <TextView
+                android:id="@+id/archiveSummary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical">
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="10dp"
+                android:background="?attr/fetchitInk2"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingHorizontal="12dp"
-                    android:paddingVertical="10dp"
-                    android:background="?attr/fetchitInk2">
-
-                    <TextView
-                        android:id="@+id/archiveSummary"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textColor="?attr/fetchitAsh"
-                        android:fontFamily="monospace"
-                        android:textSize="11sp"
-                        android:textAllCaps="true"
-                        android:letterSpacing="0.1" />
-
-                    <Button
-                        android:id="@+id/saveArchiveButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/archive_save_all"
-                        android:backgroundTint="?attr/fetchitCopper"
-                        android:textColor="?attr/fetchitInk" />
-                </LinearLayout>
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
 
                 <LinearLayout
                     android:id="@+id/archiveList"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical" />
-            </LinearLayout>
-        </ScrollView>
+            </ScrollView>
+
+            <Button
+                android:id="@+id/saveArchiveButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="12dp"
+                android:layout_marginVertical="10dp"
+                android:text="@string/archive_save_all"
+                android:backgroundTint="?attr/fetchitCopper"
+                android:textColor="?attr/fetchitInk" />
+        </LinearLayout>
 
         <!-- Close ✕ — dismisses the rendition and brings the fetch
              button back. Visible only while content is rendered. -->
