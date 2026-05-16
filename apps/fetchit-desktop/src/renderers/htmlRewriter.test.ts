@@ -167,6 +167,7 @@ describe("rewriteHtml — security boundaries", () => {
     expect(content).toContain(`img-src 'self' fetchit: autonomi: data: blob: ${MEDIA_BASE}`);
     expect(content).toContain(`media-src 'self' fetchit: autonomi: data: blob: ${MEDIA_BASE}`);
     expect(content).toContain(`connect-src 'self' fetchit: autonomi: ${MEDIA_BASE}`);
+    expect(content).toContain("style-src 'self' fetchit: autonomi: data: 'unsafe-inline'");
   });
 
   it("sets <base href> to autonomi://<addr>/", () => {

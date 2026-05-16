@@ -79,7 +79,7 @@ function buildCsp(mediaBase: string): string {
   return [
     "default-src 'self' fetchit: autonomi:",
     "script-src 'self' fetchit: autonomi: 'unsafe-inline' 'unsafe-eval'",
-    "style-src 'self' fetchit: autonomi: 'unsafe-inline'",
+    "style-src 'self' fetchit: autonomi: data: 'unsafe-inline'",
     `img-src 'self' fetchit: autonomi: data: blob: ${mediaBase}`,
     `media-src 'self' fetchit: autonomi: data: blob: ${mediaBase}`,
     "font-src 'self' fetchit: autonomi: data:",
