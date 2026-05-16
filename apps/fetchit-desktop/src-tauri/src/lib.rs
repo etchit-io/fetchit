@@ -99,6 +99,15 @@ fn log(_line: String) {
     eprintln!("{_line}");
 }
 
+/// Write bytes to a user-chosen file. The JS side picks the path via
+/// `plugin-dialog`'s `save`; we just write what they hand us. Used by
+/// the archive viewer's per-entry / whole-archive Save buttons, where
+/// the browser-native `<a download>` trick fails inside the WebView.
+#[tauri::command]
+fn save_bytes_to_path(path: String, data: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, &data).map_err(|e| format!("couldn't write {path}: {e}"))
+}
+
 /// Open the WebView devtools window. The `devtools` feature on tauri makes
 /// this available in release builds too — the desktop app is read-only, so
 /// letting power users inspect what's being rendered is fine.
@@ -283,6 +292,7 @@ pub fn run() {
     // custom URI schemes for media), spawned in `setup` below.
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol("fetchit", protocol::handle)
         .register_asynchronous_uri_scheme_protocol("autonomi", protocol::handle)
         .setup(move |app| {
@@ -339,6 +349,7 @@ pub fn run() {
             disconnect,
             fetch_and_render,
             archive_extract::extract_archive_entry,
+            save_bytes_to_path,
             log,
             open_devtools,
             media_url_base,

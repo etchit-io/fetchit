@@ -10,6 +10,7 @@
 // a Save As… affordance.
 
 import { invoke } from "@tauri-apps/api/core";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import type { Rendition } from "../types";
 import { fmtBytes } from "../format";
@@ -288,7 +289,7 @@ function mimeFromPath(path: string): string | null {
 async function saveEntry(entry: InnerEntry, address: string): Promise<void> {
   try {
     const bytes = await extractEntry(address, entry.path);
-    downloadBytes(bytes, basename(entry.path));
+    await writeBytesViaDialog(bytes, basename(entry.path));
   } catch (e) {
     alert(`Couldn't save: ${errMessage(e)}`);
   }
@@ -302,22 +303,22 @@ async function saveWholeArchive(address: string): Promise<void> {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const blob = await res.blob();
     const bytes = new Uint8Array(await blob.arrayBuffer());
-    downloadBytes(bytes, `${address.slice(0, 12)}.zip`);
+    await writeBytesViaDialog(bytes, `${address.slice(0, 12)}.zip`);
   } catch (e) {
     alert(`Couldn't save archive: ${errMessage(e)}`);
   }
 }
 
-function downloadBytes(bytes: Uint8Array, filename: string): void {
-  const url = URL.createObjectURL(new Blob([bytes]));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  // Give the download a moment to start before revoking.
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+/** Use Tauri's plugin-dialog `save` + a Rust write command. The
+ *  browser-native `<a download>` trick fails silently inside Tauri
+ *  WebViews on Linux / Windows; this is the reliable path. */
+async function writeBytesViaDialog(bytes: Uint8Array, defaultName: string): Promise<void> {
+  const dest = await saveDialog({
+    defaultPath: defaultName,
+    title: "Save",
+  });
+  if (typeof dest !== "string") return; // user cancelled
+  await invoke("save_bytes_to_path", { path: dest, data: Array.from(bytes) });
 }
 
 function basename(path: string): string {

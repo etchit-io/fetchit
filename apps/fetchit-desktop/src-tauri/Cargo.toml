@@ -23,6 +23,7 @@ bytes = "1.7"
 infer = { version = "0.16", default-features = false }
 filetime = "0.2"
 tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
 
