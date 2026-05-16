@@ -737,6 +737,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -755,6 +757,8 @@ internal interface IntegrityCheckingUniffiLib : Library {
     fun uniffi_fetchit_ffi_checksum_func_default_peers(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_detect(
+): Short
+fun uniffi_fetchit_ffi_checksum_func_extract_archive_entry(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_set_data_home(
 ): Short
@@ -832,6 +836,8 @@ fun uniffi_fetchit_ffi_fn_method_client_peer_count(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_func_default_peers(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_detect(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_func_extract_archive_entry(`archiveBytes`: RustBuffer.ByValue,`entryPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_set_data_home(`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -967,6 +973,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_func_detect() != 20729.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_func_extract_archive_entry() != 6186.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_func_set_data_home() != 29042.toShort()) {
@@ -2402,6 +2411,26 @@ public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<Li
     uniffiRustCallWithError(FetchitException) { _status ->
     UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_detect(
         FfiConverterByteArray.lower(`bytes`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Read one named entry's decompressed bytes out of a ZIP archive.
+         *
+         * Pure extraction: callers supply the full archive bytes (already
+         * fetched / cached by the surface) and an `entry_path` matching one of
+         * the [`ArchiveEntryFFI::path`]s returned by [`detect`] /
+         * [`Client::fetch_and_render`]. Returns the entry's decompressed bytes;
+         * the surface decides what to do with them (render inline, save to
+         * disk, hand off to another app).
+         */
+    @Throws(FetchitException::class) fun `extractArchiveEntry`(`archiveBytes`: kotlin.ByteArray, `entryPath`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(FetchitException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_extract_archive_entry(
+        FfiConverterByteArray.lower(`archiveBytes`),FfiConverterString.lower(`entryPath`),_status)
 }
     )
     }

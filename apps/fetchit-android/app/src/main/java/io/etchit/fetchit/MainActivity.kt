@@ -69,6 +69,16 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
     private val backCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
+            // Inner-archive nav: viewing an entry preview, back returns
+            // to the listing — no refetch, no address-stack change.
+            val ctx = archiveContext
+            if (viewingArchiveEntry && ctx != null) {
+                viewingArchiveEntry = false
+                renderer.showArchive(ctx.address, ctx.entries)
+                lastFetchAddr = ctx.address
+                isEnabled = backStack.size >= 2
+                return
+            }
             // Pop the current page; the *new* top is where we want to go.
             // Remove it too so doFetch's push will re-add cleanly without
             // a duplicate entry.
@@ -95,6 +105,94 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private val saveLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri -> uri?.let(::onSavePicked) }
+
+    /** Bytes waiting for the user to confirm a SAF destination — written
+     *  on the matching launcher callback and cleared after. The save and
+     *  open-with paths for archive entries / whole archives flow through
+     *  here so the launcher result handler can recover the right bytes. */
+    private var pendingArchiveSave: ByteArray? = null
+
+    private val archiveSaveLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val bytes = pendingArchiveSave
+        pendingArchiveSave = null
+        if (uri == null || bytes == null) return@registerForActivityResult
+        BinaryActions.saveTo(this, uri, bytes)
+            .onSuccess {
+                Snackbar.make(binding.rootCoordinator, R.string.save_done, Snackbar.LENGTH_SHORT).show()
+            }
+            .onFailure { e ->
+                Snackbar.make(
+                    binding.rootCoordinator,
+                    getString(R.string.save_failed, e.message),
+                    Snackbar.LENGTH_LONG,
+                ).show()
+            }
+    }
+
+    /** State of the archive the user is currently navigating inside.
+     *  Non-null whenever an archive's listing has been shown this fetch;
+     *  preserved through entry previews so the back gesture can restore
+     *  the listing without a network refetch. Cleared by `renderer.clear()`
+     *  via the close button (`MainActivity.onClose`) or when a fresh
+     *  address is fetched.                                              */
+    private data class ArchiveContext(
+        val address: String,
+        val entries: List<uniffi.fetchit_ffi.ArchiveEntryFfi>,
+    )
+    private var archiveContext: ArchiveContext? = null
+
+    /** True while showing an inner-entry preview inside an open archive
+     *  — back press returns to the listing in that mode.                */
+    private var viewingArchiveEntry = false
+
+    /** Callbacks the ArchiveView uses to hand work back to the activity. */
+    private val archiveCallbacks = object : ArchiveView.Callbacks {
+        override fun onSaveArchive(address: String) {
+            val bytes = fetchitApp().bytesCache.get(address) ?: return
+            pendingArchiveSave = bytes
+            archiveSaveLauncher.launch("fetchit-${address.take(8)}.zip")
+        }
+
+        override fun onEntryTap(address: String, entryPath: String) {
+            val bytes = extractEntryOrToast(address, entryPath) ?: return
+            val rendition = try {
+                uniffi.fetchit_ffi.detect(bytes)
+            } catch (e: Exception) {
+                Log.w(TAG, "detect failed for $entryPath", e)
+                Snackbar.make(
+                    binding.rootCoordinator,
+                    getString(R.string.archive_extract_failed, entryPath),
+                    Snackbar.LENGTH_LONG,
+                ).show()
+                return
+            }
+            // Cache the entry bytes under a synthetic "address" so the
+            // existing binary-actions / share paths can pick them up if
+            // the rendition turns out to be OpaqueBinary.
+            val syntheticAddr = "$address::$entryPath"
+            lastFetchAddr = syntheticAddr
+            viewingArchiveEntry = true
+            backCallback.isEnabled = true
+            renderer.render(rendition, syntheticAddr)
+        }
+    }
+
+    private fun extractEntryOrToast(address: String, entryPath: String): ByteArray? {
+        val archive = fetchitApp().bytesCache.get(address) ?: return null
+        return try {
+            uniffi.fetchit_ffi.extractArchiveEntry(archive, entryPath)
+        } catch (e: Exception) {
+            Log.w(TAG, "extract failed for $entryPath", e)
+            Snackbar.make(
+                binding.rootCoordinator,
+                getString(R.string.archive_extract_failed, entryPath),
+                Snackbar.LENGTH_LONG,
+            ).show()
+            null
+        }
+    }
 
     /**
      * In-app QR scanner. Powered by `zxing-android-embedded` — opens its
@@ -126,7 +224,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         setContentView(binding.root)
 
         audio = AudioPlayback(this)
-        renderer = RenditionRenderer(binding, audio, ::onAudioError)
+        renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
         settingsSheet = SettingsSheet(binding, this).also { it.bind() }
 
@@ -135,7 +233,11 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             BookmarkSheet().show(supportFragmentManager, "bookmarks")
         }
         binding.scanButton.setOnClickListener { onScanClicked() }
-        binding.closeButton.setOnClickListener { renderer.clear() }
+        binding.closeButton.setOnClickListener {
+            archiveContext = null
+            viewingArchiveEntry = false
+            renderer.clear()
+        }
         binding.epubView.setOnExit { renderer.clear() }
         binding.shareButton.setOnClickListener { onShareCurrentClicked() }
         binding.openWithButton.setOnClickListener { onOpenWithClicked() }
@@ -319,10 +421,23 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private fun afterRender(addr: String, rendition: RenditionFfi, bytes: ByteArray) {
         lastBinary = null
         cacheBinaryHandle(rendition)
+        // Archive-context bookkeeping: capture the listing when we land
+        // on a pure Archive rendition so inner-entry previews can back
+        // out to it without a refetch. EPUBs render via their own viewer
+        // and don't expose a listing, so they don't open archive context.
+        archiveContext = if (
+            rendition is RenditionFfi.Archive &&
+            !EpubBook.looksLikeEpub(rendition.entries.map { it.path })
+        ) {
+            ArchiveContext(addr, rendition.entries)
+        } else {
+            null
+        }
+        viewingArchiveEntry = false
         if (rendition is RenditionFfi.Archive && EpubBook.looksLikeEpub(rendition.entries.map { it.path })) {
             renderer.bindEpub(addr, bytes, rendition.entries)
         } else {
-            renderer.render(rendition)
+            renderer.render(rendition, addr)
         }
         hasConnectedOnce = true
         lastFetchAddr = addr

@@ -98,4 +98,9 @@
     <string name="settings_theme_dark">Dark</string>
     <string name="settings_theme_dim">Dim</string>
     <string name="settings_theme_light">Light</string>
+
+    <!-- Archive viewer -->
+    <string name="archive_summary">application/zip · %1$d entries</string>
+    <string name="archive_save_all">save archive…</string>
+    <string name="archive_extract_failed">couldn\'t extract %1$s</string>
 </resources>

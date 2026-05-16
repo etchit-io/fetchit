@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One row in the archive entry list. Tap = save the entry to a chosen
+  location via SAF; long-press = "open with…" via Intent.ACTION_VIEW.
+  RenditionRenderer.bindArchive inflates this once per ArchiveEntryFfi
+  and appends to `archiveList`.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="10dp"
+    android:background="?android:attr/selectableItemBackground"
+    android:clickable="true"
+    android:focusable="true">
+
+    <TextView
+        android:id="@+id/entryPath"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textColor="?attr/fetchitBone"
+        android:fontFamily="monospace"
+        android:textSize="12sp"
+        android:ellipsize="middle"
+        android:singleLine="true" />
+
+    <TextView
+        android:id="@+id/entrySize"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:textColor="?attr/fetchitAsh"
+        android:fontFamily="monospace"
+        android:textSize="11sp" />
+
+</LinearLayout>

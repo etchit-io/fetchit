@@ -26,7 +26,10 @@ class RenditionRenderer(
     private val binding: ActivityMainBinding,
     private val audio: AudioPlayback,
     private val onError: (String) -> Unit,
+    archiveCallbacks: ArchiveView.Callbacks,
 ) {
+
+    private val archiveView = ArchiveView(binding, archiveCallbacks)
 
     /** Markdown renderer; instantiated lazily so plain-text renditions
      *  pay no startup cost. */
@@ -41,7 +44,7 @@ class RenditionRenderer(
      * full vertical space — caller restores the button by invoking
      * [`clear`].
      */
-    fun render(r: RenditionFfi) {
+    fun render(r: RenditionFfi, address: String) {
         clear()
         binding.fetchButton.visibility = View.GONE
         binding.closeButton.visibility = View.VISIBLE
@@ -68,7 +71,10 @@ class RenditionRenderer(
             is RenditionFfi.Video -> bindVideo(r.mime, r.data)
             is RenditionFfi.Html -> bindHtml(r.body)
             is RenditionFfi.Tabular -> bindTabular(r.columns, r.rows)
-            is RenditionFfi.Archive -> bindArchive(r.entries)
+            is RenditionFfi.Archive -> {
+                binding.kindText.text = "application/zip"
+                archiveView.bind(address, r.entries)
+            }
             is RenditionFfi.OpaqueBinary -> bindBinary(r.mime, r.data)
             else -> bindText(label = "(unsupported rendition variant)", body = r.toString())
         }
@@ -89,6 +95,7 @@ class RenditionRenderer(
         binding.epubView.release()
         binding.pdfView.visibility = View.GONE
         binding.pdfView.release()
+        archiveView.hide()
         binding.binaryActions.visibility = View.GONE
         binding.closeButton.visibility = View.GONE
         binding.shareButton.visibility = View.GONE
@@ -164,6 +171,21 @@ class RenditionRenderer(
     }
 
     /**
+     * Re-display the archive listing for an address whose entries are
+     * already known — used by the activity to restore the listing when
+     * the user backs out of an entry preview without re-fetching.
+     */
+    fun showArchive(address: String, entries: List<uniffi.fetchit_ffi.ArchiveEntryFfi>) {
+        clear()
+        binding.fetchButton.visibility = View.GONE
+        binding.closeButton.visibility = View.VISIBLE
+        binding.shareButton.visibility = View.VISIBLE
+        binding.swipeRefresh.isEnabled = false
+        binding.kindText.text = "application/zip"
+        archiveView.bind(address, entries)
+    }
+
+    /**
      * Render an EPUB (a ZIP carrying `META-INF/container.xml`) as a book
      * in [EpubView]. If it looks like an EPUB but won't parse, fall back
      * to the plain archive listing.
@@ -178,7 +200,7 @@ class RenditionRenderer(
             binding.kindText.text = "application/epub+zip"
             binding.epubView.visibility = View.VISIBLE
         } else {
-            bindArchive(archiveEntries)
+            archiveView.bind(addr, archiveEntries)
         }
     }
 
@@ -203,21 +225,6 @@ class RenditionRenderer(
         sb.append('\n')
         for (row in rows) {
             sb.append(row.padTo(widths))
-            sb.append('\n')
-        }
-        binding.contentText.text = sb.toString()
-        binding.contentScroll.visibility = View.VISIBLE
-    }
-
-    private fun bindArchive(entries: List<uniffi.fetchit_ffi.ArchiveEntryFfi>) {
-        binding.kindText.text = "application/zip · ${entries.size} entries"
-        val sb = StringBuilder()
-        // Find the longest path so sizes line up to the right.
-        val maxPath = entries.maxOfOrNull { it.path.length } ?: 0
-        for (e in entries) {
-            sb.append(e.path.padEnd(maxPath + 2))
-            val s = e.size
-            sb.append(if (s != null) formatBytes(s.toInt().coerceAtMost(Int.MAX_VALUE)) else "?")
             sb.append('\n')
         }
         binding.contentText.text = sb.toString()
