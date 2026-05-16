@@ -202,17 +202,49 @@ jobs:
         working-directory: apps/fetchit-desktop
         run: npm ci
 
+      # ── Optional Apple code-signing + notarisation ────────────────
+      # Only stages the env vars when the cert secret is non-empty. We
+      # write them via $GITHUB_ENV instead of putting them on tauri-
+      # action's `env:` block, because expression interpolation of an
+      # unset secret yields the empty string — and tauri-action
+      # interprets a defined-but-empty APPLE_CERTIFICATE as "import
+      # this," then `security import` fails on the empty content
+      # (that was the original macOS-leg failure mode on v0.2.1-rc1).
+      - name: Stage Apple signing credentials
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE:           ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD:  ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY:      ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID:                    ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD:              ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID:               ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "APPLE_CERTIFICATE not configured — bundle will be unsigned (Gatekeeper warning on first launch)."
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            echo "APPLE_ID=$APPLE_ID"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
       # ── Optional Windows code-signing ─────────────────────────────
-      # Decodes a base64-PFX out of secrets.WINDOWS_CERTIFICATE if it
-      # exists and exports its on-disk path so tauri-action's bundler
-      # picks it up. No-ops on every other matrix leg, and no-ops on
-      # Windows too if the secret isn't configured — leaving the bundle
-      # unsigned (still installable, with a SmartScreen warning).
+      # Same pattern as Apple: only stages WINDOWS_CERTIFICATE_FILE and
+      # _PASSWORD into $GITHUB_ENV when the cert secret is set, so an
+      # unset cert produces an unsigned bundle (SmartScreen warning)
+      # rather than failing the build.
       - name: Stage Windows signing certificate
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         env:
-          WIN_CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WIN_CERT:     ${{ secrets.WINDOWS_CERTIFICATE }}
+          WIN_CERT_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           if (-not $env:WIN_CERT) {
             Write-Host "WINDOWS_CERTIFICATE not configured — bundle will be unsigned."
@@ -220,23 +252,19 @@ jobs:
           }
           $pfx = Join-Path $env:RUNNER_TEMP "fetchit-cert.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WIN_CERT))
-          "WINDOWS_CERTIFICATE_FILE=$pfx" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          @(
+            "WINDOWS_CERTIFICATE_FILE=$pfx",
+            "WINDOWS_CERTIFICATE_PASSWORD=$env:WIN_CERT_PWD"
+          ) | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       # ── Build + publish (tauri-action handles bundle discovery) ───
+      # No signing env vars on this step — the Stage Apple / Stage
+      # Windows steps above export them into $GITHUB_ENV ONLY when the
+      # secrets are populated. Unset → unsigned but installable bundle.
       - name: Build and upload Tauri bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Apple signing + notarisation — all secrets are optional; the
-          # bundler skips signing for any that are unset.
-          APPLE_CERTIFICATE:           ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD:  ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY:      ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID:                    ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD:              ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID:               ${{ secrets.APPLE_TEAM_ID }}
-          # Windows signing — staged above into WINDOWS_CERTIFICATE_FILE.
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
           projectPath: apps/fetchit-desktop
           tagName: ${{ steps.ver.outputs.tag }}
