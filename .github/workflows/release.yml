@@ -1,13 +1,20 @@
 name: release
 
-# Triggered by pushing a tag matching `v*` (e.g. `v0.1.0`).
-# Builds a signed release APK and uploads it to a GitHub Release.
+# Triggered by pushing a tag matching `v*` (e.g. `v0.1.0`). Builds the
+# signed release APK and the desktop bundles (macOS universal .dmg,
+# Linux .AppImage + .deb, Windows .msi + .exe) and uploads all
+# artifacts to a single GitHub Release.
 #
-# Requires GitHub repo secrets:
+# ── Android signing (required for a Play-grade APK) ─────────────────
 #   KEYSTORE_BASE64   — base64-encoded release keystore (.keystore / .jks)
 #   KEYSTORE_PASSWORD — keystore password
 #   KEY_ALIAS         — key alias inside the keystore (typically "fetchit")
 #   KEY_PASSWORD      — key password (often same as KEYSTORE_PASSWORD)
+#
+# ── Desktop code-signing (optional — unsigned bundles publish if missing) ──
+#   macOS:   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+#            APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+#   Windows: WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD
 #
 # See RELEASING.md for the one-time setup walk-through.
 
@@ -124,3 +131,116 @@ jobs:
             ${{ steps.apk.outputs.sha }}
             app-release.apk
           generate_release_notes: true
+
+  # ── Desktop bundles (Tauri 2) ───────────────────────────────────────
+  # macOS universal .dmg, Linux .AppImage + .deb, Windows .msi + .exe.
+  # Each matrix leg attaches its native bundles to the same GitHub
+  # Release the APK job creates (softprops/action-gh-release upserts on
+  # tag, so parallel jobs just append assets to one release).
+  release-desktop:
+    name: build + publish desktop bundles
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest          # arm64 runner — builds a universal binary
+            args: --target universal-apple-darwin
+            label: macos-universal
+          - platform: ubuntu-22.04          # 22.04 (not 24.04) for AppImage glibc portability
+            args: ''
+            label: linux-x86_64
+          - platform: windows-latest
+            args: ''
+            label: windows-x86_64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # ── toolchains ────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/fetchit-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The macOS universal build needs both Mac targets installed
+          # so the linker can produce a fat binary in one pass.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # `fetchit-desktop` is workspace-excluded — cache its own Cargo.lock
+      # tree, not the root workspace.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+
+      # Tauri 2 on Linux needs WebKitGTK 4.1 + librsvg + libappindicator
+      # + patchelf for AppImage post-processing. Ubuntu 22.04 has all of
+      # these in main.
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
+
+      - name: Install frontend deps
+        working-directory: apps/fetchit-desktop
+        run: npm ci
+
+      # ── Optional Windows code-signing ─────────────────────────────
+      # Decodes a base64-PFX out of secrets.WINDOWS_CERTIFICATE if it
+      # exists and exports its on-disk path so tauri-action's bundler
+      # picks it up. No-ops on every other matrix leg, and no-ops on
+      # Windows too if the secret isn't configured — leaving the bundle
+      # unsigned (still installable, with a SmartScreen warning).
+      - name: Stage Windows signing certificate
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WIN_CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+        run: |
+          if (-not $env:WIN_CERT) {
+            Write-Host "WINDOWS_CERTIFICATE not configured — bundle will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "fetchit-cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WIN_CERT))
+          "WINDOWS_CERTIFICATE_FILE=$pfx" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      # ── Build + publish (tauri-action handles bundle discovery) ───
+      - name: Build and upload Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple signing + notarisation — all secrets are optional; the
+          # bundler skips signing for any that are unset.
+          APPLE_CERTIFICATE:           ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD:  ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY:      ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID:                    ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD:              ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID:               ${{ secrets.APPLE_TEAM_ID }}
+          # Windows signing — staged above into WINDOWS_CERTIFICATE_FILE.
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          projectPath: apps/fetchit-desktop
+          tagName: ${{ steps.ver.outputs.tag }}
+          releaseName: ${{ steps.ver.outputs.tag }}
+          releaseDraft: false
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
+          args: ${{ matrix.args }}

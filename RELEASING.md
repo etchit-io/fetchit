@@ -1,20 +1,34 @@
 # Releasing fetch>it
 
-Release process for the Android APK.
+A single `v*` tag releases every platform in one pass:
+
+| Platform | Artifact(s) attached to the Release |
+|----------|--------------------------------------|
+| Android  | `fetchit-<ver>.apk` + `.sha256`, plus stable-named `app-release.apk` |
+| macOS    | Universal `.dmg` + `.app.tar.gz` (Apple Silicon + Intel in one bundle) |
+| Linux    | `.AppImage` + `.deb` (x86_64) |
+| Windows  | `.msi` + NSIS `.exe` (x86_64) |
+
+All five artifacts land on the same GitHub Release because both jobs
+in `.github/workflows/release.yml` upsert against the same tag.
 
 ## TL;DR
 
 ```
-# bump version
+# 1. Keep versions in sync across the three projects:
 $EDITOR apps/fetchit-android/app/build.gradle.kts   # versionCode + versionName
+$EDITOR apps/fetchit-desktop/src-tauri/tauri.conf.json   # "version"
+$EDITOR apps/fetchit-desktop/package.json           # "version"
+
+# 2. Tag + push:
 git commit -am "release: v0.1.0"
 git tag v0.1.0
 git push --follow-tags origin main
 ```
 
-The `release.yml` workflow picks up the tag, builds a signed APK, and
-publishes it to GitHub Releases as `fetchit-0.1.0.apk` plus a
-`.sha256` checksum.
+The Android job (`release-apk`) finishes in ~5–10 min; the desktop
+matrix (`release-desktop`, 3 runners in parallel) takes ~15–25 min
+because Tauri compiles the Rust backend from scratch on each OS.
 
 ## One-time setup
 
@@ -72,32 +86,88 @@ New repository secret**, add four secrets:
 
 Then `rm /tmp/fetchit-keystore.b64`.
 
+### 4. Desktop code-signing (OPTIONAL — unsigned bundles still publish)
+
+The desktop matrix runs without any of these secrets. Bundles publish
+unsigned and users see a one-time warning the first time they open
+the app:
+
+- **macOS unsigned**: Gatekeeper blocks; user clicks System Settings →
+  Privacy & Security → "Open Anyway" once. Notarised builds skip this.
+- **Windows unsigned**: SmartScreen flags as unknown; user clicks
+  "More info" → "Run anyway". Authenticode-signed builds skip this.
+- **Linux**: no equivalent gating; `.AppImage` / `.deb` run as-is.
+
+When (if) you want to remove those warnings, set up the certs and
+upload them as repo secrets.
+
+**Apple Developer ID** ($99/yr, [developer.apple.com](https://developer.apple.com)):
+
+| Secret                       | What                                                   |
+|------------------------------|--------------------------------------------------------|
+| `APPLE_CERTIFICATE`          | base64 of the .p12 export of the Developer ID cert     |
+| `APPLE_CERTIFICATE_PASSWORD` | the .p12 export password                               |
+| `APPLE_SIGNING_IDENTITY`     | `Developer ID Application: <Your Name> (<TEAM_ID>)`    |
+| `APPLE_ID`                   | the Apple ID email used to enroll                      |
+| `APPLE_PASSWORD`             | an app-specific password from appleid.apple.com        |
+| `APPLE_TEAM_ID`              | 10-char team identifier from the Developer portal      |
+
+**Windows Authenticode** (DigiCert, Sectigo, etc. — ~$200–500/yr):
+
+| Secret                          | What                                          |
+|---------------------------------|-----------------------------------------------|
+| `WINDOWS_CERTIFICATE`           | base64 of the .pfx file                       |
+| `WINDOWS_CERTIFICATE_PASSWORD`  | .pfx export password                          |
+
+The workflow's "Stage Windows signing certificate" step decodes the
+PFX into `$RUNNER_TEMP` and exports its path so `tauri-action`'s
+bundler picks it up automatically. Missing secret → step logs "not
+configured" and the bundle ships unsigned.
+
 ## Per-release process
 
-1. **Bump the version** in `apps/fetchit-android/app/build.gradle.kts`:
+1. **Bump the version in all four files** (they must agree):
 
    ```kotlin
+   // apps/fetchit-android/app/build.gradle.kts
    versionCode = 2          // monotonic — Android refuses downgrades
    versionName = "0.1.0"    // semantic version (no `v` prefix)
    ```
 
-   **If you also publish the Rust crates** (not part of this APK
-   pipeline today, but for completeness): bump `version` in **both**
+   ```json
+   // apps/fetchit-desktop/src-tauri/tauri.conf.json
+   "version": "0.1.0"
+   ```
+
+   ```json
+   // apps/fetchit-desktop/package.json
+   "version": "0.1.0"
+   ```
+
+   **If you also publish the Rust crates** (not part of this pipeline
+   today, but for completeness): bump `version` in **both**
    `Cargo.toml` (the `[workspace.package]` block) **and**
    `crates/fetchit-ffi/Cargo.toml` (the `[package]` block). The FFI
    crate sits outside the main workspace by design and can't inherit
    `version.workspace = true`, so the value lives in two places that
    must stay in sync.
 
-2. **Smoke-test the build locally** (catches signing-config issues
-   before CI):
+2. **Smoke-test both builds locally** (catches config drift before CI):
 
    ```
+   # Android signed APK
    ./scripts/build-jni-libs.sh
-   cd apps/fetchit-android
-   ./gradlew :app:assembleRelease
-   adb install -r app/build/outputs/apk/release/app-release.apk
+   cd apps/fetchit-android && ./gradlew :app:assembleRelease && cd -
+   adb install -r apps/fetchit-android/app/build/outputs/apk/release/app-release.apk
+
+   # Desktop bundle for the host OS
+   cd apps/fetchit-desktop
+   npm ci
+   npm run tauri build
    ```
+
+   Local `tauri build` only produces a bundle for the host OS — the
+   cross-platform fan-out is the matrix's job.
 
 3. **Commit, tag, push**:
 
@@ -108,11 +178,13 @@ Then `rm /tmp/fetchit-keystore.b64`.
    ```
 
 4. **Watch the workflow**: GitHub Actions → `release` → look for the
-   tag. Takes ~5–10 minutes. Output is a Release on the repo's
-   Releases page with the APK + sha256 attached.
+   tag. APK job ~5–10 min; desktop matrix ~15–25 min for all three
+   runners. Output is one Release on the repo's Releases page with
+   APK + macOS .dmg + Linux .AppImage/.deb + Windows .msi/.exe.
 
-5. **Verify the download**: pull the published APK, compare its
-   sha256 against the `.sha256` file, install it on a clean device.
+5. **Verify the downloads**: pull each artifact, compare APK sha256
+   against the `.sha256` file, install on a clean device / VM /
+   machine of each kind.
 
 ## Tag conventions
 
@@ -132,7 +204,10 @@ GitHub Releases is the source of truth. To unrelease:
 - **Soft delete**: Releases → … → "delete release". Tag stays in git.
 - **Hard delete**: also delete the tag (`git push --delete origin v0.1.0`).
   Local users with the bad APK installed are stuck on it; the next
-  release with a higher `versionCode` upgrades them.
+  release with a higher `versionCode` upgrades them. Desktop users
+  who already downloaded a bad bundle keep it until they redownload —
+  unlike Android there's no upgrade-refuses-downgrade enforcement, so
+  bumping the version and re-releasing is the cleanest fix.
 
 Never reuse a `versionCode`. Even after deleting a release, the next
 release must have a strictly higher `versionCode` than any APK that
@@ -147,6 +222,12 @@ already.
   `app/build.gradle.kts` and to `scripts/build-jni-libs.sh`.
 - **Play Store upload** — manual for now. The signing key is
   upload-key compatible if/when we go through Play App Signing.
+- **ARM Linux / ARM Windows desktop bundles** — only x86_64 today.
+  macOS is universal so Apple Silicon is covered. Add `linux/arm64`
+  or `windows-11-arm` matrix legs when there's user demand.
+- **Auto-update for desktop** — bundles are install-once. Wire
+  `tauri-plugin-updater` + signed update manifests when we want
+  background updates.
 - **Reproducible builds** — gradle's `assembleRelease` is mostly but
   not perfectly deterministic. Independent verification of a published
   APK requires the same NDK / JDK / Rust toolchain versions plus the
