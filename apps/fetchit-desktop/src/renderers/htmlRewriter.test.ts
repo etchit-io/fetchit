@@ -250,6 +250,18 @@ describe("rewriteHtml — link interceptor", () => {
     );
     expect(interceptors.length).toBe(1);
   });
+
+  it("the script handles intra-page fragment links explicitly (Chromium sandbox quirk)", () => {
+    // Chromium-based WebView2 refuses default anchor navigation inside
+    // null-origin sandboxed iframes — the library's `<a href="#ch-i">`
+    // chapter links silently do nothing without an explicit fallback.
+    // Verify the script calls scrollIntoView for `#…` hrefs.
+    const out = rewriteHtml(`<html><body></body></html>`, ADDR);
+    const text = interceptor(out)?.textContent ?? "";
+    expect(text).toMatch(/href\.charAt\(0\)\s*===\s*'#'/);
+    expect(text).toMatch(/scrollIntoView/);
+    expect(text).toMatch(/getElementById/);
+  });
 });
 
 describe("rewriteHtml — strips resource hints to prevent preconnect leaks", () => {

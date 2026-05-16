@@ -33,6 +33,24 @@ const LINK_INTERCEPTOR = `
       try { parent.postMessage({ kind: 'fetchit:back' }, '*'); } catch (err) { dbg('postMessage failed: ' + err); }
       return;
     }
+    // Intra-page fragment links (#chapter-2) — Chromium-based WebView2
+    // refuses default anchor navigation inside null-origin sandboxed
+    // iframes (treats the fragment-only same-document update as
+    // cross-origin and silently blocks). WebKit on Mac/Linux is
+    // permissive. Doing the scroll ourselves works on every engine and
+    // doesn't require relaxing the sandbox attribute.
+    if (href.charAt(0) === '#' && href.length > 1) {
+      var id = href.slice(1);
+      var target = document.getElementById(id)
+        || document.querySelector('a[name="' + id.replace(/"/g, '\\\\"') + '"]');
+      if (target) {
+        e.preventDefault();
+        try { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        catch (_) { target.scrollIntoView(); }
+        dbg('fragment scroll href=' + href);
+      }
+      return;
+    }
     var m = /^(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})/.exec(href);
     if (!m) {
       dbg('click skipped href=' + href.slice(0, 80));
