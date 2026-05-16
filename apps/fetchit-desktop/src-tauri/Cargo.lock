@@ -2783,7 +2783,6 @@ dependencies = [
  "tauri-plugin-deep-link",
  "tempfile",
  "tokio",
- "zip",
 ]
 
 [[package]]

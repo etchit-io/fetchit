@@ -25,10 +25,6 @@ filetime = "0.2"
 tauri-plugin-deep-link = "2"
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
-# Inner-entry extraction from ZIP archives. The core's `ZipHandler`
-# parses the index but explicitly leaves extraction to the surface
-# (see its module doc) — `extract_archive_entry` here is that surface.
-zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"

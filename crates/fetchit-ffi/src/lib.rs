@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use fetchit_core::handlers::default_registry;
+use fetchit_core::handlers::{default_registry, extract_entry};
 use fetchit_core::{Address, Hint, NetworkClient, RenderContext};
 use fetchit_net::{set_data_home as set_data_home_inner, AutonomiClient, DEFAULT_PEERS};
 
@@ -94,6 +94,22 @@ pub fn detect(bytes: Vec<u8>) -> Result<RenditionFFI, FetchitError> {
         &RenderContext::default(),
     )?;
     Ok(rendition.into())
+}
+
+/// Read one named entry's decompressed bytes out of a ZIP archive.
+///
+/// Pure extraction: callers supply the full archive bytes (already
+/// fetched / cached by the surface) and an `entry_path` matching one of
+/// the [`ArchiveEntryFFI::path`]s returned by [`detect`] /
+/// [`Client::fetch_and_render`]. Returns the entry's decompressed bytes;
+/// the surface decides what to do with them (render inline, save to
+/// disk, hand off to another app).
+#[uniffi::export]
+pub fn extract_archive_entry(
+    archive_bytes: Vec<u8>,
+    entry_path: String,
+) -> Result<Vec<u8>, FetchitError> {
+    Ok(extract_entry(Bytes::from(archive_bytes), &entry_path)?)
 }
 
 /// Connected Autonomi client. Construct with [`Client::connect`].
