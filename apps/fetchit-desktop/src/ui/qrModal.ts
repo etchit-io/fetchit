@@ -34,7 +34,7 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
         <button type="button" class="qr-modal-copy-url">Copy autonomi://…</button>
       </div>
       <p class="qr-modal-footer">
-        scan with fetch&gt;it on Android &middot; <span class="qr-modal-domain">etchit.io</span>
+        scan with fetch<span class="brand-mark">&gt;</span>it on Android &middot; <span class="qr-modal-domain">etchit.io</span>
       </p>
     </div>
   `;

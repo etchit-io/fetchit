@@ -139,6 +139,9 @@ body {
 #mark span {
   color: var(--copper);
 }
+.brand-mark {
+  color: var(--copper);
+}
 
 #addr {
   flex: 1;

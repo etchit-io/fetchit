@@ -19,7 +19,7 @@ export function renderHtml(
   wrap.className = "rendered-html";
 
   const iframe = document.createElement("iframe");
-  iframe.title = "fetch>it content";
+  iframe.title = "fetchit content";
   iframe.setAttribute("referrerpolicy", "no-referrer");
   iframe.setAttribute("sandbox", SANDBOX);
   // Permits <video> / <audio> requestFullscreen() inside the iframe.

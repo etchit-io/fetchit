@@ -361,7 +361,7 @@ function buildPage(): HTMLElement {
       <details class="setting-collapsible">
         <summary><h2>Appearance</h2></summary>
         <p class="setting-desc">
-          fetch&gt;it ships dark — pick a softer surface if dark isn&rsquo;t your thing.
+          fetch<span class="brand-mark">&gt;</span>it ships dark — pick a softer surface if dark isn&rsquo;t your thing.
         </p>
         <div class="settings-theme-options" role="radiogroup" aria-label="Theme"></div>
       </details>
@@ -369,7 +369,7 @@ function buildPage(): HTMLElement {
     <section class="setting-group" id="group-network">
       <h2>Network</h2>
       <p class="setting-desc">
-        fetch>it connects to the Autonomi network lazily — the first fetch kicks off the
+        fetch<span class="brand-mark">&gt;</span>it connects to the Autonomi network lazily — the first fetch kicks off the
         client. While this panel is open, peer count auto-refreshes every 5 seconds.
       </p>
       <div class="setting-row">
@@ -381,7 +381,7 @@ function buildPage(): HTMLElement {
         <select id="idle-timeout"></select>
       </label>
       <p class="setting-desc setting-desc-muted">
-        After this many minutes with no mouse / keyboard activity, fetch&gt;it
+        After this many minutes with no mouse / keyboard activity, fetch<span class="brand-mark">&gt;</span>it
         drops the network connection and clears the in-memory cache. If the
         on-disk cache mode below is set to <em>Clear after idle</em>, that
         gets wiped too.
@@ -391,7 +391,7 @@ function buildPage(): HTMLElement {
       <details class="setting-collapsible">
         <summary><h2>Bootstrap peers</h2></summary>
         <p class="setting-desc">
-          The list of Autonomi peers fetch&gt;it dials on the first fetch.
+          The list of Autonomi peers fetch<span class="brand-mark">&gt;</span>it dials on the first fetch.
           Defaults to the bundled production list; override only if you
           know what you&rsquo;re doing (running a local node, joining a
           test network, etc.). One peer per line — either an
@@ -449,7 +449,7 @@ function buildPage(): HTMLElement {
       <details class="setting-collapsible">
         <summary><h2>About &amp; License</h2></summary>
         <p class="setting-desc">
-          <strong>fetch&gt;it &mdash; beta software.</strong>
+          <strong>fetch<span class="brand-mark">&gt;</span>it &mdash; beta software.</strong>
           Released under the
           <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener noreferrer">AGPL-3.0-only</a>
           license, with a commercial license available separately (see
