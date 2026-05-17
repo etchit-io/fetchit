@@ -63,7 +63,7 @@ jobs:
         run: cargo install cargo-ndk
 
       - name: Install uniffi-bindgen (version must match crates/fetchit-ffi)
-        run: cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.4
+        run: cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.5
 
       - name: Set up Android NDK r27
         id: ndk

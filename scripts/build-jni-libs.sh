@@ -18,7 +18,7 @@
 #     the version)
 #   - cargo-ndk: `cargo install cargo-ndk`
 #   - uniffi-bindgen, matching `uniffi` in crates/fetchit-ffi/Cargo.toml:
-#     `cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.4`
+#     `cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.5`
 #   - Android NDK r27 (matches `ndkVersion` in app/build.gradle.kts).
 #     Set ANDROID_NDK_HOME or ANDROID_NDK_ROOT to its install path.
 
@@ -73,7 +73,7 @@ done
 if ! command -v uniffi-bindgen >/dev/null 2>&1; then
   echo "error: uniffi-bindgen not found." >&2
   echo "       install it (version must match \`uniffi\` in crates/fetchit-ffi/Cargo.toml):" >&2
-  echo "         cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.4" >&2
+  echo "         cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.5" >&2
   exit 1
 fi
 echo
