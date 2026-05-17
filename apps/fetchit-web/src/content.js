@@ -11,6 +11,11 @@
 (() => {
   const HEX_64 = /^autonomi:\/\/([0-9a-fA-F]{64})/i;
   const ATTR = "data-fetchit-decorated";
+  // Opt-out marker that any page can set on an anchor or any ancestor to
+  // suppress the badge. Use case: card-style anchors where an extra inline
+  // span breaks the layout. (etchit.io/city sets this via CSS; pages that
+  // want even tighter control can set it as an attribute.)
+  const OPT_OUT = "data-no-fetchit-badge";
 
   // One stylesheet, injected once. Scoped to a class with two leading
   // underscores so the chance of colliding with page styles is near zero.
@@ -41,16 +46,46 @@
     (document.head || document.documentElement).appendChild(s);
   }
 
+  // Returns true if the anchor's parent uses a CSS display value that treats
+  // each child as a layout slot (flex/grid). Inserting an extra <span> after
+  // the anchor in such a parent inserts a new slot between siblings, which
+  // breaks card grids, button rows, etc. (We saw this on etchit.io/city
+  // before we hid the badge there.) In that case we still flag the anchor
+  // with a tooltip but skip the visible badge.
+  function parentTreatsChildrenAsSlots(a) {
+    const p = a.parentElement;
+    if (!p) return false;
+    try {
+      const display = getComputedStyle(p).display;
+      return /(^|\s)(flex|grid|inline-flex|inline-grid)($|\s)/.test(display);
+    } catch {
+      return false;
+    }
+  }
+
   function decorateAnchor(a) {
     if (a.hasAttribute(ATTR)) return;
     const m = HEX_64.exec(a.getAttribute("href") || "");
     if (!m) return;
-    a.setAttribute(ATTR, "1");
+    // Honor an opt-out on the anchor or any ancestor.
+    if (a.closest(`[${OPT_OUT}]`)) {
+      a.setAttribute(ATTR, "1");
+      return;
+    }
     const addr = m[1].toLowerCase();
+    a.setAttribute(ATTR, "1");
+    // Always set a tooltip — works whether or not we add a visible badge.
+    // Only set if the page hasn't already set one we'd clobber.
+    if (!a.title) {
+      a.title = `Autonomi address ${addr.slice(0, 12)}… — opens in fetch>it desktop`;
+    }
+    // Skip the visible badge if it would land between siblings in a flex/grid
+    // container — tooltip alone signals the link.
+    if (parentTreatsChildrenAsSlots(a)) return;
     const badge = document.createElement("span");
     badge.className = "__fetchit-badge";
     badge.textContent = "fetch>it";
-    badge.title = `Autonomi address ${addr.slice(0, 12)}… — opens in fetch>it desktop`;
+    badge.setAttribute("aria-hidden", "true");
     a.insertAdjacentElement("afterend", badge);
   }
 
@@ -60,26 +95,54 @@
 
   function sweep(root) {
     const scope = root && root.querySelectorAll ? root : document;
-    for (const a of scope.querySelectorAll(LINK_SEL)) {
-      decorateAnchor(a);
-    }
+    // If `root` is itself a matching anchor, decorate it directly — querySelectorAll
+    // doesn't include the root element.
+    if (root && root.matches && root.matches(LINK_SEL)) decorateAnchor(root);
+    for (const a of scope.querySelectorAll(LINK_SEL)) decorateAnchor(a);
   }
 
   ensureStyle();
   sweep(document);
 
-  // React/Vue/etc. mount content asynchronously — observe the document so
-  // links injected after our initial sweep still get decorated.
+  // React/Vue/etc. mount content asynchronously. We coalesce mutation bursts
+  // into one sweep per animation frame — busy SPAs (Twitter, GitHub, Discord)
+  // can fire thousands of mutations per second, and running querySelectorAll
+  // on each one is the kind of well-meaning extension that earns "this slowed
+  // my browser to a crawl" reviews. One pass per frame is plenty.
+  const pendingRoots = new Set();
+  let scheduled = false;
+  const flush = () => {
+    scheduled = false;
+    for (const node of pendingRoots) sweep(node);
+    pendingRoots.clear();
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    (typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (cb) => setTimeout(cb, 16))(flush);
+  };
+
   const obs = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (const node of m.addedNodes) {
-        if (node.nodeType !== Node.ELEMENT_NODE) continue;
-        if (node.matches && node.matches(LINK_SEL)) {
-          decorateAnchor(node);
-        }
-        sweep(node);
+        if (node.nodeType === Node.ELEMENT_NODE) pendingRoots.add(node);
       }
     }
+    if (pendingRoots.size > 0) schedule();
   });
   obs.observe(document.documentElement, { childList: true, subtree: true });
+
+  // Cheap insurance: long-lived SPAs that bfcache-restore can re-fire mutation
+  // bursts. Stop observing when the page is leaving so we don't pile up state
+  // across navigations.
+  addEventListener(
+    "pagehide",
+    () => {
+      obs.disconnect();
+      pendingRoots.clear();
+    },
+    { once: true },
+  );
 })();

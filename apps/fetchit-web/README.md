@@ -19,25 +19,37 @@ desktop app (or the Android app on mobile).
 
 - No content rendering. The browser is the wrong place to run a P2P
   client; `ant-core` is Rust, libp2p is QUIC, browsers have neither.
-- No telemetry, no analytics, no remote calls. The only permissions it
-  asks for are `contextMenus` and `storage`.
+- No telemetry, no analytics, no remote calls. The only permission it
+  asks for is `contextMenus`.
 - No content-script DOM walking for bare 64-hex strings in arbitrary
   text — that would false-positive on every git commit hash on the
   web. Bare addresses go through the right-click path.
+
+## Supported browsers
+
+| Browser | Version | Status | Notes |
+|---|---|---|---|
+| Chrome | 109+ | Supported | First version with reliable MV3 service workers + `omnibox`. |
+| Edge | 109+ | Supported | Chromium-based, identical to Chrome. |
+| Brave | 1.50+ | Supported | Chromium-based; `brave://extensions` instead of `chrome://`. |
+| Arc | All | Supported | Chromium-based. |
+| Firefox | 121+ | Supported | First version with stable MV3 background service workers (Dec 2023). |
+| Safari | — | Not supported | Safari WebExtensions need Xcode packaging + an Apple Developer account. Out of scope for now; on the roadmap. |
+| Mobile Chrome / Mobile Firefox | — | Not supported | Mobile browsers don't run desktop extensions. Use the Android app instead. |
 
 ## Install (dev, load-unpacked)
 
 Chrome / Edge / Brave / Arc:
 
-1. Open `chrome://extensions`
-2. Toggle **Developer mode** on (top right)
-3. Click **Load unpacked**, pick `apps/fetchit-web/`
+1. Open `chrome://extensions` (Edge: `edge://extensions`, Brave: `brave://extensions`).
+2. Toggle **Developer mode** on (top right).
+3. Click **Load unpacked**, pick `apps/fetchit-web/`.
 
 Firefox (121+):
 
-1. Open `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on…**
-3. Pick `apps/fetchit-web/manifest.json`
+1. Open `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on…**.
+3. Pick `apps/fetchit-web/manifest.json`.
 
 Firefox unloads temporary add-ons on restart — for persistent install,
 sign and load through `about:addons`.
@@ -57,12 +69,91 @@ desktop install page for that case.
 
 | Path | Role |
 |---|---|
-| `manifest.json` | MV3 declaration. Chrome 102+ / Firefox 121+. |
+| `manifest.json` | MV3 declaration. Chrome 109+ / Firefox 121+. |
 | `src/addr.js` | Address parser (mirrors `apps/fetchit-desktop/src/address.ts`). |
 | `src/content.js` | Link decorator (no module imports — content scripts can't). |
 | `src/background.js` | Service worker. Context menu + omnibox handlers. |
 | `src/popup.html` + `popup.css` + `popup.js` | Toolbar popup. |
 | `icons/` | 16/32/48/128 PNGs, regenerated from `fetchit-desktop/src-tauri/icons/`. |
+| `test/addr.test.mjs` | Node-built-in tests for the address parser. |
+| `test/sample.html` | Hand-test fixture — anchors of varying shapes for QA. |
+
+## Tests
+
+The address parser is the only thing with non-trivial logic. Tests run on
+plain Node (20+), no deps:
+
+```bash
+node --test apps/fetchit-web/test/addr.test.mjs
+```
+
+Anything that changes `src/addr.js` MUST keep all 15 tests green. If you
+change the parser intentionally (e.g., to accept a new input shape), add
+a test for the new shape before changing the implementation — divergence
+between this parser and `fetchit-desktop/src/address.ts` is exactly the
+class of bug that shows up as "the address worked in one place and not
+the other."
+
+## Opting an anchor out of the badge
+
+The content script adds a small `fetch>it` badge next to every
+`<a href="autonomi://...">`. That works well for inline links but can
+break card-style layouts (the badge becomes an extra flex/grid child
+between siblings). The script already detects flex/grid parents and
+skips the badge in those cases.
+
+Page authors can also opt out explicitly by adding the
+`data-no-fetchit-badge` attribute on the anchor or any ancestor:
+
+```html
+<div data-no-fetchit-badge>
+  <a href="autonomi://...">My card</a>  <!-- badge suppressed -->
+</div>
+```
+
+The anchor still gets the hover tooltip; only the visible badge is
+suppressed.
+
+## Debugging a broken install
+
+Symptoms first, then where to look:
+
+**Right-click menu doesn't appear**
+
+Verify the extension is enabled in `chrome://extensions` (or your
+browser's equivalent). On Firefox, temporary add-ons clear at restart —
+re-load from `about:debugging#/runtime/this-firefox`.
+
+**Right-click menu appears but clicking does nothing**
+
+Open the service-worker DevTools console:
+
+- Chrome / Edge / Brave / Arc → `chrome://extensions` → click "service
+  worker" link under the fetch>it card → DevTools opens.
+- Firefox → `about:debugging#/runtime/this-firefox` → click "Inspect"
+  next to the extension → console tab.
+
+`[fetch>it] failed to open autonomi://… NoApplicationFound` (or similar)
+means the OS doesn't have a registered handler for `autonomi://`. Install
+fetch>it desktop — that's the part that registers the scheme. Open the
+popup and follow the install link.
+
+**Badge doesn't appear next to autonomi:// links**
+
+If `getComputedStyle(parent).display` reports `flex` or `grid` on the
+anchor's parent, the badge is suppressed on purpose to avoid breaking
+the layout. Hover the anchor — the tooltip still confirms the extension
+saw it. If neither badge nor tooltip appears, the content script isn't
+loading; check `chrome://extensions` to confirm the extension has
+permission for the current site (it asks for `<all_urls>`, so this is
+rare).
+
+**Omnibox keyword `fetchit` doesn't suggest anything**
+
+The omnibox only suggests once the input parses as a valid 64-hex
+Autonomi address. Until then there's no suggestion — that's by design.
+Press the keyword + Tab + paste the address. If the address is invalid
+the entry path is a no-op and logs to the service-worker console.
 
 ## Security posture
 
@@ -71,10 +162,11 @@ The extension's threat surface is narrow on purpose:
 - Reads no page content (the content script only looks at `href`
   attributes, never DOM text or form values).
 - Writes nothing back to pages (decoration is a sibling element added
-  *after* the original anchor, never modifying the page's own DOM).
+  *after* the original anchor, never modifying the page's own DOM —
+  except for setting a `title` if the page hasn't already set one).
 - Sends no IPC anywhere except the OS scheme handler.
-- Permissions are `contextMenus` and `storage` only. No `tabs`, no
-  `host_permissions`, no `webRequest`.
+- Permissions are `contextMenus` only. No `tabs`, no `host_permissions`,
+  no `webRequest`, no `storage`.
 
 See [`docs/SECURITY.md`](../../docs/SECURITY.md) for fetch&gt;it's
 broader trust model.

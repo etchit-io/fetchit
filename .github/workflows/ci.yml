@@ -44,6 +44,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  # Cross-browser extension. Runs the address-parser unit tests under plain
+  # Node (no package.json, no deps — just node --test). If you change the
+  # parser, this job is what catches divergence with the desktop-app parser.
+  web-extension:
+    name: web extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: addr.js parser tests
+        run: node --test apps/fetchit-web/test/addr.test.mjs
+      - name: manifest.json is valid JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('apps/fetchit-web/manifest.json', 'utf8'))"
+      - name: background.js parses as ES module
+        run: node --input-type=module -e "import('./apps/fetchit-web/src/addr.js').then(() => console.log('addr.js OK'))"
+
   # Builds the Android debug APK end-to-end (FFI .so via cargo-ndk +
   # gradle assembleDebug). Catches breakage in the gradle build, the
   # NDK toolchain, or the JNI handoff before a release tag. The
