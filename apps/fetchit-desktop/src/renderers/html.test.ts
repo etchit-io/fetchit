@@ -21,11 +21,14 @@ describe("renderHtml", () => {
     expect(into.querySelector(".rendered-html > iframe")).toBeTruthy();
   });
 
-  it("enables only allow-scripts, allow-forms, and allow-fullscreen in sandbox", () => {
+  it("enables only allow-scripts and allow-forms in sandbox (no allow-same-origin / top-nav / popups)", () => {
     const sandbox = setup("<p>x</p>").getAttribute("sandbox") ?? "";
     expect(sandbox).toContain("allow-scripts");
     expect(sandbox).toContain("allow-forms");
-    expect(sandbox).toContain("allow-fullscreen");
+    // `allow-fullscreen` is NOT a real sandbox token. Chromium warns
+    // about it; fullscreen is enabled by the `allowfullscreen`
+    // attribute below instead.
+    expect(sandbox).not.toContain("allow-fullscreen");
     expect(sandbox).not.toContain("allow-same-origin");
     expect(sandbox).not.toContain("allow-top-navigation");
     expect(sandbox).not.toContain("allow-popups");
@@ -36,7 +39,7 @@ describe("renderHtml", () => {
     expect(setup("").getAttribute("referrerpolicy")).toBe("no-referrer");
   });
 
-  it("sets allowfullscreen so <video> can enter fullscreen", () => {
+  it("sets the `allowfullscreen` attribute so <video> can request fullscreen", () => {
     expect(setup("").hasAttribute("allowfullscreen")).toBe(true);
   });
 

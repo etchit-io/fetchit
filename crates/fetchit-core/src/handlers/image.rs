@@ -50,7 +50,10 @@ fn detect_mime(head: &[u8]) -> Option<&'static str> {
         // only the image-shaped brands; everything else falls through
         // to VideoHandler.
         let brand = &head[8..12];
-        if matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1") {
+        if matches!(
+            brand,
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1"
+        ) {
             return Some("image/heic");
         }
     }
@@ -94,10 +97,10 @@ mod tests {
             .expect("image handler should not error")
     }
 
-    fn ftyp(brand: &[u8; 4]) -> Vec<u8> {
+    fn ftyp(brand: [u8; 4]) -> Vec<u8> {
         let mut data = vec![0u8, 0, 0, 0x18];
         data.extend_from_slice(b"ftyp");
-        data.extend_from_slice(brand);
+        data.extend_from_slice(&brand);
         data.extend_from_slice(&[0u8; 12]);
         data
     }
@@ -161,7 +164,7 @@ mod tests {
 
     #[test]
     fn claims_heic() {
-        let data = ftyp(b"heic");
+        let data = ftyp(*b"heic");
         assert_eq!(confidence(&data), Confidence::Definite);
         match render(&data) {
             Rendition::Image { mime, .. } => assert_eq!(mime, "image/heic"),
@@ -171,14 +174,14 @@ mod tests {
 
     #[test]
     fn claims_mif1_heif() {
-        let data = ftyp(b"mif1");
+        let data = ftyp(*b"mif1");
         assert_eq!(confidence(&data), Confidence::Definite);
     }
 
     #[test]
     fn rejects_mp4_ftyp() {
         // Plain MP4 brand must NOT be claimed — VideoHandler runs after.
-        let data = ftyp(b"isom");
+        let data = ftyp(*b"isom");
         assert_eq!(confidence(&data), Confidence::None);
     }
 

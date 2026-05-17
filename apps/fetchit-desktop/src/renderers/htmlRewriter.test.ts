@@ -13,17 +13,15 @@ function parse(html: string): Document {
 }
 
 describe("rewriteHtml — preserves authored URLs", () => {
-  it("leaves non-media autonomi:// references untouched (both schemes are registered with Tauri)", () => {
+  it("leaves non-resource autonomi:// references untouched (anchors, scripts, links, forms)", () => {
     const out = rewriteHtml(
       `<a href="autonomi://${ADDR}">a</a>` +
-        `<img src="autonomi://${ADDR}/img.png">` +
         `<script src="autonomi://${ADDR}/main.js"></script>` +
         `<link rel="stylesheet" href="autonomi://${ADDR}/style.css">` +
         `<form action="autonomi://${ADDR}/submit"></form>`,
     );
     const doc = parse(out);
     expect(doc.querySelector("a")?.getAttribute("href")).toBe(`autonomi://${ADDR}`);
-    expect(doc.querySelector("img")?.getAttribute("src")).toBe(`autonomi://${ADDR}/img.png`);
     expect(doc.querySelector("script[src]")?.getAttribute("src")).toBe(
       `autonomi://${ADDR}/main.js`,
     );
@@ -57,6 +55,45 @@ describe("rewriteHtml — preserves authored URLs", () => {
     const audio = parse(out).querySelector("audio");
     expect(audio?.getAttribute("src")).toBe("https://example.com/track.mp3");
     expect(audio?.hasAttribute("data-fetchit-src")).toBe(false);
+  });
+
+  it("rewrites <img src> autonomi:// to the localhost media-server URL (Windows WebView2 rejects custom schemes for subresources)", () => {
+    const out = rewriteHtml(`<img src="autonomi://${ADDR}">`);
+    const img = parse(out).querySelector("img");
+    expect(img?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("rewrites <img src> with the fetchit:// alias too", () => {
+    const out = rewriteHtml(`<img src="fetchit://${ADDR}">`);
+    const img = parse(out).querySelector("img");
+    expect(img?.getAttribute("src")).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("rewrites <img srcset> entries (responsive images)", () => {
+    const ADDR_B = "f".repeat(64);
+    const out = rewriteHtml(
+      `<img srcset="autonomi://${ADDR} 1x, fetchit://${ADDR_B} 2x">`,
+    );
+    const img = parse(out).querySelector("img");
+    expect(img?.getAttribute("srcset")).toBe(`${MEDIA_BASE}/${ADDR} 1x, ${MEDIA_BASE}/${ADDR_B} 2x`);
+  });
+
+  it("rewrites <picture><source srcset> entries", () => {
+    const out = rewriteHtml(
+      `<picture><source srcset="autonomi://${ADDR}" media="(min-width:800px)"><img></picture>`,
+    );
+    const source = parse(out).querySelector("picture source");
+    expect(source?.getAttribute("srcset")).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("doesn't touch <img> src that isn't an Autonomi address", () => {
+    const out = rewriteHtml(
+      `<img src="data:image/png;base64,iVBORw0KGgo=">` +
+        `<img src="https://example.com/logo.png">`,
+    );
+    const imgs = parse(out).querySelectorAll("img");
+    expect(imgs[0].getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+    expect(imgs[1].getAttribute("src")).toBe("https://example.com/logo.png");
   });
 
   it("leaves non-autonomi schemes untouched too", () => {
@@ -121,14 +158,16 @@ describe("rewriteHtml — security boundaries", () => {
     expect(content).not.toMatch(/\*\s/);
   });
 
-  it("the CSP names the configured media base for media-src and connect-src", () => {
+  it("the CSP names the configured media base for img-src, media-src, and connect-src", () => {
     const out = rewriteHtml(`<html></html>`);
     const content =
       parse(out)
         .querySelector("meta[http-equiv='Content-Security-Policy']")
         ?.getAttribute("content") ?? "";
+    expect(content).toContain(`img-src 'self' fetchit: autonomi: data: blob: ${MEDIA_BASE}`);
     expect(content).toContain(`media-src 'self' fetchit: autonomi: data: blob: ${MEDIA_BASE}`);
     expect(content).toContain(`connect-src 'self' fetchit: autonomi: ${MEDIA_BASE}`);
+    expect(content).toContain("style-src 'self' fetchit: autonomi: data: 'unsafe-inline'");
   });
 
   it("sets <base href> to autonomi://<addr>/", () => {
@@ -212,6 +251,18 @@ describe("rewriteHtml — link interceptor", () => {
     );
     expect(interceptors.length).toBe(1);
   });
+
+  it("the script handles intra-page fragment links explicitly (Chromium sandbox quirk)", () => {
+    // Chromium-based WebView2 refuses default anchor navigation inside
+    // null-origin sandboxed iframes — the library's `<a href="#ch-i">`
+    // chapter links silently do nothing without an explicit fallback.
+    // Verify the script calls scrollIntoView for `#…` hrefs.
+    const out = rewriteHtml(`<html><body></body></html>`, ADDR);
+    const text = interceptor(out)?.textContent ?? "";
+    expect(text).toMatch(/href\.charAt\(0\)\s*===\s*'#'/);
+    expect(text).toMatch(/scrollIntoView/);
+    expect(text).toMatch(/getElementById/);
+  });
 });
 
 describe("rewriteHtml — strips resource hints to prevent preconnect leaks", () => {
@@ -244,12 +295,40 @@ describe("rewriteHtml — strips resource hints to prevent preconnect leaks", ()
     expect(out).not.toContain("https://x.example/");
   });
 
-  it("preserves <link rel=\"stylesheet\"> — CSP handles those at fetch time", () => {
+  it("preserves <link rel=\"stylesheet\"> with autonomi:// href (rendered via the protocol handler)", () => {
     const out = rewriteHtml(
       `<html><head><link rel="stylesheet" href="autonomi://${ADDR}/style.css"></head><body>x</body></html>`,
     );
     const sheets = parse(out).head.querySelectorAll('link[rel="stylesheet"]');
     expect(sheets.length).toBe(1);
+  });
+
+  it("preserves <link rel=\"stylesheet\"> with a relative href (resolved against base)", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="/style.css"></head><body>x</body></html>`,
+    );
+    const sheets = parse(out).head.querySelectorAll('link[rel="stylesheet"]');
+    expect(sheets.length).toBe(1);
+  });
+
+  it("strips <link rel=\"stylesheet\"> with an external https:// href — avoids CSP-violation console spam", () => {
+    // CSP `style-src` already blocks it at fetch time, but Chromium
+    // emits a loud "Loading the stylesheet '<URL>' violates the
+    // following Content Security Policy directive" message per
+    // blocked link. Stripping at parse time silences the noise with
+    // the same end result.
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("fonts.googleapis.com");
+    expect(parse(out).head.querySelectorAll('link[rel="stylesheet"]').length).toBe(0);
+  });
+
+  it("strips http:// stylesheets too (defense in depth)", () => {
+    const out = rewriteHtml(
+      `<html><head><link rel="stylesheet" href="http://insecure.example/style.css"></head><body>x</body></html>`,
+    );
+    expect(out).not.toContain("insecure.example");
   });
 });
 
@@ -356,6 +435,195 @@ describe("rewriteHtml — injects the media hydration script", () => {
     const text = hydrationScript(out)?.textContent ?? "";
     expect(text).toMatch(/_fetchitHydrated/);
   });
+
+  it("the hydration script also attaches document- and window-level capture listeners (WebView2 path)", () => {
+    // Chromium-based WebView2 lets native <audio>/<video> shadow-DOM
+    // controls consume per-element pointerdown before any user-script
+    // listener fires, so per-element alone misses the play button's
+    // first click. We attach a wider net at document AND window for
+    // multiple event types so whichever the engine routes the event
+    // through first triggers hydration.
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    // List of event types covered.
+    expect(text).toMatch(/'pointerdown'/);
+    expect(text).toMatch(/'mousedown'/);
+    expect(text).toMatch(/'click'/);
+    expect(text).toMatch(/'keydown'/);
+    expect(text).toMatch(/'touchstart'/);
+    // Both targets present.
+    expect(text).toMatch(/document\.addEventListener\(/);
+    expect(text).toMatch(/window\.addEventListener\(/);
+    // Listeners are capture-phase (third arg true).
+    expect(text).toMatch(/addEventListener\([^)]+true\)/);
+  });
+
+  it("the document/window listeners are one-shot (removeEventListener after first fire)", () => {
+    const out = rewriteHtml(`<html><body><audio src="autonomi://${ADDR}"></audio></body></html>`);
+    const text = hydrationScript(out)?.textContent ?? "";
+    expect(text).toMatch(/document\.removeEventListener\(/);
+    expect(text).toMatch(/window\.removeEventListener\(/);
+  });
+});
+
+describe("rewriteHtml — runtime URL rewriter (dynamic resource loads)", () => {
+  // `rewriteSrcset` is unique to the URL rewriter; the neuter script
+  // also uses `Object.defineProperty` (to lock APIs) so we can't use
+  // that as the discriminator.
+  function rewriterScript(html: string): HTMLScriptElement | null {
+    const scripts = parse(html).head.querySelectorAll("script");
+    return (Array.from(scripts).find((s) =>
+      s.textContent?.includes("rewriteSrcset"),
+    ) ?? null) as HTMLScriptElement | null;
+  }
+
+  it("injects a rewriter script in <head> (runs before any author script)", () => {
+    const out = rewriteHtml(`<html><head></head><body></body></html>`);
+    expect(rewriterScript(out)).toBeTruthy();
+  });
+
+  it("the script names the configured media base", () => {
+    const out = rewriteHtml(`<html></html>`);
+    const text = rewriterScript(out)?.textContent ?? "";
+    expect(text).toContain(JSON.stringify(MEDIA_BASE));
+  });
+
+  it("patches HTMLImageElement.src so dynamic `img.src = autonomi://…` is rewritten", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLImageElement\.prototype.*'src'/s);
+  });
+
+  it("patches HTMLImageElement.srcset (responsive images set at runtime)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLImageElement\.prototype.*'srcset'/s);
+  });
+
+  it("patches HTMLMediaElement.src (dynamic audio.src / video.src — the lab-page exhibits)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLMediaElement\.prototype.*'src'/s);
+  });
+
+  it("patches HTMLLinkElement.href (dynamic stylesheet loads) but NOT anchor href", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLLinkElement\.prototype.*'href'/s);
+    expect(text).not.toMatch(/HTMLAnchorElement/);
+  });
+
+  it("wraps window.fetch so fetch('autonomi://…') (gallery, lab text, WASM) is rewritten", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/window\.fetch\s*=\s*function/);
+  });
+
+  it("wraps XMLHttpRequest.open for older code paths", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/XMLHttpRequest\.prototype\.open/);
+  });
+
+  it("intercepts setAttribute for 'src' and 'srcset' (attribute-API path)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/Element\.prototype\.setAttribute\s*=/);
+    expect(text).toMatch(/'src'/);
+    expect(text).toMatch(/'srcset'/);
+  });
+
+  it("only intercepts setAttribute('href', …) for <link>, NOT for <a> (navigation must stay autonomi://)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/tagName\s*===\s*'LINK'/);
+  });
+
+  // Behavioural — actually run the rewriter logic in jsdom and verify
+  // it rewrites correctly. We re-use the same regex/transform that the
+  // injected script uses so a regression in the URL parser would show
+  // up as a unit test failure here, not just an integration failure.
+  it("behavioural: rewrites autonomi://<addr> to media-base URL", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    // The script defines a `rewrite` function inside an IIFE; eval the
+    // body but expose `rewrite` for assertion.
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite, rewriteSrcset: rewriteSrcset };
+    `)();
+    expect(probe.rewrite(`autonomi://${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(probe.rewrite(`fetchit://${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(probe.rewrite("https://example.com")).toBe("https://example.com");
+    expect(probe.rewrite("autonomi://not-hex-not-64")).toBe("autonomi://not-hex-not-64");
+  });
+
+  it("behavioural: bare 64-hex (SPA passes relative URL → would resolve against base href)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite };
+    `)();
+    // demo-city gallery does \`img.src = "<hash>"\`; the property
+    // setter sees the raw hash before the browser resolves it against
+    // <base href="autonomi://<page>/">. Both forms must land at the
+    // same media-server URL.
+    expect(probe.rewrite(ADDR)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    // Mixed case → lowercase output.
+    const UPPER = ADDR.toUpperCase();
+    expect(probe.rewrite(UPPER)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    // Strings that LOOK hex-like but aren't 64 chars stay untouched.
+    expect(probe.rewrite("abc123")).toBe("abc123");
+    expect(probe.rewrite("a".repeat(63))).toBe("a".repeat(63));
+    expect(probe.rewrite("a".repeat(65))).toBe("a".repeat(65));
+  });
+
+  it("behavioural: absolute-path form /<hash> (gallery's `img.src = '/' + addr`)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite };
+    `)();
+    // The smoking gun from the v4 Windows log — demo-city's gallery
+    // does \`img.src = '/' + addr\` to force absolute-path resolution
+    // against <base href>. Without leading-slash support, browser
+    // resolves to autonomi://<page>/<hash> and WebView2 rejects.
+    expect(probe.rewrite(`/${ADDR}`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    // Trailing query / fragment / extra path is stripped (we only
+    // need the address; the media server doesn't honour query params).
+    expect(probe.rewrite(`/${ADDR}?x=1`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+    expect(probe.rewrite(`/${ADDR}#frag`)).toBe(`${MEDIA_BASE}/${ADDR}`);
+  });
+
+  it("patches HTMLMediaElement.play to lazy-hydrate before native controls fire", () => {
+    // WebView2 native shadow-DOM media controls intercept pointer
+    // events before document/window capture-phase listeners can fire,
+    // so our document-level hydration listener was being bypassed and
+    // the user had to click outside the player first. Patching .play()
+    // (which the native controls call internally) lets the first
+    // click-on-play work everywhere.
+    const text = rewriterScript(rewriteHtml(`<html></html>`))?.textContent ?? "";
+    expect(text).toMatch(/HTMLMediaElement\.prototype\.play\s*=/);
+    expect(text).toMatch(/data-fetchit-src/);
+    expect(text).toMatch(/this\.load\(\)/);
+  });
+
+  it("behavioural: autonomi://<page>/<address> — path wins (matches protocol.rs)", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewrite: rewrite };
+    `)();
+    // Demo-city gallery case: base href is autonomi://<gallery>/, JS sets
+    // img.src = "<image-hash>" → resolves to autonomi://<gallery>/<image>.
+    // The image hash (path) is the address we actually want.
+    const PAGE = "a".repeat(64);
+    const IMG = "b".repeat(64);
+    expect(probe.rewrite(`autonomi://${PAGE}/${IMG}`)).toBe(`${MEDIA_BASE}/${IMG}`);
+  });
+
+  it("behavioural: srcset rewriter handles comma-separated entries", () => {
+    const text = rewriterScript(rewriteHtml(`<html></html>`))!.textContent!;
+    const probe = new Function(`
+      ${text.replace(/^\(function \(\) \{/, "").replace(/\}\)\(\);?$/, "")}
+      return { rewriteSrcset: rewriteSrcset };
+    `)();
+    const ADDR_B = "f".repeat(64);
+    expect(probe.rewriteSrcset(`autonomi://${ADDR} 1x, autonomi://${ADDR_B} 2x`)).toBe(
+      `${MEDIA_BASE}/${ADDR} 1x, ${MEDIA_BASE}/${ADDR_B} 2x`,
+    );
+  });
 });
 
 describe("rewriteHtml — injects the neuter script", () => {
@@ -378,9 +646,12 @@ describe("rewriteHtml — injects the neuter script", () => {
       `<html><head><script>window.spa = 1;</script></head><body>x</body></html>`,
     );
     const headScripts = Array.from(parse(out).head.querySelectorAll("script"));
-    // First script in head must be ours (contains RTCPeerConnection); the
-    // SPA's `window.spa = 1` script comes after.
+    // Order: neuter (API lockdown), then URL rewriter (subresource
+    // scheme normalisation), then any author scripts. Both injected
+    // scripts must run before `window.spa = 1` so the SPA sees the
+    // patched globals from the start.
     expect(headScripts[0]?.textContent ?? "").toContain("RTCPeerConnection");
-    expect(headScripts[1]?.textContent ?? "").toContain("window.spa");
+    expect(headScripts[1]?.textContent ?? "").toContain("rewriteSrcset");
+    expect(headScripts[2]?.textContent ?? "").toContain("window.spa");
   });
 });

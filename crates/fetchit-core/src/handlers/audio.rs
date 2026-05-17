@@ -3,7 +3,7 @@
 //! can hand bytes straight to a platform decoder.
 //!
 //! Decoding to PCM is intentionally not done here — the platform's
-//! audio pipeline (Media3 / ExoPlayer on the Android app, the browser
+//! audio pipeline (`Media3` / `ExoPlayer` on the Android app, the browser
 //! `<audio>` element for HTML renditions, whatever the `fetchit` CLI
 //! plays through) accepts the encoded bytes directly.
 

@@ -16,7 +16,7 @@
 import { unzipSync, strFromU8 } from "fflate";
 import type { Rendition } from "../types";
 import { rewriteHtml } from "./htmlRewriter";
-import { mediaBase } from "../mediaUrl";
+import { mediaBase, mediaUrlOf } from "../mediaUrl";
 
 const SANDBOX = "allow-scripts allow-forms";
 
@@ -59,7 +59,13 @@ export function renderEpub(
 }
 
 async function loadAndRender(address: string): Promise<Book> {
-  const res = await fetch(`autonomi://${address}`);
+  // Route through the local media server, not via `autonomi://` directly:
+  // Chromium-based WebView2 (Windows) rejects custom URI schemes for
+  // fetch() subresources with ERR_UNKNOWN_URL_SCHEME, even though it
+  // accepts the same scheme for top-level navigation. The media server
+  // wraps the same byte-cache + Autonomi fallback the protocol handler
+  // does, so this is a pure transport swap.
+  const res = await fetch(mediaUrlOf(address));
   if (!res.ok) throw new Error(`fetch failed: HTTP ${res.status}`);
   const bytes = new Uint8Array(await res.arrayBuffer());
   const files = unzipSync(bytes);

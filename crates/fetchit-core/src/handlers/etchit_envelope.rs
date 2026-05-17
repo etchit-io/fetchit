@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn does_not_force_markdown_for_plain_envelope_content() {
         // No markdown markers — envelope stays untagged.
-        let raw = br##"{"v":1,"meta":{"title":"plain","lang":""},"content":"just some prose, nothing fancy."}"##;
+        let raw = br#"{"v":1,"meta":{"title":"plain","lang":""},"content":"just some prose, nothing fancy."}"#;
         match render(raw).expect("should render") {
             Rendition::EtchitEnvelope { language, .. } => {
                 assert_eq!(language, None);

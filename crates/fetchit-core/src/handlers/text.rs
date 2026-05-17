@@ -56,7 +56,7 @@ impl ContentHandler for TextHandler {
         // regex passes. Markdown-shaped text was claimed by
         // MarkdownHandler upstream, so this only fires for non-prose
         // text — code, mostly.
-        let language = super::lang_detect::detect(&body).map(|s| s.to_owned());
+        let language = super::lang_detect::detect(&body).map(str::to_owned);
         Ok(Rendition::Text { language, body })
     }
 }

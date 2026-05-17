@@ -3,12 +3,15 @@ import { rewriteHtml } from "./htmlRewriter";
 import { mediaBase } from "../mediaUrl";
 
 // The iframe sandbox: scripts run (SPAs need it), forms post (sandboxed
-// inside CSP), and `<video>` / `<audio>` can enter fullscreen — but no
-// `allow-same-origin` (the iframe is a null origin, no access to parent
-// state), no top-level navigation, no popups, no pointer lock. Fullscreen
-// is gated by user activation and the browser shows its own exit banner;
-// the iframe still can't read parent state.
-const SANDBOX = "allow-scripts allow-forms allow-fullscreen";
+// inside CSP) — but no `allow-same-origin` (the iframe is a null origin,
+// no access to parent state), no top-level navigation, no popups, no
+// pointer lock. Fullscreen for <video>/<audio> is granted via the
+// separate `allowfullscreen` attribute below, not via a sandbox token.
+//
+// (`allow-fullscreen` is NOT a real sandbox token per the HTML spec —
+// Chromium warns "invalid sandbox flag" if you list it; WebKit silently
+// ignores. Keep it OUT of this string.)
+const SANDBOX = "allow-scripts allow-forms";
 
 export function renderHtml(
   r: Extract<Rendition, { kind: "html" }>,
@@ -23,9 +26,9 @@ export function renderHtml(
   iframe.setAttribute("referrerpolicy", "no-referrer");
   iframe.setAttribute("sandbox", SANDBOX);
   // Permits <video> / <audio> requestFullscreen() inside the iframe.
-  // The sandbox token above only authorises fullscreen within a sandbox
-  // that's already been granted the capability — this attribute is the
-  // grant.
+  // This is the legacy attribute that actually authorises fullscreen
+  // (the modern equivalent is `allow="fullscreen"`, also valid; we use
+  // the attribute for maximum WebView compatibility).
   iframe.setAttribute("allowfullscreen", "");
   iframe.srcdoc = rewriteHtml(r.body, address, mediaBase());
 

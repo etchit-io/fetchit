@@ -7,9 +7,7 @@ use std::io::Cursor;
 
 use bytes::Bytes;
 
-use crate::handler::{
-    ArchiveEntry, Confidence, ContentHandler, Hint, RenderContext, Rendition,
-};
+use crate::handler::{ArchiveEntry, Confidence, ContentHandler, Hint, RenderContext, Rendition};
 use crate::{Error, Result};
 
 /// Recognises ZIP archives.
@@ -43,7 +41,7 @@ pub fn extract_entry(archive_bytes: Bytes, entry_path: &str) -> Result<Vec<u8>> 
         kind: KIND,
         reason: format!("entry {entry_path:?}: {e}"),
     })?;
-    let mut out = Vec::with_capacity(file.size() as usize);
+    let mut out = Vec::with_capacity(usize::try_from(file.size()).unwrap_or(usize::MAX));
     file.read_to_end(&mut out).map_err(|e| Error::Render {
         kind: KIND,
         reason: format!("entry read failed: {e}"),
@@ -102,7 +100,7 @@ mod tests {
     fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<()> =
+        let opts: zip::write::FileOptions<'static, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             zip.start_file(*name, opts).unwrap();

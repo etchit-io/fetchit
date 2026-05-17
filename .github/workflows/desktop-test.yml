@@ -1,0 +1,105 @@
+name: desktop test build
+
+# Fast iteration loop for desktop changes that don't need a full
+# Mac+Linux+Win matrix. Builds an unsigned bundle for ONE platform on
+# push to fix/* and feat/* branches, uploads it as a workflow artifact
+# (not a GitHub Release asset). No version bump, no tag, no announce.
+#
+# Default platform: windows (the matrix leg that bites most often).
+# Override via workflow_dispatch input when a different platform regresses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Which platform to test-build'
+        type: choice
+        default: windows
+        options: [windows, linux, macos]
+  push:
+    branches:
+      - 'fix/**'
+      - 'feat/**'
+    paths:
+      - 'apps/fetchit-desktop/**'
+      - 'crates/fetchit-core/**'
+      - 'crates/fetchit-net/**'
+      - '.github/workflows/desktop-test.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  PLATFORM: ${{ inputs.platform || 'windows' }}
+
+jobs:
+  build:
+    name: ${{ inputs.platform || 'windows' }} (unsigned, artifact only)
+    runs-on: >-
+      ${{ (inputs.platform || 'windows') == 'windows' && 'windows-latest'
+       || (inputs.platform || 'windows') == 'linux'   && 'ubuntu-22.04'
+       ||                                                 'macos-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/fetchit-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
+
+      - name: Install frontend deps
+        working-directory: apps/fetchit-desktop
+        run: npm ci
+
+      - name: Build Tauri bundle
+        working-directory: apps/fetchit-desktop
+        run: npm run tauri build
+
+      # Verify the generated Linux .desktop file passes the URL to fetchit
+      # via %u — without it, autonomi:// links from the browser launch
+      # fetch>it but don't tell it which address to open. Tauri's default
+      # template forgets %u in some versions, so we keep our own at
+      # src-tauri/desktop-entry.desktop; this guard catches drift.
+      - name: Verify .deb's .desktop has %u
+        if: runner.os == 'Linux'
+        run: |
+          deb=$(find apps/fetchit-desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+          test -n "$deb" || { echo "::error::no .deb produced"; exit 1; }
+          mkdir -p /tmp/deb-check
+          dpkg-deb -x "$deb" /tmp/deb-check
+          dt=$(find /tmp/deb-check/usr/share/applications -name '*.desktop' -print -quit)
+          test -n "$dt" || { echo "::error::no .desktop file in .deb"; exit 1; }
+          echo "found $dt"
+          grep ^Exec= "$dt"
+          grep -q '^Exec=.* %u' "$dt" || {
+            echo "::error file=apps/fetchit-desktop/src-tauri/desktop-entry.desktop::Generated .desktop has no %u in Exec= — autonomi:// clicks will launch fetch>it without the URL"
+            cat "$dt"
+            exit 1
+          }
+          echo "  ✓ %u present"
+
+      # Tauri emits bundles under src-tauri/target/release/bundle/<format>/
+      # on every host. Grab everything in that tree.
+      - name: Upload bundles as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetchit-desktop-${{ runner.os }}-${{ github.run_number }}
+          path: apps/fetchit-desktop/src-tauri/target/release/bundle/**/*
+          retention-days: 7
+          if-no-files-found: error

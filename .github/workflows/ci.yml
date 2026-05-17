@@ -44,6 +44,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  # Cross-browser extension. Runs the address-parser unit tests under plain
+  # Node (no package.json, no deps — just node --test). If you change the
+  # parser, this job is what catches divergence with the desktop-app parser.
+  web-extension:
+    name: web extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: addr.js parser tests
+        run: node --test apps/fetchit-web/test/addr.test.mjs
+      - name: both manifests are valid JSON
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('apps/fetchit-web/manifest.json', 'utf8'))"
+          node -e "JSON.parse(require('fs').readFileSync('apps/fetchit-web/manifest.firefox.json', 'utf8'))"
+      - name: Chrome manifest declares service_worker, not scripts
+        run: |
+          node -e "
+            const m = JSON.parse(require('fs').readFileSync('apps/fetchit-web/manifest.json','utf8'));
+            if (!m.background.service_worker) throw new Error('manifest.json missing background.service_worker (Chrome rejects)');
+            if (m.background.scripts) throw new Error('manifest.json has background.scripts (Chrome MV3 forbids it)');
+          "
+      - name: Firefox manifest declares scripts, not service_worker
+        run: |
+          node -e "
+            const m = JSON.parse(require('fs').readFileSync('apps/fetchit-web/manifest.firefox.json','utf8'));
+            if (!m.background.scripts) throw new Error('manifest.firefox.json missing background.scripts (Firefox needs it until SW pref is default-on)');
+            if (m.background.service_worker) throw new Error('manifest.firefox.json has background.service_worker (Firefox pref is off by default; would prompt user to add scripts)');
+          "
+      - name: background.js parses as ES module
+        run: node --input-type=module -e "import('./apps/fetchit-web/src/addr.js').then(() => console.log('addr.js OK'))"
+
   # Builds the Android debug APK end-to-end (FFI .so via cargo-ndk +
   # gradle assembleDebug). Catches breakage in the gradle build, the
   # NDK toolchain, or the JNI handoff before a release tag. The
@@ -74,7 +108,7 @@ jobs:
         run: cargo install cargo-ndk --locked
 
       - name: Install uniffi-bindgen (version must match crates/fetchit-ffi)
-        run: cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.4
+        run: cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.5
 
       - name: Set up Android NDK r27
         id: ndk

@@ -10,29 +10,38 @@
 //! to pick a syntax highlighter (e.g. `"rust"`, `"python"`, `"json"`).
 //! `None` means "no confident match — render plain".
 
-use once_cell::sync::Lazy;
-use regex::Regex;
+// The static regex initialisers below `.unwrap()` on `Regex::new` against
+// compile-time-known literal patterns. A failure here is a developer error
+// caught the first time anything in the module is touched, not a runtime
+// concern. Allowing the lint at module scope avoids decorating every static.
+#![allow(clippy::unwrap_used)]
 
-static SHEBANG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^#!").unwrap());
-static JSON_KEY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#""[\w-]+"\s*:"#).unwrap());
-static PYTHON_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(def |class |import |from |if __name__|@\w+)").unwrap());
-static KOTLIN_RE: Lazy<Regex> = Lazy::new(|| {
+use regex::Regex;
+use std::sync::LazyLock;
+
+static SHEBANG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^#!").unwrap());
+static JSON_KEY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""[\w-]+"\s*:"#).unwrap());
+static PYTHON_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(def |class |import |from |if __name__|@\w+)").unwrap());
+static KOTLIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(fun |val |var |package |object |class \w+(\s*:|\s*\())").unwrap()
 });
-static JS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(import|export|const|let|var|function|class|interface|type|async function|require\()").unwrap()
+static JS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(import|export|const|let|var|function|class|interface|type|async function|require\()",
+    )
+    .unwrap()
 });
-static RUST_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(fn |use |mod |struct |enum |impl |pub |#!?\[)").unwrap());
-static GO_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(package |import |func )").unwrap());
-static SQL_RE: Lazy<Regex> = Lazy::new(|| {
+static RUST_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(fn |use |mod |struct |enum |impl |pub |#!?\[)").unwrap());
+static GO_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(package |import |func )").unwrap());
+static SQL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH|BEGIN)\b").unwrap()
 });
-static CSS_RE: Lazy<Regex> = Lazy::new(|| {
+static CSS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^([.#]?[A-Za-z][\w-]*|::?[\w-]+|@\w+)[\w\s.,#:>-]*\{").unwrap()
 });
-static YAML_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[\w-]+:\s+\S").unwrap());
+static YAML_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^[\w-]+:\s+\S").unwrap());
 
 /// Best-guess language tag. `None` if nothing matches confidently.
 pub fn detect(text: &str) -> Option<&'static str> {
@@ -145,7 +154,10 @@ mod tests {
 
     #[test]
     fn detects_python_shebang() {
-        assert_eq!(detect("#!/usr/bin/env python3\nprint('hi')\n"), Some("python"));
+        assert_eq!(
+            detect("#!/usr/bin/env python3\nprint('hi')\n"),
+            Some("python")
+        );
     }
 
     #[test]

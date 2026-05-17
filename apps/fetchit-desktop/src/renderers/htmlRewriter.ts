@@ -33,6 +33,24 @@ const LINK_INTERCEPTOR = `
       try { parent.postMessage({ kind: 'fetchit:back' }, '*'); } catch (err) { dbg('postMessage failed: ' + err); }
       return;
     }
+    // Intra-page fragment links (#chapter-2) — Chromium-based WebView2
+    // refuses default anchor navigation inside null-origin sandboxed
+    // iframes (treats the fragment-only same-document update as
+    // cross-origin and silently blocks). WebKit on Mac/Linux is
+    // permissive. Doing the scroll ourselves works on every engine and
+    // doesn't require relaxing the sandbox attribute.
+    if (href.charAt(0) === '#' && href.length > 1) {
+      var id = href.slice(1);
+      var target = document.getElementById(id)
+        || document.querySelector('a[name="' + id.replace(/"/g, '\\\\"') + '"]');
+      if (target) {
+        e.preventDefault();
+        try { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        catch (_) { target.scrollIntoView(); }
+        dbg('fragment scroll href=' + href);
+      }
+      return;
+    }
     var m = /^(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})/.exec(href);
     if (!m) {
       dbg('click skipped href=' + href.slice(0, 80));
@@ -61,8 +79,8 @@ function buildCsp(mediaBase: string): string {
   return [
     "default-src 'self' fetchit: autonomi:",
     "script-src 'self' fetchit: autonomi: 'unsafe-inline' 'unsafe-eval'",
-    "style-src 'self' fetchit: autonomi: 'unsafe-inline'",
-    "img-src 'self' fetchit: autonomi: data: blob:",
+    "style-src 'self' fetchit: autonomi: data: 'unsafe-inline'",
+    `img-src 'self' fetchit: autonomi: data: blob: ${mediaBase}`,
     `media-src 'self' fetchit: autonomi: data: blob: ${mediaBase}`,
     "font-src 'self' fetchit: autonomi: data:",
     `connect-src 'self' fetchit: autonomi: ${mediaBase}`,
@@ -83,10 +101,13 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripIncomingCsp(doc);
   injectCsp(doc, mediaBase);
   stripResourceHints(doc);
+  stripExternalStylesheets(doc);
   stripMetaRefresh(doc);
   stripAnchorPing(doc);
   injectNeuterScript(doc);
+  injectUrlRewriter(doc, mediaBase);
   rewriteMediaSrc(doc, mediaBase);
+  rewriteImageSrc(doc, mediaBase);
   injectMediaHydration(doc);
   injectLinkInterceptor(doc);
   return `<!doctype html>\n${doc.documentElement.outerHTML}`;
@@ -137,6 +158,23 @@ function stripIncomingCsp(doc: Document): void {
 function stripAnchorPing(doc: Document): void {
   for (const a of Array.from(doc.querySelectorAll("a[ping], area[ping]"))) {
     a.removeAttribute("ping");
+  }
+}
+
+// Drop `<link rel="stylesheet" href="http(s)://…">` at parse time. CSP
+// `style-src` already blocks them at load time, but Chromium emits a
+// loud `Loading the stylesheet '<URL>' violates the following Content
+// Security Policy directive:` message in the console for every one.
+// SPA authors auditing fetch>it through devtools read that as "fetchit
+// is hostile to my page" — it's better to silently drop the link
+// element so no fetch is even attempted. Same security outcome,
+// quieter console. Relative-path and autonomi:// / fetchit:// stylesheets
+// are NOT touched (those go through the protocol handler / media
+// server like every other in-network subresource).
+function stripExternalStylesheets(doc: Document): void {
+  for (const link of Array.from(doc.querySelectorAll('link[rel~="stylesheet"]'))) {
+    const href = link.getAttribute("href") ?? "";
+    if (/^https?:\/\//i.test(href)) link.remove();
   }
 }
 
@@ -234,10 +272,53 @@ function rewriteMediaSrc(doc: Document, mediaBase: string): void {
   }
 }
 
-// Lifts the deferred media src into place on first user interaction with the
-// element. Capture-phase listeners on the host element fire before the
-// in-shadow controls process the click, so play() has a real src by the time
-// it runs. Hydration is one-shot per element.
+// Same idea as `rewriteMediaSrc`, applied to `<img>` and `<picture><source>`.
+// WebKit (Mac, Linux) accepts `autonomi://` as an image subresource because
+// the registered custom URI scheme handler returns bytes with sniffed MIME.
+// Chromium-based WebView2 (Windows) rejects custom schemes for subresources
+// with `ERR_UNKNOWN_URL_SCHEME` — so we route images through the same
+// localhost HTTP media server already used for `<audio>` / `<video>`. The
+// server `infer::get`s the Content-Type (image/jpeg, image/png, …) so
+// rendering is identical to the protocol-handler path.
+//
+// `connect-src` and `img-src` both list `${mediaBase}` in `buildCsp` so
+// both `<img>` and `fetch()` paths are CSP-permitted.
+//
+// Note: this rewrites the DOM-visible `src` directly (not via a
+// `data-fetchit-src` stash like the media one). There's no equivalent of
+// the spurious-loadstart-spinner concern for `<img>` — images don't have
+// preload / play / loadstart UI surfaces in author scripts.
+function rewriteImageSrc(doc: Document, mediaBase: string): void {
+  const prefix = /^(?:fetchit|autonomi):\/\/([0-9a-fA-F]{64})/i;
+  for (const el of Array.from(doc.querySelectorAll("img[src]"))) {
+    const src = el.getAttribute("src") ?? "";
+    const m = prefix.exec(src);
+    if (!m) continue;
+    el.setAttribute("src", `${mediaBase}/${m[1].toLowerCase()}`);
+  }
+  // Responsive: <img srcset> + <picture><source srcset>. The query
+  // intentionally excludes `<audio>` / `<video>` <source>; those are
+  // covered above and srcset wouldn't apply to them anyway.
+  const srcsetRe = /\b(?:fetchit|autonomi):\/\/([0-9a-fA-F]{64})/gi;
+  for (const el of Array.from(doc.querySelectorAll("img[srcset], picture source[srcset]"))) {
+    const srcset = el.getAttribute("srcset") ?? "";
+    const rewritten = srcset.replace(srcsetRe, (_, addr) => `${mediaBase}/${addr.toLowerCase()}`);
+    if (rewritten !== srcset) el.setAttribute("srcset", rewritten);
+  }
+}
+
+// Lifts the deferred media src into place on first user interaction.
+// Two capture-phase listeners run in parallel:
+//
+//   1. Per-element on each <audio>/<video> — fires fine in WebKit
+//      (Mac, Linux), where the in-shadow controls let pointerdown
+//      bubble through to user-script handlers.
+//   2. Document-level — fires in Chromium-based WebView2 (Windows),
+//      where the native shadow-DOM controls consume the per-element
+//      pointerdown before any user-script listener sees it.
+//
+// Belt + braces: whichever fires first hydrates ALL pending media (it's
+// cheap, idempotent, and one-shot per element via `_fetchitHydrated`).
 const MEDIA_HYDRATION = `
 (function () {
   function hydrate(media) {
@@ -257,6 +338,26 @@ const MEDIA_HYDRATION = `
       try { media.load(); } catch (_) {}
     }
   }
+  // Multiple event types: WebView2's native <audio>/<video> shadow-DOM
+  // controls swallow pointerdown for the play button on first
+  // interaction, so the user had to click somewhere else first to
+  // hydrate, then click play. mousedown and click reach the document
+  // capture phase on the same play-button click, so adding them makes
+  // play-on-first-click work everywhere.
+  var DOC_EVENTS = ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'click'];
+  function hydrateAll() {
+    var medias = document.querySelectorAll('audio, video');
+    for (var i = 0; i < medias.length; i++) {
+      var m = medias[i];
+      if (!m.hasAttribute('data-fetchit-src') && !m.querySelector('source[data-fetchit-src]')) continue;
+      hydrate(m);
+    }
+    // One-shot — detach all listeners after first fire.
+    for (var j = 0; j < DOC_EVENTS.length; j++) {
+      document.removeEventListener(DOC_EVENTS[j], hydrateAll, true);
+      window.removeEventListener(DOC_EVENTS[j], hydrateAll, true);
+    }
+  }
   function attach() {
     var medias = document.querySelectorAll('audio, video');
     for (var i = 0; i < medias.length; i++) {
@@ -265,6 +366,12 @@ const MEDIA_HYDRATION = `
       var fire = (function (target) { return function () { hydrate(target); }; })(m);
       m.addEventListener('pointerdown', fire, true);
       m.addEventListener('keydown',     fire, true);
+    }
+    // Capture phase on both window and document — whichever the
+    // engine routes the event through first triggers hydration.
+    for (var j = 0; j < DOC_EVENTS.length; j++) {
+      document.addEventListener(DOC_EVENTS[j], hydrateAll, true);
+      window.addEventListener(DOC_EVENTS[j], hydrateAll, true);
     }
   }
   if (document.readyState === 'loading') {
@@ -279,6 +386,181 @@ function injectMediaHydration(doc: Document): void {
   const s = doc.createElement("script");
   s.textContent = MEDIA_HYDRATION;
   doc.body.appendChild(s);
+}
+
+// Runtime URL rewriter for resources the parse-time pass can't reach.
+//
+// The parse-time `rewriteImageSrc` / `rewriteMediaSrc` only see DOM in
+// the initial HTML markup. SPAs that build elements at runtime —
+// `var img = new Image(); img.src = "autonomi://X"` is the canonical
+// case, used by demo-city's gallery — go around those rewriters and hit
+// the WebView with a raw `autonomi://` URL. WebKit (Mac, Linux) honours
+// our registered custom URI scheme handler for any subresource, so the
+// raw URL works. Chromium-based WebView2 (Windows) rejects custom
+// schemes as subresources with `ERR_UNKNOWN_URL_SCHEME`, so we need to
+// rewrite at the JS layer too.
+//
+// Strategy: monkeypatch the property setters and `setAttribute` paths
+// that load subresources. Each setter wraps the original so the
+// browser sees the localhost media-server URL instead of the
+// `autonomi://` one. Anchor `href` is deliberately NOT patched —
+// clicks on `<a href="autonomi://X">` must keep the scheme so the
+// top-level protocol handler / link interceptor takes them as a
+// navigation, not a subresource fetch.
+//
+// URL form `autonomi://A/B` (gallery sets relative `<hash>` and the
+// `<base href="autonomi://<page>/">` resolves it) takes the path as
+// the address when both look 64-hex — matches the desktop protocol
+// handler's resolution in `src-tauri/src/protocol.rs`.
+function buildUrlRewriter(mediaBase: string): string {
+  return `
+(function () {
+  var MEDIA = ${JSON.stringify(mediaBase)};
+  var ONE   = /^(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/i;
+  // Bare 64-hex, optionally with a leading "/" (absolute path within
+  // the iframe's null origin) and optionally with a trailing query /
+  // fragment / extra path. All forms collapse to the same address.
+  var BARE  = /^\\/?([0-9a-fA-F]{64})(?:[\\/?#].*)?$/i;
+  var MANY  = /\\b(?:fetchit|autonomi):\\/\\/([0-9a-fA-F]{64})(?:\\/([0-9a-fA-F]{64}))?/gi;
+
+  function rewrite(url) {
+    if (typeof url !== 'string') return url;
+    // \`autonomi://A\` or \`autonomi://A/B\` (path wins when both are 64-hex,
+    // matching the desktop protocol handler's resolution).
+    var m = ONE.exec(url);
+    if (m) return MEDIA + '/' + (m[2] || m[1]).toLowerCase();
+    // Relative URLs: \`<hash>\` and \`/<hash>\` (demo-city's gallery uses
+    // the latter as \`img.src = '/' + addr\` to force absolute-path
+    // resolution against the base). The browser would otherwise
+    // resolve to \`autonomi://<page>/<hash>\` and WebView2 would reject
+    // the custom scheme. Catch it pre-resolution.
+    m = BARE.exec(url);
+    if (m) return MEDIA + '/' + m[1].toLowerCase();
+    return url;
+  }
+  function rewriteSrcset(srcset) {
+    if (typeof srcset !== 'string') return srcset;
+    return srcset.replace(MANY, function (_, host, path) {
+      return MEDIA + '/' + (path || host).toLowerCase();
+    });
+  }
+  function patch(proto, name, transform) {
+    if (!proto) return;
+    var desc = Object.getOwnPropertyDescriptor(proto, name);
+    if (!desc || !desc.set) return;
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: desc.get,
+      set: function (value) { desc.set.call(this, transform(value)); }
+    });
+  }
+
+  // Property setters — \`el.src = url\` and friends.
+  patch(window.HTMLImageElement  && HTMLImageElement.prototype,  'src',    rewrite);
+  patch(window.HTMLImageElement  && HTMLImageElement.prototype,  'srcset', rewriteSrcset);
+  patch(window.HTMLSourceElement && HTMLSourceElement.prototype, 'src',    rewrite);
+  patch(window.HTMLSourceElement && HTMLSourceElement.prototype, 'srcset', rewriteSrcset);
+  patch(window.HTMLScriptElement && HTMLScriptElement.prototype, 'src',    rewrite);
+  patch(window.HTMLLinkElement   && HTMLLinkElement.prototype,   'href',   rewrite);
+  patch(window.HTMLMediaElement  && HTMLMediaElement.prototype,  'src',    rewrite);
+
+  // Attribute API — \`el.setAttribute('src', url)\` and friends.
+  var origSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    var n = (name || '').toLowerCase();
+    if (n === 'src') {
+      value = rewrite(value);
+    } else if (n === 'srcset') {
+      value = rewriteSrcset(value);
+    } else if (n === 'href' && this.tagName === 'LINK') {
+      // <link rel="stylesheet" href="…"> et al. (NOT <a href> — those
+      // route through the link interceptor as top-level navigations.)
+      value = rewrite(value);
+    }
+    return origSetAttribute.call(this, name, value);
+  };
+
+  // fetch() — runtime data loads.
+  if (window.fetch) {
+    var origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      if (typeof input === 'string') {
+        return origFetch(rewrite(input), init);
+      }
+      if (input && typeof input.url === 'string') {
+        var nu = rewrite(input.url);
+        if (nu !== input.url) input = new Request(nu, input);
+      }
+      return origFetch(input, init);
+    };
+  }
+
+  // XMLHttpRequest — older-style data loads.
+  if (window.XMLHttpRequest) {
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      arguments[1] = rewrite(url);
+      return origOpen.apply(this, arguments);
+    };
+  }
+
+  // Lazy media hydration — when native shadow-DOM controls invoke
+  // .play() on an audio/video that's still holding data-fetchit-src,
+  // copy the deferred src into place + .load() first. Catches the
+  // single-click play case on WebView2, where capture-phase pointer
+  // events on document/window are consumed by the native controls
+  // before they reach user-script listeners.
+  if (window.HTMLMediaElement) {
+    var origPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      var changed = false;
+      var deferred = this.getAttribute('data-fetchit-src');
+      if (deferred) {
+        this.removeAttribute('data-fetchit-src');
+        this.setAttribute('src', deferred);
+        changed = true;
+      }
+      var sources = this.querySelectorAll('source[data-fetchit-src]');
+      for (var i = 0; i < sources.length; i++) {
+        var s = sources[i];
+        var sd = s.getAttribute('data-fetchit-src');
+        if (sd) {
+          s.removeAttribute('data-fetchit-src');
+          s.setAttribute('src', sd);
+          changed = true;
+        }
+      }
+      if (changed) {
+        try { this.load(); } catch (_) {}
+      }
+      return origPlay.apply(this, arguments);
+    };
+  }
+})();
+`.trim();
+}
+
+function injectUrlRewriter(doc: Document, mediaBase: string): void {
+  const s = doc.createElement("script");
+  s.textContent = buildUrlRewriter(mediaBase);
+  // Slot in directly after the neuter script. The two together must
+  // sit before any author script in the document so SPAs see patched
+  // globals + neutered APIs from the very first JS that runs.
+  // Identifying the neuter by its content marker avoids confusing it
+  // with author-side <script>s already present in the input head.
+  const neuter = Array.from(doc.head.querySelectorAll("script")).find((sc) =>
+    sc.textContent?.includes("RTCPeerConnection"),
+  );
+  if (neuter) {
+    if (neuter.nextSibling) doc.head.insertBefore(s, neuter.nextSibling);
+    else doc.head.appendChild(s);
+  } else {
+    // Defensive fallback — neuter should always be present, but if it
+    // isn't, anchoring to head's start still puts the rewriter ahead
+    // of any author scripts.
+    doc.head.insertBefore(s, doc.head.firstChild);
+  }
 }
 
 function injectLinkInterceptor(doc: Document): void {

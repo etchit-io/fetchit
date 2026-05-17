@@ -178,6 +178,7 @@ body {
   cursor: default;
 }
 
+#back-toggle,
 #bookmark-toggle,
 #share-toggle,
 #settings-toggle {
@@ -201,6 +202,10 @@ body {
   border-color: var(--copper);
   color: var(--copper-bright);
 }
+#back-toggle:hover:not(:disabled) {
+  color: var(--bone);
+}
+#back-toggle:disabled,
 #bookmark-toggle:disabled,
 #share-toggle:disabled {
   opacity: 0.4;

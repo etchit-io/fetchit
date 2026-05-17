@@ -25,6 +25,7 @@ export async function init(): Promise<void> {
   }
   const input = need<HTMLInputElement>("addr");
   const button = need<HTMLButtonElement>("go");
+  const backBtn = need<HTMLButtonElement>("back-toggle");
   const settingsBtn = need<HTMLButtonElement>("settings-toggle");
   const settingsHost = need<HTMLElement>("settings");
   const bookmarkBtn = need<HTMLButtonElement>("bookmark-toggle");
@@ -80,6 +81,12 @@ export async function init(): Promise<void> {
     if (settings.isOpen()) await settings.refreshBookmarks();
   };
   bookmarkBtn.addEventListener("click", () => void toggleBookmark());
+
+  // Top-bar back button — same handler as the keyboard binding (Alt+Left).
+  // EPUB / PDF / lab-page exhibits etc. take over the full stage, so a
+  // visible ← in the chrome is the only obvious way out for users who
+  // don't know the keyboard shortcut.
+  backBtn.addEventListener("click", () => backNavigate(store));
 
   const store = new TabStore();
 
@@ -156,6 +163,8 @@ export async function init(): Promise<void> {
     button.disabled = active?.status === "loading";
     bookmarkBtn.disabled = !active?.address || active.status === "loading";
     shareBtn.disabled = !active?.address || active.status === "loading";
+    // Back is enabled only when the active tab has history we can pop.
+    backBtn.disabled = !active || (active.history?.length ?? 0) === 0;
     const addr = active?.address ?? null;
     if (addr !== lastBookmarkAddr) {
       lastBookmarkAddr = addr;
@@ -279,6 +288,14 @@ function startIn(
   void runFetch(addr, tab.id, tab.root, store);
 }
 
+// Session flag — true once any fetch has succeeded in this app session.
+// Drives the loading-status copy: the first fetch may genuinely be slow
+// (bootstrap warmup, peer connect), but every subsequent fetch in the
+// same session reuses the live client. Showing "the first connection
+// takes a moment" on every fetch is misleading after the first one
+// lands.
+let firstFetchSucceeded = false;
+
 async function runFetch(
   addr: string,
   id: string,
@@ -289,6 +306,7 @@ async function runFetch(
   try {
     const r = await invoke<Rendition>("fetch_and_render", { addr });
     dlog(`[fetch] done addr=${addr.slice(0, 8)}… kind=${r.kind}`);
+    firstFetchSucceeded = true;
     renderRendition(r, root, addr);
     store.setRendered(id, r);
   } catch (e) {
@@ -340,7 +358,11 @@ function buildErrorState(msg: string): HTMLElement {
 
 function statusFor(active: ReturnType<TabStore["active"]>): string {
   if (!active) return "";
-  if (active.status === "loading") return "fetching… (the first connection takes a moment)";
+  if (active.status === "loading") {
+    return firstFetchSucceeded
+      ? "fetching…"
+      : "fetching… (the first connection takes a moment)";
+  }
   if (active.status === "error") return `fetch failed: ${active.error ?? "(unknown)"}`;
   return "";
 }
