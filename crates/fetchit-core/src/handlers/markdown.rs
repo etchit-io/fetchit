@@ -176,10 +176,13 @@ mod tests {
 
     #[test]
     fn rejects_binary() {
-        assert_eq!(
-            confidence(std::str::from_utf8(&[0u8, 0xFF, 0x42]).unwrap_or("")),
-            Confidence::None,
-        );
+        // Inline-bytes here aren't valid UTF-8, so from_utf8 falls back
+        // to the empty string. That's intentional — the test is asserting
+        // markdown detection on a non-text payload doesn't fire, and the
+        // empty string is the safest "looks like text but isn't" sample.
+        #[allow(invalid_from_utf8)]
+        let s = std::str::from_utf8(&[0u8, 0xFF, 0x42]).unwrap_or("");
+        assert_eq!(confidence(s), Confidence::None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Video handler. Detects ISO BMFF containers (MP4 / MOV / M4V),
-//! EBML (WebM / MKV), and RIFF/AVI by their magic bytes. Emits
+//! EBML (`WebM` / MKV), and RIFF/AVI by their magic bytes. Emits
 //! [`Rendition::Video`] tagged with a MIME so UI shells can hand the
 //! bytes straight to a platform decoder (Android `MediaPlayer` /
-//! Media3 `ExoPlayer`, browser `<video>` element, desktop player, etc.).
+//! `Media3` `ExoPlayer`, browser `<video>` element, desktop player, etc.).
 //!
 //! Decoding is intentionally not done here — the platform players
 //! handle raw container bytes natively.
@@ -79,17 +79,17 @@ mod tests {
             .expect("video handler should not error")
     }
 
-    fn ftyp(brand: &[u8; 4]) -> Vec<u8> {
+    fn ftyp(brand: [u8; 4]) -> Vec<u8> {
         let mut data = vec![0u8, 0, 0, 0x18]; // 24-byte ftyp box
         data.extend_from_slice(b"ftyp");
-        data.extend_from_slice(brand);
+        data.extend_from_slice(&brand);
         data.extend_from_slice(&[0u8; 12]);
         data
     }
 
     #[test]
     fn claims_mp4_isom() {
-        let data = ftyp(b"isom");
+        let data = ftyp(*b"isom");
         assert_eq!(confidence(&data), Confidence::Definite);
         match render(&data) {
             Rendition::Video { mime, .. } => assert_eq!(mime, "video/mp4"),
@@ -99,19 +99,19 @@ mod tests {
 
     #[test]
     fn claims_mp4_mp42() {
-        let data = ftyp(b"mp42");
+        let data = ftyp(*b"mp42");
         assert_eq!(confidence(&data), Confidence::Definite);
     }
 
     #[test]
     fn claims_mov() {
-        let data = ftyp(b"qt  ");
+        let data = ftyp(*b"qt  ");
         assert_eq!(confidence(&data), Confidence::Definite);
     }
 
     #[test]
     fn claims_m4v() {
-        let data = ftyp(b"M4V ");
+        let data = ftyp(*b"M4V ");
         assert_eq!(confidence(&data), Confidence::Definite);
     }
 
