@@ -537,6 +537,16 @@
                         android:textColor="?attr/fetchitInk" />
                 </LinearLayout>
             </LinearLayout>
+
+            <TextView
+                android:id="@+id/settingsVersionText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:layout_marginBottom="8dp"
+                android:gravity="center"
+                android:textColor="?attr/fetchitAsh"
+                android:textSize="11sp" />
         </LinearLayout>
     </LinearLayout>
 

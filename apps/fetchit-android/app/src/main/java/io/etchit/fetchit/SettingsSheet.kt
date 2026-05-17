@@ -31,6 +31,8 @@ class SettingsSheet(
         binding.savePeersButton.setOnClickListener { onSaveClicked() }
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
+        binding.settingsVersionText.text =
+            activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
         bindThemePicker()
         observePeerCount()
     }

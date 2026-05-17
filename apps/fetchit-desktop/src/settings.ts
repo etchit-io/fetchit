@@ -4,6 +4,7 @@
 // the user's choice without a "Save" button.
 
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { fmtBytes } from "./format";
 import { addBookmark, listBookmarks, removeBookmark, type Bookmark } from "./bookmarks";
 import { applyTheme, loadTheme, type Theme } from "./theme/theme";
@@ -75,6 +76,14 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   host.replaceChildren(buildPage());
 
   const root = host.firstElementChild as HTMLElement;
+  // Stamp the running version into the About section. Tauri exposes the value
+  // declared in src-tauri/tauri.conf.json's `version` field; we render it on
+  // mount so users can quote what they're on without us hard-coding the
+  // string in two places (tauri.conf.json stays the single source of truth).
+  void getVersion().then((v) => {
+    const verEl = root.querySelector<HTMLElement>("#setting-version");
+    if (verEl) verEl.textContent = v;
+  });
   const close = root.querySelector<HTMLButtonElement>(".settings-close");
   const enabledBox = root.querySelector<HTMLInputElement>("#cache-enabled");
   const modeSelect = root.querySelector<HTMLSelectElement>("#cache-mode");
@@ -448,6 +457,9 @@ function buildPage(): HTMLElement {
     <section class="setting-group setting-group-about" id="group-about">
       <details class="setting-collapsible">
         <summary><h2>About &amp; License</h2></summary>
+        <p class="setting-desc">
+          Version <code id="setting-version">&hellip;</code>
+        </p>
         <p class="setting-desc">
           <strong>fetch<span class="brand-mark">&gt;</span>it &mdash; beta software.</strong>
           Released under the

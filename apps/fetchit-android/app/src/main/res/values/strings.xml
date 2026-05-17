@@ -99,6 +99,9 @@
     <string name="settings_theme_dim">Dim</string>
     <string name="settings_theme_light">Light</string>
 
+    <!-- Footer of the Settings panel — version of the app the user is on. -->
+    <string name="settings_version">fetch&gt;it &#xb7; v%1$s</string>
+
     <!-- Archive viewer -->
     <string name="archive_summary">application/zip · %1$d entries</string>
     <string name="archive_save_all">save archive…</string>
