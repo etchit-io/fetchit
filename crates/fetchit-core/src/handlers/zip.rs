@@ -7,9 +7,7 @@ use std::io::Cursor;
 
 use bytes::Bytes;
 
-use crate::handler::{
-    ArchiveEntry, Confidence, ContentHandler, Hint, RenderContext, Rendition,
-};
+use crate::handler::{ArchiveEntry, Confidence, ContentHandler, Hint, RenderContext, Rendition};
 use crate::{Error, Result};
 
 /// Recognises ZIP archives.

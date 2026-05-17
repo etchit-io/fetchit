@@ -52,10 +52,7 @@ pub(crate) fn looks_like_markdown(text: &str) -> bool {
         if trimmed.starts_with("```") {
             had_fence = true;
         }
-        if trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ")
-        {
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
             score += 1;
         }
         if trimmed.starts_with("> ") {

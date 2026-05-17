@@ -106,20 +106,28 @@ mod tests {
 
     #[test]
     fn claims_bare_html_tag() {
-        assert_eq!(confidence("<html lang=\"en\"></html>"), Confidence::Definite);
+        assert_eq!(
+            confidence("<html lang=\"en\"></html>"),
+            Confidence::Definite
+        );
     }
 
     #[test]
     fn claims_xhtml_xml_preamble() {
         assert_eq!(
-            confidence("<?xml version=\"1.0\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"></html>"),
+            confidence(
+                "<?xml version=\"1.0\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"></html>"
+            ),
             Confidence::Definite,
         );
     }
 
     #[test]
     fn rejects_plain_text() {
-        assert_eq!(confidence("just some prose, nothing tagged."), Confidence::None);
+        assert_eq!(
+            confidence("just some prose, nothing tagged."),
+            Confidence::None
+        );
     }
 
     #[test]

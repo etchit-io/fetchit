@@ -55,11 +55,7 @@ fn split_record(line: &str) -> Vec<String> {
 
 /// Cheap structural sniff — multi-row, consistent-column shape.
 fn looks_like_csv(text: &str) -> bool {
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|l| !l.is_empty())
-        .take(10)
-        .collect();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).take(10).collect();
     if lines.len() < MIN_ROWS {
         return false;
     }
@@ -67,9 +63,7 @@ fn looks_like_csv(text: &str) -> bool {
     if first_cols < MIN_COLUMNS {
         return false;
     }
-    lines
-        .iter()
-        .all(|l| split_record(l).len() == first_cols)
+    lines.iter().all(|l| split_record(l).len() == first_cols)
 }
 
 impl ContentHandler for CsvHandler {

@@ -50,7 +50,10 @@ fn detect_mime(head: &[u8]) -> Option<&'static str> {
         // only the image-shaped brands; everything else falls through
         // to VideoHandler.
         let brand = &head[8..12];
-        if matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1") {
+        if matches!(
+            brand,
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1"
+        ) {
             return Some("image/heic");
         }
     }
