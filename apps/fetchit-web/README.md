@@ -49,12 +49,29 @@ Chrome / Edge / Brave / Arc:
 
 Firefox (121+):
 
+Chrome MV3 forbids `background.scripts`; Firefox MV3 (151 and earlier)
+forbids `background.service_worker` by default. We ship two manifests
+because no single MV3 manifest loads in both. **Run the swap script
+before loading in Firefox**:
+
+```bash
+./apps/fetchit-web/scripts/use-firefox-manifest.sh firefox
+```
+
+That copies `manifest.firefox.json` over `manifest.json`. Then:
+
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on…**.
 3. Pick `apps/fetchit-web/manifest.json`.
 
 Firefox unloads temporary add-ons on restart — for persistent install,
 sign and load through `about:addons`.
+
+To switch back to the Chrome variant later:
+
+```bash
+./apps/fetchit-web/scripts/use-firefox-manifest.sh restore
+```
 
 ## Routing — how `autonomi://` actually opens fetch&gt;it
 

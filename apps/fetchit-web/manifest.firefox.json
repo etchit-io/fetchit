@@ -5,7 +5,6 @@
   "version": "0.1.0",
   "description": "Open autonomi://<address> links in fetch>it desktop. Right-click any 64-hex address to read it on the Autonomi network.",
   "homepage_url": "https://github.com/etchit-io/fetchit",
-  "minimum_chrome_version": "109",
   "browser_specific_settings": {
     "gecko": {
       "id": "fetchit-web@etchit.io",
@@ -14,7 +13,7 @@
   },
   "permissions": ["contextMenus"],
   "background": {
-    "service_worker": "src/background.js",
+    "scripts": ["src/background.js"],
     "type": "module"
   },
   "content_scripts": [
