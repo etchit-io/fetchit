@@ -1,13 +1,10 @@
 # fetch&gt;it web
 
-A thin browser extension that routes `autonomi://<64-hex-address>` and
-`fetchit://<64-hex-address>` links to **fetch&gt;it desktop**. Both
-schemes resolve to the same address on the Autonomi network; `autonomi://`
-is the network-canonical name, `fetchit://` is the brand alias. The
-extension itself runs no network code, holds no Autonomi keys, and
-never sees content bytes — it is purely a discovery and routing aid.
-All fetching and rendering happens in the desktop app (or the Android
-app on mobile).
+A thin browser extension that routes `autonomi://<64-hex-address>` links
+to **fetch&gt;it desktop**. The extension itself runs no network code,
+holds no Autonomi keys, and never sees content bytes — it is purely a
+discovery and routing aid. All fetching and rendering happens in the
+desktop app (or the Android app on mobile).
 
 ## What it does
 
@@ -98,6 +95,25 @@ a test for the new shape before changing the implementation — divergence
 between this parser and `fetchit-desktop/src/address.ts` is exactly the
 class of bug that shows up as "the address worked in one place and not
 the other."
+
+## Scheme aliasing (technical)
+
+The desktop app's deep-link plugin registers two scheme handlers:
+
+- `autonomi://<64-hex>` — the network-canonical name, used everywhere in
+  user-facing copy.
+- `fetchit://<64-hex>` — the brand-aliased name. Same hash, same target
+  binary, same render path.
+
+The extension's parser, content-script anchor selector, omnibox handler,
+and right-click context-menu all silently accept either form. We don't
+advertise `fetchit://` to users — the existing site, demo-city, brief
+essay, and QR codes all use `autonomi://`, and surfacing two schemes
+side-by-side in user docs causes "wait, which?" confusion. But anything
+in the wild that happens to use `fetchit://` (third-party tooling, copy-
+pasted from a future post, typed from brand memory) will route correctly.
+
+`autonomi://` is the form to share. `fetchit://` is the safety net.
 
 ## Opting an anchor out of the badge
 
