@@ -47,8 +47,8 @@ hex = "0.4"
 log = "0.4"
 # Pinned to the same revision the etchit FFI ships against — keeps both
 # projects aligned with the production network. Bump deliberately.
-ant-core = { git = "https://github.com/WithAutonomi/ant-client", rev = "6cada1d" }
-self_encryption = "=0.35.0"
+ant-core = { git = "https://github.com/WithAutonomi/ant-client", rev = "3df6764" }
+self_encryption = "=0.36.0"
 xor_name = "=5.0.0"
 # uniffi pinned to the etchit-android version to keep both projects on
 # the same Kotlin binding generator. Bump deliberately and verify that
