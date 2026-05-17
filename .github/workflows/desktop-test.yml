@@ -71,6 +71,29 @@ jobs:
         working-directory: apps/fetchit-desktop
         run: npm run tauri build
 
+      # Verify the generated Linux .desktop file passes the URL to fetchit
+      # via %u — without it, autonomi:// links from the browser launch
+      # fetch>it but don't tell it which address to open. Tauri's default
+      # template forgets %u in some versions, so we keep our own at
+      # src-tauri/desktop-entry.desktop; this guard catches drift.
+      - name: Verify .deb's .desktop has %u
+        if: runner.os == 'Linux'
+        run: |
+          deb=$(find apps/fetchit-desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+          test -n "$deb" || { echo "::error::no .deb produced"; exit 1; }
+          mkdir -p /tmp/deb-check
+          dpkg-deb -x "$deb" /tmp/deb-check
+          dt=$(find /tmp/deb-check/usr/share/applications -name '*.desktop' -print -quit)
+          test -n "$dt" || { echo "::error::no .desktop file in .deb"; exit 1; }
+          echo "found $dt"
+          grep ^Exec= "$dt"
+          grep -q '^Exec=.* %u' "$dt" || {
+            echo "::error file=apps/fetchit-desktop/src-tauri/desktop-entry.desktop::Generated .desktop has no %u in Exec= — autonomi:// clicks will launch fetch>it without the URL"
+            cat "$dt"
+            exit 1
+          }
+          echo "  ✓ %u present"
+
       # Tauri emits bundles under src-tauri/target/release/bundle/<format>/
       # on every host. Grab everything in that tree.
       - name: Upload bundles as artifact

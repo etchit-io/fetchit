@@ -272,3 +272,27 @@ jobs:
           releaseDraft: false
           prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
           args: ${{ matrix.args }}
+
+      # Verify the Linux .deb's .desktop passes the URL to fetchit via %u.
+      # Without it, autonomi:// clicks launch fetch>it but the URL never
+      # reaches the app. Tauri's default desktop template has been observed
+      # to omit %u in some bundler versions; we override with
+      # src-tauri/desktop-entry.desktop and this step fails the release
+      # if that override ever stops being applied.
+      - name: Verify .deb's .desktop has %u
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          deb=$(find apps/fetchit-desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+          test -n "$deb" || { echo "::error::no .deb produced"; exit 1; }
+          mkdir -p /tmp/deb-check
+          dpkg-deb -x "$deb" /tmp/deb-check
+          dt=$(find /tmp/deb-check/usr/share/applications -name '*.desktop' -print -quit)
+          test -n "$dt" || { echo "::error::no .desktop file in .deb"; exit 1; }
+          echo "found $dt"
+          grep ^Exec= "$dt"
+          grep -q '^Exec=.* %u' "$dt" || {
+            echo "::error file=apps/fetchit-desktop/src-tauri/desktop-entry.desktop::Generated .desktop has no %u in Exec= — autonomi:// clicks will launch fetch>it without the URL"
+            cat "$dt"
+            exit 1
+          }
+          echo "  ✓ %u present"
