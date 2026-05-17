@@ -2,8 +2,12 @@ name: release
 
 # Triggered by pushing a tag matching `v*` (e.g. `v0.1.0`). Builds the
 # signed release APK and the desktop bundles (macOS universal .dmg,
-# Linux .AppImage + .deb, Windows .msi + .exe) and uploads all
-# artifacts to a single GitHub Release.
+# Linux .deb, Windows .msi + .exe) and uploads all artifacts to a
+# single GitHub Release. AppImage was dropped — its mount-point Exec
+# path doesn't survive a launch, so the autonomi:// URL-handler
+# hand-off from the browser extension never registers reliably; .deb
+# installs a stable /usr/bin/fetchit + /usr/share/applications/.desktop
+# so the scheme works.
 #
 # ── Android signing (required for a Play-grade APK) ─────────────────
 #   KEYSTORE_BASE64   — base64-encoded release keystore (.keystore / .jks)
@@ -133,10 +137,10 @@ jobs:
           generate_release_notes: true
 
   # ── Desktop bundles (Tauri 2) ───────────────────────────────────────
-  # macOS universal .dmg, Linux .AppImage + .deb, Windows .msi + .exe.
-  # Each matrix leg attaches its native bundles to the same GitHub
-  # Release the APK job creates (softprops/action-gh-release upserts on
-  # tag, so parallel jobs just append assets to one release).
+  # macOS universal .dmg, Linux .deb, Windows .msi + .exe. Each matrix
+  # leg attaches its native bundles to the same GitHub Release the APK
+  # job creates (softprops/action-gh-release upserts on tag, so parallel
+  # jobs just append assets to one release).
   release-desktop:
     name: build + publish desktop bundles
     strategy:
@@ -146,7 +150,7 @@ jobs:
           - platform: macos-latest          # arm64 runner — builds a universal binary
             args: --target universal-apple-darwin
             label: macos-universal
-          - platform: ubuntu-22.04          # 22.04 (not 24.04) for AppImage glibc portability
+          - platform: ubuntu-22.04          # 22.04 (not 24.04) keeps the .deb's libc baseline portable
             args: ''
             label: linux-x86_64
           - platform: windows-latest
@@ -184,9 +188,9 @@ jobs:
         with:
           workspaces: apps/fetchit-desktop/src-tauri
 
-      # Tauri 2 on Linux needs WebKitGTK 4.1 + librsvg + libappindicator
-      # + patchelf for AppImage post-processing. Ubuntu 22.04 has all of
-      # these in main.
+      # Tauri 2 on Linux needs WebKitGTK 4.1 + librsvg + libappindicator;
+      # patchelf is kept for any RPATH adjustments Tauri's deb step makes.
+      # Ubuntu 22.04 has all of these in main.
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
