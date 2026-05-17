@@ -14,7 +14,7 @@
     .row { padding: 0.6rem 0; border-bottom: 1px solid #eee; }
     .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
              color: #8a857d; font-weight: 600; margin-right: 0.5rem; }
-    a[href^="autonomi"] { color: #b87333; }
+    a[href^="autonomi"], a[href^="fetchit"] { color: #b87333; }
     .async-mount { margin-top: 1rem; padding: 0.6rem; border: 1px dashed #b87333;
                    border-radius: 4px; background: #fafafa; }
   </style>
@@ -49,6 +49,14 @@
     <span class="label">d (uppercase scheme)</span>
     <a href="AUTONOMI://dcbbd3e5bdc16a36923fab41a2f67430949dbdc998bac500ce1d75d35a7226c1">dcbbd3e5…5a7226c1 — should still get a badge</a>
   </div>
+  <div class="row">
+    <span class="label">e (fetchit:// scheme)</span>
+    <a href="fetchit://b2a979ec389b11390bb5bc87f115c71f44d9d18a606afa090b512094fbe84b29">b2a979ec…fbe84b29 — brand-alias scheme should also badge</a>
+  </div>
+  <div class="row">
+    <span class="label">f (FETCHIT:// uppercase)</span>
+    <a href="FETCHIT://627efc9780263be6123ad09b597adf73259ae1f29ae381b38f7eae4fa5b468b9">627efc97…fa5b468b9 — uppercase brand alias</a>
+  </div>
 
   <h2>2 · Right-click on a bare address</h2>
   <p>
@@ -70,10 +78,15 @@
 
   <h2>4 · Omnibox</h2>
   <p>
-    Type <code>fetchit</code> in the URL bar, press <kbd>Tab</kbd>, paste this
+    Type <code>fetchit</code> in the URL bar, press <kbd>Space</kbd>
+    (works in all browsers; Tab autocompletes in Firefox), paste this
     address, hit Enter:
     <br>
     <code>3f4e80fde66423592bb6e03e1de767fb3bd4fb6d9b75be104edabfab052ee56c</code>
+  </p>
+  <p>
+    The omnibox parser also accepts a full URL with either scheme:
+    <code>fetchit://3f4e80fd…</code> or <code>autonomi://3f4e80fd…</code>.
   </p>
 
   <h2>5 · Negative — should not decorate</h2>

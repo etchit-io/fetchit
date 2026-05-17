@@ -26,6 +26,20 @@ test("parseAutonomiInput — autonomi:// prefix is stripped", () => {
   assert.equal(parseAutonomiInput(`autonomi://${HEX64}`), HEX64);
 });
 
+test("parseAutonomiInput — fetchit:// prefix is stripped (brand alias)", () => {
+  // Both schemes route to fetch>it via the OS handler; the parser
+  // accepts either and returns the bare hex address.
+  assert.equal(parseAutonomiInput(`fetchit://${HEX64}`), HEX64);
+  assert.equal(parseAutonomiInput(`FETCHIT://${HEX64}`), HEX64);
+  assert.equal(parseAutonomiInput(`Fetchit://${HEX64}`), HEX64);
+});
+
+test("parseAutonomiInput — fetchit:// with path / query / fragment", () => {
+  assert.equal(parseAutonomiInput(`fetchit://${HEX64}/page.html`), HEX64);
+  assert.equal(parseAutonomiInput(`fetchit://${HEX64}?k=v`), HEX64);
+  assert.equal(parseAutonomiInput(`fetchit://${HEX64}#x`), HEX64);
+});
+
 test("parseAutonomiInput — uppercase scheme is case-insensitive", () => {
   assert.equal(parseAutonomiInput(`AUTONOMI://${HEX64}`), HEX64);
   assert.equal(parseAutonomiInput(`Autonomi://${HEX64}`), HEX64);
@@ -87,14 +101,21 @@ test("parseAutonomiInput — extra junk after address returns null", () => {
   assert.equal(parseAutonomiInput(`${HEX64}.png`), null);
 });
 
-test("isAutonomiHref — accepts both cases", () => {
+test("isAutonomiHref — accepts both cases of autonomi://", () => {
   assert.equal(isAutonomiHref(`autonomi://${HEX64}`), true);
   assert.equal(isAutonomiHref(`AUTONOMI://${HEX64}`), true);
   assert.equal(isAutonomiHref(`autonomi://${HEX64}/path?q#f`), true);
 });
 
-test("isAutonomiHref — rejects non-autonomi schemes", () => {
+test("isAutonomiHref — accepts fetchit:// (brand alias)", () => {
+  assert.equal(isAutonomiHref(`fetchit://${HEX64}`), true);
+  assert.equal(isAutonomiHref(`FETCHIT://${HEX64}`), true);
+  assert.equal(isAutonomiHref(`Fetchit://${HEX64}/path?q#f`), true);
+});
+
+test("isAutonomiHref — rejects non-routing schemes", () => {
   assert.equal(isAutonomiHref(`https://${HEX64}`), false);
+  assert.equal(isAutonomiHref(`ipfs://${HEX64}`), false);
   assert.equal(isAutonomiHref(HEX64), false);
   assert.equal(isAutonomiHref("javascript:alert(1)"), false);
 });

@@ -35,6 +35,10 @@ header {
   letter-spacing: -0.01em;
 }
 
+/* Brand-letter span — copper chevron in fetch>it and copper slash in
+   etch/it wherever they appear in body text. */
+.m { color: var(--copper); }
+
 .tag {
   font-size: 11px;
   letter-spacing: 0.06em;

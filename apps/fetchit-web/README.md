@@ -1,18 +1,23 @@
 # fetch&gt;it web
 
-A thin browser extension that routes `autonomi://<64-hex-address>` links
-to **fetch&gt;it desktop**. The extension itself runs no network code,
-holds no Autonomi keys, and never sees content bytes — it is purely a
-discovery and routing aid. All fetching and rendering happens in the
-desktop app (or the Android app on mobile).
+A thin browser extension that routes `autonomi://<64-hex-address>` and
+`fetchit://<64-hex-address>` links to **fetch&gt;it desktop**. Both
+schemes resolve to the same address on the Autonomi network; `autonomi://`
+is the network-canonical name, `fetchit://` is the brand alias. The
+extension itself runs no network code, holds no Autonomi keys, and
+never sees content bytes — it is purely a discovery and routing aid.
+All fetching and rendering happens in the desktop app (or the Android
+app on mobile).
 
 ## What it does
 
 1. **Decorates `autonomi://` links** on any page with a small `fetch>it`
    badge so users can see at a glance which links route here.
 2. **Right-click → "Open in fetch>it"** on any selected 64-hex address.
-3. **Omnibox keyword** &mdash; type `fetchit`, press <kbd>Tab</kbd>,
-   paste an address, hit Enter.
+3. **Omnibox keyword** &mdash; type `fetchit`, press <kbd>Space</kbd>,
+   paste an address, hit Enter. (Works the same in Chrome / Edge /
+   Brave / Arc and Firefox. Tab autocompletes in Firefox instead of
+   activating the keyword — use Space.)
 4. **Popup** with an install link if you don't have fetch&gt;it desktop yet.
 
 ## What it does *not* do
@@ -152,7 +157,7 @@ rare).
 
 The omnibox only suggests once the input parses as a valid 64-hex
 Autonomi address. Until then there's no suggestion — that's by design.
-Press the keyword + Tab + paste the address. If the address is invalid
+Press the keyword + Space + paste the address. If the address is invalid
 the entry path is a no-op and logs to the service-worker console.
 
 ## Security posture

@@ -9,7 +9,9 @@
 // context menu in the background service worker instead.
 
 (() => {
-  const HEX_64 = /^autonomi:\/\/([0-9a-fA-F]{64})/i;
+  // Both schemes route to fetch>it via the OS handler; we badge anchors
+  // declared in either form. Keep this regex in sync with src/addr.js.
+  const HEX_64 = /^(?:autonomi|fetchit):\/\/([0-9a-fA-F]{64})/i;
   const ATTR = "data-fetchit-decorated";
   // Opt-out marker that any page can set on an anchor or any ancestor to
   // suppress the badge. Use case: card-style anchors where an extra inline
@@ -91,7 +93,9 @@
 
   // `i` flag → case-insensitive attribute match, so AUTONOMI:// gets caught
   // alongside autonomi://. URL schemes are case-insensitive by the RFC.
-  const LINK_SEL = 'a[href^="autonomi://" i]';
+  // We badge both scheme variants — autonomi:// (canonical) and fetchit://
+  // (brand alias). Same target binary on the desktop side.
+  const LINK_SEL = 'a[href^="autonomi://" i], a[href^="fetchit://" i]';
 
   function sweep(root) {
     const scope = root && root.querySelectorAll ? root : document;
