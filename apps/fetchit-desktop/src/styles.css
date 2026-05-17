@@ -323,10 +323,11 @@ body:not([data-view="settings"]) #settings {
 }
 .qr-modal-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
 }
 .qr-modal-actions button {
-  flex: 1;
+  flex: 1 1 calc(50% - 0.25rem);
   background: transparent;
   color: var(--bone);
   border: 1px solid var(--copper);
