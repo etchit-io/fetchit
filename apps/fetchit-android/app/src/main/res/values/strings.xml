@@ -90,6 +90,11 @@
     <string name="settings_peers_help">one peer per line — `ip:port` or full multiaddr. leave empty to use bundled defaults.</string>
     <string name="settings_save_peers">save</string>
     <string name="settings_reset_peers">reset</string>
+    <string name="settings_refresh_peers">refresh from upstream</string>
+    <string name="settings_refresh_peers_running">fetching latest peers…</string>
+    <string name="settings_refresh_peers_updated">updated — %1$d peers from upstream</string>
+    <string name="settings_refresh_peers_current">already current — %1$d peers</string>
+    <string name="settings_refresh_peers_failed">refresh failed: %1$s</string>
     <string name="settings_saved">saved — next fetch will reconnect</string>
     <string name="settings_reset">reset to defaults — next fetch will reconnect</string>
 

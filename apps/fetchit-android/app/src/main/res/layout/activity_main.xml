@@ -536,6 +536,15 @@
                         android:backgroundTint="?attr/fetchitCopper"
                         android:textColor="?attr/fetchitInk" />
                 </LinearLayout>
+
+                <Button
+                    android:id="@+id/refreshPeersButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/settings_refresh_peers"
+                    android:backgroundTint="?attr/fetchitInk3"
+                    android:textColor="?attr/fetchitCopper" />
             </LinearLayout>
 
             <TextView

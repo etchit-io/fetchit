@@ -5,8 +5,10 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import io.etchit.fetchit.databinding.ActivityMainBinding
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.fetchit_ffi.defaultPeers
 
 /**
@@ -30,6 +32,7 @@ class SettingsSheet(
         binding.peersEdit.setText(store.peers().joinToString("\n"))
         binding.savePeersButton.setOnClickListener { onSaveClicked() }
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
+        binding.refreshPeersButton.setOnClickListener { onRefreshClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
         binding.settingsVersionText.text =
             activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
@@ -118,7 +121,36 @@ class SettingsSheet(
         toast(R.string.settings_reset)
     }
 
+    private fun onRefreshClicked() {
+        binding.refreshPeersButton.isEnabled = false
+        toastStr(activity.getString(R.string.settings_refresh_peers_running))
+        activity.lifecycleScope.launch {
+            val result = runCatching { withContext(Dispatchers.IO) { BootstrapPeersUpstream.fetch() } }
+            binding.refreshPeersButton.isEnabled = true
+            result.fold(
+                onSuccess = { upstream ->
+                    val current = store.peers()
+                    if (upstream == current) {
+                        toastStr(activity.getString(R.string.settings_refresh_peers_current, upstream.size))
+                    } else {
+                        store.savePeers(upstream)
+                        binding.peersEdit.setText(upstream.joinToString("\n"))
+                        activity.fetchitApp().disconnect()
+                        toastStr(activity.getString(R.string.settings_refresh_peers_updated, upstream.size))
+                    }
+                },
+                onFailure = { e ->
+                    toastStr(activity.getString(R.string.settings_refresh_peers_failed, e.message ?: e.javaClass.simpleName))
+                },
+            )
+        }
+    }
+
     private fun toast(@androidx.annotation.StringRes msg: Int) {
+        Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun toastStr(msg: String) {
         Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
     }
 }
