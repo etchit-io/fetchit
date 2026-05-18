@@ -89,6 +89,85 @@ async fn reset_peers_override(state: tauri::State<'_, AppState>) -> Result<(), S
     Ok(())
 }
 
+/// Outcome of [`refresh_peers_from_upstream`]: the list now active +
+/// whether it changed from what was previously effective.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshResult {
+    peers: Vec<String>,
+    updated: bool,
+}
+
+const UPSTREAM_PEERS_URL: &str =
+    "https://raw.githubusercontent.com/WithAutonomi/ant-node/main/config/bootstrap_peers.toml";
+
+/// Fetch WithAutonomi's canonical `bootstrap_peers.toml`, parse it
+/// tolerantly (any string leaf that passes `parse_bootstrap_peer`
+/// counts), and replace the user override + cached client if it
+/// differs from the currently-effective list. Always writes fresh on
+/// every call — no diff-and-skip, no soft-merge.
+#[tauri::command]
+async fn refresh_peers_from_upstream(
+    state: tauri::State<'_, AppState>,
+) -> Result<RefreshResult, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("http client build: {e}"))?;
+    let body = client
+        .get(UPSTREAM_PEERS_URL)
+        .send()
+        .await
+        .map_err(|e| format!("GET {UPSTREAM_PEERS_URL} failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("upstream HTTP error: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("read upstream body: {e}"))?;
+
+    let value: toml::Value = body
+        .parse()
+        .map_err(|e| format!("upstream is not valid TOML: {e}"))?;
+    let mut found: Vec<String> = Vec::new();
+    collect_toml_strings(&value, &mut found);
+    let upstream: Vec<String> = found
+        .into_iter()
+        .filter(|s| fetchit_net::parse_bootstrap_peer(s).is_ok())
+        .collect();
+    if upstream.is_empty() {
+        return Err("upstream TOML had no recognisable peer entries".into());
+    }
+
+    let current = state.effective_peers();
+    if upstream == current {
+        return Ok(RefreshResult { peers: current, updated: false });
+    }
+
+    if let Ok(mut s) = state.settings.lock() {
+        s.peers.clone_from(&upstream);
+        let _ = s.save(&state.settings_path);
+    }
+    *state.client.lock().await = None;
+    Ok(RefreshResult { peers: upstream, updated: true })
+}
+
+fn collect_toml_strings(value: &toml::Value, out: &mut Vec<String>) {
+    match value {
+        toml::Value::String(s) => out.push(s.clone()),
+        toml::Value::Array(arr) => {
+            for v in arr {
+                collect_toml_strings(v, out);
+            }
+        }
+        toml::Value::Table(t) => {
+            for (_, v) in t {
+                collect_toml_strings(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// JS-side diagnostic forwarding: anything the frontend wants to land in the
 /// dev daemon log calls this so we can tail everything in one place. No-op in
 /// release builds — the JS side gates calls behind `import.meta.env.DEV` too,
@@ -344,6 +423,7 @@ pub fn run() {
             peers_override,
             set_peers_override,
             reset_peers_override,
+            refresh_peers_from_upstream,
             connect,
             peer_count,
             disconnect,

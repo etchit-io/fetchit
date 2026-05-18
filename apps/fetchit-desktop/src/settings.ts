@@ -293,12 +293,18 @@ function mountAppearance(root: HTMLElement): void {
   }
 }
 
+interface PeersRefreshResult {
+  peers: string[];
+  updated: boolean;
+}
+
 function mountPeers(root: HTMLElement): void {
   const editor = root.querySelector<HTMLTextAreaElement>("#peers-editor");
   const errorEl = root.querySelector<HTMLElement>("#peers-error");
   const saveBtn = root.querySelector<HTMLButtonElement>("#peers-save");
   const resetBtn = root.querySelector<HTMLButtonElement>("#peers-reset");
-  if (!editor || !errorEl || !saveBtn || !resetBtn) return;
+  const refreshBtn = root.querySelector<HTMLButtonElement>("#peers-refresh");
+  if (!editor || !errorEl || !saveBtn || !resetBtn || !refreshBtn) return;
 
   const showError = (msg: string): void => {
     errorEl.textContent = msg;
@@ -356,6 +362,25 @@ function mountPeers(root: HTMLElement): void {
         resetBtn.disabled = false;
       });
   });
+
+  refreshBtn.addEventListener("click", () => {
+    clearError();
+    refreshBtn.disabled = true;
+    void invoke<PeersRefreshResult>("refresh_peers_from_upstream")
+      .then((result) => {
+        editor.value = result.peers.join("\n");
+        // showError is the only status surface in this UI; reuse it for
+        // success notes too (tone is conveyed by the absence of the red
+        // error class — fine for a transient confirmation).
+        const n = result.peers.length;
+        const verb = result.updated ? "Updated" : "Already current";
+        showError(`${verb} — ${n} peer${n === 1 ? "" : "s"} from upstream.`);
+      })
+      .catch((e: unknown) => showError(typeof e === "string" ? e : "refresh failed"))
+      .finally(() => {
+        refreshBtn.disabled = false;
+      });
+  });
 }
 
 function buildPage(): HTMLElement {
@@ -405,13 +430,16 @@ function buildPage(): HTMLElement {
           know what you&rsquo;re doing (running a local node, joining a
           test network, etc.). One peer per line — either an
           <code>ip:port</code> shorthand or a full
-          <code>/ip4/&hellip;/udp/&hellip;/quic</code> multiaddr.
+          <code>/ip4/&hellip;/udp/&hellip;/quic</code> multiaddr. Refresh
+          pulls the latest list from
+          <a href="https://github.com/WithAutonomi/ant-node/blob/main/config/bootstrap_peers.toml" target="_blank" rel="noopener noreferrer">WithAutonomi&rsquo;s canonical file</a>.
         </p>
         <textarea id="peers-editor" rows="6" spellcheck="false" aria-label="Bootstrap peers"></textarea>
         <p class="setting-error" id="peers-error" role="alert" hidden></p>
         <div class="setting-actions">
           <button type="button" class="setting-action" id="peers-save">Save</button>
           <button type="button" class="setting-action setting-action-ghost" id="peers-reset">Reset to defaults</button>
+          <button type="button" class="setting-action setting-action-ghost" id="peers-refresh">Refresh from upstream</button>
         </div>
         <p class="setting-desc setting-desc-muted">
           Saving drops the current connection so the next fetch reconnects
