@@ -117,6 +117,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
 
   mountAppearance(root);
   mountPeers(root);
+  mountSupport(root);
 
   idleSelect.addEventListener("change", () => {
     const minutes = Math.max(0, Number(idleSelect.value) || 0);
@@ -374,12 +375,32 @@ function mountPeers(root: HTMLElement): void {
         // error class — fine for a transient confirmation).
         const n = result.peers.length;
         const verb = result.updated ? "Updated" : "Already current";
-        showError(`${verb} — ${n} peer${n === 1 ? "" : "s"} from upstream.`);
+        showError(`${verb} · ${n} peer${n === 1 ? "" : "s"}`);
       })
       .catch((e: unknown) => showError(typeof e === "string" ? e : "refresh failed"))
       .finally(() => {
         refreshBtn.disabled = false;
       });
+  });
+}
+
+function mountSupport(root: HTMLElement): void {
+  const addrEl = root.querySelector<HTMLElement>(".setting-support-addr");
+  const copyBtn = root.querySelector<HTMLButtonElement>(".setting-support-copy");
+  const status = root.querySelector<HTMLElement>(".setting-support-status");
+  if (!addrEl || !copyBtn || !status) return;
+  const address = addrEl.textContent?.trim() ?? "";
+  copyBtn.addEventListener("click", () => {
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(address);
+        status.textContent = "Address copied.";
+        status.dataset.tone = "ok";
+      } catch {
+        status.textContent = "Copy failed.";
+        status.dataset.tone = "error";
+      }
+    })();
   });
 }
 
@@ -402,10 +423,6 @@ function buildPage(): HTMLElement {
     </section>
     <section class="setting-group" id="group-network">
       <h2>Network</h2>
-      <p class="setting-desc">
-        fetch<span class="brand-mark">&gt;</span>it connects to the Autonomi network lazily — the first fetch kicks off the
-        client. While this panel is open, peer count auto-refreshes every 5 seconds.
-      </p>
       <div class="setting-row">
         <span>Connected peers</span>
         <span id="net-peers" data-state="off">—</span>
@@ -414,26 +431,10 @@ function buildPage(): HTMLElement {
         <span>Disconnect when idle</span>
         <select id="idle-timeout"></select>
       </label>
-      <p class="setting-desc setting-desc-muted">
-        After this many minutes with no mouse / keyboard activity, fetch<span class="brand-mark">&gt;</span>it
-        drops the network connection and clears the in-memory cache. If the
-        on-disk cache mode below is set to <em>Clear after idle</em>, that
-        gets wiped too.
-      </p>
     </section>
     <section class="setting-group" id="group-peers">
       <details class="setting-collapsible">
         <summary><h2>Bootstrap peers</h2></summary>
-        <p class="setting-desc">
-          The list of Autonomi peers fetch<span class="brand-mark">&gt;</span>it dials on the first fetch.
-          Defaults to the bundled production list; override only if you
-          know what you&rsquo;re doing (running a local node, joining a
-          test network, etc.). One peer per line — either an
-          <code>ip:port</code> shorthand or a full
-          <code>/ip4/&hellip;/udp/&hellip;/quic</code> multiaddr. Refresh
-          pulls the latest list from
-          <a href="https://github.com/WithAutonomi/ant-node/blob/main/config/bootstrap_peers.toml" target="_blank" rel="noopener noreferrer">WithAutonomi&rsquo;s canonical file</a>.
-        </p>
         <textarea id="peers-editor" rows="6" spellcheck="false" aria-label="Bootstrap peers"></textarea>
         <p class="setting-error" id="peers-error" role="alert" hidden></p>
         <div class="setting-actions">
@@ -441,19 +442,12 @@ function buildPage(): HTMLElement {
           <button type="button" class="setting-action setting-action-ghost" id="peers-reset">Reset to defaults</button>
           <button type="button" class="setting-action setting-action-ghost" id="peers-refresh">Refresh from upstream</button>
         </div>
-        <p class="setting-desc setting-desc-muted">
-          Saving drops the current connection so the next fetch reconnects
-          using the new list.
-        </p>
       </details>
     </section>
     <section class="setting-group" id="group-cache">
       <h2>On-disk byte cache</h2>
       <p class="setting-desc">
-        Off by default — a fresh install leaves zero on-disk trace of fetched content.
-        When enabled, fetched bytes are kept locally so reopening a recent address is
-        instant (and air-gap testing works). Content survives until the chosen clear
-        mode wipes it, or you press <em>Clear cache now</em>.
+        Off by default. When on, fetched bytes stay on disk for instant re-open.
       </p>
       <label class="setting-row">
         <span>Enable on-disk cache</span>
@@ -476,11 +470,17 @@ function buildPage(): HTMLElement {
     </section>
     <section class="setting-group" id="group-bookmarks">
       <h2>Bookmarks</h2>
-      <p class="setting-desc">
-        Star addresses in the toolbar to save them here. Click a row to navigate;
-        click the label to rename; click × to remove.
-      </p>
       <div id="bookmarks-list"></div>
+    </section>
+    <section class="setting-group" id="group-support">
+      <details class="setting-collapsible">
+        <summary><h2>Support development</h2></summary>
+        <div class="setting-support-row">
+          <code class="setting-support-addr">0xC842451eC3454913585B885240e58aa5E4F4ed2b</code>
+          <button type="button" class="setting-action setting-action-ghost setting-support-copy">Copy address</button>
+        </div>
+        <p class="setting-support-status" role="status" aria-live="polite"></p>
+      </details>
     </section>
     <section class="setting-group setting-group-about" id="group-about">
       <details class="setting-collapsible">
@@ -490,17 +490,8 @@ function buildPage(): HTMLElement {
         </p>
         <p class="setting-desc">
           <strong>fetch<span class="brand-mark">&gt;</span>it &mdash; beta software.</strong>
-          Released under the
           <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener noreferrer">AGPL-3.0-only</a>
-          license, with a commercial license available separately (see
-          <code>COMMERCIAL.md</code> in the source tree). Provided
-          <em>"AS IS" without warranty of any kind, express or implied</em>;
-          the authors and copyright holders accept no liability for any damages arising
-          from its use. See sections&nbsp;15&nbsp;&amp;&nbsp;16 of the AGPL for the full
-          disclaimer.
-        </p>
-        <p class="setting-desc setting-desc-muted">
-          Security model and threat scope: <code>docs/SECURITY.md</code> in the source tree.
+          or commercial (<code>COMMERCIAL.md</code>). Provided <em>"AS IS"</em>, no warranty.
         </p>
       </details>
     </section>

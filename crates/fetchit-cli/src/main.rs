@@ -230,6 +230,12 @@ fn print_rendition(r: &Rendition) {
             println!("---");
             println!("{}", hex_preview(data, 64));
         }
+        Rendition::Html { body } => {
+            println!("kind: text/html");
+            println!("bytes: {}", body.len());
+            println!("---");
+            println!("{}", preview_text(body, 4_000));
+        }
         // Rendition is #[non_exhaustive]; future variants print a
         // generic header so the CLI never panics on a new kind.
         _ => println!("kind: (unknown rendition variant)"),
