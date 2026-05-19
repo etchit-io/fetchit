@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>fetch&gt;it connects to the Autonomi peer-to-peer network to fetch content. Peers can be anywhere in the world, including occasionally on the same local network. fetch&gt;it does not scan, browse, or collect data from devices on your network.</string>
+</dict>
+</plist>
