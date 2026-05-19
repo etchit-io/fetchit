@@ -187,6 +187,44 @@ fn save_bytes_to_path(path: String, data: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, &data).map_err(|e| format!("couldn't write {path}: {e}"))
 }
 
+/// Decode a PNG and write it to the OS clipboard as an image, in a single
+/// backend hop. The QR share modal calls this instead of the JS-side
+/// `Image.fromBytes(..)` → `writeImage(img)` chain because that chain
+/// crosses the IPC boundary twice carrying an `Image` resource handle in
+/// between, and on webkit2gtk that resource sometimes never makes it
+/// back across the second invoke (the handle is reaped before the
+/// clipboard write resolves). Doing the decode + clipboard write in one
+/// Rust frame sidesteps the cross-IPC resource lifecycle entirely. The
+/// clipboard plugin takes RGBA bytes, not encoded PNG, so we decode
+/// here using the `png` crate.
+#[tauri::command]
+fn copy_png_to_clipboard(app: tauri::AppHandle, data: Vec<u8>) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let decoder = png::Decoder::new(std::io::Cursor::new(&data));
+    let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| format!("png frame: {e}"))?;
+    buf.truncate(info.buffer_size());
+    // Canvas.toBlob("image/png") emits RGBA8. Defend against the off
+    // chance a future renderer emits something else by widening here
+    // rather than silently writing a malformed buffer to the clipboard.
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(buf.len() / 3 * 4);
+            for px in buf.chunks_exact(3) {
+                out.extend_from_slice(&[px[0], px[1], px[2], 0xff]);
+            }
+            out
+        }
+        other => return Err(format!("unsupported png color type: {other:?}")),
+    };
+    let img = tauri::image::Image::new_owned(rgba, info.width, info.height);
+    app.clipboard()
+        .write_image(&img)
+        .map_err(|e| format!("clipboard write: {e}"))
+}
+
 /// Open the WebView devtools window. The `devtools` feature on tauri makes
 /// this available in release builds too — the desktop app is read-only, so
 /// letting power users inspect what's being rendered is fine.
@@ -370,6 +408,20 @@ pub fn run() {
     // server is the third path WebKit's `<video>` will accept (it ignores
     // custom URI schemes for media), spawned in `setup` below.
     tauri::Builder::default()
+        // single-instance MUST be first per plugin docs — it short-
+        // circuits the secondary process before any other plugin
+        // initialises. The `deep-link` feature on the dep wires
+        // forwarded argv URLs straight into the same on_open_url
+        // listeners the first instance already registered, so the
+        // controller's deep-link handler fires unchanged.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol("fetchit", protocol::handle)
@@ -430,6 +482,7 @@ pub fn run() {
             fetch_and_render,
             archive_extract::extract_archive_entry,
             save_bytes_to_path,
+            copy_png_to_clipboard,
             log,
             open_devtools,
             media_url_base,

@@ -29,8 +29,8 @@ android {
         applicationId = "io.etchit.fetchit"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.2.3"
+        versionCode = 7
+        versionName = "0.2.5"
 
         ndk {
             // arm64 only — x86_64 is for emulators and bloats the APK

@@ -5,10 +5,16 @@
 // the ▦ button in the header. Closes on Esc, on backdrop click, or on the
 // explicit close affordance.
 
-import { renderQrSvg } from "../qr";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+
+import { abbreviateAddress, renderExportCardSvg, renderQrSvg } from "../qr";
 
 export interface QrModalApi {
-  open(address: string): void;
+  /** `title` is shown verbatim above the address row when supplied. Callers
+   *  pass the etch / page / file title so the recipient sees what they're
+   *  about to open before they scan. */
+  open(address: string, title?: string | null): void;
   close(): void;
   isOpen(): boolean;
 }
@@ -28,20 +34,30 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
         <button type="button" class="qr-modal-close" aria-label="Close (Esc)">×</button>
       </header>
       <div class="qr-modal-qr" aria-live="polite"></div>
+      <input
+        type="text"
+        class="qr-modal-title-input"
+        maxlength="60"
+        placeholder="add a title (optional)"
+        aria-label="Share title"
+        autocomplete="off"
+        spellcheck="false"
+      />
       <p class="qr-modal-addr"><code></code></p>
       <div class="qr-modal-actions">
-        <button type="button" class="qr-modal-copy-hex">Copy address</button>
-        <button type="button" class="qr-modal-copy-url">Copy autonomi://…</button>
-        <button type="button" class="qr-modal-save-png">Save image</button>
-        <button type="button" class="qr-modal-copy-png">Copy image</button>
+        <button type="button" class="qr-modal-copy-hex">address</button>
+        <button type="button" class="qr-modal-copy-url">autonomi://&hellip;</button>
+        <button type="button" class="qr-modal-save-png">save image</button>
+        <button type="button" class="qr-modal-copy-png">copy image</button>
       </div>
       <p class="qr-modal-footer">
-        scan with fetch<span class="brand-mark">&gt;</span>it on Android &middot; <span class="qr-modal-domain">etchit.io</span>
+        scan with fetch<span class="brand-mark">&gt;</span>it on mobile &middot; <span class="qr-modal-domain">etchit.io</span>
       </p>
     </div>
   `;
 
   const qrSlot = host.querySelector(".qr-modal-qr") as HTMLDivElement;
+  const titleInput = host.querySelector(".qr-modal-title-input") as HTMLInputElement;
   const codeEl = host.querySelector(".qr-modal-addr code") as HTMLElement;
   const copyHex = host.querySelector(".qr-modal-copy-hex") as HTMLButtonElement;
   const copyUrl = host.querySelector(".qr-modal-copy-url") as HTMLButtonElement;
@@ -49,13 +65,16 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
   const copyPng = host.querySelector(".qr-modal-copy-png") as HTMLButtonElement;
   const closeBtn = host.querySelector(".qr-modal-close") as HTMLButtonElement;
 
-  // Rasterise the currently-shown QR SVG to a 1024×1024 PNG blob with a white
-  // background. White is critical for scannability — most cameras need high
-  // contrast against the QR modules, and our modal renders on bone surface.
+  // Rasterise the full branded card (wordmark + QR + address + "scan
+  // with fetch>it on mobile · etchit.io" footer) to a PNG blob. Save
+  // image and Copy image both call this so the exported artifact
+  // carries the brand chrome, not just an anonymous QR.
   async function rasterise(): Promise<Blob | null> {
-    const svg = qrSlot.querySelector("svg");
-    if (!svg) return null;
-    const xml = new XMLSerializer().serializeToString(svg);
+    if (!currentAddr) return null;
+    // Read the live input each call so a title typed after the modal
+    // opened lands on the exported card.
+    const card = renderExportCardSvg(currentAddr, titleInput.value);
+    const xml = new XMLSerializer().serializeToString(card);
     const svgUrl = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml" }));
     try {
       const img = new Image();
@@ -64,15 +83,16 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
         img.onerror = () => reject(new Error("svg load failed"));
         img.src = svgUrl;
       });
+      const w = Number(card.getAttribute("width")) || 720;
+      const h = Number(card.getAttribute("height")) || 900;
       const canvas = document.createElement("canvas");
-      const size = 1024;
-      canvas.width = size;
-      canvas.height = size;
+      canvas.width = w;
+      canvas.height = h;
       const ctx = canvas.getContext("2d");
       if (!ctx) return null;
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, size, size);
-      ctx.drawImage(img, 0, 0, size, size);
+      ctx.fillStyle = "#f5f2eb";
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
       return await new Promise<Blob | null>((resolve) => {
         canvas.toBlob((b) => resolve(b), "image/png");
       });
@@ -106,9 +126,13 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
   };
 
   const api: QrModalApi = {
-    open(address) {
+    open(address, title) {
       currentAddr = address;
-      codeEl.textContent = address;
+      // Pre-fill the title with any caller-derived label (etch title,
+      // page <title>, filename) but leave it editable — recipients
+      // benefit most when the sharer can tweak before exporting.
+      titleInput.value = (title ?? "").trim();
+      codeEl.textContent = abbreviateAddress(address);
       // Copper-colored center mark so the QR carries the brand chevron even
       // when the modal frame is cropped out of a screenshot.
       qrSlot.replaceChildren(
@@ -126,6 +150,7 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
     close() {
       host.hidden = true;
       currentAddr = null;
+      titleInput.value = "";
       document.removeEventListener("keydown", onKey);
       host.removeEventListener("click", onBackdrop);
     },
@@ -156,15 +181,19 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
         flash(savePng, "Save failed");
         return;
       }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `fetchit-${currentAddr.slice(0, 8)}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      flash(savePng, "Saved!");
+      try {
+        const suggested = `fetchit-${currentAddr.slice(0, 8)}.png`;
+        const path = await save({
+          defaultPath: suggested,
+          filters: [{ name: "PNG image", extensions: ["png"] }],
+        });
+        if (!path) return;
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        await invoke("save_bytes_to_path", { path, data: Array.from(bytes) });
+        flash(savePng, "Saved!");
+      } catch {
+        flash(savePng, "Save failed");
+      }
     })();
   });
 
@@ -177,13 +206,14 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
         return;
       }
       try {
-        // ClipboardItem with image/png works in modern browsers + Tauri WebView.
-        // If the surrounding browser blocks it (e.g., not focused), fall back
-        // to copying a markdown image link to the rendered PNG isn't useful;
-        // we just surface the failure.
-        await navigator.clipboard.write([
-          new ClipboardItem({ "image/png": blob }),
-        ]);
+        // Go through one backend command, not the two-hop JS chain
+        // (`Image.fromBytes` + `writeImage`). The two-hop form crosses
+        // the IPC boundary twice with an `Image` resource handle in
+        // between, which webkit2gtk drops on the floor sometimes. The
+        // backend command does the decode + clipboard write in one
+        // Rust frame, no intermediate resource handle to lose.
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        await invoke("copy_png_to_clipboard", { data: Array.from(bytes) });
         flash(copyPng, "Copied!");
       } catch {
         flash(copyPng, "Copy failed");

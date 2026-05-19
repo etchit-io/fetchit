@@ -1,6 +1,6 @@
 [package]
 name = "fetchit-desktop"
-version = "0.2.3"
+version = "0.2.7"
 description = "Desktop reader for content stored on the Autonomi network."
 authors = ["the fetch>it contributors"]
 license = "AGPL-3.0-only"
@@ -22,8 +22,20 @@ tokio = { version = "1", features = ["sync"] }
 bytes = "1.7"
 infer = { version = "0.16", default-features = false }
 filetime = "0.2"
+tauri-plugin-clipboard-manager = "2"
+# PNG → RGBA decode for `copy_png_to_clipboard`. Tauri's clipboard plugin
+# takes RGBA bytes, not encoded PNG, so we decode here. `png` is the
+# minimal crate that does it — no JPEG / GIF / TIFF baggage.
+png = "0.17"
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
+# Multiplex `autonomi://` / `fetchit://` URL launches into one running
+# fetch>it process instead of spawning a fresh instance per click. The
+# secondary invocation's argv is forwarded to the existing instance,
+# which focuses its window and re-emits the URL so the same deep-link
+# handler that fires on first-launch runs again and the tab strip
+# picks up a new tab.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
 # Used only by refresh_peers_from_upstream to GET WithAutonomi's

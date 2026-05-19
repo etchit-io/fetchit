@@ -68,12 +68,15 @@
 
     <!-- QR preview dialog — in-app modal that mirrors the desktop one. -->
     <string name="qr_preview_qr_alt">QR code for this address</string>
-    <string name="qr_preview_copy_address">Copy address</string>
-    <string name="qr_preview_copy_url">Copy autonomi://</string>
-    <string name="qr_preview_share_image">Share image</string>
-    <string name="qr_preview_share_text">Share text</string>
+    <string name="qr_preview_copy_address">address</string>
+    <string name="qr_preview_copy_url">autonomi://…</string>
+    <string name="qr_preview_save_image">save image</string>
+    <string name="qr_preview_copy_image">copy image</string>
     <string name="qr_preview_copied">Copied!</string>
-    <string name="qr_preview_footer">scan with fetch&gt;it on desktop · etchit.io</string>
+    <string name="qr_preview_saved">Saved!</string>
+    <string name="qr_preview_failed">Failed</string>
+    <string name="qr_preview_footer">scan with fetch&gt;it on mobile · etchit.io</string>
+    <string name="qr_preview_title_hint">add a title (optional)</string>
     <string name="bookmark_export_done">bookmarks exported</string>
     <string name="bookmark_export_failed">export failed: %1$s</string>
     <string name="bookmark_import_done">imported %1$d bookmark(s)</string>
@@ -87,16 +90,16 @@
     <string name="settings_peer_count_disconnected">not connected</string>
     <string name="settings_peers_header_collapsed">bootstrap peers ▾</string>
     <string name="settings_peers_header_expanded">bootstrap peers ▴</string>
-    <string name="settings_peers_help">one peer per line — `ip:port` or full multiaddr. leave empty to use bundled defaults.</string>
+    <string name="settings_peers_help">one per line</string>
     <string name="settings_save_peers">save</string>
     <string name="settings_reset_peers">reset</string>
     <string name="settings_refresh_peers">refresh from upstream</string>
-    <string name="settings_refresh_peers_running">fetching latest peers…</string>
-    <string name="settings_refresh_peers_updated">updated — %1$d peers from upstream</string>
-    <string name="settings_refresh_peers_current">already current — %1$d peers</string>
+    <string name="settings_refresh_peers_running">fetching…</string>
+    <string name="settings_refresh_peers_updated">updated · %1$d peers</string>
+    <string name="settings_refresh_peers_current">already current · %1$d peers</string>
     <string name="settings_refresh_peers_failed">refresh failed: %1$s</string>
-    <string name="settings_saved">saved — next fetch will reconnect</string>
-    <string name="settings_reset">reset to defaults — next fetch will reconnect</string>
+    <string name="settings_saved">saved</string>
+    <string name="settings_reset">reset to defaults</string>
 
     <!-- Appearance / theme picker (settings sheet) -->
     <string name="settings_appearance_title">appearance</string>

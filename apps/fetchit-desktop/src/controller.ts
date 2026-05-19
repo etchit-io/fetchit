@@ -9,7 +9,7 @@ import { initMediaBase } from "./mediaUrl";
 import { parseAutonomiInput } from "./address";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
-import { addBookmark, deriveLabel, isBookmarked, removeBookmark } from "./bookmarks";
+import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
 
@@ -58,9 +58,10 @@ export async function init(): Promise<void> {
 
   const qrModal = mountQrModal(qrHost);
   const openShare = (): void => {
-    const addr = store.active()?.address;
+    const active = store.active();
+    const addr = active?.address;
     if (!addr) return;
-    qrModal.open(addr);
+    qrModal.open(addr, deriveTitle(active?.rendition));
   };
   shareBtn.addEventListener("click", openShare);
 

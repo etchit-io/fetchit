@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "deep-link:default",
-    "dialog:default"
+    "dialog:default",
+    "clipboard-manager:allow-write-image"
   ]
 }

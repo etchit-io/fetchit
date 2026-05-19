@@ -310,15 +310,46 @@ body:not([data-view="settings"]) #settings {
   max-width: 280px;
   height: auto;
 }
+.qr-modal-title-input {
+  display: block;
+  width: 100%;
+  margin: 0.7rem 0 0.15rem;
+  padding: 0.5rem 0.6rem;
+  text-align: center;
+  font-family: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.1rem;
+  line-height: 1.2;
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px dashed var(--ash);
+  border-radius: 4px;
+  outline: none;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.qr-modal-title-input::placeholder {
+  color: var(--ash);
+  font-style: italic;
+  opacity: 1;
+}
+.qr-modal-title-input:hover {
+  border-color: var(--copper);
+}
+.qr-modal-title-input:focus {
+  border-style: solid;
+  border-color: var(--copper);
+  background: rgba(255, 255, 255, 0.5);
+}
 .qr-modal-addr {
-  margin: 0.85rem 0 0.75rem;
+  margin: 0.35rem 0 0.75rem;
   text-align: center;
 }
 .qr-modal-addr code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   color: var(--ash);
-  word-break: break-all;
+  white-space: nowrap;
   user-select: text;
 }
 .qr-modal-actions {
@@ -782,6 +813,31 @@ body:not([data-view="settings"]) #settings {
   line-height: 1.5;
   word-break: break-all;
 }
+
+.setting-support-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+}
+.setting-support-addr {
+  font-size: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  word-break: break-all;
+  user-select: all;
+}
+.setting-support-status {
+  margin: 8px 0 0;
+  font-size: 12px;
+  min-height: 1em;
+  color: var(--ash);
+}
+.setting-support-status[data-tone="ok"] { color: var(--copper); }
+.setting-support-status[data-tone="error"] { color: var(--rust); }
 #peers-editor {
   width: 100%;
   min-height: 8rem;

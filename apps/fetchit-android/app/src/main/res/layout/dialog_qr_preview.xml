@@ -81,18 +81,43 @@
             android:padding="8dp"
             android:contentDescription="@string/qr_preview_qr_alt" />
 
-        <!-- Full 64-hex address, monospace, selectable. -->
+        <!-- Editable title — pre-filled when the caller passes one
+             (etch title / page <title> / filename), but always editable
+             so the sharer can override before saving / copying. The
+             render-card pipeline reads this value at export time, not
+             at dialog open. -->
+        <EditText
+            android:id="@+id/qr_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textColor="#0a0a0a"
+            android:textColorHint="#8a8a8a"
+            android:textSize="18sp"
+            android:textStyle="italic"
+            android:gravity="center"
+            android:maxLength="60"
+            android:maxLines="2"
+            android:hint="@string/qr_preview_title_hint"
+            android:background="@android:color/transparent"
+            android:imeOptions="actionDone"
+            android:inputType="textCapSentences|textAutoCorrect"
+            tools:text="example title" />
+
+        <!-- Abbreviated 64-hex address (8+…+8). Single line, mono. The full
+             hex still lives inside the QR and on the clipboard buttons. -->
         <TextView
             android:id="@+id/qr_address"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="18dp"
+            android:layout_marginTop="10dp"
             android:fontFamily="monospace"
             android:textColor="#8a8a8a"
-            android:textSize="11sp"
+            android:textSize="13sp"
             android:textIsSelectable="true"
+            android:singleLine="true"
             android:gravity="center"
-            tools:text="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" />
+            tools:text="01234567…cdef0123" />
 
         <!-- Copy buttons. -->
         <LinearLayout
@@ -106,6 +131,7 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginEnd="4dp"
+                android:maxLines="1"
                 android:text="@string/qr_preview_copy_address" />
             <Button
                 android:id="@+id/qr_copy_url"
@@ -113,29 +139,32 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="4dp"
+                android:maxLines="1"
                 android:text="@string/qr_preview_copy_url" />
         </LinearLayout>
 
-        <!-- Share buttons — image (branded PNG card via QrShare) or plain text. -->
+        <!-- Image buttons — save PNG to Downloads, or copy PNG to clipboard. -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:orientation="horizontal">
             <Button
-                android:id="@+id/qr_share_image"
+                android:id="@+id/qr_save_image"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginEnd="4dp"
-                android:text="@string/qr_preview_share_image" />
+                android:maxLines="1"
+                android:text="@string/qr_preview_save_image" />
             <Button
-                android:id="@+id/qr_share_text"
+                android:id="@+id/qr_copy_image"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="4dp"
-                android:text="@string/qr_preview_share_text" />
+                android:maxLines="1"
+                android:text="@string/qr_preview_copy_image" />
         </LinearLayout>
 
         <!-- Brand footer. Matches the desktop modal's etchit.io copper accent. -->

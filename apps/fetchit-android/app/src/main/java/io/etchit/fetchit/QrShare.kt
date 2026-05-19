@@ -78,6 +78,18 @@ object QrShare {
         return true
     }
 
+    /**
+     * Render-only variant — produces the full branded card bitmap
+     * (wordmark + QR + address + "scan with fetch>it on mobile" footer)
+     * for the QR-share modal's Save / Copy image actions. Returns null
+     * on encode failure.
+     */
+    fun renderCardFor(address: String, label: String? = null): Bitmap? {
+        val hex = address.lowercase()
+        if (!hex.matches(Regex("^[0-9a-f]{64}$"))) return null
+        return renderCard("autonomi://$hex", hex, label?.ifBlank { null })
+    }
+
     // ── colours (this card lives on white — dark text, copper accent) ──
     private val INK = 0xFF1A1A1A.toInt()      // near-black: QR modules + headings
     private val COPPER = 0xFFC9732B.toInt()   // brand copper
@@ -142,10 +154,12 @@ object QrShare {
             textSize = 16f
             color = ASH
         }
+        // Companion footer — bold ink so the brand pair stays clear
+        // when the card is reshared on a busy timeline.
         val sibPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = Typeface.DEFAULT
-            textSize = 13f
-            color = ASH
+            typeface = Typeface.DEFAULT_BOLD
+            textSize = 14f
+            color = INK
         }
 
         fun lineH(p: Paint): Float = p.fontMetrics.let { it.descent - it.ascent }
@@ -238,11 +252,13 @@ object QrShare {
         }
         y += gBeforeAddr
 
-        // — abbreviated address (full one is in the QR) —
-        val shortAddr = if (address.length > 18) {
-            "autonomi://${address.take(8)}…${address.takeLast(6)}"
+        // — abbreviated address (full one is in the QR). Symmetric 8+…+8
+        //   matches desktop's `abbreviateAddress(..)` so a card shared from
+        //   one app looks identical regardless of which surface produced it. —
+        val shortAddr = if (address.length > 17) {
+            "${address.take(8)}…${address.takeLast(8)}"
         } else {
-            "autonomi://$address"
+            address
         }
         val ab = y - addrPaint.fontMetrics.ascent
         c.drawText(shortAddr, (CARD_W - addrPaint.measureText(shortAddr)) / 2f, ab, addrPaint)
@@ -256,11 +272,24 @@ object QrShare {
         y += lineH(tagPaint)
         y += gAfterTag
 
-        // — companion app (brand-typographic wordmarks: fetch>it / etch/it) —
-        val sib = "fetch>it reads it  ·  etch/it publishes it  —  etchit.io"
-        val sibFit = ellipsize(sib, sibPaint, CARD_W - PAD.toFloat())
+        // — companion app (brand-typographic; > and / in copper) —
+        // Split into segments so the marks render copper without
+        // losing kerning inside each text run.
+        val sibSegments = listOf(
+            "fetch" to INK,
+            ">" to COPPER,
+            "it reads it  ·  etch" to INK,
+            "/" to COPPER,
+            "it publishes it  —  etchit.io" to INK,
+        )
+        val sibTotal = sibSegments.fold(0f) { acc, (txt, _) -> acc + sibPaint.measureText(txt) }
         val sb = y - sibPaint.fontMetrics.ascent
-        c.drawText(sibFit, (CARD_W - sibPaint.measureText(sibFit)) / 2f, sb, sibPaint)
+        var sx = (CARD_W - sibTotal) / 2f
+        for ((txt, col) in sibSegments) {
+            sibPaint.color = col
+            c.drawText(txt, sx, sb, sibPaint)
+            sx += sibPaint.measureText(txt)
+        }
 
         card
     } catch (_: Exception) {
