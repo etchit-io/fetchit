@@ -113,7 +113,10 @@ mod tests {
         // Regression: prior cheap-prefilter ran render on this and
         // surfaced the user-visible "expected ident at line 1 column 3"
         // error instead of falling back to the text handler.
-        assert_eq!(confidence(br#"{ this is plain text, just happens to start with a brace }"#), Confidence::None);
+        assert_eq!(
+            confidence(b"{ this is plain text, just happens to start with a brace }"),
+            Confidence::None
+        );
     }
 
     #[test]
@@ -131,7 +134,10 @@ mod tests {
         // Head ends mid-valid-JSON — likely a >head-sized payload.
         // serde_json reports Category::Eof, which we treat as a
         // "still JSON" signal so large files don't get misclassified.
-        assert_eq!(confidence(br#"{"key":"value with a very lo"#), Confidence::High);
+        assert_eq!(
+            confidence(br#"{"key":"value with a very lo"#),
+            Confidence::High
+        );
     }
 
     #[test]
