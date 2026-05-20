@@ -189,6 +189,10 @@ fn cli_style_client_config() -> ClientConfig {
 async fn start_node_with_warmup(node: Arc<P2PNode>) -> CoreResult<()> {
     const START_DEADLINE: Duration = Duration::from_secs(10);
     const WARMUP_POLL: Duration = Duration::from_millis(250);
+    // Clock drift beyond this many seconds is treated as the cause when
+    // bootstrap finds zero peers: saorsa-core rejects time-skewed peer
+    // messages, so a wrong clock is indistinguishable from "no peers".
+    const CLOCK_SKEW_TOLERANCE_SECS: u64 = 30;
 
     let start_task = {
         let node = node.clone();
@@ -209,6 +213,28 @@ async fn start_node_with_warmup(node: Arc<P2PNode>) -> CoreResult<()> {
             };
         }
         if tokio::time::Instant::now() >= deadline {
+            // Zero peers after the warmup window. A common and very
+            // hard-to-diagnose cause is local clock skew: saorsa-core
+            // rejects peers' identity messages whose UTC timestamp looks
+            // stale, so the routing table never fills. Probe the clock
+            // and, when it is the culprit, fail with a message that
+            // names the real cause instead of a misleading "no peers".
+            let skew = tokio::task::spawn_blocking(crate::clock::measure_clock_skew_secs)
+                .await
+                .ok()
+                .flatten();
+            if let Some(skew) = skew {
+                if skew.unsigned_abs() > CLOCK_SKEW_TOLERANCE_SECS {
+                    return Err(net_err(format!(
+                        "system clock is {} — the Autonomi network rejects \
+                         time-skewed messages, so no peers can be reached. \
+                         Fix your system clock and retry (on Windows: run \
+                         'w32tm /resync /force' as administrator and make \
+                         sure the time zone is correct).",
+                        describe_skew(skew),
+                    )));
+                }
+            }
             log::warn!(
                 "fetchit-net: bootstrap warmup hit {}s deadline with no peers, returning anyway",
                 START_DEADLINE.as_secs()
@@ -221,6 +247,20 @@ async fn start_node_with_warmup(node: Arc<P2PNode>) -> CoreResult<()> {
 
 fn net_err(reason: String) -> CoreError {
     CoreError::Network(reason)
+}
+
+/// Renders a signed clock skew (seconds) as a human phrase, e.g.
+/// `"~3m 0s ahead of real time"` or `"~12s behind real time"`.
+fn describe_skew(skew_secs: i64) -> String {
+    let direction = if skew_secs >= 0 { "ahead of" } else { "behind" };
+    let magnitude = skew_secs.unsigned_abs();
+    let minutes = magnitude / 60;
+    let seconds = magnitude % 60;
+    if minutes > 0 {
+        format!("~{minutes}m {seconds}s {direction} real time")
+    } else {
+        format!("~{seconds}s {direction} real time")
+    }
 }
 
 static SET_DATA_HOME_ONCE: Once = Once::new();

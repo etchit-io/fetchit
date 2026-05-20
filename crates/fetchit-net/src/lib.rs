@@ -14,6 +14,7 @@
 //! connection (tests, fixture inspectors, future WASM viewer).
 
 pub mod client;
+mod clock;
 pub mod peers;
 
 pub use client::{set_data_home, AutonomiClient};
