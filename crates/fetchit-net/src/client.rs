@@ -294,3 +294,23 @@ pub fn set_data_home(path: &Path) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn describe_skew_under_one_minute() {
+        assert_eq!(describe_skew(45), "~45s ahead of real time");
+        assert_eq!(describe_skew(-12), "~12s behind real time");
+    }
+
+    #[test]
+    fn describe_skew_minutes_and_seconds() {
+        assert_eq!(describe_skew(60), "~1m 0s ahead of real time");
+        assert_eq!(describe_skew(180), "~3m 0s ahead of real time");
+        assert_eq!(describe_skew(-3661), "~61m 1s behind real time");
+    }
+}
