@@ -21,7 +21,6 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
 log = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

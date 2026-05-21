@@ -2457,7 +2457,6 @@ dependencies = [
  "bytes",
  "hex",
  "infer",
- "once_cell",
  "regex",
  "serde",
  "serde_json",
@@ -2470,14 +2469,12 @@ name = "fetchit-ffi"
 version = "0.2.0"
 dependencies = [
  "android_logger",
- "async-trait",
  "bytes",
  "fetchit-core",
  "fetchit-net",
  "log",
  "serde_json",
  "thiserror 1.0.69",
- "tokio",
  "uniffi",
 ]
 
@@ -2492,7 +2489,6 @@ dependencies = [
  "hex",
  "log",
  "self_encryption",
- "thiserror 1.0.69",
  "tokio",
  "xor_name",
 ]
