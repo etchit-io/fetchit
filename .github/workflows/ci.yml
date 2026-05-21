@@ -19,6 +19,10 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      # fetchit-ffi and apps/fetchit-desktop/src-tauri are excluded from the
+      # workspace — `--all` skips them. Check their formatting explicitly.
+      - run: cargo fmt --manifest-path crates/fetchit-ffi/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml -- --check
 
   clippy:
     name: clippy
