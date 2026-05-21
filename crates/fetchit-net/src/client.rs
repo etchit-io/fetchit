@@ -29,7 +29,8 @@ pub struct AutonomiClient {
 }
 
 impl AutonomiClient {
-    /// Connect to the network using the supplied bootstrap peers.
+    /// Connect to the production network using the supplied bootstrap
+    /// peers.
     ///
     /// `peers` accepts both full multiaddrs and `ip:port` shorthand —
     /// each entry is parsed via [`parse_bootstrap_peer`].
@@ -46,10 +47,34 @@ impl AutonomiClient {
     /// strings fail to parse or the underlying P2P node cannot be
     /// constructed.
     pub async fn connect(peers: &[String]) -> CoreResult<Self> {
+        Self::connect_with(peers, false).await
+    }
+
+    /// Connect with loopback peering enabled — for local-devnet testing
+    /// only.
+    ///
+    /// An `ant-core` `LocalDevnet` runs entirely on `127.0.0.1`. A
+    /// production client filters loopback addresses out of its routing
+    /// table, so it cannot peer with a devnet at all; this enables the
+    /// node's `local` mode — the toggle `ant-cli` exposes as
+    /// `--allow-loopback`. Production callers use [`connect`]: real
+    /// bootstrap peers are never loopback.
+    ///
+    /// # Errors
+    ///
+    /// As [`connect`].
+    pub async fn connect_local(peers: &[String]) -> CoreResult<Self> {
+        Self::connect_with(peers, true).await
+    }
+
+    /// Shared connect path. `local` enables loopback peering — `false`
+    /// for the production network, `true` for a `LocalDevnet`.
+    async fn connect_with(peers: &[String], local: bool) -> CoreResult<Self> {
         let mut builder = CoreNodeConfig::builder()
             .mode(NodeMode::Client)
             .port(0)
             .ipv6(false)
+            .local(local)
             .max_message_size(MAX_WIRE_MESSAGE_SIZE);
 
         for raw in peers {
