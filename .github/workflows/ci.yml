@@ -78,13 +78,13 @@ jobs:
       - name: background.js parses as ES module
         run: node --input-type=module -e "import('./apps/fetchit-web/src/addr.js').then(() => console.log('addr.js OK'))"
 
-  # Builds the Android debug APK end-to-end (FFI .so via cargo-ndk +
-  # gradle assembleDebug). Catches breakage in the gradle build, the
-  # NDK toolchain, or the JNI handoff before a release tag. The
-  # signed-release path is a separate workflow (.github/workflows/
-  # release.yml) triggered only on `v*` tag pushes.
+  # Runs the Android JVM unit tests, then builds the debug APK end-to-end
+  # (FFI .so via cargo-ndk + gradle assembleDebug). Catches logic
+  # regressions and breakage in the gradle build, the NDK toolchain, or
+  # the JNI handoff before a release tag. The signed-release path is a
+  # separate workflow (.github/workflows/release.yml), `v*` tags only.
   android:
-    name: android (debug APK)
+    name: android (unit tests + debug APK)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +95,13 @@ jobs:
           java-version: '17'
 
       - uses: gradle/actions/setup-gradle@v4
+
+      # JVM unit tests — pure logic, no NDK / FFI needed, so they run first
+      # to fail fast before the slower native build below.
+      - name: Run Android unit tests
+        run: |
+          cd apps/fetchit-android
+          ./gradlew :app:testDebugUnitTest --no-daemon
 
       - uses: dtolnay/rust-toolchain@stable
         with:
