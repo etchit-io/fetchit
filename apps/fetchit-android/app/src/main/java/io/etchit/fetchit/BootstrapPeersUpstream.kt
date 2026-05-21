@@ -49,7 +49,9 @@ object BootstrapPeersUpstream {
         }
     }
 
-    private fun looksLikePeer(s: String): Boolean {
+    // `internal`, not `private`, so unit tests can exercise the peer-shape
+    // validation directly without going through the `fetch` HTTP round-trip.
+    internal fun looksLikePeer(s: String): Boolean {
         // ip:port shorthand — quick check, no full SocketAddress parse.
         val colon = s.lastIndexOf(':')
         if (colon > 0 && colon < s.length - 1) {

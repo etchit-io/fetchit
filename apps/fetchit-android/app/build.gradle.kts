@@ -86,6 +86,13 @@ android {
             useLegacyPackaging = true
         }
     }
+
+    testOptions {
+        // Pure-logic unit tests touch android.util.Log only for logging —
+        // let the framework stubs return defaults instead of throwing, so
+        // those files (e.g. EpubBook) are JVM-testable without a device.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -128,4 +135,8 @@ dependencies {
     // in-app "scan a QR" button so users can pull addresses off a
     // printed page or another phone's screen without leaving fetch>it.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // JVM unit tests for the app's pure Kotlin logic — run with
+    // `./gradlew :app:testDebugUnitTest`, no device or emulator needed.
+    testImplementation("junit:junit:4.13.2")
 }
