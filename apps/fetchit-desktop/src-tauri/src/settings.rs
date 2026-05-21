@@ -32,7 +32,9 @@ pub struct IdlePolicy {
 
 impl Default for IdlePolicy {
     fn default() -> Self {
-        Self { timeout_minutes: 30 }
+        Self {
+            timeout_minutes: 30,
+        }
     }
 }
 
@@ -68,8 +70,8 @@ impl Settings {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text =
-            serde_json::to_string_pretty(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         fs::write(path, text)
     }
 }
@@ -162,7 +164,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = dir.path().join("settings.json");
         // A file written by an older build without the bookmarks field.
-        fs::write(&p, r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#).unwrap();
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
         let s = Settings::load(&p);
         assert!(s.bookmarks.is_empty());
     }
@@ -188,7 +194,11 @@ mod tests {
     fn missing_idle_field_in_file_defaults_to_30() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("settings.json");
-        fs::write(&p, r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#).unwrap();
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
         let s = Settings::load(&p);
         assert_eq!(s.idle.timeout_minutes, 30);
     }
@@ -209,7 +219,11 @@ mod tests {
     fn missing_peers_field_in_file_defaults_to_empty() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("settings.json");
-        fs::write(&p, r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#).unwrap();
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
         let s = Settings::load(&p);
         assert!(s.peers.is_empty());
     }

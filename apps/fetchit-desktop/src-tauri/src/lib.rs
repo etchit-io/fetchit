@@ -25,8 +25,7 @@ use state::{default_peers as bundled_peers, ensure_client, AppState};
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Filled in by `run`'s setup callback once the local media server is bound.
@@ -101,7 +100,7 @@ struct RefreshResult {
 const UPSTREAM_PEERS_URL: &str =
     "https://raw.githubusercontent.com/WithAutonomi/ant-node/main/config/bootstrap_peers.toml";
 
-/// Fetch WithAutonomi's canonical `bootstrap_peers.toml`, parse it
+/// Fetch `WithAutonomi`'s canonical `bootstrap_peers.toml`, parse it
 /// tolerantly (any string leaf that passes `parse_bootstrap_peer`
 /// counts), and replace the user override + cached client if it
 /// differs from the currently-effective list. Always writes fresh on
@@ -140,7 +139,10 @@ async fn refresh_peers_from_upstream(
 
     let current = state.effective_peers();
     if upstream == current {
-        return Ok(RefreshResult { peers: current, updated: false });
+        return Ok(RefreshResult {
+            peers: current,
+            updated: false,
+        });
     }
 
     if let Ok(mut s) = state.settings.lock() {
@@ -148,7 +150,10 @@ async fn refresh_peers_from_upstream(
         let _ = s.save(&state.settings_path);
     }
     *state.client.lock().await = None;
-    Ok(RefreshResult { peers: upstream, updated: true })
+    Ok(RefreshResult {
+        peers: upstream,
+        updated: true,
+    })
 }
 
 fn collect_toml_strings(value: &toml::Value, out: &mut Vec<String>) {
@@ -173,15 +178,17 @@ fn collect_toml_strings(value: &toml::Value, out: &mut Vec<String>) {
 /// release builds — the JS side gates calls behind `import.meta.env.DEV` too,
 /// so the IPC isn't even fired.
 #[tauri::command]
-fn log(_line: String) {
+fn log(line: String) {
     #[cfg(debug_assertions)]
-    eprintln!("{_line}");
+    eprintln!("{line}");
+    #[cfg(not(debug_assertions))]
+    let _ = line;
 }
 
 /// Write bytes to a user-chosen file. The JS side picks the path via
 /// `plugin-dialog`'s `save`; we just write what they hand us. Used by
 /// the archive viewer's per-entry / whole-archive Save buttons, where
-/// the browser-native `<a download>` trick fails inside the WebView.
+/// the browser-native `<a download>` trick fails inside the `WebView`.
 #[tauri::command]
 fn save_bytes_to_path(path: String, data: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, &data).map_err(|e| format!("couldn't write {path}: {e}"))
@@ -201,9 +208,13 @@ fn save_bytes_to_path(path: String, data: Vec<u8>) -> Result<(), String> {
 fn copy_png_to_clipboard(app: tauri::AppHandle, data: Vec<u8>) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
     let decoder = png::Decoder::new(std::io::Cursor::new(&data));
-    let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png header: {e}"))?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|e| format!("png frame: {e}"))?;
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png frame: {e}"))?;
     buf.truncate(info.buffer_size());
     // Canvas.toBlob("image/png") emits RGBA8. Defend against the off
     // chance a future renderer emits something else by widening here
@@ -225,7 +236,7 @@ fn copy_png_to_clipboard(app: tauri::AppHandle, data: Vec<u8>) -> Result<(), Str
         .map_err(|e| format!("clipboard write: {e}"))
 }
 
-/// Open the WebView devtools window. The `devtools` feature on tauri makes
+/// Open the `WebView` devtools window. The `devtools` feature on tauri makes
 /// this available in release builds too — the desktop app is read-only, so
 /// letting power users inspect what's being rendered is fine.
 #[tauri::command]
@@ -235,7 +246,7 @@ fn open_devtools(window: tauri::WebviewWindow) {
 
 /// Base URL of the local media server (e.g. `http://127.0.0.1:54321`).
 /// Renderers append `/<addr>` and set the resulting URL on `<audio>` /
-/// `<video>` elements. WebKit's media pipeline accepts plain `http://`
+/// `<video>` elements. `WebKit`'s media pipeline accepts plain `http://`
 /// where it rejects our `fetchit://` / `autonomi://` schemes.
 #[tauri::command]
 fn media_url_base() -> Result<String, String> {
@@ -247,7 +258,11 @@ fn media_url_base() -> Result<String, String> {
 
 #[tauri::command]
 async fn connect(state: tauri::State<'_, AppState>, peers: Vec<String>) -> Result<(), String> {
-    let peers = if peers.is_empty() { state.effective_peers() } else { peers };
+    let peers = if peers.is_empty() {
+        state.effective_peers()
+    } else {
+        peers
+    };
     ensure_client(&state, &peers).await.map(|_| ())
 }
 
@@ -318,8 +333,7 @@ fn is_bookmarked(state: tauri::State<'_, AppState>, address: String) -> bool {
     state
         .settings
         .lock()
-        .map(|s| s.bookmarks.iter().any(|b| b.address == address))
-        .unwrap_or(false)
+        .is_ok_and(|s| s.bookmarks.iter().any(|b| b.address == address))
 }
 
 /// Add or rename a bookmark. Dedupes by address — re-bookmarking the same
@@ -327,7 +341,9 @@ fn is_bookmarked(state: tauri::State<'_, AppState>, address: String) -> bool {
 /// stable ordering survives renames).
 #[tauri::command]
 fn add_bookmark(state: tauri::State<'_, AppState>, address: String, label: String) {
-    let Ok(mut s) = state.settings.lock() else { return };
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
     if let Some(existing) = s.bookmarks.iter_mut().find(|b| b.address == address) {
         existing.label = label;
     } else {
@@ -342,23 +358,23 @@ fn add_bookmark(state: tauri::State<'_, AppState>, address: String, label: Strin
 
 #[tauri::command]
 fn remove_bookmark(state: tauri::State<'_, AppState>, address: String) {
-    let Ok(mut s) = state.settings.lock() else { return };
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
     s.bookmarks.retain(|b| b.address != address);
     let _ = s.save(&state.settings_path);
 }
 
 #[tauri::command]
 fn idle_policy(state: tauri::State<'_, AppState>) -> IdlePolicy {
-    state
-        .settings
-        .lock()
-        .map(|s| s.idle)
-        .unwrap_or_default()
+    state.settings.lock().map(|s| s.idle).unwrap_or_default()
 }
 
 #[tauri::command]
 fn set_idle_policy(state: tauri::State<'_, AppState>, policy: IdlePolicy) {
-    let Ok(mut s) = state.settings.lock() else { return };
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
     s.idle = policy;
     let _ = s.save(&state.settings_path);
 }
@@ -383,15 +399,16 @@ async fn fetch_and_render(
     state: tauri::State<'_, AppState>,
     addr: String,
 ) -> Result<RenditionDto, String> {
-    let parsed: Address = addr.parse().map_err(|e: fetchit_core::Error| e.to_string())?;
-    let bytes = match state.cached_bytes(&parsed) {
-        Some(b) => b,
-        None => {
-            let client = ensure_client(&state, &state.effective_peers()).await?;
-            let b = client.fetch(&parsed).await.map_err(|e| e.to_string())?;
-            state.cache_bytes(&parsed, b.clone());
-            b
-        }
+    let parsed: Address = addr
+        .parse()
+        .map_err(|e: fetchit_core::Error| e.to_string())?;
+    let bytes = if let Some(b) = state.cached_bytes(&parsed) {
+        b
+    } else {
+        let client = ensure_client(&state, &state.effective_peers()).await?;
+        let b = client.fetch(&parsed).await.map_err(|e| e.to_string())?;
+        state.cache_bytes(&parsed, b.clone());
+        b
     };
     let rendition = default_registry()
         .render(bytes, &Hint::default(), &RenderContext::default())
@@ -402,6 +419,12 @@ async fn fetch_and_render(
 /// Build and run the Tauri application: wires the URI scheme protocols,
 /// loads persisted settings, manages app state, and starts the local
 /// media server.
+///
+/// # Panics
+///
+/// Panics if the Tauri runtime fails to start — an unrecoverable startup
+/// error with nothing to fall back to.
+#[allow(clippy::expect_used)] // entry point: a failed startup is unrecoverable
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Two scheme aliases for the same protocol handler. The localhost HTTP

@@ -31,7 +31,9 @@ pub async fn extract_archive_entry(
     addr: String,
     entry_path: String,
 ) -> Result<Vec<u8>, String> {
-    let parsed: Address = addr.parse().map_err(|e: fetchit_core::Error| e.to_string())?;
+    let parsed: Address = addr
+        .parse()
+        .map_err(|e: fetchit_core::Error| e.to_string())?;
     let bytes = resolve_bytes(&state, &parsed).await?;
     extract_entry(bytes, &entry_path).map_err(|e| e.to_string())
 }

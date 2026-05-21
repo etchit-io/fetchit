@@ -35,7 +35,11 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { enabled: false, mode: ClearMode::Persist, max_bytes: 500 * 1024 * 1024 }
+        Self {
+            enabled: false,
+            mode: ClearMode::Persist,
+            max_bytes: 500 * 1024 * 1024,
+        }
     }
 }
 
@@ -48,7 +52,10 @@ impl DiskCache {
     /// Build a cache rooted at `root`. The directory is created if missing.
     pub fn new(root: PathBuf, policy: Policy) -> Self {
         let _ = fs::create_dir_all(&root);
-        Self { root, policy: Mutex::new(policy) }
+        Self {
+            root,
+            policy: Mutex::new(policy),
+        }
     }
 
     pub fn policy(&self) -> Policy {
@@ -120,9 +127,7 @@ impl DiskCache {
 
     /// Number of cached files (one per address).
     pub fn file_count(&self) -> usize {
-        fs::read_dir(&self.root)
-            .map(|it| it.flatten().count())
-            .unwrap_or(0)
+        fs::read_dir(&self.root).map_or(0, |it| it.flatten().count())
     }
 
     /// Drop oldest-mtime files until total size is at or below `cap`.
@@ -170,7 +175,11 @@ mod tests {
     }
 
     fn enabled(max: u64) -> Policy {
-        Policy { enabled: true, mode: ClearMode::Persist, max_bytes: max }
+        Policy {
+            enabled: true,
+            mode: ClearMode::Persist,
+            max_bytes: max,
+        }
     }
 
     #[test]
@@ -219,8 +228,8 @@ mod tests {
     fn size_on_disk_reports_total() {
         let dir = tempdir().unwrap();
         let c = DiskCache::new(dir.path().to_path_buf(), enabled(1024));
-        c.put(&addr(A), b"hello");      // 5
-        c.put(&addr(B), b"worlds!");    // 7
+        c.put(&addr(A), b"hello"); // 5
+        c.put(&addr(B), b"worlds!"); // 7
         assert_eq!(c.size_on_disk(), 12);
     }
 
@@ -255,7 +264,10 @@ mod tests {
         let _ = c.get(&addr(A));
         sleep(Duration::from_millis(15));
         c.put(&addr(C), b"cccc");
-        assert!(c.get(&addr(A)).is_some(), "recently-touched A should survive");
+        assert!(
+            c.get(&addr(A)).is_some(),
+            "recently-touched A should survive"
+        );
         assert!(c.get(&addr(B)).is_none(), "B should be the eviction victim");
         assert!(c.get(&addr(C)).is_some(), "fresh write C should remain");
     }
