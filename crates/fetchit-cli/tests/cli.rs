@@ -89,3 +89,65 @@ fn detect_missing_file_errors() {
         .assert()
         .code(1);
 }
+
+#[test]
+fn detects_json() {
+    let f = fixture(br#"{"foo":"bar","n":42}"#);
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .args(["detect", f.path().to_str().expect("path")])
+        .assert()
+        .success()
+        .stdout(contains("kind: application/json"));
+}
+
+#[test]
+fn detects_csv_as_tabular() {
+    let f = fixture(b"name,age,city\nalice,30,nyc\nbob,25,la\ncarol,40,sf\n");
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .args(["detect", f.path().to_str().expect("path")])
+        .assert()
+        .success()
+        .stdout(contains("kind: text/csv"))
+        .stdout(contains("rows: 3"));
+}
+
+#[test]
+fn detects_html() {
+    let f = fixture(b"<!DOCTYPE html>\n<html><body>hi</body></html>");
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .args(["detect", f.path().to_str().expect("path")])
+        .assert()
+        .success()
+        .stdout(contains("kind: text/html"));
+}
+
+#[test]
+fn detects_zip_as_archive() {
+    // 22-byte end-of-central-directory record — a valid, empty ZIP.
+    let empty_zip: [u8; 22] = [
+        0x50, 0x4B, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let f = fixture(&empty_zip);
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .args(["detect", f.path().to_str().expect("path")])
+        .assert()
+        .success()
+        .stdout(contains("kind: application/archive"))
+        .stdout(contains("entries: 0"));
+}
+
+#[test]
+fn detects_binary_as_opaque() {
+    let f = fixture(&[0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF]);
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .args(["detect", f.path().to_str().expect("path")])
+        .assert()
+        .success()
+        // The OpaqueBinary arm of print_rendition appends a hex dump.
+        .stdout(contains("de ad be ef"));
+}

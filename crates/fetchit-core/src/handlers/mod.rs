@@ -31,8 +31,8 @@ pub use zip::{extract_entry, ZipHandler};
 use crate::HandlerRegistry;
 
 /// Build a [`HandlerRegistry`] populated with the default handler
-/// set in priority order: envelope, image, audio, video, HTML, JSON,
-/// markdown, text, binary fallback.
+/// set in priority order: envelope, image, audio, video, zip, HTML,
+/// JSON, CSV, markdown, text, binary fallback.
 ///
 /// **Order matters**: image runs before video so HEIC `ftyp` brands
 /// claim correctly; HTML runs before markdown/text so HTML markup

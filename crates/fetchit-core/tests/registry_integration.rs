@@ -91,3 +91,70 @@ fn pdf_falls_through_to_binary_handler_with_correct_mime() {
         other => panic!("expected OpaqueBinary with PDF MIME, got {other:?}"),
     }
 }
+
+#[test]
+fn mp3_magic_renders_as_audio() {
+    let mut data = b"ID3\x03\x00\x00\x00\x00\x00\x0A".to_vec();
+    data.extend_from_slice(&[0u8; 16]);
+    match render(&data) {
+        Rendition::Audio { mime, .. } => assert_eq!(mime, "audio/mpeg"),
+        other => panic!("ID3 audio should be Rendition::Audio, got {other:?}"),
+    }
+}
+
+#[test]
+fn mp4_ftyp_renders_as_video() {
+    // 24-byte ftyp box, brand `isom` — a plain MP4. Also confirms the
+    // image handler (registered first) doesn't claim a video ftyp brand.
+    let mut data = vec![0u8, 0, 0, 0x18];
+    data.extend_from_slice(b"ftypisom");
+    data.extend_from_slice(&[0u8; 12]);
+    match render(&data) {
+        Rendition::Video { mime, .. } => assert_eq!(mime, "video/mp4"),
+        other => panic!("MP4 ftyp should be Rendition::Video, got {other:?}"),
+    }
+}
+
+#[test]
+fn html_document_renders_as_html_not_text() {
+    let raw = b"<!DOCTYPE html>\n<html><body>hi</body></html>";
+    match render(raw) {
+        Rendition::Html { body } => assert!(body.contains("<body>")),
+        other => panic!("an HTML document should win over text, got {other:?}"),
+    }
+}
+
+#[test]
+fn csv_renders_as_tabular_not_text() {
+    let raw = b"name,age,city\nalice,30,nyc\nbob,25,la\ncarol,40,sf\n";
+    match render(raw) {
+        Rendition::Tabular { columns, rows } => {
+            assert_eq!(columns.len(), 3);
+            assert_eq!(rows.len(), 3);
+        }
+        other => panic!("CSV should win over text, got {other:?}"),
+    }
+}
+
+#[test]
+fn markdown_renders_as_text_tagged_markdown() {
+    let raw = b"# heading\n\nsome body text under it.\n";
+    match render(raw) {
+        Rendition::Text { language, .. } => {
+            assert_eq!(language, Some("markdown".to_owned()));
+        }
+        other => panic!("markdown should be Text tagged markdown, got {other:?}"),
+    }
+}
+
+#[test]
+fn zip_renders_as_archive() {
+    // A 22-byte end-of-central-directory record — a valid, empty ZIP.
+    let empty_zip: [u8; 22] = [
+        0x50, 0x4B, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    match render(&empty_zip) {
+        Rendition::Archive { entries } => assert!(entries.is_empty()),
+        other => panic!("a ZIP should be Rendition::Archive, got {other:?}"),
+    }
+}
