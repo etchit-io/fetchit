@@ -47,7 +47,7 @@ class FetchitApplication : Application() {
         setDataHome(filesDir.absolutePath)
         setupLogger()
         peerCountTracker.start()
-        ProcessLifecycleOwner.get().lifecycle.addObserver(IdleDisconnect(this))
+        ProcessLifecycleOwner.get().lifecycle.addObserver(IdleDisconnect(::disconnect))
     }
 
     /** Returns the connected client; constructs it on first call. */

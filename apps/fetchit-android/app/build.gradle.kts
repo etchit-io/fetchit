@@ -136,7 +136,9 @@ dependencies {
     // printed page or another phone's screen without leaving fetch>it.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
-    // JVM unit tests for the app's pure Kotlin logic — run with
-    // `./gradlew :app:testDebugUnitTest`, no device or emulator needed.
+    // JVM unit tests — `./gradlew :app:testDebugUnitTest`, no device needed.
+    // JUnit covers pure Kotlin; Robolectric runs tests that touch Android
+    // framework classes (org.json, SharedPreferences, …) on the JVM.
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14")
 }

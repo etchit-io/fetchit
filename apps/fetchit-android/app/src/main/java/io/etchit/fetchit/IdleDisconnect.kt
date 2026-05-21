@@ -18,12 +18,12 @@ import androidx.lifecycle.LifecycleOwner
  * `onStop` fires only when *every* activity in the app is backgrounded
  * — config-change re-creates and quick fragment swaps don't trip it.
  */
-class IdleDisconnect(private val app: FetchitApplication) : DefaultLifecycleObserver {
+class IdleDisconnect(private val onIdle: () -> Unit) : DefaultLifecycleObserver {
 
     private val handler = Handler(Looper.getMainLooper())
     private val disconnectTask = Runnable {
         Log.i(TAG, "idle timeout — disconnecting client to save battery")
-        app.disconnect()
+        onIdle()
     }
 
     override fun onStart(owner: LifecycleOwner) {
