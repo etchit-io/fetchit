@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "fetchit-desktop"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "bytes",
  "fetchit-core",
