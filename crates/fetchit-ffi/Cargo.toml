@@ -22,6 +22,9 @@ crate-type = ["cdylib", "staticlib", "lib"]
 [dependencies]
 fetchit-core = { path = "../fetchit-core" }
 fetchit-net = { path = "../fetchit-net" }
+# Exact-pinned: the uniffi runtime must match the uniffi-bindgen CLI version
+# (scripts/build-jni-libs.sh) — a mismatch fails the generated bindings'
+# API-checksum check at startup. Bump the runtime and the CLI together.
 uniffi = { version = "=0.29.5", features = ["tokio"] }
 bytes = "1.7"
 log = "0.4"

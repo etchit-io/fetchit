@@ -50,10 +50,6 @@ log = "0.4"
 ant-core = { git = "https://github.com/WithAutonomi/ant-client", rev = "3df6764" }
 self_encryption = "=0.36.0"
 xor_name = "=5.0.0"
-# uniffi pinned to the etchit-android version to keep both projects on
-# the same Kotlin binding generator. Bump deliberately and verify that
-# `uniffi-bindgen` (the standalone CLI) still produces matching bindings.
-uniffi = "=0.29.4"
 
 [profile.release]
 lto = "thin"
