@@ -32,8 +32,8 @@ generated/
 # ── Autonomi upload artifacts ────────────────────────────
 *.datamap
 
-# ── Local agent tooling ──────────────────────────────────
-CLAUDE.md
+# ── Local agent tooling (Claude Code) ────────────────────
+CLAUDE*.md
 .claude/
 
 # ── IDE / OS ─────────────────────────────────────────────
