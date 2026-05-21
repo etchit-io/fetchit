@@ -8,8 +8,9 @@ video, PDF, archive, code with syntax highlighting, JSON, CSV, full HTML
 SPAs — without installing a wallet, signing a message, or running a node.
 
 fetch>it ships as a small Rust engine (`fetchit-core`), a CLI (`fetchit
-get <addr>`), a uniffi FFI surface (`fetchit-ffi`), and a native Android
-shell that gives the engine a touch UI.
+get <addr>`), a uniffi FFI surface (`fetchit-ffi`), and two GUI shells
+over the engine — a native Android app and a Tauri 2 desktop app. A thin
+browser extension routes `autonomi://` links into the desktop app.
 
 For end-user instructions — every gesture, address-bar format, supported
 content type, the `autonomi://` URL scheme, and honest limitations — see
@@ -20,10 +21,10 @@ makes the full Fetch API work over content-addressed URLs), see
 
 ## Status
 
-`0.2.0` — **beta**. The Android shell builds and runs end-to-end against
-the live Autonomi network — the [`docs/USING.md`](docs/USING.md) guide
-describes what it currently does. CLI compiles. Desktop (Tauri 2) is in
-active development.
+**Beta.** The Rust engine, the CLI, the Android shell, and the Tauri 2
+desktop shell all build and run end-to-end against the live Autonomi
+network. [`docs/USING.md`](docs/USING.md) is the end-user guide for the
+Android app.
 
 **Dual-licensed.** Open-source under [`AGPL-3.0-only`](LICENSE);
 a commercial license is available for closed-source / proprietary use
@@ -41,14 +42,19 @@ fetchit/
 │   ├── fetchit-cli/                 # `fetchit get <addr>` binary
 │   └── fetchit-ffi/                 # uniffi 0.29 bindings (workspace-excluded)
 ├── apps/
-│   └── fetchit-android/             # Material3 shell, sandboxed WebView, Media3
+│   ├── fetchit-android/             # Material3 shell, sandboxed WebView, Media3
+│   ├── fetchit-desktop/             # Tauri 2 shell — TS/Vite frontend, Rust backend
+│   └── fetchit-web/                 # browser extension — routes autonomi:// links
 ├── docs/
-│   ├── USING.md                     # end-user guide
+│   ├── USING.md                     # end-user guide (Android)
 │   ├── AUTONOMI-WEB.md              # autonomi:// scheme + SPA platform
-│   └── HANDLER-AUTHORS.md           # how to add a content handler
+│   ├── HANDLER-AUTHORS.md           # how to add a content handler
+│   ├── SECURITY.md                  # threat model + sandbox architecture
+│   ├── BRAND.md                     # design tokens shared with etch/it
+│   └── QR-SHARE.md                  # QR address-sharing design spec
 ├── scripts/
 │   └── build-jni-libs.sh            # cargo ndk → jniLibs/ for the Android build
-├── .github/workflows/               # CI (fmt/clippy/test) + release (signed APK)
+├── .github/workflows/               # CI (fmt/clippy/test) + release (signed bundles)
 ├── CONTRIBUTING.md                  # DCO, quality bar
 ├── RELEASING.md                     # one-time keystore setup + per-release flow
 └── LICENSE                          # AGPL-3.0-only (+ commercial — see COMMERCIAL.md)
@@ -76,6 +82,15 @@ first:
 cd apps/fetchit-android
 ./gradlew :app:assembleDebug                        # debug-signed APK
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+The desktop app (Tauri 2) builds straight from a workspace checkout:
+
+```bash
+cd apps/fetchit-desktop
+npm install
+npm run tauri dev                                   # dev shell
+npm run tauri build                                 # platform bundle
 ```
 
 For signed release builds, see [`RELEASING.md`](RELEASING.md).
