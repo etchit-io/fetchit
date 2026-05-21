@@ -44,6 +44,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  # Desktop app — runs the Vite/TS frontend suite (vitest) and the Tauri
+  # backend suite (src-tauri). src-tauri is excluded from the root
+  # workspace (it links the system webkit stack), so `cargo test
+  # --workspace` in the `test` job never sees it. Linux only; the tests
+  # are platform-agnostic logic. desktop-test.yml builds bundles — this
+  # job runs tests.
+  desktop:
+    name: desktop (vitest + src-tauri)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/fetchit-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+
+      - name: Install frontend deps
+        working-directory: apps/fetchit-desktop
+        run: npm ci
+
+      # Fast TS/Vite suite first — fails in seconds if a renderer regressed.
+      - name: Frontend unit tests (vitest)
+        working-directory: apps/fetchit-desktop
+        run: npm run test:run
+
+      - name: Install Linux webkit deps (for the src-tauri build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
+
+      - name: Backend unit tests (src-tauri)
+        run: cargo test --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
+
   # Cross-browser extension. Runs the address-parser unit tests under plain
   # Node (no package.json, no deps — just node --test). If you change the
   # parser, this job is what catches divergence with the desktop-app parser.
@@ -78,7 +124,8 @@ jobs:
       - name: background.js parses as ES module
         run: node --input-type=module -e "import('./apps/fetchit-web/src/addr.js').then(() => console.log('addr.js OK'))"
 
-  # Runs the Android JVM unit tests, then builds the debug APK end-to-end
+  # Runs the Android JVM unit tests + the fetchit-ffi host unit tests,
+  # then builds the debug APK end-to-end
   # (FFI .so via cargo-ndk + gradle assembleDebug). Catches logic
   # regressions and breakage in the gradle build, the NDK toolchain, or
   # the JNI handoff before a release tag. The signed-release path is a
@@ -110,6 +157,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/fetchit-ffi
+
+      # fetchit-ffi host unit tests — rendition-mapping logic. The crate is
+      # workspace-excluded (cdylib for the JNI build), so the `test` job's
+      # `cargo test --workspace` never runs them. Host target; no NDK needed.
+      - name: Test fetchit-ffi (host unit tests)
+        run: cargo test --manifest-path crates/fetchit-ffi/Cargo.toml
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
