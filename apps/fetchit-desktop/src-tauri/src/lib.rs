@@ -4,6 +4,8 @@
 mod archive_extract;
 mod cache;
 mod disk_cache;
+#[cfg(feature = "e2e")]
+mod e2e;
 mod protocol;
 mod rendition;
 mod server;
@@ -12,8 +14,12 @@ mod state;
 
 use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
 use fetchit_core::handlers::default_registry;
-use fetchit_core::{Address, Hint, NetworkClient, RenderContext};
+use fetchit_core::{Address, Hint, RenderContext};
+// Brings `.fetch()` into scope — unused once the e2e build stubs fetching.
+#[cfg(not(feature = "e2e"))]
+use fetchit_core::NetworkClient;
 
 use disk_cache::{ClearMode, DiskCache, Policy};
 use rendition::RenditionDto;
@@ -378,6 +384,20 @@ async fn idle_disconnect(state: tauri::State<'_, AppState>) -> Result<(), String
     Ok(())
 }
 
+/// Acquire the raw bytes for an address. Normal builds fetch from the
+/// Autonomi network; an `e2e` build serves in-process fixtures so the
+/// desktop E2E suite is deterministic and offline.
+#[cfg(not(feature = "e2e"))]
+async fn fetch_bytes(state: &AppState, addr: &Address) -> Result<Bytes, String> {
+    let client = ensure_client(state, &state.effective_peers()).await?;
+    client.fetch(addr).await.map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "e2e")]
+async fn fetch_bytes(_state: &AppState, addr: &Address) -> Result<Bytes, String> {
+    e2e::fixture_bytes(addr)
+}
+
 #[tauri::command]
 async fn fetch_and_render(
     state: tauri::State<'_, AppState>,
@@ -387,8 +407,7 @@ async fn fetch_and_render(
     let bytes = match state.cached_bytes(&parsed) {
         Some(b) => b,
         None => {
-            let client = ensure_client(&state, &state.effective_peers()).await?;
-            let b = client.fetch(&parsed).await.map_err(|e| e.to_string())?;
+            let b = fetch_bytes(&state, &parsed).await?;
             state.cache_bytes(&parsed, b.clone());
             b
         }

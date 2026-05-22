@@ -94,6 +94,53 @@ jobs:
       - name: Backend unit tests (src-tauri)
         run: cargo test --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
 
+  # Desktop GUI end-to-end tests — drives the real built Tauri app through
+  # tauri-driver (WebDriver) + WebdriverIO: cold launch and address-bar
+  # validation, no network. Linux only — tauri-driver has no macOS
+  # (WKWebView) support. wdio.conf.mjs's onPrepare hook builds the debug
+  # binary; xvfb supplies the headless runner a display.
+  desktop-e2e:
+    name: desktop (E2E)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/fetchit-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+
+      - name: Install Linux webkit + WebDriver deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --version 2.0.6 --locked
+
+      - name: Install frontend deps
+        working-directory: apps/fetchit-desktop
+        run: npm ci
+
+      # onPrepare builds the debug binary; xvfb-run supplies the display.
+      - name: Run desktop E2E (WebdriverIO)
+        working-directory: apps/fetchit-desktop
+        run: xvfb-run --auto-servernum npm run e2e
+
   # Cross-browser extension. Runs the address-parser unit tests under plain
   # Node (no package.json, no deps — just node --test). If you change the
   # parser, this job is what catches divergence with the desktop-app parser.

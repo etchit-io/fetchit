@@ -11,6 +11,11 @@ edition = "2021"
 name = "fetchit_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Desktop E2E build: fetch_and_render serves in-process fixtures
+# instead of fetching from the network. Never enabled by a release build.
+e2e = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
