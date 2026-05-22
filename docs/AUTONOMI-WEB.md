@@ -132,8 +132,10 @@ autonomi://<address>[/<path>]?<query>#<fragment>
 - **`<address>`**: 64-character hex (case-insensitive accepted; lowercase
   is canonical). The on-network address of a public data-map.
 - **`<path>`**: reserved. Currently ignored — only the address resolves.
-- **`<query>`**, **`<fragment>`**: stripped before resolution; the page's
-  JS / `<a href>` can still read them via the `URL` API.
+- **`<query>`**: not part of the address (content-addressing ignores it),
+  but carried into the rendered page as `location.search` — see
+  [Query strings](#query-strings) below.
+- **`<fragment>`**: not resolved, and not yet carried into the page.
 
 ### Examples
 
@@ -185,6 +187,42 @@ xhr.send();
    instantly.
 5. Errors return synthetic HTTP responses (`400 invalid Autonomi
    address`, `502 fetch failed`, `503 no client connected`).
+
+### Query strings
+
+An `autonomi://` address may carry a `?query`, and the reader hands it to
+the rendered page as a normal `location.search`:
+
+```js
+const params = new URLSearchParams(location.search);
+const file = params.get("file");   // from autonomi://<spa>?file=<addr>
+```
+
+The query is **not** part of the address — content is addressed by the
+64-hex alone, so `autonomi://<spa>?a=1` and `autonomi://<spa>?a=2` fetch
+the identical bytes. The query is purely data for the page. That makes an
+SPA **parameterised and shareable with state**: one uploaded SPA, and
+many `autonomi://<spa>?…` links that each open it differently.
+
+The page renders without a real URL of its own (a `srcdoc` iframe on
+desktop, a synthetic origin on Android), so the reader injects the query
+with `history.replaceState` *before any author script runs* — by the time
+your code reads `location.search` it is already there. `#fragment` is the
+natural sibling but is not carried yet.
+
+**Worked example — a generic file viewer.**
+[`examples/file-viewer.html`](examples/file-viewer.html) is a
+self-contained SPA that reads `?file=<addr>` and renders whatever file
+the link points at:
+
+```
+autonomi://<viewer-address>?file=<any-file-address>
+```
+
+Upload the viewer once; every `?file=` link reuses it. It loads the
+target with a root-relative `fetch("/" + addr)` — the form the reader
+resolves to network bytes on every platform for an address built at
+runtime (see [the synthetic-origin trick](#the-synthetic-origin-trick)).
 
 ### What this is **not**
 
