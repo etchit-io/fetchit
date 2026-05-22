@@ -8,6 +8,7 @@ import { closeAllTabs } from "./helpers.mjs";
 const TEXT_ADDR = "0000000000000000000000000000000000000000000000000000000000000001";
 const JSON_ADDR = "0000000000000000000000000000000000000000000000000000000000000002";
 const HTML_ADDR = "0000000000000000000000000000000000000000000000000000000000000003";
+const QUERY_ADDR = "0000000000000000000000000000000000000000000000000000000000000004";
 const UNKNOWN_ADDR = "00000000000000000000000000000000000000000000000000000000000000ff";
 
 async function fetchAddress(addr) {
@@ -37,6 +38,18 @@ describe("fetch and render", () => {
     const frame = $("#stage .tab-content .rendered-html iframe");
     await expect(frame).toBeExisting();
     await expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-forms");
+  });
+
+  it("carries an autonomi:// query into the rendered SPA", async () => {
+    // The fixture SPA echoes location.search into #q. The iframe has no
+    // real URL, so the rewriter injects a history.replaceState — this
+    // proves ?k=v survives the address bar -> rewriter -> SPA round trip.
+    await fetchAddress(`${QUERY_ADDR}?k=v`);
+    const frame = $("#stage .tab-content .rendered-html iframe");
+    await expect(frame).toBeExisting();
+    await browser.switchFrame(frame);
+    await expect($("#q")).toHaveText("search=?k=v", { containing: true });
+    await browser.switchFrame(null);
   });
 
   it("shows the error state when the fetch has no content", async () => {
