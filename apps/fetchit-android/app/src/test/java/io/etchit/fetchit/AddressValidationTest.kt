@@ -52,6 +52,12 @@ class AddressValidationTest {
     }
 
     @Test
+    fun strips_leading_0x_prefix() {
+        assertEquals(addr, parseAutonomiInput("0x$addr"))
+        assertEquals(addr, parseAutonomiInput("0X$addr"))
+    }
+
+    @Test
     fun trims_surrounding_whitespace() {
         assertEquals(addr, parseAutonomiInput("  $addr  "))
         assertEquals(addr, parseAutonomiInput("\t autonomi://$addr \n"))

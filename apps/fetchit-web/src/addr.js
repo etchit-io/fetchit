@@ -9,10 +9,13 @@
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 const SCHEME = /^(?:autonomi|fetchit):\/\//i;
+// The Autonomi app prefixes public addresses with `0x`; the address
+// itself is bare 64-hex, so a leading `0x` is tolerated and dropped.
+const HEX_PREFIX = /^0x/i;
 
 export function parseAutonomiInput(raw) {
   if (typeof raw !== "string") return null;
-  const a = raw.trim().replace(SCHEME, "").split(/[/?#]/, 1)[0].trim();
+  const a = raw.trim().replace(SCHEME, "").replace(HEX_PREFIX, "").split(/[/?#]/, 1)[0].trim();
   return HEX_64.test(a) ? a.toLowerCase() : null;
 }
 

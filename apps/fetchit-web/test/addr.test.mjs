@@ -77,9 +77,13 @@ test("parseAutonomiInput — non-hex characters return null", () => {
   // Same length as HEX64 but contains 'g' — outside hex range.
   const notHex = "g".repeat(64);
   assert.equal(parseAutonomiInput(notHex), null);
-  // 0x prefix is intentionally NOT stripped — Autonomi addresses are bare
-  // hex, not Ethereum-style. If a user pastes `0x<hex>` it's invalid input.
-  assert.equal(parseAutonomiInput(`0x${HEX64}`), null);
+});
+
+test("parseAutonomiInput — leading 0x prefix is stripped", () => {
+  // The Autonomi app prefixes public addresses with `0x`; the address
+  // itself is bare 64-hex, so the parser tolerates and drops it.
+  assert.equal(parseAutonomiInput(`0x${HEX64}`), HEX64);
+  assert.equal(parseAutonomiInput(`0X${HEX64}`), HEX64);
 });
 
 test("parseAutonomiInput — non-string inputs return null", () => {

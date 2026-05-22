@@ -14,14 +14,19 @@ fun isValidAutonomiAddress(s: String): Boolean {
 
 /**
  * Normalise whatever the user pasted into a bare 64-hex address.
- * Accepts a leading `autonomi://` URL scheme, surrounding whitespace,
- * and trailing query / fragment. Returns the address if it parses,
- * `null` otherwise.
+ * Accepts a leading `autonomi://` scheme or `0x` prefix, surrounding
+ * whitespace, and a trailing query / fragment. Returns the address if
+ * it parses, `null` otherwise.
  */
 fun parseAutonomiInput(raw: String): String? {
     val trimmed = raw.trim()
     val withoutScheme = trimmed.removePrefix("autonomi://")
-    val withoutPath = withoutScheme.substringBefore('/')
+    // Tolerate a leading `0x` — the Autonomi app prefixes public
+    // addresses with it; the address itself is bare 64-hex.
+    val bare =
+        if (withoutScheme.startsWith("0x", ignoreCase = true)) withoutScheme.substring(2)
+        else withoutScheme
+    val withoutPath = bare.substringBefore('/')
         .substringBefore('?')
         .substringBefore('#')
         .trim()

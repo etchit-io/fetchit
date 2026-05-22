@@ -12,6 +12,11 @@ describe("parseAutonomiInput", () => {
     expect(parseAutonomiInput(`autonomi://${HEX}`)).toBe(HEX);
   });
 
+  it("strips a leading 0x prefix", () => {
+    expect(parseAutonomiInput(`0x${HEX}`)).toBe(HEX);
+    expect(parseAutonomiInput(`0X${HEX}`)).toBe(HEX);
+  });
+
   it("matches the prefix case-insensitively", () => {
     expect(parseAutonomiInput(`AUTONOMI://${HEX}`)).toBe(HEX);
   });
