@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAutonomiInput } from "./address";
+import { parseAutonomiInput, parseAutonomiUrl } from "./address";
 
 const HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -49,5 +49,29 @@ describe("parseAutonomiInput", () => {
   it("rejects the empty string", () => {
     expect(parseAutonomiInput("")).toBeNull();
     expect(parseAutonomiInput("   ")).toBeNull();
+  });
+});
+
+describe("parseAutonomiUrl", () => {
+  it("returns the address and an empty query for a bare address", () => {
+    expect(parseAutonomiUrl(HEX)).toEqual({ address: HEX, query: "" });
+  });
+
+  it("captures a query string", () => {
+    expect(parseAutonomiUrl(`autonomi://${HEX}?file=abc&n=2`)).toEqual({
+      address: HEX,
+      query: "?file=abc&n=2",
+    });
+  });
+
+  it("drops a trailing #fragment from the captured query", () => {
+    expect(parseAutonomiUrl(`${HEX}?k=v#section`)).toEqual({
+      address: HEX,
+      query: "?k=v",
+    });
+  });
+
+  it("returns null when there is no address", () => {
+    expect(parseAutonomiUrl("not-an-address")).toBeNull();
   });
 });

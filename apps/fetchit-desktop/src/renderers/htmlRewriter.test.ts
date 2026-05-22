@@ -466,6 +466,25 @@ describe("rewriteHtml — injects the media hydration script", () => {
   });
 });
 
+describe("rewriteHtml — query state", () => {
+  it("injects a history.replaceState carrying the query", () => {
+    const out = rewrite("<html><head></head><body></body></html>", ADDR, MEDIA_BASE, "?file=abc&n=2");
+    expect(out).toContain("history.replaceState");
+    expect(out).toContain('"?file=abc&n=2"');
+  });
+
+  it("injects nothing when there is no query", () => {
+    const out = rewriteHtml("<html><head></head><body></body></html>");
+    expect(out).not.toContain("history.replaceState");
+  });
+
+  it("defuses </script> inside the query so it cannot break out", () => {
+    const out = rewrite("<html><head></head><body></body></html>", ADDR, MEDIA_BASE, "?x=</script>");
+    expect(out).toContain("?x=");
+    expect(out).not.toContain("?x=</script>");
+  });
+});
+
 describe("rewriteHtml — runtime URL rewriter (dynamic resource loads)", () => {
   // `rewriteSrcset` is unique to the URL rewriter; the neuter script
   // also uses `Object.defineProperty` (to lock APIs) so we can't use

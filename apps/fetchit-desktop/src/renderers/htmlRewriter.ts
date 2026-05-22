@@ -91,7 +91,12 @@ function buildCsp(mediaBase: string): string {
   ].join("; ");
 }
 
-export function rewriteHtml(body: string, address: string, mediaBase: string): string {
+export function rewriteHtml(
+  body: string,
+  address: string,
+  mediaBase: string,
+  query = "",
+): string {
   const doc = new DOMParser().parseFromString(body, "text/html");
   setBase(doc, `autonomi://${address}/`);
   // Strip an incoming Content-Security-Policy meta tag *before* we add ours.
@@ -106,6 +111,7 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripAnchorPing(doc);
   injectNeuterScript(doc);
   injectUrlRewriter(doc, mediaBase);
+  if (query) injectQueryState(doc, query);
   rewriteMediaSrc(doc, mediaBase);
   rewriteImageSrc(doc, mediaBase);
   injectMediaHydration(doc);
@@ -567,4 +573,20 @@ function injectLinkInterceptor(doc: Document): void {
   const script = doc.createElement("script");
   script.textContent = LINK_INTERCEPTOR;
   doc.body.appendChild(script);
+}
+
+// Carry a `?query` from the address into the iframe's `location.search`.
+// The SPA renders in a srcdoc null-origin iframe — no real URL — so a
+// `history.replaceState` ahead of any author script is what gives the
+// page a normal `location.search`.
+function injectQueryState(doc: Document, query: string): void {
+  // JSON-encode the query as a JS string literal, then defuse any `</`
+  // so the value cannot close this <script> element early.
+  const literal = JSON.stringify(query).replace(/<\//g, "<\\/");
+  const s = doc.createElement("script");
+  s.textContent =
+    `(function(){try{history.replaceState(history.state,"",${literal});}catch(e){}})();`;
+  const csp = doc.head.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  if (csp) doc.head.insertBefore(s, csp.nextSibling);
+  else doc.head.insertBefore(s, doc.head.firstChild);
 }
