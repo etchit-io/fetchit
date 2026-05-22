@@ -29,11 +29,24 @@ describe("renderProgress", () => {
     );
   });
 
-  it("labels the resolving phase without a percentage", () => {
+  it("marks the resolving phase as an indeterminate bar", () => {
     const r = root();
     renderProgress(r, { address: "a", phase: "resolving", done: 1, total: 3 });
+    const bar = r.querySelector<HTMLElement>(".tab-progress");
+    expect(bar?.classList.contains("is-indeterminate")).toBe(true);
     expect(r.querySelector(".tab-progress-label")?.textContent).toBe(
       "resolving…",
+    );
+  });
+
+  it("clears the indeterminate state once fetching starts", () => {
+    const r = root();
+    renderProgress(r, { address: "a", phase: "resolving", done: 0, total: 0 });
+    renderProgress(r, { address: "a", phase: "fetching", done: 10, total: 100 });
+    const bar = r.querySelector<HTMLElement>(".tab-progress");
+    expect(bar?.classList.contains("is-indeterminate")).toBe(false);
+    expect(r.querySelector<HTMLElement>(".tab-progress-fill")?.style.width).toBe(
+      "10%",
     );
   });
 

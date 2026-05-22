@@ -999,6 +999,15 @@ body:not([data-view="settings"]) #settings {
   background: var(--copper);
   transition: width 120ms linear;
 }
+.tab-progress.is-indeterminate .tab-progress-fill {
+  width: 35%;
+  transition: none;
+  animation: tab-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes tab-progress-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(320%); }
+}
 .tab-progress-label {
   color: var(--ash);
   font-size: 13px;

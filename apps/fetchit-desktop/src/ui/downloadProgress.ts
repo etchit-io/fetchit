@@ -39,13 +39,19 @@ export function renderProgress(root: HTMLElement, p: DownloadProgress): void {
     bar = buildProgressBar();
     root.replaceChildren(bar);
   }
-  const pct =
-    p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
   const fill = bar.querySelector<HTMLElement>(".tab-progress-fill");
   const label = bar.querySelector<HTMLElement>(".tab-progress-label");
-  if (fill) fill.style.width = `${pct}%`;
-  if (label) {
-    label.textContent = p.phase === "resolving" ? "resolving…" : `fetching ${pct}%`;
+  if (p.phase === "resolving") {
+    // No firm chunk total yet — show an indeterminate bar.
+    bar.classList.add("is-indeterminate");
+    if (fill) fill.style.width = "";
+    if (label) label.textContent = "resolving…";
+  } else {
+    bar.classList.remove("is-indeterminate");
+    const pct =
+      p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
+    if (fill) fill.style.width = `${pct}%`;
+    if (label) label.textContent = `fetching ${pct}%`;
   }
 }
 

@@ -41,40 +41,24 @@ pub struct DownloadProgress {
     pub total: u64,
 }
 
-/// Folds the `ant-core` [`DownloadEvent`] stream into [`DownloadProgress`]
-/// updates. Stateful only to carry the resolving-phase total across events.
-#[derive(Default)]
-struct ProgressFold {
-    map_total: u64,
-}
-
-impl ProgressFold {
-    fn fold(&mut self, ev: &DownloadEvent) -> DownloadProgress {
-        match ev {
-            DownloadEvent::ResolvingDataMap { total_map_chunks } => {
-                self.map_total = *total_map_chunks as u64;
-                DownloadProgress {
-                    phase: "resolving",
-                    done: 0,
-                    total: self.map_total,
-                }
-            }
-            DownloadEvent::MapChunkFetched { fetched } => DownloadProgress {
-                phase: "resolving",
-                done: *fetched as u64,
-                total: self.map_total,
-            },
-            DownloadEvent::DataMapResolved { total_chunks } => DownloadProgress {
-                phase: "fetching",
-                done: 0,
-                total: *total_chunks as u64,
-            },
-            DownloadEvent::ChunksFetched { fetched, total } => DownloadProgress {
-                phase: "fetching",
-                done: *fetched as u64,
-                total: *total as u64,
-            },
-        }
+/// Maps an `ant-core` [`DownloadEvent`] to a coarse [`DownloadProgress`].
+/// The resolve phase has no firm chunk total until it completes, so its
+/// three events all report the indeterminate `resolving` state; only
+/// `ChunksFetched` carries a real `done` / `total`.
+fn download_progress(ev: &DownloadEvent) -> DownloadProgress {
+    match ev {
+        DownloadEvent::ResolvingDataMap { .. }
+        | DownloadEvent::MapChunkFetched { .. }
+        | DownloadEvent::DataMapResolved { .. } => DownloadProgress {
+            phase: "resolving",
+            done: 0,
+            total: 0,
+        },
+        DownloadEvent::ChunksFetched { fetched, total } => DownloadProgress {
+            phase: "fetching",
+            done: *fetched as u64,
+            total: *total as u64,
+        },
     }
 }
 
@@ -197,9 +181,8 @@ impl AutonomiClient {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<DownloadEvent>(PROGRESS_CHANNEL);
         let forward = tokio::spawn(async move {
-            let mut fold = ProgressFold::default();
             while let Some(ev) = rx.recv().await {
-                on_progress(fold.fold(&ev));
+                on_progress(download_progress(&ev));
             }
         });
 
@@ -390,41 +373,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fold_resolving_phase_tracks_map_chunks() {
-        let mut fold = ProgressFold::default();
-        assert_eq!(
-            fold.fold(&DownloadEvent::ResolvingDataMap {
-                total_map_chunks: 3
-            }),
-            DownloadProgress {
-                phase: "resolving",
-                done: 0,
-                total: 3
+    fn resolve_events_report_indeterminate_resolving() {
+        for ev in [
+            DownloadEvent::ResolvingDataMap {
+                total_map_chunks: 3,
             },
-        );
-        assert_eq!(
-            fold.fold(&DownloadEvent::MapChunkFetched { fetched: 2 }),
-            DownloadProgress {
-                phase: "resolving",
-                done: 2,
-                total: 3
-            },
-        );
+            DownloadEvent::MapChunkFetched { fetched: 2 },
+            DownloadEvent::DataMapResolved { total_chunks: 128 },
+        ] {
+            assert_eq!(
+                download_progress(&ev),
+                DownloadProgress {
+                    phase: "resolving",
+                    done: 0,
+                    total: 0
+                },
+            );
+        }
     }
 
     #[test]
-    fn fold_switches_to_fetching_on_data_map_resolved() {
-        let mut fold = ProgressFold::default();
+    fn chunks_fetched_reports_determinate_fetching() {
         assert_eq!(
-            fold.fold(&DownloadEvent::DataMapResolved { total_chunks: 128 }),
-            DownloadProgress {
-                phase: "fetching",
-                done: 0,
-                total: 128
-            },
-        );
-        assert_eq!(
-            fold.fold(&DownloadEvent::ChunksFetched {
+            download_progress(&DownloadEvent::ChunksFetched {
                 fetched: 64,
                 total: 128
             }),
@@ -432,21 +403,6 @@ mod tests {
                 phase: "fetching",
                 done: 64,
                 total: 128
-            },
-        );
-    }
-
-    #[test]
-    fn fold_map_total_is_zero_before_a_resolving_event() {
-        // A MapChunkFetched with no preceding ResolvingDataMap reports
-        // total 0 rather than panicking.
-        let mut fold = ProgressFold::default();
-        assert_eq!(
-            fold.fold(&DownloadEvent::MapChunkFetched { fetched: 1 }),
-            DownloadProgress {
-                phase: "resolving",
-                done: 1,
-                total: 0
             },
         );
     }
