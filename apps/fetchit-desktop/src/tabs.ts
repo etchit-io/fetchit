@@ -5,6 +5,8 @@ export type TabStatus = "empty" | "loading" | "rendered" | "error";
 export interface Tab {
   id: string;
   address: string | null;
+  /** Query string from the address (`?…`), or `""`. Carried into SPAs. */
+  query: string;
   shortLabel: string;
   status: TabStatus;
   error: string | null;
@@ -46,6 +48,7 @@ export class TabStore {
     const tab: Tab = {
       id: `t${this.seq}`,
       address: null,
+      query: "",
       shortLabel: "new tab",
       status: "empty",
       error: null,
@@ -60,18 +63,20 @@ export class TabStore {
   }
 
   /**
-   * Move the tab to `address` and mark it loading. When `recordHistory` is
-   * true (the default) any non-null previous address is pushed onto the
-   * tab's back stack — set false during a back-navigation so we don't
-   * record the move we just popped from.
+   * Move the tab to `address` (carrying its optional `query`) and mark it
+   * loading. When `recordHistory` is true (the default) any non-null
+   * previous address is pushed onto the tab's back stack — set false
+   * during a back-navigation so we don't record the move we just popped
+   * from.
    */
-  startFetch(id: string, address: string, recordHistory = true): void {
+  startFetch(id: string, address: string, recordHistory = true, query = ""): void {
     const tab = this.byId(id);
     if (!tab) return;
     if (recordHistory && tab.address && tab.address !== address) {
       tab.history.push(tab.address);
     }
     tab.address = address;
+    tab.query = query;
     tab.shortLabel = shortLabel(address);
     tab.status = "loading";
     tab.error = null;

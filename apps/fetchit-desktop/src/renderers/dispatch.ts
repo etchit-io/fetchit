@@ -12,7 +12,12 @@ import { renderVideo } from "./video";
 import { renderPdf } from "./pdf";
 import { renderBinary } from "./binary";
 
-export function render(r: Rendition, into: HTMLElement, address: string): void {
+export function render(
+  r: Rendition,
+  into: HTMLElement,
+  address: string,
+  query = "",
+): void {
   into.replaceChildren();
   const src = `autonomi://${address}`;
   switch (r.kind) {
@@ -37,7 +42,7 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       else renderArchive(r, into, address);
       return;
     case "html":
-      renderHtml(r, into, address);
+      renderHtml(r, into, address, query);
       return;
     case "image":
       renderImage(r, into, src);

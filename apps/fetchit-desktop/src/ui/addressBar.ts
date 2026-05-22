@@ -1,7 +1,7 @@
-import { parseAutonomiInput } from "../address";
+import { parseAutonomiUrl } from "../address";
 
 export interface AddressBarHooks {
-  onSubmit: (addr: string) => void;
+  onSubmit: (address: string, query: string) => void;
   onInvalid: (msg: string) => void;
 }
 
@@ -18,13 +18,13 @@ export function mountAddressBar(
   hooks: AddressBarHooks,
 ): AddressBarApi {
   const submit = (): void => {
-    const a = parseAutonomiInput(input.value);
-    if (!a) {
+    const parsed = parseAutonomiUrl(input.value);
+    if (!parsed) {
       hooks.onInvalid("address must be 64 hex characters");
       return;
     }
-    input.value = a;
-    hooks.onSubmit(a);
+    input.value = parsed.address + parsed.query;
+    hooks.onSubmit(parsed.address, parsed.query);
   };
   button.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => {

@@ -17,6 +17,7 @@ export function renderHtml(
   r: Extract<Rendition, { kind: "html" }>,
   into: HTMLElement,
   address: string,
+  query = "",
 ): void {
   const wrap = document.createElement("div");
   wrap.className = "rendered-html";
@@ -30,7 +31,7 @@ export function renderHtml(
   // (the modern equivalent is `allow="fullscreen"`, also valid; we use
   // the attribute for maximum WebView compatibility).
   iframe.setAttribute("allowfullscreen", "");
-  iframe.srcdoc = rewriteHtml(r.body, address, mediaBase());
+  iframe.srcdoc = rewriteHtml(r.body, address, mediaBase(), query);
 
   wrap.appendChild(iframe);
   into.appendChild(wrap);

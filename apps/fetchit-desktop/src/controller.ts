@@ -6,7 +6,7 @@ import { mountTabStrip } from "./ui/tabStrip";
 import { mountAddressBar, type AddressBarApi } from "./ui/addressBar";
 import { bindKeyboard } from "./ui/keyboard";
 import { initMediaBase } from "./mediaUrl";
-import { parseAutonomiInput } from "./address";
+import { parseAutonomiUrl } from "./address";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
 import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
@@ -92,7 +92,7 @@ export async function init(): Promise<void> {
   const store = new TabStore();
 
   const bar: AddressBarApi = mountAddressBar(input, button, {
-    onSubmit: (addr) => submit(addr, store, stageEl),
+    onSubmit: (addr, query) => submit(addr, store, stageEl, query),
     onInvalid: (msg) => {
       statusEl.textContent = msg;
     },
@@ -108,15 +108,15 @@ export async function init(): Promise<void> {
   const refresh = (): void => {
     const active = store.active();
     if (!active || !active.address) return;
-    startIn(active, active.address, store, false);
+    startIn(active, active.address, store, active.query, false);
   };
 
   const smartPaste = (): void => {
     void navigator.clipboard.readText().then((text) => {
-      const parsed = parseAutonomiInput(text);
+      const parsed = parseAutonomiUrl(text);
       if (!parsed) return;
-      bar.setValue(parsed);
-      submit(parsed, store, stageEl);
+      bar.setValue(parsed.address + parsed.query);
+      submit(parsed.address, store, stageEl, parsed.query);
     }).catch(() => {});
   };
 
@@ -159,7 +159,7 @@ export async function init(): Promise<void> {
     for (const t of store.list()) {
       t.root.classList.toggle("is-active", !!active && t.id === active.id);
     }
-    if (!bar.isFocused()) bar.setValue(active && active.address ? active.address : "");
+    if (!bar.isFocused()) bar.setValue(active && active.address ? active.address + active.query : "");
     statusEl.textContent = statusFor(active);
     button.disabled = active?.status === "loading";
     bookmarkBtn.disabled = !active?.address || active.status === "loading";
@@ -187,10 +187,10 @@ export async function init(): Promise<void> {
   // launched with (if any); `onOpenUrl` fires for subsequent links that come
   // in while the app is running.
   const handleDeepLink = (url: string): void => {
-    const addr = parseAutonomiInput(url);
-    if (!addr) return;
-    bar.setValue(addr);
-    submit(addr, store, stageEl);
+    const parsed = parseAutonomiUrl(url);
+    if (!parsed) return;
+    bar.setValue(parsed.address + parsed.query);
+    submit(parsed.address, store, stageEl, parsed.query);
   };
   void getCurrentDeepLink()
     .then((urls) => {
@@ -253,7 +253,7 @@ function backNavigate(store: TabStore): void {
     return;
   }
   dlog(`[parent] back to addr=${prev.slice(0, 8)}…`);
-  startIn(active, prev, store, false);
+  startIn(active, prev, store, "", false);
 }
 
 function navigate(addr: string, store: TabStore, stage: HTMLElement, newTab: boolean): void {
@@ -266,27 +266,28 @@ function navigate(addr: string, store: TabStore, stage: HTMLElement, newTab: boo
   startIn(target, addr, store);
 }
 
-function submit(addr: string, store: TabStore, stage: HTMLElement): void {
+function submit(addr: string, store: TabStore, stage: HTMLElement, query = ""): void {
   const existing = store.findByAddress(addr);
   if (existing) {
     store.activate(existing.id);
-    if (existing.status === "error") startIn(existing, addr, store);
+    if (existing.status === "error") startIn(existing, addr, store, query);
     return;
   }
   const active = store.active();
   const target = active && active.status === "empty" ? active : store.createEmpty(buildStageRoot(stage));
-  startIn(target, addr, store);
+  startIn(target, addr, store, query);
 }
 
 function startIn(
   tab: { id: string; root: HTMLElement },
   addr: string,
   store: TabStore,
+  query = "",
   recordHistory = true,
 ): void {
   tab.root.replaceChildren(buildSpinner());
-  store.startFetch(tab.id, addr, recordHistory);
-  void runFetch(addr, tab.id, tab.root, store);
+  store.startFetch(tab.id, addr, recordHistory, query);
+  void runFetch(addr, tab.id, tab.root, store, query);
 }
 
 // Session flag — true once any fetch has succeeded in this app session.
@@ -302,13 +303,14 @@ async function runFetch(
   id: string,
   root: HTMLElement,
   store: TabStore,
+  query = "",
 ): Promise<void> {
   dlog(`[fetch] start addr=${addr.slice(0, 8)}…`);
   try {
     const r = await invoke<Rendition>("fetch_and_render", { addr });
     dlog(`[fetch] done addr=${addr.slice(0, 8)}… kind=${r.kind}`);
     firstFetchSucceeded = true;
-    renderRendition(r, root, addr);
+    renderRendition(r, root, addr, query);
     store.setRendered(id, r);
   } catch (e) {
     const msg = errorMessage(e);
