@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAutonomiInput, isAutonomiHref } from "../src/addr.js";
+import { parseAutonomiInput, parseAutonomiUrl, isAutonomiHref } from "../src/addr.js";
 
 const HEX64 =
   "bebb4f16bc23aa4581bff5fec471829959c1edbe4485eb4cf0d853a62f5406f0";
@@ -128,4 +128,56 @@ test("isAutonomiHref — rejects non-string inputs", () => {
   assert.equal(isAutonomiHref(null), false);
   assert.equal(isAutonomiHref(undefined), false);
   assert.equal(isAutonomiHref(123), false);
+});
+
+test("parseAutonomiUrl — bare address, empty query", () => {
+  assert.deepEqual(parseAutonomiUrl(HEX64), { address: HEX64, query: "" });
+});
+
+test("parseAutonomiUrl — captures a query string", () => {
+  assert.deepEqual(parseAutonomiUrl(`autonomi://${HEX64}?file=a&n=2`), {
+    address: HEX64,
+    query: "?file=a&n=2",
+  });
+});
+
+test("parseAutonomiUrl — fetchit:// scheme, with query", () => {
+  assert.deepEqual(parseAutonomiUrl(`fetchit://${HEX64}?k=v`), {
+    address: HEX64,
+    query: "?k=v",
+  });
+});
+
+test("parseAutonomiUrl — 0x prefix stripped, query kept", () => {
+  assert.deepEqual(parseAutonomiUrl(`0x${HEX64}?k=v`), {
+    address: HEX64,
+    query: "?k=v",
+  });
+});
+
+test("parseAutonomiUrl — uppercase hex is lowercased", () => {
+  assert.deepEqual(parseAutonomiUrl(`${HEX64_UPPER}?k=v`), {
+    address: HEX64,
+    query: "?k=v",
+  });
+});
+
+test("parseAutonomiUrl — trailing #fragment dropped from the query", () => {
+  assert.deepEqual(parseAutonomiUrl(`${HEX64}?k=v#section`), {
+    address: HEX64,
+    query: "?k=v",
+  });
+});
+
+test("parseAutonomiUrl — a ? inside the fragment is not a query", () => {
+  assert.deepEqual(parseAutonomiUrl(`${HEX64}#frag?notquery`), {
+    address: HEX64,
+    query: "",
+  });
+});
+
+test("parseAutonomiUrl — invalid address returns null", () => {
+  assert.equal(parseAutonomiUrl("not-an-address"), null);
+  assert.equal(parseAutonomiUrl(HEX64.slice(0, 63)), null);
+  assert.equal(parseAutonomiUrl(null), null);
 });
