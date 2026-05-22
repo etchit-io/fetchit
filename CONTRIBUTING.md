@@ -41,7 +41,9 @@ fetch>it ships open-source from commit one. That means:
 - New public functions ship with the tests that cover them, in the
   same change
 
-CI runs all of the above on every push and pull request.
+CI runs all of the above on every push and pull request. The full test
+matrix — every app, plus the network-test tiers — is documented in
+[`docs/TESTING.md`](docs/TESTING.md).
 
 ## Adding a content handler
 
