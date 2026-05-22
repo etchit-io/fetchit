@@ -9,6 +9,7 @@ import { initMediaBase } from "./mediaUrl";
 import { parseAutonomiUrl } from "./address";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
+import { mountDownloadProgress } from "./ui/downloadProgress";
 import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
@@ -90,6 +91,7 @@ export async function init(): Promise<void> {
   backBtn.addEventListener("click", () => backNavigate(store));
 
   const store = new TabStore();
+  mountDownloadProgress(store);
 
   const bar: AddressBarApi = mountAddressBar(input, button, {
     onSubmit: (addr, query) => submit(addr, store, stageEl, query),

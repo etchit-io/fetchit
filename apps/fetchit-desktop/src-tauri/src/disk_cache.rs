@@ -35,7 +35,11 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { enabled: false, mode: ClearMode::Persist, max_bytes: 500 * 1024 * 1024 }
+        Self {
+            enabled: false,
+            mode: ClearMode::Persist,
+            max_bytes: 500 * 1024 * 1024,
+        }
     }
 }
 
@@ -48,7 +52,10 @@ impl DiskCache {
     /// Build a cache rooted at `root`. The directory is created if missing.
     pub fn new(root: PathBuf, policy: Policy) -> Self {
         let _ = fs::create_dir_all(&root);
-        Self { root, policy: Mutex::new(policy) }
+        Self {
+            root,
+            policy: Mutex::new(policy),
+        }
     }
 
     pub fn policy(&self) -> Policy {
@@ -95,6 +102,29 @@ impl DiskCache {
         self.evict_to(policy.max_bytes);
     }
 
+    /// Path a streaming download writes to before it is committed. Lives
+    /// in the cache directory so a completed stream becomes a cache entry
+    /// with a single rename, no extra copy.
+    #[cfg(not(feature = "e2e"))]
+    pub fn stream_path(&self, addr: &Address) -> PathBuf {
+        self.root.join(format!("{}.partial", addr.to_hex()))
+    }
+
+    /// Promote a completed streaming download to a cache entry: rename the
+    /// partial file onto the address slot, then evict to the policy cap.
+    #[cfg(not(feature = "e2e"))]
+    pub fn commit_stream(&self, addr: &Address) {
+        if fs::rename(self.stream_path(addr), self.path_for(addr)).is_ok() {
+            self.evict_to(self.policy().max_bytes);
+        }
+    }
+
+    /// Delete an aborted streaming download's partial file.
+    #[cfg(not(feature = "e2e"))]
+    pub fn discard_stream(&self, addr: &Address) {
+        let _ = fs::remove_file(self.stream_path(addr));
+    }
+
     /// Wipe every file in the cache directory. Always available, regardless
     /// of policy (so a user can clear even after disabling the cache).
     pub fn clear(&self) {
@@ -130,9 +160,14 @@ impl DiskCache {
         let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.root) {
             for e in entries.flatten() {
+                let path = e.path();
+                // In-flight streaming downloads must not be evicted.
+                if path.extension().is_some_and(|x| x == "partial") {
+                    continue;
+                }
                 if let Ok(m) = e.metadata() {
                     let mtime = m.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    files.push((e.path(), m.len(), mtime));
+                    files.push((path, m.len(), mtime));
                 }
             }
         }
@@ -170,7 +205,11 @@ mod tests {
     }
 
     fn enabled(max: u64) -> Policy {
-        Policy { enabled: true, mode: ClearMode::Persist, max_bytes: max }
+        Policy {
+            enabled: true,
+            mode: ClearMode::Persist,
+            max_bytes: max,
+        }
     }
 
     #[test]
@@ -219,8 +258,8 @@ mod tests {
     fn size_on_disk_reports_total() {
         let dir = tempdir().unwrap();
         let c = DiskCache::new(dir.path().to_path_buf(), enabled(1024));
-        c.put(&addr(A), b"hello");      // 5
-        c.put(&addr(B), b"worlds!");    // 7
+        c.put(&addr(A), b"hello"); // 5
+        c.put(&addr(B), b"worlds!"); // 7
         assert_eq!(c.size_on_disk(), 12);
     }
 
@@ -255,7 +294,10 @@ mod tests {
         let _ = c.get(&addr(A));
         sleep(Duration::from_millis(15));
         c.put(&addr(C), b"cccc");
-        assert!(c.get(&addr(A)).is_some(), "recently-touched A should survive");
+        assert!(
+            c.get(&addr(A)).is_some(),
+            "recently-touched A should survive"
+        );
         assert!(c.get(&addr(B)).is_none(), "B should be the eviction victim");
         assert!(c.get(&addr(C)).is_some(), "fresh write C should remain");
     }
@@ -278,5 +320,50 @@ mod tests {
         assert!(!p.enabled);
         assert_eq!(p.mode, ClearMode::Persist);
         assert_eq!(p.max_bytes, 500 * 1024 * 1024);
+    }
+
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn stream_path_is_a_partial_sibling_of_the_slot() {
+        let dir = tempdir().unwrap();
+        let c = DiskCache::new(dir.path().to_path_buf(), enabled(1024));
+        let p = c.stream_path(&addr(A));
+        assert_eq!(p.extension().unwrap(), "partial");
+        assert!(p.starts_with(dir.path()));
+    }
+
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn commit_stream_promotes_a_partial_to_a_cache_entry() {
+        let dir = tempdir().unwrap();
+        let c = DiskCache::new(dir.path().to_path_buf(), enabled(1024));
+        fs::write(c.stream_path(&addr(A)), b"streamed").unwrap();
+        c.commit_stream(&addr(A));
+        assert_eq!(c.get(&addr(A)).as_deref(), Some(&b"streamed"[..]));
+    }
+
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn discard_stream_removes_the_partial() {
+        let dir = tempdir().unwrap();
+        let c = DiskCache::new(dir.path().to_path_buf(), enabled(1024));
+        let partial = c.stream_path(&addr(A));
+        fs::write(&partial, b"scratch").unwrap();
+        c.discard_stream(&addr(A));
+        assert!(!partial.exists());
+    }
+
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn eviction_never_drops_an_in_flight_partial() {
+        let dir = tempdir().unwrap();
+        // Cap = 4: the committed file alone fills it, so eviction runs.
+        let c = DiskCache::new(dir.path().to_path_buf(), enabled(4));
+        fs::write(c.stream_path(&addr(B)), b"downloading").unwrap();
+        c.put(&addr(A), b"aaaa");
+        assert!(
+            c.stream_path(&addr(B)).exists(),
+            "partial must survive eviction",
+        );
     }
 }

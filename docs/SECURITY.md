@@ -195,7 +195,9 @@ sandboxed iframe** (the rendered-content surface).
   stored under `<app-local-data>/bytes_cache/` keyed by 64-hex address.
   LRU-evicted to a user-set cap. Three clear modes: *Persist /
   Clear on close / Clear after idle*. A *Clear cache now* button is
-  always available.
+  always available. With the cache on, the download streams straight
+  into the slot — which is also what drives the desktop progress bar;
+  the default cache-off fetch stays in memory, behind a spinner.
 - **Settings file**: `<app-local-data>/settings.json`. Contains: cache
   policy + bookmarks. Nothing else. Human-readable, deletable.
 

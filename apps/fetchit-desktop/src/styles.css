@@ -977,6 +977,34 @@ body:not([data-view="settings"]) #settings {
   user-select: none;
 }
 
+.tab-progress {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.tab-progress-track {
+  width: 200px;
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.tab-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--copper);
+  transition: width 120ms linear;
+}
+.tab-progress-label {
+  color: var(--ash);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
 .tab-spinner {
   position: absolute;
   inset: 0;

@@ -20,6 +20,9 @@ use fetchit_core::{Address, Hint, RenderContext};
 // Brings `.fetch()` into scope — unused once the e2e build stubs fetching.
 #[cfg(not(feature = "e2e"))]
 use fetchit_core::NetworkClient;
+// `.emit()` for download-progress events — same e2e gating.
+#[cfg(not(feature = "e2e"))]
+use tauri::Emitter;
 
 use disk_cache::{ClearMode, DiskCache, Policy};
 use rendition::RenditionDto;
@@ -146,7 +149,10 @@ async fn refresh_peers_from_upstream(
 
     let current = state.effective_peers();
     if upstream == current {
-        return Ok(RefreshResult { peers: current, updated: false });
+        return Ok(RefreshResult {
+            peers: current,
+            updated: false,
+        });
     }
 
     if let Ok(mut s) = state.settings.lock() {
@@ -154,7 +160,10 @@ async fn refresh_peers_from_upstream(
         let _ = s.save(&state.settings_path);
     }
     *state.client.lock().await = None;
-    Ok(RefreshResult { peers: upstream, updated: true })
+    Ok(RefreshResult {
+        peers: upstream,
+        updated: true,
+    })
 }
 
 fn collect_toml_strings(value: &toml::Value, out: &mut Vec<String>) {
@@ -207,9 +216,13 @@ fn save_bytes_to_path(path: String, data: Vec<u8>) -> Result<(), String> {
 fn copy_png_to_clipboard(app: tauri::AppHandle, data: Vec<u8>) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
     let decoder = png::Decoder::new(std::io::Cursor::new(&data));
-    let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png header: {e}"))?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|e| format!("png frame: {e}"))?;
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png frame: {e}"))?;
     buf.truncate(info.buffer_size());
     // Canvas.toBlob("image/png") emits RGBA8. Defend against the off
     // chance a future renderer emits something else by widening here
@@ -253,7 +266,11 @@ fn media_url_base() -> Result<String, String> {
 
 #[tauri::command]
 async fn connect(state: tauri::State<'_, AppState>, peers: Vec<String>) -> Result<(), String> {
-    let peers = if peers.is_empty() { state.effective_peers() } else { peers };
+    let peers = if peers.is_empty() {
+        state.effective_peers()
+    } else {
+        peers
+    };
     ensure_client(&state, &peers).await.map(|_| ())
 }
 
@@ -333,7 +350,9 @@ fn is_bookmarked(state: tauri::State<'_, AppState>, address: String) -> bool {
 /// stable ordering survives renames).
 #[tauri::command]
 fn add_bookmark(state: tauri::State<'_, AppState>, address: String, label: String) {
-    let Ok(mut s) = state.settings.lock() else { return };
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
     if let Some(existing) = s.bookmarks.iter_mut().find(|b| b.address == address) {
         existing.label = label;
     } else {
@@ -348,23 +367,23 @@ fn add_bookmark(state: tauri::State<'_, AppState>, address: String, label: Strin
 
 #[tauri::command]
 fn remove_bookmark(state: tauri::State<'_, AppState>, address: String) {
-    let Ok(mut s) = state.settings.lock() else { return };
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
     s.bookmarks.retain(|b| b.address != address);
     let _ = s.save(&state.settings_path);
 }
 
 #[tauri::command]
 fn idle_policy(state: tauri::State<'_, AppState>) -> IdlePolicy {
-    state
-        .settings
-        .lock()
-        .map(|s| s.idle)
-        .unwrap_or_default()
+    state.settings.lock().map(|s| s.idle).unwrap_or_default()
 }
 
 #[tauri::command]
 fn set_idle_policy(state: tauri::State<'_, AppState>, policy: IdlePolicy) {
-    let Ok(mut s) = state.settings.lock() else { return };
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
     s.idle = policy;
     let _ = s.save(&state.settings_path);
 }
@@ -384,33 +403,95 @@ async fn idle_disconnect(state: tauri::State<'_, AppState>) -> Result<(), String
     Ok(())
 }
 
-/// Acquire the raw bytes for an address. Normal builds fetch from the
-/// Autonomi network; an `e2e` build serves in-process fixtures so the
-/// desktop E2E suite is deterministic and offline.
+/// Progress update for an in-flight download, forwarded to the frontend
+/// as a `download-progress` event. Emitted only when the on-disk cache
+/// is enabled — that is the one path that streams (see [`fetch_bytes`]).
 #[cfg(not(feature = "e2e"))]
-async fn fetch_bytes(state: &AppState, addr: &Address) -> Result<Bytes, String> {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgressDto {
+    address: String,
+    phase: String,
+    done: u64,
+    total: u64,
+}
+
+/// Acquire the raw bytes for an address and populate the in-memory cache.
+///
+/// With the on-disk cache enabled the download streams into the cache
+/// slot, emitting `download-progress` events; with it disabled (the
+/// default) the fetch stays in memory and nothing touches disk. An `e2e`
+/// build serves in-process fixtures so the desktop E2E suite is offline.
+#[cfg(not(feature = "e2e"))]
+async fn fetch_bytes(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    addr: &Address,
+) -> Result<Bytes, String> {
     let client = ensure_client(state, &state.effective_peers()).await?;
-    client.fetch(addr).await.map_err(|e| e.to_string())
+    let bytes = if state.disk_cache.policy().enabled {
+        // Cache on: stream into the cache slot, reporting progress. The
+        // bytes land where the cache would have written them anyway.
+        let dest = state.disk_cache.stream_path(addr);
+        let app = app.clone();
+        let hex = addr.to_hex();
+        match client
+            .fetch_with_progress(addr, &dest, move |p| {
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgressDto {
+                        address: hex.clone(),
+                        phase: p.phase.to_owned(),
+                        done: p.done,
+                        total: p.total,
+                    },
+                );
+            })
+            .await
+        {
+            Ok(()) => {
+                state.disk_cache.commit_stream(addr);
+                state
+                    .disk_cache
+                    .get(addr)
+                    .ok_or_else(|| "download finished but the cache slot was empty".to_string())?
+            }
+            Err(e) => {
+                state.disk_cache.discard_stream(addr);
+                return Err(e.to_string());
+            }
+        }
+    } else {
+        // Cache off: in-memory fetch, no on-disk trace.
+        client.fetch(addr).await.map_err(|e| e.to_string())?
+    };
+    state.cache.put(addr.clone(), bytes.clone());
+    Ok(bytes)
 }
 
 #[cfg(feature = "e2e")]
-async fn fetch_bytes(_state: &AppState, addr: &Address) -> Result<Bytes, String> {
-    e2e::fixture_bytes(addr)
+async fn fetch_bytes(
+    _app: &tauri::AppHandle,
+    state: &AppState,
+    addr: &Address,
+) -> Result<Bytes, String> {
+    let bytes = e2e::fixture_bytes(addr)?;
+    state.cache.put(addr.clone(), bytes.clone());
+    Ok(bytes)
 }
 
 #[tauri::command]
 async fn fetch_and_render(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     addr: String,
 ) -> Result<RenditionDto, String> {
-    let parsed: Address = addr.parse().map_err(|e: fetchit_core::Error| e.to_string())?;
+    let parsed: Address = addr
+        .parse()
+        .map_err(|e: fetchit_core::Error| e.to_string())?;
     let bytes = match state.cached_bytes(&parsed) {
         Some(b) => b,
-        None => {
-            let b = fetch_bytes(&state, &parsed).await?;
-            state.cache_bytes(&parsed, b.clone());
-            b
-        }
+        None => fetch_bytes(&app, &state, &parsed).await?,
     };
     let rendition = default_registry()
         .render(bytes, &Hint::default(), &RenderContext::default())

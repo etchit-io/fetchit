@@ -13,13 +13,70 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use ant_core::data::{
-    Client as CoreClient, ClientConfig, CoreNodeConfig, IPDiversityConfig, NodeMode, P2PNode,
-    MAX_WIRE_MESSAGE_SIZE,
+    Client as CoreClient, ClientConfig, CoreNodeConfig, DownloadEvent, IPDiversityConfig, NodeMode,
+    P2PNode, MAX_WIRE_MESSAGE_SIZE,
 };
 
 use fetchit_core::{Address, Error as CoreError, NetworkClient, Result as CoreResult};
 
 use crate::parse_bootstrap_peer;
+
+/// Bound on the `ant-core` progress-event channel. `ant-core` emits with
+/// `try_send`, so a full channel drops events — harmless for a coarse bar.
+const PROGRESS_CHANNEL: usize = 64;
+
+/// A coarse, UI-ready download-progress update.
+///
+/// Mirrors etch>it's upload-progress struct so the publish/view pair
+/// reports progress in one vocabulary: a `phase` plus a `done` / `total`
+/// chunk count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadProgress {
+    /// `"resolving"` while walking the data map, then `"fetching"` for
+    /// the content chunks.
+    pub phase: &'static str,
+    /// Chunks completed in the current phase.
+    pub done: u64,
+    /// Total chunks in the current phase; `0` until `ant-core` knows it.
+    pub total: u64,
+}
+
+/// Folds the `ant-core` [`DownloadEvent`] stream into [`DownloadProgress`]
+/// updates. Stateful only to carry the resolving-phase total across events.
+#[derive(Default)]
+struct ProgressFold {
+    map_total: u64,
+}
+
+impl ProgressFold {
+    fn fold(&mut self, ev: &DownloadEvent) -> DownloadProgress {
+        match ev {
+            DownloadEvent::ResolvingDataMap { total_map_chunks } => {
+                self.map_total = *total_map_chunks as u64;
+                DownloadProgress {
+                    phase: "resolving",
+                    done: 0,
+                    total: self.map_total,
+                }
+            }
+            DownloadEvent::MapChunkFetched { fetched } => DownloadProgress {
+                phase: "resolving",
+                done: *fetched as u64,
+                total: self.map_total,
+            },
+            DownloadEvent::DataMapResolved { total_chunks } => DownloadProgress {
+                phase: "fetching",
+                done: 0,
+                total: *total_chunks as u64,
+            },
+            DownloadEvent::ChunksFetched { fetched, total } => DownloadProgress {
+                phase: "fetching",
+                done: *fetched as u64,
+                total: *total as u64,
+            },
+        }
+    }
+}
 
 /// Production network backend. Cheap to clone — wraps an `Arc`-shared
 /// `ant-core` client.
@@ -108,6 +165,53 @@ impl AutonomiClient {
     /// indicators.
     pub async fn peer_count(&self) -> usize {
         self.inner.network().connected_peers().await.len()
+    }
+
+    /// Fetch the content at `addr`, streaming it to the file at `output`
+    /// and reporting coarse [`DownloadProgress`] through `on_progress`.
+    ///
+    /// `ant-core`'s only progress-instrumented download path is file-
+    /// based, so this streams to disk rather than holding the payload in
+    /// memory like [`NetworkClient::fetch`]. The desktop shell calls it
+    /// only when the user has enabled the on-disk cache, with `output`
+    /// pointing at the cache slot — so no fetched content reaches disk
+    /// that the cache would not have written anyway. With the cache off,
+    /// callers stay on the in-memory `fetch`.
+    ///
+    /// # Errors
+    ///
+    /// [`fetchit_core::Error::Network`] if the data-map fetch or the
+    /// download fails.
+    pub async fn fetch_with_progress(
+        &self,
+        addr: &Address,
+        output: &Path,
+        on_progress: impl Fn(DownloadProgress) + Send + 'static,
+    ) -> CoreResult<()> {
+        let key = *addr.as_bytes();
+        let data_map = self
+            .inner
+            .data_map_fetch(&key)
+            .await
+            .map_err(|e| net_err(format!("data_map_fetch: {e}")))?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DownloadEvent>(PROGRESS_CHANNEL);
+        let forward = tokio::spawn(async move {
+            let mut fold = ProgressFold::default();
+            while let Some(ev) = rx.recv().await {
+                on_progress(fold.fold(&ev));
+            }
+        });
+
+        let result = self
+            .inner
+            .file_download_with_progress(&data_map, output, Some(tx))
+            .await
+            .map_err(|e| net_err(format!("file_download: {e}")));
+        // `file_download_with_progress` owns `tx` and drops it on return,
+        // closing the channel so the forward task drains and exits.
+        let _ = forward.await;
+        result.map(|_| ())
     }
 }
 
@@ -278,4 +382,72 @@ pub fn set_data_home(path: &Path) {
             std::env::set_var("XDG_DATA_HOME", path);
         }
     });
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fold_resolving_phase_tracks_map_chunks() {
+        let mut fold = ProgressFold::default();
+        assert_eq!(
+            fold.fold(&DownloadEvent::ResolvingDataMap {
+                total_map_chunks: 3
+            }),
+            DownloadProgress {
+                phase: "resolving",
+                done: 0,
+                total: 3
+            },
+        );
+        assert_eq!(
+            fold.fold(&DownloadEvent::MapChunkFetched { fetched: 2 }),
+            DownloadProgress {
+                phase: "resolving",
+                done: 2,
+                total: 3
+            },
+        );
+    }
+
+    #[test]
+    fn fold_switches_to_fetching_on_data_map_resolved() {
+        let mut fold = ProgressFold::default();
+        assert_eq!(
+            fold.fold(&DownloadEvent::DataMapResolved { total_chunks: 128 }),
+            DownloadProgress {
+                phase: "fetching",
+                done: 0,
+                total: 128
+            },
+        );
+        assert_eq!(
+            fold.fold(&DownloadEvent::ChunksFetched {
+                fetched: 64,
+                total: 128
+            }),
+            DownloadProgress {
+                phase: "fetching",
+                done: 64,
+                total: 128
+            },
+        );
+    }
+
+    #[test]
+    fn fold_map_total_is_zero_before_a_resolving_event() {
+        // A MapChunkFetched with no preceding ResolvingDataMap reports
+        // total 0 rather than panicking.
+        let mut fold = ProgressFold::default();
+        assert_eq!(
+            fold.fold(&DownloadEvent::MapChunkFetched { fetched: 1 }),
+            DownloadProgress {
+                phase: "resolving",
+                done: 1,
+                total: 0
+            },
+        );
+    }
 }
