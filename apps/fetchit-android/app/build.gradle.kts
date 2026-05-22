@@ -92,6 +92,9 @@ android {
         // let the framework stubs return defaults instead of throwing, so
         // those files (e.g. EpubBook) are JVM-testable without a device.
         unitTests.isReturnDefaultValues = true
+        // Robolectric Activity tests need the merged resources — themes,
+        // drawables, layouts — on the unit-test classpath.
+        unitTests.isIncludeAndroidResources = true
     }
 }
 

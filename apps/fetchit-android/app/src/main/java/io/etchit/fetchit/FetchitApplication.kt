@@ -24,7 +24,7 @@ import uniffi.fetchit_ffi.setupLogger
  * Pointing both at the app-private files dir before any FFI call avoids
  * the panic. Same workaround etchit-android uses.
  */
-class FetchitApplication : Application() {
+open class FetchitApplication : Application() {
 
     private var cached: Client? = null
 
@@ -44,10 +44,19 @@ class FetchitApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        setDataHome(filesDir.absolutePath)
-        setupLogger()
+        bootstrapFfi()
         peerCountTracker.start()
         ProcessLifecycleOwner.get().lifecycle.addObserver(IdleDisconnect(::disconnect))
+    }
+
+    /**
+     * Initialise the native FFI side: point `ant-core`'s data dir at the
+     * app-private files dir, then start the logger. Overridable so test
+     * builds can stub it — there is no `.so` off-device.
+     */
+    protected open fun bootstrapFfi() {
+        setDataHome(filesDir.absolutePath)
+        setupLogger()
     }
 
     /** Returns the connected client; constructs it on first call. */
