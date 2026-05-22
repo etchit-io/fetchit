@@ -149,14 +149,17 @@ class HtmlView @JvmOverloads constructor(
      * pattern is anchored to a real 64-hex address so prose that
      * mentions the scheme abstractly (e.g. "the autonomi:// URL
      * scheme...") is left alone.
+     *
+     * `query` (a `?…` string, or `""`) rides on the synthetic base URL
+     * so the SPA reads it as a normal `location.search`.
      */
-    fun load(html: String) {
+    fun load(html: String, query: String = "") {
         resourceCache.clear()
         val rewritten = ADDR_REWRITE.replace(html) { match ->
             "$SYNTH_PREFIX${match.groupValues[1]}"
         }
         webView.loadDataWithBaseURL(
-            SYNTH_ORIGIN,
+            SYNTH_ORIGIN + query,
             rewritten,
             "text/html",
             "UTF-8",

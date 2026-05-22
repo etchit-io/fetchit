@@ -44,7 +44,7 @@ class RenditionRenderer(
      * full vertical space — caller restores the button by invoking
      * [`clear`].
      */
-    fun render(r: RenditionFfi, address: String) {
+    fun render(r: RenditionFfi, address: String, query: String = "") {
         clear()
         binding.fetchButton.visibility = View.GONE
         binding.closeButton.visibility = View.VISIBLE
@@ -69,7 +69,7 @@ class RenditionRenderer(
             is RenditionFfi.Image -> bindImage(r.mime, r.data)
             is RenditionFfi.Audio -> bindAudio(r.mime, r.data)
             is RenditionFfi.Video -> bindVideo(r.mime, r.data)
-            is RenditionFfi.Html -> bindHtml(r.body)
+            is RenditionFfi.Html -> bindHtml(r.body, query)
             is RenditionFfi.Tabular -> bindTabular(r.columns, r.rows)
             is RenditionFfi.Archive -> {
                 binding.kindText.text = "application/zip"
@@ -204,9 +204,9 @@ class RenditionRenderer(
         }
     }
 
-    private fun bindHtml(body: String) {
+    private fun bindHtml(body: String, query: String) {
         binding.kindText.text = "text/html"
-        binding.htmlView.load(body)
+        binding.htmlView.load(body, query)
         binding.htmlView.visibility = View.VISIBLE
     }
 

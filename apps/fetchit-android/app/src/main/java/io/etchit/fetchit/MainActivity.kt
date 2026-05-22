@@ -202,8 +202,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      */
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         val raw = result?.contents ?: return@registerForActivityResult
-        val addr = parseAutonomiInput(raw)
-        if (addr == null) {
+        val parsed = parseAutonomiUrl(raw)
+        if (parsed == null) {
             Snackbar.make(
                 binding.rootCoordinator,
                 R.string.scan_qr_not_autonomi,
@@ -211,7 +211,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             ).show()
             return@registerForActivityResult
         }
-        loadAddress(addr)
+        loadAddress(parsed.address, parsed.query)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -269,7 +269,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
         // In-page autonomi:// links: tapping <a href="autonomi://addr">
         // inside a rendered SPA loads that address as a fresh fetch.
-        binding.htmlView.setOnAutonomiNavigate(::loadAddress)
+        binding.htmlView.setOnAutonomiNavigate { loadAddress(it) }
         binding.htmlView.setOnAutonomiBack(::navigateBack)
 
         // External entry: another app, a QR scanner, or a clicked link
@@ -320,7 +320,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         val clip = cm.primaryClip ?: return
         if (clip.itemCount == 0) return
         val text = clip.getItemAt(0)?.coerceToText(this)?.toString() ?: return
-        val addr = parseAutonomiInput(text) ?: return
+        val parsed = parseAutonomiUrl(text) ?: return
+        val addr = parsed.address
 
         // Truncated display so the chip stays readable on phones.
         val display = "autonomi://${addr.take(6)}…${addr.takeLast(4)}"
@@ -330,7 +331,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             binding.pasteChip.visibility = View.GONE
             binding.addressInput.setText(addr)
             binding.addressInput.setSelection(addr.length)
-            lifecycleScope.launch { doFetch(addr) }
+            lifecycleScope.launch { doFetch(addr, parsed.query) }
         }
     }
 
@@ -346,36 +347,43 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (uri.scheme != "autonomi") return
         // `autonomi://abc…` parses with `host = "abc…"`. Some senders
         // produce `autonomi:abc…` (opaque) which lands in
-        // `schemeSpecificPart` — accept both shapes.
-        val raw = uri.host ?: uri.schemeSpecificPart?.removePrefix("//") ?: return
-        val addr = parseAutonomiInput(raw) ?: return
-        loadAddress(addr)
+        // `schemeSpecificPart` — accept both shapes. Keep any `?query`
+        // so it reaches the renderer.
+        val host = uri.host
+        val raw = if (host != null) {
+            host + (uri.encodedQuery?.let { "?$it" } ?: "")
+        } else {
+            uri.schemeSpecificPart?.removePrefix("//") ?: return
+        }
+        val parsed = parseAutonomiUrl(raw) ?: return
+        loadAddress(parsed.address, parsed.query)
     }
 
     /** Populate the input and kick off a fetch. Used by deep links + in-page navigation. */
-    private fun loadAddress(addr: String) {
+    private fun loadAddress(addr: String, query: String = "") {
         binding.addressInput.setText(addr)
         binding.addressInput.setSelection(addr.length)
-        lifecycleScope.launch { doFetch(addr) }
+        lifecycleScope.launch { doFetch(addr, query) }
     }
 
     private fun onFetchClicked() {
         val raw = binding.addressInput.text.toString()
-        val addr = parseAutonomiInput(raw)
-        if (addr == null) {
+        val parsed = parseAutonomiUrl(raw)
+        if (parsed == null) {
             showValidationError(getString(R.string.error_invalid_address))
             return
         }
+        val addr = parsed.address
         // Re-write the input in canonical form (drop the optional
         // `autonomi://` so the user sees what's actually being fetched).
         if (raw.trim() != addr) {
             binding.addressInput.setText(addr)
             binding.addressInput.setSelection(addr.length)
         }
-        lifecycleScope.launch { doFetch(addr) }
+        lifecycleScope.launch { doFetch(addr, parsed.query) }
     }
 
-    private suspend fun doFetch(addr: String) {
+    private suspend fun doFetch(addr: String, query: String = "") {
         val app = fetchitApp()
         // Disk cache first — Autonomi addresses are immutable, so a hit
         // is always correct, even across app restarts. On a hit we render
@@ -386,7 +394,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (cached != null) {
             try {
                 val rendition = withContext(Dispatchers.IO) { detect(cached) }
-                afterRender(addr, rendition, cached)
+                afterRender(addr, rendition, cached, query)
                 binding.swipeRefresh.isRefreshing = false
                 return
             } catch (e: Exception) {
@@ -405,12 +413,12 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
                 app.bytesCache.put(addr, b)
                 detect(b) to b
             }
-            afterRender(addr, rendition, bytes)
+            afterRender(addr, rendition, bytes, query)
         } catch (e: FetchitException) {
-            showFetchError(addr, e.message ?: e.toString())
+            showFetchError(addr, query, e.message ?: e.toString())
         } catch (e: Exception) {
             Log.e(TAG, "fetch failed", e)
-            showFetchError(addr, e.message ?: e.toString())
+            showFetchError(addr, query, e.message ?: e.toString())
         } finally {
             setFetchInFlight(false)
             binding.swipeRefresh.isRefreshing = false
@@ -418,7 +426,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     /** Common tail of a successful fetch: bind the rendition and record nav state. */
-    private fun afterRender(addr: String, rendition: RenditionFfi, bytes: ByteArray) {
+    private fun afterRender(addr: String, rendition: RenditionFfi, bytes: ByteArray, query: String = "") {
         lastBinary = null
         cacheBinaryHandle(rendition)
         // Archive-context bookkeeping: capture the listing when we land
@@ -437,7 +445,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (rendition is RenditionFfi.Archive && EpubBook.looksLikeEpub(rendition.entries.map { it.path })) {
             renderer.bindEpub(addr, bytes, rendition.entries)
         } else {
-            renderer.render(rendition, addr)
+            renderer.render(rendition, addr, query)
         }
         hasConnectedOnce = true
         lastFetchAddr = addr
@@ -503,7 +511,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     private fun onAudioError(msg: String) {
-        showFetchError(currentAddressInput(), msg)
+        showFetchError(currentAddressInput(), "", msg)
     }
 
     /**
@@ -588,13 +596,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      * by string-matching known patterns. The technical detail still
      * lands in logcat for debugging.
      */
-    private fun showFetchError(addr: String, msg: String) {
+    private fun showFetchError(addr: String, query: String, msg: String) {
         renderer.clear()
         Log.w(TAG, "fetch error for $addr: $msg")
         val friendly = friendlyFetchError(msg)
         Snackbar.make(binding.rootCoordinator, friendly, Snackbar.LENGTH_INDEFINITE)
             .setAction(R.string.action_retry) {
-                lifecycleScope.launch { doFetch(addr) }
+                lifecycleScope.launch { doFetch(addr, query) }
             }
             .show()
     }

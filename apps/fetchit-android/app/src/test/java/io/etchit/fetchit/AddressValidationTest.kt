@@ -85,4 +85,49 @@ class AddressValidationTest {
         // parseAutonomiInput validates the shape but does not lowercase.
         assertEquals(addr.uppercase(), parseAutonomiInput(addr.uppercase()))
     }
+
+    // ── parseAutonomiUrl ──────────────────────────────────────────────
+
+    @Test
+    fun url_bare_address_has_an_empty_query() {
+        assertEquals(AutonomiUrl(addr, ""), parseAutonomiUrl(addr))
+    }
+
+    @Test
+    fun url_captures_a_query_string() {
+        assertEquals(
+            AutonomiUrl(addr, "?file=a&n=2"),
+            parseAutonomiUrl("autonomi://$addr?file=a&n=2"),
+        )
+    }
+
+    @Test
+    fun url_keeps_the_query_when_a_0x_prefix_is_stripped() {
+        assertEquals(AutonomiUrl(addr, "?k=v"), parseAutonomiUrl("0x$addr?k=v"))
+    }
+
+    @Test
+    fun url_drops_a_trailing_fragment_from_the_query() {
+        assertEquals(AutonomiUrl(addr, "?k=v"), parseAutonomiUrl("$addr?k=v#section"))
+    }
+
+    @Test
+    fun url_a_question_mark_inside_the_fragment_is_not_a_query() {
+        assertEquals(AutonomiUrl(addr, ""), parseAutonomiUrl("$addr#frag?notquery"))
+    }
+
+    @Test
+    fun url_query_survives_a_trailing_path() {
+        assertEquals(
+            AutonomiUrl(addr, "?q=1"),
+            parseAutonomiUrl("autonomi://$addr/path?q=1#f"),
+        )
+    }
+
+    @Test
+    fun url_returns_null_for_invalid_input() {
+        assertNull(parseAutonomiUrl(""))
+        assertNull(parseAutonomiUrl("not an address"))
+        assertNull(parseAutonomiUrl(addr.dropLast(1)))
+    }
 }
