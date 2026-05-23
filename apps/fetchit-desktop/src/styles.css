@@ -21,6 +21,14 @@
   --rust: #ff8a7a;
   --signal-ok: #6ab04c;
   color-scheme: dark;
+
+  /* Shared motion vocabulary — aligned with etch>it for cross-app
+     coherence. --ease-out-expo for meaningful one-shot transitions
+     (enter, reveal); --dur-* for the three speeds. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-micro: 160ms;
+  --dur-trans: 280ms;
+  --dur-enter: 720ms;
 }
 
 body[data-theme="dim"] {
@@ -373,7 +381,7 @@ body:not([data-view="settings"]) #settings {
   border: 1px dashed var(--ash);
   border-radius: 4px;
   outline: none;
-  transition: border-color 0.15s, background-color 0.15s;
+  transition: border-color var(--dur-micro), background-color var(--dur-micro);
 }
 .qr-modal-title-input::placeholder {
   color: var(--ash);
@@ -663,7 +671,7 @@ body:not([data-view="settings"]) #settings {
   border-right: 1.5px solid var(--copper);
   border-bottom: 1.5px solid var(--copper);
   transform: rotate(-45deg);
-  transition: transform 120ms ease;
+  transition: transform var(--dur-micro) ease;
   margin-left: auto;
 }
 .setting-collapsible[open] > summary::after {
@@ -686,7 +694,7 @@ body:not([data-view="settings"]) #settings {
   border-radius: 8px;
   cursor: pointer;
   background: var(--ink);
-  transition: border-color 140ms ease, background 140ms ease;
+  transition: border-color var(--dur-micro) ease, background var(--dur-micro) ease;
 }
 .settings-theme-option:hover { border-color: var(--copper); }
 .settings-theme-option:has(input:checked) {
@@ -781,7 +789,7 @@ body:not([data-view="settings"]) #settings {
   border-radius: 4px;
   cursor: pointer;
   position: relative;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--dur-micro) ease;
 }
 .setting-row input[type="checkbox"]:hover {
   border-color: var(--ash);
@@ -1047,13 +1055,18 @@ body:not([data-view="settings"]) #settings {
   transition: width 120ms linear;
 }
 .tab-progress.is-indeterminate .tab-progress-fill {
-  width: 35%;
+  /* Breathing copper line — paired with etch>it's indeterminate uploads
+     so both progress states share one rhythm. 200ms rise / 800ms fall
+     per cycle: quick inhale, slow exhale. */
+  width: 100%;
   transition: none;
-  animation: tab-progress-slide 1.2s ease-in-out infinite;
+  opacity: 0.25;
+  animation: tab-progress-breathing 1s ease-in-out infinite;
 }
-@keyframes tab-progress-slide {
-  from { transform: translateX(-110%); }
-  to { transform: translateX(320%); }
+@keyframes tab-progress-breathing {
+  0%   { opacity: 0.25; }
+  20%  { opacity: 1; }
+  100% { opacity: 0.25; }
 }
 .tab-progress-label {
   color: var(--ash);
@@ -1342,7 +1355,7 @@ body:not([data-view="settings"]) #settings {
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--dur-micro), color var(--dur-micro);
 }
 .archive-save-all:hover {
   background: var(--copper);
@@ -1400,7 +1413,7 @@ body:not([data-view="settings"]) #settings {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.12s, color 0.12s;
+  transition: border-color var(--dur-micro), color var(--dur-micro);
 }
 .archive-row-actions button:hover:not(:disabled) {
   border-color: var(--copper);
