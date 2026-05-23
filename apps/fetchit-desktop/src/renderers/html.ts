@@ -1,5 +1,6 @@
 import type { Rendition } from "../types";
 import { rewriteHtml } from "./htmlRewriter";
+import { isSelfContained } from "./selfContained";
 import { mediaBase } from "../mediaUrl";
 
 // The iframe sandbox: scripts run (SPAs need it), forms post (sandboxed
@@ -34,5 +35,17 @@ export function renderHtml(
   iframe.srcdoc = rewriteHtml(r.body, address, mediaBase(), query);
 
   wrap.appendChild(iframe);
+  if (isSelfContained(r.body)) {
+    wrap.appendChild(buildSelfContainedBadge());
+  }
   into.appendChild(wrap);
+}
+
+function buildSelfContainedBadge(): HTMLElement {
+  const badge = document.createElement("div");
+  badge.className = "self-contained-badge";
+  badge.title =
+    "This page references nothing external — sandboxed and provably inert.";
+  badge.textContent = "✓ self-contained";
+  return badge;
 }

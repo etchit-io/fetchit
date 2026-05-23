@@ -1133,6 +1133,22 @@ body:not([data-view="settings"]) #settings {
   border: none;
   display: block;
 }
+.self-contained-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 3px 10px;
+  background: rgba(28, 28, 32, 0.82);
+  color: var(--copper);
+  border: 1px solid var(--copper);
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+  z-index: 10;
+  user-select: none;
+}
+.self-contained-badge:hover { opacity: 1; }
 
 /* ── EPUB reader ───────────────────────────────────────────────────── */
 
