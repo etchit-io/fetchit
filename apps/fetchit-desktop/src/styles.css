@@ -1186,8 +1186,8 @@ body:not([data-view="settings"]) #settings {
   right: 10px;
   padding: 3px 10px;
   background: rgba(28, 28, 32, 0.82);
-  color: var(--copper);
-  border: 1px solid var(--copper);
+  color: var(--signal-ok);
+  border: 1px solid var(--signal-ok);
   border-radius: 999px;
   font-size: 11px;
   letter-spacing: 0.02em;
