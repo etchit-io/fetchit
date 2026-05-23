@@ -278,7 +278,9 @@ function submit(addr: string, store: TabStore, stage: HTMLElement, query = ""): 
   const existing = store.findByAddress(addr);
   if (existing) {
     store.activate(existing.id);
-    if (existing.status === "error") startIn(existing, addr, store, query);
+    if (existing.status === "error" || query !== (existing.query ?? "")) {
+      startIn(existing, addr, store, query);
+    }
     return;
   }
   const active = store.active();

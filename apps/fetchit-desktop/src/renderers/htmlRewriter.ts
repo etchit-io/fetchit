@@ -111,7 +111,7 @@ export function rewriteHtml(
   stripAnchorPing(doc);
   injectNeuterScript(doc);
   injectUrlRewriter(doc, mediaBase);
-  if (query) injectQueryState(doc, query);
+  injectFetchitContext(doc, address, query);
   rewriteMediaSrc(doc, mediaBase);
   rewriteImageSrc(doc, mediaBase);
   injectMediaHydration(doc);
@@ -575,18 +575,90 @@ function injectLinkInterceptor(doc: Document): void {
   doc.body.appendChild(script);
 }
 
-// Carry a `?query` from the address into the iframe's `location.search`.
-// The SPA renders in a srcdoc null-origin iframe — no real URL — so a
-// `history.replaceState` ahead of any author script is what gives the
-// page a normal `location.search`.
-function injectQueryState(doc: Document, query: string): void {
-  // JSON-encode the query as a JS string literal, then defuse any `</`
-  // so the value cannot close this <script> element early.
-  const literal = JSON.stringify(query).replace(/<\//g, "<\\/");
+// Expose the `window.fetchit` context — `address` (always) and `query`
+// (the carried query string, possibly empty). When `query` is non-empty,
+// additionally shim `location.search` so SPAs reading the standard API
+// still see the query: `history.replaceState` in srcdoc iframes is
+// silently refused by WebKit, hence the backstop layers.
+function injectFetchitContext(
+  doc: Document,
+  address: string,
+  query: string,
+): void {
+  // JSON-encode each as a JS string literal, then defuse any `</` so
+  // the value cannot close this <script> element early.
+  const safeAddr = String(address ?? "");
+  const safeQuery = String(query ?? "");
+  const aLit = JSON.stringify(safeAddr).replace(/<\//g, "<\\/");
+  const qLit = JSON.stringify(safeQuery).replace(/<\//g, "<\\/");
+
+  const queryShim = safeQuery
+    ? `
+  try { history.replaceState(history.state, "", q); } catch (_) {}
+  // Backstop 1 — shim the prototype getter (works in Chromium).
+  if (location.search !== q) {
+    try {
+      var d = Object.getOwnPropertyDescriptor(Location.prototype, "search");
+      if (d && d.get) {
+        Object.defineProperty(Location.prototype, "search", {
+          configurable: true,
+          get: function () { return this === location ? q : d.get.call(this); },
+        });
+      }
+    } catch (_) {}
+  }
+  // Backstop 2 — shim the instance directly (WebKit may put properties
+  // on the instance rather than the prototype).
+  if (location.search !== q) {
+    try {
+      Object.defineProperty(location, "search", {
+        configurable: true,
+        get: function () { return q; },
+      });
+    } catch (_) {}
+  }
+  // Backstop 3 — wrap URLSearchParams so SPAs feeding the still-empty
+  // location.search into it still see the carried query. Narrow guard
+  // (init === "" AND location.search === "") so we don't override
+  // intentional empty-init constructions on documents that don't need us.
+  if (location.search !== q) {
+    try {
+      var O = window.URLSearchParams;
+      var W = function (init) {
+        return new O(init === "" && location.search === "" ? q : init);
+      };
+      W.prototype = O.prototype;
+      window.URLSearchParams = W;
+    } catch (_) {}
+  }`
+    : "";
+
   const s = doc.createElement("script");
-  s.textContent =
-    `(function(){try{history.replaceState(history.state,"",${literal});}catch(e){}})();`;
-  const csp = doc.head.querySelector('meta[http-equiv="Content-Security-Policy"]');
-  if (csp) doc.head.insertBefore(s, csp.nextSibling);
-  else doc.head.insertBefore(s, doc.head.firstChild);
+  s.textContent = `(function(){
+  var q = ${qLit};
+  var addr = ${aLit};
+  try {
+    window.fetchit = window.fetchit || {};
+    window.fetchit.address = addr;
+    window.fetchit.query = q;
+  } catch (_) {}${queryShim}
+})();`;
+
+  // Slot in directly after the URL rewriter script so the established
+  // neuter → rewriter → context order is preserved and our script still
+  // sits before any author script in the document.
+  const rewriter = Array.from(doc.head.querySelectorAll("script")).find(
+    (sc) => sc.textContent?.includes("rewriteSrcset"),
+  );
+  if (rewriter) {
+    if (rewriter.nextSibling) doc.head.insertBefore(s, rewriter.nextSibling);
+    else doc.head.appendChild(s);
+  } else {
+    // Defensive fallback — the rewriter should always be present, but
+    // if it isn't, anchoring after CSP still puts us ahead of author
+    // scripts.
+    const csp = doc.head.querySelector('meta[http-equiv="Content-Security-Policy"]');
+    if (csp && csp.nextSibling) doc.head.insertBefore(s, csp.nextSibling);
+    else doc.head.insertBefore(s, doc.head.firstChild);
+  }
 }
