@@ -143,9 +143,14 @@ body {
   color: var(--copper);
 }
 
-#addr {
+.addr-shell {
+  position: relative;
   flex: 1;
   min-width: 0;
+}
+#addr {
+  width: 100%;
+  box-sizing: border-box;
   background: var(--ink);
   color: var(--bone);
   border: 1px solid var(--line);
@@ -159,6 +164,48 @@ body {
 }
 #addr:focus {
   border-color: var(--copper);
+}
+
+.addr-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.addr-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.addr-suggestion:hover,
+.addr-suggestion.is-active {
+  background: rgba(255, 255, 255, 0.05);
+}
+.addr-suggestion-label {
+  color: var(--bone);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.addr-suggestion-address {
+  color: var(--ash);
+  font: 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+  flex-shrink: 0;
 }
 
 #go {

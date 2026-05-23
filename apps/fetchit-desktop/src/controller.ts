@@ -10,6 +10,7 @@ import { parseAutonomiUrl } from "./address";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
 import { mountDownloadProgress } from "./ui/downloadProgress";
+import { mountAddressBarSuggestions } from "./ui/addressBarSuggestions";
 import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
@@ -81,6 +82,7 @@ export async function init(): Promise<void> {
       setBookmarkState(true);
     }
     if (settings.isOpen()) await settings.refreshBookmarks();
+    void suggestions.refresh();
   };
   bookmarkBtn.addEventListener("click", () => void toggleBookmark());
 
@@ -98,6 +100,10 @@ export async function init(): Promise<void> {
     onInvalid: (msg) => {
       statusEl.textContent = msg;
     },
+  });
+  const suggestions = mountAddressBarSuggestions({
+    input,
+    onSelect: (addr) => submit(addr, store, stageEl),
   });
 
   const newTab = (): void => {

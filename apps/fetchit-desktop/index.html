@@ -11,13 +11,15 @@
     <header id="bar">
       <button id="back-toggle" type="button" title="Back (Alt+Left)" aria-label="Back" disabled>←</button>
       <span id="mark">fetch<span>&gt;</span>it</span>
-      <input
-        id="addr"
-        type="text"
-        spellcheck="false"
-        autocomplete="off"
-        placeholder="Autonomi address"
-      />
+      <div class="addr-shell">
+        <input
+          id="addr"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Autonomi address"
+        />
+      </div>
       <button id="go" type="button">fetch</button>
       <button id="bookmark-toggle" type="button" title="Bookmark this address (Ctrl/Cmd+D)" aria-label="Bookmark" data-bookmarked="false">★</button>
       <button id="share-toggle" type="button" title="Share QR (Ctrl/Cmd+Shift+S)" aria-label="Share QR">▦</button>
