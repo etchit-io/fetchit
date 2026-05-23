@@ -224,6 +224,29 @@ target with a root-relative `fetch("/" + addr)` — the form the reader
 resolves to network bytes on every platform for an address built at
 runtime (see [the synthetic-origin trick](#the-synthetic-origin-trick)).
 
+**Worked example — a multi-parameter showcase + live composer.**
+[`examples/showcase.html`](examples/showcase.html) shows what `?query`
+enables at the upper end: one SPA that composes a beautifully typeset
+share card from many parameters at once — `title`, `body`, `eyebrow`,
+`author`, `date`, `img`, plus a `theme` (copper · forest · midnight ·
+paper · noir) and `layout` (hero · side · prose). For long-form
+bodies it also accepts `body-addr=<64-hex>` — a pointer to a separate
+Autonomi address whose contents are fetched and rendered as the body,
+so the URL stays short and shareable while the prose lives on the
+network as its own immutable blob. The page ships with a composer
+panel — edit any field, the preview updates live, the URL recipe
+builds itself, and a "Copy share URL" button hands you the finished
+link (using `window.fetchit.address`, exposed by the reader to every
+rendered page, to fill in the page's own address). The URL *is* the
+document:
+
+```
+autonomi://<showcase>?eyebrow=ANNOUNCEMENT&title=Hello+world&body=...&theme=midnight&layout=prose
+```
+
+One upload, endless views — every announcement, essay, photo card,
+release note, or memo is just a different URL.
+
 ### What this is **not**
 
 - **Not** a network protocol — `autonomi://` is a URL scheme that the
