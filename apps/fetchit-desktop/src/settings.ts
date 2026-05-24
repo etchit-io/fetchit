@@ -43,6 +43,10 @@ export interface SettingsHooks {
    *  Controller wires this to its in-memory idle tracker so the timer
    *  reflects the new value without a relaunch. */
   onIdleChanged?: (timeoutMinutes: number) => void;
+  /** Fired when the user clicks the per-bookmark share button.
+   *  Controller routes this to the QR-share modal so any bookmark can
+   *  be shared without first opening it in a tab. */
+  onShareBookmark?: (address: string, label: string) => void;
 }
 
 export interface IdlePolicy {
@@ -528,6 +532,17 @@ function buildBookmarkRow(
   main.append(label, addr);
   main.addEventListener("click", () => hooks.onNavigate(bm.address));
 
+  const share = document.createElement("button");
+  share.type = "button";
+  share.className = "bookmark-share";
+  share.setAttribute("aria-label", `Share ${bm.label}`);
+  share.title = "Share QR";
+  share.textContent = "▦";
+  share.addEventListener("click", (e) => {
+    e.stopPropagation();
+    hooks.onShareBookmark?.(bm.address, bm.label);
+  });
+
   const del = document.createElement("button");
   del.type = "button";
   del.className = "bookmark-delete";
@@ -542,7 +557,7 @@ function buildBookmarkRow(
     }).catch(() => {});
   });
 
-  row.append(main, del);
+  row.append(main, share, del);
   return row;
 }
 
