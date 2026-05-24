@@ -49,16 +49,21 @@ export async function init(): Promise<void> {
     .then((p) => idle.setTimeoutMinutes(p.timeoutMinutes))
     .catch(() => {});
 
+  const qrModal = mountQrModal(qrHost);
+
   const settings = mountSettings(settingsHost, {
     onNavigate: (addr) => {
       settings.close();
       submit(addr, store, stageEl);
     },
     onIdleChanged: (m) => idle.setTimeoutMinutes(m),
+    onShareBookmark: (addr, label) => {
+      settings.close();
+      qrModal.open(addr, label);
+    },
   });
   settingsBtn.addEventListener("click", () => void settings.toggle());
 
-  const qrModal = mountQrModal(qrHost);
   const openShare = (): void => {
     const active = store.active();
     const addr = active?.address;

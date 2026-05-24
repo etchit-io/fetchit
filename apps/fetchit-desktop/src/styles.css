@@ -634,6 +634,20 @@ body:not([data-view="settings"]) #settings {
   font-size: 11px;
   color: var(--ash);
 }
+.bookmark-share {
+  background: transparent;
+  color: var(--ash);
+  border: none;
+  border-left: 1px solid var(--line);
+  width: 38px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.bookmark-share:hover {
+  background: color-mix(in srgb, var(--copper) 12%, transparent);
+  color: var(--copper);
+}
 .bookmark-delete {
   background: transparent;
   color: var(--ash);
