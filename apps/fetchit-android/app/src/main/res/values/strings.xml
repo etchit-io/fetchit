@@ -31,6 +31,20 @@
         <item quantity="other">added %1$d bookmarks</item>
     </plurals>
 
+    <!-- Multi-bookmark share-as-QR dialog: pick a subset of your
+         bookmarks; encoded as a `fetchit://import?…` QR another
+         device can scan. -->
+    <string name="bookmark_share_multi_button">share</string>
+    <string name="bookmark_share_multi_title">share which bookmarks?</string>
+    <string name="bookmark_share_multi_share">share</string>
+    <string name="bookmark_share_multi_empty">no bookmarks to share yet</string>
+    <string name="bookmark_share_multi_none_selected">pick at least one</string>
+    <string name="bookmark_share_multi_too_many">that\'s more than fits in one QR — uncheck a few</string>
+    <plurals name="bookmark_share_multi_summary">
+        <item quantity="one">%1$d bookmark · scan with fetch&gt;it on another device</item>
+        <item quantity="other">%1$d bookmarks · scan with fetch&gt;it on another device</item>
+    </plurals>
+
     <!-- Smart-paste chip: shown when the clipboard holds an Autonomi
          address and the user hasn\'t already typed something. -->
     <string name="paste_chip_label">📋 paste %1$s ?</string>

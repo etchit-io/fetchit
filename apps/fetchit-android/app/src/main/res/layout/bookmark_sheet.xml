@@ -38,6 +38,16 @@
             android:text="@string/bookmark_import"
             android:textColor="?attr/fetchitCopper"
             android:backgroundTint="?attr/fetchitInk3" />
+
+        <Button
+            android:id="@+id/shareManyButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:text="@string/bookmark_share_multi_button"
+            android:textColor="?attr/fetchitCopper"
+            android:backgroundTint="?attr/fetchitInk3" />
     </LinearLayout>
 
     <View
