@@ -6,6 +6,7 @@ mod cache;
 mod disk_cache;
 #[cfg(feature = "e2e")]
 mod e2e;
+mod linux_deep_link;
 mod protocol;
 mod rendition;
 mod server;
@@ -531,13 +532,18 @@ pub fn run() {
 
             // Deep-link: register `autonomi://` and `fetchit://` with the OS
             // on Linux + Windows. macOS reads the schemes from Info.plist via
-            // the bundle config and registers automatically. In dev, Linux
-            // needs this runtime call so the desktop file gets installed.
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            // the bundle config and registers automatically. Linux additionally
+            // skips runtime registration when a bundle install (.deb / .rpm)
+            // already claims the schemes — prevents duplicate "fetchit" entries
+            // in "Open With" dialogs on machines that have both an installed
+            // bundle and a dev/AppImage run on disk.
+            #[cfg(target_os = "windows")]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let _ = app.deep_link().register_all();
             }
+            #[cfg(target_os = "linux")]
+            crate::linux_deep_link::register_or_cleanup(&app.handle());
 
             // Resolve the app-local data dir once; everything user-persisted
             // lives under it (settings.json + the on-disk byte cache).
