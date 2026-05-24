@@ -202,6 +202,11 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      */
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         val raw = result?.contents ?: return@registerForActivityResult
+        val importPayload = parseBookmarkImportUrl(raw)
+        if (importPayload != null) {
+            handleBookmarkImport(importPayload)
+            return@registerForActivityResult
+        }
         val parsed = parseAutonomiUrl(raw)
         if (parsed == null) {
             Snackbar.make(
@@ -344,6 +349,14 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
     private fun handleViewIntent(intent: Intent?) {
         val uri = intent?.data ?: return
+        // `fetchit://import?v=1&data=…` is the bookmark-import deep
+        // link the desktop's QR-share emits. Route to the
+        // confirmation dialog before anything else.
+        if (uri.scheme == "fetchit" && uri.host == "import") {
+            val parsed = parseBookmarkImportUrl(uri.toString()) ?: return
+            handleBookmarkImport(parsed)
+            return
+        }
         if (uri.scheme != "autonomi") return
         // `autonomi://abc…` parses with `host = "abc…"`. Some senders
         // produce `autonomi:abc…` (opaque) which lands in
@@ -357,6 +370,40 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         }
         val parsed = parseAutonomiUrl(raw) ?: return
         loadAddress(parsed.address, parsed.query)
+    }
+
+    /**
+     * Show the import-confirmation dialog and, on positive, merge the
+     * incoming bookmarks into [`BookmarkStore`]. De-duplication by
+     * address is handled inside [`BookmarkStore.mergeImport`] —
+     * existing bookmarks win on conflict so the user's chosen labels
+     * survive a re-import.
+     */
+    private fun handleBookmarkImport(payload: BookmarkImport) {
+        if (payload.bookmarks.isEmpty()) {
+            Snackbar.make(
+                binding.rootCoordinator,
+                R.string.bookmark_import_empty,
+                Snackbar.LENGTH_LONG,
+            ).show()
+            return
+        }
+        showBookmarkImportDialog(this, payload) { confirmed ->
+            val bookmarks = confirmed.bookmarks.map {
+                Bookmark.create(label = it.label.ifBlank { it.address }, address = it.address)
+            }
+            store.mergeImport(bookmarks)
+            val added = bookmarks.size
+            Snackbar.make(
+                binding.rootCoordinator,
+                resources.getQuantityString(
+                    R.plurals.bookmark_import_added,
+                    added,
+                    added,
+                ),
+                Snackbar.LENGTH_SHORT,
+            ).show()
+        }
     }
 
     /** Populate the input and kick off a fetch. Used by deep links + in-page navigation. */

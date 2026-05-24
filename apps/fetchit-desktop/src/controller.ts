@@ -12,6 +12,7 @@ import { mountQrModal } from "./ui/qrModal";
 import { mountDownloadProgress } from "./ui/downloadProgress";
 import { mountAddressBarSuggestions } from "./ui/addressBarSuggestions";
 import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
+import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
 
@@ -60,6 +61,17 @@ export async function init(): Promise<void> {
     onShareBookmark: (addr, label) => {
       settings.close();
       qrModal.open(addr, label);
+    },
+    onShareBookmarkList: (bookmarks) => {
+      try {
+        const url = encodeBookmarksForShare(bookmarks);
+        settings.close();
+        const count = bookmarks.length;
+        const summary = count === 1 ? "1 bookmark" : `${count} bookmarks`;
+        qrModal.openImport(url, summary);
+      } catch (err) {
+        console.error("[fetchit] share bookmark list:", err);
+      }
     },
   });
   settingsBtn.addEventListener("click", () => void settings.toggle());

@@ -575,6 +575,14 @@ body:not([data-view="settings"]) #settings {
   border-radius: 6px;
   border: 1px dashed var(--line);
 }
+.bookmark-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.bookmark-toolbar .setting-action {
+  flex: 0 0 auto;
+}
 .bookmark-row {
   display: flex;
   align-items: stretch;
@@ -586,6 +594,15 @@ body:not([data-view="settings"]) #settings {
 }
 .bookmark-row:hover {
   border-color: var(--copper);
+}
+.bookmark-select {
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0 10px 0 12px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--copper);
+  cursor: pointer;
 }
 .bookmark-main {
   flex: 1;

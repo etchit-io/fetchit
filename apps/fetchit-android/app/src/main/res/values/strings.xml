@@ -23,6 +23,14 @@
     <string name="scan_qr_not_autonomi">that QR didn\'t hold an Autonomi address</string>
     <string name="scan_qr_camera_denied">camera permission needed to scan</string>
 
+    <!-- Bookmark-import confirmation Snackbars. Fires when a
+         `fetchit://import?…` QR or deep link has been processed. -->
+    <string name="bookmark_import_empty">no bookmarks found in that QR</string>
+    <plurals name="bookmark_import_added">
+        <item quantity="one">added %1$d bookmark</item>
+        <item quantity="other">added %1$d bookmarks</item>
+    </plurals>
+
     <!-- Smart-paste chip: shown when the clipboard holds an Autonomi
          address and the user hasn\'t already typed something. -->
     <string name="paste_chip_label">📋 paste %1$s ?</string>

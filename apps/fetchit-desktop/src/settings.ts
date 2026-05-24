@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { fmtBytes } from "./format";
 import { addBookmark, listBookmarks, removeBookmark, type Bookmark } from "./bookmarks";
+import { MAX_BOOKMARKS_PER_QR } from "./bookmarkShare";
 import { applyTheme, loadTheme, type Theme } from "./theme/theme";
 
 interface ThemeOption {
@@ -47,6 +48,11 @@ export interface SettingsHooks {
    *  Controller routes this to the QR-share modal so any bookmark can
    *  be shared without first opening it in a tab. */
   onShareBookmark?: (address: string, label: string) => void;
+  /** Fired when the user clicks "Share all" or "Share selected" in
+   *  the bookmarks panel. Controller routes this to the QR-share
+   *  modal's import mode, which encodes the list as a
+   *  `fetchit://import?…` URL and renders a multi-bookmark QR. */
+  onShareBookmarkList?: (bookmarks: Bookmark[]) => void;
 }
 
 export interface IdlePolicy {
@@ -96,6 +102,8 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   const clearBtn = root.querySelector<HTMLButtonElement>("#clear-cache");
   const peersEl = root.querySelector<HTMLElement>("#net-peers");
   const bookmarksEl = root.querySelector<HTMLElement>("#bookmarks-list");
+  const shareAllBtn = root.querySelector<HTMLButtonElement>("#bookmarks-share-all");
+  const shareSelectedBtn = root.querySelector<HTMLButtonElement>("#bookmarks-share-selected");
   const idleSelect = root.querySelector<HTMLSelectElement>("#idle-timeout");
 
   if (
@@ -107,6 +115,8 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     !clearBtn ||
     !peersEl ||
     !bookmarksEl ||
+    !shareAllBtn ||
+    !shareSelectedBtn ||
     !idleSelect
   ) {
     throw new Error("settings: missing form element");
@@ -153,6 +163,43 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     }
   };
 
+  // Bookmark-list share selection. Persists across `refreshBookmarks`
+  // calls so renames / deletes don't drop the user's in-progress
+  // selection. Pruned to only-still-present addresses on every
+  // refresh.
+  const selectedAddresses = new Set<string>();
+  let currentBookmarks: Bookmark[] = [];
+
+  const shareSelection = (bookmarks: Bookmark[]): void => {
+    if (bookmarks.length === 0) return;
+    const capped = bookmarks.slice(0, MAX_BOOKMARKS_PER_QR);
+    hooks.onShareBookmarkList?.(capped);
+  };
+
+  const updateShareButtons = (): void => {
+    const total = currentBookmarks.length;
+    const selected = selectedAddresses.size;
+    shareAllBtn!.disabled = total === 0;
+    shareAllBtn!.textContent =
+      total > MAX_BOOKMARKS_PER_QR
+        ? `Share first ${MAX_BOOKMARKS_PER_QR} (of ${total})`
+        : "Share all";
+    shareSelectedBtn!.disabled = selected === 0;
+    shareSelectedBtn!.textContent = `Share ${selected} selected`;
+  };
+
+  shareAllBtn.addEventListener("click", () => shareSelection(currentBookmarks));
+  shareSelectedBtn.addEventListener("click", () => {
+    const picked = currentBookmarks.filter((bm) => selectedAddresses.has(bm.address));
+    shareSelection(picked);
+  });
+
+  const onRowToggle = (address: string, checked: boolean): void => {
+    if (checked) selectedAddresses.add(address);
+    else selectedAddresses.delete(address);
+    updateShareButtons();
+  };
+
   const refreshBookmarks = async (): Promise<void> => {
     let list: Bookmark[] = [];
     try {
@@ -160,17 +207,31 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     } catch {
       // leave empty
     }
+    // Newest first — stable on rename because we keep the original createdAt.
+    list.sort((a, b) => b.createdAt - a.createdAt);
+    currentBookmarks = list;
+    // Drop selections whose address vanished (deleted from another window etc.).
+    for (const addr of [...selectedAddresses]) {
+      if (!list.some((bm) => bm.address === addr)) selectedAddresses.delete(addr);
+    }
     bookmarksEl!.replaceChildren();
     if (list.length === 0) {
       const empty = document.createElement("div");
       empty.className = "bookmark-empty";
       empty.textContent = "No bookmarks yet — click the ★ in the toolbar to save an address.";
       bookmarksEl!.appendChild(empty);
+      updateShareButtons();
       return;
     }
-    // Newest first — stable on rename because we keep the original createdAt.
-    list.sort((a, b) => b.createdAt - a.createdAt);
-    for (const bm of list) bookmarksEl!.appendChild(buildBookmarkRow(bm, hooks, refreshBookmarks));
+    for (const bm of list) {
+      bookmarksEl!.appendChild(
+        buildBookmarkRow(bm, hooks, refreshBookmarks, {
+          selected: selectedAddresses.has(bm.address),
+          onToggle: onRowToggle,
+        }),
+      );
+    }
+    updateShareButtons();
   };
 
   const api: SettingsApi = {
@@ -474,6 +535,10 @@ function buildPage(): HTMLElement {
     </section>
     <section class="setting-group" id="group-bookmarks">
       <h2>Bookmarks</h2>
+      <div class="bookmark-toolbar">
+        <button type="button" class="setting-action setting-action-ghost" id="bookmarks-share-all">Share all</button>
+        <button type="button" class="setting-action setting-action-ghost" id="bookmarks-share-selected" disabled>Share 0 selected</button>
+      </div>
       <div id="bookmarks-list"></div>
     </section>
     <section class="setting-group" id="group-support">
@@ -503,13 +568,29 @@ function buildPage(): HTMLElement {
   return page;
 }
 
+interface RowSelection {
+  selected: boolean;
+  onToggle: (address: string, checked: boolean) => void;
+}
+
 function buildBookmarkRow(
   bm: Bookmark,
   hooks: SettingsHooks,
   reload: () => Promise<void>,
+  selection: RowSelection,
 ): HTMLElement {
   const row = document.createElement("div");
   row.className = "bookmark-row";
+
+  const select = document.createElement("input");
+  select.type = "checkbox";
+  select.className = "bookmark-select";
+  select.checked = selection.selected;
+  select.setAttribute("aria-label", `Select ${bm.label} for bulk share`);
+  select.addEventListener("click", (e) => e.stopPropagation());
+  select.addEventListener("change", () => {
+    selection.onToggle(bm.address, select.checked);
+  });
 
   const main = document.createElement("button");
   main.type = "button";
@@ -557,7 +638,7 @@ function buildBookmarkRow(
     }).catch(() => {});
   });
 
-  row.append(main, share, del);
+  row.append(select, main, share, del);
   return row;
 }
 

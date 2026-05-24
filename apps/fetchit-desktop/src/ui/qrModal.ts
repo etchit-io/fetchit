@@ -15,6 +15,11 @@ export interface QrModalApi {
    *  pass the etch / page / file title so the recipient sees what they're
    *  about to open before they scan. */
   open(address: string, title?: string | null): void;
+  /** Render a non-address payload (e.g. a `fetchit://import?…` URL
+   *  carrying a bookmark list). `summary` is shown below the QR in
+   *  place of the abbreviated address. The copy + save-image actions
+   *  are hidden — the QR itself is the share artifact. */
+  openImport(url: string, summary: string): void;
   close(): void;
   isOpen(): boolean;
 }
@@ -103,6 +108,13 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
 
   let currentAddr: string | null = null;
 
+  const actionsRow = host.querySelector(".qr-modal-actions") as HTMLElement;
+
+  const setImportModeVisibility = (importMode: boolean): void => {
+    actionsRow.style.display = importMode ? "none" : "";
+    titleInput.style.display = importMode ? "none" : "";
+  };
+
   const flash = (btn: HTMLButtonElement, msg: string): void => {
     const original = btn.textContent ?? "";
     btn.textContent = msg;
@@ -142,6 +154,28 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
           centerLogo: { text: ">", sizeRatio: 0.16, color: "var(--copper)" },
         }),
       );
+      setImportModeVisibility(false);
+      host.hidden = false;
+      document.addEventListener("keydown", onKey);
+      host.addEventListener("click", onBackdrop);
+      closeBtn.focus();
+    },
+    openImport(url, summary) {
+      currentAddr = null;
+      titleInput.value = "";
+      codeEl.textContent = summary;
+      // Smaller cells + medium ECC let the QR fit the larger
+      // import-URL payload (~1–2 KB) while staying readable; the
+      // single-address QR uses larger cells + H-level ECC because the
+      // payload is fixed-size and small.
+      qrSlot.replaceChildren(
+        renderQrSvg(url, {
+          cellSize: 6,
+          errorCorrectionLevel: "M",
+          centerLogo: { text: ">", sizeRatio: 0.16, color: "var(--copper)" },
+        }),
+      );
+      setImportModeVisibility(true);
       host.hidden = false;
       document.addEventListener("keydown", onKey);
       host.addEventListener("click", onBackdrop);
@@ -151,6 +185,7 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
       host.hidden = true;
       currentAddr = null;
       titleInput.value = "";
+      setImportModeVisibility(false);
       document.removeEventListener("keydown", onKey);
       host.removeEventListener("click", onBackdrop);
     },
