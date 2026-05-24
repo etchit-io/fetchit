@@ -67,6 +67,10 @@ missing_docs = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Tauri command + URI-scheme handlers must take their args (State,
+# AppHandle, WebviewWindow, the IPC-deserialized String / Vec) by value —
+# the framework's macros require it; the lint can't see that contract.
+needless_pass_by_value = "allow"
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"

@@ -23,15 +23,15 @@ no cloud, no name registrar**. Just IP packets to Autonomi peers.
 Anyone who has the bytes can serve the bytes; nobody can revoke an
 address; nobody can take it down.
 
-The end state: if you can run fetch>it (or its desktop / WASM siblings
-when those land), you can **author and consume the entire stack of a
-small webapp** without depending on any centralized service.
+The end state: if you can run fetch>it — the Android app, the desktop
+app, or a future WASM viewer — you can **author and consume the entire
+stack of a small webapp** without depending on any centralized service.
 
 ---
 
-## What works today (v0.1.0)
+## What works today
 
-Verified on the Android shell against live Autonomi addresses.
+Verified against live Autonomi addresses.
 
 | Capability | State |
 |---|---|

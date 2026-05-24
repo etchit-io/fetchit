@@ -6,7 +6,6 @@
          lives everywhere else (fetch button face, share extras, docs). -->
     <string name="app_name">fetchit</string>
     <string name="hint_address">Autonomi address</string>
-    <string name="action_fetch">fetch</string>
     <string name="action_retry">retry</string>
     <string name="action_close">close</string>
     <!-- Success message shown for any binary that fetch&gt;it can't
@@ -17,11 +16,9 @@
     <string name="action_open_with">open with…</string>
     <string name="action_save">save…</string>
     <string name="action_share_current">share this address</string>
-    <string name="action_share_label">share fetch&gt;it address</string>
     <string name="scan_qr_button_label">scan QR</string>
     <string name="scan_qr_prompt">point at an autonomi:// QR code</string>
     <string name="scan_qr_not_autonomi">that QR didn\'t hold an Autonomi address</string>
-    <string name="scan_qr_camera_denied">camera permission needed to scan</string>
 
     <!-- Bookmark-import confirmation Snackbars. Fires when a
          `fetchit://import?…` QR or deep link has been processed. -->
@@ -67,11 +64,7 @@
     <string name="open_no_app">no app installed to open %1$s</string>
     <string name="save_done">saved</string>
     <string name="save_failed">save failed: %1$s</string>
-    <string name="action_play">play</string>
-    <string name="action_pause">pause</string>
-    <string name="audio_loading">loading audio…</string>
     <string name="error_invalid_address">address must be 64 hex characters</string>
-    <string name="error_fetch_prefix">couldn\'t fetch: %1$s</string>
     <string name="image_content_description">fetched image</string>
 
     <!-- Bookmarks -->
@@ -108,7 +101,6 @@
     <string name="settings_button_label">settings</string>
     <string name="settings_peer_count_title">network</string>
     <string name="settings_peer_count_value">%1$d peers</string>
-    <string name="settings_peer_count_unknown">— peers</string>
     <string name="settings_peer_count_disconnected">not connected</string>
     <string name="settings_peers_header_collapsed">bootstrap peers ▾</string>
     <string name="settings_peers_header_expanded">bootstrap peers ▴</string>

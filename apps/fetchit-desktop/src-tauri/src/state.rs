@@ -40,14 +40,14 @@ impl AppState {
             return Some(b);
         }
         let b = self.disk_cache.get(addr)?;
-        self.cache.put(addr.clone(), b.clone());
+        self.cache.put(*addr, b.clone());
         Some(b)
     }
 
     /// Write-through: every fresh fetch lands in both layers.
     /// `disk_cache.put` is a no-op when the policy is disabled.
     pub fn cache_bytes(&self, addr: &Address, bytes: Bytes) {
-        self.cache.put(addr.clone(), bytes.clone());
+        self.cache.put(*addr, bytes.clone());
         self.disk_cache.put(addr, &bytes);
     }
 }
@@ -57,7 +57,9 @@ pub async fn ensure_client(state: &AppState, peers: &[String]) -> Result<Autonom
     if let Some(c) = guard.as_ref() {
         return Ok(c.clone());
     }
-    let c = AutonomiClient::connect(peers).await.map_err(|e| e.to_string())?;
+    let c = AutonomiClient::connect(peers)
+        .await
+        .map_err(|e| e.to_string())?;
     *guard = Some(c.clone());
     Ok(c)
 }

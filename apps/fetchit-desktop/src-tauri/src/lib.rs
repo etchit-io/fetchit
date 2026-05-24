@@ -35,8 +35,7 @@ use state::{default_peers as bundled_peers, ensure_client, AppState};
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Filled in by `run`'s setup callback once the local media server is bound.
@@ -111,7 +110,7 @@ struct RefreshResult {
 const UPSTREAM_PEERS_URL: &str =
     "https://raw.githubusercontent.com/WithAutonomi/ant-node/main/config/bootstrap_peers.toml";
 
-/// Fetch WithAutonomi's canonical `bootstrap_peers.toml`, parse it
+/// Fetch `WithAutonomi`'s canonical `bootstrap_peers.toml`, parse it
 /// tolerantly (any string leaf that passes `parse_bootstrap_peer`
 /// counts), and replace the user override + cached client if it
 /// differs from the currently-effective list. Always writes fresh on
@@ -189,15 +188,17 @@ fn collect_toml_strings(value: &toml::Value, out: &mut Vec<String>) {
 /// release builds — the JS side gates calls behind `import.meta.env.DEV` too,
 /// so the IPC isn't even fired.
 #[tauri::command]
-fn log(_line: String) {
+fn log(line: String) {
     #[cfg(debug_assertions)]
-    eprintln!("{_line}");
+    eprintln!("{line}");
+    #[cfg(not(debug_assertions))]
+    let _ = line;
 }
 
 /// Write bytes to a user-chosen file. The JS side picks the path via
 /// `plugin-dialog`'s `save`; we just write what they hand us. Used by
 /// the archive viewer's per-entry / whole-archive Save buttons, where
-/// the browser-native `<a download>` trick fails inside the WebView.
+/// the browser-native `<a download>` trick fails inside the `WebView`.
 #[tauri::command]
 fn save_bytes_to_path(path: String, data: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, &data).map_err(|e| format!("couldn't write {path}: {e}"))
@@ -245,7 +246,7 @@ fn copy_png_to_clipboard(app: tauri::AppHandle, data: Vec<u8>) -> Result<(), Str
         .map_err(|e| format!("clipboard write: {e}"))
 }
 
-/// Open the WebView devtools window. The `devtools` feature on tauri makes
+/// Open the `WebView` devtools window. The `devtools` feature on tauri makes
 /// this available in release builds too — the desktop app is read-only, so
 /// letting power users inspect what's being rendered is fine.
 #[tauri::command]
@@ -255,7 +256,7 @@ fn open_devtools(window: tauri::WebviewWindow) {
 
 /// Base URL of the local media server (e.g. `http://127.0.0.1:54321`).
 /// Renderers append `/<addr>` and set the resulting URL on `<audio>` /
-/// `<video>` elements. WebKit's media pipeline accepts plain `http://`
+/// `<video>` elements. `WebKit`'s media pipeline accepts plain `http://`
 /// where it rejects our `fetchit://` / `autonomi://` schemes.
 #[tauri::command]
 fn media_url_base() -> Result<String, String> {
@@ -342,8 +343,7 @@ fn is_bookmarked(state: tauri::State<'_, AppState>, address: String) -> bool {
     state
         .settings
         .lock()
-        .map(|s| s.bookmarks.iter().any(|b| b.address == address))
-        .unwrap_or(false)
+        .is_ok_and(|s| s.bookmarks.iter().any(|b| b.address == address))
 }
 
 /// Add or rename a bookmark. Dedupes by address — re-bookmarking the same
@@ -503,6 +503,12 @@ async fn fetch_and_render(
 /// Build and run the Tauri application: wires the URI scheme protocols,
 /// loads persisted settings, manages app state, and starts the local
 /// media server.
+///
+/// # Panics
+///
+/// Panics if the Tauri runtime fails to start — an unrecoverable startup
+/// error with nothing to fall back to.
+#[allow(clippy::expect_used)] // entry point: a failed startup is unrecoverable
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Two scheme aliases for the same protocol handler. The localhost HTTP

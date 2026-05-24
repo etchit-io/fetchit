@@ -150,9 +150,7 @@ impl DiskCache {
 
     /// Number of cached files (one per address).
     pub fn file_count(&self) -> usize {
-        fs::read_dir(&self.root)
-            .map(|it| it.flatten().count())
-            .unwrap_or(0)
+        fs::read_dir(&self.root).map_or(0, |it| it.flatten().count())
     }
 
     /// Drop oldest-mtime files until total size is at or below `cap`.
