@@ -10,6 +10,7 @@ import { parseAutonomiUrl } from "./address";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
 import { mountDownloadProgress } from "./ui/downloadProgress";
+import { findMascotIn, mountMascot } from "./ui/mascot";
 import { mountAddressBarSuggestions } from "./ui/addressBarSuggestions";
 import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
 import { encodeBookmarksForShare } from "./bookmarkShare";
@@ -104,9 +105,9 @@ export async function init(): Promise<void> {
   bookmarkBtn.addEventListener("click", () => void toggleBookmark());
 
   // Top-bar back button — same handler as the keyboard binding (Alt+Left).
-  // EPUB / PDF / lab-page exhibits etc. take over the full stage, so a
-  // visible ← in the chrome is the only obvious way out for users who
-  // don't know the keyboard shortcut.
+  // EPUB / PDF / HTML renderers occupy the full stage and intercept their
+  // own scrolling, so the toolbar control is the only DOM-accessible back
+  // trigger from inside those renderers.
   backBtn.addEventListener("click", () => backNavigate(store));
 
   const store = new TabStore();
@@ -312,17 +313,25 @@ function startIn(
   query = "",
   recordHistory = true,
 ): void {
-  tab.root.replaceChildren(buildSpinner());
+  // Cancel any prior fetch on this tab so a refetch (refresh, retry,
+  // re-paste of the same address) stops the previous Rust task
+  // instead of leaving it running to completion in the background.
+  // Fire-and-forget: the backend tolerates no-op cancel calls.
+  void invoke("cancel_fetch", { tabId: tab.id }).catch(() => {});
+  // If a previous mascot is still mounted (e.g. user re-submitted the
+  // address while the first fetch was in flight) dispose it so its
+  // idle-behavior timers stop before we mount a fresh one.
+  findMascotIn(tab.root)?.dispose();
+  const mascot = mountMascot();
+  tab.root.replaceChildren(mascot.element);
   store.startFetch(tab.id, addr, recordHistory, query);
   void runFetch(addr, tab.id, tab.root, store, query);
 }
 
 // Session flag — true once any fetch has succeeded in this app session.
-// Drives the loading-status copy: the first fetch may genuinely be slow
-// (bootstrap warmup, peer connect), but every subsequent fetch in the
-// same session reuses the live client. Showing "the first connection
-// takes a moment" on every fetch is misleading after the first one
-// lands.
+// The first fetch waits on bootstrap + peer connect; subsequent fetches
+// reuse the live client. Gates the bootstrap-hint status string in
+// `statusFor`.
 let firstFetchSucceeded = false;
 
 async function runFetch(
@@ -334,14 +343,19 @@ async function runFetch(
 ): Promise<void> {
   dlog(`[fetch] start addr=${addr.slice(0, 8)}…`);
   try {
-    const r = await invoke<Rendition>("fetch_and_render", { addr });
+    const r = await invoke<Rendition>("fetch_and_render", { addr, tabId: id });
     dlog(`[fetch] done addr=${addr.slice(0, 8)}… kind=${r.kind}`);
     firstFetchSucceeded = true;
+    // Stop the mascot's idle-behavior timers before the renderer
+    // replaces the tab contents — otherwise blink/ear-flick timers
+    // keep firing on a detached element.
+    findMascotIn(root)?.dispose();
     renderRendition(r, root, addr, query);
     store.setRendered(id, r);
   } catch (e) {
     const msg = errorMessage(e);
     dlog(`[fetch] fail addr=${addr.slice(0, 8)}… msg=${msg}`);
+    findMascotIn(root)?.dispose();
     root.replaceChildren(buildErrorState(msg));
     store.setError(id, msg);
   }
@@ -360,17 +374,6 @@ function buildEmptyState(): HTMLElement {
   e.className = "tab-empty";
   e.textContent = "paste an address above to fetch";
   return e;
-}
-
-function buildSpinner(): HTMLElement {
-  const wrap = document.createElement("div");
-  wrap.className = "tab-spinner";
-  wrap.setAttribute("aria-label", "loading");
-  wrap.setAttribute("role", "status");
-  const ring = document.createElement("div");
-  ring.className = "tab-spinner-ring";
-  wrap.appendChild(ring);
-  return wrap;
 }
 
 function buildErrorState(msg: string): HTMLElement {

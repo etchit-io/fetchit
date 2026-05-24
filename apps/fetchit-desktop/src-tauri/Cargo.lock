@@ -3032,6 +3032,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 0.8.23",
 ]
 

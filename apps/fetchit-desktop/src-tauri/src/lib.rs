@@ -246,9 +246,9 @@ fn copy_png_to_clipboard(app: tauri::AppHandle, data: Vec<u8>) -> Result<(), Str
         .map_err(|e| format!("clipboard write: {e}"))
 }
 
-/// Open the `WebView` devtools window. The `devtools` feature on tauri makes
-/// this available in release builds too — the desktop app is read-only, so
-/// letting power users inspect what's being rendered is fine.
+/// Open the `WebView` devtools window. The `devtools` feature on tauri
+/// makes this available in release builds too — the app is read-only,
+/// so exposing devtools cannot enable writes.
 #[tauri::command]
 fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools();
@@ -291,8 +291,8 @@ async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Snapshot of the on-disk cache: policy + footprint. Wired to the settings
-/// panel so the user can see "currently using N MB across M files".
+/// Snapshot of the on-disk cache: policy + footprint, surfaced by the
+/// settings panel.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CacheStats {
@@ -315,9 +315,9 @@ fn cache_stats(state: tauri::State<'_, AppState>) -> CacheStats {
 #[tauri::command]
 fn set_cache_policy(state: tauri::State<'_, AppState>, policy: Policy) {
     state.disk_cache.set_policy(policy);
-    // Persist through so the choice survives a relaunch. Failure here doesn't
-    // affect the in-memory policy — the user sees the new behaviour
-    // immediately, even if the save couldn't land (read-only home dir, etc).
+    // Persist through so the policy survives a relaunch. Failure here
+    // doesn't affect the in-memory policy — runtime behaviour updates
+    // immediately even if the save fails (read-only home dir, etc).
     if let Ok(mut s) = state.settings.lock() {
         s.cache = policy;
         let _ = s.save(&state.settings_path);
@@ -326,6 +326,10 @@ fn set_cache_policy(state: tauri::State<'_, AppState>, policy: Policy) {
 
 #[tauri::command]
 fn clear_cache(state: tauri::State<'_, AppState>) {
+    // Both layers must be wiped — `cached_bytes` reads in-memory first
+    // and would otherwise keep serving fetched bytes from the current
+    // session even after the user explicitly cleared the cache.
+    state.cache.clear();
     state.disk_cache.clear();
 }
 
@@ -486,18 +490,37 @@ async fn fetch_and_render(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     addr: String,
+    tab_id: String,
 ) -> Result<RenditionDto, String> {
     let parsed: Address = addr
         .parse()
         .map_err(|e: fetchit_core::Error| e.to_string())?;
-    let bytes = match state.cached_bytes(&parsed) {
-        Some(b) => b,
-        None => fetch_bytes(&app, &state, &parsed).await?,
+    let token = state.register_fetch(tab_id.clone());
+    let work = async {
+        let bytes = match state.cached_bytes(&parsed) {
+            Some(b) => b,
+            None => fetch_bytes(&app, &state, &parsed).await?,
+        };
+        default_registry()
+            .render(bytes, &Hint::default(), &RenderContext::default())
+            .map(RenditionDto::from)
+            .map_err(|e| e.to_string())
     };
-    let rendition = default_registry()
-        .render(bytes, &Hint::default(), &RenderContext::default())
-        .map_err(|e| e.to_string())?;
-    Ok(rendition.into())
+    let result = tokio::select! {
+        r = work => r,
+        () = token.cancelled() => Err("fetch cancelled".to_string()),
+    };
+    state.finish_fetch(&tab_id);
+    result
+}
+
+/// Cancel any in-flight fetch registered for `tab_id`. Fire-and-forget
+/// from the frontend: no error if nothing is pending. The Rust task
+/// stops at its next `.await` after the token flips, so cancellation
+/// is "soon" but not instantaneous.
+#[tauri::command]
+fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
+    state.cancel_fetch(&tab_id);
 }
 
 /// Build and run the Tauri application: wires the URI scheme protocols,
@@ -577,8 +600,8 @@ pub fn run() {
                     Err(e) => eprintln!("[fetchit] media server failed to bind: {e}"),
                 }
             });
-            // Devtools is available via F12 / Ctrl-Shift-I / right-click in every
-            // build; auto-opening it on launch was noisy.
+            // Devtools is reachable via F12 / Ctrl-Shift-I / right-click
+            // in every build.
             let _ = app;
             Ok(())
         })
@@ -601,6 +624,7 @@ pub fn run() {
             cache_stats,
             set_cache_policy,
             clear_cache,
+            cancel_fetch,
             list_bookmarks,
             is_bookmarked,
             add_bookmark,

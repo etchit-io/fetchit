@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { Rendition } from "./types";
 
 export type TabStatus = "empty" | "loading" | "rendered" | "error";
@@ -114,6 +115,11 @@ export class TabStore {
   close(id: string): void {
     const idx = this.tabs.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    // Cancel any in-flight fetch for the tab so the Rust task stops
+    // making progress instead of running to completion against a DOM
+    // root that no longer exists. Fire-and-forget — the backend
+    // tolerates no-op cancel calls if no fetch is pending.
+    void invoke("cancel_fetch", { tabId: id }).catch(() => {});
     const [removed] = this.tabs.splice(idx, 1);
     removed.root.remove();
     if (this.activeId === id) {

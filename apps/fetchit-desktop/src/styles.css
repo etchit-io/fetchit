@@ -1,12 +1,13 @@
 /*
- * Theme tokens. The variable names are inherited from the brand bible
- * (etchit.io/brand.html) and play semantic roles:
+ * Theme tokens. Variable naming mirrors etch/it for cross-app
+ * consistency; see docs/BRAND.md for the canonical role / value
+ * mapping. Each theme redefines the same set so existing rules stay
+ * unchanged.
  *   --ink   canvas background           --bone     primary text
  *   --ink-2 elevated surface            --bone-dim secondary text
  *   --line  dividers / hairlines        --ash      labels / muted
  *   --copper / --copper-bright accent + hover  --rust  error
  *   --signal-ok status                  color-scheme matches surface
- * Each theme redefines the same set so existing rules stay unchanged.
  */
 
 :root, body[data-theme="dark"] {
@@ -22,9 +23,9 @@
   --signal-ok: #6ab04c;
   color-scheme: dark;
 
-  /* Shared motion vocabulary — aligned with etch>it for cross-app
-     coherence. --ease-out-expo for meaningful one-shot transitions
-     (enter, reveal); --dur-* for the three speeds. */
+  /* Motion tokens shared with etch/it. --ease-out-expo for one-shot
+     transitions (enter, reveal); --dur-micro/-trans/-enter for the
+     three durations. */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-micro: 160ms;
   --dur-trans: 280ms;
@@ -1063,69 +1064,6 @@ body:not([data-view="settings"]) #settings {
   user-select: none;
 }
 
-.tab-progress {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-}
-.tab-progress-track {
-  width: 200px;
-  height: 4px;
-  background: var(--line);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.tab-progress-fill {
-  height: 100%;
-  width: 0;
-  background: var(--copper);
-  transition: width 120ms linear;
-}
-.tab-progress.is-indeterminate .tab-progress-fill {
-  /* Breathing copper line — paired with etch>it's indeterminate uploads
-     so both progress states share one rhythm. 200ms rise / 800ms fall
-     per cycle: quick inhale, slow exhale. */
-  width: 100%;
-  transition: none;
-  opacity: 0.25;
-  animation: tab-progress-breathing 1s ease-in-out infinite;
-}
-@keyframes tab-progress-breathing {
-  0%   { opacity: 0.25; }
-  20%  { opacity: 1; }
-  100% { opacity: 0.25; }
-}
-.tab-progress-label {
-  color: var(--ash);
-  font-size: 13px;
-  letter-spacing: 0.02em;
-}
-
-.tab-spinner {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.tab-spinner-ring {
-  width: 36px;
-  height: 36px;
-  border: 3px solid var(--line);
-  border-top-color: var(--copper);
-  border-radius: 50%;
-  animation: fetchit-spin 800ms linear infinite;
-}
-@keyframes fetchit-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .tab-error {
   position: absolute;
   inset: 0;
@@ -1503,4 +1441,443 @@ body:not([data-view="settings"]) #settings {
   height: 70vh;
   border: 0;
   background: var(--bone);
+}
+
+/* === Fetcher mascot ===
+ * Styles for the SVG mascot mounted by `src/ui/mascot.ts`. Theme
+ * tokens: --bone (stroke / dark zone), --ink (canvas / paper),
+ * --copper (saddle / body), --rust (tongue).
+ */
+.mascot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  user-select: none;
+  /* Animation timing tokens — overridden per state. */
+  --mascot-gait: 0.6s;
+  --mascot-ground: 0.55s;
+  --mascot-cloud: 38s;
+}
+.mascot-stage {
+  position: relative;
+  width: min(720px, 92%);
+  max-height: 70%;
+  aspect-ratio: 720 / 280;
+}
+.mascot-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.mascot-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+  margin: 0;
+  text-align: center;
+  font-size: 13.5px;
+  letter-spacing: 0.04em;
+  color: var(--ash);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Scene background --- */
+.mascot-sky-top    { stop-color: var(--bone); stop-opacity: 0; }
+.mascot-sky-bottom { stop-color: var(--bone); stop-opacity: 0.08; }
+
+.mascot-hill {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.22;
+}
+
+.mascot-cloud circle {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  opacity: 0.45;
+}
+.mascot-cloud {
+  animation: mascot-cloud-drift var(--mascot-cloud) linear infinite;
+}
+.mascot-cloud--b { animation-duration: calc(var(--mascot-cloud) * 1.3); animation-delay: -12s; }
+.mascot-cloud--c { animation-duration: calc(var(--mascot-cloud) * 0.85); animation-delay: -22s; }
+@keyframes mascot-cloud-drift {
+  from { transform: translateX(640px); }
+  to   { transform: translateX(-820px); }
+}
+
+.mascot-ground-line {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.42;
+}
+.mascot-ground-tick {
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  opacity: 0.34;
+}
+.mascot-ground-ticks {
+  animation: mascot-ground-scroll var(--mascot-ground) linear infinite;
+}
+@keyframes mascot-ground-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-30px); }
+}
+
+/* --- Dust trail. Four puffs with staggered delays so the loop
+   never empties. --- */
+.mascot-dust-puff {
+  fill: var(--bone);
+  fill-opacity: 0.2;
+  stroke: var(--bone);
+  stroke-opacity: 0.4;
+  stroke-width: 1.1;
+}
+.mascot-dust-puff--1 { animation: mascot-dust 0.8s linear infinite; }
+.mascot-dust-puff--2 { animation: mascot-dust 0.8s linear infinite; animation-delay: -0.2s; }
+.mascot-dust-puff--3 { animation: mascot-dust 0.8s linear infinite; animation-delay: -0.4s; }
+.mascot-dust-puff--4 { animation: mascot-dust 0.8s linear infinite; animation-delay: -0.6s; }
+@keyframes mascot-dust {
+  0%   { transform: translateX(0) translateY(0) scale(0.6); opacity: 0; }
+  15%  { transform: translateX(-6px) translateY(-2px) scale(0.95); opacity: 0.75; }
+  55%  { transform: translateX(-32px) translateY(-6px) scale(1.3); opacity: 0.4; }
+  100% { transform: translateX(-70px) translateY(-12px) scale(1.7); opacity: 0; }
+}
+
+/* --- Puppy group. No wobble filter — see scene SVG comment. --- */
+.puppy {
+  animation: puppy-bound var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-bound {
+  0%, 100% { transform: translateY(-12px); }
+  50%      { transform: translateY(0); }
+}
+
+.puppy-body {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.4;
+  stroke-opacity: 0.45;
+}
+.puppy-belly {
+  fill: var(--bone);
+  fill-opacity: 0.2;
+  stroke: none;
+}
+.puppy-saddle {
+  fill: var(--bone);
+  fill-opacity: 0.85;
+  stroke: none;
+}
+
+.puppy-head {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.4;
+  stroke-opacity: 0.45;
+}
+.puppy-skullcap {
+  fill: var(--bone);
+  fill-opacity: 0.85;
+  stroke: none;
+}
+
+.puppy-snout {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.2;
+  stroke-opacity: 0.45;
+}
+.puppy-snout-light {
+  fill: var(--bone);
+  fill-opacity: 0.22;
+  stroke: none;
+}
+
+.puppy-mouth {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-opacity: 0.78;
+  stroke-linecap: round;
+}
+.puppy-nose {
+  fill: var(--bone);
+  fill-opacity: 0.9;
+  stroke: none;
+}
+.puppy-nose-highlight {
+  fill: var(--ink);
+  stroke: none;
+}
+
+.puppy-brow {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-opacity: 0.85;
+}
+.puppy-brow-wrap {
+  transform-origin: 384px 110px;
+  transition: transform 280ms var(--ease-out-expo, ease-out);
+}
+.mascot--sprinting .puppy-brow-wrap {
+  transform: translateY(-1.5px) rotate(-3deg);
+}
+
+.puppy-collar {
+  fill: none;
+  stroke: var(--copper-bright);
+  stroke-width: 1.7;
+  opacity: 0.85;
+}
+.puppy-collar-tag {
+  fill: var(--copper-bright);
+  stroke: var(--bone);
+  stroke-width: 0.5;
+}
+.puppy-collar-tag-wrap {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-tag-swing var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-tag-swing {
+  0%, 100% { transform: rotate(-14deg); }
+  50%      { transform: rotate(14deg); }
+}
+
+.puppy-eye-white {
+  fill: var(--ink);
+  stroke: var(--bone);
+  stroke-width: 1.1;
+}
+.puppy-pupil { fill: var(--bone); }
+.puppy-eye-highlight {
+  fill: var(--ink);
+  stroke: none;
+}
+.puppy-eyelid {
+  fill: var(--bone);
+  fill-opacity: 0.92;
+  stroke: var(--bone);
+  stroke-width: 1.1;
+  transform-origin: 384px 116px;
+  transform: scaleY(0);
+  transition: transform 110ms ease-out;
+}
+.mascot.is-blinking .puppy-eyelid {
+  transform: scaleY(1);
+}
+
+.puppy-tongue {
+  fill: var(--rust);
+  fill-opacity: 0.85;
+  stroke: var(--rust);
+  stroke-width: 1;
+}
+.puppy-tongue-wrap {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-tongue-bob var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-tongue-bob {
+  0%, 100% { transform: rotate(-6deg); }
+  50%      { transform: rotate(8deg) translateY(2px); }
+}
+
+.puppy-tail-fill {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-opacity: 0.45;
+}
+.puppy-tail-tip {
+  fill: var(--bone);
+  fill-opacity: 0.55;
+  stroke: none;
+}
+.puppy-tail-wrap {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-tail-whip var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-tail-whip {
+  0%, 100% { transform: rotate(18deg); }
+  50%      { transform: rotate(-10deg); }
+}
+
+.puppy-ear-back-fill,
+.puppy-ear-front-fill {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-opacity: 0.45;
+}
+.puppy-ear-back-shadow,
+.puppy-ear-front-shadow {
+  fill: var(--bone);
+  fill-opacity: 0.55;
+  stroke: none;
+}
+.puppy-ear {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-ear-flop var(--mascot-gait) ease-in-out infinite;
+}
+.puppy-ear--back { opacity: 0.9; }
+@keyframes puppy-ear-flop {
+  0%, 100% { transform: rotate(-6deg) translateY(-3px); }
+  50%      { transform: rotate(8deg) translateY(2px); }
+}
+
+/* --- Legs. The `.puppy-leg-knee` group is nested inside `.puppy-leg`
+   in the SVG so its CSS rotation composes with the parent's; that's
+   what makes the joint bend through the cycle. --- */
+.puppy-leg-upper,
+.puppy-leg-lower {
+  stroke: var(--copper);
+  stroke-width: 5.5;
+  stroke-linecap: round;
+  fill: none;
+}
+.puppy-leg-paw {
+  fill: var(--bone);
+  fill-opacity: 0.45;
+  stroke: var(--copper);
+  stroke-width: 1;
+}
+.puppy-leg--front-far .puppy-leg-upper,
+.puppy-leg--front-far .puppy-leg-lower,
+.puppy-leg--back-far .puppy-leg-upper,
+.puppy-leg--back-far .puppy-leg-lower {
+  stroke-opacity: 0.75;
+}
+
+.puppy-leg {
+  animation: puppy-leg-upper var(--mascot-gait) ease-in-out infinite;
+}
+.puppy-leg .puppy-leg-knee {
+  animation: puppy-leg-knee var(--mascot-gait) ease-in-out infinite;
+}
+.puppy-leg--back {
+  animation-delay: calc(var(--mascot-gait) * -0.12);
+}
+.puppy-leg--back .puppy-leg-knee {
+  animation-delay: calc(var(--mascot-gait) * -0.12);
+}
+@keyframes puppy-leg-upper {
+  0%, 100% { transform: rotate(-10deg); }
+  50%      { transform: rotate(8deg); }
+}
+@keyframes puppy-leg-knee {
+  0%, 100% { transform: rotate(-55deg); }
+  50%      { transform: rotate(0deg); }
+}
+
+/* --- Goal text. JS toggles `.is-swapping` to fade out, swap content
+   mid-fade, fade back. The 320ms transition must match
+   `MASCOT_GOAL_SWAP_MS` in mascot.ts. --- */
+.mascot-goal-text {
+  fill: var(--copper-bright);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  opacity: 0.3;
+  transition: opacity 320ms ease;
+}
+.mascot--fetching  .mascot-goal-text { opacity: 0.7; }
+.mascot--sprinting .mascot-goal-text { opacity: 1;   }
+.mascot-goal-text.is-swapping        { opacity: 0;   }
+
+/* --- State: resolving. Replaces the bound + leg cycles with a
+   crouched pose. --- */
+.mascot--resolving .mascot-ground-ticks,
+.mascot--resolving .mascot-cloud,
+.mascot--resolving .puppy-ear,
+.mascot--resolving .puppy-collar-tag-wrap,
+.mascot--resolving .puppy-tongue-wrap {
+  animation-play-state: paused;
+}
+.mascot--resolving .puppy {
+  animation: puppy-crouch 1.6s ease-in-out infinite;
+}
+@keyframes puppy-crouch {
+  0%, 100% { transform: translateY(14px); }
+  50%      { transform: translateY(16px); }
+}
+.mascot--resolving .puppy-leg {
+  animation: none;
+  transform: rotate(0deg);
+}
+.mascot--resolving .puppy-leg .puppy-leg-knee {
+  animation: none;
+  transform: rotate(0deg);
+}
+/* Composes with the inline `transform-origin` on `.puppy-head-wrap`
+   so the rotation pivots at the base of the neck. */
+.mascot--resolving .puppy-head-wrap {
+  animation: puppy-head-sniff 1.6s ease-in-out infinite;
+}
+@keyframes puppy-head-sniff {
+  0%, 100% { transform: rotate(-30deg) translate(5px, 9px); }
+  50%      { transform: rotate(-32deg) translate(5px, 12px); }
+}
+.mascot--resolving .puppy-tail-wrap {
+  animation: puppy-tail-slow 1.4s ease-in-out infinite;
+}
+@keyframes puppy-tail-slow {
+  0%, 100% { transform: rotate(22deg); }
+  50%      { transform: rotate(4deg); }
+}
+.mascot--resolving .mascot-dust-puff {
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+/* --- State: sprinting. Faster cycle. --- */
+.mascot--sprinting {
+  --mascot-gait: 0.42s;
+  --mascot-ground: 0.4s;
+}
+
+/* --- One-shot animations driven by JS class toggles. --- */
+.mascot.is-ear-flicking .puppy-ear--front {
+  animation: puppy-ear-flick 0.6s ease-in-out;
+}
+@keyframes puppy-ear-flick {
+  0%   { transform: rotate(-6deg); }
+  25%  { transform: rotate(18deg); }
+  55%  { transform: rotate(-12deg); }
+  80%  { transform: rotate(8deg); }
+  100% { transform: rotate(-6deg); }
+}
+.mascot.is-head-tilting.mascot--resolving .puppy-head-wrap {
+  animation: puppy-head-tilt 0.9s ease-in-out;
+}
+/* Endpoints must match `.mascot--resolving .puppy-head-wrap` so the
+   one-shot starts and ends without snapping back to identity. */
+@keyframes puppy-head-tilt {
+  0%, 100% { transform: rotate(-30deg) translate(5px, 9px); }
+  40%, 60% { transform: rotate(-5deg) translate(0, 0); }
+}
+
+/* --- Reduced motion: stop everything that loops, keep the dog
+       drawn and visible so the user still gets the affordance. --- */
+@media (prefers-reduced-motion: reduce) {
+  .mascot * {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
 }
