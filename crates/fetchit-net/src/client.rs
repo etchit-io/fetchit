@@ -27,9 +27,8 @@ const PROGRESS_CHANNEL: usize = 64;
 
 /// A coarse, UI-ready download-progress update.
 ///
-/// Mirrors etch>it's upload-progress struct so the publish/view pair
-/// reports progress in one vocabulary: a `phase` plus a `done` / `total`
-/// chunk count.
+/// Same shape as the etchit upload-progress struct: a `phase` plus a
+/// `done` / `total` chunk count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DownloadProgress {
     /// `"resolving"` while walking the data map, then `"fetching"` for

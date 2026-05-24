@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Home-screen label shown under the launcher icon. Without the
-         chevron — Android renders single-line labels small, where the
-         `>` reads as visual noise. The brand wordmark with chevron
-         lives everywhere else (fetch button face, share extras, docs). -->
+    <!-- Launcher label. No `>` glyph — Android renders single-line
+         launcher labels at a size where the chevron is unreadable;
+         the full wordmark is used elsewhere. -->
     <string name="app_name">fetchit</string>
     <string name="hint_address">Autonomi address</string>
     <string name="action_retry">retry</string>
@@ -46,17 +45,16 @@
          address and the user hasn\'t already typed something. -->
     <string name="paste_chip_label">📋 paste %1$s ?</string>
 
-    <!-- Network status during in-flight fetches. The "first connection"
-         pair is shown only before the first successful fetch (the
-         bootstrap warmup is the likely cause of slowness then); after
-         that, the neutral "fetching" pair. -->
+    <!-- In-flight-fetch status strings. The "first connection" pair
+         is used until the first successful fetch this session; after,
+         the steady-state "fetching" pair. -->
     <string name="status_connecting">connecting to Autonomi…</string>
     <string name="status_first_connection">first connection takes a moment…</string>
     <string name="status_fetching">fetching…</string>
     <string name="status_still_fetching">still fetching…</string>
 
-    <!-- Friendlier error variants. The technical FetchitException
-         message goes to logcat; the user sees something they can act on. -->
+    <!-- User-facing variants of the FetchitException error categories;
+         the underlying message still goes to logcat. -->
     <string name="error_no_client">Couldn\'t reach the network. Check your connection?</string>
     <string name="error_not_found">Couldn\'t find this content on Autonomi.</string>
     <string name="error_timed_out">The network is slow right now. Try again?</string>

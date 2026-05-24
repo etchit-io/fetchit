@@ -1,6 +1,6 @@
 // fetch>it content script. Finds existing <a href="autonomi://..."> anchors
-// and decorates them with a small inline badge so users can see at a glance
-// that the link routes to fetch>it (not just a dead custom-scheme URL).
+// and decorates them with a small inline badge marking them as routing
+// to the fetch>it OS handler (not a dead custom-scheme URL).
 //
 // Deliberately conservative: only decorates anchors that *already* declare
 // `href="autonomi://..."`. We do not walk arbitrary text nodes looking for
@@ -48,12 +48,11 @@
     (document.head || document.documentElement).appendChild(s);
   }
 
-  // Returns true if the anchor's parent uses a CSS display value that treats
-  // each child as a layout slot (flex/grid). Inserting an extra <span> after
-  // the anchor in such a parent inserts a new slot between siblings, which
-  // breaks card grids, button rows, etc. (We saw this on etchit.io/city
-  // before we hid the badge there.) In that case we still flag the anchor
-  // with a tooltip but skip the visible badge.
+  // Returns true if the anchor's parent uses a CSS display value that
+  // treats each child as a layout slot (flex/grid). Inserting an extra
+  // <span> after the anchor in such a parent inserts a new slot between
+  // siblings, which breaks card grids, button rows, etc. In that case
+  // we still flag the anchor with a tooltip but skip the visible badge.
   function parentTreatsChildrenAsSlots(a) {
     const p = a.parentElement;
     if (!p) return false;
@@ -93,8 +92,8 @@
 
   // `i` flag → case-insensitive attribute match, so AUTONOMI:// gets caught
   // alongside autonomi://. URL schemes are case-insensitive by the RFC.
-  // We badge both scheme variants — autonomi:// (canonical) and fetchit://
-  // (brand alias). Same target binary on the desktop side.
+  // Badge both scheme variants — autonomi:// (canonical) and fetchit://.
+  // Same target binary on the desktop side.
   const LINK_SEL = 'a[href^="autonomi://" i], a[href^="fetchit://" i]';
 
   function sweep(root) {
@@ -108,11 +107,10 @@
   ensureStyle();
   sweep(document);
 
-  // React/Vue/etc. mount content asynchronously. We coalesce mutation bursts
-  // into one sweep per animation frame — busy SPAs (Twitter, GitHub, Discord)
-  // can fire thousands of mutations per second, and running querySelectorAll
-  // on each one is the kind of well-meaning extension that earns "this slowed
-  // my browser to a crawl" reviews. One pass per frame is plenty.
+  // React/Vue/etc. mount content asynchronously. Coalesce mutation
+  // bursts into one sweep per animation frame — busy SPAs (Twitter,
+  // GitHub, Discord) can fire thousands of mutations per second;
+  // running querySelectorAll on every one is O(n) per burst.
   const pendingRoots = new Set();
   let scheduled = false;
   const flush = () => {

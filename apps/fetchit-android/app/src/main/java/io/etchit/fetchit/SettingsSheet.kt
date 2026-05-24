@@ -16,9 +16,8 @@ import uniffi.fetchit_ffi.defaultPeers
  * `CoordinatorLayout` bottom sheet.
  *
  * Live-paints the peer count from
- * [`FetchitApplication.peerCountTracker`]: ash when ≥ 1, red when 0
- * (matches etchit's "honest dip" rule). Bootstrap-peers section starts
- * collapsed — most users never touch it.
+ * [`FetchitApplication.peerCountTracker`]: ash when ≥ 1, red when 0.
+ * Bootstrap-peers section starts collapsed.
  */
 class SettingsSheet(
     private val binding: ActivityMainBinding,

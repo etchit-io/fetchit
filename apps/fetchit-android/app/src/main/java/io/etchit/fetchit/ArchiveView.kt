@@ -11,8 +11,7 @@ import uniffi.fetchit_ffi.ArchiveEntryFfi
  * in `archiveView` from `activity_main.xml`. Tapping an entry
  * hands the activity the entry's bytes so it can detect-and-render the
  * inner content with the existing rendition machinery (image / audio /
- * video / pdf / text / …). fetch>it is the viewer — there's no
- * hand-off to other apps for kinds the engine already understands.
+ * video / pdf / text / …).
  *
  * Pure UI layer — the activity owns the heavy lifting (FFI extraction,
  * SAF launchers, back-nav) via [Callbacks].

@@ -33,9 +33,9 @@ export function deriveLabel(rendition: Rendition | null | undefined, address: st
 }
 
 /// Real title only — returns `null` when the rendition has no inherent
-/// title. The QR-share modal uses this to decide whether to show a title
-/// row at all (showing the address-slug fallback there would be noise,
-/// since the abbreviated address is already on the line below).
+/// title. The QR-share modal uses this to decide whether to emit a
+/// title row; the address-slug fallback would duplicate the abbreviated
+/// address shown on the next line.
 export function deriveTitle(rendition: Rendition | null | undefined): string | null {
   if (!rendition) return null;
   if (rendition.kind === "etchitEnvelope" && rendition.title) return rendition.title.trim();

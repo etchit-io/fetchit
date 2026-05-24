@@ -1,7 +1,6 @@
-// Settings panel — opens via the gear button or Ctrl/Cmd+,. Browser-familiar
-// full-page form (Chrome / Firefox / Brave all do the same). Reads current
-// state from Rust on open; writes through on every change so the disk reflects
-// the user's choice without a "Save" button.
+// Settings panel — opens via the gear button or Ctrl/Cmd+,. Full-page
+// form. Reads current state from Rust on open; writes through on
+// every change, so there is no explicit save action.
 
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
@@ -435,9 +434,8 @@ function mountPeers(root: HTMLElement): void {
     void invoke<PeersRefreshResult>("refresh_peers_from_upstream")
       .then((result) => {
         editor.value = result.peers.join("\n");
-        // showError is the only status surface in this UI; reuse it for
-        // success notes too (tone is conveyed by the absence of the red
-        // error class — fine for a transient confirmation).
+        // showError is the only status surface in this UI; reused
+        // here for success notes too.
         const n = result.peers.length;
         const verb = result.updated ? "Updated" : "Already current";
         showError(`${verb} · ${n} peer${n === 1 ? "" : "s"}`);

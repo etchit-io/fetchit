@@ -8,9 +8,8 @@
     <color name="ash">#8a8a8a</color>
     <color name="copper">#c9732b</color>
     <color name="copper_bright">#e58a3f</color>
-    <!-- Status colours match etchit exactly (Tokyo Night palette).
-         Used for "this thing is in a good state" (green) and "honest
-         transient failure surface" (red). -->
+    <!-- Status colours (Tokyo Night palette, kept in sync with etchit):
+         green for ok states, red for transient failure surfaces. -->
     <color name="status_green">#9ece6a</color>
     <color name="status_red">#f7768e</color>
 </resources>

@@ -94,11 +94,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private var statusJob: Job? = null
 
     /**
-     * True once any fetch has succeeded this session. Before that, the
-     * timed status text frames a slow fetch as "connecting / first
-     * connection takes a moment" (the bootstrap warmup is the likely
-     * culprit). After, it's just "fetching / still fetching" — saying
-     * "first connection" on every fetch is misleading.
+     * True once any fetch has succeeded this session. Selects between
+     * the pre-first-connection status string set (mentions the bootstrap
+     * warmup) and the steady-state set.
      */
     private var hasConnectedOnce = false
 
@@ -281,9 +279,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         // routed an autonomi://<addr> intent at us — pick it up.
         handleViewIntent(intent)
 
-        // Pull-down-from-top: full reset to the idle screen — clear
-        // the address input, dismiss any rendition, restore the fetch
-        // button. Lighter than ✕ + manual address-clear.
+        // Pull-down-from-top: full reset — clear the address input,
+        // dismiss any rendition, restore the fetch button.
         binding.swipeRefresh.setColorSchemeColors(themeColor(R.attr.fetchitCopper))
         binding.swipeRefresh.setProgressBackgroundColorSchemeColor(themeColor(R.attr.fetchitInk3))
         binding.swipeRefresh.setOnRefreshListener { resetToIdle() }
@@ -433,10 +430,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private suspend fun doFetch(addr: String, query: String = "") {
         val app = fetchitApp()
         // Disk cache first — Autonomi addresses are immutable, so a hit
-        // is always correct, even across app restarts. On a hit we render
-        // straight over whatever's on screen, with no "fetching" chrome
-        // and no blank frame in between — so back-navigation and revisits
-        // feel instant instead of looking like the page is reloading.
+        // is always correct, even across app restarts. Cache-hit path
+        // renders directly without clearing or toggling the in-flight
+        // fetch chrome.
         val cached = withContext(Dispatchers.IO) { app.bytesCache.get(addr) }
         if (cached != null) {
             try {
@@ -536,12 +532,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.fetchButton.setFetching(inFlight)
         statusJob?.cancel()
         if (inFlight) {
-            // Two-stage status: a short line appears after a brief delay
-            // so quick cache hits don't flash text; a longer one
-            // replaces it if the fetch drags. Before the first
-            // successful fetch the wording leans on the bootstrap
-            // warmup ("connecting / first connection takes a moment");
-            // after, it's just "fetching / still fetching".
+            // Two-stage status: an initial delay before any text appears,
+            // then a second timer swaps to the long-fetch string. The
+            // string-set pair is selected by hasConnectedOnce.
             val short = if (hasConnectedOnce) R.string.status_fetching else R.string.status_connecting
             val long = if (hasConnectedOnce) R.string.status_still_fetching else R.string.status_first_connection
             statusJob = lifecycleScope.launch {
@@ -703,13 +696,11 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
     private companion object {
         const val TAG = "fetchit"
-        /** Wait this long before flashing any status text — keeps fast
-         *  cache hits invisible (no flicker). */
+        /** Initial delay before any status text appears; fetches that
+         *  finish below this duration display none. */
         const val STATUS_INITIAL_DELAY_MS = 1_500L
-        /** Switch from "connecting…" to the long-fetch reassurance after
-         *  this many ms. fetch>it's connect warmup runs up to ~10s
-         *  before it returns, so we reassure the user a couple of
-         *  seconds before that ceiling. */
+        /** Switch to the long-fetch string after this many ms. Set
+         *  below the ~10s ant-core connect-warmup ceiling. */
         const val STATUS_LONG_THRESHOLD_MS = 8_000L
     }
 }

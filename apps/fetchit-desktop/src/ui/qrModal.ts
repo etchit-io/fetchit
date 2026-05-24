@@ -70,10 +70,8 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
   const copyPng = host.querySelector(".qr-modal-copy-png") as HTMLButtonElement;
   const closeBtn = host.querySelector(".qr-modal-close") as HTMLButtonElement;
 
-  // Rasterise the full branded card (wordmark + QR + address + "scan
-  // with fetch>it on mobile · etchit.io" footer) to a PNG blob. Save
-  // image and Copy image both call this so the exported artifact
-  // carries the brand chrome, not just an anonymous QR.
+  // Rasterise the export-card SVG (wordmark + QR + address + footer)
+  // to a PNG blob. Shared path for Save image and Copy image.
   async function rasterise(): Promise<Blob | null> {
     if (!currentAddr) return null;
     // Read the live input each call so a title typed after the modal
@@ -141,12 +139,12 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
     open(address, title) {
       currentAddr = address;
       // Pre-fill the title with any caller-derived label (etch title,
-      // page <title>, filename) but leave it editable — recipients
-      // benefit most when the sharer can tweak before exporting.
+      // page <title>, filename). The input stays editable so the
+      // caller's label can be overridden before export.
       titleInput.value = (title ?? "").trim();
       codeEl.textContent = abbreviateAddress(address);
-      // Copper-colored center mark so the QR carries the brand chevron even
-      // when the modal frame is cropped out of a screenshot.
+      // Copper-colored center mark — survives screenshots cropped to
+      // just the QR.
       qrSlot.replaceChildren(
         renderQrSvg(`autonomi://${address}`, {
           cellSize: 8,

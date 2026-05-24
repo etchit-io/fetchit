@@ -16,7 +16,7 @@
         <item name="android:windowBackground">?attr/fetchitInk</item>
     </style>
 
-    <!-- Theme 1 / Dark — brand-bible canonical. Default. -->
+    <!-- Dark theme — default. -->
     <style name="Theme.Fetchit.Dark" parent="Theme.Fetchit.Base">
         <item name="fetchitInk">#0a0a0a</item>
         <item name="fetchitInk2">#141414</item>
@@ -48,7 +48,7 @@
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
-    <!-- Theme 3 / Light — bone canvas, ink text (bible's inverted form). -->
+    <!-- Light theme — bone canvas, ink text (inverted from Dark). -->
     <style name="Theme.Fetchit.Light" parent="Theme.Fetchit.Base">
         <item name="fetchitInk">#f5f2eb</item>
         <item name="fetchitInk2">#faf7f2</item>
@@ -68,10 +68,8 @@
          time; MainActivity overrides to the user's chosen theme on launch. -->
     <style name="Theme.Fetchit" parent="Theme.Fetchit.Dark" />
 
-    <!-- Full-screen brand-fixed share dialog (cream / ink / copper). Used
-         for the QR share preview so the host activity's theme can't bleed
-         around the share artifact — the share screen always reads as a
-         printed card regardless of which app theme is active. -->
+    <!-- Full-screen share-dialog style with a fixed palette (cream /
+         ink / copper), independent of the host activity's theme. -->
     <style name="Theme.Fetchit.ShareDialog" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:windowBackground">#f5f2eb</item>
         <item name="android:statusBarColor">#f5f2eb</item>

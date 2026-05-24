@@ -52,9 +52,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Read the settings file at `path`. Missing or malformed files yield
-    /// defaults — explicit, no surprises, and lets users always recover by
-    /// deleting the file.
+    /// Read the settings file at `path`. Missing or malformed files
+    /// yield defaults; deleting the file is a valid recovery path.
     pub fn load(path: &Path) -> Self {
         let Ok(text) = fs::read_to_string(path) else {
             return Self::default();

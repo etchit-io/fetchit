@@ -3,9 +3,9 @@
 //
 // Two schemes route to fetch>it through the OS handler:
 //   * autonomi://<64-hex>  — the network-canonical name
-//   * fetchit://<64-hex>   — the brand-aliased name (same target)
-// We accept either as input; downstream openers build whichever scheme they
-// prefer (we default to autonomi:// for maximum interop with other clients).
+//   * fetchit://<64-hex>   — the alias scheme (same target)
+// We accept either as input; downstream openers build whichever scheme
+// they prefer (we default to autonomi:// for interop with other clients).
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 const SCHEME = /^(?:autonomi|fetchit):\/\//i;

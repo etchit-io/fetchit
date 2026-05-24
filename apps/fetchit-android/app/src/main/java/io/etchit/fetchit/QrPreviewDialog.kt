@@ -58,8 +58,8 @@ fun showQrPreviewDialog(context: Context, address: String, label: String? = null
         return QrShare.renderCardFor(address, label)
     }
 
-    // Full-screen, brand-fixed cream surface — the share artifact reads
-    // identically regardless of which app theme is active.
+    // Force the ShareDialog theme so the rendered card uses a fixed
+    // palette and isn't affected by the host activity's theme.
     val dialog = Dialog(context, R.style.Theme_Fetchit_ShareDialog).apply {
         setContentView(view)
         window?.setLayout(MATCH_PARENT, MATCH_PARENT)

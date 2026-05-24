@@ -26,7 +26,7 @@ test("parseAutonomiInput — autonomi:// prefix is stripped", () => {
   assert.equal(parseAutonomiInput(`autonomi://${HEX64}`), HEX64);
 });
 
-test("parseAutonomiInput — fetchit:// prefix is stripped (brand alias)", () => {
+test("parseAutonomiInput — fetchit:// prefix is stripped (alias scheme)", () => {
   // Both schemes route to fetch>it via the OS handler; the parser
   // accepts either and returns the bare hex address.
   assert.equal(parseAutonomiInput(`fetchit://${HEX64}`), HEX64);
@@ -111,7 +111,7 @@ test("isAutonomiHref — accepts both cases of autonomi://", () => {
   assert.equal(isAutonomiHref(`autonomi://${HEX64}/path?q#f`), true);
 });
 
-test("isAutonomiHref — accepts fetchit:// (brand alias)", () => {
+test("isAutonomiHref — accepts fetchit:// (alias scheme)", () => {
   assert.equal(isAutonomiHref(`fetchit://${HEX64}`), true);
   assert.equal(isAutonomiHref(`FETCHIT://${HEX64}`), true);
   assert.equal(isAutonomiHref(`Fetchit://${HEX64}/path?q#f`), true);

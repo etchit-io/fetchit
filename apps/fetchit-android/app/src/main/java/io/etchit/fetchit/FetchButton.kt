@@ -16,10 +16,10 @@ import android.widget.FrameLayout
  *   * native [`setFetching`] → CSS class toggle on the button (ring
  *     sweeps, text fades, beagle runs)
  *
- * Why a `WebView`: the design ships as HTML/SVG/CSS animations, which
- * stay synchronised in one place. Re-implementing the leg-paired,
- * tail-wagging, dust-trailing beagle as Android `AnimatedVectorDrawable`
- * would multiply the maintenance surface for no gain. JavaScript is
+ * Why a `WebView`: the asset ships as HTML/SVG/CSS animations, which
+ * stay synchronised in one place. Re-implementing the SVG animation
+ * as an Android `AnimatedVectorDrawable` would duplicate the
+ * maintenance surface for no gain. JavaScript is
  * enabled here (the button's state changes are driven from JS via a
  * small `Native` bridge), but the WebView is otherwise scoped tight:
  * one instance, transparent body, no DOM storage, no file or

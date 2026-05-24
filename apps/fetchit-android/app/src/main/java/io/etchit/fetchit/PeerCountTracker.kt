@@ -17,11 +17,10 @@ import uniffi.fetchit_ffi.Client
  * Polls [`Client.peerCount`] periodically and exposes the latest value
  * as a [`StateFlow`].
  *
- * Mirrors etchit's pattern (15s interval, 5s per-query timeout). The
- * peer count genuinely drifts at runtime — DHT churn, NAT, bootstrap
- * progressively discovering more peers — so a "Connected" label
- * without a live number lies during the transient dips. Painting the
- * value honestly (red at 0) is more useful than a fixed status.
+ * Mirrors etchit's pattern (15s interval, 5s per-query timeout).
+ * Peer count drifts at runtime (DHT churn, NAT, bootstrap-driven
+ * discovery); the live value — including 0 — is surfaced instead of
+ * a binary connected/disconnected label.
  *
  * Owned by [`FetchitApplication`]; lives for the process. Idempotent
  * `start()` so on-demand callers don't spawn duplicate jobs.
@@ -54,8 +53,8 @@ class PeerCountTracker(
         return try {
             withTimeout(QUERY_TIMEOUT_MS) { client.peerCount().toLong() }
         } catch (_: Exception) {
-            // Timeout or transient FFI failure. Leave the previous
-            // value visible rather than flashing "unknown".
+            // Timeout or transient FFI failure: retain the previous
+            // value instead of overwriting with null.
             _flow.value
         }
     }

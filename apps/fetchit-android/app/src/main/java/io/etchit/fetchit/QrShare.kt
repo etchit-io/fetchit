@@ -19,24 +19,20 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Encode an Autonomi address as a small branded QR-code card (PNG) and
- * fire the system share sheet so the user can drop it into any
- * messenger / mail client / file manager.
+ * Encode an Autonomi address as a small QR-code card (PNG) and fire
+ * the system share sheet so it can be passed to any messenger / mail
+ * client / file manager.
  *
- * **Why QR**: Gmail / WhatsApp / SMS and most other messengers only
- * auto-linkify a small whitelist of URL schemes (`http`, `https`,
- * `mailto`, `tel`). `autonomi://<addr>` arrives as plain text — the
- * recipient can't tap to open. A QR lets them point their phone's
- * camera and have the system intent flow route to fetch>it without
- * any messenger cooperation. Aligns with the no-DNS / no-traditional-
- * internet ethos.
+ * **Why QR**: most messengers auto-linkify only a fixed set of URL
+ * schemes (http/https/mailto/tel); `autonomi://<addr>` arrives as
+ * inert text. A QR routes through the camera + system-intent chooser
+ * instead.
  *
- * **The card**: the QR carries the canonical payload (`autonomi://<64-hex>`,
- * so any Autonomi-aware client handles it), with the `[>]` mark in its
- * centre (the QR uses error-correction level H, which tolerates the
- * obscured modules), and the `fetch>it` wordmark + the address printed
- * below. Sized ~560 px wide — comfortably scannable off a phone screen,
- * but not the wall-filling 880 px square it used to be.
+ * **The card**: the QR carries the canonical payload
+ * (`autonomi://<64-hex>`, so any Autonomi-aware client handles it),
+ * with the `[>]` mark in its centre (error-correction level H
+ * tolerates the obscured modules), and the wordmark + address
+ * printed below. Card is ~560 px wide.
  */
 object QrShare {
 
@@ -154,8 +150,7 @@ object QrShare {
             textSize = 16f
             color = ASH
         }
-        // Companion footer — bold ink so the brand pair stays clear
-        // when the card is reshared on a busy timeline.
+        // Companion footer paint — bold ink, contrasts against cream.
         val sibPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = Typeface.DEFAULT_BOLD
             textSize = 14f
@@ -272,9 +267,9 @@ object QrShare {
         y += lineH(tagPaint)
         y += gAfterTag
 
-        // — companion app (brand-typographic; > and / in copper) —
-        // Split into segments so the marks render copper without
-        // losing kerning inside each text run.
+        // — companion-app line; `>` and `/` drawn in copper, rest
+        // in ink. Split into segments so the marks render copper
+        // without losing kerning inside each text run.
         val sibSegments = listOf(
             "fetch" to INK,
             ">" to COPPER,
