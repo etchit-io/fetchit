@@ -1,0 +1,43 @@
+//! Typed error surface for chat-client operations.
+
+use thiserror::Error;
+
+/// Convenience alias used throughout the crate.
+pub type Result<T> = std::result::Result<T, ChatError>;
+
+/// All failure modes the client can surface.
+#[derive(Debug, Error)]
+pub enum ChatError {
+    /// The daemon's data directory or auth token was not discoverable.
+    #[error("x0xd not discoverable: {0}")]
+    NotDiscoverable(String),
+
+    /// HTTP transport / connection error.
+    #[error("transport: {0}")]
+    Transport(#[from] reqwest::Error),
+
+    /// WebSocket connection or framing error.
+    #[error("websocket: {0}")]
+    WebSocket(String),
+
+    /// The daemon returned a non-success status with a body.
+    #[error("daemon returned {status}: {body}")]
+    Daemon {
+        /// HTTP status code.
+        status: u16,
+        /// Response body, truncated for log safety.
+        body: String,
+    },
+
+    /// JSON serialization / deserialization mismatch.
+    #[error("decode: {0}")]
+    Decode(#[from] serde_json::Error),
+
+    /// Malformed input (bad agent id, malformed card, etc.).
+    #[error("invalid input: {0}")]
+    Invalid(String),
+
+    /// I/O error reading discovery files.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
