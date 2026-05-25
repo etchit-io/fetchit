@@ -156,15 +156,56 @@ where
     )
 }
 
+fn decode_dm(value: serde_json::Value) -> Result<DirectMessage> {
+    #[derive(Deserialize)]
+    struct Raw {
+        sender: AgentId,
+        payload: String,
+        #[serde(default)]
+        received_at: Option<u64>,
+        #[serde(default)]
+        verified: Option<bool>,
+        #[serde(default)]
+        message_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Env {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        sender_name: Option<String>,
+        #[serde(default)]
+        ts: Option<u64>,
+    }
+    let raw: Raw = serde_json::from_value(value)?;
+    let env_bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &raw.payload,
+    )
+    .map_err(|e| ChatError::Invalid(format!("dm payload b64: {e}")))?;
+    let env: Env = serde_json::from_slice(&env_bytes).unwrap_or(Env {
+        text: None,
+        sender_name: None,
+        ts: None,
+    });
+    Ok(DirectMessage {
+        from: raw.sender,
+        to: None,
+        body: env.text.unwrap_or_default(),
+        sender_name: env.sender_name,
+        timestamp_ms: env.ts.or(raw.received_at),
+        message_id: raw.message_id,
+        verified: raw.verified,
+    })
+}
+
 fn decode_frame(frame: &Frame) -> Result<Option<Event>> {
     if frame.data.is_empty() {
         return Ok(None);
     }
     let value: serde_json::Value = serde_json::from_str(&frame.data)?;
     let ev = match frame.event.as_str() {
-        "dm" | "direct" | "direct_message" => {
-            Event::DirectMessage(serde_json::from_value::<DirectMessage>(value)?)
-        }
+        "dm" | "direct" | "direct_message" => Event::DirectMessage(decode_dm(value)?),
         "presence" => Event::Presence(serde_json::from_value::<PresenceTransition>(value)?),
         "contact_added" => Event::ContactAdded(serde_json::from_value::<Contact>(value)?),
         "contact_removed" => {
@@ -223,12 +264,21 @@ mod tests {
     #[test]
     fn direct_message_frame_decodes() {
         let id = "a".repeat(64);
+        // The envelope `{"text":"hi","sender_name":"Alice","ts":1}` as base64.
+        let payload = "eyJ0ZXh0IjoiaGkiLCJzZW5kZXJfbmFtZSI6IkFsaWNlIiwidHMiOjF9";
         let f = frame(
             "direct_message",
-            &format!(r#"{{"from":"{id}","to":"{id}","body":"hi"}}"#),
+            &format!(r#"{{"sender":"{id}","payload":"{payload}","verified":true}}"#),
         );
         let ev = decode_frame(&f).unwrap().unwrap();
-        assert!(matches!(ev, Event::DirectMessage(_)));
+        match ev {
+            Event::DirectMessage(dm) => {
+                assert_eq!(dm.body, "hi");
+                assert_eq!(dm.sender_name.as_deref(), Some("Alice"));
+                assert_eq!(dm.verified, Some(true));
+            }
+            _ => panic!("expected DirectMessage"),
+        }
     }
 
     #[test]

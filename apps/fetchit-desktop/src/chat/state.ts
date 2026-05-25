@@ -150,7 +150,8 @@ export class ChatStore {
 
   recordDirectMessage(dm: DirectMessage): void {
     const me = this.myId();
-    const peer = dm.from === me ? dm.to : dm.from;
+    const peer = dm.from === me ? (dm.to ?? "") : dm.from;
+    if (!peer) return;
     const conv = this.ensureDm(peer);
     const ts = dm.timestamp_ms ?? Date.now();
     conv.messages.push({

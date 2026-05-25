@@ -17,21 +17,32 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
-/// A direct message — inbound or outbound.
+/// A direct message — inbound or outbound, after the base64+JSON
+/// envelope has been unwrapped.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirectMessage {
     /// Sender's agent id.
     pub from: AgentId,
-    /// Recipient's agent id.
-    pub to: AgentId,
-    /// Plaintext body (already decrypted by the daemon).
+    /// Recipient's agent id. Inbound events from `/direct/events`
+    /// don't carry this — the recipient is always the local agent
+    /// — so it's optional.
+    #[serde(default)]
+    pub to: Option<AgentId>,
+    /// Plaintext body extracted from the envelope's `text` field.
     pub body: String,
-    /// Unix epoch milliseconds.
+    /// Display name from the envelope's `sender_name` field.
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    /// Envelope timestamp (ms) if present, else the daemon's
+    /// `received_at`.
     #[serde(default)]
     pub timestamp_ms: Option<u64>,
     /// Daemon-assigned message id.
     #[serde(default)]
     pub message_id: Option<String>,
+    /// Whether the daemon verified the sender's ML-DSA signature.
+    #[serde(default)]
+    pub verified: Option<bool>,
 }
 
 /// Endpoint wrapper. Build via [`Client::messages`](crate::Client::messages).

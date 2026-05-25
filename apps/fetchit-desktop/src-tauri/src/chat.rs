@@ -274,45 +274,111 @@ pub async fn chat_group_messages(
         .map_err(|e| e.to_string())
 }
 
-/// Spawn the background SSE event pump. Reconnects with backoff on
-/// disconnect or daemon-not-running. Emits Tauri events:
-///
-/// - `chat:event` — every event with the typed variant tag
-/// - `chat:dm` — DMs only, body shape: [`fetchit_chat::messages::DirectMessage`]
-/// - `chat:presence` — presence transitions only
+/// Spawn the background SSE event pumps. The daemon exposes three
+/// relevant streams — `/events` (subscribed gossip topics),
+/// `/direct/events` (inbound DMs), and `/presence/events` (online/
+/// offline transitions). Each gets its own task; all funnel through
+/// the same Tauri event emitter so the frontend only listens once.
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
+    spawn_direct(app.clone(), state.clone());
+    spawn_presence(app.clone(), state.clone());
+    spawn_unified(app, state);
+}
+
+fn spawn_direct(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let client = match state.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    log_pump(&format!("daemon not reachable: {e}"));
-                    state.invalidate().await;
-                    tokio::time::sleep(RECONNECT_BACKOFF).await;
-                    continue;
-                }
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
             };
-            let mut stream = match client.events().await {
+            let mut stream = match client.direct_events().await {
                 Ok(s) => s,
                 Err(e) => {
-                    log_pump(&format!("event stream open failed: {e}"));
+                    log_pump(&format!("[direct] open failed: {e}"));
                     state.invalidate().await;
                     tokio::time::sleep(RECONNECT_BACKOFF).await;
                     continue;
                 }
             };
-            log_pump("event stream open");
+            log_pump("[direct] stream open");
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(ev) => emit(&app, &ev),
                     Err(e) => {
-                        log_pump(&format!("event stream error: {e}"));
+                        log_pump(&format!("[direct] error: {e}"));
                         break;
                     }
                 }
             }
-            log_pump("event stream ended; reconnecting");
-            state.invalidate().await;
+            log_pump("[direct] ended; reconnecting");
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
+fn spawn_presence(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let mut stream = match client.presence_events().await {
+                Ok(s) => s,
+                Err(e) => {
+                    log_pump(&format!("[presence] open failed: {e}"));
+                    state.invalidate().await;
+                    tokio::time::sleep(RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            log_pump("[presence] stream open");
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(ev) => emit(&app, &ev),
+                    Err(e) => {
+                        log_pump(&format!("[presence] error: {e}"));
+                        break;
+                    }
+                }
+            }
+            log_pump("[presence] ended; reconnecting");
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
+fn spawn_unified(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let mut stream = match client.events().await {
+                Ok(s) => s,
+                Err(e) => {
+                    log_pump(&format!("[unified] open failed: {e}"));
+                    state.invalidate().await;
+                    tokio::time::sleep(RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            log_pump("[unified] stream open");
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(ev) => emit(&app, &ev),
+                    Err(e) => {
+                        log_pump(&format!("[unified] error: {e}"));
+                        break;
+                    }
+                }
+            }
+            log_pump("[unified] ended; reconnecting");
             tokio::time::sleep(RECONNECT_BACKOFF).await;
         }
     });

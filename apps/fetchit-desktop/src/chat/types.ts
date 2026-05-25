@@ -38,10 +38,12 @@ export interface Contact {
 
 export interface DirectMessage {
   from: AgentId;
-  to: AgentId;
+  to?: AgentId | null;
   body: string;
+  sender_name?: string | null;
   timestamp_ms?: number | null;
   message_id?: string | null;
+  verified?: boolean | null;
 }
 
 export interface PresenceTransition {
