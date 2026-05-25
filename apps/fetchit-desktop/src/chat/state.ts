@@ -68,6 +68,12 @@ export class ChatStore {
   loadContacts(list: Contact[]): void {
     this.contacts.clear();
     for (const c of list) this.contacts.set(c.agent_id, c);
+    const me = this.myId();
+    for (const c of list) {
+      if (c.agent_id === me) continue;
+      if (c.trust_level !== "known" && c.trust_level !== "trusted") continue;
+      this.ensureDm(c.agent_id);
+    }
     this.emit();
   }
 

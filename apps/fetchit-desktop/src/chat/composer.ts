@@ -38,6 +38,9 @@ export function mountComposer(
       await handlers.onSend(body);
       ta.value = "";
       tryGrow();
+    } catch (e) {
+      console.error("[chat] send failed:", e);
+      send.title = `Send failed: ${(e as Error).message}`;
     } finally {
       send.disabled = ta.value.trim().length === 0;
     }

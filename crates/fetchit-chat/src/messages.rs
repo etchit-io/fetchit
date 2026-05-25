@@ -4,10 +4,17 @@
 //! (`GET /direct/events` or the unified `/events`). The daemon does
 //! not retain DM history server-side; persistent transcripts live on
 //! the consumer (the fetch>it desktop app stores them locally).
+//!
+//! Wire shape — `POST /direct/send` takes `{agent_id, payload}` where
+//! `payload` is base64-encoded JSON: `{text, sender_name, ts}`. The
+//! daemon transports the envelope as opaque bytes; the convention is
+//! shared between client implementations (CLI / GUI / fetch>it).
 
 use crate::error::Result;
 use crate::identity::AgentId;
 use crate::transport::Http;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 /// A direct message — inbound or outbound.
@@ -36,7 +43,14 @@ pub struct Endpoint<'a> {
 #[derive(Serialize)]
 struct SendRequest<'a> {
     agent_id: &'a str,
-    body: &'a str,
+    payload: String,
+}
+
+#[derive(Serialize)]
+struct Envelope<'a> {
+    text: &'a str,
+    sender_name: &'a str,
+    ts: u64,
 }
 
 #[derive(Serialize)]
@@ -77,15 +91,29 @@ impl<'a> Endpoint<'a> {
         Ok(())
     }
 
-    /// Send a direct message. Returns the daemon-assigned message id.
-    pub async fn send(&self, to: &AgentId, body: &str) -> Result<Option<String>> {
+    /// Send a direct message. `sender_name` is the display name shown
+    /// to the recipient inside the JSON envelope. Returns the daemon-
+    /// assigned message id.
+    pub async fn send(
+        &self,
+        to: &AgentId,
+        text: &str,
+        sender_name: &str,
+    ) -> Result<Option<String>> {
+        let envelope = Envelope {
+            text,
+            sender_name,
+            ts: now_ms(),
+        };
+        let envelope_bytes = serde_json::to_vec(&envelope)?;
+        let payload = STANDARD.encode(&envelope_bytes);
         let resp: SendResponse = self
             .http
             .post_json(
                 "/direct/send",
                 &SendRequest {
                     agent_id: &to.0,
-                    body,
+                    payload,
                 },
             )
             .await?;
@@ -97,4 +125,10 @@ impl<'a> Endpoint<'a> {
         let resp: ConnectionsResponse = self.http.get_json("/direct/connections").await?;
         Ok(resp.connections)
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }

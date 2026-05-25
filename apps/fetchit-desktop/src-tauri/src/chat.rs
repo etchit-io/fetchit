@@ -146,13 +146,15 @@ pub async fn chat_send_dm(
     state: tauri::State<'_, ChatState>,
     to: String,
     body: String,
+    sender_name: Option<String>,
 ) -> Result<Option<String>, String> {
     let id = AgentId::parse(to).map_err(|e| e.to_string())?;
+    let name = sender_name.unwrap_or_else(|| "fetchit".to_string());
     state
         .get()
         .await?
         .messages()
-        .send(&id, &body)
+        .send(&id, &body, &name)
         .await
         .map_err(|e| e.to_string())
 }
@@ -279,7 +281,7 @@ pub async fn chat_group_messages(
 /// - `chat:dm` — DMs only, body shape: [`fetchit_chat::messages::DirectMessage`]
 /// - `chat:presence` — presence transitions only
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         loop {
             let client = match state.get().await {
                 Ok(c) => c,

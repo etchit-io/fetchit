@@ -178,14 +178,14 @@ async fn dm_send_returns_message_id() {
     let peer = id('e');
     Mock::given(method("POST"))
         .and(path("/direct/send"))
-        .and(body_partial_json(json!({"agent_id": peer.0, "body": "hello"})))
+        .and(body_partial_json(json!({"agent_id": peer.0})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "m-42"})))
         .mount(&server)
         .await;
     let id = client_against(&server)
         .await
         .messages()
-        .send(&peer, "hello")
+        .send(&peer, "hello", "Alice")
         .await
         .unwrap();
     assert_eq!(id.as_deref(), Some("m-42"));

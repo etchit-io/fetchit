@@ -15,6 +15,7 @@ import { mountSidebar } from "./sidebar";
 import { mountConversation } from "./conversation";
 import { mountCardDialog } from "./contactCard";
 import { mountAddContact } from "./addContact";
+import { mountNewGroup } from "./newGroup";
 import { ChatStore } from "./state";
 
 export interface ChatPanelHandlers {
@@ -60,7 +61,6 @@ export function mountChatPanel(
   closeBtn.className = "chat-panel__close";
   closeBtn.setAttribute("aria-label", "Close chat");
   closeBtn.textContent = "✕";
-  closeBtn.addEventListener("click", () => api.close());
 
   headerEl.appendChild(titleEl);
   headerEl.appendChild(idBadge);
@@ -110,16 +110,25 @@ export function mountChatPanel(
 
   shareBtn.addEventListener("click", openShareCard);
 
+  const openNewGroup = (): void => {
+    const me = store.identity();
+    const name = me?.user_id ?? `agent-${me?.agent_id.slice(0, 6) ?? "anon"}`;
+    showDialog((root) => {
+      mountNewGroup(root, name, {
+        onClose: hideDialog,
+        onCreated: () => {
+          void refreshGroups();
+        },
+      });
+    });
+  };
+
   mountSidebar(sidebarEl, store, {
     onSelect: (conv) => {
       store.setActive(conv.key);
     },
     onNewContact: openAddContact,
-    onNewGroup: () => {
-      // Group create flow lands in a follow-up — direct users to the
-      // group-invite paste path for now.
-      openAddContact();
-    },
+    onNewGroup: openNewGroup,
   });
 
   mountConversation(conversationEl, store, {
@@ -156,11 +165,17 @@ export function mountChatPanel(
     }
   };
 
-  let bound = false;
+  const refreshGroups = async (): Promise<void> => {
+    try {
+      store.loadGroups(await listGroups());
+    } catch (e) {
+      console.warn("[chat] groups refresh failed:", e);
+    }
+  };
+
+  let eventsBound = false;
   const open = async (): Promise<void> => {
     host.hidden = false;
-    if (bound) return;
-    bound = true;
     try {
       await health();
       const me = await identity();
@@ -174,7 +189,10 @@ export function mountChatPanel(
       store.loadContacts(contacts);
       store.loadPresence(online.map((a) => a.agent_id));
       store.loadGroups(groups);
-      await bindChatEvents(store);
+      if (!eventsBound) {
+        eventsBound = true;
+        await bindChatEvents(store);
+      }
     } catch (e) {
       idBadge.textContent = "x0xd not running";
       console.warn("[chat] bootstrap failed:", e);
@@ -196,5 +214,10 @@ export function mountChatPanel(
       else close();
     },
   };
+
+  closeBtn.addEventListener("click", () => {
+    close();
+  });
+
   return api;
 }

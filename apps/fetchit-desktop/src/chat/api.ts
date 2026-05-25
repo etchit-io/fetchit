@@ -47,8 +47,13 @@ export async function removeContact(agentId: string): Promise<void> {
 export async function sendDm(
   to: string,
   body: string,
+  senderName?: string,
 ): Promise<string | null> {
-  return invoke<string | null>("chat_send_dm", { to, body });
+  return invoke<string | null>("chat_send_dm", {
+    to,
+    body,
+    senderName: senderName ?? null,
+  });
 }
 
 export async function dmConnect(agentId: string): Promise<void> {

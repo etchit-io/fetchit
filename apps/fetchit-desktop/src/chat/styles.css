@@ -11,6 +11,7 @@
   color: var(--bone);
   animation: chat-slide var(--dur-trans) var(--ease-out-expo) both;
 }
+.chat-panel[hidden] { display: none !important; }
 
 @keyframes chat-slide {
   from { transform: translateX(24px); opacity: 0; }

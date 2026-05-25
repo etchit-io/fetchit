@@ -8,9 +8,14 @@ use reqwest::{Method, RequestBuilder, Response};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Lightweight bearer-authenticated HTTP transport.
+///
+/// Holds two clients: a short-timeout one for normal request/response
+/// endpoints, and a no-timeout one for SSE streams whose bodies stay
+/// open indefinitely.
 #[derive(Debug, Clone)]
 pub(crate) struct Http {
     inner: reqwest::Client,
+    streaming: reqwest::Client,
     base_url: String,
     token: String,
 }
@@ -20,7 +25,10 @@ impl Http {
         let inner = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
-        Ok(Self { inner, base_url, token })
+        let streaming = reqwest::Client::builder()
+            .pool_idle_timeout(None)
+            .build()?;
+        Ok(Self { inner, streaming, base_url, token })
     }
 
     pub(crate) async fn get_json<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
@@ -47,9 +55,11 @@ impl Http {
     /// GET a long-lived response (SSE) without imposing the standard
     /// timeout. Callers consume `resp.bytes_stream()` directly.
     pub(crate) async fn stream_get(&self, path: &str) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
         let resp = self
-            .authed(Method::GET, path)
-            .timeout(std::time::Duration::from_secs(0))
+            .streaming
+            .get(url)
+            .bearer_auth(&self.token)
             .send()
             .await?;
         if !resp.status().is_success() {
