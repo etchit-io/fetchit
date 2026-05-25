@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct GroupId(pub String);
 
 /// A group as seen from the local agent.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Group {
     /// Stable group id.
     pub group_id: GroupId,
@@ -27,7 +27,7 @@ pub struct Group {
 }
 
 /// A message inside a group.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GroupMessage {
     /// Group it was sent in.
     pub group_id: GroupId,

@@ -9,7 +9,7 @@
 use crate::error::Result;
 use crate::identity::AgentId;
 use crate::transport::Http;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Coarse-grained presence status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -24,7 +24,7 @@ pub enum PresenceStatus {
 }
 
 /// A peer entry from the online snapshot.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnlineAgent {
     /// Peer's agent id.
     pub agent_id: AgentId,
@@ -46,7 +46,7 @@ pub struct OnlineAgent {
 }
 
 /// A single online/offline transition from the SSE stream.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PresenceTransition {
     /// Peer whose status changed.
     pub agent_id: AgentId,

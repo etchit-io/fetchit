@@ -20,7 +20,7 @@ pub enum TrustLevel {
 }
 
 /// A single contact record.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Contact {
     /// Contact's agent id.
     pub agent_id: AgentId,

@@ -48,6 +48,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
+fetchit-chat = { path = "../../../crates/fetchit-chat" }
 # Used only by refresh_peers_from_upstream to GET WithAutonomi's
 # canonical bootstrap_peers.toml. rustls-tls keeps us off the system
 # OpenSSL dep tree on Linux.

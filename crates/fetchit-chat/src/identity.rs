@@ -39,7 +39,7 @@ impl std::fmt::Display for AgentId {
 }
 
 /// Your local agent's identity, as reported by the daemon.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentIdentity {
     /// Your agent's 64-char hex id.
     pub agent_id: AgentId,

@@ -26,7 +26,8 @@ use std::pin::Pin;
 /// All event variants this client recognises from the daemon SSE
 /// streams. Unrecognised event names are surfaced as [`Event::Other`]
 /// so forward-compatibility doesn't drop the connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     /// A direct message arrived.
     DirectMessage(DirectMessage),
@@ -52,7 +53,7 @@ pub enum Event {
     /// so callers can opt into new variants without a client bump.
     Other {
         /// SSE `event:` name as sent by the daemon.
-        kind: String,
+        event_name: String,
         /// Parsed JSON body.
         data: serde_json::Value,
     },
@@ -193,7 +194,7 @@ fn decode_frame(frame: &Frame) -> Result<Option<Event>> {
             Event::GossipMessage { topic, payload: bytes, from }
         }
         other => Event::Other {
-            kind: other.to_string(),
+            event_name: other.to_string(),
             data: value,
         },
     };
@@ -235,7 +236,7 @@ mod tests {
         let f = frame("brand_new_thing", r#"{"x":1}"#);
         let ev = decode_frame(&f).unwrap().unwrap();
         match ev {
-            Event::Other { kind, .. } => assert_eq!(kind, "brand_new_thing"),
+            Event::Other { event_name, .. } => assert_eq!(event_name, "brand_new_thing"),
             _ => panic!("expected Other"),
         }
     }

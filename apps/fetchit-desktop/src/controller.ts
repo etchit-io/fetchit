@@ -16,6 +16,7 @@ import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } f
 import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
+import { mountChatPanel } from "./chat";
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 
@@ -34,6 +35,8 @@ export async function init(): Promise<void> {
   const settingsHost = need<HTMLElement>("settings");
   const bookmarkBtn = need<HTMLButtonElement>("bookmark-toggle");
   const shareBtn = need<HTMLButtonElement>("share-toggle");
+  const chatBtn = need<HTMLButtonElement>("chat-toggle");
+  const chatHost = need<HTMLElement>("chat-panel");
   const qrHost = need<HTMLElement>("qr-modal");
   const statusEl = need<HTMLElement>("status");
   const stripEl = need<HTMLElement>("tabs");
@@ -84,6 +87,22 @@ export async function init(): Promise<void> {
     qrModal.open(addr, deriveTitle(active?.rendition));
   };
   shareBtn.addEventListener("click", openShare);
+
+  const chat = mountChatPanel(chatHost, {
+    onAutonomi: (uri) => {
+      const parsed = parseAutonomiUrl(uri);
+      if (parsed) {
+        chat.close();
+        submit(parsed.address, store, stageEl, parsed.query);
+      }
+    },
+    onClose: () => {
+      // No-op: the chat panel manages its own visibility. Hook is
+      // exposed so the controller can react if it ever needs to (e.g.
+      // restoring focus to a specific element).
+    },
+  });
+  chatBtn.addEventListener("click", () => void chat.toggle());
 
   const toggleBookmark = async (): Promise<void> => {
     const active = store.active();
@@ -177,6 +196,7 @@ export async function init(): Promise<void> {
     openSettings: () => void settings.open(),
     openShare,
     toggleBookmark: () => void toggleBookmark(),
+    toggleChat: () => void chat.toggle(),
   });
 
   let lastBookmarkAddr: string | null = null;

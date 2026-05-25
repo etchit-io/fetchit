@@ -3,6 +3,7 @@
 
 mod archive_extract;
 mod cache;
+mod chat;
 mod disk_cache;
 #[cfg(feature = "e2e")]
 mod e2e;
@@ -592,6 +593,10 @@ pub fn run() {
             let server_state = state.clone();
             app.manage(state);
 
+            let chat_state = chat::ChatState::default();
+            app.manage(chat_state.clone());
+            chat::spawn_event_pump(app.handle().clone(), chat_state);
+
             tauri::async_runtime::spawn(async move {
                 match server::spawn(server_state).await {
                     Ok(port) => {
@@ -632,6 +637,22 @@ pub fn run() {
             idle_policy,
             set_idle_policy,
             idle_disconnect,
+            chat::chat_health,
+            chat::chat_identity,
+            chat::chat_card,
+            chat::chat_import_card,
+            chat::chat_contacts,
+            chat::chat_set_trust,
+            chat::chat_remove_contact,
+            chat::chat_send_dm,
+            chat::chat_dm_connect,
+            chat::chat_presence_online,
+            chat::chat_groups_list,
+            chat::chat_group_create,
+            chat::chat_group_invite,
+            chat::chat_group_join,
+            chat::chat_group_send,
+            chat::chat_group_messages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
