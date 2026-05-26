@@ -4,6 +4,7 @@
 // route to the appropriate chat dialog.
 
 import type { ChatBubble } from "./state";
+import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
 
 const URL_RE = /(autonomi:\/\/[0-9a-fA-F]{64}|x0x:\/\/(?:agent|invite)\/[A-Za-z0-9_-]+)/g;
 
@@ -20,16 +21,24 @@ export function renderBubble(
   const row = document.createElement("div");
   row.className = `chat-row chat-row--${b.mine ? "out" : "in"}`;
 
+  const stack = document.createElement("div");
+  stack.className = "chat-bubble__stack";
+
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble";
   appendBodyWithLinks(bubble, b.body, handlers);
+  stack.appendChild(bubble);
+
+  for (const addr of extractAutonomiAddresses(b.body)) {
+    mountAutonomiPreview(stack, addr, { onOpen: handlers.onAutonomi });
+  }
 
   const meta = document.createElement("time");
   meta.className = "chat-bubble__meta";
   meta.textContent = formatTime(b.timestampMs);
   meta.dateTime = new Date(b.timestampMs).toISOString();
 
-  row.appendChild(bubble);
+  row.appendChild(stack);
   row.appendChild(meta);
   return row;
 }
