@@ -14,7 +14,7 @@ import {
   sendDm,
   setTrust,
 } from "./api";
-import { startOutboxDriver } from "./outboxDriver";
+import { startOutboxDriver, type OutboxDriver } from "./outboxDriver";
 import { bindChatEvents } from "./events";
 import { mountSidebar } from "./sidebar";
 import { mountConversation } from "./conversation";
@@ -96,7 +96,10 @@ export function mountChatPanel(
   outboxRetry.type = "button";
   outboxRetry.className = "chat-outbox-banner__retry";
   outboxRetry.textContent = "Retry";
-  outboxRetry.addEventListener("click", () => store.resetFailedRetryCounters());
+  outboxRetry.addEventListener("click", () => {
+    store.resetFailedRetryCounters();
+    outboxDriver?.flushAll();
+  });
   outboxBanner.appendChild(outboxLabel);
   outboxBanner.appendChild(outboxRetry);
 
@@ -280,7 +283,7 @@ export function mountChatPanel(
 
   let eventsBound = false;
   let stalenessTimer: ReturnType<typeof setInterval> | null = null;
-  let outboxStop: (() => void) | null = null;
+  let outboxDriver: OutboxDriver | null = null;
   const startStalenessTick = (): void => {
     if (stalenessTimer !== null) return;
     // Re-render periodically so views age out stale beacons, AND
@@ -324,8 +327,11 @@ export function mountChatPanel(
         eventsBound = true;
         await bindChatEvents(store);
       }
-      if (!outboxStop) {
-        outboxStop = startOutboxDriver(store, { sendDm, connect: dmConnect });
+      if (!outboxDriver) {
+        outboxDriver = startOutboxDriver(store, {
+          sendDm,
+          connect: dmConnect,
+        });
       }
       startStalenessTick();
     } catch (e) {

@@ -52,9 +52,6 @@ export interface ChatBubble {
   retryAttempts?: number;
 }
 
-/// Cap on automatic retries per bubble before the driver gives up and
-/// requires a manual nudge.
-export const MAX_AUTO_RETRIES = 3;
 
 type Listener = () => void;
 
