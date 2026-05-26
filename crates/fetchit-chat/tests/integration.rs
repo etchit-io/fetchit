@@ -266,7 +266,7 @@ async fn groups_create_and_invite() {
         .await;
     Mock::given(method("POST"))
         .and(path("/groups/g-1/invite"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"invite": "x0x://invite/zzz"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"invite_link": "x0x://invite/zzz"})))
         .mount(&server)
         .await;
     let c = client_against(&server).await;

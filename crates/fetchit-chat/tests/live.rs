@@ -63,3 +63,19 @@ async fn live_presence_online() {
     let online = c.presence().online().await.expect("presence");
     println!("online agents: {}", online.len());
 }
+
+#[tokio::test]
+#[ignore = "requires a running x0xd daemon"]
+async fn live_group_create_decodes() {
+    let Some(c) = client_or_skip().await else {
+        return;
+    };
+    let g = c
+        .groups()
+        .create("live-decode-probe", Some("me"))
+        .await
+        .expect("create");
+    println!("created group {} ({:?})", g.group_id.0, g.name);
+    // Clean up.
+    c.groups().leave(&g.group_id).await.expect("leave");
+}

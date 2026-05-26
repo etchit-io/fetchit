@@ -68,7 +68,10 @@ struct CreateRequest<'a> {
 
 #[derive(Deserialize)]
 struct InviteResponse {
-    invite: String,
+    // x0xd 0.19+ calls the field `invite_link` (the full x0x:// URI),
+    // not bare `invite`. Earlier shape would have failed decode
+    // silently with "transport: error decoding response body".
+    invite_link: String,
 }
 
 #[derive(Serialize)]
@@ -126,7 +129,7 @@ impl<'a> Endpoint<'a> {
     pub async fn invite(&self, group: &GroupId) -> Result<GroupInvite> {
         let path = format!("/groups/{}/invite", group.0);
         let resp: InviteResponse = self.http.post_json(&path, &serde_json::json!({})).await?;
-        Ok(GroupInvite(resp.invite))
+        Ok(GroupInvite(resp.invite_link))
     }
 
     /// Accept a `x0x://invite/…` link into the local roster.
@@ -157,5 +160,28 @@ impl<'a> Endpoint<'a> {
         let path = format!("/groups/{}/messages", group.0);
         let resp: GroupMessagesResponse = self.http.get_json(&path).await?;
         Ok(resp.messages)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_decodes_daemon_create_response() {
+        let json = r#"{"chat_topic":"x0x.group.4d216f18.chat/general","group_id":"4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e","name":"diag-grp","ok":true}"#;
+        let g: Group = serde_json::from_str(json).expect("decode");
+        assert_eq!(g.name.as_deref(), Some("diag-grp"));
+        assert_eq!(g.member_count, 0);
+        assert!(!g.is_owner);
+    }
+
+    #[test]
+    fn groups_list_decodes_daemon_response() {
+        let json = r#"{"groups":[{"created_at":1779769097495,"creator":"d8cf933be41c578936cd03eaba1dedf45c3a52165bf7042dcfed808883a97c3c","description":"","group_id":"e2394e8013031dc637a223f18e8a5338df9235560a93ff72db7d4c80a50e497d","member_count":1,"name":"test-grp"}]}"#;
+        let resp: GroupsResponse = serde_json::from_str(json).expect("decode");
+        assert_eq!(resp.groups.len(), 1);
+        assert_eq!(resp.groups[0].member_count, 1);
     }
 }
