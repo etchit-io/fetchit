@@ -37,13 +37,24 @@ export interface Conversation {
   lastActivityMs: number;
 }
 
+/// Delivery status for outbound bubbles. Inbound bubbles leave this
+/// unset (treated as delivered by renderers).
+export type BubbleStatus = "pending" | "delivered" | "failed";
+
 export interface ChatBubble {
   id: string;
   from: AgentId;
   body: string;
   timestampMs: number;
   mine: boolean;
+  status?: BubbleStatus;
+  failureReason?: string;
+  retryAttempts?: number;
 }
+
+/// Cap on automatic retries per bubble before the driver gives up and
+/// requires a manual nudge.
+export const MAX_AUTO_RETRIES = 3;
 
 type Listener = () => void;
 
@@ -288,6 +299,77 @@ export class ChatStore {
   active(): Conversation | null {
     if (!this.activeKey) return null;
     return this.conversations.get(this.activeKey) ?? null;
+  }
+
+  /// Append an outbound bubble in "pending" state and return its id so
+  /// the caller can flip it to delivered/failed once the send resolves.
+  enqueueOutbound(peer: AgentId, body: string): string {
+    const me = this.myId() ?? "";
+    const ts = Date.now();
+    const id = `local-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+    const conv = this.ensureDm(peer);
+    conv.messages.push({
+      id,
+      from: me,
+      body,
+      timestampMs: ts,
+      mine: true,
+      status: "pending",
+      retryAttempts: 0,
+    });
+    conv.lastActivityMs = ts;
+    this.persistDms();
+    this.emit();
+    return id;
+  }
+
+  markDelivered(peer: AgentId, bubbleId: string): void {
+    const conv = this.conversations.get(`dm:${peer}`);
+    if (!conv) return;
+    const b = conv.messages.find((m) => m.id === bubbleId);
+    if (!b) return;
+    b.status = "delivered";
+    b.failureReason = undefined;
+    this.persistDms();
+    this.emit();
+  }
+
+  markFailed(peer: AgentId, bubbleId: string, reason: string): void {
+    const conv = this.conversations.get(`dm:${peer}`);
+    if (!conv) return;
+    const b = conv.messages.find((m) => m.id === bubbleId);
+    if (!b) return;
+    b.status = "failed";
+    b.failureReason = reason;
+    b.retryAttempts = (b.retryAttempts ?? 0) + 1;
+    this.persistDms();
+    this.emit();
+  }
+
+  markPending(peer: AgentId, bubbleId: string): void {
+    const conv = this.conversations.get(`dm:${peer}`);
+    if (!conv) return;
+    const b = conv.messages.find((m) => m.id === bubbleId);
+    if (!b) return;
+    b.status = "pending";
+    this.emit();
+  }
+
+  /// Every bubble that hasn't been confirmed delivered, across all DM
+  /// conversations. Used by the outbox driver to find retry work and
+  /// by the UI to render the "waiting to deliver" banner.
+  pendingOutbound(): Array<{ peer: AgentId; bubble: ChatBubble }> {
+    const out: Array<{ peer: AgentId; bubble: ChatBubble }> = [];
+    for (const conv of this.conversations.values()) {
+      if (conv.key.kind !== "dm") continue;
+      for (const m of conv.messages) {
+        if (!m.mine) continue;
+        if (m.status === "pending" || m.status === "failed") {
+          out.push({ peer: conv.key.peer, bubble: m });
+        }
+      }
+    }
+    return out;
   }
 
   /// Drop a DM transcript both in-memory and from storage. Used when a

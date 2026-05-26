@@ -2,7 +2,10 @@
 // Enter sends; Shift+Enter inserts a newline.
 
 export interface ComposerHandlers {
-  onSend: (body: string) => Promise<void> | void;
+  /// Fire-and-forget. The orchestrator owns the bubble lifecycle —
+  /// the composer just clears its input and lets the store represent
+  /// delivery state via bubble status icons.
+  onSend: (body: string) => void;
 }
 
 export function mountComposer(
@@ -30,20 +33,13 @@ export function mountComposer(
     ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
   };
 
-  const trySend = async (): Promise<void> => {
+  const trySend = (): void => {
     const body = ta.value.trim();
     if (!body) return;
+    ta.value = "";
+    tryGrow();
     send.disabled = true;
-    try {
-      await handlers.onSend(body);
-      ta.value = "";
-      tryGrow();
-    } catch (e) {
-      console.error("[chat] send failed:", e);
-      send.title = `Send failed: ${(e as Error).message}`;
-    } finally {
-      send.disabled = ta.value.trim().length === 0;
-    }
+    handlers.onSend(body);
   };
 
   ta.addEventListener("input", () => {
@@ -54,13 +50,11 @@ export function mountComposer(
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      void trySend();
+      trySend();
     }
   });
 
-  send.addEventListener("click", () => {
-    void trySend();
-  });
+  send.addEventListener("click", trySend);
 
   root.appendChild(ta);
   root.appendChild(send);

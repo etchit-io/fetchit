@@ -26,7 +26,13 @@ export function renderBubble(
 
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble";
+  if (b.mine && b.status && b.status !== "delivered") {
+    bubble.dataset.status = b.status;
+  }
   appendBodyWithLinks(bubble, b.body, handlers);
+  if (b.mine && b.status && b.status !== "delivered") {
+    bubble.appendChild(statusIcon(b.status, b.failureReason));
+  }
   stack.appendChild(bubble);
 
   for (const addr of extractAutonomiAddresses(b.body)) {
@@ -76,6 +82,19 @@ function linkFor(url: string, h: BubbleHandlers): HTMLElement {
     else if (url.startsWith("x0x://agent/")) h.onCard(url);
   });
   return a;
+}
+
+function statusIcon(status: "pending" | "failed", reason?: string): HTMLElement {
+  const span = document.createElement("span");
+  span.className = `chat-bubble__status chat-bubble__status--${status}`;
+  if (status === "pending") {
+    span.textContent = "◌";
+    span.title = "Sending…";
+  } else {
+    span.textContent = "⚠";
+    span.title = reason ? `Not delivered: ${reason}` : "Not delivered";
+  }
+  return span;
 }
 
 function compactUrl(url: string): string {

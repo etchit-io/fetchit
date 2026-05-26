@@ -10,8 +10,10 @@ import {
   listGroups,
   presenceOnline,
   removeContact,
+  sendDm,
   setTrust,
 } from "./api";
+import { startOutboxDriver } from "./outboxDriver";
 import { bindChatEvents } from "./events";
 import { mountSidebar } from "./sidebar";
 import { mountConversation } from "./conversation";
@@ -82,6 +84,11 @@ export function mountChatPanel(
   headerEl.appendChild(dockBtn);
   headerEl.appendChild(closeBtn);
 
+  const outboxBanner = document.createElement("div");
+  outboxBanner.className = "chat-outbox-banner";
+  outboxBanner.hidden = true;
+  outboxBanner.setAttribute("role", "status");
+
   const sidebarEl = document.createElement("aside");
   const conversationEl = document.createElement("section");
   const dialogHost = document.createElement("div");
@@ -91,8 +98,25 @@ export function mountChatPanel(
   layout.appendChild(conversationEl);
 
   host.appendChild(headerEl);
+  host.appendChild(outboxBanner);
   host.appendChild(layout);
   host.appendChild(dialogHost);
+
+  const renderOutboxBanner = (): void => {
+    const pending = store.pendingOutbound();
+    if (pending.length === 0) {
+      outboxBanner.hidden = true;
+      return;
+    }
+    const failed = pending.filter((p) => p.bubble.status === "failed").length;
+    const waiting = pending.length - failed;
+    const parts: string[] = [];
+    if (waiting > 0) parts.push(`${waiting} waiting to deliver`);
+    if (failed > 0) parts.push(`${failed} undelivered`);
+    outboxBanner.textContent = parts.join(" · ");
+    outboxBanner.hidden = false;
+  };
+  store.subscribe(renderOutboxBanner);
 
   const showDialog = (mount: (root: HTMLElement) => void): void => {
     dialogHost.hidden = false;
@@ -244,6 +268,7 @@ export function mountChatPanel(
 
   let eventsBound = false;
   let stalenessTimer: ReturnType<typeof setInterval> | null = null;
+  let outboxStop: (() => void) | null = null;
   const startStalenessTick = (): void => {
     if (stalenessTimer !== null) return;
     // Re-render periodically so views age out stale beacons, AND
@@ -286,6 +311,9 @@ export function mountChatPanel(
       if (!eventsBound) {
         eventsBound = true;
         await bindChatEvents(store);
+      }
+      if (!outboxStop) {
+        outboxStop = startOutboxDriver(store, { sendDm });
       }
       startStalenessTick();
     } catch (e) {

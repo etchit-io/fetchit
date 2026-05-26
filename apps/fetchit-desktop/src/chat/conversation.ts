@@ -55,20 +55,21 @@ export function mountConversation(
 
   let lastConv: Conversation | null = null;
   const composer = mountComposer(composerEl, {
-    onSend: async (body) => {
+    onSend: (body) => {
       const conv = store.active();
       if (!conv) return;
       if (conv.key.kind === "dm") {
-        await sendDm(conv.key.peer, body);
-        store.recordDirectMessage({
-          from: store.myId() ?? "",
-          to: conv.key.peer,
-          body,
-          timestamp_ms: Date.now(),
-          message_id: null,
-        });
+        const peer = conv.key.peer;
+        const bubbleId = store.enqueueOutbound(peer, body);
+        void sendDm(peer, body).then(
+          () => store.markDelivered(peer, bubbleId),
+          (e: unknown) =>
+            store.markFailed(peer, bubbleId, (e as Error).message),
+        );
       } else {
-        await sendGroupMessage(conv.key.groupId, body);
+        void sendGroupMessage(conv.key.groupId, body).catch((e) =>
+          console.warn("[chat] group send failed:", e),
+        );
       }
     },
   });
