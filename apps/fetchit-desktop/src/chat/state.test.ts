@@ -139,6 +139,23 @@ describe("ChatStore — presence", () => {
     expect(s.isOnline(PEER)).toBe(true);
   });
 
+  it("resetFailedRetryCounters zeros the counter on failed bubbles only", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const stuck = s.enqueueOutbound(PEER, "stuck");
+    s.markFailed(PEER, stuck, "first");
+    s.markFailed(PEER, stuck, "second");
+    s.markFailed(PEER, stuck, "third");
+    const delivered = s.enqueueOutbound(PEER, "ok");
+    s.markDelivered(PEER, delivered);
+    expect(s.resetFailedRetryCounters()).toBe(1);
+    const failedBubble = s
+      .conversationsSorted()[0]
+      .messages.find((m) => m.id === stuck);
+    expect(failedBubble?.retryAttempts).toBe(0);
+    expect(failedBubble?.status).toBe("failed");
+  });
+
   it("mergePresenceSnapshot does not regress a fresher SSE-set entry", () => {
     const s = new ChatStore();
     s.applyPresenceTransition({ agent_id: PEER, event: "online" });

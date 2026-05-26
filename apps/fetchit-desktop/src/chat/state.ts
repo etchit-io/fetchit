@@ -355,6 +355,27 @@ export class ChatStore {
     this.emit();
   }
 
+  /// Reset retry counters on every failed bubble so the driver gives
+  /// them another full budget. Used by the manual "Retry" affordance
+  /// in the outbox banner.
+  resetFailedRetryCounters(): number {
+    let touched = 0;
+    for (const conv of this.conversations.values()) {
+      if (conv.key.kind !== "dm") continue;
+      for (const m of conv.messages) {
+        if (m.status === "failed" && (m.retryAttempts ?? 0) > 0) {
+          m.retryAttempts = 0;
+          touched += 1;
+        }
+      }
+    }
+    if (touched > 0) {
+      this.persistDms();
+      this.emit();
+    }
+    return touched;
+  }
+
   /// Every bubble that hasn't been confirmed delivered, across all DM
   /// conversations. Used by the outbox driver to find retry work and
   /// by the UI to render the "waiting to deliver" banner.

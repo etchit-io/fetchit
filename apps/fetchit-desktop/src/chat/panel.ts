@@ -90,6 +90,16 @@ export function mountChatPanel(
   outboxBanner.hidden = true;
   outboxBanner.setAttribute("role", "status");
 
+  const outboxLabel = document.createElement("span");
+  outboxLabel.className = "chat-outbox-banner__label";
+  const outboxRetry = document.createElement("button");
+  outboxRetry.type = "button";
+  outboxRetry.className = "chat-outbox-banner__retry";
+  outboxRetry.textContent = "Retry";
+  outboxRetry.addEventListener("click", () => store.resetFailedRetryCounters());
+  outboxBanner.appendChild(outboxLabel);
+  outboxBanner.appendChild(outboxRetry);
+
   const sidebarEl = document.createElement("aside");
   const conversationEl = document.createElement("section");
   const dialogHost = document.createElement("div");
@@ -114,7 +124,8 @@ export function mountChatPanel(
     const parts: string[] = [];
     if (waiting > 0) parts.push(`${waiting} waiting to deliver`);
     if (failed > 0) parts.push(`${failed} undelivered`);
-    outboxBanner.textContent = parts.join(" · ");
+    outboxLabel.textContent = parts.join(" · ");
+    outboxRetry.hidden = failed === 0;
     outboxBanner.hidden = false;
   };
   store.subscribe(renderOutboxBanner);
