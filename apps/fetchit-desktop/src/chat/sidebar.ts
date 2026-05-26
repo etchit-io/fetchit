@@ -8,6 +8,7 @@ export interface SidebarHandlers {
   onSelect: (conv: Conversation) => void;
   onNewContact: () => void;
   onNewGroup: () => void;
+  onJoinGroup: () => void;
 }
 
 export function mountSidebar(
@@ -28,6 +29,7 @@ export function mountSidebar(
   actions.className = "chat-sidebar__actions";
   actions.appendChild(iconButton("＋", "Add contact", handlers.onNewContact));
   actions.appendChild(iconButton("⌗", "New group", handlers.onNewGroup));
+  actions.appendChild(iconButton("↪", "Join group", handlers.onJoinGroup));
   header.appendChild(actions);
 
   const list = document.createElement("ul");

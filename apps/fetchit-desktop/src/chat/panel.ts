@@ -16,6 +16,7 @@ import { mountConversation } from "./conversation";
 import { mountCardDialog } from "./contactCard";
 import { mountAddContact } from "./addContact";
 import { mountNewGroup } from "./newGroup";
+import { mountJoinGroup } from "./joinGroup";
 import { ChatStore } from "./state";
 
 export interface ChatPanelHandlers {
@@ -123,12 +124,33 @@ export function mountChatPanel(
     });
   };
 
+  const openJoinGroup = (initialUri?: string): void => {
+    const me = store.identity();
+    const name = me?.user_id ?? `agent-${me?.agent_id.slice(0, 6) ?? "anon"}`;
+    showDialog((root) => {
+      mountJoinGroup(
+        root,
+        name,
+        {
+          onClose: hideDialog,
+          onJoined: (group) => {
+            hideDialog();
+            void refreshGroups();
+            store.setActive({ kind: "group", groupId: group.group_id });
+          },
+        },
+        initialUri,
+      );
+    });
+  };
+
   mountSidebar(sidebarEl, store, {
     onSelect: (conv) => {
       store.setActive(conv.key);
     },
     onNewContact: openAddContact,
     onNewGroup: openNewGroup,
+    onJoinGroup: () => openJoinGroup(),
   });
 
   mountConversation(conversationEl, store, {
@@ -151,8 +173,8 @@ export function mountChatPanel(
         }
       });
     },
-    onInvite: () => {
-      // Group join lands with the group flow.
+    onInvite: (uri) => {
+      openJoinGroup(uri);
     },
     onAddContact: openAddContact,
   });
