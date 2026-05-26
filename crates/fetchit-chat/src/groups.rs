@@ -27,21 +27,35 @@ pub struct Group {
 }
 
 /// A message inside a group.
+///
+/// The `#[serde(rename(deserialize = …))]` attributes only flip the
+/// names we read from the daemon — the serialization shape stays
+/// `from` / `timestamp_ms`, which is what the JS frontend's
+/// `GroupMessage` type expects when this struct crosses the Tauri
+/// IPC boundary.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GroupMessage {
     /// Group it was sent in.
     pub group_id: GroupId,
-    /// Sender.
+    /// Sender. Daemon returns this as `author_agent_id`.
+    #[serde(rename(deserialize = "author_agent_id"))]
     pub from: AgentId,
-    /// Plaintext (decrypted by the daemon).
+    /// Plaintext.
     pub body: String,
-    /// Unix epoch ms.
+    /// Unix epoch ms. Daemon returns this as bare `timestamp`.
+    #[serde(rename(deserialize = "timestamp"))]
     pub timestamp_ms: u64,
     /// `chat`, `system`, etc.
     #[serde(default = "default_kind")]
     pub kind: String,
-    /// Daemon-assigned message id.
+    /// Stable identifier. Synthesised from the signature in
+    /// [`Endpoint::history`] when the daemon omits it.
+    #[serde(default)]
     pub message_id: String,
+    /// Cryptographic signature; used as a de-dup key when `message_id`
+    /// is missing.
+    #[serde(default)]
+    pub signature: String,
 }
 
 fn default_kind() -> String {
@@ -64,6 +78,12 @@ struct CreateRequest<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<&'a str>,
+    /// Daemon's named-group policy preset. We use `public_open` so
+    /// messages can travel over the standard `/groups/<id>/send` +
+    /// `/messages` plaintext-over-gossip path; the alternative is
+    /// MLS-encrypted, which requires a separate
+    /// `/secure/encrypt` + `/publish` orchestration we don't wire yet.
+    preset: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -118,10 +138,21 @@ impl<'a> Endpoint<'a> {
         self.http.delete(&path).await
     }
 
-    /// Create a new group with a display name visible to peers.
+    /// Create a new group with a display name visible to peers. The
+    /// group is created under the `public_open` preset so messages
+    /// flow plain-over-gossip and `/groups/<id>/send` accepts them
+    /// directly. MLS-encrypted groups would require a separate
+    /// encrypt + publish flow that isn't wired through fetchit yet.
     pub async fn create(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
         self.http
-            .post_json("/groups", &CreateRequest { name, display_name })
+            .post_json(
+                "/groups",
+                &CreateRequest {
+                    name,
+                    display_name,
+                    preset: "public_open",
+                },
+            )
             .await
     }
 
@@ -155,11 +186,28 @@ impl<'a> Endpoint<'a> {
         Ok(resp.get("message_id").and_then(|v| v.as_str()).map(String::from))
     }
 
-    /// Fetch the recent message history for a group.
+    /// Fetch the recent message history for a group. Daemon-side
+    /// messages don't carry a stable `message_id` on public groups, so
+    /// we synthesise one from the cryptographic signature (which is
+    /// per-message-unique) when the daemon omits it.
     pub async fn history(&self, group: &GroupId) -> Result<Vec<GroupMessage>> {
         let path = format!("/groups/{}/messages", group.0);
         let resp: GroupMessagesResponse = self.http.get_json(&path).await?;
-        Ok(resp.messages)
+        let messages = resp
+            .messages
+            .into_iter()
+            .map(|mut m| {
+                if m.message_id.is_empty() {
+                    m.message_id = if m.signature.is_empty() {
+                        format!("{}-{}", m.timestamp_ms, m.from)
+                    } else {
+                        m.signature.clone()
+                    };
+                }
+                m
+            })
+            .collect();
+        Ok(messages)
     }
 }
 
@@ -183,5 +231,45 @@ mod tests {
         let resp: GroupsResponse = serde_json::from_str(json).expect("decode");
         assert_eq!(resp.groups.len(), 1);
         assert_eq!(resp.groups[0].member_count, 1);
+    }
+
+    #[test]
+    fn group_message_decodes_daemon_shape() {
+        // Real shape from /groups/<id>/messages on a public_open group:
+        // `author_agent_id`, bare `timestamp`, no `message_id`, plus
+        // signature + other public-message-only fields we ignore.
+        let json = r#"{
+            "author_agent_id": "4dc0f2f6031ee14f7f25f7d8133aa95389a09d023eaa53d2a8c8e977e2dd6c41",
+            "author_user_id": null,
+            "body": "hi from alice plaintext",
+            "group_id": "bfb13a2ddbe518ef76e1c2941b724e8edb9f8c5f6174a54d6e261124fa71b592",
+            "kind": "chat",
+            "revision_at_send": 0,
+            "signature": "3f429c004adb",
+            "state_hash_at_send": "b3b2d2632714f5",
+            "timestamp": 1779801025898
+        }"#;
+        let m: GroupMessage = serde_json::from_str(json).expect("decode");
+        assert_eq!(m.body, "hi from alice plaintext");
+        assert_eq!(m.timestamp_ms, 1_779_801_025_898);
+        assert_eq!(m.kind, "chat");
+        assert!(m.from.0.starts_with("4dc0f2f6"));
+        assert_eq!(m.signature, "3f429c004adb");
+    }
+
+    #[test]
+    fn create_request_includes_preset() {
+        let req = CreateRequest {
+            name: "demo",
+            display_name: Some("josh"),
+            preset: "public_open",
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        assert!(
+            json.contains("\"preset\":\"public_open\""),
+            "preset missing: {json}"
+        );
+        assert!(json.contains("\"name\":\"demo\""));
+        assert!(json.contains("\"display_name\":\"josh\""));
     }
 }

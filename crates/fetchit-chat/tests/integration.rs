@@ -257,8 +257,15 @@ async fn dm_connect_posts_to_agents_connect() {
 #[tokio::test]
 async fn groups_create_and_invite() {
     let server = MockServer::start().await;
+    // The daemon only accepts plaintext sends on `public_open` groups,
+    // so fetchit-chat always sends that preset on create.
     Mock::given(method("POST"))
         .and(path("/groups"))
+        .and(body_partial_json(json!({
+            "name": "Team",
+            "display_name": "Alice",
+            "preset": "public_open"
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "group_id": "g-1", "name": "Team", "member_count": 1, "is_owner": true
         })))
