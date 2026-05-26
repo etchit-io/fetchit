@@ -8,10 +8,19 @@ export interface ComposerHandlers {
   onSend: (body: string) => void;
 }
 
+export interface ComposerApi {
+  focus(): void;
+  /// Toggle whether the composer accepts input. When disabled, the
+  /// textarea is read-only, the Send button is greyed out, and the
+  /// placeholder reflects the supplied hint. Used when no conversation
+  /// is selected so typing-into-the-void can't happen.
+  setEnabled(enabled: boolean, hint?: string): void;
+}
+
 export function mountComposer(
   root: HTMLElement,
   handlers: ComposerHandlers,
-): { focus: () => void } {
+): ComposerApi {
   root.replaceChildren();
   root.className = "chat-composer";
 
@@ -33,7 +42,11 @@ export function mountComposer(
     ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
   };
 
+  let enabled = true;
+  const DEFAULT_PLACEHOLDER = "Write a message…";
+
   const trySend = (): void => {
+    if (!enabled) return;
     const body = ta.value.trim();
     if (!body) return;
     ta.value = "";
@@ -43,6 +56,7 @@ export function mountComposer(
   };
 
   ta.addEventListener("input", () => {
+    if (!enabled) return;
     send.disabled = ta.value.trim().length === 0;
     tryGrow();
   });
@@ -59,7 +73,20 @@ export function mountComposer(
   root.appendChild(ta);
   root.appendChild(send);
 
+  const setEnabled = (next: boolean, hint?: string): void => {
+    enabled = next;
+    ta.disabled = !next;
+    if (!next) {
+      ta.placeholder = hint ?? DEFAULT_PLACEHOLDER;
+      send.disabled = true;
+    } else {
+      ta.placeholder = DEFAULT_PLACEHOLDER;
+      send.disabled = ta.value.trim().length === 0;
+    }
+  };
+
   return {
     focus: () => ta.focus(),
+    setEnabled,
   };
 }

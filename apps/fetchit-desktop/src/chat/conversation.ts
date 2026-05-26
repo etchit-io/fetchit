@@ -85,11 +85,13 @@ export function mountConversation(
     if (!conv) {
       subjectEl.textContent = "";
       presenceEl.textContent = "";
+      trustEl.hidden = true;
+      trustEl.replaceChildren();
       stream.replaceChildren(emptyPane(handlers.onAddContact));
-      composerEl.hidden = true;
+      composer.setEnabled(false, "Select a conversation to start writing…");
       return;
     }
-    composerEl.hidden = false;
+    composer.setEnabled(true);
 
     subjectEl.textContent = conv.title;
     if (conv.key.kind === "dm") {
