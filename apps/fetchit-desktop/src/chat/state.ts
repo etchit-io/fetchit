@@ -183,8 +183,10 @@ export class ChatStore {
   }
 
   loadGroups(groups: Group[]): void {
+    const present = new Set<string>();
     for (const g of groups) {
       const k = `g:${g.group_id}`;
+      present.add(k);
       if (!this.conversations.has(k)) {
         this.conversations.set(k, {
           key: { kind: "group", groupId: g.group_id },
@@ -197,6 +199,14 @@ export class ChatStore {
         const existing = this.conversations.get(k)!;
         existing.title = g.name ?? existing.title;
       }
+    }
+    // Drop group conversations the daemon no longer reports — left
+    // or deleted groups would otherwise linger in the sidebar.
+    for (const [key, conv] of this.conversations) {
+      if (conv.key.kind !== "group") continue;
+      if (present.has(key)) continue;
+      this.conversations.delete(key);
+      if (this.activeKey === key) this.activeKey = null;
     }
     this.emit();
   }
