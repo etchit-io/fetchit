@@ -568,8 +568,8 @@ body.chat-docked {
   height: 16px;
   padding: 0 4px;
   border-radius: 999px;
-  background: var(--copper);
-  color: var(--ink);
+  background: rgb(220, 50, 47);
+  color: #fff;
   font-size: 10px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;

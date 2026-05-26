@@ -17,6 +17,7 @@ import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
 import { mountChatPanel } from "./chat";
+import { playInboundPing } from "./chat/ping";
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 
@@ -120,6 +121,9 @@ export async function init(): Promise<void> {
       setTimeout(() => renderChatBadge(lastUnread), 0);
     },
     onUnreadChange: (n) => {
+      // Only ping on an actual increase, and only when the panel is
+      // closed (otherwise the user is plainly already looking).
+      if (n > lastUnread && !chat.isOpen()) playInboundPing();
       lastUnread = n;
       renderChatBadge(n);
     },
