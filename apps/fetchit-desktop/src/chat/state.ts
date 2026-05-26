@@ -1,7 +1,7 @@
 // Local-only chat state: conversation list, message transcripts,
-// contact roster, presence map, my identity. Nothing here persists to
-// disk in v1 — the daemon is the source of truth for everything except
-// local DM transcripts, which we keep in memory for the session.
+// contact roster, presence map, my identity. DM transcripts persist
+// to localStorage (the daemon does not retain them); everything else
+// is rebuilt from the daemon on each open.
 
 import type {
   AgentId,
@@ -12,6 +12,7 @@ import type {
   GroupMessage,
   PresenceTransition,
 } from "./types";
+import { loadDms, saveDms, type PersistedDm } from "./persistence";
 
 export type ConversationKey =
   | { kind: "dm"; peer: AgentId }
@@ -53,7 +54,9 @@ export class ChatStore {
   }
 
   setIdentity(id: AgentIdentity): void {
+    const changed = this.myIdentity?.agent_id !== id.agent_id;
     this.myIdentity = id;
+    if (changed) this.hydrate();
     this.emit();
   }
 
@@ -154,17 +157,22 @@ export class ChatStore {
     if (!peer) return;
     const conv = this.ensureDm(peer);
     const ts = dm.timestamp_ms ?? Date.now();
-    conv.messages.push({
+    const bubble: ChatBubble = {
       id: dm.message_id ?? `local-${ts}-${Math.random().toString(36).slice(2, 6)}`,
       from: dm.from,
       body: dm.body,
       timestampMs: ts,
       mine: dm.from === me,
-    });
+    };
+    if (bubble.id && conv.messages.some((m) => m.id === bubble.id)) {
+      return;
+    }
+    conv.messages.push(bubble);
     conv.lastActivityMs = ts;
-    if (!conv.messages[conv.messages.length - 1].mine && this.activeKey !== convKey(conv.key)) {
+    if (!bubble.mine && this.activeKey !== convKey(conv.key)) {
       conv.unread += 1;
     }
+    this.persistDms();
     this.emit();
   }
 
@@ -215,7 +223,10 @@ export class ChatStore {
     } else {
       this.activeKey = convKey(key);
       const conv = this.conversations.get(this.activeKey);
-      if (conv) conv.unread = 0;
+      if (conv && conv.unread !== 0) {
+        conv.unread = 0;
+        this.persistDms();
+      }
     }
     this.emit();
   }
@@ -223,6 +234,44 @@ export class ChatStore {
   active(): Conversation | null {
     if (!this.activeKey) return null;
     return this.conversations.get(this.activeKey) ?? null;
+  }
+
+  /// Drop a DM transcript both in-memory and from storage. Used when a
+  /// contact is blocked or removed.
+  clearDmTranscript(peer: AgentId): void {
+    const key = `dm:${peer}`;
+    if (this.conversations.delete(key)) {
+      if (this.activeKey === key) this.activeKey = null;
+      this.persistDms();
+      this.emit();
+    }
+  }
+
+  private hydrate(): void {
+    const me = this.myId();
+    if (!me) return;
+    const persisted = loadDms(me);
+    for (const [peer, dm] of persisted) {
+      const conv = this.ensureDm(peer);
+      conv.messages = dm.messages;
+      conv.unread = dm.unread;
+      conv.lastActivityMs = dm.lastActivityMs;
+    }
+  }
+
+  private persistDms(): void {
+    const me = this.myId();
+    if (!me) return;
+    const out = new Map<AgentId, PersistedDm>();
+    for (const conv of this.conversations.values()) {
+      if (conv.key.kind !== "dm") continue;
+      out.set(conv.key.peer, {
+        messages: conv.messages,
+        unread: conv.unread,
+        lastActivityMs: conv.lastActivityMs,
+      });
+    }
+    saveDms(me, out);
   }
 }
 

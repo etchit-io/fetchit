@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { ChatStore, convKey } from "./state";
 
 const ME = "a".repeat(64);
 const PEER = "b".repeat(64);
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 describe("ChatStore — DM bookkeeping", () => {
   it("records an inbound DM under the peer's conversation", () => {
