@@ -191,6 +191,40 @@ async fn dm_send_returns_message_id() {
     assert_eq!(id.as_deref(), Some("m-42"));
 }
 
+/// Tighter assertion on the wire shape: the daemon expects `payload`
+/// to be a base64-encoded JSON envelope `{text, sender_name, ts}`.
+/// Regression guard — an earlier client sent the body verbatim and the
+/// daemon rejected with `missing field "payload"`.
+#[tokio::test]
+async fn dm_send_payload_is_base64_envelope() {
+    use base64::Engine;
+    let server = MockServer::start().await;
+    let peer = id('e');
+    Mock::given(method("POST"))
+        .and(path("/direct/send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "m-1"})))
+        .mount(&server)
+        .await;
+    client_against(&server)
+        .await
+        .messages()
+        .send(&peer, "hi there", "Alice")
+        .await
+        .unwrap();
+    let req = &server.received_requests().await.unwrap()[0];
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    let payload_b64 = body
+        .get("payload")
+        .and_then(|v| v.as_str())
+        .expect("payload field missing");
+    let decoded =
+        base64::engine::general_purpose::STANDARD.decode(payload_b64).unwrap();
+    let env: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(env["text"], "hi there");
+    assert_eq!(env["sender_name"], "Alice");
+    assert!(env["ts"].is_number());
+}
+
 #[tokio::test]
 async fn dm_connect_posts_to_agents_connect() {
     let server = MockServer::start().await;

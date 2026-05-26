@@ -8,11 +8,11 @@ import type { ChatEvent } from "./types";
 
 export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
   return listen<ChatEvent>("chat:event", (ev) => {
-    handle(store, ev.payload);
+    applyChatEvent(store, ev.payload);
   });
 }
 
-function handle(store: ChatStore, ev: ChatEvent): void {
+export function applyChatEvent(store: ChatStore, ev: ChatEvent): void {
   switch (ev.kind) {
     case "direct_message":
       store.recordDirectMessage(ev);

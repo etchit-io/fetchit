@@ -296,4 +296,120 @@ mod tests {
         let f = frame("presence", "");
         assert!(decode_frame(&f).unwrap().is_none());
     }
+
+    #[test]
+    fn dm_alias_event_names_all_decode() {
+        let id = "a".repeat(64);
+        // {"text":"hi","sender_name":"Alice","ts":1}
+        let payload = "eyJ0ZXh0IjoiaGkiLCJzZW5kZXJfbmFtZSI6IkFsaWNlIiwidHMiOjF9";
+        for name in ["dm", "direct", "direct_message"] {
+            let f = frame(
+                name,
+                &format!(r#"{{"sender":"{id}","payload":"{payload}"}}"#),
+            );
+            match decode_frame(&f).unwrap().unwrap() {
+                Event::DirectMessage(dm) => assert_eq!(dm.body, "hi"),
+                _ => panic!("expected DirectMessage for event '{name}'"),
+            }
+        }
+    }
+
+    #[test]
+    fn dm_with_missing_envelope_fields_yields_empty_body() {
+        let id = "a".repeat(64);
+        // empty JSON `{}` base64 = "e30="
+        let f = frame(
+            "direct_message",
+            &format!(r#"{{"sender":"{id}","payload":"e30="}}"#),
+        );
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::DirectMessage(dm) => {
+                assert_eq!(dm.body, "");
+                assert!(dm.sender_name.is_none());
+                assert!(dm.verified.is_none());
+                assert!(dm.message_id.is_none());
+                assert!(dm.to.is_none());
+            }
+            _ => panic!("expected DirectMessage"),
+        }
+    }
+
+    #[test]
+    fn dm_with_malformed_base64_payload_errors() {
+        let id = "a".repeat(64);
+        let f = frame(
+            "direct_message",
+            &format!(r#"{{"sender":"{id}","payload":"@@@not-base64@@@"}}"#),
+        );
+        let r = decode_frame(&f);
+        assert!(r.is_err(), "expected base64 error, got {r:?}");
+    }
+
+    #[test]
+    fn dm_falls_back_to_received_at_when_envelope_ts_missing() {
+        let id = "a".repeat(64);
+        // envelope `{"text":"x"}` → "eyJ0ZXh0IjoieCJ9"
+        let f = frame(
+            "direct_message",
+            &format!(
+                r#"{{"sender":"{id}","payload":"eyJ0ZXh0IjoieCJ9","received_at":1700000000}}"#
+            ),
+        );
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::DirectMessage(dm) => {
+                assert_eq!(dm.timestamp_ms, Some(1_700_000_000));
+            }
+            _ => panic!("expected DirectMessage"),
+        }
+    }
+
+    #[test]
+    fn contact_added_decodes() {
+        let id = "c".repeat(64);
+        let f = frame(
+            "contact_added",
+            &format!(r#"{{"agent_id":"{id}","trust_level":"trusted","label":"Bob"}}"#),
+        );
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::ContactAdded(c) => {
+                assert_eq!(c.label.as_deref(), Some("Bob"));
+            }
+            _ => panic!("expected ContactAdded"),
+        }
+    }
+
+    #[test]
+    fn contact_removed_decodes() {
+        let id = "d".repeat(64);
+        let f = frame("contact_removed", &format!(r#"{{"agent_id":"{id}"}}"#));
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::ContactRemoved { agent_id } => assert_eq!(agent_id.0, id),
+            _ => panic!("expected ContactRemoved"),
+        }
+    }
+
+    #[test]
+    fn gossip_message_decodes_with_base64_payload() {
+        // payload "hello" → "aGVsbG8="
+        let f = frame(
+            "gossip",
+            r#"{"topic":"news","payload":"aGVsbG8="}"#,
+        );
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::GossipMessage { topic, payload, .. } => {
+                assert_eq!(topic, "news");
+                assert_eq!(payload, b"hello");
+            }
+            _ => panic!("expected GossipMessage"),
+        }
+    }
+
+    #[test]
+    fn message_event_name_routes_to_gossip() {
+        let f = frame("message", r#"{"topic":"t","payload":null}"#);
+        assert!(matches!(
+            decode_frame(&f).unwrap().unwrap(),
+            Event::GossipMessage { .. }
+        ));
+    }
 }
