@@ -72,6 +72,13 @@ body.chat-docked {
   padding: 2px 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition: color var(--dur-micro) ease, border-color var(--dur-micro) ease;
+}
+.chat-panel__id:hover {
+  color: var(--copper);
+  border-color: var(--copper);
 }
 
 .chat-panel__share {

@@ -57,9 +57,12 @@ export function mountChatPanel(
   const titleEl = document.createElement("div");
   titleEl.className = "chat-panel__title";
   titleEl.textContent = "Chat";
-  const idBadge = document.createElement("div");
+  const idBadge = document.createElement("button");
+  idBadge.type = "button";
   idBadge.className = "chat-panel__id";
   idBadge.textContent = "—";
+  idBadge.title = "Share your card";
+  idBadge.setAttribute("aria-label", "Share your card");
 
   const shareBtn = document.createElement("button");
   shareBtn.type = "button";
@@ -166,6 +169,7 @@ export function mountChatPanel(
   };
 
   shareBtn.addEventListener("click", openShareCard);
+  idBadge.addEventListener("click", openShareCard);
 
   const openNewGroup = (): void => {
     const me = store.identity();
