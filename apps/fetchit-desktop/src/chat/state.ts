@@ -338,11 +338,12 @@ export class ChatStore {
   }
 
   /// Bump a peer's last-seen to now and mark them online. Called when
-  /// we have direct evidence of reachability — currently a successful
-  /// outbound send — so the dot stays green even when the daemon's
-  /// gossip beacon view is stale.
+  /// we have direct evidence of reachability — a successful outbound
+  /// send, or a connect probe when entering a DM — so the dot stays
+  /// green even when the daemon's gossip beacon view is stale.
   touchPresence(peer: AgentId): void {
     this.presence.set(peer, { state: "online", lastSeenMs: Date.now() });
+    this.emit();
   }
 
   markFailed(peer: AgentId, bubbleId: string, reason: string): void {

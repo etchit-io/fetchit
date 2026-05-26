@@ -127,6 +127,17 @@ export function mountConversation(
     }
     if (lastConv !== conv) {
       composer.focus();
+      // Entering a DM is a cheap chance to probe reachability — if the
+      // QUIC handshake succeeds, treat the peer as freshly online even
+      // when their gossip beacon to the daemon is lagging.
+      if (conv.key.kind === "dm") {
+        const peer = conv.key.peer;
+        void dmConnect(peer)
+          .then(() => store.touchPresence(peer))
+          .catch(() => {
+            // silent — staleness threshold decides
+          });
+      }
     }
     lastConv = conv;
   };
