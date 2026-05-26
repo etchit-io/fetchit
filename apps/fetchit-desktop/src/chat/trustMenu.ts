@@ -41,9 +41,15 @@ export function mountTrustMenu(
   removeBtn.textContent = "Remove";
   removeBtn.addEventListener("click", () => {
     const label = contact.label ?? contact.display_name ?? contact.agent_id;
-    if (confirm(`Remove ${label}? Their local message history will be deleted.`)) {
-      handlers.onRemove();
-    }
+    void (async () => {
+      // Tauri 2 redirects window.confirm() to its dialog plugin, which
+      // returns a Promise<boolean> — must await, otherwise the truthy
+      // pending promise would always trigger onRemove.
+      const ok = await window.confirm(
+        `Remove ${label}? Their local message history will be deleted.`,
+      );
+      if (ok) handlers.onRemove();
+    })();
   });
 
   parent.appendChild(select);

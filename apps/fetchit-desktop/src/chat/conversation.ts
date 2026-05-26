@@ -125,9 +125,12 @@ export function mountConversation(
       leaveBtn.title = "Leave / delete this group";
       leaveBtn.addEventListener("click", () => {
         const title = conv.title;
-        if (confirm(`Leave "${title}"? You'll need a new invite to rejoin.`)) {
-          handlers.onLeaveGroup(groupId);
-        }
+        void (async () => {
+          const ok = await window.confirm(
+            `Leave "${title}"? You'll need a new invite to rejoin.`,
+          );
+          if (ok) handlers.onLeaveGroup(groupId);
+        })();
       });
       trustEl.appendChild(leaveBtn);
     }

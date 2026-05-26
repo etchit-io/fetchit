@@ -45,19 +45,28 @@ describe("mountTrustMenu", () => {
     expect(onSetTrust).toHaveBeenCalledWith("trusted");
   });
 
-  it("confirms before firing onRemove", () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("confirms before firing onRemove", async () => {
+    // window.confirm is async in Tauri 2 — return a resolved promise.
+    vi.spyOn(window, "confirm").mockReturnValue(
+      Promise.resolve(true) as unknown as boolean,
+    );
     const onRemove = vi.fn();
     mountTrustMenu(host, contact(), { onSetTrust: () => {}, onRemove });
     host.querySelector<HTMLButtonElement>(".chat-trust__remove")!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
     expect(onRemove).toHaveBeenCalledTimes(1);
   });
 
-  it("does not call onRemove if the confirm is declined", () => {
-    vi.spyOn(window, "confirm").mockReturnValue(false);
+  it("does not call onRemove if the confirm is declined", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(
+      Promise.resolve(false) as unknown as boolean,
+    );
     const onRemove = vi.fn();
     mountTrustMenu(host, contact(), { onSetTrust: () => {}, onRemove });
     host.querySelector<HTMLButtonElement>(".chat-trust__remove")!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
     expect(onRemove).not.toHaveBeenCalled();
   });
 });
