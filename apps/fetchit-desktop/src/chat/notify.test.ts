@@ -26,7 +26,6 @@ beforeEach(() => {
   sendNotifMock.mockReset();
   store = new ChatStore();
   store.setIdentity({ agent_id: ME, machine_id: "m" });
-  vi.spyOn(document, "hasFocus").mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -55,13 +54,16 @@ describe("maybeNotifyInboundDm", () => {
     expect(sendNotifMock).not.toHaveBeenCalled();
   });
 
-  it("skips when the window has focus", async () => {
+  it("notifies regardless of window focus state", async () => {
+    // We dropped the focus gate to match etchit's behavior — toast
+    // fires for every inbound DM, the OS already de-duplicates with
+    // its own notification grouping.
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     isPermGrantedMock.mockResolvedValue(true);
     await maybeNotifyInboundDm(store, {
       from: PEER, to: ME, body: "hi", timestamp_ms: 1, message_id: "m1",
     });
-    expect(sendNotifMock).not.toHaveBeenCalled();
+    expect(sendNotifMock).toHaveBeenCalledTimes(1);
   });
 
   it("requests permission when default and respects a denial", async () => {
