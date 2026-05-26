@@ -85,6 +85,21 @@ export function mountNewGroup(
     createBtn.disabled = nameInput.value.trim().length === 0;
   });
 
+  copyBtn.addEventListener("click", async () => {
+    const invite = inviteBox.value;
+    if (!invite) return;
+    try {
+      await navigator.clipboard.writeText(invite);
+      copyBtn.textContent = "Copied";
+      setTimeout(() => {
+        copyBtn.textContent = "Copy invite";
+      }, 1200);
+    } catch {
+      inviteBox.select();
+      document.execCommand("copy");
+    }
+  });
+
   createBtn.addEventListener("click", async () => {
     const name = nameInput.value.trim();
     if (!name) return;
@@ -92,24 +107,20 @@ export function mountNewGroup(
     status.textContent = "Creating…";
     try {
       const group = await createGroup(name, myDisplayName);
-      status.textContent = `Created ${group.name ?? group.group_id.slice(0, 8)}.`;
       const invite = await groupInvite(group.group_id);
+      // Swap into the post-create state: hide the name input + Create
+      // button (the dialog has done its one job); show the invite,
+      // the Copy button, and let the user close when ready.
+      nameInput.hidden = true;
+      createBtn.hidden = true;
       inviteBox.value = invite;
       inviteBox.hidden = false;
       copyBtn.hidden = false;
-      copyBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(invite);
-          copyBtn.textContent = "Copied";
-          setTimeout(() => {
-            copyBtn.textContent = "Copy invite";
-          }, 1200);
-        } catch {
-          inviteBox.select();
-          document.execCommand("copy");
-        }
-      });
+      title.textContent = `Group "${group.name ?? group.group_id.slice(0, 8)}" created`;
+      help.textContent = "Share this invite with members. They'll join when they paste it.";
+      status.textContent = "";
       handlers.onCreated();
+      setTimeout(() => copyBtn.focus(), 0);
     } catch (e) {
       status.textContent = `Failed: ${errMsg(e)}`;
       createBtn.disabled = false;
