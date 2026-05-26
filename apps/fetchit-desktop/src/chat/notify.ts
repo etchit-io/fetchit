@@ -7,6 +7,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { ChatStore } from "./state";
 import type { DirectMessage } from "./types";
 
@@ -15,15 +16,35 @@ let inflight: Promise<void> | null = null;
 
 const TITLE = "fetch>it · DM";
 
+async function windowIsFocused(): Promise<boolean> {
+  try {
+    return await getCurrentWindow().isFocused();
+  } catch (e) {
+    // Outside Tauri (tests) — fall back to the DOM check.
+    return typeof document !== "undefined" && document.hasFocus();
+  }
+}
+
 export async function maybeNotifyInboundDm(
   store: ChatStore,
   dm: DirectMessage,
 ): Promise<void> {
-  if (!dm.body || dm.body.trim().length === 0) return;
-  if (dm.from === store.myId()) return;
-  if (typeof document !== "undefined" && document.hasFocus()) return;
+  if (!dm.body || dm.body.trim().length === 0) {
+    console.log("[chat][notify] skip: empty body");
+    return;
+  }
+  if (dm.from === store.myId()) {
+    console.log("[chat][notify] skip: own echo");
+    return;
+  }
+  const focused = await windowIsFocused();
+  if (focused) {
+    console.log("[chat][notify] skip: window focused");
+    return;
+  }
 
   await ensurePermission();
+  console.log("[chat][notify] permission:", cachedPermission);
   if (cachedPermission !== "granted") return;
 
   const sender = senderLabel(store, dm);
@@ -33,8 +54,9 @@ export async function maybeNotifyInboundDm(
       title: TITLE,
       body: `${sender}: ${body}`,
     });
+    console.log("[chat][notify] sent:", sender, "→", body);
   } catch (e) {
-    console.warn("[chat] notify failed:", e);
+    console.warn("[chat][notify] failed:", e);
   }
 }
 
@@ -44,14 +66,16 @@ async function ensurePermission(): Promise<void> {
   inflight = (async () => {
     try {
       const already = await isPermissionGranted();
+      console.log("[chat][notify] isPermissionGranted:", already);
       if (already) {
         cachedPermission = "granted";
         return;
       }
       const result = await requestPermission();
+      console.log("[chat][notify] requestPermission ->", result);
       cachedPermission = result === "granted" ? "granted" : "denied";
     } catch (e) {
-      console.warn("[chat] permission probe failed:", e);
+      console.warn("[chat][notify] permission probe failed:", e);
       cachedPermission = "denied";
     } finally {
       inflight = null;
