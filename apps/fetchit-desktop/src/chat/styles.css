@@ -441,6 +441,34 @@ body.chat-docked {
   color: var(--ash);
 }
 
+.chat-trust {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.chat-trust__select {
+  background: var(--ink-2);
+  color: var(--bone);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.chat-trust__remove {
+  background: transparent;
+  color: var(--ash);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chat-trust__remove:hover {
+  color: var(--copper);
+  border-color: var(--copper);
+}
+
 .chat-composer {
   display: flex;
   gap: 10px;

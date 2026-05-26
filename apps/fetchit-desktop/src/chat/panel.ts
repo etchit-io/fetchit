@@ -9,6 +9,8 @@ import {
   listContacts,
   listGroups,
   presenceOnline,
+  removeContact,
+  setTrust,
 } from "./api";
 import { bindChatEvents } from "./events";
 import { mountSidebar } from "./sidebar";
@@ -189,6 +191,27 @@ export function mountChatPanel(
       openJoinGroup(uri);
     },
     onAddContact: openAddContact,
+    onSetTrust: (agentId, level) => {
+      void (async () => {
+        try {
+          await setTrust(agentId, level);
+          await refreshContacts();
+        } catch (e) {
+          console.warn("[chat] set trust failed:", e);
+        }
+      })();
+    },
+    onRemoveContact: (agentId) => {
+      void (async () => {
+        try {
+          await removeContact(agentId);
+          store.clearDmTranscript(agentId);
+          await refreshContacts();
+        } catch (e) {
+          console.warn("[chat] remove contact failed:", e);
+        }
+      })();
+    },
   });
 
   const refreshContacts = async (): Promise<void> => {

@@ -5,12 +5,16 @@ import { renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import type { ChatStore, Conversation } from "./state";
 import { sendDm, sendGroupMessage } from "./api";
+import { mountTrustMenu } from "./trustMenu";
+import type { TrustLevel } from "./types";
 
 export interface ConversationHandlers {
   onAutonomi: (addr: string) => void;
   onCard: (uri: string) => void;
   onInvite: (uri: string) => void;
   onAddContact: () => void;
+  onSetTrust: (agentId: string, level: TrustLevel) => void;
+  onRemoveContact: (agentId: string) => void;
 }
 
 export function mountConversation(
@@ -27,8 +31,11 @@ export function mountConversation(
   subjectEl.className = "chat-conv-header__subject";
   const presenceEl = document.createElement("span");
   presenceEl.className = "chat-conv-header__presence";
+  const trustEl = document.createElement("div");
+  trustEl.hidden = true;
   headerEl.appendChild(subjectEl);
   headerEl.appendChild(presenceEl);
+  headerEl.appendChild(trustEl);
 
   const stream = document.createElement("div");
   stream.className = "chat-stream";
@@ -79,12 +86,26 @@ export function mountConversation(
 
     subjectEl.textContent = conv.title;
     if (conv.key.kind === "dm") {
-      const online = store.isOnline(conv.key.peer);
+      const peer = conv.key.peer;
+      const online = store.isOnline(peer);
       presenceEl.textContent = online ? "online" : "offline";
       presenceEl.dataset.state = online ? "online" : "offline";
+      const contact = store.contact(peer);
+      if (contact) {
+        trustEl.hidden = false;
+        mountTrustMenu(trustEl, contact, {
+          onSetTrust: (level) => handlers.onSetTrust(peer, level),
+          onRemove: () => handlers.onRemoveContact(peer),
+        });
+      } else {
+        trustEl.hidden = true;
+        trustEl.replaceChildren();
+      }
     } else {
       presenceEl.textContent = "group";
       presenceEl.dataset.state = "group";
+      trustEl.hidden = true;
+      trustEl.replaceChildren();
     }
 
     const wasAtBottom = isNearBottom(stream);
