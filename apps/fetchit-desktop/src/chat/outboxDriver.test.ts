@@ -7,6 +7,7 @@ const PEER = "b".repeat(64);
 
 let store: ChatStore;
 let sendDm: ReturnType<typeof vi.fn>;
+let connect: ReturnType<typeof vi.fn>;
 let stop: () => void;
 
 beforeEach(() => {
@@ -14,6 +15,7 @@ beforeEach(() => {
   store = new ChatStore();
   store.setIdentity({ agent_id: ME, machine_id: "m" });
   sendDm = vi.fn();
+  connect = vi.fn().mockResolvedValue(undefined);
   stop = () => {};
 });
 
@@ -75,7 +77,7 @@ describe("startOutboxDriver — retries", () => {
     store.markFailed(PEER, id, "peer offline");
 
     sendDm.mockResolvedValue("server-id-1");
-    stop = startOutboxDriver(store, { sendDm });
+    stop = startOutboxDriver(store, { sendDm, connect });
     expect(sendDm).not.toHaveBeenCalled();
 
     store.applyPresenceTransition({ agent_id: PEER, event: "online" });
@@ -89,7 +91,7 @@ describe("startOutboxDriver — retries", () => {
   it("does not retry pending (initial-send) bubbles", async () => {
     store.enqueueOutbound(PEER, "in flight");
     sendDm.mockResolvedValue(null);
-    stop = startOutboxDriver(store, { sendDm });
+    stop = startOutboxDriver(store, { sendDm, connect });
     store.applyPresenceTransition({ agent_id: PEER, event: "online" });
     await flushPromises();
     expect(sendDm).not.toHaveBeenCalled();
@@ -101,7 +103,7 @@ describe("startOutboxDriver — retries", () => {
       store.markFailed(PEER, id, "still offline");
     }
     sendDm.mockRejectedValue(new Error("nope"));
-    stop = startOutboxDriver(store, { sendDm });
+    stop = startOutboxDriver(store, { sendDm, connect });
     store.applyPresenceTransition({ agent_id: PEER, event: "online" });
     await flushPromises();
     expect(sendDm).not.toHaveBeenCalled();
@@ -111,7 +113,7 @@ describe("startOutboxDriver — retries", () => {
     const id = store.enqueueOutbound(PEER, "still-broken");
     store.markFailed(PEER, id, "first try");
     sendDm.mockRejectedValueOnce(new Error("still-broken"));
-    stop = startOutboxDriver(store, { sendDm });
+    stop = startOutboxDriver(store, { sendDm, connect });
     store.applyPresenceTransition({ agent_id: PEER, event: "online" });
     await flushPromises();
     const b = store.conversationsSorted()[0].messages[0];
@@ -119,12 +121,41 @@ describe("startOutboxDriver — retries", () => {
     expect((b.retryAttempts ?? 0)).toBeGreaterThanOrEqual(2);
   });
 
+  it("warms the QUIC link via connect() before each retry sendDm", async () => {
+    const id = store.enqueueOutbound(PEER, "needs-warmup");
+    store.markFailed(PEER, id, "cold link");
+    const callOrder: string[] = [];
+    connect.mockImplementation(async () => {
+      callOrder.push("connect");
+    });
+    sendDm.mockImplementation(async () => {
+      callOrder.push("send");
+      return "ok";
+    });
+    stop = startOutboxDriver(store, { sendDm, connect });
+    store.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    await flushPromises();
+    expect(callOrder).toEqual(["connect", "send"]);
+  });
+
+  it("still sends if connect() fails — warmup is best-effort", async () => {
+    const id = store.enqueueOutbound(PEER, "warmup-fails");
+    store.markFailed(PEER, id, "first try");
+    connect.mockRejectedValueOnce(new Error("no route"));
+    sendDm.mockResolvedValue("delivered");
+    stop = startOutboxDriver(store, { sendDm, connect });
+    store.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    await flushPromises();
+    expect(sendDm).toHaveBeenCalledTimes(1);
+    expect(store.pendingOutbound()).toHaveLength(0);
+  });
+
   it("runs an initial tick on subscribe so restored failures kick off immediately", async () => {
     const id = store.enqueueOutbound(PEER, "from-last-session");
     store.markFailed(PEER, id, "offline last time");
     store.applyPresenceTransition({ agent_id: PEER, event: "online" });
     sendDm.mockResolvedValue("ok");
-    stop = startOutboxDriver(store, { sendDm });
+    stop = startOutboxDriver(store, { sendDm, connect });
     await flushPromises();
     expect(sendDm).toHaveBeenCalledTimes(1);
   });

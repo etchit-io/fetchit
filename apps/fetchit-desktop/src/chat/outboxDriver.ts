@@ -9,6 +9,11 @@ import type { AgentId } from "./types";
 
 export interface OutboxDriverDeps {
   sendDm: (peer: AgentId, body: string) => Promise<string | null>;
+  /// Warm up the QUIC link before retrying. x0xd's `/direct/send`
+  /// times out at 12s when the link is cold even though the peer is
+  /// reachable via gossip; an explicit `/agents/connect` establishes
+  /// the direct path so the next send returns in milliseconds.
+  connect: (peer: AgentId) => Promise<void>;
 }
 
 export function startOutboxDriver(
@@ -27,13 +32,18 @@ export function startOutboxDriver(
       if (inflight.has(bubble.id)) continue;
       if ((bubble.retryAttempts ?? 0) >= MAX_AUTO_RETRIES) continue;
       inflight.add(bubble.id);
-      void deps
-        .sendDm(peer, bubble.body)
-        .then(() => store.markDelivered(peer, bubble.id))
-        .catch((e: unknown) =>
-          store.markFailed(peer, bubble.id, (e as Error).message),
-        )
-        .finally(() => inflight.delete(bubble.id));
+      void (async () => {
+        try {
+          // Warm-up is best-effort; sendDm still runs even if it fails.
+          await deps.connect(peer).catch(() => {});
+          await deps.sendDm(peer, bubble.body);
+          store.markDelivered(peer, bubble.id);
+        } catch (e) {
+          store.markFailed(peer, bubble.id, (e as Error).message);
+        } finally {
+          inflight.delete(bubble.id);
+        }
+      })();
     }
   };
 

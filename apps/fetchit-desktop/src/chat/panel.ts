@@ -4,6 +4,7 @@
 // initial state from the daemon.
 
 import {
+  dmConnect,
   health,
   identity,
   listContacts,
@@ -313,7 +314,7 @@ export function mountChatPanel(
         await bindChatEvents(store);
       }
       if (!outboxStop) {
-        outboxStop = startOutboxDriver(store, { sendDm });
+        outboxStop = startOutboxDriver(store, { sendDm, connect: dmConnect });
       }
       startStalenessTick();
     } catch (e) {
