@@ -4,7 +4,7 @@
 import { renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import type { ChatStore, Conversation } from "./state";
-import { sendDm, sendGroupMessage } from "./api";
+import { dmConnect, sendDm, sendGroupMessage } from "./api";
 import { mountTrustMenu } from "./trustMenu";
 import type { TrustLevel } from "./types";
 
@@ -61,11 +61,17 @@ export function mountConversation(
       if (conv.key.kind === "dm") {
         const peer = conv.key.peer;
         const bubbleId = store.enqueueOutbound(peer, body);
-        void sendDm(peer, body).then(
-          () => store.markDelivered(peer, bubbleId),
-          (e: unknown) =>
-            store.markFailed(peer, bubbleId, (e as Error).message),
-        );
+        void (async () => {
+          try {
+            // Same warmup the driver does for retries — turns a 12s
+            // cold-link timeout into a sub-second raw_quic send.
+            await dmConnect(peer).catch(() => {});
+            await sendDm(peer, body);
+            store.markDelivered(peer, bubbleId);
+          } catch (e) {
+            store.markFailed(peer, bubbleId, (e as Error).message);
+          }
+        })();
       } else {
         void sendGroupMessage(conv.key.groupId, body).catch((e) =>
           console.warn("[chat] group send failed:", e),
