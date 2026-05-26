@@ -46,6 +46,10 @@ tauri-plugin-dialog = "2"
 # handler that fires on first-launch runs again and the tab strip
 # picks up a new tab.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# OS-native toast notifications for inbound DMs delivered while the
+# window is unfocused; the chat panel falls back gracefully if the
+# user hasn't granted permission.
+tauri-plugin-notification = "2"
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
 fetchit-chat = { path = "../../../crates/fetchit-chat" }
