@@ -243,6 +243,20 @@ export function mountChatPanel(
   applyDock();
 
   let eventsBound = false;
+  let stalenessTimer: ReturnType<typeof setInterval> | null = null;
+  const startStalenessTick = (): void => {
+    if (stalenessTimer !== null) return;
+    // Re-emit periodically so renderers re-evaluate isOnline() and grey
+    // out peers whose last beacon has aged past STALE_PRESENCE_MS,
+    // even if the daemon hasn't yet emitted an offline transition.
+    stalenessTimer = setInterval(() => store.tickPresence(), 30_000);
+  };
+  const stopStalenessTick = (): void => {
+    if (stalenessTimer !== null) {
+      clearInterval(stalenessTimer);
+      stalenessTimer = null;
+    }
+  };
   const open = async (): Promise<void> => {
     host.hidden = false;
     applyDock();
@@ -257,12 +271,13 @@ export function mountChatPanel(
         listGroups().catch(() => []),
       ]);
       store.loadContacts(contacts);
-      store.loadPresence(online.map((a) => a.agent_id));
+      store.loadPresence(online);
       store.loadGroups(groups);
       if (!eventsBound) {
         eventsBound = true;
         await bindChatEvents(store);
       }
+      startStalenessTick();
     } catch (e) {
       idBadge.textContent = "x0xd not running";
       console.warn("[chat] bootstrap failed:", e);
@@ -272,6 +287,7 @@ export function mountChatPanel(
   const close = (): void => {
     host.hidden = true;
     document.body.classList.remove("chat-docked");
+    stopStalenessTick();
     hideDialog();
     handlers.onClose();
   };

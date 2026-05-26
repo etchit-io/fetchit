@@ -96,6 +96,29 @@ describe("ChatStore — presence", () => {
     s.loadPresence([]);
     expect(s.isOnline(PEER)).toBe(false);
   });
+
+  it("treats peers with a stale last_seen as offline (client-side fallback)", () => {
+    const s = new ChatStore();
+    const oldSeconds = Math.floor((Date.now() - 5 * 60_000) / 1000);
+    s.loadPresence([{ agent_id: PEER, last_seen: oldSeconds }]);
+    expect(s.isOnline(PEER)).toBe(false);
+  });
+
+  it("keeps peers with a recent last_seen online", () => {
+    const s = new ChatStore();
+    const recentSeconds = Math.floor(Date.now() / 1000);
+    s.loadPresence([{ agent_id: PEER, last_seen: recentSeconds }]);
+    expect(s.isOnline(PEER)).toBe(true);
+  });
+
+  it("a fresh online transition resets the staleness clock", () => {
+    const s = new ChatStore();
+    const oldSeconds = Math.floor((Date.now() - 5 * 60_000) / 1000);
+    s.loadPresence([{ agent_id: PEER, last_seen: oldSeconds }]);
+    expect(s.isOnline(PEER)).toBe(false);
+    s.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    expect(s.isOnline(PEER)).toBe(true);
+  });
 });
 
 describe("ChatStore — contacts", () => {

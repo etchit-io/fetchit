@@ -10,9 +10,20 @@ import type {
   DirectMessage,
   Group,
   GroupMessage,
+  OnlineAgent,
   PresenceTransition,
 } from "./types";
 import { loadDms, saveDms, type PersistedDm } from "./persistence";
+
+/// A peer is considered grey if its last beacon is older than this.
+/// x0xd's own eviction window is far longer (5+ minutes); this is the
+/// client-side hint that catches crashed/dead peers sooner.
+export const STALE_PRESENCE_MS = 90_000;
+
+interface PresenceEntry {
+  state: "online" | "offline";
+  lastSeenMs: number;
+}
 
 export type ConversationKey =
   | { kind: "dm"; peer: AgentId }
@@ -39,7 +50,7 @@ type Listener = () => void;
 export class ChatStore {
   private myIdentity: AgentIdentity | null = null;
   private contacts = new Map<AgentId, Contact>();
-  private presence = new Map<AgentId, "online" | "offline">();
+  private presence = new Map<AgentId, PresenceEntry>();
   private conversations = new Map<string, Conversation>();
   private activeKey: string | null = null;
   private listeners = new Set<Listener>();
@@ -100,20 +111,44 @@ export class ChatStore {
     return this.contacts.get(id);
   }
 
-  loadPresence(online: AgentId[]): void {
+  loadPresence(agents: OnlineAgent[]): void {
     this.presence.clear();
-    for (const id of online) this.presence.set(id, "online");
+    const now = Date.now();
+    for (const a of agents) {
+      const lastSeenMs = typeof a.last_seen === "number"
+        ? a.last_seen * 1000
+        : now;
+      this.presence.set(a.agent_id, { state: "online", lastSeenMs });
+    }
     this.emit();
   }
 
   applyPresenceTransition(t: PresenceTransition): void {
-    if (t.event === "online") this.presence.set(t.agent_id, "online");
-    else if (t.event === "offline") this.presence.set(t.agent_id, "offline");
+    if (t.event === "online") {
+      this.presence.set(t.agent_id, {
+        state: "online",
+        lastSeenMs: Date.now(),
+      });
+    } else if (t.event === "offline") {
+      const existing = this.presence.get(t.agent_id);
+      this.presence.set(t.agent_id, {
+        state: "offline",
+        lastSeenMs: existing?.lastSeenMs ?? 0,
+      });
+    }
     this.emit();
   }
 
   isOnline(id: AgentId): boolean {
-    return this.presence.get(id) === "online";
+    const entry = this.presence.get(id);
+    if (!entry || entry.state !== "online") return false;
+    return Date.now() - entry.lastSeenMs < STALE_PRESENCE_MS;
+  }
+
+  /// Force a re-render so views re-evaluate isOnline(); called by a
+  /// periodic panel-level ticker to age out stale beacons.
+  tickPresence(): void {
+    this.emit();
   }
 
   loadGroups(groups: Group[]): void {
