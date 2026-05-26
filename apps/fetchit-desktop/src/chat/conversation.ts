@@ -3,6 +3,7 @@
 
 import { renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
+import { chatConfirm } from "./confirmDialog";
 import type { ChatStore, Conversation } from "./state";
 import { dmConnect, sendDm, sendGroupMessage } from "./api";
 import { mountTrustMenu } from "./trustMenu";
@@ -126,9 +127,11 @@ export function mountConversation(
       leaveBtn.addEventListener("click", () => {
         const title = conv.title;
         void (async () => {
-          const ok = await window.confirm(
-            `Leave "${title}"? You'll need a new invite to rejoin.`,
-          );
+          const ok = await chatConfirm({
+            title: "Leave group",
+            message: `Leave "${title}"? You'll need a new invite to rejoin.`,
+            confirmLabel: "Leave",
+          });
           if (ok) handlers.onLeaveGroup(groupId);
         })();
       });

@@ -7,9 +7,6 @@
     "core:default",
     "deep-link:default",
     "dialog:default",
-    "dialog:allow-confirm",
-    "dialog:allow-message",
-    "dialog:allow-ask",
     "clipboard-manager:allow-write-image",
     "notification:default"
   ]

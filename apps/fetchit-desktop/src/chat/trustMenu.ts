@@ -2,6 +2,7 @@
 // the four trust levels, plus a small Remove button that confirms
 // before nuking the contact and its local transcript.
 
+import { chatConfirm } from "./confirmDialog";
 import type { Contact, TrustLevel } from "./types";
 
 export interface TrustMenuHandlers {
@@ -42,12 +43,11 @@ export function mountTrustMenu(
   removeBtn.addEventListener("click", () => {
     const label = contact.label ?? contact.display_name ?? contact.agent_id;
     void (async () => {
-      // Tauri 2 redirects window.confirm() to its dialog plugin, which
-      // returns a Promise<boolean> — must await, otherwise the truthy
-      // pending promise would always trigger onRemove.
-      const ok = await window.confirm(
-        `Remove ${label}? Their local message history will be deleted.`,
-      );
+      const ok = await chatConfirm({
+        title: "Remove contact",
+        message: `Remove ${label}? Their local message history will be deleted.`,
+        confirmLabel: "Remove",
+      });
       if (ok) handlers.onRemove();
     })();
   });
