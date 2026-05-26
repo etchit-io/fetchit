@@ -119,6 +119,37 @@ describe("ChatStore — presence", () => {
     s.applyPresenceTransition({ agent_id: PEER, event: "online" });
     expect(s.isOnline(PEER)).toBe(true);
   });
+
+  it("mergePresenceSnapshot promotes a peer absent from the live map", () => {
+    const s = new ChatStore();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    s.mergePresenceSnapshot([{ agent_id: PEER, last_seen: nowSeconds }]);
+    expect(s.isOnline(PEER)).toBe(true);
+  });
+
+  it("mergePresenceSnapshot refreshes a stale peer whose snapshot is newer", () => {
+    const s = new ChatStore();
+    s.loadPresence([{
+      agent_id: PEER,
+      last_seen: Math.floor((Date.now() - 5 * 60_000) / 1000),
+    }]);
+    expect(s.isOnline(PEER)).toBe(false);
+    const fresh = Math.floor(Date.now() / 1000);
+    s.mergePresenceSnapshot([{ agent_id: PEER, last_seen: fresh }]);
+    expect(s.isOnline(PEER)).toBe(true);
+  });
+
+  it("mergePresenceSnapshot does not regress a fresher SSE-set entry", () => {
+    const s = new ChatStore();
+    s.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    const fresh = Date.now();
+    // Snapshot's last_seen is older than the SSE-set timestamp.
+    s.mergePresenceSnapshot([{
+      agent_id: PEER,
+      last_seen: Math.floor((fresh - 30_000) / 1000),
+    }]);
+    expect(s.isOnline(PEER)).toBe(true);
+  });
 });
 
 describe("ChatStore — contacts", () => {

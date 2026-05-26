@@ -151,6 +151,25 @@ export class ChatStore {
     this.emit();
   }
 
+  /// Merge a fresh `/presence/online` snapshot into the live map.
+  /// Unlike loadPresence, this does not reset — it only promotes peers
+  /// to online when the snapshot's last_seen is newer than what we
+  /// already have. Used by the panel ticker as a safety net for SSE
+  /// transitions that get dropped during a reconnect window.
+  mergePresenceSnapshot(agents: OnlineAgent[]): void {
+    const now = Date.now();
+    for (const a of agents) {
+      const lastSeenMs = typeof a.last_seen === "number"
+        ? a.last_seen * 1000
+        : now;
+      const existing = this.presence.get(a.agent_id);
+      if (!existing || existing.lastSeenMs < lastSeenMs) {
+        this.presence.set(a.agent_id, { state: "online", lastSeenMs });
+      }
+    }
+    this.emit();
+  }
+
   loadGroups(groups: Group[]): void {
     for (const g of groups) {
       const k = `g:${g.group_id}`;

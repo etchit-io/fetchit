@@ -246,10 +246,20 @@ export function mountChatPanel(
   let stalenessTimer: ReturnType<typeof setInterval> | null = null;
   const startStalenessTick = (): void => {
     if (stalenessTimer !== null) return;
-    // Re-emit periodically so renderers re-evaluate isOnline() and grey
-    // out peers whose last beacon has aged past STALE_PRESENCE_MS,
-    // even if the daemon hasn't yet emitted an offline transition.
-    stalenessTimer = setInterval(() => store.tickPresence(), 30_000);
+    // Re-render periodically so views age out stale beacons, AND
+    // re-pull /presence/online so transitions dropped during an SSE
+    // reconnect get reconciled instead of leaving the dot wrong until
+    // the user reopens the panel.
+    stalenessTimer = setInterval(() => {
+      store.tickPresence();
+      void (async () => {
+        try {
+          store.mergePresenceSnapshot(await presenceOnline());
+        } catch {
+          // ignore — staleness fallback will grey peers out anyway
+        }
+      })();
+    }, 30_000);
   };
   const stopStalenessTick = (): void => {
     if (stalenessTimer !== null) {
