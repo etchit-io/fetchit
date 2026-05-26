@@ -65,6 +65,9 @@ describe("ChatStore — persistence", () => {
     expect(stored?.unread).toBe(2);
     expect(stored?.lastActivityMs).toBe(6);
 
+    // Visible+active is what counts as "seen" — without setPanelVisible
+    // the user can't actually see the conversation, so unread persists.
+    s.setPanelVisible(true);
     s.setActive({ kind: "dm", peer: PEER });
     stored = loadDms(ME).get(PEER);
     expect(stored?.unread).toBe(0);

@@ -328,6 +328,7 @@ export function mountChatPanel(
   const open = async (): Promise<void> => {
     host.hidden = false;
     applyDock();
+    store.setPanelVisible(true);
     try {
       await health();
       const me = await identity();
@@ -361,6 +362,7 @@ export function mountChatPanel(
   const close = (): void => {
     host.hidden = true;
     document.body.classList.remove("chat-docked");
+    store.setPanelVisible(false);
     stopStalenessTick();
     hideDialog();
     handlers.onClose();

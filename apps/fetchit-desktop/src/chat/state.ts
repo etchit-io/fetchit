@@ -64,6 +64,7 @@ export class ChatStore {
   private presence = new Map<AgentId, PresenceEntry>();
   private conversations = new Map<string, Conversation>();
   private activeKey: string | null = null;
+  private panelVisible = false;
   private listeners = new Set<Listener>();
 
   subscribe(fn: Listener): () => void {
@@ -234,7 +235,12 @@ export class ChatStore {
     }
     conv.messages.push(bubble);
     conv.lastActivityMs = ts;
-    if (!bubble.mine && this.activeKey !== convKey(conv.key)) {
+    // "Seen" requires both: panel visible AND this conv is the active
+    // one. Otherwise (panel closed, OR a different conv showing) the
+    // message bumps unread so the header badge + ping fire.
+    const seen
+      = this.panelVisible && this.activeKey === convKey(conv.key);
+    if (!bubble.mine && !seen) {
       conv.unread += 1;
     }
     this.persistDms();
@@ -296,6 +302,30 @@ export class ChatStore {
       this.activeKey = null;
     } else {
       this.activeKey = convKey(key);
+      // Only clear unread when the panel is actually open — otherwise
+      // a panel-closed setActive (e.g. restored state on reload)
+      // would silently consume the badge without the user seeing
+      // the messages.
+      if (this.panelVisible) {
+        const conv = this.conversations.get(this.activeKey);
+        if (conv && conv.unread !== 0) {
+          conv.unread = 0;
+          this.persistDms();
+        }
+      }
+    }
+    this.emit();
+  }
+
+  /// The panel reports its visibility so the store can decide what
+  /// counts as "seen" for unread tracking and unread-reset logic.
+  setPanelVisible(visible: boolean): void {
+    if (this.panelVisible === visible) return;
+    this.panelVisible = visible;
+    // Becoming visible while a conv is already active = the user just
+    // unhid the chat with their last conversation in front of them →
+    // mark it read.
+    if (visible && this.activeKey) {
       const conv = this.conversations.get(this.activeKey);
       if (conv && conv.unread !== 0) {
         conv.unread = 0;

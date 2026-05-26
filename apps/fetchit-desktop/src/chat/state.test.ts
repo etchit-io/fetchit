@@ -43,6 +43,7 @@ describe("ChatStore — DM bookkeeping", () => {
   it("increments unread for inbound messages on inactive conversations", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.setPanelVisible(true);
     s.recordDirectMessage({
       from: PEER, to: ME, body: "x", timestamp_ms: 1, message_id: "1",
     });
@@ -52,13 +53,38 @@ describe("ChatStore — DM bookkeeping", () => {
     expect(s.conversationsSorted()[0].unread).toBe(2);
   });
 
-  it("clears unread when the conversation becomes active", () => {
+  it("clears unread when the conversation becomes active and panel is visible", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.setPanelVisible(true);
     s.recordDirectMessage({
       from: PEER, to: ME, body: "x", timestamp_ms: 1, message_id: "1",
     });
     s.setActive({ kind: "dm", peer: PEER });
+    expect(s.conversationsSorted()[0].unread).toBe(0);
+  });
+
+  it("bumps unread for active conv when the panel is closed", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.setActive({ kind: "dm", peer: PEER });
+    // Panel still closed — inbound to "active" conv still counts as
+    // unread because the user can't actually see anything.
+    s.recordDirectMessage({
+      from: PEER, to: ME, body: "y", timestamp_ms: 1, message_id: "1",
+    });
+    expect(s.conversationsSorted()[0].unread).toBe(1);
+  });
+
+  it("setPanelVisible(true) clears unread for the active conv on open", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.setActive({ kind: "dm", peer: PEER });
+    s.recordDirectMessage({
+      from: PEER, to: ME, body: "y", timestamp_ms: 1, message_id: "1",
+    });
+    expect(s.conversationsSorted()[0].unread).toBe(1);
+    s.setPanelVisible(true);
     expect(s.conversationsSorted()[0].unread).toBe(0);
   });
 });
