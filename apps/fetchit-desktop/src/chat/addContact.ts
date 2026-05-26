@@ -2,6 +2,7 @@
 // forwards it to the daemon's import endpoint.
 
 import { importCard } from "./api";
+import { errMsg } from "./errors";
 
 export interface AddContactHandlers {
   onClose: () => void;
@@ -77,7 +78,7 @@ export function mountAddContact(
       status.textContent = "Imported.";
       handlers.onImported();
     } catch (e) {
-      status.textContent = `Failed: ${(e as Error).message}`;
+      status.textContent = `Failed: ${errMsg(e)}`;
       addBtn.disabled = false;
     }
   });

@@ -3,6 +3,7 @@
 // for sharing.
 
 import { createGroup, groupInvite } from "./api";
+import { errMsg } from "./errors";
 
 export interface NewGroupHandlers {
   onClose: () => void;
@@ -110,7 +111,7 @@ export function mountNewGroup(
       });
       handlers.onCreated();
     } catch (e) {
-      status.textContent = `Failed: ${(e as Error).message}`;
+      status.textContent = `Failed: ${errMsg(e)}`;
       createBtn.disabled = false;
     }
   });

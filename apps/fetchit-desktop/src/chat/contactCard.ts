@@ -2,6 +2,7 @@
 // and displays the share URI + a QR. The user can copy either form.
 
 import { myCard } from "./api";
+import { errMsg } from "./errors";
 import { renderQrSvg } from "../qr";
 
 export interface CardDialogHandlers {
