@@ -5,9 +5,11 @@ import { renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
 import type { ChatStore, Conversation } from "./state";
-import { dmConnect, sendDm, sendGroupMessage } from "./api";
+import { dmConnect, groupHistory, sendDm, sendGroupMessage } from "./api";
 import { mountTrustMenu } from "./trustMenu";
 import type { TrustLevel } from "./types";
+
+const GROUP_POLL_INTERVAL_MS = 4_000;
 
 export interface ConversationHandlers {
   onAutonomi: (addr: string) => void;
@@ -56,6 +58,20 @@ export function mountConversation(
   };
 
   let lastConv: Conversation | null = null;
+  let groupPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  const refreshGroupHistory = (groupId: string): Promise<void> =>
+    groupHistory(groupId)
+      .then((msgs) => store.recordGroupHistory(groupId, msgs))
+      .catch((e) => console.warn("[chat] group history fetch:", e));
+
+  const stopGroupPoll = (): void => {
+    if (groupPollTimer !== null) {
+      clearInterval(groupPollTimer);
+      groupPollTimer = null;
+    }
+  };
+
   const composer = mountComposer(composerEl, {
     onSend: (body) => {
       const conv = store.active();
@@ -75,9 +91,12 @@ export function mountConversation(
           }
         })();
       } else {
-        void sendGroupMessage(conv.key.groupId, body).catch((e) =>
-          console.warn("[chat] group send failed:", e),
-        );
+        const groupId = conv.key.groupId;
+        // Fire the send, then refresh history so the user sees their
+        // own bubble appear without waiting for the next poll tick.
+        void sendGroupMessage(groupId, body)
+          .then(() => refreshGroupHistory(groupId))
+          .catch((e) => console.warn("[chat] group send failed:", e));
       }
     },
   });
@@ -152,12 +171,27 @@ export function mountConversation(
       // QUIC handshake succeeds, treat the peer as freshly online even
       // when their gossip beacon to the daemon is lagging.
       if (conv.key.kind === "dm") {
+        stopGroupPoll();
         const peer = conv.key.peer;
         void dmConnect(peer)
           .then(() => store.touchPresence(peer))
           .catch(() => {
             // silent — staleness threshold decides
           });
+      } else {
+        // Group: there's no group-message SSE wired through yet, so
+        // poll `/groups/<id>/messages` while this conv is active. One
+        // immediate refresh, then on a small interval.
+        const groupId = conv.key.groupId;
+        stopGroupPoll();
+        void refreshGroupHistory(groupId);
+        groupPollTimer = setInterval(() => {
+          if (store.active()?.key.kind !== "group") {
+            stopGroupPoll();
+            return;
+          }
+          void refreshGroupHistory(groupId);
+        }, GROUP_POLL_INTERVAL_MS);
       }
     }
     lastConv = conv;
@@ -167,6 +201,7 @@ export function mountConversation(
   render();
   return {
     dispose: () => {
+      stopGroupPoll();
       unsub();
     },
   };
