@@ -76,6 +76,26 @@ describe("ChatStore — presence", () => {
     s.applyPresenceTransition({ agent_id: PEER, event: "offline" });
     expect(s.isOnline(PEER)).toBe(false);
   });
+
+  it("notifies subscribers on every presence transition", () => {
+    const s = new ChatStore();
+    let calls = 0;
+    s.subscribe(() => {
+      calls += 1;
+    });
+    const before = calls;
+    s.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    s.applyPresenceTransition({ agent_id: PEER, event: "offline" });
+    expect(calls - before).toBe(2);
+  });
+
+  it("loadPresence resets and re-seeds the online map", () => {
+    const s = new ChatStore();
+    s.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    expect(s.isOnline(PEER)).toBe(true);
+    s.loadPresence([]);
+    expect(s.isOnline(PEER)).toBe(false);
+  });
 });
 
 describe("ChatStore — contacts", () => {

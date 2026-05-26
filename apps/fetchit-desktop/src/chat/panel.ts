@@ -159,7 +159,12 @@ export function mountChatPanel(
 
   const refreshContacts = async (): Promise<void> => {
     try {
-      store.loadContacts(await listContacts());
+      const [contacts, online] = await Promise.all([
+        listContacts(),
+        presenceOnline().catch(() => []),
+      ]);
+      store.loadContacts(contacts);
+      store.loadPresence(online.map((a) => a.agent_id));
     } catch (e) {
       console.warn("[chat] contacts refresh failed:", e);
     }
