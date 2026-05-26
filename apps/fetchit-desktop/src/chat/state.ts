@@ -247,6 +247,15 @@ export class ChatStore {
     );
   }
 
+  /// Total unread count across every conversation. Used by the
+  /// header-bar chat button badge so the user sees pending traffic
+  /// even when the chat panel itself is closed.
+  unreadCount(): number {
+    let total = 0;
+    for (const conv of this.conversations.values()) total += conv.unread;
+    return total;
+  }
+
   ensureDm(peer: AgentId): Conversation {
     const key = `dm:${peer}`;
     let conv = this.conversations.get(key);

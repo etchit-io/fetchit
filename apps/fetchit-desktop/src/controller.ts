@@ -88,6 +88,23 @@ export async function init(): Promise<void> {
   };
   shareBtn.addEventListener("click", openShare);
 
+  const chatBadge = document.createElement("span");
+  chatBadge.className = "chat-toggle__badge";
+  chatBadge.hidden = true;
+  chatBtn.appendChild(chatBadge);
+  const renderChatBadge = (count: number): void => {
+    // Hide entirely while the panel is open — the user is plainly
+    // already reading, no need to nag with a count.
+    if (chat.isOpen() || count <= 0) {
+      chatBadge.hidden = true;
+      chatBtn.removeAttribute("data-unread");
+      return;
+    }
+    chatBadge.hidden = false;
+    chatBadge.textContent = count > 99 ? "99+" : String(count);
+    chatBtn.setAttribute("data-unread", "true");
+  };
+
   const chat = mountChatPanel(chatHost, {
     onAutonomi: (uri) => {
       const parsed = parseAutonomiUrl(uri);
@@ -97,12 +114,20 @@ export async function init(): Promise<void> {
       }
     },
     onClose: () => {
-      // No-op: the chat panel manages its own visibility. Hook is
-      // exposed so the controller can react if it ever needs to (e.g.
-      // restoring focus to a specific element).
+      // Re-render badge in case unread accrued while the panel was
+      // open (user could've left the panel on a different conv).
+      // Defer one tick so chat.isOpen() reports the new state first.
+      setTimeout(() => renderChatBadge(lastUnread), 0);
+    },
+    onUnreadChange: (n) => {
+      lastUnread = n;
+      renderChatBadge(n);
     },
   });
-  chatBtn.addEventListener("click", () => void chat.toggle());
+  let lastUnread = 0;
+  chatBtn.addEventListener("click", () => {
+    void chat.toggle().then(() => renderChatBadge(lastUnread));
+  });
 
   const toggleBookmark = async (): Promise<void> => {
     const active = store.active();

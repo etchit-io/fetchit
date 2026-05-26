@@ -27,6 +27,9 @@ import { ChatStore } from "./state";
 export interface ChatPanelHandlers {
   onAutonomi: (addr: string) => void;
   onClose: () => void;
+  /// Fires whenever the unread-count rolls up — used by the header
+  /// chat button to badge itself. Receives the total across all DMs.
+  onUnreadChange?: (count: number) => void;
 }
 
 export interface ChatPanelApi {
@@ -118,6 +121,14 @@ export function mountChatPanel(
   host.appendChild(outboxBanner);
   host.appendChild(layout);
   host.appendChild(dialogHost);
+
+  let lastUnread = -1;
+  store.subscribe(() => {
+    const next = store.unreadCount();
+    if (next === lastUnread) return;
+    lastUnread = next;
+    handlers.onUnreadChange?.(next);
+  });
 
   const renderOutboxBanner = (): void => {
     const pending = store.pendingOutbound();

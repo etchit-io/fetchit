@@ -550,6 +550,38 @@ body.chat-docked {
   cursor: help;
 }
 
+#chat-toggle {
+  position: relative;
+}
+#chat-toggle[data-unread="true"] {
+  animation: chat-toggle-pulse 1.6s var(--ease-out-expo) infinite;
+}
+@keyframes chat-toggle-pulse {
+  0%, 100% { transform: none; }
+  50% { transform: scale(1.06); }
+}
+.chat-toggle__badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--copper);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  box-shadow: 0 0 0 1.5px var(--ink-2);
+  pointer-events: none;
+}
+.chat-toggle__badge[hidden] { display: none; }
+
 .chat-composer {
   display: flex;
   gap: 10px;
