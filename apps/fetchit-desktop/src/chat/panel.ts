@@ -216,12 +216,11 @@ export function mountChatPanel(
 
   const refreshContacts = async (): Promise<void> => {
     try {
-      const [contacts, online] = await Promise.all([
-        listContacts(),
-        presenceOnline().catch(() => []),
-      ]);
-      store.loadContacts(contacts);
-      store.loadPresence(online.map((a) => a.agent_id));
+      // Only refresh contacts here. Presence is seeded once at open() and
+      // then driven exclusively by the SSE pump; calling loadPresence on
+      // every contact action would clobber online-events the stream has
+      // already delivered with a snapshot that may not yet reflect them.
+      store.loadContacts(await listContacts());
     } catch (e) {
       console.warn("[chat] contacts refresh failed:", e);
     }
