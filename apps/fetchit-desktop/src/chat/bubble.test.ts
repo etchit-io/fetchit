@@ -25,22 +25,36 @@ describe("renderBubble — content", () => {
     expect(row.querySelectorAll("a")).toHaveLength(0);
   });
 
-  it("linkifies an autonomi:// address", () => {
+  it("strips autonomi:// URLs from the text bubble (preview card represents them)", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const row = renderBubble(
       bubble({ body: `check autonomi://${ADDR} please` }),
       handlers,
     );
-    const links = row.querySelectorAll("a.chat-link");
-    expect(links).toHaveLength(1);
-    expect(links[0].getAttribute("title")).toBe(`autonomi://${ADDR}`);
+    const inlineLinks = row.querySelectorAll("a.chat-link");
+    expect(inlineLinks).toHaveLength(0);
+    const previews = row.querySelectorAll(".chat-preview");
+    expect(previews).toHaveLength(1);
+    // Surrounding text is preserved in the text bubble.
+    const textBubble = row.querySelector(".chat-bubble");
+    expect(textBubble?.textContent).toContain("check");
+    expect(textBubble?.textContent).toContain("please");
   });
 
-  it("clicking an autonomi link fires onAutonomi with the full URI", () => {
+  it("for an autonomi-only body, hides the text bubble entirely", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const row = renderBubble(bubble({ body: `autonomi://${ADDR}` }), handlers);
-    const a = row.querySelector("a.chat-link") as HTMLAnchorElement;
-    a.click();
+    expect(row.querySelector(".chat-bubble")).toBeNull();
+    expect(row.querySelectorAll(".chat-preview")).toHaveLength(1);
+  });
+
+  it("clicking the preview card's Open button fires onAutonomi", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const row = renderBubble(bubble({ body: `autonomi://${ADDR}` }), handlers);
+    const openBtn = row.querySelectorAll<HTMLButtonElement>(
+      ".chat-preview__btn",
+    )[1];
+    openBtn.click();
     expect(handlers.onAutonomi).toHaveBeenCalledWith(`autonomi://${ADDR}`);
   });
 
@@ -64,9 +78,18 @@ describe("renderBubble — content", () => {
       bubble({ body: `look: autonomi://${ADDR} now!` }),
       handlers,
     );
-    expect(row.textContent?.startsWith("look: ")).toBe(true);
-    expect(row.textContent?.endsWith(" now!")).toBe(false); // timestamp gets appended
-    expect(row.textContent).toContain(" now!");
+    const textBubble = row.querySelector(".chat-bubble");
+    expect(textBubble?.textContent).toContain("look: ");
+    expect(textBubble?.textContent).toContain(" now!");
+  });
+
+  it("keeps the text bubble visible for an autonomi-only message that's still sending (mine)", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const row = renderBubble(
+      bubble({ body: `autonomi://${ADDR}`, mine: true, status: "pending" }),
+      handlers,
+    );
+    expect(row.querySelector(".chat-bubble")).not.toBeNull();
   });
 });
 

@@ -24,18 +24,33 @@ export function renderBubble(
   const stack = document.createElement("div");
   stack.className = "chat-bubble__stack";
 
+  const addresses = extractAutonomiAddresses(b.body);
+
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble";
   if (b.mine && b.status && b.status !== "delivered") {
     bubble.dataset.status = b.status;
   }
-  appendBodyWithLinks(bubble, b.body, handlers);
+  const hasSurroundingText = appendBodyWithLinks(
+    bubble,
+    b.body,
+    handlers,
+    /* skipAutonomi */ addresses.length > 0,
+  );
   if (b.mine && b.status && b.status !== "delivered") {
     bubble.appendChild(statusIcon(b.status, b.failureReason));
   }
-  stack.appendChild(bubble);
+  // Suppress the text bubble entirely when the only content was
+  // autonomi:// links — the preview card below already represents
+  // the address. Keep it around when there's surrounding text, or
+  // when we still need to show a sending / failed status indicator.
+  const needsStatus =
+    !!(b.mine && b.status && b.status !== "delivered");
+  if (hasSurroundingText || addresses.length === 0 || needsStatus) {
+    stack.appendChild(bubble);
+  }
 
-  for (const addr of extractAutonomiAddresses(b.body)) {
+  for (const addr of addresses) {
     mountAutonomiPreview(stack, addr, { onOpen: handlers.onAutonomi });
   }
 
@@ -53,24 +68,40 @@ export function renderBubble(
   return row;
 }
 
+/// Returns true if any non-whitespace text or non-autonomi link was
+/// emitted into `parent`. When `skipAutonomi` is set, autonomi:// URLs
+/// are dropped from the rendered text since the preview card below
+/// already represents them.
 function appendBodyWithLinks(
   parent: HTMLElement,
   body: string,
   handlers: BubbleHandlers,
-): void {
+  skipAutonomi = false,
+): boolean {
   let cursor = 0;
+  let hasContent = false;
   for (const m of body.matchAll(URL_RE)) {
     const start = m.index ?? 0;
     if (start > cursor) {
-      parent.appendChild(document.createTextNode(body.slice(cursor, start)));
+      const slice = body.slice(cursor, start);
+      parent.appendChild(document.createTextNode(slice));
+      if (slice.trim().length > 0) hasContent = true;
     }
     const url = m[0];
-    parent.appendChild(linkFor(url, handlers));
+    if (skipAutonomi && url.startsWith("autonomi://")) {
+      // dropped — preview card represents it
+    } else {
+      parent.appendChild(linkFor(url, handlers));
+      hasContent = true;
+    }
     cursor = start + url.length;
   }
   if (cursor < body.length) {
-    parent.appendChild(document.createTextNode(body.slice(cursor)));
+    const slice = body.slice(cursor);
+    parent.appendChild(document.createTextNode(slice));
+    if (slice.trim().length > 0) hasContent = true;
   }
+  return hasContent;
 }
 
 function linkFor(url: string, h: BubbleHandlers): HTMLElement {
