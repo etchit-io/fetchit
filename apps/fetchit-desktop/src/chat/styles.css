@@ -1,7 +1,7 @@
 /* Chat surface — slide-in panel, conversation list, message thread,
    composer. Uses the shared theme tokens from styles.css. */
 
-:root { --chat-dock-width: 420px; }
+:root { --chat-dock-width: 460px; }
 
 .chat-panel {
   position: fixed;
@@ -22,7 +22,13 @@
   box-shadow: -10px 0 28px rgba(0, 0, 0, 0.32);
 }
 .chat-panel--docked .chat-panel__layout {
-  grid-template-columns: minmax(160px, 200px) 1fr;
+  grid-template-columns: minmax(150px, 180px) 1fr;
+}
+.chat-panel--docked .chat-panel__share {
+  display: none;
+}
+.chat-panel--docked .chat-row {
+  max-width: 92%;
 }
 
 body.chat-docked {
@@ -253,6 +259,10 @@ body.chat-docked {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Without min-width:0 the grid track grows to the widest bubble's
+     intrinsic width, which breaks the chat-row 75% max-width and lets
+     bubbles overflow the panel edge in dock mode. */
+  min-width: 0;
 }
 
 .chat-conv-header {
@@ -262,11 +272,17 @@ body.chat-docked {
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
   background: var(--ink-2);
+  flex-wrap: wrap;
 }
 
 .chat-conv-header__subject {
   font-weight: 600;
   font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
 }
 
 .chat-conv-header__presence {
@@ -291,6 +307,7 @@ body.chat-docked {
   flex-direction: column;
   gap: 10px;
   scroll-behavior: smooth;
+  min-width: 0;
 }
 
 .chat-row {
@@ -309,6 +326,8 @@ body.chat-docked {
   line-height: 1.45;
   white-space: pre-wrap;
   word-wrap: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
   animation: chat-bubble-pop var(--dur-trans) var(--ease-out-expo) both;
 }
 
