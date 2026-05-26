@@ -7,6 +7,7 @@ import {
   dmConnect,
   health,
   identity,
+  leaveGroup,
   listContacts,
   listGroups,
   presenceOnline,
@@ -266,6 +267,17 @@ export function mountChatPanel(
           await refreshContacts();
         } catch (e) {
           console.warn("[chat] remove contact failed:", e);
+        }
+      })();
+    },
+    onLeaveGroup: (groupId) => {
+      void (async () => {
+        try {
+          await leaveGroup(groupId);
+          await refreshGroups();
+          store.setActive(null);
+        } catch (e) {
+          console.warn("[chat] leave group failed:", e);
         }
       })();
     },

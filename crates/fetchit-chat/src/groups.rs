@@ -107,6 +107,14 @@ impl<'a> Endpoint<'a> {
         Ok(resp.groups)
     }
 
+    /// Leave or delete a group. The daemon picks based on ownership:
+    /// the creator's call removes the group for everyone in the
+    /// roster; a non-creator's call leaves it locally only.
+    pub async fn leave(&self, group: &GroupId) -> Result<()> {
+        let path = format!("/groups/{}", group.0);
+        self.http.delete(&path).await
+    }
+
     /// Create a new group with a display name visible to peers.
     pub async fn create(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
         self.http

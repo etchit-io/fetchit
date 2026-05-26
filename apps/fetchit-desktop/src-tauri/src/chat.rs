@@ -261,6 +261,20 @@ pub async fn chat_group_send(
 }
 
 #[tauri::command]
+pub async fn chat_group_leave(
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+) -> Result<(), String> {
+    state
+        .get()
+        .await?
+        .groups()
+        .leave(&GroupId(group_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn chat_group_messages(
     state: tauri::State<'_, ChatState>,
     group_id: String,

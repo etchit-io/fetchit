@@ -654,6 +654,7 @@ pub fn run() {
             chat::chat_group_join,
             chat::chat_group_send,
             chat::chat_group_messages,
+            chat::chat_group_leave,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

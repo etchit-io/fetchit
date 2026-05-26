@@ -82,6 +82,6 @@ export async function mountCardDialog(
       }
     });
   } catch (e) {
-    status.textContent = `Could not generate card: ${(e as Error).message}`;
+    status.textContent = `Could not generate card: ${errMsg(e)}`;
   }
 }

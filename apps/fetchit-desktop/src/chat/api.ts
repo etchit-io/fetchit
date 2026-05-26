@@ -102,3 +102,7 @@ export async function sendGroupMessage(
 export async function groupHistory(groupId: string): Promise<GroupMessage[]> {
   return invoke<GroupMessage[]>("chat_group_messages", { groupId });
 }
+
+export async function leaveGroup(groupId: string): Promise<void> {
+  await invoke("chat_group_leave", { groupId });
+}

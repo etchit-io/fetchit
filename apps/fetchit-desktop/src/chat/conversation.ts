@@ -15,6 +15,7 @@ export interface ConversationHandlers {
   onAddContact: () => void;
   onSetTrust: (agentId: string, level: TrustLevel) => void;
   onRemoveContact: (agentId: string) => void;
+  onLeaveGroup: (groupId: string) => void;
 }
 
 export function mountConversation(
@@ -113,8 +114,22 @@ export function mountConversation(
     } else {
       presenceEl.textContent = "group";
       presenceEl.dataset.state = "group";
-      trustEl.hidden = true;
+      const groupId = conv.key.groupId;
+      trustEl.hidden = false;
       trustEl.replaceChildren();
+      trustEl.className = "chat-group-actions";
+      const leaveBtn = document.createElement("button");
+      leaveBtn.type = "button";
+      leaveBtn.className = "chat-trust__remove";
+      leaveBtn.textContent = "Leave";
+      leaveBtn.title = "Leave / delete this group";
+      leaveBtn.addEventListener("click", () => {
+        const title = conv.title;
+        if (confirm(`Leave "${title}"? You'll need a new invite to rejoin.`)) {
+          handlers.onLeaveGroup(groupId);
+        }
+      });
+      trustEl.appendChild(leaveBtn);
     }
 
     const wasAtBottom = isNearBottom(stream);
