@@ -111,6 +111,17 @@ describe("ChatStore — presence", () => {
     expect(s.isOnline(PEER)).toBe(true);
   });
 
+  it("a successful send refreshes the staleness clock via touchPresence", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const oldSeconds = Math.floor((Date.now() - 10 * 60_000) / 1000);
+    s.loadPresence([{ agent_id: PEER, last_seen: oldSeconds }]);
+    expect(s.isOnline(PEER)).toBe(false);
+    const id = s.enqueueOutbound(PEER, "hi");
+    s.markDelivered(PEER, id);
+    expect(s.isOnline(PEER)).toBe(true);
+  });
+
   it("a fresh online transition resets the staleness clock", () => {
     const s = new ChatStore();
     const oldSeconds = Math.floor((Date.now() - 5 * 60_000) / 1000);

@@ -16,9 +16,12 @@ import type {
 import { loadDms, saveDms, type PersistedDm } from "./persistence";
 
 /// A peer is considered grey if its last beacon is older than this.
-/// x0xd's own eviction window is far longer (5+ minutes); this is the
-/// client-side hint that catches crashed/dead peers sooner.
-export const STALE_PRESENCE_MS = 90_000;
+/// x0xd's own eviction window is far longer (5+ minutes) and a healthy
+/// peer's gossip beacon to main can lag several minutes despite the
+/// QUIC link being fine. 90s was too tight in practice and would grey
+/// out reachable peers; 5 minutes still catches crashed peers well
+/// before the daemon's own eviction.
+export const STALE_PRESENCE_MS = 300_000;
 
 interface PresenceEntry {
   state: "online" | "offline";
@@ -327,8 +330,19 @@ export class ChatStore {
     if (!b) return;
     b.status = "delivered";
     b.failureReason = undefined;
+    // A successful send is proof the peer is reachable right now, so
+    // refresh the staleness clock even if their gossip beacon is lagging.
+    this.touchPresence(peer);
     this.persistDms();
     this.emit();
+  }
+
+  /// Bump a peer's last-seen to now and mark them online. Called when
+  /// we have direct evidence of reachability — currently a successful
+  /// outbound send — so the dot stays green even when the daemon's
+  /// gossip beacon view is stale.
+  touchPresence(peer: AgentId): void {
+    this.presence.set(peer, { state: "online", lastSeenMs: Date.now() });
   }
 
   markFailed(peer: AgentId, bubbleId: string, reason: string): void {
