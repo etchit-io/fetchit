@@ -57,7 +57,10 @@ struct AddRequest<'a> {
 #[derive(Serialize)]
 struct TrustRequest<'a> {
     agent_id: &'a str,
-    trust_level: TrustLevel,
+    // The quick-set route on x0xd 0.19+ expects `level`, not
+    // `trust_level` — getting this wrong used to 422 silently and the
+    // dropdown would snap back to the old value on every refresh.
+    level: TrustLevel,
 }
 
 #[derive(Deserialize)]
@@ -112,7 +115,7 @@ impl<'a> Endpoint<'a> {
                 "/contacts/trust",
                 &TrustRequest {
                     agent_id: &agent_id.0,
-                    trust_level: level,
+                    level,
                 },
             )
             .await?;

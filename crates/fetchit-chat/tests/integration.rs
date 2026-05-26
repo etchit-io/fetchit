@@ -138,11 +138,14 @@ async fn contacts_list_decodes() {
 async fn contacts_set_trust_posts_to_quick_endpoint() {
     let server = MockServer::start().await;
     let peer = id('c');
+    // The daemon's quick-set route expects `level`, not `trust_level`.
+    // Older versions of this test asserted the wrong shape, which let
+    // a 422-silently-eaten regression through.
     Mock::given(method("POST"))
         .and(path("/contacts/trust"))
         .and(body_partial_json(json!({
             "agent_id": peer.0,
-            "trust_level": "blocked"
+            "level": "blocked"
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&server)
@@ -153,6 +156,14 @@ async fn contacts_set_trust_posts_to_quick_endpoint() {
         .set_trust(&peer, TrustLevel::Blocked)
         .await
         .unwrap();
+
+    // Confirm the body really uses `level` — wiremock's
+    // body_partial_json above passes if either matches, since absent
+    // fields are ignored. Inspect the captured request to be sure.
+    let req = &server.received_requests().await.unwrap()[0];
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(body["level"], "blocked");
+    assert!(body.get("trust_level").is_none());
 }
 
 #[tokio::test]
