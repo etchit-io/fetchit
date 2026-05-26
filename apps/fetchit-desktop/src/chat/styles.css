@@ -651,6 +651,7 @@ body.chat-docked {
   place-items: center;
   animation: chat-dialog-fade var(--dur-trans) ease both;
 }
+.chat-dialog[hidden] { display: none !important; }
 
 @keyframes chat-dialog-fade {
   from { opacity: 0; }

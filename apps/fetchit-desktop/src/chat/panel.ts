@@ -112,7 +112,15 @@ export function mountChatPanel(
 
   const sidebarEl = document.createElement("aside");
   const conversationEl = document.createElement("section");
+  // dialogHost is mounted on document.body and pre-styled with the
+  // chat-dialog class from the start (just hidden). When a dialog
+  // opens, only `hidden = false` + child insertion happens — no class
+  // change, no late-applied position:absolute. webkit2gtk on Linux
+  // wedges its compositor when a hidden element gets its positioning
+  // class and its first children in the same task; pre-styling
+  // sidesteps that path.
   const dialogHost = document.createElement("div");
+  dialogHost.className = "chat-dialog";
   dialogHost.hidden = true;
 
   layout.appendChild(sidebarEl);
@@ -121,7 +129,7 @@ export function mountChatPanel(
   host.appendChild(headerEl);
   host.appendChild(outboxBanner);
   host.appendChild(layout);
-  host.appendChild(dialogHost);
+  document.body.appendChild(dialogHost);
 
   let lastUnread = -1;
   store.subscribe(() => {
