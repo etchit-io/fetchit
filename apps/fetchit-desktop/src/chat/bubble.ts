@@ -39,6 +39,10 @@ export function renderBubble(
     mountAutonomiPreview(stack, addr, { onOpen: handlers.onAutonomi });
   }
 
+  if (b.mine && b.status && b.status !== "delivered") {
+    stack.appendChild(substatusCaption(b.status, b.failureReason));
+  }
+
   const meta = document.createElement("time");
   meta.className = "chat-bubble__meta";
   meta.textContent = formatTime(b.timestampMs);
@@ -82,6 +86,21 @@ function linkFor(url: string, h: BubbleHandlers): HTMLElement {
     else if (url.startsWith("x0x://agent/")) h.onCard(url);
   });
   return a;
+}
+
+function substatusCaption(
+  status: "pending" | "failed",
+  reason?: string,
+): HTMLElement {
+  const cap = document.createElement("div");
+  cap.className = `chat-bubble__substatus chat-bubble__substatus--${status}`;
+  if (status === "pending") {
+    cap.textContent = "Sending…";
+  } else {
+    cap.textContent = "Not delivered";
+    if (reason) cap.title = reason;
+  }
+  return cap;
 }
 
 function statusIcon(status: "pending" | "failed", reason?: string): HTMLElement {

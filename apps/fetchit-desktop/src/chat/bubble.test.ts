@@ -70,6 +70,45 @@ describe("renderBubble — content", () => {
   });
 });
 
+describe("renderBubble — outbound status", () => {
+  it("shows a pending caption while the bubble is in flight", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const row = renderBubble(
+      bubble({ mine: true, status: "pending" }),
+      handlers,
+    );
+    const cap = row.querySelector(".chat-bubble__substatus--pending");
+    expect(cap?.textContent).toBe("Sending…");
+  });
+
+  it("shows an explicit 'Not delivered' caption when the send failed", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const row = renderBubble(
+      bubble({ mine: true, status: "failed", failureReason: "timeout" }),
+      handlers,
+    );
+    const cap = row.querySelector<HTMLElement>(
+      ".chat-bubble__substatus--failed",
+    );
+    expect(cap?.textContent).toBe("Not delivered");
+    expect(cap?.title).toBe("timeout");
+  });
+
+  it("never decorates delivered or inbound bubbles", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const deliveredOut = renderBubble(
+      bubble({ mine: true, status: "delivered" }),
+      handlers,
+    );
+    expect(deliveredOut.querySelector(".chat-bubble__substatus")).toBeNull();
+    const inbound = renderBubble(
+      bubble({ mine: false, status: "pending" }),
+      handlers,
+    );
+    expect(inbound.querySelector(".chat-bubble__substatus")).toBeNull();
+  });
+});
+
 describe("renderBubble — direction", () => {
   it("uses chat-row--out for my own messages", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };

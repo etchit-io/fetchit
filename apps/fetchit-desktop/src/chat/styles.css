@@ -508,6 +508,22 @@ body.chat-docked {
 .chat-bubble__status--pending { color: var(--ash); }
 .chat-bubble__status--failed { color: rgb(255, 120, 120); cursor: help; }
 
+.chat-bubble__substatus {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+  align-self: flex-end;
+}
+.chat-bubble__substatus--pending {
+  color: var(--ash);
+  font-style: italic;
+}
+.chat-bubble__substatus--failed {
+  color: rgb(255, 120, 120);
+  font-weight: 600;
+  cursor: help;
+}
+
 .chat-composer {
   display: flex;
   gap: 10px;
