@@ -1,6 +1,8 @@
 /* Chat surface — slide-in panel, conversation list, message thread,
    composer. Uses the shared theme tokens from styles.css. */
 
+:root { --chat-dock-width: 420px; }
+
 .chat-panel {
   position: fixed;
   inset: 0;
@@ -13,10 +15,34 @@
 }
 .chat-panel[hidden] { display: none !important; }
 
+.chat-panel--docked {
+  inset: 0 0 0 auto;
+  width: var(--chat-dock-width);
+  border-left: 1px solid var(--line);
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.32);
+}
+.chat-panel--docked .chat-panel__layout {
+  grid-template-columns: minmax(160px, 200px) 1fr;
+}
+
+body.chat-docked {
+  padding-right: var(--chat-dock-width);
+}
+
 @keyframes chat-slide {
   from { transform: translateX(24px); opacity: 0; }
   to   { transform: none; opacity: 1; }
 }
+
+.chat-panel__dock {
+  background: transparent;
+  color: var(--ash);
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.chat-panel__dock:hover { color: var(--bone); }
 
 .chat-panel__header {
   display: flex;

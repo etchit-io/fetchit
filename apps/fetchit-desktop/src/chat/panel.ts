@@ -29,7 +29,11 @@ export interface ChatPanelApi {
   close(): void;
   toggle(): Promise<void>;
   isOpen(): boolean;
+  setDocked(docked: boolean): void;
+  isDocked(): boolean;
 }
+
+const DOCK_KEY = "fetchit-chat:dock";
 
 export function mountChatPanel(
   host: HTMLElement,
@@ -57,6 +61,13 @@ export function mountChatPanel(
   shareBtn.className = "chat-panel__share";
   shareBtn.textContent = "Share my card";
 
+  const dockBtn = document.createElement("button");
+  dockBtn.type = "button";
+  dockBtn.className = "chat-panel__dock";
+  dockBtn.setAttribute("aria-label", "Toggle dock");
+  dockBtn.title = "Dock / undock";
+  dockBtn.textContent = "▤";
+
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "chat-panel__close";
@@ -66,6 +77,7 @@ export function mountChatPanel(
   headerEl.appendChild(titleEl);
   headerEl.appendChild(idBadge);
   headerEl.appendChild(shareBtn);
+  headerEl.appendChild(dockBtn);
   headerEl.appendChild(closeBtn);
 
   const sidebarEl = document.createElement("aside");
@@ -200,9 +212,18 @@ export function mountChatPanel(
     }
   };
 
+  let docked = readDockPref();
+  const applyDock = (): void => {
+    host.classList.toggle("chat-panel--docked", docked);
+    document.body.classList.toggle("chat-docked", docked && !host.hidden);
+    dockBtn.title = docked ? "Undock" : "Dock to side";
+  };
+  applyDock();
+
   let eventsBound = false;
   const open = async (): Promise<void> => {
     host.hidden = false;
+    applyDock();
     try {
       await health();
       const me = await identity();
@@ -228,6 +249,7 @@ export function mountChatPanel(
 
   const close = (): void => {
     host.hidden = true;
+    document.body.classList.remove("chat-docked");
     hideDialog();
     handlers.onClose();
   };
@@ -236,15 +258,36 @@ export function mountChatPanel(
     open,
     close,
     isOpen: () => !host.hidden,
+    isDocked: () => docked,
+    setDocked(next: boolean) {
+      docked = next;
+      writeDockPref(next);
+      applyDock();
+    },
     async toggle() {
       if (host.hidden) await open();
       else close();
     },
   };
 
-  closeBtn.addEventListener("click", () => {
-    close();
-  });
+  dockBtn.addEventListener("click", () => api.setDocked(!docked));
+  closeBtn.addEventListener("click", () => close());
 
   return api;
+}
+
+function readDockPref(): boolean {
+  try {
+    return localStorage.getItem(DOCK_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDockPref(v: boolean): void {
+  try {
+    localStorage.setItem(DOCK_KEY, v ? "1" : "0");
+  } catch {
+    // ignore
+  }
 }
