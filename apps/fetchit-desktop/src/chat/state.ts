@@ -214,13 +214,18 @@ export class ChatStore {
   recordGroupHistory(groupId: string, messages: GroupMessage[]): void {
     const key = `g:${groupId}`;
     const conv = this.ensureGroup(groupId);
-    conv.messages = messages.map((m) => ({
+    const next = messages.map((m) => ({
       id: m.message_id,
       from: m.from,
       body: m.body,
       timestampMs: m.timestamp_ms,
       mine: m.from === this.myId(),
     }));
+    // Skip the emit when the poll returned the same set we already
+    // have — re-rendering the stream every 4s tears down any in-flight
+    // bubble state (autonomi:// preview cards, scroll position, focus).
+    if (sameMessages(conv.messages, next)) return;
+    conv.messages = next;
     conv.lastActivityMs =
       messages.length > 0 ? messages[messages.length - 1].timestamp_ms : 0;
     this.conversations.set(key, conv);
@@ -499,4 +504,12 @@ export function convKey(k: ConversationKey): string {
 
 function contactSortKey(c: Contact): string {
   return (c.label ?? c.display_name ?? c.agent_id).toLowerCase();
+}
+
+function sameMessages(a: ChatBubble[], b: ChatBubble[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id) return false;
+  }
+  return true;
 }
