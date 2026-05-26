@@ -122,13 +122,16 @@ export function mountChatPanel(
       outboxBanner.hidden = true;
       return;
     }
-    const failed = pending.filter((p) => p.bubble.status === "failed").length;
-    const waiting = pending.length - failed;
+    const failed = pending.filter((p) => p.bubble.status === "failed");
+    const waiting = pending.length - failed.length;
     const parts: string[] = [];
     if (waiting > 0) parts.push(`${waiting} waiting to deliver`);
-    if (failed > 0) parts.push(`${failed} undelivered`);
+    if (failed.length > 0) parts.push(`${failed.length} undelivered`);
     outboxLabel.textContent = parts.join(" · ");
-    outboxRetry.hidden = failed === 0;
+    // Retry only makes sense when something can plausibly be re-sent
+    // right now — i.e. at least one failed bubble's peer is online.
+    const retryable = failed.some(({ peer }) => store.isOnline(peer));
+    outboxRetry.hidden = !retryable;
     outboxBanner.hidden = false;
   };
   store.subscribe(renderOutboxBanner);
