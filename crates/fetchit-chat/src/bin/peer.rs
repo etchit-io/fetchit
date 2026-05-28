@@ -25,6 +25,7 @@ use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::decode_direct_message;
 use fetchit_chat::transport::InboundEnvelope;
 use fetchit_chat::Client;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use url::Url;
@@ -66,6 +67,15 @@ struct Cli {
     #[arg(long, default_value = "Peer")]
     display_name: String,
 
+    /// Where to keep the at-rest vault (identity, conversations, contacts).
+    #[arg(long, default_value = "/opt/alice/fetchit-data")]
+    data_dir: PathBuf,
+
+    /// Argon2id passphrase for the at-rest vault on headless installs
+    /// (no OS keystore). Read from `FETCHIT_PASSPHRASE` env if unset.
+    #[arg(long, env = "FETCHIT_PASSPHRASE")]
+    passphrase: Option<String>,
+
     #[command(subcommand)]
     mode: Mode,
 }
@@ -89,13 +99,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let token = resolve_token(&cli)?;
 
-    let client = Client::builder()
+    let mut builder = Client::builder()
         .base_url(&cli.x0xd_base)
         .token(&token)
         .relay_url(cli.relay.clone())
-        .build()
-        .await
-        .context("build Client")?;
+        .data_dir(cli.data_dir.clone());
+    if let Some(p) = cli.passphrase.clone() {
+        builder = builder.passphrase(p);
+    }
+    let client = builder.build().await.context("build Client")?;
 
     let me = client.identity().me().await.context("read /agent")?;
     eprintln!("[peer] agent_id: {}", me.agent_id);
