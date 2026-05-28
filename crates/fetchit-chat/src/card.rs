@@ -1,6 +1,6 @@
 //! Extended share-card v2 — additive fields on top of x0xd's
 //! `AgentCard` JSON. The user-facing URI stays `x0x://agent/<base64>`;
-//! we add three signed fields that fetchit-chat reads and x0xd
+//! we add four signed fields that fetchit-chat reads and x0xd
 //! preserves as unknown JSON.
 
 use crate::chat_crypto::{ml_dsa_verify, SIGN_DOMAIN_CARD};
@@ -17,7 +17,7 @@ pub const CARD_VERSION: u16 = 1;
 pub const URI_PREFIX: &str = "x0x://agent/";
 
 /// The fetchit-namespaced fields tucked into an x0x share-card's JSON.
-/// All three fields together form the v2 extension.
+/// All four fields together form the v2 extension.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardExtension {
     /// Card v2 schema version. Currently 1.
@@ -26,15 +26,25 @@ pub struct CardExtension {
     /// ML-KEM-768 public key (base64).
     #[serde(rename = "fetchit_kem_public_key_b64")]
     pub kem_public_key_b64: String,
+    /// Issuer's ML-DSA-65 public key (base64). Lets receivers verify
+    /// the card signature without an out-of-band key lookup.
+    #[serde(rename = "fetchit_agent_public_key_b64")]
+    pub agent_public_key_b64: String,
     /// ML-DSA-65 signature over canonical card bytes excluding this signature.
     #[serde(rename = "fetchit_card_signature_b64")]
     pub signature_b64: String,
 }
 
 /// Bytes signed for `CardExtension.signature_b64`:
-/// `concat(SIGN_DOMAIN_CARD, postcard({ x0x_card_json, fetchit_card_version, kem_public_key_b64 }))`.
-/// We use postcard on a tuple of those three values so signer and
-/// verifier compute byte-identical strings.
+/// `concat(SIGN_DOMAIN_CARD, postcard({ x0x_card_json, fetchit_card_version,
+/// kem_public_key_b64, agent_public_key_b64 }))`. We use postcard on a tuple
+/// of these values so signer and verifier compute byte-identical strings.
+///
+/// The `agent_public_key_b64` field (v2-additive) carries the issuer's
+/// ML-DSA-65 public key so receivers can self-verify the card signature
+/// without an out-of-band key lookup. It is part of the signed body so
+/// the receiver can be sure the pubkey it imports is the same one that
+/// signed the card.
 #[derive(Serialize, Deserialize)]
 struct SignedCardBody<'a> {
     /// The x0x card JSON as it appears on the wire BEFORE the extension
@@ -43,6 +53,7 @@ struct SignedCardBody<'a> {
     x0x_card_canonical_json: &'a [u8],
     version: u16,
     kem_public_key_b64: &'a str,
+    agent_public_key_b64: &'a str,
 }
 
 /// Add the fetchit-chat v2 fields to an existing x0x share-card JSON.
@@ -64,11 +75,13 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
         .ok_or_else(|| ChatError::Invalid("x0x card must be a JSON object".into()))?;
     let canonical_x0x_bytes = canonical_json(x0x_card)?;
     let kem_b64 = B64.encode(kem_public_key);
+    let agent_pk_b64 = B64.encode(signer.public_key());
 
     let to_sign = SignedCardBody {
         x0x_card_canonical_json: &canonical_x0x_bytes,
         version: CARD_VERSION,
         kem_public_key_b64: &kem_b64,
+        agent_public_key_b64: &agent_pk_b64,
     };
     let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_CARD.len() + 256);
     sign_bytes.extend_from_slice(SIGN_DOMAIN_CARD);
@@ -81,7 +94,7 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
         .await
         .map_err(|e| ChatError::Invalid(format!("card sign: {e}")))?;
 
-    let mut out = serde_json::Map::with_capacity(x0x_obj.len() + 3);
+    let mut out = serde_json::Map::with_capacity(x0x_obj.len() + 4);
     for (k, v) in x0x_obj {
         out.insert(k.clone(), v.clone());
     }
@@ -92,6 +105,10 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
     out.insert(
         "fetchit_kem_public_key_b64".into(),
         serde_json::Value::String(kem_b64),
+    );
+    out.insert(
+        "fetchit_agent_public_key_b64".into(),
+        serde_json::Value::String(agent_pk_b64),
     );
     out.insert(
         "fetchit_card_signature_b64".into(),
@@ -155,16 +172,21 @@ pub fn verify_card_extension(
         .get("fetchit_kem_public_key_b64")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ChatError::Invalid("missing fetchit_kem_public_key_b64".into()))?;
+    let agent_pk_b64 = obj
+        .get("fetchit_agent_public_key_b64")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ChatError::Invalid("missing fetchit_agent_public_key_b64".into()))?;
     let sig_b64 = obj
         .get("fetchit_card_signature_b64")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ChatError::Invalid("missing fetchit_card_signature_b64".into()))?;
 
-    // Reconstruct the x0x-card-only JSON (without the three v2 fields)
+    // Reconstruct the x0x-card-only JSON (without the four v2 fields)
     // so we sign the same canonical bytes the issuer signed.
     let mut x0x_only = obj.clone();
     x0x_only.remove("fetchit_card_version");
     x0x_only.remove("fetchit_kem_public_key_b64");
+    x0x_only.remove("fetchit_agent_public_key_b64");
     x0x_only.remove("fetchit_card_signature_b64");
     let x0x_only_value = serde_json::Value::Object(x0x_only);
     let canonical_x0x_bytes = canonical_json(&x0x_only_value)?;
@@ -173,6 +195,7 @@ pub fn verify_card_extension(
         x0x_card_canonical_json: &canonical_x0x_bytes,
         version: CARD_VERSION,
         kem_public_key_b64: kem_b64,
+        agent_public_key_b64: agent_pk_b64,
     };
     let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_CARD.len() + 256);
     sign_bytes.extend_from_slice(SIGN_DOMAIN_CARD);
@@ -190,6 +213,7 @@ pub fn verify_card_extension(
         // so we can assign the typed constant directly instead of a fallible cast.
         version: CARD_VERSION,
         kem_public_key_b64: kem_b64.to_owned(),
+        agent_public_key_b64: agent_pk_b64.to_owned(),
         signature_b64: sig_b64.to_owned(),
     })
 }

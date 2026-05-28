@@ -81,7 +81,8 @@ pub struct StoredContactCard {
     /// Sender's ML-DSA-65 public key (base64). `None` when the import
     /// source didn't carry one — older or trust-on-first-use cards.
     /// Populated by [`Self::from_share_uri`] whenever the share-card
-    /// JSON includes `public_key_b64` or `agent_public_key_b64`.
+    /// JSON includes `fetchit_agent_public_key_b64` (v2-extended cards),
+    /// `public_key_b64`, or `agent_public_key_b64`.
     #[serde(default)]
     pub agent_public_key_b64: Option<String>,
 }
@@ -113,7 +114,8 @@ impl StoredContactCard {
             .to_owned();
 
         let agent_pk_b64_opt = obj
-            .get("public_key_b64")
+            .get("fetchit_agent_public_key_b64")
+            .or_else(|| obj.get("public_key_b64"))
             .or_else(|| obj.get("agent_public_key_b64"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
