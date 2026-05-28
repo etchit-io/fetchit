@@ -532,14 +532,14 @@ fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
 /// compile-time constant known to parse as a valid URL. The `expect`
 /// guards a programming error in the fallback constant.
 #[allow(clippy::expect_used)]
-fn build_chat_state(relay_url: &str) -> chat::ChatState {
-    match chat::ChatState::new(relay_url) {
+fn build_chat_state(relay_url: &str, data_dir: std::path::PathBuf) -> chat::ChatState {
+    match chat::ChatState::new(relay_url, data_dir.clone(), None) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
                 "[fetchit][chat] invalid relay_url ({relay_url}): {e}; falling back to default"
             );
-            chat::ChatState::new(settings::DEFAULT_RELAY_URL)
+            chat::ChatState::new(settings::DEFAULT_RELAY_URL, data_dir, None)
                 .expect("default relay url is always valid")
         }
     }
@@ -616,7 +616,7 @@ pub fn run() {
             let server_state = state.clone();
             app.manage(state);
 
-            let chat_state = build_chat_state(&relay_url);
+            let chat_state = build_chat_state(&relay_url, app_data.join("chat"));
             app.manage(chat_state.clone());
             chat::spawn_event_pump(app.handle().clone(), chat_state);
 
@@ -677,6 +677,7 @@ pub fn run() {
             chat::chat_group_send,
             chat::chat_group_messages,
             chat::chat_group_leave,
+            chat::chat_set_passphrase,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

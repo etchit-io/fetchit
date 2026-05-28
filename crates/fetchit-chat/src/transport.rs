@@ -16,6 +16,7 @@
 use crate::error::{ChatError, Result};
 use crate::identity::AgentId;
 use async_trait::async_trait;
+use fetchit_relay_proto::TransitEnvelope;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -75,6 +76,11 @@ pub struct OutboundEnvelope {
     pub payload: Vec<u8>,
     /// Sender-asserted timestamp (ms since the Unix epoch).
     pub timestamp_ms: u64,
+    /// Optional pre-built `TransitEnvelope` — when set, transports
+    /// MUST forward it verbatim (preserves KEM ciphertext, nonce,
+    /// epoch, signature for the conversation v2 path). When `None`,
+    /// transports fabricate a v1-shape envelope from the other fields.
+    pub transit: Option<TransitEnvelope>,
 }
 
 /// One inbound message decoded enough for the chat layer to route.
@@ -90,6 +96,11 @@ pub struct InboundEnvelope {
     pub timestamp_ms: u64,
     /// Name of the transport that delivered it (for telemetry / dedup).
     pub transport_name: &'static str,
+    /// Original `TransitEnvelope` when the transport carried one — the
+    /// chat-v2 path (`conversation::dispatch_inbound`) needs the full
+    /// envelope (KEM ciphertext, signature, epoch, nonce). Transports
+    /// without a wire `TransitEnvelope` leave it `None`.
+    pub transit: Option<TransitEnvelope>,
 }
 
 /// A message-transport that can send and receive chat envelopes.
@@ -244,6 +255,7 @@ mod tests {
             from_machine_id: None,
             payload: b"x".to_vec(),
             timestamp_ms: 1,
+            transit: None,
         }
     }
 

@@ -20,11 +20,20 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
+use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::decode_direct_message;
+use fetchit_chat::transport::InboundEnvelope;
 use fetchit_chat::Client;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use url::Url;
+
+/// Decoded inbound suitable for the peer to display + reply to.
+struct PeerInbound {
+    from: AgentId,
+    body: String,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "fetchit-chat-peer", version, about)]
@@ -118,18 +127,59 @@ fn resolve_token(cli: &Cli) -> Result<String> {
     Ok(raw.trim().to_owned())
 }
 
+async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<PeerInbound> {
+    // Chat-v2 envelopes (TransitEnvelope present) go through the
+    // conversation dispatcher so we get a decrypted MessagePayload.
+    if let Some(transit) = env.transit.take() {
+        let identity = client.identity_arc()?;
+        let registry = client.registry_arc()?;
+        match dispatch_inbound(transit, identity.as_ref(), registry.as_ref()).await {
+            Ok(InboundDispatch::Message {
+                sender_agent_id_hex,
+                payload,
+                ..
+            }) => {
+                let Ok(from) = AgentId::parse(sender_agent_id_hex) else {
+                    return None;
+                };
+                Some(PeerInbound {
+                    from,
+                    body: payload.body,
+                })
+            }
+            Ok(other) => {
+                eprintln!("[peer] dispatch returned non-message: {other:?}");
+                None
+            }
+            Err(e) => {
+                eprintln!("[peer] dispatch error: {e}");
+                None
+            }
+        }
+    } else {
+        // Legacy plaintext envelope — used by transports that don't
+        // speak the v2 conversation wire format.
+        match decode_direct_message(env) {
+            Ok(dm) => Some(PeerInbound {
+                from: dm.from,
+                body: dm.body,
+            }),
+            Err(e) => {
+                eprintln!("[peer] decode error: {e}");
+                None
+            }
+        }
+    }
+}
+
 async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
     let mut inbound = client
         .take_transport_inbound("relay")
         .context("relay inbound already taken")?;
     eprintln!("[peer] echo mode — auto-replying to every inbound DM");
     while let Some(env) = inbound.recv().await {
-        let dm = match decode_direct_message(env) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("[peer] decode error: {e}");
-                continue;
-            }
+        let Some(dm) = decode_inbound(client, env).await else {
+            continue;
         };
         eprintln!("[peer] in: from={} body={:?}", short(&dm.from.0), dm.body);
         let reply = format!("[echo] {}", dm.body);
@@ -144,17 +194,16 @@ async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
 }
 
 async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result<()> {
-    use fetchit_chat::identity::AgentId;
     let peer = AgentId::parse(peer_hex.to_owned()).context("invalid peer agent id")?;
     let mut inbound = client
         .take_transport_inbound("relay")
         .context("relay inbound already taken")?;
 
+    let client_clone = client.clone();
     let reader_handle = tokio::spawn(async move {
         while let Some(env) = inbound.recv().await {
-            match decode_direct_message(env) {
-                Ok(dm) => println!("[{}] {}", short(&dm.from.0), dm.body),
-                Err(e) => eprintln!("[peer] decode: {e}"),
+            if let Some(dm) = decode_inbound(&client_clone, env).await {
+                println!("[{}] {}", short(&dm.from.0), dm.body);
             }
         }
     });

@@ -104,28 +104,35 @@ impl Transport for RelayTransport {
 
     async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
         let to_relay = agent_id_to_relay(to)?;
-        let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
-        let (kind, group_id) = match envelope.kind {
-            OutboundKind::Dm => (RelayKind::Dm, None),
-            OutboundKind::Group { ref group_id } => {
-                let bytes = parse_hex_32(group_id)
-                    .map_err(|e| ChatError::Invalid(format!("group id: {e}")))?;
-                (RelayKind::GroupChat, Some(RelayGroupId::from_bytes(bytes)))
+        let transit = if let Some(prebuilt) = envelope.transit {
+            // The chat-v2 path hands us a fully-sealed envelope —
+            // forward it verbatim so the KEM ciphertext, nonce, epoch,
+            // and signature survive intact.
+            prebuilt
+        } else {
+            let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
+            let (kind, group_id) = match envelope.kind {
+                OutboundKind::Dm => (RelayKind::Dm, None),
+                OutboundKind::Group { ref group_id } => {
+                    let bytes = parse_hex_32(group_id)
+                        .map_err(|e| ChatError::Invalid(format!("group id: {e}")))?;
+                    (RelayKind::GroupChat, Some(RelayGroupId::from_bytes(bytes)))
+                }
+            };
+            TransitEnvelope {
+                version: 2,
+                kind,
+                group_id,
+                tenant_id: None,
+                sender_agent_id: self.local_agent_id,
+                sender_machine_id: machine_id,
+                timestamp_ms: envelope.timestamp_ms,
+                epoch: 0,
+                ciphertext: envelope.payload,
+                nonce: Vec::new(),
+                kem_ciphertext: Vec::new(),
+                sender_signature: Vec::new(),
             }
-        };
-        let transit = TransitEnvelope {
-            version: 2,
-            kind,
-            group_id,
-            tenant_id: None,
-            sender_agent_id: self.local_agent_id,
-            sender_machine_id: machine_id,
-            timestamp_ms: envelope.timestamp_ms,
-            epoch: 0,
-            ciphertext: envelope.payload,
-            nonce: Vec::new(),
-            kem_ciphertext: Vec::new(),
-            sender_signature: Vec::new(),
         };
         let dedupe_key = self.next_dedupe_key();
         let receipt = self
@@ -166,9 +173,10 @@ fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<Inboun
             let inbound = InboundEnvelope {
                 kind,
                 from,
-                payload: env.ciphertext,
+                payload: env.ciphertext.clone(),
                 timestamp_ms: env.timestamp_ms,
                 transport_name: TRANSPORT_NAME,
+                transit: Some(env),
             };
             if tx.send(inbound).is_err() {
                 break;
