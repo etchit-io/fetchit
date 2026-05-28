@@ -7,20 +7,24 @@ use crate::at_rest::{
     MasterKeySource, ARGON_SALT_LEN,
 };
 use crate::chat_identity::FetchitIdentity;
-use crate::conversation::ConversationRegistry;
+use crate::conversation::{build_welcome_outbox, ConversationRegistry};
 use crate::discovery::{discover_local, DaemonEndpoint};
 use crate::error::{ChatError, Result};
 use crate::events::{open_stream, Event, EventStream};
 use crate::http::Http;
 use crate::local_store::StoreLayout;
 use crate::relay_transport::RelayTransport;
-use crate::transport::{InboundEnvelope, Router};
+use crate::transport::{InboundEnvelope, OutboundEnvelope, OutboundKind, Router};
 use crate::{contacts, groups, identity, messages, presence};
 use fetchit_relay_client::{Signer, X0xdSigner};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
+
+/// How often the auto-rekey sweeper fires.
+const AUTO_REKEY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// File name that gates whether vault state already exists for this
 /// data dir. The chat identity vault is the first file written, so its
@@ -160,11 +164,12 @@ impl Client {
             (Router::new(), None)
         };
 
-        Ok(Self {
-            http,
-            router: Arc::new(router),
-            chat,
-        })
+        let router = Arc::new(router);
+        if let Some(chat) = chat.as_ref() {
+            spawn_auto_rekey_sweeper(&router, chat);
+        }
+
+        Ok(Self { http, router, chat })
     }
 
     /// Identity endpoint: read your agent, generate cards, import others.
@@ -382,6 +387,83 @@ fn derive_machine_id(machine_id: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// Spawn the background task that walks the conversation registry
+/// every [`AUTO_REKEY_SWEEP_INTERVAL`] and rotates every Admin
+/// conversation whose `auto_rekey_due()` is true.
+///
+/// The first tick is consumed immediately so the sweep does not run
+/// the instant the client starts.
+fn spawn_auto_rekey_sweeper(router: &Arc<Router>, chat: &ChatState) {
+    let registry = chat.registry.clone();
+    let identity = chat.identity.clone();
+    let signer = chat.signer.clone();
+    let router = router.clone();
+    let machine_id = chat.local_machine_id;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(AUTO_REKEY_SWEEP_INTERVAL);
+        // First tick fires immediately; skip so we don't rotate on
+        // launch.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            match sweep_auto_rekey(&registry, &identity, &router, machine_id, &signer).await {
+                Ok(n) if n > 0 => log::info!("[chat] auto-rekey: rotated {n} conversations"),
+                Ok(_) => {}
+                Err(e) => log::warn!("[chat] auto-rekey sweep error: {e}"),
+            }
+        }
+    });
+}
+
+/// Walk the in-memory conversation cache, rotating every Admin
+/// conversation whose `auto_rekey_due()` returns true. Returns the
+/// count of rotated conversations.
+///
+/// Individual transport-send failures are logged but do not abort the
+/// sweep — a single unreachable recipient must not block the rest.
+/// Persistence failures (`registry.save`) propagate.
+async fn sweep_auto_rekey(
+    registry: &Arc<ConversationRegistry>,
+    identity: &Arc<FetchitIdentity>,
+    router: &Arc<Router>,
+    machine_id: [u8; 32],
+    signer: &Arc<dyn Signer>,
+) -> Result<usize> {
+    use crate::chat_crypto::random_symmetric_key;
+    use rand::rngs::OsRng;
+
+    let cached = registry.snapshot_cached().await;
+    let mut rekeyed = 0usize;
+    for mut conv in cached {
+        if !conv.auto_rekey_due() {
+            continue;
+        }
+        let new_key = random_symmetric_key(&mut OsRng);
+        conv.advance_epoch(new_key);
+        let welcomes = build_welcome_outbox(&conv, identity, machine_id, signer.as_ref()).await?;
+        for ob in welcomes {
+            let recipient = identity::AgentId(hex::encode(ob.recipient_agent_id.as_bytes()));
+            let timestamp_ms = ob.envelope.timestamp_ms;
+            let transport_out = OutboundEnvelope {
+                kind: OutboundKind::Dm,
+                from_machine_id: Some(machine_id),
+                payload: Vec::new(),
+                timestamp_ms,
+                transit: Some(ob.envelope),
+            };
+            if let Err(e) = router.send(&recipient, transport_out).await {
+                log::warn!(
+                    "[chat] auto-rekey: send to {} failed: {e}",
+                    recipient.short()
+                );
+            }
+        }
+        registry.save(&conv).await?;
+        rekeyed += 1;
+    }
+    Ok(rekeyed)
 }
 
 fn resolve_master_key(

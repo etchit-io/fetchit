@@ -343,4 +343,62 @@ mod tests {
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
     }
+
+    #[test]
+    fn auto_rekey_due_fires_when_interval_elapsed() {
+        let conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: 1,
+        };
+        assert!(conv.auto_rekey_due());
+    }
+
+    #[test]
+    fn auto_rekey_due_does_not_fire_for_member_role() {
+        let conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Member,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: 1,
+        };
+        assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
+    }
+
+    #[test]
+    fn advance_epoch_after_auto_rekey_due_resets_timer() {
+        let mut conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: 1,
+        };
+        assert!(conv.auto_rekey_due());
+        conv.advance_epoch([2u8; 32]);
+        assert_eq!(conv.current_epoch, 1);
+        assert_eq!(conv.prior_keys.len(), 1);
+        assert!(
+            !conv.auto_rekey_due(),
+            "advance_epoch should reset last_rekey_at_ms to now"
+        );
+    }
 }

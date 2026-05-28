@@ -98,6 +98,15 @@ impl ConversationRegistry {
         Ok(None)
     }
 
+    /// Snapshot the in-memory conversation cache. Returns clones so the
+    /// lock is released before the caller iterates — used by the
+    /// `Client` auto-rekey sweeper.
+    #[must_use]
+    pub(crate) async fn snapshot_cached(&self) -> Vec<Conversation> {
+        let g = self.by_group_id.lock().await;
+        g.values().cloned().collect()
+    }
+
     /// Persist a conversation to disk and update the in-memory cache.
     ///
     /// # Errors
