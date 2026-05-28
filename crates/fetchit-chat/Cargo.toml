@@ -19,16 +19,19 @@ required-features = []
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chacha20poly1305.workspace = true
 clap.workspace = true
+directories.workspace = true
 fetchit-relay-client = { path = "../fetchit-relay-client" }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 futures-util.workspace = true
 hex.workspace = true
 hkdf.workspace = true
+keyring.workspace = true
 log.workspace = true
 postcard.workspace = true
 rand.workspace = true
