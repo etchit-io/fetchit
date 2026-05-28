@@ -205,22 +205,12 @@ mod tests {
         let master =
             MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
         let aid = "deadbeef00000000000000000000000000000000000000000000000000000000";
-        let a = FetchitIdentity::load_or_create(
-            dir.path(),
-            &master,
-            aid,
-            kdf_id_argon2(),
-            Some(&salt),
-        )
-        .unwrap();
-        let b = FetchitIdentity::load_or_create(
-            dir.path(),
-            &master,
-            aid,
-            kdf_id_argon2(),
-            Some(&salt),
-        )
-        .unwrap();
+        let a =
+            FetchitIdentity::load_or_create(dir.path(), &master, aid, kdf_id_argon2(), Some(&salt))
+                .unwrap();
+        let b =
+            FetchitIdentity::load_or_create(dir.path(), &master, aid, kdf_id_argon2(), Some(&salt))
+                .unwrap();
         assert_eq!(a.kem_public_key(), b.kem_public_key());
         assert_eq!(a.kem_secret_key(), b.kem_secret_key());
     }

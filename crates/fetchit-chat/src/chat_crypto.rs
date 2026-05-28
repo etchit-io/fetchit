@@ -141,7 +141,13 @@ pub fn aead_seal(
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_ref = Nonce::from_slice(nonce);
     cipher
-        .encrypt(nonce_ref, Payload { msg: plaintext, aad })
+        .encrypt(
+            nonce_ref,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| ChatError::Invalid(format!("aead seal: {e}")))
 }
 
@@ -159,7 +165,13 @@ pub fn aead_open(
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_ref = Nonce::from_slice(nonce);
     cipher
-        .decrypt(nonce_ref, Payload { msg: ciphertext, aad })
+        .decrypt(
+            nonce_ref,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|e| ChatError::Invalid(format!("aead open: {e}")))
 }
 
@@ -244,7 +256,10 @@ mod tests {
         let (pk, sk) = kem_keygen().unwrap();
         let (ct, ss_a) = kem_encapsulate(&pk).unwrap();
         let ss_b = kem_decapsulate(&sk, &ct).unwrap();
-        assert_eq!(ss_a, ss_b, "encap/decap must produce the same shared secret");
+        assert_eq!(
+            ss_a, ss_b,
+            "encap/decap must produce the same shared secret"
+        );
     }
 
     #[test]

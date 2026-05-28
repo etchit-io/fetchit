@@ -17,9 +17,7 @@
 //! Argon2id parameters: m=64 MiB, t=3, p=4. These are the OWASP-
 //! recommended defaults for interactive logins as of 2024.
 
-use crate::chat_crypto::{
-    aead_open, aead_seal, random_nonce, AEAD_KEY_LEN, AEAD_NONCE_LEN,
-};
+use crate::chat_crypto::{aead_open, aead_seal, random_nonce, AEAD_KEY_LEN, AEAD_NONCE_LEN};
 use crate::error::ChatError;
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
@@ -182,9 +180,7 @@ pub fn seal_to_path(
     rand::rngs::OsRng.fill_bytes(&mut suffix);
     let tmp_name = format!(
         "{}.tmp.{}",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("vault"),
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("vault"),
         hex::encode(suffix),
     );
     let tmp = path.with_file_name(tmp_name);
@@ -312,11 +308,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m1 = MasterKey::resolve(&MasterKeySource::Passphrase("a".into()), Some(&salt))
-            .unwrap();
+        let m1 = MasterKey::resolve(&MasterKeySource::Passphrase("a".into()), Some(&salt)).unwrap();
         seal_to_path(&path, b"x", &m1, kdf_id_argon2(), Some(&salt)).unwrap();
-        let m2 = MasterKey::resolve(&MasterKeySource::Passphrase("b".into()), Some(&salt))
-            .unwrap();
+        let m2 = MasterKey::resolve(&MasterKeySource::Passphrase("b".into()), Some(&salt)).unwrap();
         assert!(open_from_path(&path, &m2).is_err());
     }
 
@@ -325,8 +319,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt))
-            .unwrap();
+        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
         seal_to_path(&path, b"x", &m, kdf_id_argon2(), Some(&salt)).unwrap();
         assert_eq!(read_kdf_id(&path).unwrap(), kdf_id_argon2());
     }
@@ -336,8 +329,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt))
-            .unwrap();
+        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
         seal_to_path(&path, b"x", &m, kdf_id_argon2(), Some(&salt)).unwrap();
         let recovered = read_argon_salt(&path).unwrap();
         assert_eq!(recovered, salt);
@@ -348,10 +340,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt))
-            .unwrap();
-        seal_to_path(&path, b"some_bytes_for_testing", &m, kdf_id_argon2(), Some(&salt))
-            .unwrap();
+        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        seal_to_path(
+            &path,
+            b"some_bytes_for_testing",
+            &m,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
         let mut bytes = fs::read(&path).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
@@ -371,10 +368,15 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
-        let master =
-            MasterKey::resolve_keychain_with_service(TEST_SERVICE, TEST_USER).unwrap();
-        seal_to_path(&path, b"keychain stored secret", &master, kdf_id_keychain(), None)
-            .unwrap();
+        let master = MasterKey::resolve_keychain_with_service(TEST_SERVICE, TEST_USER).unwrap();
+        seal_to_path(
+            &path,
+            b"keychain stored secret",
+            &master,
+            kdf_id_keychain(),
+            None,
+        )
+        .unwrap();
         let opened = open_from_path(&path, &master).unwrap();
         assert_eq!(opened, b"keychain stored secret");
 
