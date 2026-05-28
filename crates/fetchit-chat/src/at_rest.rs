@@ -87,9 +87,22 @@ impl MasterKey {
     }
 
     fn resolve_keychain() -> Result<Self, ChatError> {
+        Self::resolve_keychain_with_service(KEYRING_SERVICE, KEYRING_USER)
+    }
+
+    /// Keychain resolve against an arbitrary service/user pair.
+    ///
+    /// Production code calls [`Self::resolve_keychain`] which uses the
+    /// fixed `fetchit-chat-v1` / `master-key` pair. Tests use a distinct
+    /// service name so they never read or write the user's real master
+    /// key. Kept `pub(crate)` — not part of the public API.
+    pub(crate) fn resolve_keychain_with_service(
+        service: &str,
+        user: &str,
+    ) -> Result<Self, ChatError> {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        let entry = keyring::Entry::new(service, user)
             .map_err(|e| ChatError::Invalid(format!("keyring open: {e}")))?;
         match entry.get_password() {
             Ok(b64) => {
@@ -145,6 +158,8 @@ pub fn seal_to_path(
     kdf_id: u8,
     argon_salt: Option<&[u8; ARGON_SALT_LEN]>,
 ) -> Result<(), ChatError> {
+    use std::io::Write;
+
     let mut rng = rand::rngs::OsRng;
     let nonce = random_nonce(&mut rng);
     let aad = b"lit/vault/v1";
@@ -160,9 +175,34 @@ pub fn seal_to_path(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, &out)?;
-    set_perms_0600(&tmp)?;
+
+    // Unique tmp suffix so concurrent writes to the same target don't
+    // race on a shared `*.tmp` file.
+    let mut suffix = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut suffix);
+    let tmp_name = format!(
+        "{}.tmp.{}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("vault"),
+        hex::encode(suffix),
+    );
+    let tmp = path.with_file_name(tmp_name);
+
+    // Create with owner-only mode at open time so there's no umask
+    // window between creation and chmod. `create_new` paired with the
+    // random suffix guarantees a fresh inode.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp)?;
+    f.write_all(&out)?;
+    drop(f);
+
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -234,22 +274,6 @@ pub fn fresh_argon_salt() -> [u8; ARGON_SALT_LEN] {
     let mut salt = [0u8; ARGON_SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
     salt
-}
-
-/// File-mode helper: 0600 on Unix, no-op on Windows.
-fn set_perms_0600(path: &Path) -> Result<(), ChatError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(path, perms)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
 }
 
 /// KDF identifier for keystore-resolved master keys.
@@ -338,12 +362,25 @@ mod tests {
     #[test]
     #[ignore = "requires OS keystore (Linux Secret Service / macOS Keychain / Windows DPAPI)"]
     fn keychain_round_trip() {
+        // Test-only service/user pair — must not collide with the
+        // production constants or a developer running `--ignored`
+        // would overwrite their real master key.
+        const TEST_SERVICE: &str = "fetchit-chat-test-v1";
+        const TEST_USER: &str = "keychain-round-trip";
+        assert_ne!(TEST_SERVICE, KEYRING_SERVICE);
+
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
-        let master = MasterKey::resolve(&MasterKeySource::Keychain, None).unwrap();
+        let master =
+            MasterKey::resolve_keychain_with_service(TEST_SERVICE, TEST_USER).unwrap();
         seal_to_path(&path, b"keychain stored secret", &master, kdf_id_keychain(), None)
             .unwrap();
         let opened = open_from_path(&path, &master).unwrap();
         assert_eq!(opened, b"keychain stored secret");
+
+        // Best-effort cleanup so re-running the test starts fresh.
+        if let Ok(entry) = keyring::Entry::new(TEST_SERVICE, TEST_USER) {
+            let _ = entry.delete_credential();
+        }
     }
 }
