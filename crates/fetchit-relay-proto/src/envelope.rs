@@ -42,11 +42,12 @@ pub struct TransitEnvelope {
     pub sender_machine_id: MachineId,
     /// Sender-asserted timestamp, milliseconds since the Unix epoch.
     pub timestamp_ms: u64,
-    /// Conversation epoch under which `ciphertext` was sealed. Recipient
-    /// uses this to pick the right symmetric key (`current_key` when
-    /// `epoch == conversation.current_epoch`, else a `prior_keys` entry
-    /// inside the 60s window). Welcome envelopes set this to the epoch
-    /// the carried key belongs to.
+    /// Conversation epoch under which `ciphertext` was sealed.
+    /// Recipients dispatch to the matching symmetric key for this
+    /// epoch; the conversation layer owns the key-lookup semantics
+    /// (a brief grace window covers in-flight envelopes during epoch
+    /// transitions). Welcome envelopes set this to the epoch the
+    /// carried key belongs to.
     pub epoch: u32,
     /// ChaCha20-Poly1305 ciphertext sealed under the recipient's key.
     pub ciphertext: Vec<u8>,
