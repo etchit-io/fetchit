@@ -164,6 +164,7 @@ pub fn aead_open(
 }
 
 /// Random 12-byte AEAD nonce.
+#[must_use]
 pub fn random_nonce(rng: &mut impl RngCore) -> [u8; AEAD_NONCE_LEN] {
     let mut n = [0u8; AEAD_NONCE_LEN];
     rng.fill_bytes(&mut n);
@@ -171,6 +172,7 @@ pub fn random_nonce(rng: &mut impl RngCore) -> [u8; AEAD_NONCE_LEN] {
 }
 
 /// Random 32-byte symmetric key (used for `Conversation.current_key`).
+#[must_use]
 pub fn random_symmetric_key(rng: &mut impl RngCore) -> [u8; AEAD_KEY_LEN] {
     let mut k = [0u8; AEAD_KEY_LEN];
     rng.fill_bytes(&mut k);
