@@ -18,6 +18,7 @@ pub mod card;
 pub mod chat_crypto;
 pub mod chat_identity;
 pub mod contacts;
+pub mod conversation;
 pub mod discovery;
 pub mod error;
 pub mod events;
