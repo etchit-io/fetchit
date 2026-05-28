@@ -1,0 +1,37 @@
+[package]
+name = "fetchit-trust"
+description = "Trust service — receives user reports, publishes signed denylists for fetch>it readers and LIT Chat clients to apply locally."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fetchit-trust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+hex.workspace = true
+postcard.workspace = true
+saorsa-pqc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "net"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tempfile = "3.13"
