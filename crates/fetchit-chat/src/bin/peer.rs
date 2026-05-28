@@ -72,9 +72,19 @@ struct Cli {
     data_dir: PathBuf,
 
     /// Argon2id passphrase for the at-rest vault on headless installs
-    /// (no OS keystore). Read from `FETCHIT_PASSPHRASE` env if unset.
-    #[arg(long, env = "FETCHIT_PASSPHRASE")]
-    passphrase: Option<String>,
+    /// (no OS keystore). Set via the `FETCHIT_PASSPHRASE` env var only —
+    /// avoid CLI literals so the secret doesn't appear in /proc/cmdline
+    /// or shell history. For systemd unit files, prefer the
+    /// passphrase-file path with mode 0o600 instead of an environment
+    /// variable.
+    #[arg(env = "FETCHIT_PASSPHRASE", hide = true)]
+    passphrase_env: Option<String>,
+
+    /// Path to a file containing the Argon2id passphrase (whitespace
+    /// trimmed). Preferred over `FETCHIT_PASSPHRASE` for systemd /
+    /// container installs — file can be locked down with mode 0o600.
+    #[arg(long)]
+    passphrase_file: Option<PathBuf>,
 
     #[command(subcommand)]
     mode: Mode,
@@ -98,13 +108,14 @@ enum Mode {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let token = resolve_token(&cli)?;
+    let passphrase = resolve_passphrase(&cli)?;
 
     let mut builder = Client::builder()
         .base_url(&cli.x0xd_base)
         .token(&token)
         .relay_url(cli.relay.clone())
         .data_dir(cli.data_dir.clone());
-    if let Some(p) = cli.passphrase.clone() {
+    if let Some(p) = passphrase {
         builder = builder.passphrase(p);
     }
     let client = builder.build().await.context("build Client")?;
@@ -137,6 +148,15 @@ fn resolve_token(cli: &Cli) -> Result<String> {
     let raw = std::fs::read_to_string(&cli.x0xd_token_path)
         .with_context(|| format!("read x0xd api token at {}", cli.x0xd_token_path))?;
     Ok(raw.trim().to_owned())
+}
+
+fn resolve_passphrase(cli: &Cli) -> Result<Option<String>> {
+    if let Some(path) = cli.passphrase_file.as_ref() {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("read passphrase file at {}", path.display()))?;
+        return Ok(Some(raw.trim().to_owned()));
+    }
+    Ok(cli.passphrase_env.clone().map(|s| s.trim().to_owned()))
 }
 
 async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<PeerInbound> {
