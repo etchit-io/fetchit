@@ -9,6 +9,7 @@ use crate::chat_crypto::{kem_keygen, KEM_PUBLIC_KEY_LEN, KEM_SECRET_KEY_LEN};
 use crate::error::ChatError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use zeroize::{Zeroize, Zeroizing};
 
 const IDENTITY_FILE: &str = "identity.json.enc";
 
@@ -32,13 +33,19 @@ struct IdentityVaultPayload {
     created_at_ms: u64,
 }
 
+impl Drop for IdentityVaultPayload {
+    fn drop(&mut self) {
+        self.kem_secret_key_b64.zeroize();
+    }
+}
+
 /// In-memory chat identity for the local device.
 #[derive(Clone)]
 pub struct FetchitIdentity {
     agent_id_hex: String,
     user_id_hex: Option<String>,
     kem_public_key: Vec<u8>,
-    kem_secret_key: Vec<u8>,
+    kem_secret_key: Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for FetchitIdentity {
@@ -75,7 +82,7 @@ impl FetchitIdentity {
             let payload: IdentityVaultPayload = serde_json::from_slice(&bytes)
                 .map_err(|e| ChatError::Invalid(format!("identity payload parse: {e}")))?;
             if payload.agent_id_hex == agent_id_hex {
-                return Self::from_payload(payload);
+                return Self::from_payload(&payload);
             }
         }
         Self::create_and_persist(data_dir, master, agent_id_hex, kdf_id, argon_salt)
@@ -91,30 +98,34 @@ impl FetchitIdentity {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
         let (pk, sk) = kem_keygen()?;
+        let kem_secret_key_b64 = Zeroizing::new(B64.encode(&sk));
         let payload = IdentityVaultPayload {
             version: 1,
             agent_id_hex: agent_id_hex.to_owned(),
             user_id_hex: None,
             kem_public_key_b64: B64.encode(&pk),
-            kem_secret_key_b64: B64.encode(&sk),
+            kem_secret_key_b64: kem_secret_key_b64.as_str().to_owned(),
             created_at_ms: now_ms(),
         };
-        let plaintext = serde_json::to_vec(&payload)
+        let mut plaintext = serde_json::to_vec(&payload)
             .map_err(|e| ChatError::Invalid(format!("identity payload serialize: {e}")))?;
         let path = data_dir.join(IDENTITY_FILE);
-        seal_to_path(&path, &plaintext, master, kdf_id, argon_salt)?;
-        Self::from_payload(payload)
+        let seal_result = seal_to_path(&path, &plaintext, master, kdf_id, argon_salt);
+        plaintext.zeroize();
+        seal_result?;
+        Self::from_payload(&payload)
     }
 
-    fn from_payload(payload: IdentityVaultPayload) -> Result<Self, ChatError> {
+    fn from_payload(payload: &IdentityVaultPayload) -> Result<Self, ChatError> {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
         let kem_public_key = B64
             .decode(&payload.kem_public_key_b64)
             .map_err(|e| ChatError::Invalid(format!("kem pub b64: {e}")))?;
-        let kem_secret_key = B64
-            .decode(&payload.kem_secret_key_b64)
-            .map_err(|e| ChatError::Invalid(format!("kem sec b64: {e}")))?;
+        let kem_secret_key = Zeroizing::new(
+            B64.decode(&payload.kem_secret_key_b64)
+                .map_err(|e| ChatError::Invalid(format!("kem sec b64: {e}")))?,
+        );
         if kem_public_key.len() != KEM_PUBLIC_KEY_LEN {
             return Err(ChatError::Invalid("kem pub length".into()));
         }
@@ -122,8 +133,8 @@ impl FetchitIdentity {
             return Err(ChatError::Invalid("kem sec length".into()));
         }
         Ok(Self {
-            agent_id_hex: payload.agent_id_hex,
-            user_id_hex: payload.user_id_hex,
+            agent_id_hex: payload.agent_id_hex.clone(),
+            user_id_hex: payload.user_id_hex.clone(),
             kem_public_key,
             kem_secret_key,
         })
@@ -240,6 +251,11 @@ mod tests {
             a.kem_public_key(),
             b.kem_public_key(),
             "rotating x0x agent_id must regenerate the KEM keypair"
+        );
+        assert_ne!(
+            a.kem_secret_key(),
+            b.kem_secret_key(),
+            "rotating x0x agent_id must regenerate the secret key as well"
         );
     }
 }

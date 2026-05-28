@@ -79,6 +79,7 @@ hkdf = "0.12"
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 argon2 = "0.5"
 directories = "5"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [profile.release]
 lto = "thin"
