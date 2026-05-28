@@ -1,8 +1,8 @@
 //! MLS-encrypted groups — create, invite, send, list.
 
 use crate::error::Result;
+use crate::http::Http;
 use crate::identity::AgentId;
-use crate::transport::Http;
 use serde::{Deserialize, Serialize};
 
 /// Opaque group identifier.
@@ -183,7 +183,10 @@ impl<'a> Endpoint<'a> {
             .http
             .post_json(&path, &SendGroupRequest { body, kind: "chat" })
             .await?;
-        Ok(resp.get("message_id").and_then(|v| v.as_str()).map(String::from))
+        Ok(resp
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .map(String::from))
     }
 
     /// Fetch the recent message history for a group. Daemon-side

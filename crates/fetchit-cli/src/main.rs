@@ -159,10 +159,7 @@ fn run_get(
             // Stream-to-disk path — matches `ant file download`'s call
             // shape exactly. Progress events are accepted but discarded
             // so stderr stays quiet enough for benchmark timings.
-            match client
-                .fetch_with_progress(&parsed, &out_path, |_| {})
-                .await
-            {
+            match client.fetch_with_progress(&parsed, &out_path, |_| {}).await {
                 Ok(()) => {
                     let bytes = std::fs::metadata(&out_path).map_or(0, |m| m.len());
                     eprintln!("fetchit: wrote {bytes} bytes to {}", out_path.display());

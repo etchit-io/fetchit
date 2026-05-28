@@ -40,4 +40,12 @@ pub enum ChatError {
     /// I/O error reading discovery files.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    /// No message transport could reach the recipient.
+    #[error("no transport available for recipient")]
+    NoTransportAvailable,
+
+    /// A message-transport operation failed.
+    #[error("message transport: {0}")]
+    MessageTransport(String),
 }

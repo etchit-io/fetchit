@@ -32,8 +32,8 @@ pub struct DaemonEndpoint {
 /// Returns [`ChatError::NotDiscoverable`] if the daemon's data files
 /// can't be read — usually because the daemon isn't running.
 pub async fn discover_local() -> Result<DaemonEndpoint> {
-    let dir = default_data_dir()
-        .ok_or_else(|| ChatError::NotDiscoverable("no home directory".into()))?;
+    let dir =
+        default_data_dir().ok_or_else(|| ChatError::NotDiscoverable("no home directory".into()))?;
     discover_in(&dir).await
 }
 
@@ -99,8 +99,12 @@ mod tests {
     #[tokio::test]
     async fn discovers_from_explicit_dir() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("api.port"), "12700\n").await.unwrap();
-        tokio::fs::write(dir.path().join("api-token"), "deadbeef\n").await.unwrap();
+        tokio::fs::write(dir.path().join("api.port"), "12700\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("api-token"), "deadbeef\n")
+            .await
+            .unwrap();
         let ep = discover_in(dir.path()).await.unwrap();
         assert_eq!(ep.base_url, "http://127.0.0.1:12700");
         assert_eq!(ep.token, "deadbeef");
@@ -116,8 +120,12 @@ mod tests {
     #[tokio::test]
     async fn token_and_port_are_trimmed() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("api.port"), "  12701  \n\n").await.unwrap();
-        tokio::fs::write(dir.path().join("api-token"), "tok\n").await.unwrap();
+        tokio::fs::write(dir.path().join("api.port"), "  12701  \n\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("api-token"), "tok\n")
+            .await
+            .unwrap();
         let ep = discover_in(dir.path()).await.unwrap();
         assert_eq!(ep.base_url, "http://127.0.0.1:12701");
         assert_eq!(ep.token, "tok");
@@ -126,8 +134,12 @@ mod tests {
     #[tokio::test]
     async fn full_authority_in_port_file_is_accepted() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("api.port"), "127.0.0.1:12700").await.unwrap();
-        tokio::fs::write(dir.path().join("api-token"), "tok").await.unwrap();
+        tokio::fs::write(dir.path().join("api.port"), "127.0.0.1:12700")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("api-token"), "tok")
+            .await
+            .unwrap();
         let ep = discover_in(dir.path()).await.unwrap();
         assert_eq!(ep.base_url, "http://127.0.0.1:12700");
     }

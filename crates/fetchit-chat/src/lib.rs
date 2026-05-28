@@ -21,11 +21,14 @@ pub mod groups;
 pub mod identity;
 pub mod messages;
 pub mod presence;
+pub mod relay_transport;
+pub mod transport;
 
 mod client;
-mod transport;
+mod http;
 
 pub use client::{Client, ClientBuilder};
-pub use discovery::{DaemonEndpoint, discover_local};
+pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
 pub use events::{Event, EventStream};
+pub use transport::{Reachability, Router, SendReceipt, Transport};

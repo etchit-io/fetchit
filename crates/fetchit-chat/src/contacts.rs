@@ -1,8 +1,8 @@
 //! Contacts list — list, add, remove, and adjust trust level.
 
 use crate::error::Result;
+use crate::http::Http;
 use crate::identity::AgentId;
-use crate::transport::Http;
 use serde::{Deserialize, Serialize};
 
 /// x0x trust levels, in increasing privilege.

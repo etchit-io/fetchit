@@ -1,11 +1,16 @@
-//! Internal HTTP transport shared by the typed endpoint modules.
+//! Internal HTTP client shared by the typed x0xd endpoint modules.
 //!
 //! Wraps `reqwest` to add the bearer auth header on every request and
 //! normalize daemon error responses into [`ChatError::Daemon`].
+//!
+//! Naming: this used to be `transport.rs`. It was renamed to free up
+//! the `transport` name for the message-routing trait that selects
+//! between relay / LAN-direct / future P2P paths. This file is the
+//! HTTP-to-x0xd seam only.
 
 use crate::error::{ChatError, Result};
 use reqwest::{Method, RequestBuilder, Response};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 
 /// Lightweight bearer-authenticated HTTP transport.
 ///
@@ -25,10 +30,13 @@ impl Http {
         let inner = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
-        let streaming = reqwest::Client::builder()
-            .pool_idle_timeout(None)
-            .build()?;
-        Ok(Self { inner, streaming, base_url, token })
+        let streaming = reqwest::Client::builder().pool_idle_timeout(None).build()?;
+        Ok(Self {
+            inner,
+            streaming,
+            base_url,
+            token,
+        })
     }
 
     pub(crate) async fn get_json<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
@@ -87,9 +95,7 @@ impl Http {
 
     fn authed(&self, method: Method, path: &str) -> RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
-        self.inner
-            .request(method, url)
-            .bearer_auth(&self.token)
+        self.inner.request(method, url).bearer_auth(&self.token)
     }
 }
 

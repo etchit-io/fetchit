@@ -91,11 +91,10 @@ async fn identity_card_returns_structured() {
 async fn identity_import_posts_card_to_correct_path() {
     let server = MockServer::start().await;
     let me = id('a');
+    // x0xd's `/agent/card/import` expects `card` to be the
+    // `x0x://agent/...` URI as a string (not the decoded object).
     Mock::given(method("POST"))
         .and(path("/agent/card/import"))
-        .and(body_partial_json(json!({
-            "card": {"agent_id": me.0, "display_name": "Alice"}
-        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&server)
         .await;
@@ -112,6 +111,17 @@ async fn identity_import_posts_card_to_correct_path() {
         .import(&card)
         .await
         .unwrap();
+    // Assert x0xd was actually called with a string-form card field.
+    let req = &server.received_requests().await.unwrap()[0];
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    let card_field = body
+        .get("card")
+        .and_then(|v| v.as_str())
+        .expect("card field must be a string, not an object");
+    assert!(
+        card_field.starts_with("x0x://agent/"),
+        "card field must be a share URI, got: {card_field}"
+    );
 }
 
 #[tokio::test]
@@ -127,7 +137,12 @@ async fn contacts_list_decodes() {
         })))
         .mount(&server)
         .await;
-    let list = client_against(&server).await.contacts().list().await.unwrap();
+    let list = client_against(&server)
+        .await
+        .contacts()
+        .list()
+        .await
+        .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].trust_level, TrustLevel::Trusted);
     assert_eq!(list[0].label.as_deref(), Some("Bob"));
@@ -183,32 +198,54 @@ async fn contacts_remove_uses_delete() {
         .unwrap();
 }
 
+/// With no relay (or other transport) wired, `send` surfaces a
+/// `NoTransportAvailable` error rather than falling back to x0xd's
+/// `/direct/send`. The chat layer is relay-routed.
 #[tokio::test]
-async fn dm_send_returns_message_id() {
+async fn dm_send_without_relay_transport_errors_with_no_transport() {
     let server = MockServer::start().await;
     let peer = id('e');
-    Mock::given(method("POST"))
-        .and(path("/direct/send"))
-        .and(body_partial_json(json!({"agent_id": peer.0})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "m-42"})))
-        .mount(&server)
-        .await;
-    let id = client_against(&server)
+    let err = client_against(&server)
         .await
         .messages()
         .send(&peer, "hello", "Alice")
         .await
-        .unwrap();
-    assert_eq!(id.as_deref(), Some("m-42"));
+        .unwrap_err();
+    assert!(matches!(err, fetchit_chat::ChatError::NoTransportAvailable));
 }
 
-/// Tighter assertion on the wire shape: the daemon expects `payload`
-/// to be a base64-encoded JSON envelope `{text, sender_name, ts}`.
-/// Regression guard — an earlier client sent the body verbatim and the
-/// daemon rejected with `missing field "payload"`.
+/// Inbound transport bytes (JSON envelope `{text, sender_name, ts}`)
+/// decode back into a `DirectMessage` with the original fields. This
+/// is the inverse of what the chat layer puts on the wire when
+/// sending — round-trip parity guard.
 #[tokio::test]
-async fn dm_send_payload_is_base64_envelope() {
-    use base64::Engine;
+async fn relay_inbound_payload_round_trips_to_direct_message() {
+    use fetchit_chat::messages::decode_direct_message;
+    use fetchit_chat::transport::{InboundEnvelope, OutboundKind};
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "text": "hi there",
+        "sender_name": "Alice",
+        "ts": 1_700_000_000_000_u64,
+    }))
+    .unwrap();
+    let inbound = InboundEnvelope {
+        kind: OutboundKind::Dm,
+        from: id('e'),
+        payload,
+        timestamp_ms: 1_700_000_000_000,
+        transport_name: "relay",
+    };
+    let dm = decode_direct_message(inbound).unwrap();
+    assert_eq!(dm.body, "hi there");
+    assert_eq!(dm.sender_name.as_deref(), Some("Alice"));
+    assert_eq!(dm.timestamp_ms, Some(1_700_000_000_000));
+}
+
+#[tokio::test]
+async fn legacy_x0xd_dm_send_path_is_removed() {
+    // Documentation-by-test: posts to `/direct/send` no longer fire.
+    // The chat layer routes via the message Router. If a future change
+    // re-introduces the x0xd send path, this assertion gates the regression.
     let server = MockServer::start().await;
     let peer = id('e');
     Mock::given(method("POST"))
@@ -216,24 +253,17 @@ async fn dm_send_payload_is_base64_envelope() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "m-1"})))
         .mount(&server)
         .await;
-    client_against(&server)
+    let _ = client_against(&server)
         .await
         .messages()
         .send(&peer, "hi there", "Alice")
-        .await
-        .unwrap();
-    let req = &server.received_requests().await.unwrap()[0];
-    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-    let payload_b64 = body
-        .get("payload")
-        .and_then(|v| v.as_str())
-        .expect("payload field missing");
-    let decoded =
-        base64::engine::general_purpose::STANDARD.decode(payload_b64).unwrap();
-    let env: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
-    assert_eq!(env["text"], "hi there");
-    assert_eq!(env["sender_name"], "Alice");
-    assert!(env["ts"].is_number());
+        .await;
+    let requests = server.received_requests().await.unwrap();
+    let direct_send_count = requests
+        .iter()
+        .filter(|r| r.url.path() == "/direct/send")
+        .count();
+    assert_eq!(direct_send_count, 0);
 }
 
 #[tokio::test]
@@ -273,7 +303,9 @@ async fn groups_create_and_invite() {
         .await;
     Mock::given(method("POST"))
         .and(path("/groups/g-1/invite"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"invite_link": "x0x://invite/zzz"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"invite_link": "x0x://invite/zzz"})),
+        )
         .mount(&server)
         .await;
     let c = client_against(&server).await;
@@ -309,7 +341,9 @@ async fn groups_send_returns_id() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/groups/g-1/send"))
-        .and(body_partial_json(json!({"body": "team msg", "kind": "chat"})))
+        .and(body_partial_json(
+            json!({"body": "team msg", "kind": "chat"}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "gm-1"})))
         .mount(&server)
         .await;
@@ -335,7 +369,12 @@ async fn presence_online_decodes() {
         })))
         .mount(&server)
         .await;
-    let online = client_against(&server).await.presence().online().await.unwrap();
+    let online = client_against(&server)
+        .await
+        .presence()
+        .online()
+        .await
+        .unwrap();
     assert_eq!(online.len(), 1);
     assert_eq!(online[0].last_seen, Some(1_779_740_232));
 }

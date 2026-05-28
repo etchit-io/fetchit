@@ -2,9 +2,9 @@
 //! someone else's.
 
 use crate::error::{ChatError, Result};
-use crate::transport::Http;
-use base64::Engine;
+use crate::http::Http;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// 64-character hex agent id.
@@ -107,7 +107,10 @@ struct CardResponse {
 
 #[derive(Serialize)]
 struct ImportRequest<'a> {
-    card: &'a serde_json::Value,
+    /// x0xd expects the card link (`x0x://agent/...`) or its raw
+    /// base64 payload, not the decoded card object. See its
+    /// `ImportCardRequest::card: String`.
+    card: &'a str,
 }
 
 impl<'a> Endpoint<'a> {
@@ -128,14 +131,22 @@ impl<'a> Endpoint<'a> {
         Ok(resp.card)
     }
 
-    /// Import a card into the local contacts list. Accepts either a
-    /// pre-decoded [`AgentCard`] or, via [`AgentCard::from_share_uri`],
-    /// the `x0x://agent/<base64>` URI form pasted by a user.
+    /// Import a card into the local contacts list. Re-encodes the
+    /// supplied card to its `x0x://agent/...` URI form before
+    /// posting, since x0xd's import endpoint takes the URI string,
+    /// not the decoded object.
     pub async fn import(&self, card: &AgentCard) -> Result<()> {
-        let body = serde_json::to_value(card)?;
+        let uri = card.to_share_uri()?;
+        self.import_uri(&uri).await
+    }
+
+    /// Import a card directly from its `x0x://agent/...` URI form.
+    /// Cheaper than [`Self::import`] when the caller already has the
+    /// URI (the common case for the desktop "Add a contact" flow).
+    pub async fn import_uri(&self, uri: &str) -> Result<()> {
         let _: serde_json::Value = self
             .http
-            .post_json("/agent/card/import", &ImportRequest { card: &body })
+            .post_json("/agent/card/import", &ImportRequest { card: uri })
             .await?;
         Ok(())
     }

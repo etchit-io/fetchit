@@ -7,8 +7,8 @@
 //! stream for live updates.
 
 use crate::error::Result;
+use crate::http::Http;
 use crate::identity::AgentId;
-use crate::transport::Http;
 use serde::{Deserialize, Serialize};
 
 /// Coarse-grained presence status.
@@ -117,8 +117,7 @@ mod tests {
 
     #[test]
     fn transition_decodes() {
-        let json =
-            r#"{"agent_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","event":"online","reachable":true}"#;
+        let json = r#"{"agent_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","event":"online","reachable":true}"#;
         let t: PresenceTransition = serde_json::from_str(json).unwrap();
         assert_eq!(t.event, "online");
         assert_eq!(t.reachable, Some(true));

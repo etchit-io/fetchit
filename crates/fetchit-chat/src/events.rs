@@ -14,10 +14,10 @@
 
 use crate::contacts::Contact;
 use crate::error::{ChatError, Result};
+use crate::http::Http;
 use crate::identity::AgentId;
 use crate::messages::DirectMessage;
 use crate::presence::PresenceTransition;
-use crate::transport::Http;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
@@ -69,7 +69,9 @@ where
     S: Stream<Item = Result<Event>>,
 {
     pub(crate) fn from_stream(stream: S) -> Self {
-        Self { inner: Box::pin(stream) }
+        Self {
+            inner: Box::pin(stream),
+        }
     }
 
     /// Pull the next event. Returns `None` when the stream ends.
@@ -121,7 +123,9 @@ where
                         }
                         return None;
                     }
-                    Some(Err(e)) => return Some((Err(ChatError::Transport(e)), (s, buf, cur, pending))),
+                    Some(Err(e)) => {
+                        return Some((Err(ChatError::Transport(e)), (s, buf, cur, pending)))
+                    }
                     Some(Ok(chunk)) => {
                         let text = match std::str::from_utf8(&chunk) {
                             Ok(t) => t,
@@ -178,11 +182,9 @@ fn decode_dm(value: serde_json::Value) -> Result<DirectMessage> {
         ts: Option<u64>,
     }
     let raw: Raw = serde_json::from_value(value)?;
-    let env_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &raw.payload,
-    )
-    .map_err(|e| ChatError::Invalid(format!("dm payload b64: {e}")))?;
+    let env_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &raw.payload)
+            .map_err(|e| ChatError::Invalid(format!("dm payload b64: {e}")))?;
     let env: Env = serde_json::from_slice(&env_bytes).unwrap_or(Env {
         text: None,
         sender_name: None,
@@ -225,14 +227,22 @@ fn decode_frame(frame: &Frame) -> Result<Option<Event>> {
                 #[serde(default)]
                 from: Option<AgentId>,
             }
-            let R { topic, payload, from } = serde_json::from_value(value)?;
+            let R {
+                topic,
+                payload,
+                from,
+            } = serde_json::from_value(value)?;
             let bytes = if let Some(b64) = payload {
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
                     .map_err(|e| ChatError::Invalid(format!("gossip payload b64: {e}")))?
             } else {
                 Vec::new()
             };
-            Event::GossipMessage { topic, payload: bytes, from }
+            Event::GossipMessage {
+                topic,
+                payload: bytes,
+                from,
+            }
         }
         other => Event::Other {
             event_name: other.to_string(),
@@ -248,7 +258,10 @@ mod tests {
     use super::*;
 
     fn frame(event: &str, data: &str) -> Frame {
-        Frame { event: event.into(), data: data.into() }
+        Frame {
+            event: event.into(),
+            data: data.into(),
+        }
     }
 
     #[test]
@@ -391,10 +404,7 @@ mod tests {
     #[test]
     fn gossip_message_decodes_with_base64_payload() {
         // payload "hello" → "aGVsbG8="
-        let f = frame(
-            "gossip",
-            r#"{"topic":"news","payload":"aGVsbG8="}"#,
-        );
+        let f = frame("gossip", r#"{"topic":"news","payload":"aGVsbG8="}"#);
         match decode_frame(&f).unwrap().unwrap() {
             Event::GossipMessage { topic, payload, .. } => {
                 assert_eq!(topic, "news");
