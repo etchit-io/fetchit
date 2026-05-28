@@ -335,24 +335,23 @@ async fn build_with_chat(
         argon_salt,
     ));
 
-    let signer: Arc<dyn Signer> = Arc::new(
+    // One signer, shared between the chat-state path and the relay
+    // transport: each `X0xdSigner` opens its own warmup round-trip and
+    // every `sign` call hits `/agent/sign`, so cloning the Arc keeps a
+    // single WebSocket-paired x0xd identity instead of doubling sessions.
+    let x0xd_signer = Arc::new(
         X0xdSigner::connect(
-            Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
-            token.clone(),
-        )
-        .await
-        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?,
-    );
-
-    let mut router = Router::new();
-    if let Some(url) = relay_url {
-        let transport_signer = X0xdSigner::connect(
             Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
             token,
         )
         .await
-        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?;
-        let relay = RelayTransport::connect(url, transport_signer).await?;
+        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?,
+    );
+    let signer: Arc<dyn Signer> = x0xd_signer.clone();
+
+    let mut router = Router::new();
+    if let Some(url) = relay_url {
+        let relay = RelayTransport::connect(url, &x0xd_signer).await?;
         router.add(relay);
     }
 

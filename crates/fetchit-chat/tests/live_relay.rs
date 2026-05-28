@@ -28,7 +28,7 @@ fn live_env() -> Option<(String, String, Url)> {
 }
 
 #[tokio::test]
-#[ignore = "requires running x0xd + reachable relay; set FETCHIT_X0XD_LIVE_BASE + FETCHIT_X0XD_LIVE_TOKEN + FETCHIT_RELAY_LIVE_URL"]
+#[ignore = "broken after Task 8 chat-v2 encryption switch; awaits Task 10 rewire to use conversation::dispatch_inbound"]
 async fn live_chat_self_dm_round_trips_through_relay() {
     let Some((base, token, relay)) = live_env() else {
         panic!(

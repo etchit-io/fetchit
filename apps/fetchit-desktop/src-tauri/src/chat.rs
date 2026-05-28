@@ -29,6 +29,10 @@ pub struct ChatState {
     client: Arc<Mutex<Option<Client>>>,
     relay_url: Url,
     data_dir: PathBuf,
+    // Plain heap memory — no `zeroize` wrapper because the slot is
+    // rebuilt on every set and the UX target accepts the trade-off.
+    // Long-term hardening would route this through a `SecretString`
+    // crate that zeroes on drop and resists swap-file leaks.
     passphrase: Arc<Mutex<Option<String>>>,
 }
 
@@ -420,7 +424,7 @@ async fn handle_inbound(
                 // Stale or duplicate welcome — no UI signal.
             }
             Ok(InboundDispatch::Message {
-                group_id_hex,
+                group_id_hex: _,
                 sender_agent_id_hex,
                 payload,
             }) => {
@@ -430,7 +434,12 @@ async fn handle_inbound(
                     body: payload.body.clone(),
                     sender_name: payload.sender_name.clone(),
                     timestamp_ms: Some(payload.ts_ms),
-                    message_id: Some(group_id_hex),
+                    // The v2 conversation layer doesn't carry a per-message
+                    // transport id at this seam; the relay's `dedupe_key`
+                    // isn't propagated end-to-end yet, and the conversation
+                    // payload itself doesn't include one. Leave `None`
+                    // until that wiring lands.
+                    message_id: None,
                     verified: Some(true),
                 };
                 let _ = app.emit("chat:dm", &dm);

@@ -49,14 +49,15 @@ impl RelayTransport {
     /// # Errors
     /// Returns [`ChatError::MessageTransport`] on any handshake or
     /// connection failure.
-    pub async fn connect(base_url: Url, signer: X0xdSigner) -> Result<Arc<Self>> {
+    pub async fn connect(base_url: Url, signer: &X0xdSigner) -> Result<Arc<Self>> {
         use fetchit_relay_client::Signer;
         let local_agent_id = RelayAgentId::from_bytes(signer.agent_id());
         let config = ClientConfig::new(base_url);
-        let relay_client = RelayClient::connect(config, &signer)
+        let relay_client = RelayClient::connect(config, signer)
             .await
             .map_err(|e| ChatError::MessageTransport(format!("relay connect: {e}")))?;
         let client = Arc::new(relay_client);
+        // TODO(perf): bound this channel once we measure realistic inbound rates.
         let (tx, rx) = mpsc::unbounded_channel();
         spawn_inbound_pump(client.clone(), tx);
         Ok(Arc::new(Self {
