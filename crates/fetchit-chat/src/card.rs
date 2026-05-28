@@ -186,7 +186,9 @@ pub fn verify_card_extension(
     ml_dsa_verify(agent_public_key_bytes, &sign_bytes, &sig)?;
 
     Ok(CardExtension {
-        version: u16::try_from(version).unwrap_or(1),
+        // `version` (u64) was checked equal to `u64::from(CARD_VERSION)` above,
+        // so we can assign the typed constant directly instead of a fallible cast.
+        version: CARD_VERSION,
         kem_public_key_b64: kem_b64.to_owned(),
         signature_b64: sig_b64.to_owned(),
     })
@@ -194,6 +196,14 @@ pub fn verify_card_extension(
 
 /// Canonical JSON encoding: keys sorted recursively. Deterministic so
 /// signer + verifier produce byte-identical inputs.
+///
+/// Known deviations from RFC 8785 (JCS): keys are sorted in bytewise UTF-8
+/// order rather than UTF-16 code-unit order, which differs only for
+/// supplementary-plane code points in object keys — safe for x0xd cards
+/// (ASCII keys today), but a future contributor adding non-ASCII keys must
+/// revisit this. The recursion also has no explicit depth guard; x0xd cards
+/// have a fixed shallow shape, so this is not a live risk, but this encoder
+/// is not safe for adversarial unconstrained JSON.
 fn canonical_json(value: &serde_json::Value) -> Result<Vec<u8>, ChatError> {
     let mut buf = Vec::new();
     write_canonical(value, &mut buf)?;
