@@ -471,7 +471,7 @@ async fn fetch_bytes(
         // Cache off: in-memory fetch, no on-disk trace.
         client.fetch(addr).await.map_err(|e| e.to_string())?
     };
-    state.cache.put(addr.clone(), bytes.clone());
+    state.cache.put(*addr, bytes.clone());
     Ok(bytes)
 }
 
@@ -482,7 +482,7 @@ async fn fetch_bytes(
     addr: &Address,
 ) -> Result<Bytes, String> {
     let bytes = e2e::fixture_bytes(addr)?;
-    state.cache.put(addr.clone(), bytes.clone());
+    state.cache.put(*addr, bytes.clone());
     Ok(bytes)
 }
 
@@ -522,6 +522,27 @@ async fn fetch_and_render(
 #[tauri::command]
 fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
     state.cancel_fetch(&tab_id);
+}
+
+/// Build the chat state from a relay URL, falling back to the default
+/// URL when the user-supplied one is malformed.
+///
+/// # Panics
+/// Cannot panic in practice — `settings::DEFAULT_RELAY_URL` is a
+/// compile-time constant known to parse as a valid URL. The `expect`
+/// guards a programming error in the fallback constant.
+#[allow(clippy::expect_used)]
+fn build_chat_state(relay_url: &str) -> chat::ChatState {
+    match chat::ChatState::new(relay_url) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[fetchit][chat] invalid relay_url ({relay_url}): {e}; falling back to default"
+            );
+            chat::ChatState::new(settings::DEFAULT_RELAY_URL)
+                .expect("default relay url is always valid")
+        }
+    }
 }
 
 /// Build and run the Tauri application: wires the URI scheme protocols,
@@ -574,7 +595,7 @@ pub fn run() {
                 let _ = app.deep_link().register_all();
             }
             #[cfg(target_os = "linux")]
-            crate::linux_deep_link::register_or_cleanup(&app.handle());
+            crate::linux_deep_link::register_or_cleanup(app.handle());
 
             // Resolve the app-local data dir once; everything user-persisted
             // lives under it (settings.json + the on-disk byte cache).
@@ -589,12 +610,13 @@ pub fn run() {
             // the on-disk cache with the user's saved policy.
             let loaded = Settings::load(&settings_path);
             let disk_cache = Arc::new(DiskCache::new(cache_root, loaded.cache));
+            let relay_url = loaded.relay_url.clone();
 
             let state = AppState::new(disk_cache, loaded, settings_path);
             let server_state = state.clone();
             app.manage(state);
 
-            let chat_state = chat::ChatState::default();
+            let chat_state = build_chat_state(&relay_url);
             app.manage(chat_state.clone());
             chat::spawn_event_pump(app.handle().clone(), chat_state);
 

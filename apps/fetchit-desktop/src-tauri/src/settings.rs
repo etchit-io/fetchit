@@ -38,7 +38,16 @@ impl Default for IdlePolicy {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Default fetchit-operated relay URL. The desktop ships pointing at
+/// this; users can change it from Settings → Advanced when more
+/// regions land.
+pub const DEFAULT_RELAY_URL: &str = "http://67.207.94.66:8088";
+
+fn default_relay_url() -> String {
+    DEFAULT_RELAY_URL.to_owned()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub cache: Policy,
@@ -49,6 +58,23 @@ pub struct Settings {
     /// either an `ip:port` shorthand or a full multiaddr — both parse
     /// through `parse_bootstrap_peer`.
     pub peers: Vec<String>,
+    /// Chat relay URL. Chat sends route through this relay; receivers
+    /// connect for inbound delivery. Default points at the fetchit-
+    /// operated NYC node; advanced users can change it.
+    #[serde(default = "default_relay_url")]
+    pub relay_url: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            cache: Policy::default(),
+            bookmarks: Vec::new(),
+            idle: IdlePolicy::default(),
+            peers: Vec::new(),
+            relay_url: default_relay_url(),
+        }
+    }
 }
 
 impl Settings {

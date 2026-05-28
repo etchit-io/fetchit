@@ -138,8 +138,7 @@ mod tests {
     use super::*;
     use crate::disk_cache::Policy;
 
-    const HEX_ONE: &str =
-        "0000000000000000000000000000000000000000000000000000000000000001";
+    const HEX_ONE: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
     fn make_state(tmp: &std::path::Path) -> AppState {
         let disk = Arc::new(DiskCache::new(tmp.join("disk"), Policy::default()));

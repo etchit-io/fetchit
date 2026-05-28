@@ -1,40 +1,61 @@
-//! Tauri bridge for the x0xd gossip-daemon client.
+//! Tauri bridge for the chat surface — x0xd (identity / contacts /
+//! presence / groups) + fetchit relay (DM transport).
 //!
-//! Lazily builds a [`fetchit_chat::Client`] on first use, exposes a
-//! typed command surface to the frontend, and runs a background pump
-//! that forwards the daemon's SSE events to Tauri events
+//! Lazily builds a [`fetchit_chat::Client`] on first use, configured
+//! with the relay URL from settings, exposes a typed command surface
+//! to the frontend, and runs background pumps that forward inbound
+//! events (relay deliveries, x0xd SSE) to Tauri events
 //! (`chat:event`, `chat:presence`, `chat:dm`).
 
 use fetchit_chat::contacts::TrustLevel;
 use fetchit_chat::groups::{GroupId, GroupInvite};
 use fetchit_chat::identity::{AgentCard, AgentId};
+use fetchit_chat::messages::decode_direct_message;
 use fetchit_chat::{Client, Event};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+use url::Url;
 
 const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Tauri-managed handle to the lazily-built chat client.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ChatState {
     client: Arc<Mutex<Option<Client>>>,
+    relay_url: Url,
 }
 
 impl ChatState {
+    /// Build a fresh `ChatState` bound to the supplied relay URL.
+    ///
+    /// # Errors
+    /// Returns the parse error if `relay_url` is not a valid URL.
+    pub fn new(relay_url: &str) -> Result<Self, String> {
+        let url = Url::parse(relay_url).map_err(|e| format!("invalid relay url: {e}"))?;
+        Ok(Self {
+            client: Arc::new(Mutex::new(None)),
+            relay_url: url,
+        })
+    }
+
     async fn get(&self) -> Result<Client, String> {
         let mut guard = self.client.lock().await;
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
-        let c = Client::auto().await.map_err(|e| e.to_string())?;
+        let c = Client::builder()
+            .relay_url(self.relay_url.clone())
+            .build()
+            .await
+            .map_err(|e| e.to_string())?;
         *guard = Some(c.clone());
         Ok(c)
     }
 
     /// Force the next call to rebuild — used after a daemon restart
-    /// invalidates the discovered port/token.
+    /// or relay reconnect invalidates the cached client.
     async fn invalidate(&self) {
         *self.client.lock().await = None;
     }
@@ -50,7 +71,12 @@ pub struct CardWithUri {
 
 #[tauri::command]
 pub async fn chat_health(state: tauri::State<'_, ChatState>) -> Result<bool, String> {
-    state.get().await?.health().await.map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .health()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -87,12 +113,14 @@ pub async fn chat_import_card(
     state: tauri::State<'_, ChatState>,
     uri: String,
 ) -> Result<(), String> {
-    let card = AgentCard::from_share_uri(&uri).map_err(|e| e.to_string())?;
+    // Validate the URI client-side so a malformed paste surfaces a
+    // clear error before we hit the daemon.
+    AgentCard::from_share_uri(&uri).map_err(|e| e.to_string())?;
     state
         .get()
         .await?
         .identity()
-        .import(&card)
+        .import_uri(&uri)
         .await
         .map_err(|e| e.to_string())
 }
@@ -288,18 +316,24 @@ pub async fn chat_group_messages(
         .map_err(|e| e.to_string())
 }
 
-/// Spawn the background SSE event pumps. The daemon exposes three
-/// relevant streams — `/events` (subscribed gossip topics),
-/// `/direct/events` (inbound DMs), and `/presence/events` (online/
-/// offline transitions). Each gets its own task; all funnel through
-/// the same Tauri event emitter so the frontend only listens once.
+/// Spawn the background event pumps:
+///
+/// - **Relay inbound** — drains the relay transport's inbound channel
+///   and emits each delivery as a `chat:dm` event.
+/// - **x0xd presence SSE** — keeps presence + contact / group state
+///   in sync; unchanged by the relay migration.
+/// - **x0xd unified SSE** — catch-all for events the relay isn't
+///   responsible for (gossip, contacts, groups).
+///
+/// Each pump owns its own task; reconnections invalidate the cached
+/// `Client` so the next iteration re-handshakes with x0xd + relay.
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
-    spawn_direct(app.clone(), state.clone());
+    spawn_relay_dms(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
 }
 
-fn spawn_direct(app: AppHandle, state: ChatState) {
+fn spawn_relay_dms(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
             let Ok(client) = state.get().await else {
@@ -307,26 +341,21 @@ fn spawn_direct(app: AppHandle, state: ChatState) {
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             };
-            let mut stream = match client.direct_events().await {
-                Ok(s) => s,
-                Err(e) => {
-                    log_pump(&format!("[direct] open failed: {e}"));
-                    state.invalidate().await;
-                    tokio::time::sleep(RECONNECT_BACKOFF).await;
-                    continue;
-                }
+            let Some(mut rx) = client.take_transport_inbound("relay") else {
+                log_pump("[relay] inbound already taken; forcing reconnect");
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
             };
-            log_pump("[direct] stream open");
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(ev) => emit(&app, &ev),
-                    Err(e) => {
-                        log_pump(&format!("[direct] error: {e}"));
-                        break;
-                    }
+            log_pump("[relay] inbound open");
+            while let Some(env) = rx.recv().await {
+                match decode_direct_message(env) {
+                    Ok(dm) => emit(&app, &Event::DirectMessage(dm)),
+                    Err(e) => log_pump(&format!("[relay] decode: {e}")),
                 }
             }
-            log_pump("[direct] ended; reconnecting");
+            log_pump("[relay] inbound closed; reconnecting");
+            state.invalidate().await;
             tokio::time::sleep(RECONNECT_BACKOFF).await;
         }
     });
