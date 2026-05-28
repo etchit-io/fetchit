@@ -110,7 +110,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Cha
     rand::rngs::OsRng.fill_bytes(&mut suffix);
     let tmp_name = format!(
         "{}.tmp.{}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("vault"),
         hex::encode(suffix),
     );
     let tmp = path.with_file_name(tmp_name);
@@ -163,6 +163,23 @@ mod tests {
         let bytes = fs::read(&path).unwrap();
         let recovered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(recovered, value);
+    }
+
+    #[test]
+    fn write_json_atomic_creates_missing_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("sub").join("nested");
+        let path = nested.join("contact.json");
+        assert!(
+            !nested.exists(),
+            "preconditon: nested parent shouldn't pre-exist"
+        );
+        write_json_atomic(&path, &serde_json::json!({ "k": "v" })).unwrap();
+        assert!(path.exists(), "file should be created at the nested path");
+        assert!(nested.exists(), "parent dirs should have been created");
+        let recovered: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(recovered, serde_json::json!({ "k": "v" }));
     }
 
     #[cfg(unix)]
