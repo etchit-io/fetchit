@@ -20,6 +20,8 @@ pub enum InboundDispatch {
         /// The freshly installed conversation.
         conversation: Conversation,
     },
+    /// Stale or duplicate welcome — no state change.
+    WelcomeIgnored,
     /// Updated an existing conversation (welcome carrying a higher epoch).
     Rekeyed {
         /// The updated conversation.
@@ -125,8 +127,11 @@ pub async fn dispatch_inbound(
         let existing = registry.get(&group_id_hex).await?;
         match existing {
             Some(conv) if envelope.epoch <= conv.current_epoch => {
-                // Stale or current — no-op.
-                Ok(InboundDispatch::Welcomed { conversation: conv })
+                // Drop `conv` explicitly — we read it just to check the epoch
+                // comparison; no caller-visible payload is needed for an
+                // ignored welcome.
+                let _ = conv;
+                Ok(InboundDispatch::WelcomeIgnored)
             }
             Some(mut conv) => {
                 // Higher epoch — adopt new key and member list. Don't
@@ -167,11 +172,13 @@ mod tests {
     use crate::at_rest::{
         fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource, ARGON_SALT_LEN,
     };
+    use crate::chat_crypto::random_symmetric_key;
     use crate::local_store::StoreLayout;
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
     use fetchit_relay_client::MlDsaSigner;
     use fetchit_relay_proto::{AgentId, EnvelopeKind, GroupId, MachineId};
+    use rand::rngs::OsRng;
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -312,5 +319,91 @@ mod tests {
         };
         let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
         assert!(matches!(result, InboundDispatch::StaleEpoch { .. }));
+    }
+
+    #[tokio::test]
+    async fn higher_epoch_welcome_rekeys_existing_conversation() {
+        let tmp_a = tempdir().unwrap();
+        let aid_a = "aa".repeat(32);
+        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let tmp_b = tempdir().unwrap();
+        let aid_b = "bb".repeat(32);
+        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let mut conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+        let alice_signer = MlDsaSigner::generate().unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+
+        // Epoch-0 welcome installs the conversation on Bob.
+        let outbox0 = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(outbox0[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Alice rotates the key and bumps the epoch (e.g. auto-rekey fired).
+        let new_key = random_symmetric_key(&mut OsRng);
+        conv.advance_epoch(new_key);
+        assert_eq!(conv.current_epoch, 1, "advance_epoch should bump to 1");
+        let expected_key_b64 = conv.current_key_b64.clone();
+
+        // Alice resends a welcome carrying the new epoch + key.
+        let outbox1 = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let result = dispatch_inbound(outbox1[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        match result {
+            InboundDispatch::Rekeyed { conversation } => {
+                assert_eq!(conversation.current_epoch, 1);
+                assert_eq!(conversation.current_key_b64, expected_key_b64);
+                assert_eq!(
+                    conversation.prior_keys.len(),
+                    1,
+                    "old epoch-0 key should have been pushed into prior_keys"
+                );
+                assert_eq!(conversation.prior_keys[0].epoch, 0);
+            }
+            other => panic!("expected Rekeyed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_welcome_returns_welcome_ignored() {
+        let tmp_a = tempdir().unwrap();
+        let aid_a = "aa".repeat(32);
+        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let tmp_b = tempdir().unwrap();
+        let aid_b = "bb".repeat(32);
+        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+        let alice_signer = MlDsaSigner::generate().unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+
+        let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        // First dispatch installs.
+        let r1 = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        assert!(matches!(r1, InboundDispatch::Welcomed { .. }));
+
+        // Second dispatch of the same envelope should be ignored.
+        let r2 = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        assert!(matches!(r2, InboundDispatch::WelcomeIgnored));
     }
 }
