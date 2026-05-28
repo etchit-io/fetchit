@@ -1,11 +1,14 @@
 //! Agent identity — read your own, generate shareable cards, import
 //! someone else's.
 
+use crate::chat_identity::FetchitIdentity;
 use crate::error::{ChatError, Result};
 use crate::http::Http;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use fetchit_relay_client::Signer;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// 64-character hex agent id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -95,9 +98,10 @@ impl AgentCard {
 }
 
 /// Endpoint wrapper. Build via [`Client::identity`](crate::Client::identity).
-#[derive(Debug)]
 pub struct Endpoint<'a> {
     http: &'a Http,
+    chat_identity: Option<&'a Arc<FetchitIdentity>>,
+    chat_signer: Option<&'a Arc<dyn Signer>>,
 }
 
 #[derive(Deserialize)]
@@ -114,8 +118,16 @@ struct ImportRequest<'a> {
 }
 
 impl<'a> Endpoint<'a> {
-    pub(crate) fn new(http: &'a Http) -> Self {
-        Self { http }
+    pub(crate) fn new(
+        http: &'a Http,
+        chat_identity: Option<&'a Arc<FetchitIdentity>>,
+        chat_signer: Option<&'a Arc<dyn Signer>>,
+    ) -> Self {
+        Self {
+            http,
+            chat_identity,
+            chat_signer,
+        }
     }
 
     /// Read your local agent identity.
@@ -129,6 +141,42 @@ impl<'a> Endpoint<'a> {
         let path = format!("/agent/card?display_name={encoded}");
         let resp: CardResponse = self.http.get_json(&path).await?;
         Ok(resp.card)
+    }
+
+    /// Generate a fetchit v2 extended share URI for this device. The
+    /// URI is the stock x0x card JSON plus three signed `fetchit_*`
+    /// fields carrying our chat-layer KEM public key, the schema
+    /// version, and an ML-DSA-65 signature over the canonical card
+    /// bytes.
+    ///
+    /// Callers (peer binary, desktop UI) should prefer this over the
+    /// bare [`AgentCard::to_share_uri`] for sharing with chat peers —
+    /// without the extension fields, the receiver cannot decrypt v2
+    /// DMs.
+    ///
+    /// # Errors
+    /// HTTP errors fetching the stock card; signing errors; JSON shape
+    /// errors. Also returns `ChatError::Invalid("chat state not
+    /// built…")` if the client was built without `data_dir` /
+    /// `passphrase` (REST-only mode has no chat identity to publish a
+    /// KEM pubkey for).
+    pub async fn extended_share_uri(&self, display_name: &str) -> Result<String> {
+        let card = self.card(display_name).await?;
+        let card_value = serde_json::to_value(&card)
+            .map_err(|e| ChatError::Invalid(format!("card to value: {e}")))?;
+        let identity = self.chat_identity.ok_or_else(|| {
+            ChatError::Invalid("chat state not built; cannot publish v2 card".into())
+        })?;
+        let signer = self.chat_signer.ok_or_else(|| {
+            ChatError::Invalid("chat state not built; cannot publish v2 card".into())
+        })?;
+        let extended = crate::card::extend_with_fetchit_fields(
+            &card_value,
+            identity.kem_public_key(),
+            signer.as_ref(),
+        )
+        .await?;
+        crate::card::extended_card_to_uri(&extended)
     }
 
     /// Import a card into the local contacts list. Re-encodes the

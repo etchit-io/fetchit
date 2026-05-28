@@ -175,7 +175,11 @@ impl Client {
     /// Identity endpoint: read your agent, generate cards, import others.
     #[must_use]
     pub fn identity(&self) -> identity::Endpoint<'_> {
-        identity::Endpoint::new(&self.http)
+        identity::Endpoint::new(
+            &self.http,
+            self.chat.as_ref().map(|c| &c.identity),
+            self.chat.as_ref().map(|c| &c.signer),
+        )
     }
 
     /// Contacts endpoint: list, add, remove, set trust.

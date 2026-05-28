@@ -127,12 +127,11 @@ async fn main() -> Result<()> {
 
     match cli.mode {
         Mode::Card => {
-            let card = client
+            let uri = client
                 .identity()
-                .card(&cli.display_name)
+                .extended_share_uri(&cli.display_name)
                 .await
-                .context("generate card")?;
-            let uri = card.to_share_uri().context("encode share uri")?;
+                .context("generate extended share uri")?;
             println!("{uri}");
             Ok(())
         }

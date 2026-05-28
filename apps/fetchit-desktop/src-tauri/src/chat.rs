@@ -124,7 +124,11 @@ pub async fn chat_card(
         .card(&display_name)
         .await
         .map_err(|e| e.to_string())?;
-    let uri = card.to_share_uri().map_err(|e| e.to_string())?;
+    let uri = client
+        .identity()
+        .extended_share_uri(&display_name)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(CardWithUri { card, uri })
 }
 
