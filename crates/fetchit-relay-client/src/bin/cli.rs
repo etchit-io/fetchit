@@ -75,12 +75,24 @@ async fn main() -> Result<()> {
 }
 
 fn keygen(out: &PathBuf) -> Result<()> {
+    use std::io::Write;
     let signer = MlDsaSigner::generate().map_err(anyhow::Error::msg)?;
     let key_file = KeyFile {
         public_key_hex: hex::encode(signer.public_key()),
         secret_key_hex: hex::encode(signer.secret_key_bytes()),
     };
-    std::fs::write(out, serde_json::to_vec_pretty(&key_file)?)
+    let bytes = serde_json::to_vec_pretty(&key_file)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(out)
+        .with_context(|| format!("open {}", out.display()))?;
+    f.write_all(&bytes)
         .with_context(|| format!("write {}", out.display()))?;
     let agent_id_hex = hex::encode(signer.agent_id());
     println!("wrote {}", out.display());

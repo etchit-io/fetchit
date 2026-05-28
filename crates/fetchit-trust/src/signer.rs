@@ -56,9 +56,10 @@ impl IssuerSigner {
             })
         } else {
             std::fs::create_dir_all(dir)?;
+            set_dir_perms_0700(dir)?;
             let signer = Self::generate(key_id)?;
             std::fs::write(&pk_path, signer.public_key.to_bytes())?;
-            std::fs::write(&sk_path, signer.secret_key.to_bytes())?;
+            write_secret(&sk_path, &signer.secret_key.to_bytes())?;
             Ok(signer)
         }
     }
@@ -79,6 +80,38 @@ impl IssuerSigner {
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.public_key.to_bytes()
     }
+}
+
+/// Write the secret-key bytes to `path` with owner-only (0600) mode
+/// where the filesystem supports it. Truncates any pre-existing file.
+fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), TrustError> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    Ok(())
+}
+
+/// Tighten directory permissions to owner-only (0700) on Unix.
+fn set_dir_perms_0700(path: &Path) -> Result<(), TrustError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(path, perms)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
