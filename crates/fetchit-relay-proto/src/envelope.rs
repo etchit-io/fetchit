@@ -25,7 +25,9 @@ pub enum EnvelopeKind {
 /// (sender id, timestamp, signature) are inspected.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitEnvelope {
-    /// Envelope-format version. Bump on breaking ciphertext-layout changes.
+    /// Envelope-format version. Bumped to 2 when `epoch` was added for
+    /// PQ-sealed chat. v1 envelopes did not carry an epoch; the field is
+    /// required in v2.
     pub version: u16,
     /// Which conversation surface this envelope belongs to.
     pub kind: EnvelopeKind,
@@ -40,6 +42,12 @@ pub struct TransitEnvelope {
     pub sender_machine_id: MachineId,
     /// Sender-asserted timestamp, milliseconds since the Unix epoch.
     pub timestamp_ms: u64,
+    /// Conversation epoch under which `ciphertext` was sealed. Recipient
+    /// uses this to pick the right symmetric key (`current_key` when
+    /// `epoch == conversation.current_epoch`, else a `prior_keys` entry
+    /// inside the 60s window). Welcome envelopes set this to the epoch
+    /// the carried key belongs to.
+    pub epoch: u32,
     /// ChaCha20-Poly1305 ciphertext sealed under the recipient's key.
     pub ciphertext: Vec<u8>,
     /// 12-byte nonce for the AEAD seal.
@@ -70,13 +78,14 @@ mod tests {
 
     fn sample_envelope() -> TransitEnvelope {
         TransitEnvelope {
-            version: 1,
+            version: 2,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,
             sender_agent_id: AgentId::from_bytes([1u8; AGENT_ID_LEN]),
             sender_machine_id: MachineId::from_bytes([2u8; MACHINE_ID_LEN]),
             timestamp_ms: 1_700_000_000_000,
+            epoch: 0,
             ciphertext: vec![0xaa; 64],
             nonce: vec![0xbb; 12],
             kem_ciphertext: vec![0xcc; 1088],

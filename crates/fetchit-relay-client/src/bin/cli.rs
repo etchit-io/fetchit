@@ -162,13 +162,14 @@ async fn send_loop(client: &Client, me: AgentId, peer_id: AgentId) -> Result<()>
             continue;
         }
         let env = TransitEnvelope {
-            version: 1,
+            version: 2,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,
             sender_agent_id: me,
             sender_machine_id: MachineId::from_bytes([0u8; 32]),
             timestamp_ms: now_ms(),
+            epoch: 0,
             ciphertext: line.into_bytes(),
             nonce: vec![],
             kem_ciphertext: vec![],

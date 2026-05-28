@@ -35,7 +35,7 @@ pub use identity::{
 pub use region::Region;
 
 /// Protocol version negotiated in the `Hello` / `Ready` exchange.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Encode a value as a postcard byte vector.
 ///

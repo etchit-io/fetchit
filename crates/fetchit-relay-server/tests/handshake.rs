@@ -75,13 +75,14 @@ async fn connect_ws(
 
 fn envelope_from(sender: AgentId, body: &[u8]) -> TransitEnvelope {
     TransitEnvelope {
-        version: 1,
+        version: 2,
         kind: EnvelopeKind::Dm,
         group_id: None,
         tenant_id: None,
         sender_agent_id: sender,
         sender_machine_id: MachineId::from_bytes([0u8; 32]),
         timestamp_ms: 1,
+        epoch: 0,
         ciphertext: body.to_vec(),
         nonce: vec![0u8; 12],
         kem_ciphertext: vec![0u8; 32],

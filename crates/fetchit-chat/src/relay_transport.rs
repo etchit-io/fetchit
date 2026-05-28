@@ -114,13 +114,14 @@ impl Transport for RelayTransport {
             }
         };
         let transit = TransitEnvelope {
-            version: 1,
+            version: 2,
             kind,
             group_id,
             tenant_id: None,
             sender_agent_id: self.local_agent_id,
             sender_machine_id: machine_id,
             timestamp_ms: envelope.timestamp_ms,
+            epoch: 0,
             ciphertext: envelope.payload,
             nonce: Vec::new(),
             kem_ciphertext: Vec::new(),

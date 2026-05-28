@@ -98,13 +98,14 @@ mod tests {
 
     fn env_for(sender: u8) -> TransitEnvelope {
         TransitEnvelope {
-            version: 1,
+            version: 2,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,
             sender_agent_id: AgentId::from_bytes([sender; 32]),
             sender_machine_id: MachineId::from_bytes([0u8; 32]),
             timestamp_ms: 1,
+            epoch: 0,
             ciphertext: vec![],
             nonce: vec![],
             kem_ciphertext: vec![],

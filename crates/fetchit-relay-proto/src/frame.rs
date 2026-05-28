@@ -168,13 +168,14 @@ mod tests {
 
     fn sample_envelope() -> TransitEnvelope {
         TransitEnvelope {
-            version: 1,
+            version: 2,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,
             sender_agent_id: AgentId::from_bytes([1u8; AGENT_ID_LEN]),
             sender_machine_id: crate::identity::MachineId::from_bytes([2u8; MACHINE_ID_LEN]),
             timestamp_ms: 1_700_000_000_000,
+            epoch: 0,
             ciphertext: vec![0xaa; 32],
             nonce: vec![0xbb; 12],
             kem_ciphertext: vec![0xcc; 32],

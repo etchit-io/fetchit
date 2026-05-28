@@ -29,8 +29,12 @@ use url::Url;
 #[derive(Parser, Debug)]
 #[command(name = "fetchit-chat-peer", version, about)]
 struct Cli {
-    /// x0xd HTTP base URL (e.g. http://127.0.0.1:12700).
-    #[arg(long, env = "FETCHIT_X0XD_BASE", default_value = "http://127.0.0.1:12700")]
+    /// x0xd HTTP base URL (e.g. `http://127.0.0.1:12700`).
+    #[arg(
+        long,
+        env = "FETCHIT_X0XD_BASE",
+        default_value = "http://127.0.0.1:12700"
+    )]
     x0xd_base: String,
 
     /// x0xd API token (read from this path if not supplied directly).
@@ -41,8 +45,12 @@ struct Cli {
     #[arg(long, default_value = "/root/.local/share/x0x/api-token")]
     x0xd_token_path: String,
 
-    /// Relay base URL (e.g. http://67.207.94.66:8088).
-    #[arg(long, env = "FETCHIT_RELAY_URL", default_value = "http://67.207.94.66:8088")]
+    /// Relay base URL (e.g. `http://67.207.94.66:8088`).
+    #[arg(
+        long,
+        env = "FETCHIT_RELAY_URL",
+        default_value = "http://67.207.94.66:8088"
+    )]
     relay: Url,
 
     /// Display name presented on outbound messages.
@@ -125,10 +133,7 @@ async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
         };
         eprintln!("[peer] in: from={} body={:?}", short(&dm.from.0), dm.body);
         let reply = format!("[echo] {}", dm.body);
-        let sender = client
-            .messages()
-            .send(&dm.from, &reply, display_name)
-            .await;
+        let sender = client.messages().send(&dm.from, &reply, display_name).await;
         match sender {
             Ok(id) => eprintln!("[peer] out: {reply:?} (message_id={id:?})"),
             Err(e) => eprintln!("[peer] echo send error: {e}"),
@@ -165,8 +170,11 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         }
     }
     drop(reader_handle);
-    let _ = tokio::time::timeout(Duration::from_millis(50), futures_util::future::pending::<()>())
-        .await;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(50),
+        futures_util::future::pending::<()>(),
+    )
+    .await;
     Ok(())
 }
 

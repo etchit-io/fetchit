@@ -12,13 +12,14 @@ use std::collections::BTreeSet;
 
 fn envelope() -> TransitEnvelope {
     TransitEnvelope {
-        version: 1,
+        version: 2,
         kind: EnvelopeKind::GroupChat,
         group_id: Some(GroupId::from_bytes([0x33; 32])),
         tenant_id: Some(TenantId::new("acme")),
         sender_agent_id: AgentId::from_bytes([0x11; 32]),
         sender_machine_id: MachineId::from_bytes([0x22; 32]),
         timestamp_ms: 1_700_000_000_000,
+        epoch: 0,
         ciphertext: vec![0xab; 256],
         nonce: vec![0xcd; 12],
         kem_ciphertext: vec![0xef; 1088],
