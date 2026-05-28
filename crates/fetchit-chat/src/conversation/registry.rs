@@ -107,6 +107,13 @@ impl ConversationRegistry {
         g.values().cloned().collect()
     }
 
+    /// Resolve the path to the stored contact card for `sender_agent_hex`.
+    /// Internal helper for inbound-dispatch signature verification.
+    #[must_use]
+    pub(crate) fn contact_path(&self, sender_agent_hex: &str) -> std::path::PathBuf {
+        self.layout.contact_path(sender_agent_hex)
+    }
+
     /// Persist a conversation to disk and update the in-memory cache.
     ///
     /// # Errors

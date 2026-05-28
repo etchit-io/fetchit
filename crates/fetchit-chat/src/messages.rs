@@ -78,6 +78,12 @@ pub struct StoredContactCard {
     pub display_name: String,
     /// ML-KEM-768 public key (base64).
     pub kem_public_key_b64: String,
+    /// Sender's ML-DSA-65 public key (base64). `None` when the import
+    /// source didn't carry one — older or trust-on-first-use cards.
+    /// Populated by [`Self::from_share_uri`] whenever the share-card
+    /// JSON includes `public_key_b64` or `agent_public_key_b64`.
+    #[serde(default)]
+    pub agent_public_key_b64: Option<String>,
 }
 
 impl StoredContactCard {
@@ -105,11 +111,14 @@ impl StoredContactCard {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let kem_public_key_b64 = if let Some(agent_pk_b64) = obj
+
+        let agent_pk_b64_opt = obj
             .get("public_key_b64")
             .or_else(|| obj.get("agent_public_key_b64"))
             .and_then(serde_json::Value::as_str)
-        {
+            .map(str::to_owned);
+
+        let kem_public_key_b64 = if let Some(ref agent_pk_b64) = agent_pk_b64_opt {
             let agent_pk = B64
                 .decode(agent_pk_b64)
                 .map_err(|e| ChatError::Invalid(format!("agent pk b64: {e}")))?;
@@ -126,6 +135,7 @@ impl StoredContactCard {
             agent_id_hex,
             display_name,
             kem_public_key_b64,
+            agent_public_key_b64: agent_pk_b64_opt,
         })
     }
 

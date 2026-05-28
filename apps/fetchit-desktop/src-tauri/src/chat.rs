@@ -477,6 +477,15 @@ async fn handle_inbound(
                     }),
                 );
             }
+            Ok(InboundDispatch::Dropped { kind, sender }) => {
+                let _ = app.emit(
+                    "chat:warn",
+                    serde_json::json!({
+                        "kind": kind,
+                        "sender": sender,
+                    }),
+                );
+            }
             Err(e) => {
                 log_pump(&format!("[relay] dispatch error: {e}"));
             }
