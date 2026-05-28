@@ -48,4 +48,13 @@ pub enum ChatError {
     /// A message-transport operation failed.
     #[error("message transport: {0}")]
     MessageTransport(String),
+
+    /// The local chat identity vault is missing or hasn't been
+    /// bootstrapped. Call `Client::ensure_identity` or pass the right
+    /// passphrase.
+    #[error("chat identity not initialised at {path}")]
+    IdentityNotInitialised {
+        /// Where the identity vault was looked up.
+        path: String,
+    },
 }

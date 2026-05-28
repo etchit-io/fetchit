@@ -15,6 +15,7 @@
 
 pub mod at_rest;
 pub mod chat_crypto;
+pub mod chat_identity;
 pub mod contacts;
 pub mod discovery;
 pub mod error;
@@ -29,6 +30,7 @@ pub mod transport;
 mod client;
 mod http;
 
+pub use chat_identity::FetchitIdentity;
 pub use client::{Client, ClientBuilder};
 pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
