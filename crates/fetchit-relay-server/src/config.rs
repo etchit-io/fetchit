@@ -1,0 +1,66 @@
+//! Server configuration loaded from environment / CLI.
+
+use crate::error::ServerError;
+use fetchit_relay_proto::Region;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::str::FromStr;
+use std::time::Duration;
+
+/// Operating parameters for one relay node.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Address the HTTP / WebSocket server binds to.
+    pub bind: SocketAddr,
+    /// Geographic region tag advertised in `Ready` frames.
+    pub region: Region,
+    /// Build identifier advertised in `Ready` frames.
+    pub server_version: String,
+    /// Cap on per-envelope encoded byte length at the default service profile.
+    pub max_envelope_bytes: u32,
+    /// How long undelivered envelopes sit in the transit buffer.
+    pub transit_ttl: Duration,
+    /// Per-recipient transit buffer capacity (envelope count).
+    pub transit_per_recipient: usize,
+    /// Lifetime of an issued auth challenge before it must be redeemed.
+    pub challenge_ttl: Duration,
+    /// Lifetime of a minted bearer token for the WebSocket upgrade.
+    pub bearer_ttl: Duration,
+    /// Trust anchors: issuer key id → ML-DSA-65 public key bytes.
+    pub issuer_keys: HashMap<String, Vec<u8>>,
+}
+
+impl ServerConfig {
+    /// Defaults suitable for one-node dev or single-region production.
+    #[must_use]
+    pub fn defaults(bind: SocketAddr, region: Region) -> Self {
+        Self {
+            bind,
+            region,
+            server_version: format!("fetchit-relay-server/{}", env!("CARGO_PKG_VERSION")),
+            max_envelope_bytes: fetchit_relay_proto::DEFAULT_MAX_ENVELOPE_BYTES,
+            transit_ttl: Duration::from_secs(15 * 60),
+            transit_per_recipient: 256,
+            challenge_ttl: Duration::from_secs(60),
+            bearer_ttl: Duration::from_secs(15 * 60),
+            issuer_keys: HashMap::new(),
+        }
+    }
+
+    /// Load from environment variables, falling back to defaults.
+    ///
+    /// Recognised variables: `FETCHIT_RELAY_BIND` (default `127.0.0.1:8088`),
+    /// `FETCHIT_RELAY_REGION` (default `nyc`).
+    ///
+    /// # Errors
+    /// Returns `ServerError::Config` if any variable is malformed.
+    pub fn from_env() -> Result<Self, ServerError> {
+        let bind_raw =
+            std::env::var("FETCHIT_RELAY_BIND").unwrap_or_else(|_| "127.0.0.1:8088".to_owned());
+        let bind = SocketAddr::from_str(&bind_raw)
+            .map_err(|e| ServerError::Config(format!("bad bind address: {e}")))?;
+        let region_raw = std::env::var("FETCHIT_RELAY_REGION").unwrap_or_else(|_| "nyc".to_owned());
+        let region = Region::from_str(&region_raw).unwrap_or(Region::Nyc);
+        Ok(Self::defaults(bind, region))
+    }
+}

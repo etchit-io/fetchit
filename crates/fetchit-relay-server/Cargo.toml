@@ -1,0 +1,45 @@
+[package]
+name = "fetchit-relay-server"
+description = "Transient pass-through relay for the fetchit / LIT Chat protocol. RAM-only routing buffer; no disk persistence of user data."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fetchit-relay-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+dashmap.workspace = true
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+futures-util.workspace = true
+hex.workspace = true
+postcard.workspace = true
+rand.workspace = true
+saorsa-pqc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util", "signal", "net", "io-util"] }
+tokio-tungstenite = { workspace = true }

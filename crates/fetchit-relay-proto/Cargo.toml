@@ -1,0 +1,24 @@
+[package]
+name = "fetchit-relay-proto"
+description = "Wire types for the fetchit relay protocol: WebSocket frame schema, opaque transit envelope, auth challenge/verify, capability token."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+hex.workspace = true
+postcard.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+postcard.workspace = true
