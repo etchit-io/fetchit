@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat_crypto;
 pub mod contacts;
 pub mod discovery;
 pub mod error;
