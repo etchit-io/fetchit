@@ -679,6 +679,8 @@ pub fn run() {
             chat::chat_group_leave,
             chat::chat_set_passphrase,
             chat::chat_confirm_contact,
+            chat::chat_watch_presence,
+            chat::chat_unwatch_presence,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

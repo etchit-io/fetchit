@@ -14,6 +14,7 @@ use fetchit_chat::groups::{GroupId, GroupInvite};
 use fetchit_chat::identity::{AgentCard, AgentId};
 use fetchit_chat::messages::{DirectMessage, StoredContactCard};
 use fetchit_chat::{Client, Event};
+use fetchit_relay_proto::AgentId as RelayAgentId;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -372,6 +373,47 @@ pub async fn chat_set_passphrase(
 /// # Errors
 /// Returns a stringified error if the client is in REST-only mode,
 /// the conversation isn't on disk, or the vault save fails.
+/// Subscribe to relay-level presence transitions for `agent_ids` (hex).
+///
+/// The relay immediately echoes the current online state for each
+/// requested agent, and pushes a `chat:presence` event on every
+/// subsequent transition. The watch set is owned by the relay client
+/// and rehydrated automatically on reconnect.
+#[tauri::command]
+pub async fn chat_watch_presence(
+    state: tauri::State<'_, ChatState>,
+    agent_ids: Vec<String>,
+) -> Result<(), String> {
+    let parsed = parse_relay_agent_ids(&agent_ids)?;
+    let client = state.get().await?;
+    client
+        .watch_relay_presence(&parsed)
+        .map_err(|e| e.to_string())
+}
+
+/// Drop the relay-level presence subscription for `agent_ids` (hex).
+#[tauri::command]
+pub async fn chat_unwatch_presence(
+    state: tauri::State<'_, ChatState>,
+    agent_ids: Vec<String>,
+) -> Result<(), String> {
+    let parsed = parse_relay_agent_ids(&agent_ids)?;
+    let client = state.get().await?;
+    client
+        .unwatch_relay_presence(&parsed)
+        .map_err(|e| e.to_string())
+}
+
+fn parse_relay_agent_ids(hex_ids: &[String]) -> Result<Vec<RelayAgentId>, String> {
+    let mut out = Vec::with_capacity(hex_ids.len());
+    for id in hex_ids {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(id, &mut bytes).map_err(|e| format!("agent_id hex {id}: {e}"))?;
+        out.push(RelayAgentId::from_bytes(bytes));
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub async fn chat_confirm_contact(
     state: tauri::State<'_, ChatState>,
@@ -398,8 +440,35 @@ pub async fn chat_confirm_contact(
 ///   responsible for (gossip, contacts, groups).
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_inbound(app.clone(), state.clone());
+    spawn_relay_presence(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
+}
+
+fn spawn_relay_presence(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            log_pump("[relay-presence] drain start");
+            while let Some(update) = client.next_relay_presence().await {
+                let _ = app.emit(
+                    "chat:presence",
+                    serde_json::json!({
+                        "source": "relay",
+                        "agent_id": hex::encode(update.agent_id.as_bytes()),
+                        "online": update.online,
+                    }),
+                );
+            }
+            log_pump("[relay-presence] drain ended; will reattach on rebuild");
+            state.invalidate().await;
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
 }
 
 fn spawn_relay_inbound(app: AppHandle, state: ChatState) {
@@ -425,7 +494,7 @@ fn spawn_relay_inbound(app: AppHandle, state: ChatState) {
             };
             log_pump("[relay] inbound open");
             while let Some(env) = rx.recv().await {
-                handle_inbound(&app, identity.as_ref(), registry.as_ref(), env).await;
+                handle_inbound(&app, &client, identity.as_ref(), registry.as_ref(), env).await;
             }
             log_pump("[relay] inbound closed; reconnecting");
             state.invalidate().await;
@@ -434,8 +503,10 @@ fn spawn_relay_inbound(app: AppHandle, state: ChatState) {
     });
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_inbound(
     app: &AppHandle,
+    client: &Client,
     identity: &fetchit_chat::FetchitIdentity,
     registry: &fetchit_chat::conversation::ConversationRegistry,
     mut env: fetchit_chat::transport::InboundEnvelope,
@@ -459,26 +530,55 @@ async fn handle_inbound(
                 // Stale or duplicate welcome — no UI signal.
             }
             Ok(InboundDispatch::Message {
-                group_id_hex: _,
+                group_id_hex,
                 sender_agent_id_hex,
                 payload,
             }) => {
                 let dm = DirectMessage {
-                    from: AgentId(sender_agent_id_hex),
+                    from: AgentId(sender_agent_id_hex.clone()),
                     to: None,
                     body: payload.body.clone(),
                     sender_name: payload.sender_name.clone(),
                     timestamp_ms: Some(payload.ts_ms),
-                    // The v2 conversation layer doesn't carry a per-message
-                    // transport id at this seam; the relay's `dedupe_key`
-                    // isn't propagated end-to-end yet, and the conversation
-                    // payload itself doesn't include one. Leave `None`
-                    // until that wiring lands.
-                    message_id: None,
+                    message_id: payload.message_id.clone(),
                     verified: Some(true),
                 };
                 let _ = app.emit("chat:dm", &dm);
                 let _ = app.emit("chat:event", &Event::DirectMessage(dm));
+
+                if let Some(message_id) = payload.message_id.as_deref() {
+                    let received_at_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    if let Err(e) = client
+                        .messages()
+                        .send_receipt(
+                            &group_id_hex,
+                            message_id,
+                            &sender_agent_id_hex,
+                            received_at_ms,
+                        )
+                        .await
+                    {
+                        log_pump(&format!("[relay] receipt send: {e}"));
+                    }
+                }
+            }
+            Ok(InboundDispatch::Receipt {
+                group_id_hex,
+                sender_agent_id_hex,
+                message_id,
+                received_at_ms,
+            }) => {
+                let _ = app.emit(
+                    "chat:receipt",
+                    serde_json::json!({
+                        "group_id": group_id_hex,
+                        "sender": sender_agent_id_hex,
+                        "message_id": message_id,
+                        "received_at_ms": received_at_ms,
+                    }),
+                );
             }
             Ok(InboundDispatch::StaleEpoch {
                 group_id_hex,
@@ -610,8 +710,12 @@ fn emit(app: &AppHandle, ev: &Event) {
         Event::DirectMessage(dm) => {
             let _ = app.emit("chat:dm", dm);
         }
+        // x0xd's presence stream is a noisy local-activity signal —
+        // route it on its own event name so the UI can choose to
+        // ignore it. `chat:presence` is reserved for the authoritative
+        // relay-level signal from `spawn_relay_presence`.
         Event::Presence(t) => {
-            let _ = app.emit("chat:presence", t);
+            let _ = app.emit("chat:presence:x0x", t);
         }
         _ => {}
     }

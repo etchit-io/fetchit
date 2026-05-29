@@ -127,6 +127,11 @@ pub struct Client {
     http: Arc<Http>,
     router: Arc<Router>,
     chat: Option<ChatState>,
+    /// Direct handle to the relay transport when it's wired. The
+    /// `Router` already routes outbound through it; this slot lets the
+    /// shell drive relay-level capabilities (presence watch set) that
+    /// don't fit the `Transport` trait shape.
+    relay: Option<Arc<RelayTransport>>,
 }
 
 impl Client {
@@ -158,10 +163,10 @@ impl Client {
         let http = Arc::new(Http::new(base_url.clone(), token.clone())?);
         let needs_chat = relay_url.is_some() || data_dir.is_some() || passphrase.is_some();
 
-        let (router, chat) = if needs_chat {
+        let (router, chat, relay) = if needs_chat {
             build_with_chat(&http, &base_url, token, relay_url, data_dir, passphrase).await?
         } else {
-            (Router::new(), None)
+            (Router::new(), None, None)
         };
 
         let router = Arc::new(router);
@@ -169,7 +174,12 @@ impl Client {
             spawn_auto_rekey_sweeper(&router, chat);
         }
 
-        Ok(Self { http, router, chat })
+        Ok(Self {
+            http,
+            router,
+            chat,
+            relay,
+        })
     }
 
     /// Identity endpoint: read your agent, generate cards, import others.
@@ -290,6 +300,47 @@ impl Client {
         let _: serde_json::Value = self.http.get_json("/health").await?;
         Ok(())
     }
+
+    /// Subscribe to relay-level presence transitions for the listed
+    /// agents.
+    ///
+    /// Returns `Ok(())` when no relay transport is wired — callers
+    /// don't need to gate on relay availability.
+    ///
+    /// # Errors
+    /// Returns [`ChatError::MessageTransport`] when the supervisor
+    /// has shut down.
+    pub fn watch_relay_presence(&self, agents: &[fetchit_relay_proto::AgentId]) -> Result<()> {
+        let Some(relay) = self.relay.as_ref() else {
+            return Ok(());
+        };
+        relay
+            .relay_client()
+            .watch_presence(agents)
+            .map_err(|e| ChatError::MessageTransport(format!("watch_presence: {e}")))
+    }
+
+    /// Unsubscribe from relay-level presence for the listed agents.
+    ///
+    /// # Errors
+    /// Returns [`ChatError::MessageTransport`] when the supervisor
+    /// has shut down.
+    pub fn unwatch_relay_presence(&self, agents: &[fetchit_relay_proto::AgentId]) -> Result<()> {
+        let Some(relay) = self.relay.as_ref() else {
+            return Ok(());
+        };
+        relay
+            .relay_client()
+            .unwatch_presence(agents)
+            .map_err(|e| ChatError::MessageTransport(format!("unwatch_presence: {e}")))
+    }
+
+    /// Await the next relay-emitted `PresenceUpdate`. Returns `None`
+    /// if no relay transport is wired or the supervisor has shut down.
+    pub async fn next_relay_presence(&self) -> Option<fetchit_relay_proto::PresenceUpdate> {
+        let relay = self.relay.as_ref()?;
+        relay.relay_client().next_presence().await
+    }
 }
 
 impl std::fmt::Debug for Client {
@@ -303,6 +354,10 @@ impl std::fmt::Debug for Client {
     }
 }
 
+/// Borrow the live relay transport when one is wired. Returns
+/// `None` for REST-only clients. The chat layer uses this to drive
+/// relay-level capabilities (e.g. the presence watch set) that don't
+/// fit cleanly behind the `Transport` trait.
 async fn build_with_chat(
     http: &Http,
     base_url: &str,
@@ -310,7 +365,7 @@ async fn build_with_chat(
     relay_url: Option<Url>,
     data_dir: Option<PathBuf>,
     passphrase: Option<String>,
-) -> Result<(Router, Option<ChatState>)> {
+) -> Result<(Router, Option<ChatState>, Option<Arc<RelayTransport>>)> {
     // Resolve the local agent identity from x0xd. The chat identity
     // vault is bound to this agent_id — rotating the x0xd identity
     // forces a fresh KEM keypair.
@@ -359,8 +414,10 @@ async fn build_with_chat(
     let signer: Arc<dyn Signer> = x0xd_signer.clone();
 
     let mut router = Router::new();
+    let mut relay_handle: Option<Arc<RelayTransport>> = None;
     if let Some(url) = relay_url {
         let relay = RelayTransport::connect(url, x0xd_signer.clone()).await?;
+        relay_handle = Some(relay.clone());
         router.add(relay);
     }
 
@@ -373,6 +430,7 @@ async fn build_with_chat(
             layout,
             local_machine_id,
         }),
+        relay_handle,
     ))
 }
 
