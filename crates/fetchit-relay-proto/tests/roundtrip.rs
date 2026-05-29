@@ -5,8 +5,9 @@
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
     ByeReason, Capability, CapabilityClaims, CapabilityToken, ClientFrame, DedupeKey, Deliver,
-    EffectiveCapabilities, EnvelopeKind, FeatureFlag, GroupId, Hello, MachineId, Ping, Pong, Ready,
-    Region, SendFrame, ServerFrame, Subscribe, TenantId, Throttle, ThrottleReason, TransitEnvelope,
+    EffectiveCapabilities, EnvelopeKind, FeatureFlag, GroupId, Hello, MachineId, Ping, Pong,
+    PresenceUpdate, Ready, Region, SendFrame, ServerFrame, Subscribe, TenantId, Throttle,
+    ThrottleReason, TransitEnvelope, WatchPresence,
 };
 use std::collections::BTreeSet;
 
@@ -58,6 +59,10 @@ fn client_frame_variants_all_roundtrip() {
             envelope: envelope(),
             dedupe_key: DedupeKey::from_bytes([0x66; 16]),
         }),
+        ClientFrame::WatchPresence(WatchPresence {
+            add: vec![AgentId::from_bytes([0x88; 32])],
+            remove: vec![AgentId::from_bytes([0x99; 32])],
+        }),
         ClientFrame::Ping(Ping { nonce: 0x1234 }),
         ClientFrame::Bye(Bye {
             reason: ByeReason::ClientGoodbye,
@@ -91,6 +96,10 @@ fn server_frame_variants_all_roundtrip() {
         ServerFrame::Throttle(Throttle {
             retry_after_ms: 500,
             reason: ThrottleReason::PerRecipientCapacity,
+        }),
+        ServerFrame::PresenceUpdate(PresenceUpdate {
+            agent_id: AgentId::from_bytes([0xaa; 32]),
+            online: true,
         }),
         ServerFrame::Pong(Pong { nonce: 0x1234 }),
         ServerFrame::Bye(Bye {

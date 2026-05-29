@@ -19,6 +19,14 @@ pub enum ClientFrame {
     Subscribe(Subscribe),
     /// Submit one envelope for routing.
     Send(SendFrame),
+    /// Update the per-connection presence watch set.
+    ///
+    /// The client may add agents to watch and remove agents it no longer
+    /// cares about in the same frame. The relay tracks the watch set per
+    /// connection; on register/unregister of a watched agent it pushes a
+    /// [`PresenceUpdate`]. The watch set is cleared on disconnect — the
+    /// supervisor re-sends it after reconnect.
+    WatchPresence(WatchPresence),
     /// Keepalive request.
     Ping(Ping),
     /// Client-initiated graceful close.
@@ -36,6 +44,13 @@ pub enum ServerFrame {
     Deliver(Deliver),
     /// Soft rejection with a retry hint.
     Throttle(Throttle),
+    /// Liveness signal for a watched agent.
+    ///
+    /// Emitted when a watched agent registers (online) or unregisters
+    /// (offline) on the relay. The client uses this to drive UI presence
+    /// indicators; it is *not* an end-to-end signal — only that the relay
+    /// currently has a session for that agent.
+    PresenceUpdate(PresenceUpdate),
     /// Keepalive response.
     Pong(Pong),
     /// Server-initiated close (e.g. shutdown, token expiry).
@@ -71,6 +86,28 @@ pub struct Ready {
 pub struct Subscribe {
     /// Subscription topic name; "inbox" is the only v1 topic.
     pub topic: String,
+}
+
+/// Update the client's per-connection presence watch set.
+///
+/// `add` adds the listed agents to the watch set; `remove` drops them.
+/// Either list may be empty. Sending both empty is a no-op.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchPresence {
+    /// Agents to start watching.
+    pub add: Vec<AgentId>,
+    /// Agents to stop watching.
+    pub remove: Vec<AgentId>,
+}
+
+/// Liveness update for a watched agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceUpdate {
+    /// The agent whose state changed.
+    pub agent_id: AgentId,
+    /// `true` if the relay currently has a session for that agent,
+    /// `false` if it just dropped.
+    pub online: bool,
 }
 
 /// Client submits one envelope for routing.
@@ -266,6 +303,33 @@ mod tests {
         let bytes = postcard::to_allocvec(&pong).unwrap();
         let decoded: ServerFrame = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(pong, decoded);
+    }
+
+    #[test]
+    fn watch_presence_roundtrips() {
+        let frame = ClientFrame::WatchPresence(WatchPresence {
+            add: vec![
+                AgentId::from_bytes([1u8; AGENT_ID_LEN]),
+                AgentId::from_bytes([2u8; AGENT_ID_LEN]),
+            ],
+            remove: vec![AgentId::from_bytes([3u8; AGENT_ID_LEN])],
+        });
+        let bytes = postcard::to_allocvec(&frame).unwrap();
+        let decoded: ClientFrame = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn presence_update_roundtrips() {
+        for online in [true, false] {
+            let frame = ServerFrame::PresenceUpdate(PresenceUpdate {
+                agent_id: AgentId::from_bytes([7u8; AGENT_ID_LEN]),
+                online,
+            });
+            let bytes = postcard::to_allocvec(&frame).unwrap();
+            let decoded: ServerFrame = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(frame, decoded);
+        }
     }
 
     #[test]

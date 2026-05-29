@@ -17,6 +17,16 @@ pub enum EnvelopeKind {
     GroupChat,
     /// Administrative event for a tenant's audit stream.
     AdminEvent,
+    /// End-to-end delivery receipt for a previously-delivered message.
+    ///
+    /// The ciphertext carries a JSON-encoded
+    /// `DeliveryReceiptPayload { message_id, received_at_ms }` sealed under
+    /// the conversation's symmetric key. The receipt envelope reuses
+    /// `group_id` and `epoch` so the recipient (i.e. the *sender* of the
+    /// original message) can look up the right key, and the relay can
+    /// route it like any other payload — receipts are not special-cased
+    /// in the routing path.
+    DeliveryReceipt,
 }
 
 /// One ciphertext-carrying message routed by the relay.
@@ -111,5 +121,16 @@ mod tests {
         let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.kind, EnvelopeKind::AdminEvent);
         assert_eq!(decoded.tenant_id, Some(TenantId::new("acme")));
+    }
+
+    #[test]
+    fn delivery_receipt_kind_roundtrips() {
+        let mut env = sample_envelope();
+        env.kind = EnvelopeKind::DeliveryReceipt;
+        env.kem_ciphertext = Vec::new();
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.kind, EnvelopeKind::DeliveryReceipt);
+        assert!(decoded.kem_ciphertext.is_empty());
     }
 }
