@@ -360,7 +360,7 @@ async fn build_with_chat(
 
     let mut router = Router::new();
     if let Some(url) = relay_url {
-        let relay = RelayTransport::connect(url, &x0xd_signer).await?;
+        let relay = RelayTransport::connect(url, x0xd_signer.clone()).await?;
         router.add(relay);
     }
 

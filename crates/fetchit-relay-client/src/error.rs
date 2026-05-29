@@ -37,6 +37,12 @@ pub enum ClientError {
     #[error("inbox channel closed")]
     InboxClosed,
 
+    /// A `send` was attempted while the supervisor had no live WS.
+    /// Callers may wait for `Client::connection_state` to report
+    /// `Connected` before retrying.
+    #[error("client is disconnected: {0}")]
+    Disconnected(String),
+
     /// A non-binary message was received where binary was expected.
     #[error("unexpected non-binary message")]
     UnexpectedMessage,

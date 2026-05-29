@@ -27,6 +27,7 @@ fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 futures-util.workspace = true
 hex.workspace = true
 postcard.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 saorsa-pqc.workspace = true
 serde.workspace = true

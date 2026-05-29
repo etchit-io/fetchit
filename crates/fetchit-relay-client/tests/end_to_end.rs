@@ -49,15 +49,19 @@ async fn client_round_trip_send_and_receive() {
     let addr = start_server().await;
     let base = Url::parse(&format!("http://{addr}/")).unwrap();
 
-    let alice_signer = StaticKeySigner::from_public_key(b"alice-public-key".to_vec());
-    let bob_signer = StaticKeySigner::from_public_key(b"bob-public-key-here".to_vec());
+    let alice_signer = Arc::new(StaticKeySigner::from_public_key(
+        b"alice-public-key".to_vec(),
+    ));
+    let bob_signer = Arc::new(StaticKeySigner::from_public_key(
+        b"bob-public-key-here".to_vec(),
+    ));
     let alice_id = AgentId::from_bytes(alice_signer.agent_id());
     let bob_id = AgentId::from_bytes(bob_signer.agent_id());
 
-    let alice = Client::connect(ClientConfig::new(base.clone()), &alice_signer)
+    let alice = Client::connect(ClientConfig::new(base.clone()), alice_signer)
         .await
         .unwrap();
-    let bob = Client::connect(ClientConfig::new(base), &bob_signer)
+    let bob = Client::connect(ClientConfig::new(base), bob_signer)
         .await
         .unwrap();
 
@@ -95,17 +99,15 @@ async fn real_pq_signatures_authenticate_against_the_real_verifier() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let base = Url::parse(&format!("http://{addr}/")).unwrap();
-    let alice = MlDsaSigner::generate().unwrap();
-    let bob = MlDsaSigner::generate().unwrap();
+    let alice = Arc::new(MlDsaSigner::generate().unwrap());
+    let bob = Arc::new(MlDsaSigner::generate().unwrap());
     let alice_id = AgentId::from_bytes(alice.agent_id());
     let bob_id = AgentId::from_bytes(bob.agent_id());
 
-    let alice_client = Client::connect(ClientConfig::new(base.clone()), &alice)
+    let alice_client = Client::connect(ClientConfig::new(base.clone()), alice)
         .await
         .unwrap();
-    let bob_client = Client::connect(ClientConfig::new(base), &bob)
-        .await
-        .unwrap();
+    let bob_client = Client::connect(ClientConfig::new(base), bob).await.unwrap();
 
     let payload = b"signed across PQ";
     let receipt = alice_client
@@ -242,12 +244,12 @@ async fn x0xd_signer_drives_relay_with_real_pq_signatures() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // X0xdSigner connects to mock x0xd, retrieves agent identity.
-    let signer = X0xdSigner::connect(x0xd_url, "local-token").await.unwrap();
+    let signer = Arc::new(X0xdSigner::connect(x0xd_url, "local-token").await.unwrap());
     let my_id = AgentId::from_bytes(signer.agent_id());
 
     // Open a relay session driven by the x0xd-backed signer.
     let relay_base = Url::parse(&format!("http://{relay_addr}/")).unwrap();
-    let client = Client::connect(ClientConfig::new(relay_base), &signer)
+    let client = Client::connect(ClientConfig::new(relay_base), signer)
         .await
         .unwrap();
 
@@ -294,8 +296,8 @@ async fn x0xd_signer_rejects_wrong_token() {
 async fn client_resolves_default_capabilities_when_no_token() {
     let addr = start_server().await;
     let base = Url::parse(&format!("http://{addr}/")).unwrap();
-    let signer = StaticKeySigner::from_public_key(b"some-key".to_vec());
-    let client = Client::connect(ClientConfig::new(base), &signer)
+    let signer = Arc::new(StaticKeySigner::from_public_key(b"some-key".to_vec()));
+    let client = Client::connect(ClientConfig::new(base), signer)
         .await
         .unwrap();
     assert_eq!(

@@ -49,7 +49,7 @@ impl RelayTransport {
     /// # Errors
     /// Returns [`ChatError::MessageTransport`] on any handshake or
     /// connection failure.
-    pub async fn connect(base_url: Url, signer: &X0xdSigner) -> Result<Arc<Self>> {
+    pub async fn connect(base_url: Url, signer: Arc<X0xdSigner>) -> Result<Arc<Self>> {
         use fetchit_relay_client::Signer;
         let local_agent_id = RelayAgentId::from_bytes(signer.agent_id());
         let config = ClientConfig::new(base_url);

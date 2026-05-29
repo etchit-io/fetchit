@@ -11,7 +11,7 @@ pub mod outbox;
 pub mod region_probe;
 pub mod signer;
 
-pub use client::{Client, ClientConfig};
+pub use client::{Client, ClientConfig, ConnState};
 pub use error::ClientError;
 pub use outbox::Receipt;
 pub use region_probe::{probe, ProbeResult};

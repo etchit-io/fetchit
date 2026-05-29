@@ -107,12 +107,13 @@ fn show_id(key: &PathBuf) -> Result<()> {
 }
 
 async fn connect(relay: Url, key: &PathBuf, peer: Option<String>) -> Result<()> {
-    let signer = load_signer(key)?;
-    let agent_id_hex = hex::encode(signer.agent_id());
+    let signer = std::sync::Arc::new(load_signer(key)?);
+    let me_bytes = signer.agent_id();
+    let agent_id_hex = hex::encode(me_bytes);
     eprintln!("[cli] agent_id: {agent_id_hex}");
     eprintln!("[cli] dialing {relay}");
 
-    let client = Client::connect(ClientConfig::new(relay), &signer)
+    let client = Client::connect(ClientConfig::new(relay), signer.clone())
         .await
         .context("relay connect")?;
     eprintln!(
@@ -121,7 +122,7 @@ async fn connect(relay: Url, key: &PathBuf, peer: Option<String>) -> Result<()> 
         client.effective_capabilities.max_envelope_bytes
     );
 
-    let me = AgentId::from_bytes(signer.agent_id());
+    let me = AgentId::from_bytes(me_bytes);
     let peer_id = peer
         .as_deref()
         .map(parse_agent_id)

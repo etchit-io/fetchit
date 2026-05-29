@@ -1,7 +1,12 @@
 //! Tracks pending sends until the matching `Ack` arrives.
+//!
+//! The same struct doubles as the per-connection store of last-known
+//! `Pong` receipt time so the keepalive task can detect a half-open
+//! socket without sharing a separate state object.
 
 use dashmap::DashMap;
 use fetchit_relay_proto::DedupeKey;
+use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
@@ -21,9 +26,20 @@ pub struct Receipt {
 }
 
 /// Concurrent map of outbound dedupe keys → pending send records.
-#[derive(Default)]
 pub struct Outbox {
     by_dedupe: DashMap<DedupeKey, PendingSend>,
+    last_pong: Mutex<Instant>,
+    last_pong_nonce: Mutex<Option<u64>>,
+}
+
+impl Default for Outbox {
+    fn default() -> Self {
+        Self {
+            by_dedupe: DashMap::new(),
+            last_pong: Mutex::new(Instant::now()),
+            last_pong_nonce: Mutex::new(None),
+        }
+    }
 }
 
 impl Outbox {
@@ -63,6 +79,41 @@ impl Outbox {
     pub fn in_flight(&self) -> usize {
         self.by_dedupe.len()
     }
+
+    /// Refresh the recorded `last_pong` to `Instant::now`. Called when
+    /// the supervisor installs a new connection so the keepalive task
+    /// doesn't immediately judge it dead.
+    pub fn touch_pong(&self) {
+        if let Ok(mut g) = self.last_pong.lock() {
+            *g = Instant::now();
+        }
+    }
+
+    /// Record that a `Pong` was received from the relay.
+    pub fn record_pong(&self, nonce: u64) {
+        if let Ok(mut g) = self.last_pong.lock() {
+            *g = Instant::now();
+        }
+        if let Ok(mut g) = self.last_pong_nonce.lock() {
+            *g = Some(nonce);
+        }
+    }
+
+    /// Instant the most recent `Pong` was received (or the outbox was
+    /// constructed / touched, whichever is later).
+    #[must_use]
+    pub fn last_pong(&self) -> Instant {
+        self.last_pong
+            .lock()
+            .map_or_else(|_| Instant::now(), |g| *g)
+    }
+
+    /// Nonce from the most recently observed `Pong`, useful for tests
+    /// and diagnostics.
+    #[must_use]
+    pub fn last_pong_nonce(&self) -> Option<u64> {
+        self.last_pong_nonce.lock().ok().and_then(|g| *g)
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +136,27 @@ mod tests {
     async fn ack_for_unknown_key_returns_false() {
         let ob = Outbox::new();
         assert!(!ob.ack(&DedupeKey::from_bytes([2u8; 16]), 0));
+    }
+
+    #[tokio::test]
+    async fn record_pong_updates_last_pong_and_nonce() {
+        let ob = Outbox::new();
+        let before = ob.last_pong();
+        // Sleep at least one OS tick so the clock visibly advances.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        ob.record_pong(0xfeed_face_dead_beef);
+        let after = ob.last_pong();
+        assert!(after > before);
+        assert_eq!(ob.last_pong_nonce(), Some(0xfeed_face_dead_beef));
+    }
+
+    #[tokio::test]
+    async fn touch_pong_resets_clock_to_now() {
+        let ob = Outbox::new();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let before = ob.last_pong();
+        ob.touch_pong();
+        let after = ob.last_pong();
+        assert!(after > before);
     }
 }
