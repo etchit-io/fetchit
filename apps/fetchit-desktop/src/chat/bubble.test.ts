@@ -86,7 +86,7 @@ describe("renderBubble — content", () => {
   it("keeps the text bubble visible for an autonomi-only message that's still sending (mine)", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const row = renderBubble(
-      bubble({ body: `autonomi://${ADDR}`, mine: true, status: "pending" }),
+      bubble({ body: `autonomi://${ADDR}`, mine: true, status: "sending" }),
       handlers,
     );
     expect(row.querySelector(".chat-bubble")).not.toBeNull();
@@ -94,13 +94,13 @@ describe("renderBubble — content", () => {
 });
 
 describe("renderBubble — outbound status", () => {
-  it("shows a pending caption while the bubble is in flight", () => {
+  it("shows a Sending… caption while the bubble is in flight", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const row = renderBubble(
-      bubble({ mine: true, status: "pending" }),
+      bubble({ mine: true, status: "sending" }),
       handlers,
     );
-    const cap = row.querySelector(".chat-bubble__substatus--pending");
+    const cap = row.querySelector(".chat-bubble__substatus--sending");
     expect(cap?.textContent).toBe("Sending…");
   });
 
@@ -117,15 +117,28 @@ describe("renderBubble — outbound status", () => {
     expect(cap?.title).toBe("timeout");
   });
 
-  it("never decorates delivered or inbound bubbles", () => {
+  it("decorates sent + delivered bubbles with ticks but no substatus caption", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
-    const deliveredOut = renderBubble(
+    const sent = renderBubble(bubble({ mine: true, status: "sent" }), handlers);
+    expect(sent.querySelector(".chat-bubble__status--sent")?.textContent).toBe(
+      "✓",
+    );
+    expect(sent.querySelector(".chat-bubble__substatus")).toBeNull();
+
+    const delivered = renderBubble(
       bubble({ mine: true, status: "delivered" }),
       handlers,
     );
-    expect(deliveredOut.querySelector(".chat-bubble__substatus")).toBeNull();
+    expect(
+      delivered.querySelector(".chat-bubble__status--delivered")?.textContent,
+    ).toBe("✓✓");
+    expect(delivered.querySelector(".chat-bubble__substatus")).toBeNull();
+  });
+
+  it("never decorates inbound bubbles", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const inbound = renderBubble(
-      bubble({ mine: false, status: "pending" }),
+      bubble({ mine: false, status: "sending" }),
       handlers,
     );
     expect(inbound.querySelector(".chat-bubble__substatus")).toBeNull();

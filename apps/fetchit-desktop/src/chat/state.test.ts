@@ -137,15 +137,29 @@ describe("ChatStore — presence", () => {
     expect(s.isOnline(PEER)).toBe(true);
   });
 
-  it("a successful send refreshes the staleness clock via touchPresence", () => {
+  it("a successful send does NOT flip presence — relay PresenceUpdate is the source of truth", () => {
+    // Regression: the legacy markDelivered path called touchPresence as
+    // a "side-evidence" boost. That painted contacts green during the
+    // 15-minute relay transit-buffer window even when they were offline.
+    // The relay's own PresenceUpdate is now the only signal.
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
     const oldSeconds = Math.floor((Date.now() - 10 * 60_000) / 1000);
     s.loadPresence([{ agent_id: PEER, last_seen: oldSeconds }]);
     expect(s.isOnline(PEER)).toBe(false);
     const id = s.enqueueOutbound(PEER, "hi");
-    s.markDelivered(PEER, id);
+    s.markSent(PEER, id, "msg-id-1");
+    expect(s.isOnline(PEER)).toBe(false);
+  });
+
+  it("setRelayPresence flips the dot to the relay's authoritative signal", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    expect(s.isOnline(PEER)).toBe(false);
+    s.setRelayPresence(PEER, true);
     expect(s.isOnline(PEER)).toBe(true);
+    s.setRelayPresence(PEER, false);
+    expect(s.isOnline(PEER)).toBe(false);
   });
 
   it("a fresh online transition resets the staleness clock", () => {
@@ -183,8 +197,9 @@ describe("ChatStore — presence", () => {
     s.markFailed(PEER, stuck, "first");
     s.markFailed(PEER, stuck, "second");
     s.markFailed(PEER, stuck, "third");
-    const delivered = s.enqueueOutbound(PEER, "ok");
-    s.markDelivered(PEER, delivered);
+    const deliveredId = s.enqueueOutbound(PEER, "ok");
+    s.markSent(PEER, deliveredId, "msg-id-ok");
+    s.markDelivered(PEER, "msg-id-ok");
     expect(s.resetFailedRetryCounters()).toBe(1);
     const failedBubble = s
       .conversationsSorted()[0]

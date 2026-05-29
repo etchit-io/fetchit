@@ -38,14 +38,18 @@ describe("applyChatEvent", () => {
     expect(maybeNotifyMock).toHaveBeenCalledTimes(1);
   });
 
-  it("applies presence transitions", () => {
+  it("ignores x0xd-source presence transitions (they ride chat:presence:x0x now)", () => {
+    // x0xd's gossip-derived presence is intentionally dropped from
+    // `chat:event` since the relay's `PresenceUpdate` is the only
+    // signal painted on the dot. The test guards against accidental
+    // re-introduction of the false-positive flip.
     applyChatEvent(store, {
       kind: "presence",
       agent_id: PEER,
       event: "online",
       reachable: true,
     });
-    expect(store.isOnline(PEER)).toBe(true);
+    expect(store.isOnline(PEER)).toBe(false);
   });
 
   it("upserts contacts on contact_added", () => {

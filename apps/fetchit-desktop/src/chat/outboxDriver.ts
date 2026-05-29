@@ -42,8 +42,8 @@ export function startOutboxDriver(
       void (async () => {
         try {
           await deps.connect(peer).catch(() => {});
-          await deps.sendDm(peer, bubble.body);
-          store.markDelivered(peer, bubble.id);
+          const messageId = await deps.sendDm(peer, bubble.body);
+          store.markSent(peer, bubble.id, messageId);
         } catch (e) {
           store.markFailed(peer, bubble.id, (e as Error).message);
         } finally {

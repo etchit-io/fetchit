@@ -64,6 +64,14 @@ export async function presenceOnline(): Promise<OnlineAgent[]> {
   return invoke<OnlineAgent[]>("chat_presence_online");
 }
 
+export async function watchPresence(agentIds: string[]): Promise<void> {
+  await invoke("chat_watch_presence", { agentIds });
+}
+
+export async function unwatchPresence(agentIds: string[]): Promise<void> {
+  await invoke("chat_unwatch_presence", { agentIds });
+}
+
 export async function listGroups(): Promise<Group[]> {
   return invoke<Group[]>("chat_groups_list");
 }

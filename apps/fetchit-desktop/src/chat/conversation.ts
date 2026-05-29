@@ -84,8 +84,8 @@ export function mountConversation(
             // Same warmup the driver does for retries — turns a 12s
             // cold-link timeout into a sub-second raw_quic send.
             await dmConnect(peer).catch(() => {});
-            await sendDm(peer, body);
-            store.markDelivered(peer, bubbleId);
+            const messageId = await sendDm(peer, body);
+            store.markSent(peer, bubbleId, messageId);
           } catch (e) {
             store.markFailed(peer, bubbleId, (e as Error).message);
           }
@@ -173,11 +173,10 @@ export function mountConversation(
       if (conv.key.kind === "dm") {
         stopGroupPoll();
         const peer = conv.key.peer;
-        void dmConnect(peer)
-          .then(() => store.touchPresence(peer))
-          .catch(() => {
-            // silent — staleness threshold decides
-          });
+        // Best-effort warmup so the first send doesn't pay the cold-link
+        // latency. The relay's PresenceUpdate stream — not this probe —
+        // owns the online dot.
+        void dmConnect(peer).catch(() => {});
       } else {
         // Group: there's no group-message SSE wired through yet, so
         // poll `/groups/<id>/messages` while this conv is active. One

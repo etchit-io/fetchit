@@ -14,6 +14,8 @@ import {
   removeContact,
   sendDm,
   setTrust,
+  unwatchPresence,
+  watchPresence,
 } from "./api";
 import { startOutboxDriver, type OutboxDriver } from "./outboxDriver";
 import { bindChatEvents } from "./events";
@@ -272,6 +274,9 @@ export function mountChatPanel(
         try {
           await removeContact(agentId);
           store.clearDmTranscript(agentId);
+          unwatchPresence([agentId]).catch((e) =>
+            console.warn("[chat] unwatchPresence:", e),
+          );
           await refreshContacts();
         } catch (e) {
           console.warn("[chat] remove contact failed:", e);
@@ -293,11 +298,17 @@ export function mountChatPanel(
 
   const refreshContacts = async (): Promise<void> => {
     try {
-      // Only refresh contacts here. Presence is seeded once at open() and
-      // then driven exclusively by the SSE pump; calling loadPresence on
-      // every contact action would clobber online-events the stream has
-      // already delivered with a snapshot that may not yet reflect them.
-      store.loadContacts(await listContacts());
+      const contacts = await listContacts();
+      store.loadContacts(contacts);
+      const me = store.myId();
+      const ids = contacts
+        .filter((c) => c.agent_id !== me)
+        .map((c) => c.agent_id);
+      if (ids.length > 0) {
+        watchPresence(ids).catch((e) =>
+          console.warn("[chat] watchPresence on refresh:", e),
+        );
+      }
     } catch (e) {
       console.warn("[chat] contacts refresh failed:", e);
     }
@@ -362,6 +373,14 @@ export function mountChatPanel(
       store.loadContacts(contacts);
       store.loadPresence(online);
       store.loadGroups(groups);
+      const watchIds = contacts
+        .filter((c) => c.agent_id !== me.agent_id)
+        .map((c) => c.agent_id);
+      if (watchIds.length > 0) {
+        watchPresence(watchIds).catch((e) =>
+          console.warn("[chat] watchPresence on open:", e),
+        );
+      }
       if (!eventsBound) {
         eventsBound = true;
         await bindChatEvents(store);

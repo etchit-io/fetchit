@@ -30,22 +30,31 @@ async function flushPromises(): Promise<void> {
 }
 
 describe("ChatStore — outbox bookkeeping", () => {
-  it("enqueueOutbound appends a pending bubble with retry counter zero", () => {
+  it("enqueueOutbound appends a sending bubble with retry counter zero", () => {
     const id = store.enqueueOutbound(PEER, "hello");
     const conv = store.conversationsSorted()[0];
     const bubble = conv.messages.find((m) => m.id === id);
-    expect(bubble?.status).toBe("pending");
+    expect(bubble?.status).toBe("sending");
     expect(bubble?.retryAttempts).toBe(0);
     expect(bubble?.mine).toBe(true);
   });
 
-  it("markDelivered flips status and clears any failureReason", () => {
+  it("markSent flips status and binds the daemon-assigned message id", () => {
     const id = store.enqueueOutbound(PEER, "hello");
     store.markFailed(PEER, id, "boom");
-    store.markDelivered(PEER, id);
+    store.markSent(PEER, id, "server-id-1");
+    const b = store.conversationsSorted()[0].messages[0];
+    expect(b.status).toBe("sent");
+    expect(b.messageId).toBe("server-id-1");
+    expect(b.failureReason).toBeUndefined();
+  });
+
+  it("markDelivered locates the bubble by messageId and flips it", () => {
+    const id = store.enqueueOutbound(PEER, "hello");
+    store.markSent(PEER, id, "server-id-2");
+    store.markDelivered(PEER, "server-id-2");
     const b = store.conversationsSorted()[0].messages[0];
     expect(b.status).toBe("delivered");
-    expect(b.failureReason).toBeUndefined();
   });
 
   it("markFailed increments retryAttempts and records the reason", () => {
@@ -58,10 +67,10 @@ describe("ChatStore — outbox bookkeeping", () => {
     expect(b.failureReason).toBe("timeout");
   });
 
-  it("pendingOutbound returns only mine/non-delivered bubbles", () => {
+  it("pendingOutbound returns only mine/sending|failed bubbles", () => {
     store.enqueueOutbound(PEER, "one");
-    const delivered = store.enqueueOutbound(PEER, "two");
-    store.markDelivered(PEER, delivered);
+    const sentId = store.enqueueOutbound(PEER, "two");
+    store.markSent(PEER, sentId, "server-id-2");
     store.recordDirectMessage({
       from: PEER, to: ME, body: "inbound", timestamp_ms: 1, message_id: "in-1",
     });
@@ -85,7 +94,10 @@ describe("startOutboxDriver — retries", () => {
     expect(sendDm).toHaveBeenCalledWith(PEER, "later");
     expect(store.pendingOutbound()).toHaveLength(0);
     const b = store.conversationsSorted()[0].messages[0];
-    expect(b.status).toBe("delivered");
+    // The driver landed the retry — now in "sent" state, awaiting
+    // the recipient's DeliveryReceipt to promote it to "delivered".
+    expect(b.status).toBe("sent");
+    expect(b.messageId).toBe("server-id-1");
   });
 
   it("does not retry pending (initial-send) bubbles", async () => {

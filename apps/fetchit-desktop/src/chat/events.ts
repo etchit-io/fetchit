@@ -6,10 +6,39 @@ import { maybeNotifyInboundDm } from "./notify";
 import type { ChatStore } from "./state";
 import type { ChatEvent } from "./types";
 
+/// Wire-shape of the daemon's `chat:receipt` Tauri event.
+interface ReceiptEvent {
+  group_id: string;
+  sender: string;
+  message_id: string;
+  received_at_ms: number;
+}
+
+/// Wire-shape of the daemon's `chat:presence` Tauri event (relay source).
+interface RelayPresenceEvent {
+  source: "relay";
+  agent_id: string;
+  online: boolean;
+}
+
 export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
-  return listen<ChatEvent>("chat:event", (ev) => {
+  const unsubEvent = await listen<ChatEvent>("chat:event", (ev) => {
     applyChatEvent(store, ev.payload);
   });
+  const unsubReceipt = await listen<ReceiptEvent>("chat:receipt", (ev) => {
+    store.markDelivered(ev.payload.sender, ev.payload.message_id);
+  });
+  const unsubPresence = await listen<RelayPresenceEvent>(
+    "chat:presence",
+    (ev) => {
+      store.setRelayPresence(ev.payload.agent_id, ev.payload.online);
+    },
+  );
+  return () => {
+    unsubEvent();
+    unsubReceipt();
+    unsubPresence();
+  };
 }
 
 export function applyChatEvent(store: ChatStore, ev: ChatEvent): void {
@@ -19,7 +48,10 @@ export function applyChatEvent(store: ChatStore, ev: ChatEvent): void {
       void maybeNotifyInboundDm(store, ev);
       break;
     case "presence":
-      store.applyPresenceTransition(ev);
+      // The legacy x0xd presence stream is now emitted as
+      // `chat:presence:x0x` to leave `chat:presence` for the
+      // authoritative relay-level signal. Drop it on the floor here;
+      // the relay dot is the one we paint.
       break;
     case "contact_added":
       store.upsertContact(ev);

@@ -42,10 +42,20 @@ export interface Conversation {
 
 /// Delivery status for outbound bubbles. Inbound bubbles leave this
 /// unset (treated as delivered by renderers).
-export type BubbleStatus = "pending" | "delivered" | "failed";
+///
+/// State machine:
+///   sending  — composer just enqueued; awaiting the relay's ack
+///   sent     — relay accepted the envelope; recipient hasn't decoded yet
+///   delivered — recipient emitted a DeliveryReceipt and we decoded it
+///   failed   — transport reported error OR receipt-wait timeout expired
+export type BubbleStatus = "sending" | "sent" | "delivered" | "failed";
 
 export interface ChatBubble {
   id: string;
+  /// Chat-layer logical message id assigned by the daemon. Populated
+  /// once the send resolves so receipts (which echo this id) can flip
+  /// the matching bubble to "delivered".
+  messageId?: string;
   from: AgentId;
   body: string;
   timestampMs: number;
@@ -155,6 +165,18 @@ export class ChatStore {
     const entry = this.presence.get(id);
     if (!entry || entry.state !== "online") return false;
     return Date.now() - entry.lastSeenMs < STALE_PRESENCE_MS;
+  }
+
+  /// Authoritative relay-source presence flip. Unlike `touchPresence`,
+  /// this does not advance the lastSeen clock for online → online
+  /// transitions; the relay's `PresenceUpdate` is the ground truth.
+  setRelayPresence(id: AgentId, online: boolean): void {
+    const lastSeenMs = Date.now();
+    this.presence.set(id, {
+      state: online ? "online" : "offline",
+      lastSeenMs,
+    });
+    this.emit();
   }
 
   /// Force a re-render so views re-evaluate isOnline(); called by a
@@ -355,8 +377,9 @@ export class ChatStore {
     return this.conversations.get(this.activeKey) ?? null;
   }
 
-  /// Append an outbound bubble in "pending" state and return its id so
-  /// the caller can flip it to delivered/failed once the send resolves.
+  /// Append an outbound bubble in "sending" state and return its id so
+  /// the caller can flip it through sent → delivered/failed as the send
+  /// resolves and the recipient's receipt arrives.
   enqueueOutbound(peer: AgentId, body: string): string {
     const me = this.myId() ?? "";
     const ts = Date.now();
@@ -368,7 +391,7 @@ export class ChatStore {
       body,
       timestampMs: ts,
       mine: true,
-      status: "pending",
+      status: "sending",
       retryAttempts: 0,
     });
     conv.lastActivityMs = ts;
@@ -377,16 +400,31 @@ export class ChatStore {
     return id;
   }
 
-  markDelivered(peer: AgentId, bubbleId: string): void {
+  /// Flip a bubble from sending → sent and bind the daemon-assigned
+  /// `messageId` so an inbound DeliveryReceipt can later promote it
+  /// to "delivered".
+  markSent(peer: AgentId, bubbleId: string, messageId: string | null): void {
     const conv = this.conversations.get(`dm:${peer}`);
     if (!conv) return;
     const b = conv.messages.find((m) => m.id === bubbleId);
     if (!b) return;
+    b.status = "sent";
+    b.failureReason = undefined;
+    if (messageId !== null) b.messageId = messageId;
+    this.persistDms();
+    this.emit();
+  }
+
+  /// Locate the bubble whose `messageId` matches `messageId` and flip
+  /// it to "delivered". Called when a `chat:receipt` event arrives from
+  /// the daemon.
+  markDelivered(peer: AgentId, messageId: string): void {
+    const conv = this.conversations.get(`dm:${peer}`);
+    if (!conv) return;
+    const b = conv.messages.find((m) => m.messageId === messageId);
+    if (!b) return;
     b.status = "delivered";
     b.failureReason = undefined;
-    // A successful send is proof the peer is reachable right now, so
-    // refresh the staleness clock even if their gossip beacon is lagging.
-    this.touchPresence(peer);
     this.persistDms();
     this.emit();
   }
@@ -417,7 +455,7 @@ export class ChatStore {
     if (!conv) return;
     const b = conv.messages.find((m) => m.id === bubbleId);
     if (!b) return;
-    b.status = "pending";
+    b.status = "sending";
     this.emit();
   }
 
@@ -451,7 +489,7 @@ export class ChatStore {
       if (conv.key.kind !== "dm") continue;
       for (const m of conv.messages) {
         if (!m.mine) continue;
-        if (m.status === "pending" || m.status === "failed") {
+        if (m.status === "sending" || m.status === "failed") {
           out.push({ peer: conv.key.peer, bubble: m });
         }
       }

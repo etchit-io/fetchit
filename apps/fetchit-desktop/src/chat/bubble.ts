@@ -28,7 +28,8 @@ export function renderBubble(
 
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble";
-  if (b.mine && b.status && b.status !== "delivered") {
+  const showStatus = b.mine && !!b.status;
+  if (showStatus) {
     bubble.dataset.status = b.status;
   }
   const hasSurroundingText = appendBodyWithLinks(
@@ -37,16 +38,14 @@ export function renderBubble(
     handlers,
     /* skipAutonomi */ addresses.length > 0,
   );
-  if (b.mine && b.status && b.status !== "delivered") {
-    bubble.appendChild(statusIcon(b.status, b.failureReason));
+  if (showStatus) {
+    bubble.appendChild(statusIcon(b.status as BubbleStatusTag, b.failureReason));
   }
   // Suppress the text bubble entirely when the only content was
   // autonomi:// links — the preview card below already represents
   // the address. Keep it around when there's surrounding text, or
   // when we still need to show a sending / failed status indicator.
-  const needsStatus =
-    !!(b.mine && b.status && b.status !== "delivered");
-  if (hasSurroundingText || addresses.length === 0 || needsStatus) {
+  if (hasSurroundingText || addresses.length === 0 || showStatus) {
     stack.appendChild(bubble);
   }
 
@@ -54,8 +53,8 @@ export function renderBubble(
     mountAutonomiPreview(stack, addr, { onOpen: handlers.onAutonomi });
   }
 
-  if (b.mine && b.status && b.status !== "delivered") {
-    stack.appendChild(substatusCaption(b.status, b.failureReason));
+  if (showStatus && b.status !== "sent" && b.status !== "delivered") {
+    stack.appendChild(substatusCaption(b.status as BubbleStatusTag, b.failureReason));
   }
 
   const meta = document.createElement("time");
@@ -119,30 +118,46 @@ function linkFor(url: string, h: BubbleHandlers): HTMLElement {
   return a;
 }
 
+type BubbleStatusTag = "sending" | "sent" | "delivered" | "failed";
+
 function substatusCaption(
-  status: "pending" | "failed",
+  status: BubbleStatusTag,
   reason?: string,
 ): HTMLElement {
   const cap = document.createElement("div");
   cap.className = `chat-bubble__substatus chat-bubble__substatus--${status}`;
-  if (status === "pending") {
+  if (status === "sending") {
     cap.textContent = "Sending…";
-  } else {
+  } else if (status === "failed") {
     cap.textContent = "Not delivered";
     if (reason) cap.title = reason;
   }
   return cap;
 }
 
-function statusIcon(status: "pending" | "failed", reason?: string): HTMLElement {
+function statusIcon(
+  status: BubbleStatusTag,
+  reason?: string,
+): HTMLElement {
   const span = document.createElement("span");
   span.className = `chat-bubble__status chat-bubble__status--${status}`;
-  if (status === "pending") {
-    span.textContent = "◌";
-    span.title = "Sending…";
-  } else {
-    span.textContent = "⚠";
-    span.title = reason ? `Not delivered: ${reason}` : "Not delivered";
+  switch (status) {
+    case "sending":
+      span.textContent = "◌";
+      span.title = "Sending…";
+      break;
+    case "sent":
+      span.textContent = "✓";
+      span.title = "Sent";
+      break;
+    case "delivered":
+      span.textContent = "✓✓";
+      span.title = "Delivered";
+      break;
+    case "failed":
+      span.textContent = "⚠";
+      span.title = reason ? `Not delivered: ${reason}` : "Not delivered";
+      break;
   }
   return span;
 }
