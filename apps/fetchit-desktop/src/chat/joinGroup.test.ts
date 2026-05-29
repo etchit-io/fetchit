@@ -32,7 +32,7 @@ describe("mountJoinGroup", () => {
     const btn = host.querySelector<HTMLButtonElement>(".chat-dialog__btn")!;
     expect(btn.disabled).toBe(true);
 
-    const input = host.querySelector<HTMLInputElement>(".chat-dialog__uri")!;
+    const input = host.querySelector<HTMLTextAreaElement>(".chat-dialog__uri")!;
     input.value = "not-an-invite";
     input.dispatchEvent(new Event("input"));
     expect(btn.disabled).toBe(true);
@@ -49,7 +49,7 @@ describe("mountJoinGroup", () => {
       { onClose: () => {}, onJoined: () => {} },
       VALID,
     );
-    const input = host.querySelector<HTMLInputElement>(".chat-dialog__uri")!;
+    const input = host.querySelector<HTMLTextAreaElement>(".chat-dialog__uri")!;
     const btn = host.querySelector<HTMLButtonElement>(".chat-dialog__btn")!;
     expect(input.value).toBe(VALID);
     expect(btn.disabled).toBe(false);

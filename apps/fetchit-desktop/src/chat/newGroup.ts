@@ -37,9 +37,12 @@ export function mountNewGroup(
   const status = document.createElement("p");
   status.className = "chat-dialog__status";
 
-  const inviteBox = document.createElement("input");
+  // Textarea (not input) so a multi-KB invite URI wraps visually.
+  const inviteBox = document.createElement("textarea");
   inviteBox.className = "chat-dialog__uri";
   inviteBox.readOnly = true;
+  inviteBox.rows = 4;
+  inviteBox.wrap = "soft";
   inviteBox.placeholder = "Invite URI will appear here";
   inviteBox.setAttribute("aria-label", "Invite URI");
   inviteBox.hidden = true;

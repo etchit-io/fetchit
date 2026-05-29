@@ -692,6 +692,7 @@ body.chat-docked {
 
 .chat-dialog__uri {
   width: 100%;
+  box-sizing: border-box;
   background: var(--ink);
   color: var(--bone);
   border: 1px solid var(--line);
@@ -700,6 +701,14 @@ body.chat-docked {
   font: 12px/1.4 ui-monospace, monospace;
   word-break: break-all;
   outline: none;
+}
+textarea.chat-dialog__uri {
+  /* Multi-KB share URIs wrap inside the dialog instead of forcing
+     a > 65535 px Cairo surface that crashes Wayland. */
+  resize: vertical;
+  min-height: 80px;
+  max-height: 200px;
+  overflow-y: auto;
 }
 .chat-dialog__uri:focus { border-color: var(--copper); }
 

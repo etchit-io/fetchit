@@ -31,9 +31,14 @@ export async function mountCardDialog(
   qrHost.className = "chat-dialog__qr";
   qrHost.setAttribute("aria-hidden", "true");
 
-  const uriBox = document.createElement("input");
+  // Textarea (not input) so a multi-KB URI wraps visually — a
+  // single-line input would force the text engine to lay out the
+  // entire value on one line and crash the Wayland Cairo allocator.
+  const uriBox = document.createElement("textarea");
   uriBox.className = "chat-dialog__uri";
   uriBox.readOnly = true;
+  uriBox.rows = 4;
+  uriBox.wrap = "soft";
   uriBox.setAttribute("aria-label", "Share URI");
 
   const actions = document.createElement("div");

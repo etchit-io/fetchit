@@ -27,10 +27,16 @@ export function mountAddContact(
   help.textContent
     = "Paste an x0x://agent/… card URI from someone you trust.";
 
-  const input = document.createElement("input");
+  // Share URIs are long (KEM/ML-DSA keys + signature add up to ~17KB).
+  // A single-line <input> forces the text engine to lay out the entire
+  // value on one line and crashes the Wayland Cairo surface allocator
+  // past 65535 px; textarea wraps visually and keeps the box bounded.
+  const input = document.createElement("textarea");
   input.className = "chat-dialog__uri";
   input.placeholder = "x0x://agent/…";
   input.spellcheck = false;
+  input.rows = 4;
+  input.wrap = "soft";
   input.setAttribute("aria-label", "Card URI");
 
   const status = document.createElement("p");

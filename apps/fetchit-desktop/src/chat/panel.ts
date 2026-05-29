@@ -246,7 +246,7 @@ export function mountChatPanel(
             void refreshContacts();
           },
         });
-        const input = root.querySelector<HTMLInputElement>(
+        const input = root.querySelector<HTMLTextAreaElement>(
           ".chat-dialog__uri",
         );
         if (input) {
