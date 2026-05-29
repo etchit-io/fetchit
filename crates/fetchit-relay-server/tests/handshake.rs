@@ -347,3 +347,55 @@ async fn duplicate_agent_connect_displaces_with_bye() {
     };
     assert_eq!(d.envelope.ciphertext, payload);
 }
+
+#[tokio::test]
+async fn client_disconnect_promptly_decrements_connection_count() {
+    // Observable invariant: after a connected client drops its WS, the session
+    // must clear from the registry within a short window. The receiver loop now
+    // watches the writer's `JoinHandle` so a writer crash (WS write error)
+    // triggers the same cleanup path — without that, a ghosted session would
+    // sit in `by_agent` until the client-side keepalive eventually forced a
+    // reconnect.
+    let addr = start_test_server().await;
+    let pk = b"frank-pubkey-bytes-here";
+
+    // Sanity: no live sessions yet.
+    assert_eq!(connection_count(addr).await, 0);
+
+    let tok = obtain_bearer(addr, pk).await;
+    let mut ws = connect_ws(addr, &tok).await;
+    send_hello(&mut ws).await;
+    let _ = expect_ready(&mut ws).await;
+
+    // Session is registered.
+    assert_eq!(connection_count(addr).await, 1);
+
+    // Drop the client connection — the underlying TCP closes, the server
+    // receiver yields None, the loop exits via the ClientClosed arm, and
+    // `unregister` runs. Equivalently, if the writer ever crashes the
+    // WriterDied arm would fire here.
+    drop(ws);
+
+    // Cleanup must run promptly: poll up to a second.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        if connection_count(addr).await == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session not unregistered within 1s of client disconnect"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn connection_count(addr: SocketAddr) -> u64 {
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/v1/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["connections"].as_u64().unwrap()
+}

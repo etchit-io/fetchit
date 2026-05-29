@@ -15,6 +15,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// Query string carrying the bearer token for the WS upgrade.
 #[derive(Debug, Deserialize)]
@@ -82,7 +83,7 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         state.metrics.envelope_delivered();
     }
 
-    let writer = tokio::spawn(async move {
+    let mut writer: JoinHandle<()> = tokio::spawn(async move {
         while let Some(f) = rx.recv().await {
             let Ok(bytes) = to_bytes(&f) else { break };
             if sender.send(Message::Binary(bytes)).await.is_err() {
@@ -91,23 +92,74 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         }
     });
 
-    while let Some(Ok(msg)) = receiver.next().await {
-        let bytes = match msg {
-            Message::Binary(b) => b,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let Ok(frame) = from_bytes::<ClientFrame>(&bytes) else {
-            continue;
-        };
-        if !handle_client_frame(&state, &auth, &effective_caps, &tx, frame) {
-            break;
-        }
-    }
+    let _exit = run_io_loop(
+        &mut receiver,
+        &mut writer,
+        &state,
+        &auth,
+        &effective_caps,
+        &tx,
+    )
+    .await;
 
     state.sessions.unregister(&auth.agent_id, session_id);
     state.metrics.connection_closed();
     writer.abort();
+}
+
+/// Why the per-connection receiver loop exited.
+///
+/// Cleanup is the same in every case; the variant is informational so callers
+/// (and tests) can distinguish a clean client-side close from writer death.
+#[derive(Debug, PartialEq, Eq)]
+enum LoopExit {
+    /// Client sent a Close frame, the read half closed, or a stream error
+    /// surfaced.
+    ClientClosed,
+    /// `handle_client_frame` returned false (e.g. client sent Bye).
+    ProtocolEnd,
+    /// The writer task exited — typically a WS write error or postcard encode
+    /// failure. The per-connection mpsc receiver is now dropped, so any further
+    /// `SessionRegistry::send` to this agent will silently fail. The caller
+    /// must unregister immediately so the session stops appearing live.
+    WriterDied,
+}
+
+/// Drive the receiver loop until either the client closes or the writer exits.
+///
+/// The writer task owns the outbound mpsc receiver; if it dies (WS write error,
+/// postcard encode error) the per-connection channel is silently broken. Watching
+/// the writer's `JoinHandle` here ensures the caller's cleanup runs promptly
+/// instead of waiting for the client-side keepalive timeout to force a reconnect.
+async fn run_io_loop(
+    receiver: &mut SplitStream<WebSocket>,
+    writer: &mut JoinHandle<()>,
+    state: &Arc<ServerState>,
+    auth: &AuthTokenState,
+    effective_caps: &EffectiveCapabilities,
+    tx: &mpsc::UnboundedSender<ServerFrame>,
+) -> LoopExit {
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                let Some(Ok(msg)) = msg else { return LoopExit::ClientClosed };
+                let bytes = match msg {
+                    Message::Binary(b) => b,
+                    Message::Close(_) => return LoopExit::ClientClosed,
+                    _ => continue,
+                };
+                let Ok(frame) = from_bytes::<ClientFrame>(&bytes) else {
+                    continue;
+                };
+                if !handle_client_frame(state, auth, effective_caps, tx, frame) {
+                    return LoopExit::ProtocolEnd;
+                }
+            }
+            _ = &mut *writer => {
+                return LoopExit::WriterDied;
+            }
+        }
+    }
 }
 
 async fn await_hello(receiver: &mut SplitStream<WebSocket>) -> Option<Hello> {
@@ -200,4 +252,91 @@ fn now_ms() -> u64 {
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! Loop-exit semantics for the per-connection select!.
+    //!
+    //! The production [`run_io_loop`] selects between client-frame reads and the
+    //! writer `JoinHandle`. These tests mirror that pattern with a synthetic
+    //! receiver + writer to prove the writer-exit arm fires promptly — a
+    //! regression here would re-introduce ghosted sessions that linger until
+    //! the client-side keepalive eventually triggers a reconnect.
+    use super::LoopExit;
+    use futures_util::stream::{self, StreamExt};
+    use std::time::Duration;
+    use tokio::task::JoinHandle;
+    use tokio::time::timeout;
+
+    /// Same `tokio::select!` shape as `run_io_loop`, kept generic so we can
+    /// drive it with a synthetic receiver + writer.
+    async fn select_until_exit<S>(mut receiver: S, mut writer: JoinHandle<()>) -> LoopExit
+    where
+        S: futures_util::Stream<Item = ()> + Unpin,
+    {
+        loop {
+            tokio::select! {
+                msg = receiver.next() => {
+                    if msg.is_none() { return LoopExit::ClientClosed }
+                }
+                _ = &mut writer => { return LoopExit::WriterDied }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_reports_writer_died_when_writer_returns() {
+        // Receiver never yields — the only way out is the writer arm.
+        let pending = stream::pending::<()>();
+        let writer: JoinHandle<()> = tokio::spawn(async {});
+
+        let exit = timeout(
+            Duration::from_millis(500),
+            select_until_exit(pending, writer),
+        )
+        .await
+        .expect("loop must exit promptly when the writer task completes");
+        assert_eq!(exit, LoopExit::WriterDied);
+    }
+
+    #[tokio::test]
+    async fn loop_reports_writer_died_when_writer_is_aborted() {
+        // The realistic failure mode: writer task is alive but its inner
+        // `sender.send().await` would never resolve. Aborting it externally
+        // mimics the production case where the WS sink errors and the writer
+        // returns — the receiver loop must exit immediately so the caller can
+        // unregister the now-ghosted session.
+        let pending = stream::pending::<()>();
+        let writer: JoinHandle<()> = tokio::spawn(async {
+            futures_util::future::pending::<()>().await;
+        });
+        let abort = writer.abort_handle();
+        let loop_fut = tokio::spawn(select_until_exit(pending, writer));
+        abort.abort();
+
+        let exit = timeout(Duration::from_millis(500), loop_fut)
+            .await
+            .expect("loop must exit promptly when the writer task is aborted")
+            .unwrap();
+        assert_eq!(exit, LoopExit::WriterDied);
+    }
+
+    #[tokio::test]
+    async fn loop_reports_client_closed_when_receiver_ends() {
+        // Sanity: the other select! arm still triggers normal close.
+        let closed = stream::iter(std::iter::empty::<()>());
+        let writer: JoinHandle<()> = tokio::spawn(async {
+            futures_util::future::pending::<()>().await;
+        });
+
+        let exit = timeout(
+            Duration::from_millis(500),
+            select_until_exit(closed, writer),
+        )
+        .await
+        .expect("loop must exit when the receiver yields None");
+        assert_eq!(exit, LoopExit::ClientClosed);
+    }
 }
