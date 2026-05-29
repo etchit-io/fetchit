@@ -314,6 +314,20 @@ pub struct MessagePayload {
     pub ts_ms: u64,
 }
 
+/// Inner payload of a `DeliveryReceipt` envelope.
+///
+/// The recipient of a `Message` envelope emits a `DeliveryReceipt` back to the
+/// original sender once the message has been decrypted. `message_id` echoes
+/// the relay's `dedupe_key` (hex-encoded) of the original message envelope so
+/// the sender can correlate the receipt to a specific outbound message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryReceiptPayload {
+    /// Hex-encoded dedupe key of the original message envelope.
+    pub message_id: String,
+    /// Recipient-asserted decode timestamp, milliseconds since the Unix epoch.
+    pub received_at_ms: u64,
+}
+
 pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

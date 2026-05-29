@@ -3,7 +3,8 @@
 
 use super::registry::ConversationRegistry;
 use super::types::{
-    now_ms, Conversation, MessagePayload, PriorKey, TrustState, WelcomePayload, PRIOR_KEY_WINDOW_MS,
+    now_ms, Conversation, DeliveryReceiptPayload, MessagePayload, PriorKey, TrustState,
+    WelcomePayload, PRIOR_KEY_WINDOW_MS,
 };
 use crate::chat_crypto::{
     aead_open, canonical_envelope_bytes, derive_aead_key, kem_decapsulate, message_aad,
@@ -15,7 +16,7 @@ use crate::local_store::write_json_atomic;
 use crate::messages::StoredContactCard;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use fetchit_relay_proto::{derive_agent_id, TransitEnvelope};
+use fetchit_relay_proto::{derive_agent_id, EnvelopeKind, TransitEnvelope};
 
 /// Inbound dispatch result.
 #[derive(Clone, Debug)]
@@ -49,6 +50,19 @@ pub enum InboundDispatch {
         sender_agent_id_hex: String,
         /// Decoded payload.
         payload: MessagePayload,
+    },
+    /// Decrypted a delivery receipt for a previously-sent message.
+    Receipt {
+        /// Hex group id.
+        group_id_hex: String,
+        /// Hex sender agent id (the *receiver* of the original message
+        /// — they are confirming decode).
+        sender_agent_id_hex: String,
+        /// Hex-encoded dedupe key of the original message envelope.
+        message_id: String,
+        /// Recipient-asserted decode timestamp, milliseconds since
+        /// the Unix epoch.
+        received_at_ms: u64,
     },
     /// Stale epoch — dropped.
     StaleEpoch {
@@ -163,16 +177,66 @@ pub async fn dispatch_inbound(
     };
     let group_id_hex = hex::encode(group_id_bytes);
 
-    if envelope.kem_ciphertext.is_empty() {
-        match verify_sender(&envelope, registry)? {
+    match envelope.kind {
+        EnvelopeKind::DeliveryReceipt => match verify_sender(&envelope, registry)? {
             VerifyOutcome::Drop(d) => Ok(d),
             VerifyOutcome::Ok => {
-                dispatch_message(envelope, registry, group_id_bytes, group_id_hex).await
+                dispatch_receipt(envelope, registry, group_id_bytes, group_id_hex).await
+            }
+        },
+        _ => {
+            if envelope.kem_ciphertext.is_empty() {
+                match verify_sender(&envelope, registry)? {
+                    VerifyOutcome::Drop(d) => Ok(d),
+                    VerifyOutcome::Ok => {
+                        dispatch_message(envelope, registry, group_id_bytes, group_id_hex).await
+                    }
+                }
+            } else {
+                dispatch_welcome(envelope, identity, registry, group_id_bytes, group_id_hex).await
             }
         }
-    } else {
-        dispatch_welcome(envelope, identity, registry, group_id_bytes, group_id_hex).await
     }
+}
+
+async fn dispatch_receipt(
+    envelope: TransitEnvelope,
+    registry: &ConversationRegistry,
+    group_id_bytes: [u8; 32],
+    group_id_hex: String,
+) -> Result<InboundDispatch, ChatError> {
+    let Some(conv) = registry.get(&group_id_hex).await? else {
+        return Ok(InboundDispatch::StaleEpoch {
+            group_id_hex,
+            epoch: envelope.epoch,
+        });
+    };
+    let Some(key) = conv.key_for_epoch(envelope.epoch)? else {
+        return Ok(InboundDispatch::StaleEpoch {
+            group_id_hex,
+            epoch: envelope.epoch,
+        });
+    };
+    if envelope.nonce.len() != 12 {
+        return Err(ChatError::Invalid("nonce length".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&envelope.nonce);
+    let aad = message_aad(&group_id_bytes, envelope.epoch);
+    let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
+        return Ok(InboundDispatch::AeadOpenFailed {
+            group_id_hex,
+            epoch: envelope.epoch,
+        });
+    };
+    let payload: DeliveryReceiptPayload = serde_json::from_slice(&plaintext)
+        .map_err(|e| ChatError::Invalid(format!("receipt payload parse: {e}")))?;
+    Ok(InboundDispatch::Receipt {
+        group_id_hex,
+        sender_agent_id_hex: hex::encode(envelope.sender_agent_id.as_bytes()),
+        message_id: payload.message_id,
+        received_at_ms: payload.received_at_ms,
+    })
 }
 
 async fn dispatch_message(
@@ -420,7 +484,9 @@ async fn install_or_rekey_conversation(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::outbound::{build_message_outbox, build_welcome_outbox};
+    use super::super::outbound::{
+        build_message_outbox, build_receipt_outbox, build_welcome_outbox,
+    };
     use super::super::types::{Member, MemberDevice, MemberDeviceStatus};
     use super::*;
     use crate::at_rest::{
@@ -536,6 +602,80 @@ mod tests {
                 assert_eq!(conversation.trust_state, TrustState::Confirmed);
             }
             other => panic!("expected Welcomed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_round_trip_after_message() {
+        // Alice and Bob set up a conversation. Bob receives a message,
+        // builds a receipt back to Alice, and Alice's dispatch must
+        // surface the matching `InboundDispatch::Receipt`.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        // Bob's side has Alice's card and the conversation installed.
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Alice's side has Bob's card and the conversation installed
+        // so the receipt's verify-prelude passes.
+        let tmp_a_store = tempdir().unwrap();
+        let layout_a = StoreLayout::ensure(tmp_a_store.path().join("store")).unwrap();
+        install_card(&layout_a, &aid_b, &bob_signer, bob_id.kem_public_key());
+        let (_, master_a2, salt_a2) = fixture_identity(tmp_a_store.path(), &aid_a);
+        let registry_a = ConversationRegistry::new(
+            layout_a,
+            Arc::new(master_a2),
+            kdf_id_argon2(),
+            Some(salt_a2),
+        );
+        registry_a.save(&conv).await.unwrap();
+
+        let receipt_outbox = build_receipt_outbox(
+            &conv,
+            "deadbeef",
+            1_700_000_000_001,
+            &aid_a,
+            &bob_id,
+            [0u8; 32],
+            &bob_signer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt_outbox.len(), 1);
+
+        let result = dispatch_inbound(receipt_outbox[0].envelope.clone(), &alice_id, &registry_a)
+            .await
+            .unwrap();
+        match result {
+            InboundDispatch::Receipt {
+                message_id,
+                sender_agent_id_hex,
+                received_at_ms,
+                group_id_hex,
+            } => {
+                assert_eq!(message_id, "deadbeef");
+                assert_eq!(sender_agent_id_hex, aid_b);
+                assert_eq!(received_at_ms, 1_700_000_000_001);
+                assert_eq!(group_id_hex, conv.group_id_hex);
+            }
+            other => panic!("expected Receipt, got {other:?}"),
         }
     }
 

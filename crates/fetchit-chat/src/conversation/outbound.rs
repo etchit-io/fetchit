@@ -1,6 +1,6 @@
-//! Outbound envelope construction for Welcome and Message payloads.
+//! Outbound envelope construction for Welcome, Message, and `DeliveryReceipt` payloads.
 
-use super::types::{now_ms, Conversation, MessagePayload, WelcomePayload};
+use super::types::{now_ms, Conversation, DeliveryReceiptPayload, MessagePayload, WelcomePayload};
 use crate::chat_crypto::{
     aead_seal, canonical_envelope_bytes, derive_aead_key, kem_encapsulate, message_aad,
     random_nonce, KDF_INFO_WELCOME, KEM_PUBLIC_KEY_LEN, SIGN_DOMAIN_ENVELOPE,
@@ -182,4 +182,73 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
         });
     }
     Ok(out)
+}
+
+/// Build a single delivery-receipt envelope addressed to
+/// `recipient_agent_id_hex` (the original `Message`'s sender).
+///
+/// The receipt rides the conversation's current symmetric key with the
+/// same AAD shape as a message — `EnvelopeKind::DeliveryReceipt`
+/// distinguishes it on the wire so the inbound dispatcher routes it to
+/// the receipt branch rather than the message branch.
+///
+/// # Errors
+/// AEAD or signing errors.
+pub async fn build_receipt_outbox<S: fetchit_relay_client::Signer + ?Sized>(
+    conv: &Conversation,
+    message_id: &str,
+    received_at_ms: u64,
+    recipient_agent_id_hex: &str,
+    identity: &FetchitIdentity,
+    local_machine_id: [u8; 32],
+    signer: &S,
+) -> Result<Vec<OutboundEnvelope>, ChatError> {
+    let payload = DeliveryReceiptPayload {
+        message_id: message_id.to_owned(),
+        received_at_ms,
+    };
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| ChatError::Invalid(format!("receipt serialize: {e}")))?;
+
+    let key = conv.current_key()?;
+    let group_id_bytes = conv.group_id_bytes()?;
+    let aad = message_aad(&group_id_bytes, conv.current_epoch);
+
+    let mut local_agent_bytes = [0u8; 32];
+    hex::decode_to_slice(identity.agent_id_hex(), &mut local_agent_bytes)
+        .map_err(|e| ChatError::Invalid(format!("local agent_id hex: {e}")))?;
+    let mut recipient_agent = [0u8; 32];
+    hex::decode_to_slice(recipient_agent_id_hex, &mut recipient_agent)
+        .map_err(|e| ChatError::Invalid(format!("recipient hex: {e}")))?;
+
+    let nonce = random_nonce(&mut OsRng);
+    let ciphertext = aead_seal(&key, &nonce, &payload_bytes, &aad)?;
+    let mut env = TransitEnvelope {
+        version: 2,
+        kind: EnvelopeKind::DeliveryReceipt,
+        group_id: Some(GroupId::from_bytes(group_id_bytes)),
+        tenant_id: None,
+        sender_agent_id: AgentId::from_bytes(local_agent_bytes),
+        sender_machine_id: MachineId::from_bytes(local_machine_id),
+        timestamp_ms: now_ms(),
+        epoch: conv.current_epoch,
+        ciphertext,
+        nonce: nonce.to_vec(),
+        kem_ciphertext: Vec::new(),
+        sender_signature: Vec::new(),
+    };
+    let canonical = canonical_envelope_bytes(&env)?;
+    let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+    sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+    sign_bytes.extend_from_slice(&canonical);
+    let sig = signer
+        .sign(&sign_bytes)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("envelope sign: {e}")))?;
+    env.sender_signature = sig;
+
+    Ok(vec![OutboundEnvelope {
+        recipient_agent_id: AgentId::from_bytes(recipient_agent),
+        envelope: env,
+    }])
 }

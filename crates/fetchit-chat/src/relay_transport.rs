@@ -162,7 +162,7 @@ fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<Inboun
             let env = delivery.envelope;
             let kind = match env.kind {
                 RelayKind::Dm => OutboundKind::Dm,
-                RelayKind::GroupChat => OutboundKind::Group {
+                RelayKind::GroupChat | RelayKind::DeliveryReceipt => OutboundKind::Group {
                     group_id: env
                         .group_id
                         .map(|g| hex::encode(g.as_bytes()))
