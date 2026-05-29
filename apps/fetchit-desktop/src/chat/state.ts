@@ -44,11 +44,14 @@ export interface Conversation {
 /// unset (treated as delivered by renderers).
 ///
 /// State machine:
-///   sending  — composer just enqueued; awaiting the relay's ack
-///   sent     — relay accepted the envelope; recipient hasn't decoded yet
-///   delivered — recipient emitted a DeliveryReceipt and we decoded it
-///   failed   — transport reported error OR receipt-wait timeout expired
-export type BubbleStatus = "sending" | "sent" | "delivered" | "failed";
+///   sending   — message is in flight or queued for retry until the
+///               recipient comes online. Includes the brief pre-ack
+///               window AND the longer wait between relay ack and the
+///               recipient's DeliveryReceipt.
+///   delivered — recipient emitted a DeliveryReceipt and we decoded it.
+///   failed    — transport reported error OR the 24h receipt-wait window
+///               expired with no receipt.
+export type BubbleStatus = "sending" | "delivered" | "failed";
 
 export interface ChatBubble {
   id: string;
@@ -403,15 +406,19 @@ export class ChatStore {
     return id;
   }
 
-  /// Flip a bubble from sending → sent and bind the daemon-assigned
-  /// `messageId` so an inbound DeliveryReceipt can later promote it
-  /// to "delivered".
+  /// Bind the daemon-assigned `messageId` so an inbound DeliveryReceipt
+  /// can later promote the bubble to "delivered". Does NOT advance the
+  /// visible status — the bubble stays at "sending" until either a
+  /// receipt arrives or the 24h timeout expires.
+  ///
+  /// A successful retry of a previously-failed bubble re-enters
+  /// "sending" so the user sees the in-flight clock again.
   markSent(peer: AgentId, bubbleId: string, messageId: string | null): void {
     const conv = this.conversations.get(`dm:${peer}`);
     if (!conv) return;
     const b = conv.messages.find((m) => m.id === bubbleId);
     if (!b) return;
-    b.status = "sent";
+    if (b.status === "failed") b.status = "sending";
     b.failureReason = undefined;
     if (messageId !== null) b.messageId = messageId;
     this.persistDms();

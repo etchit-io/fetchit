@@ -53,7 +53,7 @@ export function renderBubble(
     mountAutonomiPreview(stack, addr, { onOpen: handlers.onAutonomi });
   }
 
-  if (showStatus && b.status !== "sent" && b.status !== "delivered") {
+  if (showStatus && b.status !== "delivered") {
     stack.appendChild(substatusCaption(b.status as BubbleStatusTag, b.failureReason));
   }
 
@@ -118,7 +118,7 @@ function linkFor(url: string, h: BubbleHandlers): HTMLElement {
   return a;
 }
 
-type BubbleStatusTag = "sending" | "sent" | "delivered" | "failed";
+type BubbleStatusTag = "sending" | "delivered" | "failed";
 
 function substatusCaption(
   status: BubbleStatusTag,
@@ -143,15 +143,11 @@ function statusIcon(
   span.className = `chat-bubble__status chat-bubble__status--${status}`;
   switch (status) {
     case "sending":
-      span.textContent = "◌";
+      span.textContent = "⏳";
       span.title = "Sending…";
       break;
-    case "sent":
-      span.textContent = "✓";
-      span.title = "Sent";
-      break;
     case "delivered":
-      span.textContent = "✓✓";
+      span.textContent = "✓";
       span.title = "Delivered";
       break;
     case "failed":

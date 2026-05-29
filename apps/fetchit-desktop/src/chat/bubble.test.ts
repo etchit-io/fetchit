@@ -117,21 +117,29 @@ describe("renderBubble — outbound status", () => {
     expect(cap?.title).toBe("timeout");
   });
 
-  it("decorates sent + delivered bubbles with ticks but no substatus caption", () => {
+  it("shows ⏳ + Sending caption while in flight", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
-    const sent = renderBubble(bubble({ mine: true, status: "sent" }), handlers);
-    expect(sent.querySelector(".chat-bubble__status--sent")?.textContent).toBe(
-      "✓",
+    const sending = renderBubble(
+      bubble({ mine: true, status: "sending" }),
+      handlers,
     );
-    expect(sent.querySelector(".chat-bubble__substatus")).toBeNull();
+    expect(
+      sending.querySelector(".chat-bubble__status--sending")?.textContent,
+    ).toBe("⏳");
+    expect(
+      sending.querySelector(".chat-bubble__substatus--sending")?.textContent,
+    ).toBe("Sending…");
+  });
 
+  it("shows ✓ for delivered with no substatus caption", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const delivered = renderBubble(
       bubble({ mine: true, status: "delivered" }),
       handlers,
     );
     expect(
       delivered.querySelector(".chat-bubble__status--delivered")?.textContent,
-    ).toBe("✓✓");
+    ).toBe("✓");
     expect(delivered.querySelector(".chat-bubble__substatus")).toBeNull();
   });
 

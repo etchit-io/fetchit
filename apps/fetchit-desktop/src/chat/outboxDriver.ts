@@ -1,11 +1,22 @@
-// Retry driver for queued outbound DMs. Mirrors what a person would
-// do by hand: when a peer transitions from offline to online, try
-// each of their failed bubbles once. If the retry fails the bubble
-// stays failed until the next transition (or a manual Retry click).
-// No artificial cap — the trigger is bounded by real presence edges.
+// Retry driver for queued outbound DMs.
+//
+// The relay's transit buffer is intentionally short (15 min). The client
+// carries the longer retention: every offline→online edge for a peer
+// triggers a fresh send for any of their bubbles that are still in
+// flight or failed. A periodic sweep flips bubbles that have been
+// in flight for more than `SEND_TIMEOUT_MS` to "failed" so the user
+// gets an honest ⚠ instead of an indefinite ⏳.
 
-import type { ChatStore } from "./state";
+import type { ChatBubble, ChatStore } from "./state";
 import type { AgentId } from "./types";
+
+/// How long a bubble may sit in "sending" before the sweeper flips it
+/// to "failed". The user can still manually retry afterwards.
+const SEND_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+
+/// How often the timeout sweeper runs. One minute is fine — the
+/// timeout granularity is hours.
+const SWEEP_INTERVAL_MS = 60_000;
 
 export interface OutboxDriverDeps {
   sendDm: (peer: AgentId, body: string) => Promise<string | null>;
@@ -19,9 +30,20 @@ export interface OutboxDriverDeps {
 export interface OutboxDriver {
   /// Stop subscribing to the store (cancels future automatic retries).
   stop(): void;
-  /// Force a retry sweep across all online peers with failed bubbles,
-  /// regardless of presence-edge state. Used by the "Retry" button.
+  /// Force a retry sweep across all online peers, regardless of
+  /// presence-edge state. Used by the "Retry" button.
   flushAll(): void;
+}
+
+/// A bubble is eligible for retry when it's either:
+/// - "failed": the previous attempt errored out, the user wants another try; or
+/// - "sending" *and* the daemon already assigned a `messageId` (= the
+///   initial relay ACK landed). Without the messageId the original
+///   send is still in flight, and re-firing would double-send.
+function isRetryable(bubble: ChatBubble): boolean {
+  if (bubble.status === "failed") return true;
+  if (bubble.status === "sending" && bubble.messageId !== undefined) return true;
+  return false;
 }
 
 export function startOutboxDriver(
@@ -36,7 +58,7 @@ export function startOutboxDriver(
   const flushPeer = (peer: AgentId): void => {
     for (const { peer: p, bubble } of store.pendingOutbound()) {
       if (p !== peer) continue;
-      if (bubble.status !== "failed") continue;
+      if (!isRetryable(bubble)) continue;
       if (inflight.has(bubble.id)) continue;
       inflight.add(bubble.id);
       void (async () => {
@@ -53,10 +75,19 @@ export function startOutboxDriver(
     }
   };
 
+  const sweepTimeouts = (): void => {
+    const now = Date.now();
+    for (const { peer, bubble } of store.pendingOutbound()) {
+      if (bubble.status !== "sending") continue;
+      if (now - bubble.timestampMs < SEND_TIMEOUT_MS) continue;
+      store.markFailed(peer, bubble.id, "delivery timed out after 24h");
+    }
+  };
+
   const tick = (): void => {
     const seen = new Set<AgentId>();
     for (const { peer, bubble } of store.pendingOutbound()) {
-      if (bubble.status !== "failed") continue;
+      if (!isRetryable(bubble)) continue;
       if (seen.has(peer)) continue;
       seen.add(peer);
       const online = store.isOnline(peer);
@@ -73,7 +104,7 @@ export function startOutboxDriver(
       }
     }
     // Reflect the latest snapshot for peers without pending bubbles
-    // too, so a future failed bubble triggers correctly on the next
+    // too, so a future eligible bubble triggers correctly on the next
     // transition rather than mistaking initial state for an edge.
     for (const conv of store.conversationsSorted()) {
       if (conv.key.kind !== "dm") continue;
@@ -85,7 +116,8 @@ export function startOutboxDriver(
 
   const flushAll = (): void => {
     const seen = new Set<AgentId>();
-    for (const { peer } of store.pendingOutbound()) {
+    for (const { peer, bubble } of store.pendingOutbound()) {
+      if (!isRetryable(bubble)) continue;
       if (seen.has(peer)) continue;
       seen.add(peer);
       if (store.isOnline(peer)) flushPeer(peer);
@@ -93,6 +125,13 @@ export function startOutboxDriver(
   };
 
   const unsub = store.subscribe(tick);
+  const sweepTimer = setInterval(sweepTimeouts, SWEEP_INTERVAL_MS);
   tick();
-  return { stop: unsub, flushAll };
+  return {
+    stop: () => {
+      unsub();
+      clearInterval(sweepTimer);
+    },
+    flushAll,
+  };
 }
