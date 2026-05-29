@@ -364,6 +364,30 @@ pub async fn chat_set_passphrase(
     Ok(())
 }
 
+/// Flip the conversation identified by `group_id_hex` from
+/// `TrustState::Pending` to `TrustState::Confirmed` and persist.
+/// The UI calls this after the user accepts a TOFU contact request
+/// surfaced by the `chat:contact-request` event.
+///
+/// # Errors
+/// Returns a stringified error if the client is in REST-only mode,
+/// the conversation isn't on disk, or the vault save fails.
+#[tauri::command]
+pub async fn chat_confirm_contact(
+    state: tauri::State<'_, ChatState>,
+    group_id_hex: String,
+) -> Result<(), String> {
+    let client = state.get().await?;
+    let registry = client.registry_arc().ok_or("no chat state")?;
+    let mut conv = registry
+        .get(&group_id_hex)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("conversation not found")?;
+    conv.confirm_trust();
+    registry.save(&conv).await.map_err(|e| e.to_string())
+}
+
 /// Spawn the background event pumps:
 ///
 /// - **Relay inbound** — drains the relay transport's inbound channel
@@ -423,6 +447,13 @@ async fn handle_inbound(
                 | InboundDispatch::Rekeyed { conversation },
             ) => {
                 let _ = app.emit("chat:conversation", &conversation);
+            }
+            Ok(InboundDispatch::WelcomedPending { conversation }) => {
+                // TOFU first-contact welcome from a sender we'd never
+                // heard from. Surface as a contact request so the UI
+                // can prompt the user before treating it as a normal
+                // conversation.
+                let _ = app.emit("chat:contact-request", &conversation);
             }
             Ok(InboundDispatch::WelcomeIgnored) => {
                 // Stale or duplicate welcome — no UI signal.

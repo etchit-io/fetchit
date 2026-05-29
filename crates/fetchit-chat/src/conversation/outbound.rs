@@ -24,6 +24,12 @@ pub struct OutboundEnvelope {
 /// Build the set of Welcome envelopes Alice needs to send when starting
 /// a new conversation. One envelope per recipient device.
 ///
+/// The local device's `agent_public_key_b64` is populated from the
+/// signer's public key before the payload is encoded, so first-contact
+/// recipients can verify the envelope signature against the
+/// self-attested pubkey (bound to `sender_agent_id` via the
+/// `AUTONOMI_PEER_ID_V2` derivation).
+///
 /// # Errors
 /// KEM / AEAD / signing errors.
 pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
@@ -32,11 +38,21 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     local_machine_id: [u8; 32],
     signer: &S,
 ) -> Result<Vec<OutboundEnvelope>, ChatError> {
+    let local_agent_hex = identity.agent_id_hex().to_owned();
+    let signer_pk_b64 = B64.encode(signer.public_key());
+    let mut members_for_payload = conv.members.clone();
+    for member in &mut members_for_payload {
+        for device in &mut member.devices {
+            if device.agent_id_hex == local_agent_hex {
+                device.agent_public_key_b64 = Some(signer_pk_b64.clone());
+            }
+        }
+    }
     let payload = WelcomePayload {
         group_id_hex: conv.group_id_hex.clone(),
         current_key_b64: conv.current_key_b64.clone(),
         epoch: conv.current_epoch,
-        members: conv.members.clone(),
+        members: members_for_payload,
         name: conv.name.clone(),
     };
     let payload_bytes = serde_json::to_vec(&payload)
@@ -47,7 +63,6 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     hex::decode_to_slice(identity.agent_id_hex(), &mut local_agent_bytes)
         .map_err(|e| ChatError::Invalid(format!("local agent_id hex: {e}")))?;
 
-    let local_agent_hex = identity.agent_id_hex().to_owned();
     let mut out = Vec::new();
 
     for device in conv.fanout_devices(&local_agent_hex) {

@@ -279,6 +279,11 @@ impl<'a> Endpoint<'a> {
             devices: vec![MemberDevice {
                 agent_id_hex: peer_card.agent_id_hex.clone(),
                 kem_public_key_b64: peer_card.kem_public_key_b64.clone(),
+                // Carry the peer's ML-DSA pubkey through if we have it;
+                // welcomes the peer eventually sends us will self-attest
+                // anyway, but mirroring the field here keeps the local
+                // member-list consistent with what we'll re-broadcast.
+                agent_public_key_b64: peer_card.agent_public_key_b64.clone(),
                 added_at_epoch: 0,
                 status: MemberDeviceStatus::Active,
             }],
@@ -289,6 +294,10 @@ impl<'a> Endpoint<'a> {
             devices: vec![MemberDevice {
                 agent_id_hex: identity.agent_id_hex().to_owned(),
                 kem_public_key_b64: B64.encode(identity.kem_public_key()),
+                // Self-attest the local ML-DSA pubkey so first-contact
+                // recipients can bind it to our sender_agent_id via the
+                // AUTONOMI_PEER_ID_V2 derivation.
+                agent_public_key_b64: Some(B64.encode(signer.public_key())),
                 added_at_epoch: 0,
                 status: MemberDeviceStatus::Active,
             }],

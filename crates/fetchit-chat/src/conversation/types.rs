@@ -26,6 +26,18 @@ pub enum Role {
     Member,
 }
 
+/// Conversation trust posture from the local user's perspective.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TrustState {
+    /// Newly installed via TOFU welcome from a previously-unknown
+    /// sender. Messages flow but the UI surfaces this as untrusted
+    /// until the user accepts the contact request.
+    #[default]
+    Pending,
+    /// The local user has accepted the contact.
+    Confirmed,
+}
+
 /// A device's participation status in a conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemberDeviceStatus {
@@ -46,6 +58,11 @@ pub struct MemberDevice {
     pub agent_id_hex: String,
     /// ML-KEM-768 public key, base64.
     pub kem_public_key_b64: String,
+    /// ML-DSA-65 public key (base64). Populated for v2 cards; older
+    /// `MemberDevice` records may have `None` and require TOFU
+    /// resolution against the sender-bound `agent_id`.
+    #[serde(default)]
+    pub agent_public_key_b64: Option<String>,
     /// Epoch at which this device was added.
     pub added_at_epoch: u32,
     /// Active | Revoked.
@@ -98,6 +115,11 @@ pub struct Conversation {
     pub last_rekey_at_ms: u64,
     /// Auto-rekey interval in ms (default 7 days).
     pub auto_rekey_interval_ms: u64,
+    /// Trust posture for first-contact TOFU welcomes. Defaults to
+    /// `Pending` so persisted-pre-this-change conversations come back
+    /// untrusted and require explicit confirmation.
+    #[serde(default)]
+    pub trust_state: TrustState,
 }
 
 impl Conversation {
@@ -126,12 +148,19 @@ impl Conversation {
             created_at_ms: now,
             last_rekey_at_ms: now,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            // The local user initiated the conversation, so it is
+            // trusted by construction.
+            trust_state: TrustState::Confirmed,
         })
     }
 
     /// Construct from a Welcome payload (we just joined a conversation).
+    ///
+    /// `trust_state` is supplied by the caller: dispatching an
+    /// unsolicited welcome from an unknown sender installs `Pending`;
+    /// a welcome from a contact already on file installs `Confirmed`.
     #[must_use]
-    pub fn from_welcome(payload: WelcomePayload) -> Self {
+    pub fn from_welcome(payload: WelcomePayload, trust_state: TrustState) -> Self {
         let now = now_ms();
         Self {
             group_id_hex: payload.group_id_hex,
@@ -144,6 +173,16 @@ impl Conversation {
             created_at_ms: now,
             last_rekey_at_ms: now,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state,
+        }
+    }
+
+    /// Flip `TrustState::Pending` to `TrustState::Confirmed`.
+    /// No-op for already-Confirmed conversations. The caller is
+    /// responsible for persisting via `ConversationRegistry::save`.
+    pub fn confirm_trust(&mut self) {
+        if self.trust_state == TrustState::Pending {
+            self.trust_state = TrustState::Confirmed;
         }
     }
 
@@ -292,6 +331,7 @@ mod tests {
             devices: vec![MemberDevice {
                 agent_id_hex: agent_id_hex.to_owned(),
                 kem_public_key_b64: kem_pub_b64.to_owned(),
+                agent_public_key_b64: None,
                 added_at_epoch: 0,
                 status: MemberDeviceStatus::Active,
             }],
@@ -316,6 +356,7 @@ mod tests {
             created_at_ms: 0,
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -339,6 +380,7 @@ mod tests {
             created_at_ms: 0,
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -357,6 +399,7 @@ mod tests {
             created_at_ms: 0,
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: 1,
+            trust_state: TrustState::Confirmed,
         };
         assert!(conv.auto_rekey_due());
     }
@@ -374,6 +417,7 @@ mod tests {
             created_at_ms: 0,
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: 1,
+            trust_state: TrustState::Confirmed,
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -391,6 +435,7 @@ mod tests {
             created_at_ms: 0,
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: 1,
+            trust_state: TrustState::Confirmed,
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -400,5 +445,27 @@ mod tests {
             !conv.auto_rekey_due(),
             "advance_epoch should reset last_rekey_at_ms to now"
         );
+    }
+
+    #[test]
+    fn confirm_trust_flips_pending_to_confirmed() {
+        let mut conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Member,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Pending,
+        };
+        conv.confirm_trust();
+        assert_eq!(conv.trust_state, TrustState::Confirmed);
+        // Idempotent: a second call leaves it Confirmed.
+        conv.confirm_trust();
+        assert_eq!(conv.trust_state, TrustState::Confirmed);
     }
 }

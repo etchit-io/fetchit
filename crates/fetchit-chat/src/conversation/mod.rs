@@ -11,5 +11,5 @@ pub use outbound::{build_message_outbox, build_welcome_outbox, OutboundEnvelope}
 pub use registry::ConversationRegistry;
 pub use types::{
     Conversation, Member, MemberDevice, MemberDeviceStatus, MessagePayload, PriorKey, Role,
-    WelcomePayload, DEFAULT_AUTO_REKEY_INTERVAL_MS, PRIOR_KEY_WINDOW_MS,
+    TrustState, WelcomePayload, DEFAULT_AUTO_REKEY_INTERVAL_MS, PRIOR_KEY_WINDOW_MS,
 };

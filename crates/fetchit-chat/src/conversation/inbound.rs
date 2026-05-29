@@ -3,7 +3,7 @@
 
 use super::registry::ConversationRegistry;
 use super::types::{
-    now_ms, Conversation, MessagePayload, PriorKey, WelcomePayload, PRIOR_KEY_WINDOW_MS,
+    now_ms, Conversation, MessagePayload, PriorKey, TrustState, WelcomePayload, PRIOR_KEY_WINDOW_MS,
 };
 use crate::chat_crypto::{
     aead_open, canonical_envelope_bytes, derive_aead_key, kem_decapsulate, message_aad,
@@ -11,16 +11,27 @@ use crate::chat_crypto::{
 };
 use crate::chat_identity::FetchitIdentity;
 use crate::error::ChatError;
+use crate::local_store::write_json_atomic;
+use crate::messages::StoredContactCard;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use fetchit_relay_proto::TransitEnvelope;
+use fetchit_relay_proto::{derive_agent_id, TransitEnvelope};
 
 /// Inbound dispatch result.
 #[derive(Clone, Debug)]
 pub enum InboundDispatch {
-    /// Installed a new conversation (from a welcome).
+    /// Installed a new conversation from a welcome whose sender was
+    /// already on file (Confirmed trust posture).
     Welcomed {
         /// The freshly installed conversation.
+        conversation: Conversation,
+    },
+    /// Installed a new conversation from an unsolicited TOFU welcome.
+    /// The sender's card was auto-installed from the self-attested
+    /// pubkey in the payload. UI should prompt the user to accept the
+    /// contact before the conversation becomes `Confirmed`.
+    WelcomedPending {
+        /// The freshly installed (Pending-trust) conversation.
         conversation: Conversation,
     },
     /// Stale or duplicate welcome — no state change.
@@ -56,12 +67,19 @@ pub enum InboundDispatch {
         epoch: u32,
     },
     /// Envelope dropped without decryption. `kind` is one of:
-    /// `"no-card"` (sender's card isn't on file),
-    /// `"no-pubkey"` (card exists but doesn't carry an ML-DSA pubkey),
+    /// `"no-card"` (sender's card isn't on file — message path only),
+    /// `"no-pubkey"` (card exists but doesn't carry an ML-DSA pubkey —
+    /// message path only),
     /// `"bad-signature"` (signature verification failed),
     /// `"rekey-from-non-member"` (signature was valid but the sender
     /// isn't a current member of the conversation they're trying to
-    /// rekey).
+    /// rekey),
+    /// `"welcome-sender-not-member"` (welcome payload omits the
+    /// envelope's `sender_agent_id` from `members`),
+    /// `"welcome-missing-sender-pubkey"` (welcome's sender device
+    /// record lacks the self-attested ML-DSA pubkey),
+    /// `"welcome-pubkey-agent-mismatch"` (the welcome's claimed sender
+    /// pubkey does not hash to the envelope's `sender_agent_id`).
     Dropped {
         /// Short reason tag.
         kind: String,
@@ -71,16 +89,17 @@ pub enum InboundDispatch {
 }
 
 /// Outcome of the verify prelude: either an early `Dropped` result, or
-/// the sender's hex agent id ready for the main dispatch path to reuse.
+/// a green light that the message-path dispatcher can proceed.
 enum VerifyOutcome {
     Drop(InboundDispatch),
-    Ok { sender_agent_hex: String },
+    Ok,
 }
 
 /// Look up the sender's stored card and verify the envelope's ML-DSA
-/// signature against the agent's public key. Runs BEFORE any KEM decap
-/// or AEAD open so unauthenticated envelopes can't trigger the
-/// key-substitution rekey path or surface fake messages.
+/// signature against the agent's public key. Runs BEFORE the message
+/// path's AEAD open so unauthenticated envelopes can't surface fake
+/// messages. The welcome path runs its own pubkey-bound verification
+/// from the self-attested payload pubkey instead.
 fn verify_sender(
     envelope: &TransitEnvelope,
     registry: &ConversationRegistry,
@@ -116,11 +135,19 @@ fn verify_sender(
             sender: sender_agent_hex,
         }));
     }
-    Ok(VerifyOutcome::Ok { sender_agent_hex })
+    Ok(VerifyOutcome::Ok)
 }
 
 /// Dispatch an inbound envelope: distinguish Welcome vs Message,
 /// decrypt, and surface a typed result.
+///
+/// The Message path requires a `StoredContactCard` for the sender on
+/// disk (the welcome is what installs it). The Welcome path decrypts
+/// first using our own KEM secret key, then extracts the sender's
+/// self-attested ML-DSA pubkey from the payload, binds it to the
+/// envelope's `sender_agent_id` via the `AUTONOMI_PEER_ID_V2`
+/// derivation, and only then verifies the envelope signature — closing
+/// the chicken-and-egg first-contact gap.
 ///
 /// # Errors
 /// Hard errors (e.g. malformed envelope bytes). Soft errors (stale
@@ -136,23 +163,15 @@ pub async fn dispatch_inbound(
     };
     let group_id_hex = hex::encode(group_id_bytes);
 
-    let sender_agent_hex = match verify_sender(&envelope, registry)? {
-        VerifyOutcome::Drop(d) => return Ok(d),
-        VerifyOutcome::Ok { sender_agent_hex } => sender_agent_hex,
-    };
-
     if envelope.kem_ciphertext.is_empty() {
-        dispatch_message(envelope, registry, group_id_bytes, group_id_hex).await
+        match verify_sender(&envelope, registry)? {
+            VerifyOutcome::Drop(d) => Ok(d),
+            VerifyOutcome::Ok => {
+                dispatch_message(envelope, registry, group_id_bytes, group_id_hex).await
+            }
+        }
     } else {
-        dispatch_welcome(
-            envelope,
-            identity,
-            registry,
-            group_id_bytes,
-            group_id_hex,
-            sender_agent_hex,
-        )
-        .await
+        dispatch_welcome(envelope, identity, registry, group_id_bytes, group_id_hex).await
     }
 }
 
@@ -195,16 +214,68 @@ async fn dispatch_message(
     })
 }
 
+/// Successful welcome-path crypto preamble: AEAD opens, pubkey binds,
+/// signature verifies. Carries everything the install/rekey step needs.
+struct WelcomeVerified {
+    payload: WelcomePayload,
+    sender_agent_hex: String,
+    sender_pk_b64: String,
+    sender_kem_pub_b64: String,
+}
+
 async fn dispatch_welcome(
     envelope: TransitEnvelope,
     identity: &FetchitIdentity,
     registry: &ConversationRegistry,
     group_id_bytes: [u8; 32],
     group_id_hex: String,
-    sender_agent_hex: String,
 ) -> Result<InboundDispatch, ChatError> {
+    let verified = match decrypt_and_verify_welcome(&envelope, identity, group_id_bytes)? {
+        Ok(v) => v,
+        Err(d) => return Ok(d),
+    };
+
+    // Determine trust posture and TOFU-install the sender's card.
+    let prior_card_exists = registry.contact_path(&verified.sender_agent_hex).exists();
+    let trust_state = if prior_card_exists {
+        TrustState::Confirmed
+    } else {
+        let card = StoredContactCard {
+            agent_id_hex: verified.sender_agent_hex.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: verified.sender_kem_pub_b64,
+            agent_public_key_b64: Some(verified.sender_pk_b64),
+        };
+        write_json_atomic(&registry.contact_path(&verified.sender_agent_hex), &card)?;
+        TrustState::Pending
+    };
+
+    install_or_rekey_conversation(
+        envelope,
+        verified.payload,
+        verified.sender_agent_hex,
+        registry,
+        group_id_hex,
+        trust_state,
+    )
+    .await
+}
+
+/// Run the welcome-path crypto preamble: KEM-decap, AEAD-open, decode
+/// payload, locate sender device, bind self-attested pubkey to the
+/// envelope's `sender_agent_id`, ML-DSA-verify the envelope signature.
+fn decrypt_and_verify_welcome(
+    envelope: &TransitEnvelope,
+    identity: &FetchitIdentity,
+    group_id_bytes: [u8; 32],
+) -> Result<Result<WelcomeVerified, InboundDispatch>, ChatError> {
+    let sender_agent_hex = hex::encode(envelope.sender_agent_id.as_bytes());
+    let group_id_hex = hex::encode(group_id_bytes);
+
+    // KEM-decap + AEAD-open. We can do this without any prior card on
+    // file because the secret key is OURS.
     let Ok(ss) = kem_decapsulate(identity.kem_secret_key(), &envelope.kem_ciphertext) else {
-        return Ok(InboundDispatch::KemDecapFailed);
+        return Ok(Err(InboundDispatch::KemDecapFailed));
     };
     let aead_key = derive_aead_key(&ss, KDF_INFO_WELCOME);
     if envelope.nonce.len() != 12 {
@@ -214,13 +285,81 @@ async fn dispatch_welcome(
     nonce.copy_from_slice(&envelope.nonce);
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&aead_key, &nonce, &envelope.ciphertext, &aad) else {
-        return Ok(InboundDispatch::AeadOpenFailed {
+        return Ok(Err(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
-        });
+        }));
     };
     let payload: WelcomePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("welcome payload parse: {e}")))?;
+
+    // Locate the sender's device in the payload member list and extract
+    // the self-attested pubkey.
+    let Some(sender_device) = payload
+        .members
+        .iter()
+        .flat_map(|m| m.devices.iter())
+        .find(|d| d.agent_id_hex == sender_agent_hex)
+    else {
+        return Ok(Err(InboundDispatch::Dropped {
+            kind: "welcome-sender-not-member".to_owned(),
+            sender: sender_agent_hex,
+        }));
+    };
+    let Some(sender_pk_b64) = sender_device.agent_public_key_b64.clone() else {
+        return Ok(Err(InboundDispatch::Dropped {
+            kind: "welcome-missing-sender-pubkey".to_owned(),
+            sender: sender_agent_hex,
+        }));
+    };
+    let sender_pk = B64
+        .decode(&sender_pk_b64)
+        .map_err(|e| ChatError::Invalid(format!("welcome sender pk b64: {e}")))?;
+    let sender_kem_pub_b64 = sender_device.kem_public_key_b64.clone();
+
+    // Cryptographic safety net: derive_agent_id(claimed_pk) must match
+    // the envelope's sender_agent_id. The relay's auth flow already
+    // verifies the connection's agent_id matches the bearer-attached
+    // pubkey, so a forged payload pubkey can't lie about the sender's
+    // identity.
+    let derived = derive_agent_id(&sender_pk);
+    if derived != *envelope.sender_agent_id.as_bytes() {
+        return Ok(Err(InboundDispatch::Dropped {
+            kind: "welcome-pubkey-agent-mismatch".to_owned(),
+            sender: sender_agent_hex,
+        }));
+    }
+
+    // Verify the envelope signature against the bound pubkey.
+    let canonical = canonical_envelope_bytes(envelope)?;
+    let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+    sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+    sign_bytes.extend_from_slice(&canonical);
+    if ml_dsa_verify(&sender_pk, &sign_bytes, &envelope.sender_signature).is_err() {
+        return Ok(Err(InboundDispatch::Dropped {
+            kind: "bad-signature".to_owned(),
+            sender: sender_agent_hex,
+        }));
+    }
+
+    Ok(Ok(WelcomeVerified {
+        payload,
+        sender_agent_hex,
+        sender_pk_b64,
+        sender_kem_pub_b64,
+    }))
+}
+
+/// Install the welcome's conversation on first contact, or fold a
+/// higher-epoch welcome into an existing conversation as a rekey.
+async fn install_or_rekey_conversation(
+    envelope: TransitEnvelope,
+    payload: WelcomePayload,
+    sender_agent_hex: String,
+    registry: &ConversationRegistry,
+    group_id_hex: String,
+    trust_state: TrustState,
+) -> Result<InboundDispatch, ChatError> {
     let existing = registry.get(&group_id_hex).await?;
     match existing {
         Some(conv) if envelope.epoch <= conv.current_epoch => {
@@ -267,9 +406,13 @@ async fn dispatch_welcome(
             Ok(InboundDispatch::Rekeyed { conversation: conv })
         }
         None => {
-            let conv = Conversation::from_welcome(payload);
+            let conv = Conversation::from_welcome(payload, trust_state);
             registry.save(&conv).await?;
-            Ok(InboundDispatch::Welcomed { conversation: conv })
+            if trust_state == TrustState::Pending {
+                Ok(InboundDispatch::WelcomedPending { conversation: conv })
+            } else {
+                Ok(InboundDispatch::Welcomed { conversation: conv })
+            }
         }
     }
 }
@@ -315,6 +458,7 @@ mod tests {
             devices: vec![MemberDevice {
                 agent_id_hex: agent_id_hex.to_owned(),
                 kem_public_key_b64: kem_pub_b64.to_owned(),
+                agent_public_key_b64: None,
                 added_at_epoch: 0,
                 status: MemberDeviceStatus::Active,
             }],
@@ -340,19 +484,37 @@ mod tests {
         (id, master, salt)
     }
 
+    /// Derive a fresh ML-DSA signer + identity whose agent-id is the
+    /// pubkey-bound `AUTONOMI_PEER_ID_V2` hash. The welcome path
+    /// requires this binding to verify; the helper keeps every test
+    /// using a realistic identity / signer pair.
+    fn fresh_signer_with_identity(
+        tmp: &Path,
+    ) -> (
+        MlDsaSigner,
+        FetchitIdentity,
+        MasterKey,
+        [u8; ARGON_SALT_LEN],
+        String,
+    ) {
+        let signer = MlDsaSigner::generate().unwrap();
+        let aid_hex = hex::encode(derive_agent_id(&signer.public_key()));
+        let (id, master, salt) = fixture_identity(tmp, &aid_hex);
+        (signer, id, master, salt, aid_hex)
+    }
+
     #[tokio::test]
     async fn welcome_round_trip_between_two_identities() {
         let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
         let tmp_b = tempdir().unwrap();
-        let aid_b = "bb".repeat(32);
-        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
 
         let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
         let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
         let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
-        let alice_signer = MlDsaSigner::generate().unwrap();
 
         let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
             .await
@@ -371,6 +533,7 @@ mod tests {
                 assert_eq!(conversation.group_id_hex, conv.group_id_hex);
                 assert_eq!(conversation.current_key_b64, conv.current_key_b64);
                 assert_eq!(conversation.members.len(), 2);
+                assert_eq!(conversation.trust_state, TrustState::Confirmed);
             }
             other => panic!("expected Welcomed, got {other:?}"),
         }
@@ -379,15 +542,14 @@ mod tests {
     #[tokio::test]
     async fn message_round_trip_after_welcome() {
         let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
         let tmp_b = tempdir().unwrap();
-        let aid_b = "bb".repeat(32);
-        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
         let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
         let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
         let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
-        let alice_signer = MlDsaSigner::generate().unwrap();
 
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
         install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
@@ -469,15 +631,14 @@ mod tests {
     #[tokio::test]
     async fn higher_epoch_welcome_rekeys_existing_conversation() {
         let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
         let tmp_b = tempdir().unwrap();
-        let aid_b = "bb".repeat(32);
-        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
         let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
         let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
         let mut conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
-        let alice_signer = MlDsaSigner::generate().unwrap();
 
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
         install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
@@ -523,15 +684,14 @@ mod tests {
     #[tokio::test]
     async fn duplicate_welcome_returns_welcome_ignored() {
         let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
         let tmp_b = tempdir().unwrap();
-        let aid_b = "bb".repeat(32);
-        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
         let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
         let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
         let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
-        let alice_signer = MlDsaSigner::generate().unwrap();
 
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
         install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
@@ -556,27 +716,18 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_rejects_envelope_with_no_card() {
-        let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        // Welcome auto-installs cards on first contact, so this test
+        // exercises the MESSAGE path (the only path where a missing
+        // card is a hard drop).
         let tmp_b = tempdir().unwrap();
         let aid_b = "bb".repeat(32);
         let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
-        let alice_signer = MlDsaSigner::generate().unwrap();
-        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
-        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
-        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
-
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
-        // Intentionally NO card saved for Alice on Bob's side.
+        // Intentionally NO card saved for the sender.
         let registry_b =
             ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
-        let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
-            .await
-            .unwrap();
-        let result = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
-            .await
-            .unwrap();
+        let env = synthetic_message_envelope([0xaa; 32], [0xee; 32]);
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
         assert!(
             matches!(result, InboundDispatch::Dropped { ref kind, .. } if kind == "no-card"),
             "expected Dropped(no-card), got {result:?}",
@@ -585,49 +736,61 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_rejects_envelope_with_no_pubkey_card() {
-        let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        // Same as above: the no-pubkey case is also message-path-only.
         let tmp_b = tempdir().unwrap();
         let aid_b = "bb".repeat(32);
         let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
-        let alice_signer = MlDsaSigner::generate().unwrap();
-        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
-        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
-        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
-
-        let alice_card_no_pk = StoredContactCard {
-            agent_id_hex: aid_a.clone(),
-            display_name: "Alice".to_owned(),
-            kem_public_key_b64: B64.encode(alice_id.kem_public_key()),
+        let sender_hex = hex::encode([0xaa; 32]);
+        let no_pk_card = StoredContactCard {
+            agent_id_hex: sender_hex,
+            display_name: "Sender".to_owned(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
         };
-        alice_card_no_pk.save(&layout_b).unwrap();
-
+        no_pk_card.save(&layout_b).unwrap();
         let registry_b =
             ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
-        let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
-            .await
-            .unwrap();
-        let result = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
-            .await
-            .unwrap();
+        let env = synthetic_message_envelope([0xaa; 32], [0xee; 32]);
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
         assert!(
             matches!(result, InboundDispatch::Dropped { ref kind, .. } if kind == "no-pubkey"),
             "expected Dropped(no-pubkey), got {result:?}",
         );
     }
 
+    /// Build a synthetic message-shaped envelope (no KEM ciphertext) with
+    /// the supplied sender and group agent ids. Used by drop-path tests
+    /// that don't actually need to decrypt anything — the verify prelude
+    /// fires before any AEAD work.
+    fn synthetic_message_envelope(
+        sender_agent_id: [u8; 32],
+        group_id: [u8; 32],
+    ) -> TransitEnvelope {
+        TransitEnvelope {
+            version: 2,
+            kind: EnvelopeKind::GroupChat,
+            group_id: Some(GroupId::from_bytes(group_id)),
+            tenant_id: None,
+            sender_agent_id: AgentId::from_bytes(sender_agent_id),
+            sender_machine_id: MachineId::from_bytes([0; 32]),
+            timestamp_ms: 1,
+            epoch: 0,
+            ciphertext: vec![0u8; 16],
+            nonce: vec![0u8; 12],
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_rejects_envelope_with_bad_signature() {
         let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
         let tmp_b = tempdir().unwrap();
-        let aid_b = "bb".repeat(32);
-        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
-        let alice_signer = MlDsaSigner::generate().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
         install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
 
@@ -659,16 +822,14 @@ mod tests {
         // to rekey Bob's conversation. Even with a valid signature the
         // dispatch must drop it.
         let tmp_a = tempdir().unwrap();
-        let aid_a = "aa".repeat(32);
-        let (alice_id, _master_a, _salt_a) = fixture_identity(tmp_a.path(), &aid_a);
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
         let tmp_b = tempdir().unwrap();
-        let aid_b = "bb".repeat(32);
-        let (bob_id, master_b, salt_b) = fixture_identity(tmp_b.path(), &aid_b);
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
         let tmp_c = tempdir().unwrap();
-        let aid_c = "cc".repeat(32);
-        let (carol_id, _master_c, _salt_c) = fixture_identity(tmp_c.path(), &aid_c);
-        let alice_signer = MlDsaSigner::generate().unwrap();
-        let carol_signer = MlDsaSigner::generate().unwrap();
+        let (carol_signer, carol_id, _master_c, _salt_c, aid_c) =
+            fresh_signer_with_identity(tmp_c.path());
 
         let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
         let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
@@ -712,5 +873,219 @@ mod tests {
             ),
             "expected Dropped(rekey-from-non-member), got {result:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn welcome_from_unknown_sender_installs_pending_conversation() {
+        // First-contact TOFU: Bob has NO card on file for Alice, yet
+        // her welcome decrypts, the self-attested pubkey binds to her
+        // sender_agent_id, the signature verifies — and the dispatch
+        // auto-installs both the card and a Pending conversation.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        // No card pre-installed for Alice on Bob's side.
+
+        let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let result = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        match result {
+            InboundDispatch::WelcomedPending { conversation } => {
+                assert_eq!(conversation.group_id_hex, conv.group_id_hex);
+                assert_eq!(conversation.trust_state, TrustState::Pending);
+            }
+            other => panic!("expected WelcomedPending, got {other:?}"),
+        }
+
+        // Card was auto-installed.
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let stored = StoredContactCard::load(&layout_b, &aid_a)
+            .unwrap()
+            .expect("auto-install should have persisted Alice's card");
+        assert_eq!(
+            stored.agent_public_key_b64.as_deref(),
+            Some(B64.encode(alice_signer.public_key())).as_deref(),
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_from_known_sender_returns_welcomed_confirmed() {
+        // Returning trusted contact: Alice's card already on file from
+        // an out-of-band QR scan. The welcome should install the
+        // conversation as Confirmed and surface as Welcomed (not the
+        // Pending variant).
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+
+        let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let result = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        match result {
+            InboundDispatch::Welcomed { conversation } => {
+                assert_eq!(conversation.trust_state, TrustState::Confirmed);
+            }
+            other => panic!("expected Welcomed (Confirmed), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn welcome_pubkey_agent_id_mismatch_drops() {
+        // Security: even if an attacker controls the welcome payload,
+        // they cannot lie about the sender's pubkey because the
+        // AUTONOMI_PEER_ID_V2 derivation deterministically maps it back
+        // to the relay-authenticated sender_agent_id. Splicing a
+        // mismatched pubkey into the payload must drop.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        // Wrong pubkey: a different ML-DSA signer whose pubkey does NOT
+        // hash to alice's sender_agent_id.
+        let wrong_signer = MlDsaSigner::generate().unwrap();
+
+        let mut alice_member_with_wrong_pk =
+            local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        alice_member_with_wrong_pk.devices[0].agent_public_key_b64 =
+            Some(B64.encode(wrong_signer.public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let payload = WelcomePayload {
+            group_id_hex: "0".repeat(64),
+            current_key_b64: B64.encode([7u8; 32]),
+            epoch: 0,
+            members: vec![alice_member_with_wrong_pk, bob_member],
+            name: None,
+        };
+        let env =
+            seal_welcome_envelope(&payload, &aid_a, bob_id.kem_public_key(), &alice_signer).await;
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-pubkey-agent-mismatch"
+            ),
+            "expected Dropped(welcome-pubkey-agent-mismatch), got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_missing_sender_member_drops() {
+        // If the welcome payload omits the sender's agent_id from its
+        // member list there's nothing to bind the pubkey to. Drop.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, _alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        // Payload member list does NOT include Alice (the sender).
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let payload = WelcomePayload {
+            group_id_hex: "0".repeat(64),
+            current_key_b64: B64.encode([7u8; 32]),
+            epoch: 0,
+            members: vec![bob_member],
+            name: None,
+        };
+        let env =
+            seal_welcome_envelope(&payload, &aid_a, bob_id.kem_public_key(), &alice_signer).await;
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-sender-not-member"
+            ),
+            "expected Dropped(welcome-sender-not-member), got {result:?}",
+        );
+    }
+
+    /// Hand-roll a welcome envelope around a caller-supplied
+    /// `WelcomePayload`, signing with the supplied ML-DSA signer.
+    /// Used by drop-path tests that need to manipulate the payload
+    /// (e.g. splice a wrong pubkey, omit the sender member).
+    async fn seal_welcome_envelope(
+        payload: &WelcomePayload,
+        sender_aid_hex: &str,
+        recipient_kem_pub: &[u8],
+        signer: &MlDsaSigner,
+    ) -> TransitEnvelope {
+        use crate::chat_crypto::{
+            aead_seal, derive_aead_key, kem_encapsulate, message_aad, random_nonce,
+            KDF_INFO_WELCOME,
+        };
+        let payload_bytes = serde_json::to_vec(payload).unwrap();
+        let group_id_bytes: [u8; 32] = hex::decode(&payload.group_id_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let (kem_ct, ss) = kem_encapsulate(recipient_kem_pub).unwrap();
+        let aead_key = derive_aead_key(&ss, KDF_INFO_WELCOME);
+        let nonce = random_nonce(&mut OsRng);
+        let aad = message_aad(&group_id_bytes, payload.epoch);
+        let ciphertext = aead_seal(&aead_key, &nonce, &payload_bytes, &aad).unwrap();
+        let mut sender_bytes = [0u8; 32];
+        hex::decode_to_slice(sender_aid_hex, &mut sender_bytes).unwrap();
+        let mut env = TransitEnvelope {
+            version: 2,
+            kind: EnvelopeKind::GroupChat,
+            group_id: Some(GroupId::from_bytes(group_id_bytes)),
+            tenant_id: None,
+            sender_agent_id: AgentId::from_bytes(sender_bytes),
+            sender_machine_id: MachineId::from_bytes([0; 32]),
+            timestamp_ms: 1,
+            epoch: payload.epoch,
+            ciphertext,
+            nonce: nonce.to_vec(),
+            kem_ciphertext: kem_ct,
+            sender_signature: Vec::new(),
+        };
+        let canonical = crate::chat_crypto::canonical_envelope_bytes(&env).unwrap();
+        let mut sign_bytes =
+            Vec::with_capacity(crate::chat_crypto::SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(crate::chat_crypto::SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        env.sender_signature = signer.sign(&sign_bytes).await.unwrap();
+        env
     }
 }
