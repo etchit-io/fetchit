@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Ping, Pong,
-    Ready, SendFrame, ServerFrame, Throttle, ThrottleReason,
+    Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, WatchPresence,
 };
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::Deserialize;
@@ -99,9 +99,11 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         &auth,
         &effective_caps,
         &tx,
+        session_id,
     )
     .await;
 
+    state.sessions.drop_all_watches(session_id);
     state.sessions.unregister(&auth.agent_id, session_id);
     state.metrics.connection_closed();
     writer.abort();
@@ -138,6 +140,7 @@ async fn run_io_loop(
     auth: &AuthTokenState,
     effective_caps: &EffectiveCapabilities,
     tx: &mpsc::UnboundedSender<ServerFrame>,
+    session_id: crate::session::SessionId,
 ) -> LoopExit {
     loop {
         tokio::select! {
@@ -151,7 +154,7 @@ async fn run_io_loop(
                 let Ok(frame) = from_bytes::<ClientFrame>(&bytes) else {
                     continue;
                 };
-                if !handle_client_frame(state, auth, effective_caps, tx, frame) {
+                if !handle_client_frame(state, auth, effective_caps, tx, session_id, frame) {
                     return LoopExit::ProtocolEnd;
                 }
             }
@@ -179,6 +182,7 @@ fn handle_client_frame(
     auth: &AuthTokenState,
     caps: &EffectiveCapabilities,
     self_tx: &mpsc::UnboundedSender<ServerFrame>,
+    session_id: crate::session::SessionId,
     frame: ClientFrame,
 ) -> bool {
     match frame {
@@ -187,6 +191,15 @@ fn handle_client_frame(
             self_tx.send(ServerFrame::Pong(Pong { nonce })).is_ok()
         }
         ClientFrame::Bye(_) => false,
+        ClientFrame::WatchPresence(WatchPresence { add, remove }) => {
+            if !add.is_empty() {
+                state.sessions.add_watches(session_id, self_tx, &add);
+            }
+            if !remove.is_empty() {
+                state.sessions.remove_watches(session_id, &remove);
+            }
+            true
+        }
         ClientFrame::Send(SendFrame {
             to,
             envelope,

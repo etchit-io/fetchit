@@ -1,12 +1,17 @@
 //! End-to-end: spin up a server, run two clients through challenge / verify /
 //! WebSocket, send a message between them, and assert the recipient gets it.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::similar_names
+)]
 
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
-    ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, Ready, Region,
-    SendFrame, ServerFrame, TenantId, TransitEnvelope,
+    ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, PresenceUpdate,
+    Ready, Region, SendFrame, ServerFrame, TenantId, TransitEnvelope, WatchPresence,
 };
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
 use futures_util::{SinkExt, StreamExt};
@@ -398,4 +403,67 @@ async fn connection_count(addr: SocketAddr) -> u64 {
         .await
         .unwrap();
     body["connections"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn watch_presence_echoes_offline_then_online_then_offline() {
+    let addr = start_test_server().await;
+
+    let watcher_pk = b"watcher-pubkey-bytes";
+    let watched_pk = b"watched-pubkey-bytes";
+    let watched_id =
+        AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(watched_pk));
+
+    let watcher_tok = obtain_bearer(addr, watcher_pk).await;
+    let mut watcher = connect_ws(addr, &watcher_tok).await;
+    send_hello(&mut watcher).await;
+    let _ = expect_ready(&mut watcher).await;
+
+    let watch = ClientFrame::WatchPresence(WatchPresence {
+        add: vec![watched_id],
+        remove: vec![],
+    });
+    watcher
+        .send(Message::Binary(to_bytes(&watch).unwrap()))
+        .await
+        .unwrap();
+
+    let initial = next_presence(&mut watcher).await;
+    assert_eq!(initial.agent_id, watched_id);
+    assert!(!initial.online, "watched agent starts offline");
+
+    let watched_tok = obtain_bearer(addr, watched_pk).await;
+    let mut watched = connect_ws(addr, &watched_tok).await;
+    send_hello(&mut watched).await;
+    let _ = expect_ready(&mut watched).await;
+
+    let online = next_presence(&mut watcher).await;
+    assert_eq!(online.agent_id, watched_id);
+    assert!(online.online, "watched agent transitions online");
+
+    drop(watched);
+
+    let offline = next_presence(&mut watcher).await;
+    assert_eq!(offline.agent_id, watched_id);
+    assert!(!offline.online, "watched agent transitions offline");
+}
+
+async fn next_presence(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> PresenceUpdate {
+    let deadline = Duration::from_secs(2);
+    loop {
+        let msg = tokio::time::timeout(deadline, ws.next())
+            .await
+            .expect("presence update timed out")
+            .unwrap()
+            .unwrap();
+        if let Message::Binary(b) = msg {
+            if let ServerFrame::PresenceUpdate(p) = from_bytes::<ServerFrame>(&b).unwrap() {
+                return p;
+            }
+        }
+    }
 }
