@@ -132,24 +132,33 @@ async fn live_encrypted_dm_round_trips_via_alice() {
     // Send the encrypted DM.
     let body = format!("encrypted v2 hello @ {}", now_ms());
     eprintln!("[live] sending: {body}");
-    client
+    let outbound_message_id = client
         .messages()
         .send(&alice_id, &body, "Josh")
         .await
         .expect("send dm");
+    eprintln!("[live] outbound message_id={outbound_message_id:?}");
 
-    // Wait for Alice's echo on the inbound channel.
+    // Wait for both Alice's receipt for Josh's message AND her echo
+    // (a fresh Message addressed back to Josh).
     let mut inbound = client
         .take_transport_inbound("relay")
         .expect("take_transport_inbound");
     let expected_echo = format!("[echo] {body}");
+    let mut seen_receipt = false;
+    let mut seen_echo = false;
 
     let deadline = tokio::time::sleep(Duration::from_secs(8));
     tokio::pin!(deadline);
 
     loop {
+        if seen_receipt && seen_echo {
+            return;
+        }
         tokio::select! {
-            () = &mut deadline => panic!("alice should echo within 8s"),
+            () = &mut deadline => panic!(
+                "alice should echo within 8s (seen_receipt={seen_receipt}, seen_echo={seen_echo})"
+            ),
             env = inbound.recv() => {
                 let env = env.expect("inbound channel closed");
                 let Some(transit) = env.transit else { continue; };
@@ -165,13 +174,21 @@ async fn live_encrypted_dm_round_trips_via_alice() {
                 match result {
                     InboundDispatch::Message { payload, .. } => {
                         assert_eq!(payload.body, expected_echo);
-                        eprintln!("[live] received: {} OK", payload.body);
-                        return;
+                        eprintln!("[live] received echo: {} OK", payload.body);
+                        seen_echo = true;
+                    }
+                    InboundDispatch::Receipt { message_id, sender_agent_id_hex, .. } => {
+                        assert_eq!(sender_agent_id_hex, alice_id.0);
+                        if let Some(ref sent_id) = outbound_message_id {
+                            assert_eq!(&message_id, sent_id);
+                        }
+                        eprintln!("[live] received receipt for message_id={message_id} OK");
+                        seen_receipt = true;
                     }
                     InboundDispatch::Welcomed { .. } | InboundDispatch::Rekeyed { .. } => {
-                        eprintln!("[live] welcomed/rekeyed; waiting for message");
+                        eprintln!("[live] welcomed/rekeyed; waiting for message+receipt");
                     }
-                    other => panic!("expected Message, got {other:?}"),
+                    other => panic!("unexpected dispatch result: {other:?}"),
                 }
             }
         }
