@@ -72,6 +72,11 @@ export class ChatStore {
   private myIdentity: AgentIdentity | null = null;
   private contacts = new Map<AgentId, Contact>();
   private presence = new Map<AgentId, PresenceEntry>();
+  /// Authoritative relay-source presence. Wins over `presence` (which
+  /// decays via STALE_PRESENCE_MS) because the relay only emits a
+  /// PresenceUpdate on actual register / unregister — between events
+  /// the last value remains true.
+  private relayPresence = new Map<AgentId, boolean>();
   private conversations = new Map<string, Conversation>();
   private activeKey: string | null = null;
   private panelVisible = false;
@@ -162,20 +167,18 @@ export class ChatStore {
   }
 
   isOnline(id: AgentId): boolean {
+    const relay = this.relayPresence.get(id);
+    if (relay !== undefined) return relay;
     const entry = this.presence.get(id);
     if (!entry || entry.state !== "online") return false;
     return Date.now() - entry.lastSeenMs < STALE_PRESENCE_MS;
   }
 
-  /// Authoritative relay-source presence flip. Unlike `touchPresence`,
-  /// this does not advance the lastSeen clock for online → online
-  /// transitions; the relay's `PresenceUpdate` is the ground truth.
+  /// Authoritative relay-source presence flip. The relay only emits a
+  /// PresenceUpdate on actual register / unregister, so the last value
+  /// stays valid until the next transition — no staleness decay.
   setRelayPresence(id: AgentId, online: boolean): void {
-    const lastSeenMs = Date.now();
-    this.presence.set(id, {
-      state: online ? "online" : "offline",
-      lastSeenMs,
-    });
+    this.relayPresence.set(id, online);
     this.emit();
   }
 
