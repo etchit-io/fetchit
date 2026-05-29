@@ -166,17 +166,38 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
         let registry = client.registry_arc()?;
         match dispatch_inbound(transit, identity.as_ref(), registry.as_ref()).await {
             Ok(InboundDispatch::Message {
+                group_id_hex,
                 sender_agent_id_hex,
                 payload,
-                ..
             }) => {
-                let Ok(from) = AgentId::parse(sender_agent_id_hex) else {
+                let Ok(from) = AgentId::parse(sender_agent_id_hex.clone()) else {
                     return None;
                 };
+                if let Some(message_id) = payload.message_id.as_deref() {
+                    let received_at_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    if let Err(e) = client
+                        .messages()
+                        .send_receipt(
+                            &group_id_hex,
+                            message_id,
+                            &sender_agent_id_hex,
+                            received_at_ms,
+                        )
+                        .await
+                    {
+                        eprintln!("[peer] receipt send error: {e}");
+                    }
+                }
                 Some(PeerInbound {
                     from,
                     body: payload.body,
                 })
+            }
+            Ok(InboundDispatch::Receipt { message_id, .. }) => {
+                eprintln!("[peer] got receipt for message_id={message_id}");
+                None
             }
             Ok(other) => {
                 eprintln!("[peer] dispatch returned non-message: {other:?}");

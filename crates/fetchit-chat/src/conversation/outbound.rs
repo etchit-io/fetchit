@@ -116,12 +116,18 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
 
 /// Build outbound Message envelopes for a chat message in `conv`.
 ///
+/// `message_id` is the logical id assigned to *this* send — every
+/// fanout envelope carries it, so a recipient's `DeliveryReceipt`
+/// always echoes the same id regardless of which device decoded the
+/// envelope.
+///
 /// # Errors
 /// AEAD or signing errors.
 pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     conv: &Conversation,
     body: &str,
     sender_name: &str,
+    message_id: &str,
     identity: &FetchitIdentity,
     local_machine_id: [u8; 32],
     signer: &S,
@@ -131,6 +137,7 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
         sender_name: Some(sender_name.to_owned()),
         body: body.to_owned(),
         ts_ms: now,
+        message_id: Some(message_id.to_owned()),
     };
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|e| ChatError::Invalid(format!("message serialize: {e}")))?;

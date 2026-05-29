@@ -13,8 +13,9 @@
 use crate::card::{extended_card_from_uri, verify_card_extension};
 use crate::chat_identity::FetchitIdentity;
 use crate::conversation::{
-    build_message_outbox, build_welcome_outbox, Conversation, ConversationRegistry, Member,
-    MemberDevice, MemberDeviceStatus, OutboundEnvelope as ChatOutbound,
+    build_message_outbox, build_receipt_outbox, build_welcome_outbox, Conversation,
+    ConversationRegistry, Member, MemberDevice, MemberDeviceStatus,
+    OutboundEnvelope as ChatOutbound,
 };
 use crate::error::{ChatError, Result};
 use crate::http::Http;
@@ -26,6 +27,8 @@ use crate::transport::{
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use fetchit_relay_client::Signer;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -247,16 +250,19 @@ impl<'a> Endpoint<'a> {
             }
         };
 
+        let message_id = random_message_id();
         let outbox = build_message_outbox(
             &conv,
             body,
             sender_name,
+            &message_id,
             identity,
             self.local_machine_id,
             signer.as_ref(),
         )
         .await?;
-        self.dispatch_outbox(outbox).await
+        self.dispatch_outbox(outbox).await?;
+        Ok(Some(message_id))
     }
 
     async fn bootstrap_conversation(
@@ -311,6 +317,51 @@ impl<'a> Endpoint<'a> {
         Ok(conv)
     }
 
+    /// Emit a `DeliveryReceipt` envelope for a previously-decoded
+    /// message. The receipt rides the conversation's current key,
+    /// addressed to the original sender's agent id.
+    ///
+    /// # Errors
+    /// `ChatError::NoTransportAvailable` when the router has no
+    /// reachable transport, `ChatError::Invalid` when the chat state
+    /// is missing or the conversation isn't in the registry.
+    pub async fn send_receipt(
+        &self,
+        group_id_hex: &str,
+        message_id: &str,
+        recipient_agent_id_hex: &str,
+        received_at_ms: u64,
+    ) -> Result<()> {
+        if self.router.is_empty() {
+            return Err(ChatError::NoTransportAvailable);
+        }
+        let identity = self
+            .identity
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let registry = self
+            .registry
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let signer = self
+            .signer
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        let conv = registry.get(group_id_hex).await?.ok_or_else(|| {
+            ChatError::Invalid(format!("no conversation for group_id {group_id_hex}"))
+        })?;
+        let outbox = build_receipt_outbox(
+            &conv,
+            message_id,
+            received_at_ms,
+            recipient_agent_id_hex,
+            identity,
+            self.local_machine_id,
+            signer.as_ref(),
+        )
+        .await?;
+        let _ = self.dispatch_outbox(outbox).await?;
+        Ok(())
+    }
+
     async fn dispatch_outbox(&self, outbox: Vec<ChatOutbound>) -> Result<Option<String>> {
         let mut last_id = None;
         for ob in outbox {
@@ -360,6 +411,12 @@ impl<'a> Endpoint<'a> {
             .await?;
         Ok(())
     }
+}
+
+fn random_message_id() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 /// Decode an [`InboundEnvelope`] (raw bytes from a transport) into a

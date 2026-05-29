@@ -706,6 +706,7 @@ mod tests {
             &conv,
             "hello bob",
             "Alice",
+            "msg-id-1",
             &alice_id,
             [0u8; 32],
             &alice_signer,

@@ -312,6 +312,13 @@ pub struct MessagePayload {
     pub body: String,
     /// Sender-asserted timestamp (mirrors envelope `timestamp_ms`).
     pub ts_ms: u64,
+    /// Logical message identifier (hex). Same value on every fanout
+    /// envelope of one logical send, so a receiver always echoes the
+    /// same `message_id` in its `DeliveryReceipt`. Older payloads may
+    /// be missing this field — fall back to `None` and skip the
+    /// receipt path in that case.
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 /// Inner payload of a `DeliveryReceipt` envelope.
