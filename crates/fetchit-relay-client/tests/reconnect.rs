@@ -13,7 +13,12 @@
 //! demonstrates the disconnect → backoff → reconnect path end-to-end
 //! by forcibly closing the WS sink mid-session.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::similar_names
+)]
 
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -388,6 +393,89 @@ async fn send_during_disconnect_returns_disconnected_error() {
             Err(ClientError::Disconnected(_) | ClientError::InboxClosed)
         ),
         "expected Disconnected (or InboxClosed if racing shutdown), got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn watch_presence_echoes_initial_state_then_transitions() {
+    let (addr, _server) = spawn_server_on(None).await;
+    let base = Url::parse(&format!("http://{addr}/")).unwrap();
+
+    let watcher_pk = b"presence-watcher-key";
+    let watcher_signer = Arc::new(StaticKeySigner::from_public_key(watcher_pk.to_vec()));
+    let watcher = Client::connect(ClientConfig::new(base.clone()), watcher_signer)
+        .await
+        .unwrap();
+
+    let watched_pk = b"presence-watched-key";
+    let watched_id =
+        AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(watched_pk));
+
+    watcher.watch_presence(&[watched_id]).unwrap();
+
+    let initial = tokio::time::timeout(Duration::from_secs(2), watcher.next_presence())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.agent_id, watched_id);
+    assert!(!initial.online);
+
+    let watched_signer = Arc::new(StaticKeySigner::from_public_key(watched_pk.to_vec()));
+    let watched_client = Client::connect(ClientConfig::new(base), watched_signer)
+        .await
+        .unwrap();
+
+    let online = tokio::time::timeout(Duration::from_secs(2), watcher.next_presence())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(online.agent_id, watched_id);
+    assert!(online.online);
+
+    watched_client.shutdown().await;
+
+    let offline = tokio::time::timeout(Duration::from_secs(2), watcher.next_presence())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offline.agent_id, watched_id);
+    assert!(!offline.online);
+}
+
+#[tokio::test]
+async fn unwatch_presence_stops_further_updates() {
+    let (addr, _server) = spawn_server_on(None).await;
+    let base = Url::parse(&format!("http://{addr}/")).unwrap();
+
+    let watcher_pk = b"unwatch-watcher-key";
+    let watcher_signer = Arc::new(StaticKeySigner::from_public_key(watcher_pk.to_vec()));
+    let watcher = Client::connect(ClientConfig::new(base.clone()), watcher_signer)
+        .await
+        .unwrap();
+
+    let watched_pk = b"unwatch-watched-key";
+    let watched_id =
+        AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(watched_pk));
+
+    watcher.watch_presence(&[watched_id]).unwrap();
+    let _initial = tokio::time::timeout(Duration::from_secs(2), watcher.next_presence())
+        .await
+        .unwrap()
+        .unwrap();
+
+    watcher.unwatch_presence(&[watched_id]).unwrap();
+    // Give the relay a moment to apply the unwatch.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let watched_signer = Arc::new(StaticKeySigner::from_public_key(watched_pk.to_vec()));
+    let _watched_client = Client::connect(ClientConfig::new(base), watched_signer)
+        .await
+        .unwrap();
+
+    let res = tokio::time::timeout(Duration::from_millis(300), watcher.next_presence()).await;
+    assert!(
+        res.is_err(),
+        "expected no further presence updates after unwatch, got {res:?}"
     );
 }
 

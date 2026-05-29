@@ -18,10 +18,12 @@ use crate::signer::Signer;
 use fetchit_relay_proto::{
     auth_signing_bytes, from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest,
     AuthVerifyResponse, CapabilityToken, ClientFrame, DedupeKey, Deliver, EffectiveCapabilities,
-    Hello, Ping, Pong, Ready, SendFrame, ServerFrame, TenantId, Throttle, TransitEnvelope,
+    Hello, Ping, Pong, PresenceUpdate, Ready, SendFrame, ServerFrame, TenantId, Throttle,
+    TransitEnvelope, WatchPresence,
 };
 use futures_util::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
 use rand::RngCore;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -122,6 +124,15 @@ enum SupervisorCmd {
         dedupe_key: DedupeKey,
         reply: oneshot::Sender<Result<Receipt, ClientError>>,
     },
+    /// Mutate the local watch set and forward the delta to the relay.
+    ///
+    /// The supervisor owns the *authoritative* watch set so it can
+    /// resend it on reconnect — the relay clears its per-connection
+    /// watchers when the WS closes.
+    WatchPresence {
+        add: Vec<AgentId>,
+        remove: Vec<AgentId>,
+    },
     /// Internal signal raised by the reader / keepalive tasks when the
     /// WS for `gen` died. Carries the reason for diagnostics.
     Disconnected {
@@ -167,6 +178,7 @@ pub struct Client {
     pub effective_capabilities: EffectiveCapabilities,
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
     inbox: Mutex<mpsc::UnboundedReceiver<Deliver>>,
+    presence: Mutex<mpsc::UnboundedReceiver<PresenceUpdate>>,
     state_rx: watch::Receiver<ConnState>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
 }
@@ -195,6 +207,7 @@ impl Client {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        let (presence_tx, presence_rx) = mpsc::unbounded_channel();
         let effective_capabilities = initial.effective_capabilities.clone();
         let (state_tx, state_rx) = watch::channel(ConnState::Connected {
             effective_capabilities: effective_capabilities.clone(),
@@ -204,6 +217,7 @@ impl Client {
             config,
             signer,
             inbox_tx,
+            presence_tx,
             state_tx,
             cmd_tx: cmd_tx.clone(),
         };
@@ -213,6 +227,7 @@ impl Client {
             effective_capabilities,
             cmd_tx,
             inbox: Mutex::new(inbox_rx),
+            presence: Mutex::new(presence_rx),
             state_rx,
             supervisor: Mutex::new(Some(join)),
         })
@@ -262,6 +277,58 @@ impl Client {
         self.inbox.lock().await.recv().await
     }
 
+    /// Subscribe to presence transitions for `agents`.
+    ///
+    /// The relay immediately echoes each agent's current online state
+    /// over the presence channel; subsequent transitions stream through
+    /// the same channel as long as the watch is active.
+    ///
+    /// The watch set is owned by the client supervisor and re-sent on
+    /// every reconnect, so callers don't have to re-watch after the WS
+    /// drops.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when the supervisor has
+    /// shut down.
+    pub fn watch_presence(&self, agents: &[AgentId]) -> Result<(), ClientError> {
+        if agents.is_empty() {
+            return Ok(());
+        }
+        self.cmd_tx
+            .send(SupervisorCmd::WatchPresence {
+                add: agents.to_vec(),
+                remove: Vec::new(),
+            })
+            .map_err(|_| ClientError::InboxClosed)
+    }
+
+    /// Drop the supervisor's interest in `agents`. Returns `Ok` even
+    /// when `agents` are not currently in the watch set (the relay
+    /// silently ignores stale removes).
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when the supervisor has
+    /// shut down.
+    pub fn unwatch_presence(&self, agents: &[AgentId]) -> Result<(), ClientError> {
+        if agents.is_empty() {
+            return Ok(());
+        }
+        self.cmd_tx
+            .send(SupervisorCmd::WatchPresence {
+                add: Vec::new(),
+                remove: agents.to_vec(),
+            })
+            .map_err(|_| ClientError::InboxClosed)
+    }
+
+    /// Receive the next presence transition pushed by the relay, if any.
+    ///
+    /// Mirrors [`Self::next_delivery`]: the channel is owned by the
+    /// client handle and survives reconnects.
+    pub async fn next_presence(&self) -> Option<PresenceUpdate> {
+        self.presence.lock().await.recv().await
+    }
+
     /// Borrow a [`watch::Receiver`] reporting the supervisor's current
     /// [`ConnState`].
     #[must_use]
@@ -304,6 +371,7 @@ struct Supervisor {
     config: ClientConfig,
     signer: Arc<dyn Signer + Send + Sync>,
     inbox_tx: mpsc::UnboundedSender<Deliver>,
+    presence_tx: mpsc::UnboundedSender<PresenceUpdate>,
     state_tx: watch::Sender<ConnState>,
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
 }
@@ -311,7 +379,8 @@ struct Supervisor {
 impl Supervisor {
     async fn run(self, initial: OpenSession, mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCmd>) {
         let mut next_gen: ConnGen = 1;
-        let mut inner = Some(self.install(initial, next_gen));
+        let mut watch_set: HashSet<AgentId> = HashSet::new();
+        let mut inner = Some(self.install(initial, next_gen, &watch_set).await);
         next_gen += 1;
         let mut backoff = INITIAL_BACKOFF;
 
@@ -334,6 +403,17 @@ impl Supervisor {
                     };
                     let _ = reply.send(result);
                 }
+                SupervisorCmd::WatchPresence { add, remove } => {
+                    for a in &add {
+                        watch_set.insert(*a);
+                    }
+                    for a in &remove {
+                        watch_set.remove(a);
+                    }
+                    if let Some(i) = inner.as_ref() {
+                        let _ = send_watch_frame(i, add, remove).await;
+                    }
+                }
                 SupervisorCmd::Disconnected { gen, reason } => {
                     // Ignore signals from already-torn-down connections.
                     let Some(current) = inner.as_ref() else {
@@ -347,9 +427,12 @@ impl Supervisor {
                         reason: reason.clone(),
                         retry_at: Some(Instant::now() + backoff),
                     });
-                    match self.reconnect(&mut cmd_rx, &mut backoff).await {
+                    match self
+                        .reconnect(&mut cmd_rx, &mut backoff, &mut watch_set)
+                        .await
+                    {
                         ReconnectOutcome::Connected(session) => {
-                            inner = Some(self.install(session, next_gen));
+                            inner = Some(self.install(session, next_gen, &watch_set).await);
                             next_gen += 1;
                             backoff = INITIAL_BACKOFF;
                         }
@@ -360,7 +443,12 @@ impl Supervisor {
         }
     }
 
-    fn install(&self, session: OpenSession, gen: ConnGen) -> Inner {
+    async fn install(
+        &self,
+        session: OpenSession,
+        gen: ConnGen,
+        watch_set: &HashSet<AgentId>,
+    ) -> Inner {
         let OpenSession {
             sender,
             receiver,
@@ -373,6 +461,7 @@ impl Supervisor {
             receiver,
             outbox.clone(),
             self.inbox_tx.clone(),
+            self.presence_tx.clone(),
             self.cmd_tx.clone(),
         );
         let keepalive = self.config.keepalive.map(|i| {
@@ -388,19 +477,24 @@ impl Supervisor {
         let _ = self.state_tx.send(ConnState::Connected {
             effective_capabilities,
         });
-        Inner {
+        let inner = Inner {
             gen,
             sender,
             outbox,
             reader,
             keepalive,
+        };
+        if !watch_set.is_empty() {
+            let _ = send_watch_frame(&inner, watch_set.iter().copied().collect(), Vec::new()).await;
         }
+        inner
     }
 
     async fn reconnect(
         &self,
         cmd_rx: &mut mpsc::UnboundedReceiver<SupervisorCmd>,
         backoff: &mut Duration,
+        watch_set: &mut HashSet<AgentId>,
     ) -> ReconnectOutcome {
         loop {
             // Wait for the backoff, but also drain commands so that
@@ -417,6 +511,14 @@ impl Supervisor {
                             let _ = reply.send(Err(ClientError::Disconnected(
                                 "client is reconnecting".into(),
                             )));
+                        }
+                        Some(SupervisorCmd::WatchPresence { add, remove }) => {
+                            // No live connection to forward to, but the
+                            // watch_set is the supervisor's source of truth
+                            // — install() will rehydrate from it once the
+                            // reconnect completes.
+                            for a in &add { watch_set.insert(*a); }
+                            for a in &remove { watch_set.remove(a); }
                         }
                         // Spurious Disconnected from a previous WS;
                         // already handled — ignore.
@@ -566,6 +668,7 @@ fn spawn_reader(
     mut receiver: WsReceiver,
     outbox: Arc<Outbox>,
     inbox: mpsc::UnboundedSender<Deliver>,
+    presence: mpsc::UnboundedSender<PresenceUpdate>,
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -590,6 +693,11 @@ fn spawn_reader(
                                 break "inbox dropped".to_string();
                             }
                         }
+                        ServerFrame::PresenceUpdate(p) => {
+                            if presence.send(p).is_err() {
+                                break "presence channel dropped".to_string();
+                            }
+                        }
                         ServerFrame::Pong(Pong { nonce }) => {
                             outbox.record_pong(nonce);
                         }
@@ -604,6 +712,21 @@ fn spawn_reader(
         };
         let _ = cmd_tx.send(SupervisorCmd::Disconnected { gen, reason });
     })
+}
+
+async fn send_watch_frame(
+    inner: &Inner,
+    add: Vec<AgentId>,
+    remove: Vec<AgentId>,
+) -> Result<(), ClientError> {
+    if add.is_empty() && remove.is_empty() {
+        return Ok(());
+    }
+    let frame = ClientFrame::WatchPresence(WatchPresence { add, remove });
+    let bytes = to_bytes(&frame)?;
+    let mut sender = inner.sender.lock().await;
+    sender.send(Message::Binary(bytes)).await?;
+    Ok(())
 }
 
 fn spawn_keepalive(
