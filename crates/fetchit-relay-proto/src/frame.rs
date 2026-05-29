@@ -156,6 +156,10 @@ pub enum ByeReason {
     AuthExpired,
     /// A protocol violation was detected.
     ProtocolError,
+    /// A newer connection registered the same agent id; this session is
+    /// the displaced one. The client should reconnect — the supervisor's
+    /// reader breaks on `Bye`, which triggers a fresh handshake.
+    DisplacedByNewSession,
 }
 
 #[cfg(test)]
@@ -271,6 +275,7 @@ mod tests {
             ByeReason::ServerShutdown,
             ByeReason::AuthExpired,
             ByeReason::ProtocolError,
+            ByeReason::DisplacedByNewSession,
         ] {
             let b = ServerFrame::Bye(Bye { reason });
             let bytes = postcard::to_allocvec(&b).unwrap();

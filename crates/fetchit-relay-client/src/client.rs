@@ -549,8 +549,11 @@ async fn await_ready(stream: &mut WsStream) -> Result<Ready, ClientError> {
         };
         match from_bytes::<ServerFrame>(&b)? {
             ServerFrame::Ready(r) => return Ok(r),
-            ServerFrame::Bye(_) => {
-                return Err(ClientError::RelayClosed("bye before ready".into()));
+            ServerFrame::Bye(b) => {
+                return Err(ClientError::RelayClosed(format!(
+                    "bye before ready: {:?}",
+                    b.reason
+                )));
             }
             _ => {}
         }
@@ -594,7 +597,7 @@ fn spawn_reader(
                             // Throttle observable via metrics in a future pass.
                             // Stray Ready outside the handshake is a no-op.
                         }
-                        ServerFrame::Bye(_) => break "relay sent Bye".to_string(),
+                        ServerFrame::Bye(b) => break format!("relay sent Bye: {:?}", b.reason),
                     }
                 }
             }

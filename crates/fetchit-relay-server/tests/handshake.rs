@@ -4,9 +4,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fetchit_relay_proto::{
-    from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse,
-    ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, Ready, Region, SendFrame,
-    ServerFrame, TenantId, TransitEnvelope,
+    from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
+    ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, Ready, Region,
+    SendFrame, ServerFrame, TenantId, TransitEnvelope,
 };
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
 use futures_util::{SinkExt, StreamExt};
@@ -267,6 +267,81 @@ async fn offline_recipient_gets_buffered_message_on_connect() {
         }
     };
     let d: Deliver = match frame {
+        ServerFrame::Deliver(d) => d,
+        other => panic!("expected Deliver, got {other:?}"),
+    };
+    assert_eq!(d.envelope.ciphertext, payload);
+}
+
+#[tokio::test]
+async fn duplicate_agent_connect_displaces_with_bye() {
+    let addr = start_test_server().await;
+
+    let pk = b"dave-pubkey-bytes-here";
+    let dave_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(pk));
+
+    // First connection takes the registration.
+    let tok_a = obtain_bearer(addr, pk).await;
+    let mut conn_a = connect_ws(addr, &tok_a).await;
+    send_hello(&mut conn_a).await;
+    let _ = expect_ready(&mut conn_a).await;
+
+    // Second connection for the same agent_id displaces it.
+    let tok_b = obtain_bearer(addr, pk).await;
+    let mut conn_b = connect_ws(addr, &tok_b).await;
+    send_hello(&mut conn_b).await;
+    let _ = expect_ready(&mut conn_b).await;
+
+    // conn_a must observe Bye(DisplacedByNewSession).
+    let bye = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(2), conn_a.next())
+            .await
+            .expect("displaced connection did not receive Bye")
+            .unwrap()
+            .unwrap();
+        if let Message::Binary(b) = msg {
+            break from_bytes::<ServerFrame>(&b).unwrap();
+        }
+    };
+    match bye {
+        ServerFrame::Bye(Bye { reason }) => {
+            assert_eq!(reason, ByeReason::DisplacedByNewSession);
+        }
+        other => panic!("expected Bye(DisplacedByNewSession), got {other:?}"),
+    }
+
+    // conn_b's session must still be active: a Send from a third agent
+    // routes to conn_b, not conn_a, even after conn_a's reader exits.
+    drop(conn_a);
+
+    let eve_pk = b"eve-pubkey-bytes-here";
+    let eve_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(eve_pk));
+    let eve_tok = obtain_bearer(addr, eve_pk).await;
+    let mut eve = connect_ws(addr, &eve_tok).await;
+    send_hello(&mut eve).await;
+    let _ = expect_ready(&mut eve).await;
+
+    let payload = b"after displacement";
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: dave_id,
+        envelope: envelope_from(eve_id, payload),
+        dedupe_key: DedupeKey::from_bytes([0xcc; 16]),
+    });
+    eve.send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+
+    let delivered = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(2), conn_b.next())
+            .await
+            .expect("active connection did not receive Deliver after displacement")
+            .unwrap()
+            .unwrap();
+        if let Message::Binary(b) = msg {
+            break from_bytes::<ServerFrame>(&b).unwrap();
+        }
+    };
+    let d = match delivered {
         ServerFrame::Deliver(d) => d,
         other => panic!("expected Deliver, got {other:?}"),
     };

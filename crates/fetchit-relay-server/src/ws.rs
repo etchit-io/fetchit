@@ -67,7 +67,7 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         return;
     }
 
-    state.sessions.register(auth.agent_id, tx.clone());
+    let session_id = state.sessions.register(auth.agent_id, tx.clone());
     state.metrics.connection_opened();
 
     for (seq, entry) in state.transit.drain(&auth.agent_id).into_iter().enumerate() {
@@ -105,7 +105,7 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         }
     }
 
-    state.sessions.unregister(&auth.agent_id);
+    state.sessions.unregister(&auth.agent_id, session_id);
     state.metrics.connection_closed();
     writer.abort();
 }
