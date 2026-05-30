@@ -721,6 +721,7 @@ pub fn run() {
             lan_direct_enabled,
             set_lan_direct_enabled,
             chat::chat_health,
+            chat::chat_list_nearby,
             chat::chat_identity,
             chat::chat_card,
             chat::chat_import_card,

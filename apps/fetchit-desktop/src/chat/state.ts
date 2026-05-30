@@ -28,6 +28,15 @@ interface PresenceEntry {
   lastSeenMs: number;
 }
 
+/// One LAN-announced peer surfaced through the `chat:nearby` Tauri
+/// event. Mirrors the desktop `NearbyPeer` Rust type.
+export interface NearbyPeer {
+  agentId: AgentId;
+  ip: string;
+  port: number;
+  lastSeenMsAgo: number;
+}
+
 export type ConversationKey =
   | { kind: "dm"; peer: AgentId }
   | { kind: "group"; groupId: string };
@@ -84,6 +93,10 @@ export class ChatStore {
   private activeKey: string | null = null;
   private panelVisible = false;
   private listeners = new Set<Listener>();
+  /// LAN-direct nearby peers — keyed by AgentId. Fed by the `chat:nearby`
+  /// Tauri event when LAN delivery is enabled in settings. Empty
+  /// otherwise. Sidebar renders this filtered against `contacts`.
+  private nearbyPeers = new Map<AgentId, NearbyPeer>();
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -139,6 +152,27 @@ export class ChatStore {
 
   contact(id: AgentId): Contact | undefined {
     return this.contacts.get(id);
+  }
+
+  /// Replace the entire Nearby table with `peers`. Called on every
+  /// `chat:nearby` event so the UI reflects fresh + dropped entries.
+  setNearbyPeers(peers: NearbyPeer[]): void {
+    this.nearbyPeers.clear();
+    for (const p of peers) {
+      this.nearbyPeers.set(p.agentId, p);
+    }
+    this.emit();
+  }
+
+  /// Nearby peers minus any already in the contact store. The Nearby
+  /// sidebar section renders this; AgentIds already known to the user
+  /// don't need a re-add affordance.
+  nearbyPeersUnknown(): NearbyPeer[] {
+    const me = this.myId();
+    return [...this.nearbyPeers.values()]
+      .filter((p) => p.agentId !== me)
+      .filter((p) => !this.contacts.has(p.agentId))
+      .sort((a, b) => a.agentId.localeCompare(b.agentId));
   }
 
   loadPresence(agents: OnlineAgent[]): void {

@@ -120,6 +120,49 @@ pub struct CardWithUri {
     uri: String,
 }
 
+/// One row of the Nearby sidebar surface — a LAN-announced peer the
+/// transport's mDNS browser has resolved. The frontend filters out
+/// `AgentId`s already in its contact store before rendering.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NearbyPeer {
+    /// 64-char hex agent id of the announced peer.
+    pub agent_id: String,
+    /// First resolved IP from the mDNS record.
+    pub ip: String,
+    /// Advertised TCP port for the LAN-direct listener.
+    pub port: u16,
+    /// `Instant::elapsed` since last resolve, in milliseconds.
+    pub last_seen_ms_ago: u64,
+}
+
+/// Snapshot the LAN-direct peer table — every fresh announce the
+/// mDNS browser has resolved. The frontend filters `AgentId`s
+/// already in contacts before rendering the Nearby section.
+///
+/// Returns an empty list when LAN-direct is disabled.
+#[tauri::command]
+pub async fn chat_list_nearby(
+    state: tauri::State<'_, ChatState>,
+) -> Result<Vec<NearbyPeer>, String> {
+    let client = state.get().await?;
+    let Some(lan) = client.lan_transport_arc() else {
+        return Ok(Vec::new());
+    };
+    Ok(lan
+        .peer_table()
+        .snapshot()
+        .into_iter()
+        .map(|r| NearbyPeer {
+            agent_id: r.agent_id.0,
+            ip: r.ip.to_string(),
+            port: r.port,
+            last_seen_ms_ago: u64::try_from(r.last_seen.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn chat_health(state: tauri::State<'_, ChatState>) -> Result<bool, String> {
     state
@@ -471,7 +514,7 @@ pub async fn chat_confirm_contact(
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_inbound(app.clone(), state.clone());
     spawn_lan_inbound(app.clone(), state.clone());
-    spawn_lan_mdns(state.clone());
+    spawn_lan_mdns(app.clone(), state.clone());
     spawn_relay_presence(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
@@ -486,10 +529,17 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
 /// transport's `LanPeerTable`. The daemon runs on its own OS thread
 /// (mdns-sd's design), so we just hold the handle alive until the
 /// client invalidates and tear down.
-fn spawn_lan_mdns(state: ChatState) {
+///
+/// While the daemon is up, emits a `chat:nearby` event every five
+/// seconds carrying the current `LanPeerTable` snapshot. The frontend
+/// filters its own contacts out client-side.
+fn spawn_lan_mdns(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
             let Ok(client) = state.get().await else {
+                // Client unavailable: emit an empty snapshot so the
+                // Nearby section drains, then back off.
+                let _ = app.emit("chat:nearby", &Vec::<NearbyPeer>::new());
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             };
@@ -498,8 +548,9 @@ fn spawn_lan_mdns(state: ChatState) {
                 client.lan_bound_addr(),
             ) else {
                 // LAN-direct isn't wired this round (toggle off or
-                // builder path skipped). Wait and re-check on the
-                // next rebuild.
+                // builder path skipped). Drain any prior Nearby state
+                // on the UI side, then back off.
+                let _ = app.emit("chat:nearby", &Vec::<NearbyPeer>::new());
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             };
@@ -514,10 +565,13 @@ fn spawn_lan_mdns(state: ChatState) {
             };
 
             // Hold the daemon alive until the cached client is replaced
-            // (toggle flip or invalidate). `Arc::ptr_eq` on the
-            // transport handle is the cheapest identity check we have.
+            // (toggle flip or invalidate). While holding, emit the
+            // current peer-table snapshot every 5s so the Nearby
+            // sidebar stays fresh.
             let lan_for_check = lan.clone();
             loop {
+                let snapshot = nearby_snapshot(&table);
+                let _ = app.emit("chat:nearby", &snapshot);
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 let same = match state.client.lock().await.as_ref() {
                     Some(c) => c
@@ -527,12 +581,27 @@ fn spawn_lan_mdns(state: ChatState) {
                 };
                 if !same {
                     log_pump("[lan-mdns] client invalidated; tearing down");
+                    let _ = app.emit("chat:nearby", &Vec::<NearbyPeer>::new());
                     break;
                 }
             }
             // _daemon drops here -> mdns-sd's daemon thread exits.
         }
     });
+}
+
+fn nearby_snapshot(table: &fetchit_chat::lan_discovery::LanPeerTable) -> Vec<NearbyPeer> {
+    table
+        .snapshot()
+        .into_iter()
+        .map(|r| NearbyPeer {
+            agent_id: r.agent_id.0,
+            ip: r.ip.to_string(),
+            port: r.port,
+            last_seen_ms_ago: u64::try_from(r.last_seen.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
+        })
+        .collect()
 }
 
 /// Start a `ServiceDaemon`, register one `_fetchit-chat._tcp.local.`

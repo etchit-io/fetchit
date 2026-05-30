@@ -1,7 +1,7 @@
 // Conversations list with presence dots + unread badges. Click a row
 // to focus that conversation in the main pane.
 
-import type { ChatStore, Conversation } from "./state";
+import type { ChatStore, Conversation, NearbyPeer } from "./state";
 import { convKey } from "./state";
 
 export interface SidebarHandlers {
@@ -36,25 +36,93 @@ export function mountSidebar(
   list.className = "chat-conv-list";
   list.setAttribute("role", "listbox");
 
+  const nearbySection = document.createElement("section");
+  nearbySection.className = "chat-nearby";
+  nearbySection.hidden = true;
+
   root.appendChild(header);
   root.appendChild(list);
+  root.appendChild(nearbySection);
 
   const render = (): void => {
     const convs = store.conversationsSorted();
     if (convs.length === 0) {
       list.replaceChildren(emptyState());
-      return;
+    } else {
+      list.replaceChildren();
+      const activeKey = store.active() ? convKey(store.active()!.key) : null;
+      for (const conv of convs) {
+        list.appendChild(rowFor(conv, store, activeKey, handlers.onSelect));
+      }
     }
-    list.replaceChildren();
-    const activeKey = store.active() ? convKey(store.active()!.key) : null;
-    for (const conv of convs) {
-      list.appendChild(rowFor(conv, store, activeKey, handlers.onSelect));
-    }
+    renderNearby(nearbySection, store.nearbyPeersUnknown(), handlers.onNewContact);
   };
 
   const unsub = store.subscribe(render);
   render();
   return { dispose: unsub };
+}
+
+function renderNearby(
+  host: HTMLElement,
+  peers: NearbyPeer[],
+  onAdd: () => void,
+): void {
+  if (peers.length === 0) {
+    host.hidden = true;
+    host.replaceChildren();
+    return;
+  }
+  host.hidden = false;
+  host.replaceChildren();
+
+  const heading = document.createElement("h3");
+  heading.className = "chat-nearby__heading";
+  heading.textContent = "Nearby";
+  host.appendChild(heading);
+
+  const note = document.createElement("p");
+  note.className = "chat-nearby__note";
+  note.textContent =
+    "Devices announcing on your network. Add via paste-URI to trust them.";
+  host.appendChild(note);
+
+  const ul = document.createElement("ul");
+  ul.className = "chat-nearby__list";
+  ul.setAttribute("role", "list");
+  for (const peer of peers) {
+    ul.appendChild(nearbyRow(peer, onAdd));
+  }
+  host.appendChild(ul);
+}
+
+function nearbyRow(peer: NearbyPeer, onAdd: () => void): HTMLElement {
+  const li = document.createElement("li");
+  li.className = "chat-nearby__row";
+
+  const id = document.createElement("code");
+  id.className = "chat-nearby__id";
+  // Short prefix only — full agent_id is not user-meaningful and a
+  // longer label would invite spoofed display names (TXT doesn't
+  // carry one).
+  id.textContent = `${peer.agentId.slice(0, 8)}…${peer.agentId.slice(-4)}`;
+  id.title = peer.agentId;
+
+  const meta = document.createElement("span");
+  meta.className = "chat-nearby__meta";
+  meta.textContent = `${peer.ip}:${peer.port}`;
+
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "chat-nearby__add";
+  addBtn.textContent = "Add";
+  addBtn.title = "Open Add-contact dialog (you still paste their share URI)";
+  addBtn.addEventListener("click", onAdd);
+
+  li.appendChild(id);
+  li.appendChild(meta);
+  li.appendChild(addBtn);
+  return li;
 }
 
 function rowFor(

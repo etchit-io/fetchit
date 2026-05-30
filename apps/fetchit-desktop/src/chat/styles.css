@@ -738,3 +738,54 @@ textarea.chat-dialog__uri {
   border: 1px solid var(--line);
 }
 .chat-dialog__btn--ghost:hover { color: var(--bone); border-color: var(--ash); }
+
+/* Nearby section — LAN-announced peers not yet in contacts. */
+.chat-nearby {
+  border-top: 1px solid var(--line);
+  padding: 8px 12px 12px;
+}
+.chat-nearby__heading {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ash);
+}
+.chat-nearby__note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--ash);
+}
+.chat-nearby__list { list-style: none; padding: 0; margin: 0; }
+.chat-nearby__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.chat-nearby__id {
+  flex: 0 1 auto;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  color: var(--bone);
+}
+.chat-nearby__meta {
+  flex: 1 1 auto;
+  color: var(--ash);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-nearby__add {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--copper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chat-nearby__add:hover { color: var(--copper-bright); border-color: var(--copper); }

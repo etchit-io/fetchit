@@ -3,7 +3,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { maybeNotifyInboundDm } from "./notify";
-import type { ChatStore } from "./state";
+import type { ChatStore, NearbyPeer } from "./state";
 import type { ChatEvent } from "./types";
 
 /// Wire-shape of the daemon's `chat:receipt` Tauri event.
@@ -21,6 +21,16 @@ interface RelayPresenceEvent {
   online: boolean;
 }
 
+/// Wire-shape of the daemon's `chat:nearby` Tauri event — periodic
+/// snapshot of the LAN-direct peer table. Empty when LAN delivery is
+/// disabled.
+interface NearbyEventPeer {
+  agentId: string;
+  ip: string;
+  port: number;
+  lastSeenMsAgo: number;
+}
+
 export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
   const unsubEvent = await listen<ChatEvent>("chat:event", (ev) => {
     applyChatEvent(store, ev.payload);
@@ -34,10 +44,20 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       store.setRelayPresence(ev.payload.agent_id, ev.payload.online);
     },
   );
+  const unsubNearby = await listen<NearbyEventPeer[]>("chat:nearby", (ev) => {
+    const peers: NearbyPeer[] = (ev.payload ?? []).map((p) => ({
+      agentId: p.agentId,
+      ip: p.ip,
+      port: p.port,
+      lastSeenMsAgo: p.lastSeenMsAgo,
+    }));
+    store.setNearbyPeers(peers);
+  });
   return () => {
     unsubEvent();
     unsubReceipt();
     unsubPresence();
+    unsubNearby();
   };
 }
 
