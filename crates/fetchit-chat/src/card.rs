@@ -129,6 +129,20 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
 /// pasted URI keeps importing.
 const FORMAT_TAG_DEFLATE: u8 = 0x02;
 
+/// Hard ceiling on the inflated JSON. A real card is ~12 KB today and
+/// the architectural floor is in the same ballpark; 256 KB is well
+/// above any plausible card and well below "OOM the renderer".
+/// Decompression that hits this limit is rejected rather than
+/// truncated — a truncated JSON would deserialize partially and the
+/// caller would see a confusing parse error instead of the real
+/// problem.
+const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024;
+
+/// Hard ceiling on the URI body after base64 decode, applied BEFORE
+/// any decompressor runs. Stops a malicious URI from forcing a large
+/// allocation or eating CPU just to be rejected later.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
 /// Encode an extended-card JSON value as the `x0x://agent/<base64>`
 /// URI. The body is `0x02 | DEFLATE(JSON)`, URL-safe base64-encoded —
 /// the v2 card carries ~4 KB of redundant ASCII (x0xd ships its KEM
@@ -167,13 +181,34 @@ pub fn extended_card_from_uri(uri: &str) -> Result<serde_json::Value, ChatError>
     let bytes = URL_SAFE_NO_PAD
         .decode(body)
         .map_err(|e| ChatError::Invalid(format!("base64: {e}")))?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(ChatError::Invalid(format!(
+            "share card body too large: {} > {MAX_BODY_BYTES}",
+            bytes.len()
+        )));
+    }
     let json_bytes = match bytes.first() {
         Some(&FORMAT_TAG_DEFLATE) => {
-            let mut decoder = DeflateDecoder::new(&bytes[1..]);
+            // Bound the inflate output. Without a cap, a small
+            // DEFLATE-bombed body could inflate to gigabytes and OOM
+            // the renderer. `Read::take` clips the underlying reader;
+            // hitting the cap means the input was either malicious or
+            // bigger than we ever expect to handle, so reject rather
+            // than truncate.
+            let capped = std::io::Read::take(
+                DeflateDecoder::new(&bytes[1..]),
+                MAX_DECOMPRESSED_BYTES + 1,
+            );
+            let mut decoder = capped;
             let mut out = Vec::with_capacity(bytes.len() * 4);
             decoder
                 .read_to_end(&mut out)
                 .map_err(|e| ChatError::Invalid(format!("deflate read: {e}")))?;
+            if u64::try_from(out.len()).unwrap_or(u64::MAX) > MAX_DECOMPRESSED_BYTES {
+                return Err(ChatError::Invalid(format!(
+                    "share card decompresses past {MAX_DECOMPRESSED_BYTES} bytes"
+                )));
+            }
             out
         }
         // Legacy: no leading tag, body is JSON directly.
@@ -415,6 +450,36 @@ mod tests {
         // Round-trips through the decoder.
         let recovered = extended_card_from_uri(&compressed_uri).unwrap();
         assert_eq!(recovered, extended);
+    }
+
+    #[tokio::test]
+    async fn decompression_bomb_is_rejected() {
+        // 1 MB of identical bytes compresses to a few hundred bytes
+        // but blows past MAX_DECOMPRESSED_BYTES on inflate.
+        let bomb = vec![b'a'; 1_000_000];
+        let mut encoder =
+            DeflateEncoder::new(Vec::<u8>::new(), Compression::best());
+        encoder.write_all(&bomb).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(
+            compressed.len() < bomb.len() / 100,
+            "compressor not actually compressing"
+        );
+        let mut body = vec![FORMAT_TAG_DEFLATE];
+        body.extend_from_slice(&compressed);
+        let uri = format!("{URI_PREFIX}{}", URL_SAFE_NO_PAD.encode(body));
+        let err = extended_card_from_uri(&uri).expect_err("must reject");
+        assert!(matches!(err, ChatError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn oversized_body_rejected_before_decode() {
+        // A body well above MAX_BODY_BYTES should be rejected on the
+        // base64 step, before the decoder is even invoked.
+        let oversized = vec![0xff; MAX_BODY_BYTES + 1];
+        let uri = format!("{URI_PREFIX}{}", URL_SAFE_NO_PAD.encode(oversized));
+        let err = extended_card_from_uri(&uri).expect_err("must reject");
+        assert!(matches!(err, ChatError::Invalid(_)));
     }
 
     #[tokio::test]
