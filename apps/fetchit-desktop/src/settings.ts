@@ -104,6 +104,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   const shareAllBtn = root.querySelector<HTMLButtonElement>("#bookmarks-share-all");
   const shareSelectedBtn = root.querySelector<HTMLButtonElement>("#bookmarks-share-selected");
   const idleSelect = root.querySelector<HTMLSelectElement>("#idle-timeout");
+  const lanDirectBox = root.querySelector<HTMLInputElement>("#lan-direct-enabled");
 
   if (
     !close ||
@@ -116,7 +117,8 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     !bookmarksEl ||
     !shareAllBtn ||
     !shareSelectedBtn ||
-    !idleSelect
+    !idleSelect ||
+    !lanDirectBox
   ) {
     throw new Error("settings: missing form element");
   }
@@ -139,12 +141,29 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
       .catch(() => {});
   });
 
+  lanDirectBox.addEventListener("change", () => {
+    const enabled = lanDirectBox.checked;
+    void invoke("set_lan_direct_enabled", { enabled }).catch(() => {
+      // Roll the checkbox back on failure so the UI matches truth.
+      lanDirectBox.checked = !enabled;
+    });
+  });
+
   const refreshIdle = async (): Promise<void> => {
     try {
       const p = await invoke<IdlePolicy>("idle_policy");
       idleSelect!.value = String(p.timeoutMinutes);
     } catch {
       idleSelect!.value = "30";
+    }
+  };
+
+  const refreshLanDirect = async (): Promise<void> => {
+    try {
+      const on = await invoke<boolean>("lan_direct_enabled");
+      lanDirectBox!.checked = !!on;
+    } catch {
+      lanDirectBox!.checked = false;
     }
   };
 
@@ -237,7 +256,13 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     open: async () => {
       host.hidden = false;
       document.body.dataset.view = "settings";
-      await Promise.all([refresh(), refreshPeers(), refreshBookmarks(), refreshIdle()]);
+      await Promise.all([
+        refresh(),
+        refreshPeers(),
+        refreshBookmarks(),
+        refreshIdle(),
+        refreshLanDirect(),
+      ]);
       if (peersTimer === null) {
         peersTimer = window.setInterval(() => void refreshPeers(), 5_000);
       }
@@ -494,6 +519,13 @@ function buildPage(): HTMLElement {
         <span>Disconnect when idle</span>
         <select id="idle-timeout"></select>
       </label>
+      <label class="setting-row">
+        <span>Enable LAN delivery <em class="setting-pill">experimental</em></span>
+        <input type="checkbox" id="lan-direct-enabled">
+      </label>
+      <p class="setting-desc">
+        Send chat directly between devices on the same network. Falls back to relay automatically.
+      </p>
     </section>
     <section class="setting-group" id="group-peers">
       <details class="setting-collapsible">
