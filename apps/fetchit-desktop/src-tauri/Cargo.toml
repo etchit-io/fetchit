@@ -66,6 +66,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # string leaves that pass parse_bootstrap_peer, so a future minor
 # schema rotation at WithAutonomi doesn't blow up the refresh.
 toml = "0.8"
+# Enumerate the host's non-loopback network interfaces so the LAN-direct
+# mDNS announcement can publish concrete reachable IPs. Pure-Rust,
+# no system deps.
+if-addrs = "0.13"
+# Direct dep so we can call `ServiceDaemon` / `build_service_info` /
+# `spawn_browser` to drive the mDNS lifecycle from the desktop layer;
+# fetchit-chat is the structural home of these helpers.
+mdns-sd = { version = "0.20", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

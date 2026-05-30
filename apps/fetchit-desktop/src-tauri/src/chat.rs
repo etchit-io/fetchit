@@ -471,9 +471,137 @@ pub async fn chat_confirm_contact(
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_inbound(app.clone(), state.clone());
     spawn_lan_inbound(app.clone(), state.clone());
+    spawn_lan_mdns(state.clone());
     spawn_relay_presence(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
+}
+
+/// Drive the mDNS lifecycle alongside the LAN-direct transport.
+///
+/// On each rebuild of the chat client that has LAN enabled, this task
+/// spins up a `mdns_sd::ServiceDaemon`, registers a
+/// `_fetchit-chat._tcp.local.` service info pointing at the listener's
+/// bound port, and pumps `ServiceEvent::ServiceResolved` into the
+/// transport's `LanPeerTable`. The daemon runs on its own OS thread
+/// (mdns-sd's design), so we just hold the handle alive until the
+/// client invalidates and tear down.
+fn spawn_lan_mdns(state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let (Some(lan), Some(bound)) = (
+                client.lan_transport_arc().cloned(),
+                client.lan_bound_addr(),
+            ) else {
+                // LAN-direct isn't wired this round (toggle off or
+                // builder path skipped). Wait and re-check on the
+                // next rebuild.
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+
+            let aid_hex = lan.local_agent_id().0.clone();
+            let table = lan.peer_table().clone();
+
+            let Some(_daemon) = start_lan_mdns_daemon(&aid_hex, bound.port(), table.clone())
+            else {
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+
+            // Hold the daemon alive until the cached client is replaced
+            // (toggle flip or invalidate). `Arc::ptr_eq` on the
+            // transport handle is the cheapest identity check we have.
+            let lan_for_check = lan.clone();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let same = match state.client.lock().await.as_ref() {
+                    Some(c) => c
+                        .lan_transport_arc()
+                        .is_some_and(|t| Arc::ptr_eq(t, &lan_for_check)),
+                    None => false,
+                };
+                if !same {
+                    log_pump("[lan-mdns] client invalidated; tearing down");
+                    break;
+                }
+            }
+            // _daemon drops here -> mdns-sd's daemon thread exits.
+        }
+    });
+}
+
+/// Start a `ServiceDaemon`, register one `_fetchit-chat._tcp.local.`
+/// service info, and attach the browser pump to `table`. Returns the
+/// daemon handle (drop = teardown) on success.
+fn start_lan_mdns_daemon(
+    aid_hex: &str,
+    port: u16,
+    table: Arc<fetchit_chat::lan_discovery::LanPeerTable>,
+) -> Option<mdns_sd::ServiceDaemon> {
+    let daemon = match mdns_sd::ServiceDaemon::new() {
+        Ok(d) => d,
+        Err(e) => {
+            log_pump(&format!("[lan-mdns] daemon: {e}"));
+            return None;
+        }
+    };
+    let aid_short = &aid_hex[..aid_hex.len().min(12)];
+    let instance = format!("fetchit-{aid_short}");
+    let hostname = format!("fetchit-{aid_short}.local.");
+    let ips = local_lan_ipv4s();
+    if ips.is_empty() {
+        log_pump("[lan-mdns] no routable IPv4 interfaces; skipping announce");
+        let _ = daemon.shutdown();
+        return None;
+    }
+    let info = match fetchit_chat::lan_discovery::build_service_info(
+        &instance, &hostname, &ips, port, aid_hex,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            log_pump(&format!("[lan-mdns] service info: {e}"));
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+    if let Err(e) = daemon.register(info) {
+        log_pump(&format!("[lan-mdns] register: {e}"));
+        let _ = daemon.shutdown();
+        return None;
+    }
+    if let Err(e) = fetchit_chat::lan_discovery::spawn_browser(&daemon, table) {
+        log_pump(&format!("[lan-mdns] browse: {e}"));
+        let _ = daemon.shutdown();
+        return None;
+    }
+    log_pump(&format!("[lan-mdns] announce + browse on port {port}"));
+    Some(daemon)
+}
+
+/// Enumerate non-loopback IPv4 interfaces the host can announce on.
+/// Loopback is filtered so two distinct processes on one box don't
+/// fight over the `127.0.0.1:...` advertisement; LAN-direct is meant
+/// for cross-host delivery, not self-loopback.
+fn local_lan_ipv4s() -> Vec<std::net::IpAddr> {
+    match if_addrs::get_if_addrs() {
+        Ok(addrs) => addrs
+            .into_iter()
+            .filter(|i| !i.is_loopback())
+            .filter_map(|i| match i.ip() {
+                std::net::IpAddr::V4(v4) => Some(std::net::IpAddr::V4(v4)),
+                std::net::IpAddr::V6(_) => None,
+            })
+            .collect(),
+        Err(e) => {
+            log_pump(&format!("[lan-mdns] if_addrs: {e}"));
+            Vec::new()
+        }
+    }
 }
 
 /// Mirror of [`spawn_relay_inbound`] for the LAN-direct transport.
