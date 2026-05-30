@@ -31,6 +31,7 @@ pub mod lan_static;
 pub mod local_store;
 pub mod messages;
 pub mod presence;
+pub mod profile;
 pub mod relay_transport;
 pub mod transport;
 

@@ -17,6 +17,10 @@ name = "fetchit-chat-peer"
 path = "src/bin/peer.rs"
 required-features = []
 
+[[bin]]
+name = "profile-fixture-gen"
+path = "src/bin/profile_fixture_gen.rs"
+
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true
@@ -42,6 +46,7 @@ saorsa-pqc.workspace = true
 serde.workspace = true
 snow = "0.10"
 mdns-sd = { version = "0.20", default-features = false }
+serde_jcs = "0.2"
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
