@@ -65,6 +65,63 @@ There is no ephemeral token, no 5-minute TTL, no per-pair-attempt
 relay-side state. The full profile is durable on Autonomi at a
 stable address; the relay index is a cache + freshness pointer.
 
+## v3 share URI literal — pinned
+
+**Both repos implement this exact byte shape.** Drift in any
+component breaks pairing.
+
+```
+fetchit://share/v3/<AGENT_ID>/<PROFILE_ADDR>?relay=<RELAY_URL>
+```
+
+Field rules:
+
+- **Scheme + path:** literal `fetchit://share/v3/`. No alternate
+  schemes (no `x0x://` for v3 to keep the chat-card `x0x://agent/`
+  URI namespace separate from the profile-rendezvous namespace).
+- **`<AGENT_ID>`:** 64 lowercase hex characters. Upper-case is
+  rejected on parse — generators emit lowercase only so the QR
+  decoder doesn't have to normalise.
+- **`<PROFILE_ADDR>`:** 64 lowercase hex characters. The all-zeros
+  string is reserved for tombstone records inside the relay index
+  and must NOT appear in a share URI — a v3 URI with the tombstone
+  address is rejected on parse.
+- **`<RELAY_URL>`:** percent-encoded full base URL of the relay
+  holding the offerer's profile-index record (e.g.
+  `http%3A%2F%2F67.207.94.66%3A8088`). Must include scheme + host;
+  scheme is restricted to `http` and `https` (no `file://`,
+  `javascript:`, etc.). Trailing slashes are stripped on parse so
+  `http://x/` and `http://x` normalise to the same value.
+- **Order:** path components are positional; the only query
+  parameter is `relay`. Future minor revisions may add additional
+  optional query parameters but must not change the positional
+  path order. Parsers ignore unknown query parameters.
+- **Total length cap:** ≤ 256 bytes. A reference v3 URI lands at
+  ~150-180 bytes depending on relay-URL length; 256 leaves headroom
+  for future query params and still fits a QR version 11-M (~250
+  byte capacity at error-correction level M) — well under any
+  realistic camera-scan failure threshold.
+
+Reference example (real production relay):
+
+```
+fetchit://share/v3/209574d678357a4987e25162b12f2dcee5ac82a10dfcd394edf9b340c9aa879e/4444444444444444444444444444444444444444444444444444444444444444?relay=http%3A%2F%2F67.207.94.66%3A8088
+```
+
+178 bytes. Comfortably under the cap.
+
+Parse errors (`fetchit_chat::profile::V3ShareUriError`):
+
+- `WrongScheme` — not `fetchit://share/v3/`
+- `MalformedAgentId` — not 64 lowercase-hex
+- `MalformedProfileAddr` — not 64 lowercase-hex, or is the
+  all-zeros tombstone sentinel
+- `MissingRelay` — no `relay=` query parameter
+- `MalformedRelay` — relay URL is not a valid `http(s)` URL
+- `TooLong` — total URI exceeds 256 bytes
+- `UnsupportedVersion` — path starts with `fetchit://share/` but
+  the next segment isn't `v3`
+
 ## What this requires (in order)
 
 QR pairing isn't a single self-contained feature. It sits on top of
