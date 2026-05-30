@@ -62,6 +62,13 @@ export interface Conversation {
 ///               expired with no receipt.
 export type BubbleStatus = "sending" | "delivered" | "failed";
 
+/// Local-daemon health, surfaced by the backend's `chat:daemon-status`
+/// Tauri event. The header pill paints green for `connected`, amber
+/// for `reconnecting`, red for `down`. Driven by file-signature
+/// changes on x0xd's `api.port` / `api-token` so the panel
+/// self-heals after the daemon auto-upgrades or restarts.
+export type DaemonStatus = "connected" | "reconnecting" | "down";
+
 export interface ChatBubble {
   id: string;
   /// Chat-layer logical message id assigned by the daemon. Populated
@@ -97,6 +104,12 @@ export class ChatStore {
   /// Tauri event when LAN delivery is enabled in settings. Empty
   /// otherwise. Sidebar renders this filtered against `contacts`.
   private nearbyPeers = new Map<AgentId, NearbyPeer>();
+  /// State of the local x0xd daemon, surfaced by the
+  /// `chat:daemon-status` Tauri event. Drives the header pill so the
+  /// user can tell at a glance whether sends are expected to work
+  /// right now. `null` means the watcher hasn't reported yet (early
+  /// boot); UI should treat that as "connected" until proved otherwise.
+  private daemonStatus: DaemonStatus | null = null;
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -162,6 +175,24 @@ export class ChatStore {
       this.nearbyPeers.set(p.agentId, p);
     }
     this.emit();
+  }
+
+  /// Update the local-daemon status, fed by the `chat:daemon-status`
+  /// Tauri event. Only re-emits to subscribers when the value
+  /// actually changes; otherwise the chat-bubble-pop fix's signature
+  /// short-circuit would still treat each duplicate event as a tick.
+  setDaemonStatus(status: DaemonStatus): void {
+    if (this.daemonStatus === status) return;
+    this.daemonStatus = status;
+    this.emit();
+  }
+
+  /// Current local-daemon status, or `null` if the watcher hasn't
+  /// reported yet (early-boot). The header pill should paint green
+  /// while `null` so the UI isn't yellow-screaming during normal
+  /// startup.
+  getDaemonStatus(): DaemonStatus | null {
+    return this.daemonStatus;
   }
 
   /// Nearby peers minus any already in the contact store. The Nearby

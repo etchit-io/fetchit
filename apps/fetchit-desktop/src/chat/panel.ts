@@ -76,6 +76,17 @@ export function mountChatPanel(
   const titleEl = document.createElement("div");
   titleEl.className = "chat-panel__title";
   titleEl.textContent = "Chat";
+  /// Local-daemon health pill. Hidden during normal operation;
+  /// surfaces a plain-English label whenever the chat backend can't
+  /// sign or reach the relay, so the user never has to wonder why
+  /// sends are stuck. Driven by the `chat:daemon-status` Tauri event
+  /// (see src-tauri/src/chat.rs::spawn_daemon_watcher).
+  const daemonPill = document.createElement("span");
+  daemonPill.className = "chat-panel__daemon";
+  daemonPill.setAttribute("role", "status");
+  daemonPill.setAttribute("aria-live", "polite");
+  daemonPill.hidden = true;
+
   const idBadge = document.createElement("button");
   idBadge.type = "button";
   idBadge.className = "chat-panel__id";
@@ -102,6 +113,7 @@ export function mountChatPanel(
   closeBtn.textContent = "✕";
 
   headerEl.appendChild(titleEl);
+  headerEl.appendChild(daemonPill);
   headerEl.appendChild(idBadge);
   headerEl.appendChild(shareBtn);
   headerEl.appendChild(dockBtn);
@@ -173,6 +185,25 @@ export function mountChatPanel(
     outboxBanner.hidden = false;
   };
   store.subscribe(renderOutboxBanner);
+
+  /// Repaint the daemon-status pill on every store-emit. Plain
+  /// English copy on purpose — no "daemon" or "x0xd" — so a
+  /// non-technical user can read it without context.
+  const renderDaemonPill = (): void => {
+    const status = store.getDaemonStatus();
+    if (!status || status === "connected") {
+      daemonPill.hidden = true;
+      daemonPill.textContent = "";
+      daemonPill.dataset.state = status ?? "connected";
+      return;
+    }
+    daemonPill.hidden = false;
+    daemonPill.dataset.state = status;
+    daemonPill.textContent =
+      status === "reconnecting" ? "Reconnecting…" : "Chat service offline";
+  };
+  store.subscribe(renderDaemonPill);
+  renderDaemonPill();
 
   const showDialog = (mount: (root: HTMLElement) => void): void => {
     dialogHost.hidden = false;

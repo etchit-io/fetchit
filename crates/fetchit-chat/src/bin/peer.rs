@@ -159,9 +159,16 @@ async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
         .with_context(|| format!("read uri file at {}", uri_file.display()))?;
     let uri = raw.trim();
     if !uri.starts_with("x0x://agent/") {
-        anyhow::bail!("uri file does not start with x0x://agent/ — got {} bytes", uri.len());
+        anyhow::bail!(
+            "uri file does not start with x0x://agent/ — got {} bytes",
+            uri.len()
+        );
     }
-    eprintln!("[peer] importing {} byte URI from {}", uri.len(), uri_file.display());
+    eprintln!(
+        "[peer] importing {} byte URI from {}",
+        uri.len(),
+        uri_file.display()
+    );
     client
         .identity()
         .import_uri(uri)

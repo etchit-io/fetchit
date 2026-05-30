@@ -249,3 +249,38 @@ describe("convKey", () => {
     expect(convKey({ kind: "group", groupId: "g1" })).toBe("g:g1");
   });
 });
+
+describe("ChatStore — daemon status", () => {
+  it("starts with null status so the header pill stays hidden during boot", () => {
+    const s = new ChatStore();
+    expect(s.getDaemonStatus()).toBeNull();
+  });
+
+  it("records the latest daemon status emitted by the backend watcher", () => {
+    const s = new ChatStore();
+    s.setDaemonStatus("connected");
+    expect(s.getDaemonStatus()).toBe("connected");
+    s.setDaemonStatus("reconnecting");
+    expect(s.getDaemonStatus()).toBe("reconnecting");
+    s.setDaemonStatus("down");
+    expect(s.getDaemonStatus()).toBe("down");
+  });
+
+  it("only notifies subscribers when the status value actually changes", () => {
+    // Without this guard, duplicate edge-emits from the backend would
+    // trigger every store subscriber on every poll cycle — including
+    // the conversation pane's bubble-list short-circuit, defeating
+    // the chat-bubble-pop fix from c102219.
+    const s = new ChatStore();
+    let calls = 0;
+    s.subscribe(() => {
+      calls++;
+    });
+    s.setDaemonStatus("connected");
+    s.setDaemonStatus("connected");
+    s.setDaemonStatus("connected");
+    expect(calls).toBe(1);
+    s.setDaemonStatus("reconnecting");
+    expect(calls).toBe(2);
+  });
+});

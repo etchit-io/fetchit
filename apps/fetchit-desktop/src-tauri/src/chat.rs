@@ -61,9 +61,7 @@ impl ChatState {
             relay_url: url,
             data_dir,
             passphrase: Arc::new(Mutex::new(passphrase)),
-            lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
-                lan_direct_enabled,
-            )),
+            lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(lan_direct_enabled)),
         })
     }
 
@@ -157,8 +155,7 @@ pub async fn chat_list_nearby(
             agent_id: r.agent_id.0,
             ip: r.ip.to_string(),
             port: r.port,
-            last_seen_ms_ago: u64::try_from(r.last_seen.elapsed().as_millis())
-                .unwrap_or(u64::MAX),
+            last_seen_ms_ago: u64::try_from(r.last_seen.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
         .collect())
 }
@@ -512,12 +509,87 @@ pub async fn chat_confirm_contact(
 /// - **x0xd unified SSE** — catch-all for events the relay isn't
 ///   responsible for (gossip, contacts, groups).
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
+    spawn_daemon_watcher(app.clone(), state.clone());
     spawn_relay_inbound(app.clone(), state.clone());
     spawn_lan_inbound(app.clone(), state.clone());
     spawn_lan_mdns(app.clone(), state.clone());
     spawn_relay_presence(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
+}
+
+/// Tag the chat panel can paint on its daemon-status pill. Emitted
+/// over the `chat:daemon-status` Tauri event whenever the watcher
+/// observes a change in x0xd's discoverability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DaemonStatus {
+    /// x0xd discoverable and credentials match what the cached client
+    /// was built against. Local sign path expected to work.
+    Connected,
+    /// x0xd was previously discoverable but its credentials changed
+    /// (typically because the daemon restarted with a new token). The
+    /// cached chat client has been invalidated; the next chat call
+    /// will rebuild against the new credentials.
+    Reconnecting,
+    /// x0xd's `api.port` / `api-token` files are missing. Daemon is
+    /// down. The frontend should show the "Reconnecting…" badge and
+    /// stop trying to send.
+    Down,
+}
+
+/// Background task that watches x0xd's data-dir signature so the
+/// chat panel self-heals when the daemon restarts (or
+/// auto-upgrades — see issue #153) without requiring the user to
+/// re-open the panel.
+///
+/// Polls `discover_local()` every 3 seconds, compares the
+/// (port, token) tuple, and invalidates the cached chat client +
+/// emits `chat:daemon-status` whenever it changes or disappears.
+/// The next chat operation rebuilds against the new endpoint.
+///
+/// File-watch over HTTP-probe because: (a) we don't want to spam
+/// `/agent` every 3 s for every running fetchit-desktop on a box;
+/// (b) the failure modes we've seen all manifest as the daemon
+/// rewriting `api.port` / `api-token` on restart, which is exactly
+/// what `discover_local` picks up.
+fn spawn_daemon_watcher(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_sig: Option<(String, String)> = None;
+        let mut last_emitted: Option<DaemonStatus> = None;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let cur_sig = match fetchit_chat::discovery::discover_local().await {
+                Ok(ep) => Some((ep.base_url, ep.token)),
+                Err(_) => None,
+            };
+
+            // Determine the status change, if any.
+            let status = match (&last_sig, &cur_sig) {
+                (None, None) => continue, // pre-existing or stable absence; nothing to report
+                (None, Some(_)) => DaemonStatus::Connected,
+                (Some(_), None) => DaemonStatus::Down,
+                (Some(a), Some(b)) if a == b => DaemonStatus::Connected,
+                (Some(_), Some(_)) => DaemonStatus::Reconnecting,
+            };
+
+            // Invalidate when the signature changed (rotated credentials
+            // OR daemon disappeared) so the next chat call rebuilds.
+            if last_sig.as_ref() != cur_sig.as_ref() && last_sig.is_some() {
+                state.invalidate().await;
+                log_pump("[daemon-watcher] x0xd signature changed, client invalidated");
+            }
+
+            // Only emit on edges so the frontend isn't spammed with
+            // duplicate "connected" events every 3 s.
+            if last_emitted != Some(status) {
+                let _ = app.emit("chat:daemon-status", status);
+                last_emitted = Some(status);
+            }
+
+            last_sig = cur_sig;
+        }
+    });
 }
 
 /// Drive the mDNS lifecycle alongside the LAN-direct transport.
@@ -543,10 +615,9 @@ fn spawn_lan_mdns(app: AppHandle, state: ChatState) {
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             };
-            let (Some(lan), Some(bound)) = (
-                client.lan_transport_arc().cloned(),
-                client.lan_bound_addr(),
-            ) else {
+            let (Some(lan), Some(bound)) =
+                (client.lan_transport_arc().cloned(), client.lan_bound_addr())
+            else {
                 // LAN-direct isn't wired this round (toggle off or
                 // builder path skipped). Drain any prior Nearby state
                 // on the UI side, then back off.
@@ -558,8 +629,7 @@ fn spawn_lan_mdns(app: AppHandle, state: ChatState) {
             let aid_hex = lan.local_agent_id().0.clone();
             let table = lan.peer_table().clone();
 
-            let Some(_daemon) = start_lan_mdns_daemon(&aid_hex, bound.port(), table.clone())
-            else {
+            let Some(_daemon) = start_lan_mdns_daemon(&aid_hex, bound.port(), table.clone()) else {
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             };
@@ -598,8 +668,7 @@ fn nearby_snapshot(table: &fetchit_chat::lan_discovery::LanPeerTable) -> Vec<Nea
             agent_id: r.agent_id.0,
             ip: r.ip.to_string(),
             port: r.port,
-            last_seen_ms_ago: u64::try_from(r.last_seen.elapsed().as_millis())
-                .unwrap_or(u64::MAX),
+            last_seen_ms_ago: u64::try_from(r.last_seen.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
         .collect()
 }

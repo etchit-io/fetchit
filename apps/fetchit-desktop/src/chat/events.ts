@@ -3,7 +3,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { maybeNotifyInboundDm } from "./notify";
-import type { ChatStore, NearbyPeer } from "./state";
+import type { ChatStore, DaemonStatus, NearbyPeer } from "./state";
 import type { ChatEvent } from "./types";
 
 /// Wire-shape of the daemon's `chat:receipt` Tauri event.
@@ -53,11 +53,18 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     }));
     store.setNearbyPeers(peers);
   });
+  const unsubDaemon = await listen<DaemonStatus>(
+    "chat:daemon-status",
+    (ev) => {
+      store.setDaemonStatus(ev.payload);
+    },
+  );
   return () => {
     unsubEvent();
     unsubReceipt();
     unsubPresence();
     unsubNearby();
+    unsubDaemon();
   };
 }
 
