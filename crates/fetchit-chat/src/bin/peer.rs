@@ -1,7 +1,7 @@
 //! `fetchit-chat-peer` — headless chat peer for testing.
 //!
 //! Drives `fetchit_chat::Client` against a local x0xd + a relay, with
-//! no GUI. Three modes:
+//! no GUI. Four modes:
 //!
 //! - `echo` — auto-echo every inbound DM back to its sender. Useful
 //!   for confirming relay round-trips from a different machine without
@@ -10,6 +10,9 @@
 //!   inbound DMs printed to stdout. Like a tiny CLI chat client.
 //! - `card` — print this peer's share URI (so the other side can
 //!   import it) and exit.
+//! - `import` — read a peer's share URI from a file (the v2 form is
+//!   ~12 KB, too large for a CLI arg) and add it to the local contact
+//!   store. Required before `chat` can encrypt to that peer.
 
 #![allow(
     clippy::unwrap_used,
@@ -102,6 +105,16 @@ enum Mode {
         #[arg(long)]
         peer: String,
     },
+    /// Import a peer's share URI into the local contact store. Required
+    /// before `chat` can build a Conversation against that peer (the
+    /// peer's ML-KEM-768 pubkey lives inside the v2 card).
+    Import {
+        /// Path to a UTF-8 file holding the full `x0x://agent/…` URI on
+        /// a single line. File-based to side-step OS argv limits — v2
+        /// cards are 10-15 KB.
+        #[arg(long)]
+        uri_file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -137,7 +150,37 @@ async fn main() -> Result<()> {
         }
         Mode::Echo => run_echo(&client, &cli.display_name).await,
         Mode::Chat { peer } => run_chat(&client, &cli.display_name, &peer).await,
+        Mode::Import { uri_file } => run_import(&client, &uri_file).await,
     }
+}
+
+async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(uri_file)
+        .with_context(|| format!("read uri file at {}", uri_file.display()))?;
+    let uri = raw.trim();
+    if !uri.starts_with("x0x://agent/") {
+        anyhow::bail!("uri file does not start with x0x://agent/ — got {} bytes", uri.len());
+    }
+    eprintln!("[peer] importing {} byte URI from {}", uri.len(), uri_file.display());
+    client
+        .identity()
+        .import_uri(uri)
+        .await
+        .context("import_uri (x0xd /agent/card/import)")?;
+    if let Some(layout) = client.layout() {
+        match fetchit_chat::messages::StoredContactCard::from_share_uri(uri) {
+            Ok(stored) => {
+                stored.save(layout).context("StoredContactCard.save")?;
+                eprintln!("[peer] persisted v2 contact card to local layout");
+            }
+            Err(e) => {
+                eprintln!("[peer] v2 fields not parsed ({e}); the legacy import still landed");
+            }
+        }
+    } else {
+        eprintln!("[peer] no local layout (REST-only client); v2 fields not persisted");
+    }
+    Ok(())
 }
 
 fn resolve_token(cli: &Cli) -> Result<String> {
