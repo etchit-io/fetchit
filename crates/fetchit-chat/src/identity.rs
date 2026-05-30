@@ -86,14 +86,12 @@ impl AgentCard {
     }
 
     /// Decode a card from the user-facing share URI.
+    ///
+    /// Accepts both the legacy plain-JSON body and the v2 DEFLATE-tagged
+    /// body produced by [`crate::FetchitIdentity::extended_share_uri`].
     pub fn from_share_uri(uri: &str) -> Result<Self> {
-        let body = uri
-            .strip_prefix("x0x://agent/")
-            .ok_or_else(|| ChatError::Invalid("not an x0x://agent/ URI".into()))?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(body)
-            .map_err(|e| ChatError::Invalid(format!("base64: {e}")))?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let v = crate::card::extended_card_from_uri(uri)?;
+        Ok(serde_json::from_value(v)?)
     }
 }
 
@@ -191,10 +189,18 @@ impl<'a> Endpoint<'a> {
     /// Import a card directly from its `x0x://agent/...` URI form.
     /// Cheaper than [`Self::import`] when the caller already has the
     /// URI (the common case for the desktop "Add a contact" flow).
+    ///
+    /// Inbound URIs may be either legacy plain-JSON or v2 DEFLATE-tagged.
+    /// x0xd's `/agent/card/import` endpoint understands only the legacy
+    /// form, so any v2-tagged URI is decoded + re-emitted as legacy
+    /// before being forwarded; the v2-only fields are persisted
+    /// separately by the desktop shell.
     pub async fn import_uri(&self, uri: &str) -> Result<()> {
+        let card = AgentCard::from_share_uri(uri)?;
+        let legacy_uri = card.to_share_uri()?;
         let _: serde_json::Value = self
             .http
-            .post_json("/agent/card/import", &ImportRequest { card: uri })
+            .post_json("/agent/card/import", &ImportRequest { card: &legacy_uri })
             .await?;
         Ok(())
     }
@@ -255,5 +261,36 @@ mod tests {
     #[test]
     fn from_share_uri_rejects_wrong_scheme() {
         assert!(AgentCard::from_share_uri("http://nope").is_err());
+    }
+
+    /// `extended_share_uri` produces a DEFLATE-tagged body; the cross-
+    /// device import path passes that URI to [`AgentCard::from_share_uri`]
+    /// as a client-side sanity check. The legacy parser would bail with
+    /// "expected value at line 1 column 1" — this test guards against
+    /// that regression.
+    #[test]
+    fn from_share_uri_accepts_v2_deflate_body() {
+        use crate::card::extended_card_to_uri;
+
+        // Build a v2-merged JSON: legacy x0x card fields + the four
+        // fetchit-v2 extension fields. extended_card_to_uri encodes
+        // and DEFLATE-compresses the whole object.
+        let v2_json = serde_json::json!({
+            "agent_id": id_str(),
+            "display_name": "Alice",
+            "created_at": 1_779_740_234_u64,
+            "addresses": ["1.2.3.4:5483"],
+            "fetchit_card_version": 1,
+            "fetchit_kem_public_key_b64": "AAAA",
+            "fetchit_agent_public_key_b64": "AAAA",
+            "fetchit_card_signature_b64": "AAAA",
+        });
+        let uri = extended_card_to_uri(&v2_json).unwrap();
+        assert!(uri.starts_with("x0x://agent/"));
+
+        // The legacy AgentCard parser must now accept the DEFLATE body.
+        let back = AgentCard::from_share_uri(&uri).expect("v2 URI must parse");
+        assert_eq!(back.display_name, "Alice");
+        assert_eq!(back.agent_id, AgentId::parse(id_str()).unwrap());
     }
 }
