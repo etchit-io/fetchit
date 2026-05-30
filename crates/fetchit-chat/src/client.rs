@@ -500,8 +500,12 @@ async fn build_with_chat(
             argon_salt.as_ref(),
         )?);
         let table = Arc::new(LanPeerTable::new());
-        let lookup: ContactPubkeyLookup = contact_pubkey_lookup
-            .unwrap_or_else(|| Arc::new(|_a: &identity::AgentId| -> Option<Vec<u8>> { None }));
+        let lookup: ContactPubkeyLookup = contact_pubkey_lookup.unwrap_or_else(|| {
+            let registry_for_lookup = registry.clone();
+            Arc::new(move |aid: &identity::AgentId| {
+                registry_for_lookup.peer_ml_dsa_pubkey(aid)
+            })
+        });
         let local_aid = identity::AgentId(agent_id_hex.clone());
         let bind = std::net::SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),

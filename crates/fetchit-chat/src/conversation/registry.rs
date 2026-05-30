@@ -3,9 +3,12 @@
 use super::types::Conversation;
 use crate::at_rest::{open_from_path, seal_to_path, MasterKey, ARGON_SALT_LEN};
 use crate::error::ChatError;
+use crate::identity::AgentId;
 use crate::local_store::StoreLayout;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::Mutex;
 
 /// In-memory registry of open conversations, persisted via `at_rest`.
@@ -15,6 +18,13 @@ pub struct ConversationRegistry {
     kdf_id: u8,
     argon_salt: Option<[u8; ARGON_SALT_LEN]>,
     by_group_id: Mutex<HashMap<String, Conversation>>,
+    /// Sync-accessible mirror of every peer member device's ML-DSA-65
+    /// public key, indexed by `agent_id`. Populated by [`Self::save`]
+    /// and on every hydrate-from-disk path. Read by
+    /// [`crate::lan_direct_transport::LanDirectTransport`] from a sync
+    /// `reachability()` callback that can't await on the tokio mutex
+    /// holding the conversation cache.
+    peer_pubkeys: StdRwLock<HashMap<AgentId, Vec<u8>>>,
 }
 
 impl ConversationRegistry {
@@ -32,6 +42,43 @@ impl ConversationRegistry {
             kdf_id,
             argon_salt,
             by_group_id: Mutex::new(HashMap::new()),
+            peer_pubkeys: StdRwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Synchronous lookup of a peer's ML-DSA-65 public key (raw bytes,
+    /// decoded from the on-card base64). Returns `None` for unknown
+    /// peers or for peers whose member device records have no
+    /// `agent_public_key_b64` (legacy v1 cards).
+    ///
+    /// Wired through [`crate::lan_direct_transport::ContactPubkeyLookup`]
+    /// at client-build time so the LAN-direct transport's reachability
+    /// gate can run without awaiting on the tokio mutex.
+    #[must_use]
+    pub fn peer_ml_dsa_pubkey(&self, agent_id: &AgentId) -> Option<Vec<u8>> {
+        self.peer_pubkeys
+            .read()
+            .ok()
+            .and_then(|g| g.get(agent_id).cloned())
+    }
+
+    /// Walk every member device on `conv` and update the sync pubkey
+    /// cache. Called whenever a conversation is saved or hydrated.
+    fn refresh_pubkey_cache(&self, conv: &Conversation) {
+        let Ok(mut g) = self.peer_pubkeys.write() else {
+            return;
+        };
+        for member in &conv.members {
+            for device in &member.devices {
+                let Some(pk_b64) = device.agent_public_key_b64.as_deref() else {
+                    continue;
+                };
+                let Ok(pk) = B64.decode(pk_b64) else { continue };
+                let Ok(aid) = AgentId::parse(device.agent_id_hex.clone()) else {
+                    continue;
+                };
+                g.insert(aid, pk);
+            }
         }
     }
 
@@ -54,6 +101,7 @@ impl ConversationRegistry {
         let bytes = open_from_path(&path, &self.master)?;
         let conv: Conversation = serde_json::from_slice(&bytes)
             .map_err(|e| ChatError::Invalid(format!("conv parse: {e}")))?;
+        self.refresh_pubkey_cache(&conv);
         self.by_group_id
             .lock()
             .await
@@ -115,6 +163,10 @@ impl ConversationRegistry {
             if !dm_with(&conv, peer_agent_id_hex) {
                 continue;
             }
+            // Refresh the sync pubkey cache for every DM we scan,
+            // not just the winner — peers we know how to talk to
+            // should all be LAN-eligible.
+            self.refresh_pubkey_cache(&conv);
             // Hydrate every scanned-from-disk DM into the cache so
             // subsequent calls stay cheap, not just the winner.
             self.by_group_id
@@ -160,6 +212,7 @@ impl ConversationRegistry {
             self.kdf_id,
             self.argon_salt.as_ref(),
         )?;
+        self.refresh_pubkey_cache(conv);
         self.by_group_id
             .lock()
             .await
@@ -199,8 +252,6 @@ mod tests {
         Conversation, Member, MemberDevice, MemberDeviceStatus, Role, TrustState,
         DEFAULT_AUTO_REKEY_INTERVAL_MS,
     };
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
     use tempfile::tempdir;
 
     fn dm(
@@ -338,6 +389,93 @@ mod tests {
             r2.find_dm_with(PEER).await.unwrap().unwrap().group_id_hex,
             "bb"
         );
+    }
+
+    fn dm_with_pubkey(
+        group_id_hex: &str,
+        local_id: &str,
+        peer_id: &str,
+        peer_pubkey: &[u8],
+    ) -> Conversation {
+        let device = |aid: &str, pk: Option<&[u8]>| MemberDevice {
+            agent_id_hex: aid.to_owned(),
+            kem_public_key_b64: B64.encode([0u8; 32]),
+            agent_public_key_b64: pk.map(|p| B64.encode(p)),
+            added_at_epoch: 0,
+            status: MemberDeviceStatus::Active,
+        };
+        let local_member = Member {
+            user_id_hex: None,
+            devices: vec![device(local_id, None)],
+            joined_at_epoch: 0,
+        };
+        let peer_member = Member {
+            user_id_hex: None,
+            devices: vec![device(peer_id, Some(peer_pubkey))],
+            joined_at_epoch: 0,
+        };
+        Conversation {
+            group_id_hex: group_id_hex.to_owned(),
+            name: None,
+            members: vec![local_member, peer_member],
+            current_epoch: 0,
+            current_key_b64: B64.encode([0u8; 32]),
+            prior_keys: Vec::new(),
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_pubkey_lookup_populates_on_save() {
+        let (_d, reg) = fresh_registry();
+        let pk = vec![0xcd; 64];
+        reg.save(&dm_with_pubkey("aa", LOCAL, PEER, &pk)).await.unwrap();
+        let aid = AgentId::parse(PEER.to_owned()).unwrap();
+        assert_eq!(reg.peer_ml_dsa_pubkey(&aid), Some(pk));
+    }
+
+    #[tokio::test]
+    async fn peer_pubkey_lookup_populates_on_cold_disk_hydrate() {
+        // Save under r1, then construct r2 against the same layout and
+        // confirm find_dm_with hydration fills the sync cache.
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap(),
+        );
+        let r1 =
+            ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));
+        let pk = vec![0xef; 64];
+        r1.save(&dm_with_pubkey("aa", LOCAL, PEER, &pk)).await.unwrap();
+
+        let r2 = ConversationRegistry::new(layout, master, kdf_id_argon2(), Some(salt));
+        let aid = AgentId::parse(PEER.to_owned()).unwrap();
+        assert!(r2.peer_ml_dsa_pubkey(&aid).is_none(), "cold cache before lookup");
+        let _ = r2.find_dm_with(PEER).await.unwrap();
+        assert_eq!(r2.peer_ml_dsa_pubkey(&aid), Some(pk));
+    }
+
+    #[tokio::test]
+    async fn peer_pubkey_lookup_returns_none_for_unknown_agent() {
+        let (_d, reg) = fresh_registry();
+        let aid = AgentId::parse(PEER.to_owned()).unwrap();
+        assert!(reg.peer_ml_dsa_pubkey(&aid).is_none());
+    }
+
+    #[tokio::test]
+    async fn peer_pubkey_lookup_skips_devices_without_pubkey() {
+        // Legacy device records lacking agent_public_key_b64 must not
+        // pollute the cache with empty entries — keeps reachability
+        // honest about which peers we can verify.
+        let (_d, reg) = fresh_registry();
+        reg.save(&dm("aa", LOCAL, PEER, 0, 0, 0)).await.unwrap();
+        let aid = AgentId::parse(PEER.to_owned()).unwrap();
+        assert!(reg.peer_ml_dsa_pubkey(&aid).is_none());
     }
 
     #[tokio::test]
