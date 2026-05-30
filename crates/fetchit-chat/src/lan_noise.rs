@@ -91,10 +91,9 @@ fn build_xx(
     prologue: &[u8],
     static_sec: &[u8; 32],
 ) -> Result<HandshakeState, ChatError> {
-    let params: snow::params::NoiseParams =
-        NOISE_PARAMS.parse().map_err(|e: snow::Error| {
-            ChatError::Invalid(format!("snow params: {e}"))
-        })?;
+    let params: snow::params::NoiseParams = NOISE_PARAMS
+        .parse()
+        .map_err(|e: snow::Error| ChatError::Invalid(format!("snow params: {e}")))?;
     let builder = Builder::new(params)
         .local_private_key(static_sec)
         .map_err(snow_err)?
@@ -409,10 +408,7 @@ fn verify_peer_binding(
 ///
 /// # Errors
 /// I/O, framing-cap, or AEAD failures.
-pub async fn read_app_frame<R>(
-    r: &mut R,
-    ts: &mut TransportState,
-) -> Result<Vec<u8>, ChatError>
+pub async fn read_app_frame<R>(r: &mut R, ts: &mut TransportState) -> Result<Vec<u8>, ChatError>
 where
     R: AsyncRead + Unpin,
 {
@@ -451,12 +447,8 @@ mod tests {
 
         let p_i = prologue.clone();
         let p_r = prologue.clone();
-        let init = tokio::spawn(async move {
-            run_initiator_plain(&mut a, &p_i, &sec_i).await
-        });
-        let resp = tokio::spawn(async move {
-            run_responder_plain(&mut b, &p_r, &sec_r).await
-        });
+        let init = tokio::spawn(async move { run_initiator_plain(&mut a, &p_i, &sec_i).await });
+        let resp = tokio::spawn(async move { run_responder_plain(&mut b, &p_r, &sec_r).await });
 
         let (mut ts_i, mut ts_r) = (init.await.unwrap().unwrap(), resp.await.unwrap().unwrap());
 
@@ -493,12 +485,10 @@ mod tests {
         let sec_i = fresh_static();
         let sec_r = fresh_static();
 
-        let init = tokio::spawn(async move {
-            run_initiator_plain(&mut a, b"prologue-A", &sec_i).await
-        });
-        let resp = tokio::spawn(async move {
-            run_responder_plain(&mut b, b"prologue-B", &sec_r).await
-        });
+        let init =
+            tokio::spawn(async move { run_initiator_plain(&mut a, b"prologue-A", &sec_i).await });
+        let resp =
+            tokio::spawn(async move { run_responder_plain(&mut b, b"prologue-B", &sec_r).await });
 
         let (ri, rr) = (init.await.unwrap(), resp.await.unwrap());
         assert!(
@@ -518,16 +508,15 @@ mod tests {
 
     /// Build a `peer_pubkey_lookup` callback bound to a single
     /// (`agent_id` → ML-DSA pubkey) mapping.
-    fn single_lookup(
-        aid: [u8; 32],
-        pk: Vec<u8>,
-    ) -> impl Fn(&[u8; 32]) -> Option<Vec<u8>> {
+    fn single_lookup(aid: [u8; 32], pk: Vec<u8>) -> impl Fn(&[u8; 32]) -> Option<Vec<u8>> {
         move |q: &[u8; 32]| if *q == aid { Some(pk.clone()) } else { None }
     }
 
     fn make_signer_async(
         signer: std::sync::Arc<MlDsaSigner>,
-    ) -> impl FnOnce(Vec<u8>) -> std::pin::Pin<
+    ) -> impl FnOnce(
+        Vec<u8>,
+    ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Vec<u8>, ChatError>> + Send>,
     > {
         move |bytes| {

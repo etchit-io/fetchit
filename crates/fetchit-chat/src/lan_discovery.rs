@@ -250,14 +250,8 @@ mod tests {
             info.get_property_val_str(TXT_KEY_AID),
             Some(aid_hex.as_str())
         );
-        assert_eq!(
-            info.get_property_val_str(TXT_KEY_V),
-            Some(TXT_V)
-        );
-        assert_eq!(
-            info.get_property_val_str(TXT_KEY_PORT),
-            Some("45000")
-        );
+        assert_eq!(info.get_property_val_str(TXT_KEY_V), Some(TXT_V));
+        assert_eq!(info.get_property_val_str(TXT_KEY_PORT), Some("45000"));
     }
 
     #[test]

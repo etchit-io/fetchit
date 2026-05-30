@@ -72,8 +72,7 @@ pub fn lan_binding_bytes(
     x25519_pub: &[u8; 32],
     created_at_ms: u64,
 ) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(SIGN_DOMAIN_LAN_NOISE.len() + 1 + 32 + 32 + 8);
+    let mut out = Vec::with_capacity(SIGN_DOMAIN_LAN_NOISE.len() + 1 + 32 + 32 + 8);
     out.extend_from_slice(SIGN_DOMAIN_LAN_NOISE);
     out.push(1);
     out.extend_from_slice(agent_id);
