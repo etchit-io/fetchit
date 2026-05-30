@@ -3065,6 +3065,7 @@ dependencies = [
  "reqwest 0.12.28",
  "saorsa-pqc 0.5.1",
  "serde",
+ "serde_jcs",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",

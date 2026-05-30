@@ -4,6 +4,7 @@ use crate::auth::AuthService;
 use crate::capability::CapabilityResolver;
 use crate::config::ServerConfig;
 use crate::metrics::Metrics;
+use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
 use crate::session::SessionRegistry;
 use crate::signature::{MlDsa65Verifier, SignatureVerifier};
@@ -38,6 +39,9 @@ pub struct ServerState {
     pub ratelimit: Arc<RateLimiter>,
     /// Allow-listed Prometheus counters.
     pub metrics: Arc<Metrics>,
+    /// In-RAM profile-index map (`agent_id` → latest record). See
+    /// `docs/profile-manifest-v1.md` § 4 + `docs/qr-pairing-v1.md`.
+    pub profiles: Arc<ProfileIndex>,
 }
 
 /// Builder + runner for one relay node.
@@ -83,6 +87,7 @@ impl Server {
             capability_resolver: Arc::new(CapabilityResolver::new(self.config.issuer_keys.clone())),
             ratelimit: Arc::new(RateLimiter::new()),
             metrics,
+            profiles: ProfileIndex::new(),
             config: self.config,
         });
         let router = Router::new()
@@ -91,6 +96,11 @@ impl Server {
             .route("/v1/auth/challenge", post(auth_challenge))
             .route("/v1/auth/verify", post(auth_verify))
             .route("/v1/ws", get(ws_handler))
+            .route("/v1/profile", post(post_profile))
+            .route(
+                "/v1/profile/:agent_id",
+                get(get_profile).delete(delete_profile),
+            )
             .with_state(state.clone());
         (router, state)
     }

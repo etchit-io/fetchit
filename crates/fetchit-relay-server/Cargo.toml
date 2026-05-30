@@ -31,6 +31,7 @@ postcard.workspace = true
 rand.workspace = true
 saorsa-pqc.workspace = true
 serde.workspace = true
+serde_jcs = "0.2"
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
