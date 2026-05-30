@@ -39,6 +39,7 @@ rand.workspace = true
 reqwest.workspace = true
 saorsa-pqc.workspace = true
 serde.workspace = true
+snow = "0.10"
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
