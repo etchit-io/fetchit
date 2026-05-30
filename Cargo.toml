@@ -51,14 +51,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
 hex = "0.4"
 log = "0.4"
-# Temporary pin to jacderida's home-download-fixes fork while the
-# residential-saturation download hardening lands upstream. Bumps the
-# download path from "aborts on first close-group exhaustion" to
-# retries + deferred-retry with 10/30/60s backoff. Re-pin to
-# WithAutonomi/ant-client main once the PR merges. etchit is testing
-# the same SHA on a local branch in parallel; coordinate the move
-# back to mainline.
-ant-core = { git = "https://github.com/jacderida/ant-client", rev = "13070d9" }
+ant-core = { git = "https://github.com/WithAutonomi/ant-client", rev = "eeba52b" }
 self_encryption = "=0.36.0"
 xor_name = "=5.0.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
