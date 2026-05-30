@@ -274,6 +274,14 @@ impl<'a> Endpoint<'a> {
         signer: &Arc<dyn Signer>,
         layout: &StoreLayout,
     ) -> Result<Conversation> {
+        // Race guard: a concurrent inbound welcome (or a sibling
+        // outbound `send` that beat us to the punch) may have installed
+        // a DM with this peer in the window between `send`'s lookup and
+        // here. Re-resolve once more before minting a fresh group so we
+        // don't accrete a duplicate conversation in the registry.
+        if let Some(existing) = registry.find_dm_with(&to.0).await? {
+            return Ok(existing);
+        }
         let peer_card = StoredContactCard::load(layout, &to.0)?.ok_or_else(|| {
             ChatError::Invalid(format!(
                 "no stored card for {} — import their share card first",
