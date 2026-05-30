@@ -14,8 +14,11 @@
 //! Wire framing post-handshake is `u32 BE length prefix || ciphertext`,
 //! capped at [`MAX_FRAME`] (65 535) bytes.
 
+use crate::chat_crypto::{lan_binding_bytes, ml_dsa_verify};
 use crate::error::ChatError;
+use serde::{Deserialize, Serialize};
 use snow::{Builder, HandshakeState, TransportState};
+use std::future::Future;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Hard cap on a single framed ciphertext, including the AEAD tag.
@@ -170,6 +173,238 @@ where
     write_frame_raw(w, &ct[..len]).await
 }
 
+// ── Channel-binding XX (msg2 + msg3 carry an ML-DSA signature) ───────
+
+/// Wire shape of the binding payload carried in XX msg2 and msg3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanBindingProof {
+    /// Signer's `agent_id` (32 bytes, raw).
+    pub agent_id: [u8; 32],
+    /// Signer's X25519 static public key (32 bytes).
+    pub x25519_pub: [u8; 32],
+    /// `created_at_ms` from the [`crate::lan_static::LanStaticIdentity`]
+    /// that owns the X25519 keypair. Bound into the signed bytes; not
+    /// trusted as a freshness clock yet.
+    pub created_at_ms: u64,
+    /// ML-DSA-65 signature over
+    /// `lan_binding_bytes(agent_id, x25519_pub, created_at_ms) ||
+    ///  handshake_hash_at_signing_time`.
+    pub sig: Vec<u8>,
+}
+
+/// Returned by the bound handshake — what the verifier learned about
+/// the peer. The `peer_static_pub` is recovered from snow's
+/// `get_remote_static()` after the handshake completes and cross-
+/// checked against the signed binding.
+#[derive(Debug, Clone)]
+pub struct VerifiedPeer {
+    /// Peer `agent_id` proven via prologue + ML-DSA signature.
+    pub agent_id: [u8; 32],
+    /// Peer's X25519 static public key as recovered from snow.
+    pub x25519_pub: [u8; 32],
+    /// `created_at_ms` from the peer's binding.
+    pub created_at_ms: u64,
+}
+
+/// Initiator side of the channel-binding XX handshake.
+///
+/// `sign_blob` is invoked once with the bytes to sign; production
+/// callers wire it to [`fetchit_relay_client::Signer::sign`] so the
+/// ML-DSA-65 secret stays inside x0xd. `peer_pubkey_lookup` looks up
+/// the ML-DSA public key for the advertised peer `agent_id`; missing
+/// entries abort the handshake before any signature verification runs.
+///
+/// # Errors
+/// I/O, snow handshake, serialization, or signature-verification errors.
+#[allow(clippy::too_many_arguments)] // factoring into a struct hides the seam the desktop wires
+pub async fn run_initiator_bound<S, F, Fut>(
+    stream: &mut S,
+    prologue: &[u8],
+    my_static_sec: &[u8; 32],
+    my_agent_id: &[u8; 32],
+    my_x25519_pub: &[u8; 32],
+    my_created_at_ms: u64,
+    sign_blob: F,
+    peer_pubkey_lookup: &(dyn Fn(&[u8; 32]) -> Option<Vec<u8>> + Sync),
+) -> Result<(TransportState, VerifiedPeer), ChatError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, ChatError>>,
+{
+    let mut hs = build_xx(true, prologue, my_static_sec)?;
+    let mut buf = vec![0u8; HANDSHAKE_MSG_CAP];
+    let mut tmp = vec![0u8; HANDSHAKE_MSG_CAP];
+
+    // -> e
+    let len = hs.write_message(&[], &mut buf).map_err(snow_err)?;
+    write_frame_raw(stream, &buf[..len]).await?;
+
+    // h-snapshot at the moment the responder will sign (== current
+    // initiator-side h before read_message of msg2).
+    let h_at_responder_sign = hs.get_handshake_hash().to_vec();
+
+    // <- e, ee, s, es + responder binding payload
+    let msg2 = read_frame_raw(stream).await?;
+    let payload_len = hs.read_message(&msg2, &mut tmp).map_err(snow_err)?;
+    let peer_proof: LanBindingProof = postcard::from_bytes(&tmp[..payload_len])
+        .map_err(|e| ChatError::Invalid(format!("lan binding decode: {e}")))?;
+    verify_peer_binding(&hs, &peer_proof, &h_at_responder_sign, peer_pubkey_lookup)?;
+
+    // h-snapshot at the moment we sign (== h after reading msg2).
+    let h_at_self_sign = hs.get_handshake_hash().to_vec();
+    let to_sign = bind_signing_bytes(
+        my_agent_id,
+        my_x25519_pub,
+        my_created_at_ms,
+        &h_at_self_sign,
+    );
+    let sig = sign_blob(to_sign).await?;
+    let my_proof = LanBindingProof {
+        agent_id: *my_agent_id,
+        x25519_pub: *my_x25519_pub,
+        created_at_ms: my_created_at_ms,
+        sig,
+    };
+    let payload = postcard::to_allocvec(&my_proof)
+        .map_err(|e| ChatError::Invalid(format!("lan binding encode: {e}")))?;
+
+    // -> s, se + initiator binding payload
+    let len = hs.write_message(&payload, &mut buf).map_err(snow_err)?;
+    write_frame_raw(stream, &buf[..len]).await?;
+
+    let ts = hs.into_transport_mode().map_err(snow_err)?;
+    Ok((
+        ts,
+        VerifiedPeer {
+            agent_id: peer_proof.agent_id,
+            x25519_pub: peer_proof.x25519_pub,
+            created_at_ms: peer_proof.created_at_ms,
+        },
+    ))
+}
+
+/// Responder side of the channel-binding XX handshake. See
+/// [`run_initiator_bound`] for the `sign_blob` / `peer_pubkey_lookup`
+/// contract.
+///
+/// # Errors
+/// I/O, snow handshake, serialization, or signature-verification errors.
+#[allow(clippy::too_many_arguments)] // mirrors `run_initiator_bound`
+pub async fn run_responder_bound<S, F, Fut>(
+    stream: &mut S,
+    prologue: &[u8],
+    my_static_sec: &[u8; 32],
+    my_agent_id: &[u8; 32],
+    my_x25519_pub: &[u8; 32],
+    my_created_at_ms: u64,
+    sign_blob: F,
+    peer_pubkey_lookup: &(dyn Fn(&[u8; 32]) -> Option<Vec<u8>> + Sync),
+) -> Result<(TransportState, VerifiedPeer), ChatError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, ChatError>>,
+{
+    let mut hs = build_xx(false, prologue, my_static_sec)?;
+    let mut buf = vec![0u8; HANDSHAKE_MSG_CAP];
+    let mut tmp = vec![0u8; HANDSHAKE_MSG_CAP];
+
+    // <- e
+    let msg1 = read_frame_raw(stream).await?;
+    let _ = hs.read_message(&msg1, &mut tmp).map_err(snow_err)?;
+
+    // h-snapshot for our signature (== h after reading msg1).
+    let h_at_self_sign = hs.get_handshake_hash().to_vec();
+    let to_sign = bind_signing_bytes(
+        my_agent_id,
+        my_x25519_pub,
+        my_created_at_ms,
+        &h_at_self_sign,
+    );
+    let sig = sign_blob(to_sign).await?;
+    let my_proof = LanBindingProof {
+        agent_id: *my_agent_id,
+        x25519_pub: *my_x25519_pub,
+        created_at_ms: my_created_at_ms,
+        sig,
+    };
+    let payload = postcard::to_allocvec(&my_proof)
+        .map_err(|e| ChatError::Invalid(format!("lan binding encode: {e}")))?;
+
+    // -> e, ee, s, es + responder binding payload
+    let len = hs.write_message(&payload, &mut buf).map_err(snow_err)?;
+    write_frame_raw(stream, &buf[..len]).await?;
+
+    // h-snapshot for verifying the initiator's signature (== h after
+    // writing msg2; matches initiator's pre-write snapshot of msg3).
+    let h_at_initiator_sign = hs.get_handshake_hash().to_vec();
+
+    // <- s, se + initiator binding payload
+    let msg3 = read_frame_raw(stream).await?;
+    let payload_len = hs.read_message(&msg3, &mut tmp).map_err(snow_err)?;
+    let peer_proof: LanBindingProof = postcard::from_bytes(&tmp[..payload_len])
+        .map_err(|e| ChatError::Invalid(format!("lan binding decode: {e}")))?;
+    verify_peer_binding(&hs, &peer_proof, &h_at_initiator_sign, peer_pubkey_lookup)?;
+
+    let ts = hs.into_transport_mode().map_err(snow_err)?;
+    Ok((
+        ts,
+        VerifiedPeer {
+            agent_id: peer_proof.agent_id,
+            x25519_pub: peer_proof.x25519_pub,
+            created_at_ms: peer_proof.created_at_ms,
+        },
+    ))
+}
+
+fn bind_signing_bytes(
+    agent_id: &[u8; 32],
+    x25519_pub: &[u8; 32],
+    created_at_ms: u64,
+    handshake_hash: &[u8],
+) -> Vec<u8> {
+    let mut out = lan_binding_bytes(agent_id, x25519_pub, created_at_ms);
+    out.extend_from_slice(handshake_hash);
+    out
+}
+
+fn verify_peer_binding(
+    hs: &HandshakeState,
+    proof: &LanBindingProof,
+    expected_h_at_sign: &[u8],
+    peer_pubkey_lookup: &(dyn Fn(&[u8; 32]) -> Option<Vec<u8>> + Sync),
+) -> Result<(), ChatError> {
+    // The advertised peer agent_id must already be known via the
+    // contact card (TOFU happens at share-URI import, never on the LAN).
+    let peer_pk = peer_pubkey_lookup(&proof.agent_id).ok_or_else(|| {
+        ChatError::Invalid(format!(
+            "lan peer {} has no known ML-DSA pubkey",
+            hex::encode(proof.agent_id)
+        ))
+    })?;
+
+    // The X25519 in the proof must match the one snow recovered from
+    // the handshake (e/s/es covers the wire authenticity; this catches
+    // a peer that lies about its own static in the payload).
+    let recovered = hs
+        .get_remote_static()
+        .ok_or_else(|| ChatError::Invalid("snow: no remote static".into()))?;
+    if recovered != proof.x25519_pub {
+        return Err(ChatError::Invalid(
+            "lan binding x25519 mismatch with handshake static".into(),
+        ));
+    }
+
+    let to_verify = bind_signing_bytes(
+        &proof.agent_id,
+        &proof.x25519_pub,
+        proof.created_at_ms,
+        expected_h_at_sign,
+    );
+    ml_dsa_verify(&peer_pk, &to_verify, &proof.sig)
+}
+
 /// Read and AEAD-decrypt one framed plaintext from `ts`.
 ///
 /// # Errors
@@ -189,7 +424,13 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::similar_names,
+    clippy::type_complexity
+)]
 mod tests {
     use super::*;
     use tokio::io::duplex;
@@ -263,6 +504,290 @@ mod tests {
         assert!(
             ri.is_err() || rr.is_err(),
             "diverging prologue must fail at least one side"
+        );
+    }
+
+    use fetchit_relay_client::{MlDsaSigner, Signer};
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    fn fresh_x25519() -> ([u8; 32], [u8; 32]) {
+        let sec = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pubk = PublicKey::from(&sec);
+        (sec.to_bytes(), pubk.to_bytes())
+    }
+
+    /// Build a `peer_pubkey_lookup` callback bound to a single
+    /// (`agent_id` → ML-DSA pubkey) mapping.
+    fn single_lookup(
+        aid: [u8; 32],
+        pk: Vec<u8>,
+    ) -> impl Fn(&[u8; 32]) -> Option<Vec<u8>> {
+        move |q: &[u8; 32]| if *q == aid { Some(pk.clone()) } else { None }
+    }
+
+    fn make_signer_async(
+        signer: std::sync::Arc<MlDsaSigner>,
+    ) -> impl FnOnce(Vec<u8>) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<u8>, ChatError>> + Send>,
+    > {
+        move |bytes| {
+            Box::pin(async move {
+                signer
+                    .sign(&bytes)
+                    .await
+                    .map_err(|e| ChatError::Invalid(format!("test signer: {e}")))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn xx_with_binding_succeeds_when_signatures_verify() {
+        let signer_i = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_r = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let aid_i = [0x11u8; 32];
+        let aid_r = [0x22u8; 32];
+        let pk_i = signer_i.public_key();
+        let pk_r = signer_r.public_key();
+
+        let (sec_i, pub_i) = fresh_x25519();
+        let (sec_r, pub_r) = fresh_x25519();
+        let prologue = {
+            let mut p = b"fetchit-lan-v1".to_vec();
+            p.extend_from_slice(&aid_i);
+            p.extend_from_slice(&aid_r);
+            p
+        };
+
+        let (mut a, mut b) = duplex(16 * 1024);
+        let p_i = prologue.clone();
+        let p_r = prologue.clone();
+        let lookup_for_i = single_lookup(aid_r, pk_r.clone());
+        let lookup_for_r = single_lookup(aid_i, pk_i.clone());
+        let s_i = signer_i.clone();
+        let s_r = signer_r.clone();
+
+        let init = tokio::spawn(async move {
+            run_initiator_bound(
+                &mut a,
+                &p_i,
+                &sec_i,
+                &aid_i,
+                &pub_i,
+                100,
+                make_signer_async(s_i),
+                &lookup_for_i,
+            )
+            .await
+        });
+        let resp = tokio::spawn(async move {
+            run_responder_bound(
+                &mut b,
+                &p_r,
+                &sec_r,
+                &aid_r,
+                &pub_r,
+                200,
+                make_signer_async(s_r),
+                &lookup_for_r,
+            )
+            .await
+        });
+
+        let (i_res, r_res) = (init.await.unwrap(), resp.await.unwrap());
+        let (_ts_i, v_i) = i_res.unwrap();
+        let (_ts_r, v_r) = r_res.unwrap();
+        assert_eq!(v_i.agent_id, aid_r);
+        assert_eq!(v_r.agent_id, aid_i);
+        assert_eq!(v_i.x25519_pub, pub_r);
+        assert_eq!(v_r.x25519_pub, pub_i);
+        assert_eq!(v_i.created_at_ms, 200);
+        assert_eq!(v_r.created_at_ms, 100);
+    }
+
+    #[tokio::test]
+    async fn xx_aborts_when_responder_signature_is_forged() {
+        let signer_i = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        // The "real" responder key — known on the initiator side
+        let real_pk_r = MlDsaSigner::generate().unwrap().public_key();
+        // The forger uses a DIFFERENT signer, but advertises real aid_r
+        let forger = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let aid_i = [0xaa; 32];
+        let aid_r = [0xbb; 32];
+
+        let (sec_i, pub_i) = fresh_x25519();
+        let (sec_r, pub_r) = fresh_x25519();
+        let prologue = {
+            let mut p = b"fetchit-lan-v1".to_vec();
+            p.extend_from_slice(&aid_i);
+            p.extend_from_slice(&aid_r);
+            p
+        };
+
+        let (mut a, mut b) = duplex(16 * 1024);
+        let p_i = prologue.clone();
+        let p_r = prologue.clone();
+        let lookup_for_i = single_lookup(aid_r, real_pk_r);
+        let lookup_for_r = single_lookup(aid_i, signer_i.public_key());
+        let s_i = signer_i.clone();
+        let s_forger = forger.clone();
+
+        let init = tokio::spawn(async move {
+            run_initiator_bound(
+                &mut a,
+                &p_i,
+                &sec_i,
+                &aid_i,
+                &pub_i,
+                100,
+                make_signer_async(s_i),
+                &lookup_for_i,
+            )
+            .await
+        });
+        let resp = tokio::spawn(async move {
+            run_responder_bound(
+                &mut b,
+                &p_r,
+                &sec_r,
+                &aid_r,
+                &pub_r,
+                200,
+                make_signer_async(s_forger),
+                &lookup_for_r,
+            )
+            .await
+        });
+
+        let (i_res, _r_res) = (init.await.unwrap(), resp.await.unwrap());
+        assert!(
+            i_res.is_err(),
+            "initiator must reject a binding signed by a wrong ML-DSA key"
+        );
+    }
+
+    #[tokio::test]
+    async fn xx_aborts_when_peer_pubkey_lookup_returns_none() {
+        let signer_i = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_r = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let aid_i = [0xcc; 32];
+        let aid_r = [0xdd; 32];
+
+        let (sec_i, pub_i) = fresh_x25519();
+        let (sec_r, pub_r) = fresh_x25519();
+        let prologue = {
+            let mut p = b"fetchit-lan-v1".to_vec();
+            p.extend_from_slice(&aid_i);
+            p.extend_from_slice(&aid_r);
+            p
+        };
+
+        let (mut a, mut b) = duplex(16 * 1024);
+        let p_i = prologue.clone();
+        let p_r = prologue.clone();
+        // Initiator does NOT know responder's pubkey — stranger on LAN.
+        let lookup_for_i = |_q: &[u8; 32]| -> Option<Vec<u8>> { None };
+        let lookup_for_r = single_lookup(aid_i, signer_i.public_key());
+        let s_i = signer_i.clone();
+        let s_r = signer_r.clone();
+
+        let init = tokio::spawn(async move {
+            run_initiator_bound(
+                &mut a,
+                &p_i,
+                &sec_i,
+                &aid_i,
+                &pub_i,
+                100,
+                make_signer_async(s_i),
+                &lookup_for_i,
+            )
+            .await
+        });
+        let resp = tokio::spawn(async move {
+            run_responder_bound(
+                &mut b,
+                &p_r,
+                &sec_r,
+                &aid_r,
+                &pub_r,
+                200,
+                make_signer_async(s_r),
+                &lookup_for_r,
+            )
+            .await
+        });
+
+        let (i_res, _r_res) = (init.await.unwrap(), resp.await.unwrap());
+        assert!(
+            i_res.is_err(),
+            "unknown peer agent_id (no ML-DSA pubkey on file) must abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn xx_aborts_when_prologue_diverges() {
+        // Both sides have valid signers and known pubkeys, but they
+        // disagree on the prologue → the handshake hashes diverge and
+        // at least one binding verify fails. Models a peer claiming a
+        // different identity in mDNS than they actually sign for.
+        let signer_i = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_r = std::sync::Arc::new(MlDsaSigner::generate().unwrap());
+        let aid_i = [0xee; 32];
+        let aid_r = [0xff; 32];
+
+        let (sec_i, pub_i) = fresh_x25519();
+        let (sec_r, pub_r) = fresh_x25519();
+        let prologue_i = {
+            let mut p = b"fetchit-lan-v1".to_vec();
+            p.extend_from_slice(&aid_i);
+            p.extend_from_slice(&aid_r);
+            p
+        };
+        let prologue_r = {
+            // Responder thinks the initiator advertised a different aid
+            let mut p = b"fetchit-lan-v1".to_vec();
+            p.extend_from_slice(&[0u8; 32]);
+            p.extend_from_slice(&aid_r);
+            p
+        };
+
+        let (mut a, mut b) = duplex(16 * 1024);
+        let lookup_for_i = single_lookup(aid_r, signer_r.public_key());
+        let lookup_for_r = single_lookup(aid_i, signer_i.public_key());
+        let s_i = signer_i.clone();
+        let s_r = signer_r.clone();
+
+        let init = tokio::spawn(async move {
+            run_initiator_bound(
+                &mut a,
+                &prologue_i,
+                &sec_i,
+                &aid_i,
+                &pub_i,
+                100,
+                make_signer_async(s_i),
+                &lookup_for_i,
+            )
+            .await
+        });
+        let resp = tokio::spawn(async move {
+            run_responder_bound(
+                &mut b,
+                &prologue_r,
+                &sec_r,
+                &aid_r,
+                &pub_r,
+                200,
+                make_signer_async(s_r),
+                &lookup_for_r,
+            )
+            .await
+        });
+
+        let (i_res, r_res) = (init.await.unwrap(), resp.await.unwrap());
+        assert!(
+            i_res.is_err() || r_res.is_err(),
+            "diverging prologue must fail at least one side's verification"
         );
     }
 
