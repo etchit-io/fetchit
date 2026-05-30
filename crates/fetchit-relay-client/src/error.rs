@@ -46,6 +46,15 @@ pub enum ClientError {
     /// A non-binary message was received where binary was expected.
     #[error("unexpected non-binary message")]
     UnexpectedMessage,
+
+    /// A `send` attempt exceeded its WS-write or ack timeout. Returned
+    /// when the underlying TCP send buffer is wedged (write never
+    /// completed) or when the relay accepted the bytes but never
+    /// emitted an `Ack` frame within the timeout. Callers should
+    /// treat this as "definitively did not send" so the UI can flip
+    /// the bubble to a clear `failed` state.
+    #[error("send timed out after {0:?}")]
+    SendTimeout(std::time::Duration),
 }
 
 impl From<x0xd_client::X0xdError> for ClientError {

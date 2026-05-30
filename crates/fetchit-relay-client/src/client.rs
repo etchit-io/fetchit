@@ -48,6 +48,31 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Upper cap on reconnect backoff.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// How long a WS write may block before the supervisor declares the
+/// connection wedged and surfaces a [`ClientError::SendTimeout`].
+///
+/// Catches the specific TCP-wedge failure mode where bytes accumulate
+/// in the socket's send buffer because the peer never ACKs them: the
+/// `sender.send()` call cannot complete, so without a timeout the
+/// outbox future hangs forever and the bubble stays in `sending`
+/// state with no indication of the underlying failure.
+///
+/// 5 s is generous: a healthy WS write of a ~1 KB frame completes in
+/// milliseconds; if the underlying socket is taking longer than that,
+/// the link is wedged and waiting longer just delays the user-visible
+/// "Retry" affordance.
+const SEND_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to wait for the relay's `Ack` frame after the WS write
+/// completed. Distinct from [`SEND_WRITE_TIMEOUT`]: this catches the
+/// case where the bytes left the socket but the relay never echoed
+/// back (server bug, dropped packet, route flap mid-send).
+///
+/// 10 s is twice the round-trip budget we'd see in normal traffic,
+/// chosen so a slow but functioning link still resolves successfully
+/// while an actually-lost ack surfaces well before the user gives up.
+const SEND_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Connection parameters for one relay session.
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
@@ -71,6 +96,18 @@ pub struct ClientConfig {
     /// Set to `None` to disable Pong-deadline enforcement. Defaults to
     /// 60s (2× the default keepalive).
     pub pong_timeout: Option<Duration>,
+    /// Maximum time a WS write may block before the supervisor
+    /// surfaces a [`ClientError::SendTimeout`]. Catches the TCP-wedge
+    /// failure mode from issue #156.
+    ///
+    /// Defaults to 5 s. Lower in tests that exercise wedge handling.
+    pub send_write_timeout: Duration,
+    /// Maximum time to wait for the relay's `Ack` after a successful
+    /// WS write. Catches relay-side stalls / lost acks; without this,
+    /// the outbox future hangs forever.
+    ///
+    /// Defaults to 10 s. Lower in tests.
+    pub send_ack_timeout: Duration,
 }
 
 impl ClientConfig {
@@ -85,6 +122,8 @@ impl ClientConfig {
             auth_timeout: Duration::from_secs(10),
             keepalive: Some(DEFAULT_KEEPALIVE),
             pong_timeout: Some(DEFAULT_PONG_TIMEOUT),
+            send_write_timeout: SEND_WRITE_TIMEOUT,
+            send_ack_timeout: SEND_ACK_TIMEOUT,
         }
     }
 }
@@ -397,7 +436,15 @@ impl Supervisor {
                     reply,
                 } => {
                     let result = if let Some(i) = inner.as_ref() {
-                        do_send(i, to, *envelope, dedupe_key).await
+                        do_send(
+                            i,
+                            to,
+                            *envelope,
+                            dedupe_key,
+                            self.config.send_write_timeout,
+                            self.config.send_ack_timeout,
+                        )
+                        .await
                     } else {
                         Err(ClientError::Disconnected("client is reconnecting".into()))
                     };
@@ -552,6 +599,8 @@ async fn do_send(
     to: AgentId,
     envelope: TransitEnvelope,
     dedupe_key: DedupeKey,
+    write_timeout: Duration,
+    ack_timeout: Duration,
 ) -> Result<Receipt, ClientError> {
     let rx = inner.outbox.track(dedupe_key);
     let frame = ClientFrame::Send(SendFrame {
@@ -560,11 +609,28 @@ async fn do_send(
         dedupe_key,
     });
     let bytes = to_bytes(&frame)?;
+    // Cap the WS write: if the TCP send buffer is wedged (the
+    // failure mode from issue #156), `sender.send()` blocks forever.
+    // Time it out so the caller's bubble flips to a clear `failed`
+    // state instead of hanging in `sending` until the heat-death of
+    // the universe.
     {
         let mut sender = inner.sender.lock().await;
-        sender.send(Message::Binary(bytes)).await?;
+        match tokio::time::timeout(write_timeout, sender.send(Message::Binary(bytes))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(ClientError::SendTimeout(write_timeout)),
+        }
     }
-    rx.await.map_err(|_| ClientError::InboxClosed)
+    // Cap the Ack wait: bytes left our socket but the relay either
+    // never accepted them into its routing path or never emitted an
+    // Ack. Either way, treat it as definitively un-sent so the user
+    // can retry rather than wait indefinitely.
+    match tokio::time::timeout(ack_timeout, rx).await {
+        Ok(Ok(receipt)) => Ok(receipt),
+        Ok(Err(_)) => Err(ClientError::InboxClosed),
+        Err(_) => Err(ClientError::SendTimeout(ack_timeout)),
+    }
 }
 
 async fn open_session(

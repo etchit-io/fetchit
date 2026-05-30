@@ -489,3 +489,78 @@ async fn challenge_signing_bytes_are_consumed() {
     let bytes = auth_signing_bytes(&[0u8; 32]);
     assert!(!bytes.is_empty());
 }
+
+#[tokio::test]
+async fn send_returns_send_timeout_when_relay_never_acks() {
+    // Issue #156: when the relay accepts our WS write but never emits
+    // an Ack (server bug, dropped packet, or — what we saw live — a
+    // wedged TCP path), `client.send().await` used to hang forever
+    // and the user's bubble stuck in `sending`. The supervisor now
+    // enforces a per-send Ack deadline; when it expires the call
+    // surfaces `ClientError::SendTimeout` so the outbox can flip the
+    // bubble to a clear failed state.
+    use fetchit_relay_client::ClientError;
+    use fetchit_relay_proto::{AgentId, DedupeKey, EnvelopeKind, MachineId, TransitEnvelope};
+
+    let (addr, _state, _server) = spawn_mock(None).await;
+    let base = Url::parse(&format!("http://{addr}/")).unwrap();
+    let signer = Arc::new(StaticKeySigner::from_public_key(b"timeout-key".to_vec()));
+
+    // The mock here intentionally doesn't emit Ack for Send frames —
+    // it just swallows them in its main loop. Tiny ack timeout
+    // (200 ms) so the test resolves quickly while still leaving
+    // plenty of headroom over the network round-trip.
+    let mut cfg = ClientConfig::new(base);
+    cfg.keepalive = None;
+    cfg.pong_timeout = None;
+    cfg.send_write_timeout = Duration::from_millis(500);
+    cfg.send_ack_timeout = Duration::from_millis(200);
+
+    let client = Client::connect(cfg, signer).await.unwrap();
+    let envelope = TransitEnvelope {
+        version: 2,
+        kind: EnvelopeKind::Dm,
+        group_id: None,
+        tenant_id: None,
+        sender_agent_id: AgentId::from_bytes([0u8; 32]),
+        sender_machine_id: MachineId::from_bytes([0u8; 32]),
+        timestamp_ms: 1,
+        epoch: 0,
+        ciphertext: b"hi".to_vec(),
+        nonce: vec![0u8; 12],
+        kem_ciphertext: vec![0u8; 32],
+        sender_signature: vec![0u8; 32],
+    };
+
+    let started = std::time::Instant::now();
+    let res = client
+        .send(
+            AgentId::from_bytes([0xab; 32]),
+            envelope,
+            DedupeKey::from_bytes([0xee; 16]),
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    match res {
+        Err(ClientError::SendTimeout(d)) => {
+            assert_eq!(
+                d,
+                Duration::from_millis(200),
+                "should report the ack-timeout duration verbatim"
+            );
+        }
+        other => panic!("expected SendTimeout, got {other:?}"),
+    }
+    // The call must return roughly after the ack timeout — not the
+    // multi-second default, not the heat-death of the universe. Allow
+    // generous slack for test scheduling.
+    assert!(
+        elapsed >= Duration::from_millis(150),
+        "should have waited at least the ack timeout, got {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "should have returned promptly after the ack timeout, got {elapsed:?}"
+    );
+}
