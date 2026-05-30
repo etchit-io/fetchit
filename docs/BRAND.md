@@ -39,10 +39,14 @@ color-scheme: dark;
 
 ### Dim
 
+"Warm dusk" — canvas at L≈20%, a literal step between Dark (L≈4%)
+and Light (L≈94%). Bone-on-ink ≈ 10.5 : 1 (AAA). Same copper-family
+hue as the rest of the palette so no accent retune required.
+
 ```css
---ink: #1a1612;       --ink-2: #221d18;      --line: #2a2520;
+--ink: #3a322a;       --ink-2: #443c33;      --line: #524a40;
 --copper: #c9732b;    --copper-bright: #e58a3f;
---bone: #f5f2eb;      --bone-dim: #e6dfd0;   --ash: #a09a90;
+--bone: #f5f2eb;      --bone-dim: #d9d2c4;   --ash: #a09a90;
 --rust: #ff8a7a;      --signal-ok: #6ab04c;
 color-scheme: dark;
 ```

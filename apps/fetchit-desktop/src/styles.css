@@ -33,13 +33,18 @@
 }
 
 body[data-theme="dim"] {
-  --ink: #1a1612;
-  --ink-2: #221d18;
-  --line: #2a2520;
+  /* "Warm dusk" — option A from the sessions-chat 2026-05-30 audit.
+     A literal step between Dark (L≈4%) and Light (L≈94%): the canvas
+     lifts to L≈20% so Dim reads as a meaningful middle ground without
+     flipping contrast direction. Bone-on-ink ≈ 10.5:1 (AAA). Stays in
+     the warm/copper family, no token churn to other surfaces. */
+  --ink: #3a322a;
+  --ink-2: #443c33;
+  --line: #524a40;
   --copper: #c9732b;
   --copper-bright: #e58a3f;
   --bone: #f5f2eb;
-  --bone-dim: #e6dfd0;
+  --bone-dim: #d9d2c4;
   --ash: #a09a90;
   --rust: #ff8a7a;
   --signal-ok: #6ab04c;
