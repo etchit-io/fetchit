@@ -14,12 +14,23 @@ export interface BubbleHandlers {
   onInvite: (uri: string) => void;
 }
 
+/// A signature that uniquely identifies the rendered shape of a
+/// bubble. Two bubbles with the same key render to identical DOM
+/// (modulo time formatting), so the conversation pane can reuse the
+/// existing element instead of recreating it — which is what keeps
+/// the `chat-bubble-pop` enter animation from re-firing on every
+/// store mutation.
+export function bubbleRenderKey(b: ChatBubble): string {
+  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}`;
+}
+
 export function renderBubble(
   b: ChatBubble,
   handlers: BubbleHandlers,
 ): HTMLElement {
   const row = document.createElement("div");
   row.className = `chat-row chat-row--${b.mine ? "out" : "in"}`;
+  row.dataset.key = bubbleRenderKey(b);
 
   const stack = document.createElement("div");
   stack.className = "chat-bubble__stack";

@@ -1,7 +1,7 @@
 // The right-pane conversation view: header (peer / group title +
 // presence + actions), scrollable message stream, composer.
 
-import { renderBubble, type BubbleHandlers } from "./bubble";
+import { bubbleRenderKey, renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
 import type { ChatStore, Conversation } from "./state";
@@ -162,10 +162,29 @@ export function mountConversation(
     }
 
     const wasAtBottom = isNearBottom(stream);
-    stream.replaceChildren();
-    for (const b of conv.messages) {
-      stream.appendChild(renderBubble(b, bubbleHandlers));
+    // Keyed diff: reuse existing bubble elements when their render key
+    // (id + status + failureReason) is unchanged. Without this, every
+    // store mutation — including the chat:nearby 5-second tick —
+    // recreates every .chat-bubble in the thread and the
+    // chat-bubble-pop enter animation re-fires, producing visible
+    // flicker on the message column.
+    const existing = new Map<string, HTMLElement>();
+    for (const child of Array.from(stream.children)) {
+      const key = (child as HTMLElement).dataset.key;
+      if (key) existing.set(key, child as HTMLElement);
     }
+    const ordered: HTMLElement[] = [];
+    for (const b of conv.messages) {
+      const key = bubbleRenderKey(b);
+      const reused = existing.get(key);
+      if (reused) {
+        existing.delete(key);
+        ordered.push(reused);
+      } else {
+        ordered.push(renderBubble(b, bubbleHandlers));
+      }
+    }
+    stream.replaceChildren(...ordered);
     if (lastConv !== conv || wasAtBottom) {
       stream.scrollTop = stream.scrollHeight;
     }

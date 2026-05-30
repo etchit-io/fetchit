@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderBubble } from "./bubble";
+import { bubbleRenderKey, renderBubble } from "./bubble";
 import type { ChatBubble } from "./state";
 
 const ME = "a".repeat(64);
@@ -164,5 +164,47 @@ describe("renderBubble — direction", () => {
     const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
     const row = renderBubble(bubble({ mine: false }), handlers);
     expect(row.className).toContain("chat-row--in");
+  });
+});
+
+describe("bubbleRenderKey — keyed diff for flicker-free re-renders", () => {
+  // The conversation pane reuses an existing DOM element whenever a
+  // bubble's render key is unchanged across two render passes. That's
+  // how the chat-bubble-pop animation is prevented from re-firing
+  // every time an unrelated store mutation (presence tick, nearby
+  // tick, receipt for another conversation) triggers a sidebar
+  // refresh. These tests pin the key shape so any drift surfaces
+  // before users see the screen flash again.
+
+  it("renders the key onto the row's data-key attribute", () => {
+    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const row = renderBubble(bubble({ id: "m1", status: "delivered" }), handlers);
+    expect(row.dataset.key).toBe(bubbleRenderKey(bubble({ id: "m1", status: "delivered" })));
+  });
+
+  it("returns the same key for identical bubbles so the diff reuses the element", () => {
+    const a = bubble({ id: "m1", status: "delivered", body: "hi" });
+    const b = bubble({ id: "m1", status: "delivered", body: "hi" });
+    expect(bubbleRenderKey(a)).toBe(bubbleRenderKey(b));
+  });
+
+  it("changes the key when status transitions sending → delivered", () => {
+    const sending = bubbleRenderKey(bubble({ id: "m1", status: "sending" }));
+    const delivered = bubbleRenderKey(bubble({ id: "m1", status: "delivered" }));
+    expect(sending).not.toBe(delivered);
+  });
+
+  it("changes the key when failureReason flips", () => {
+    const ok = bubbleRenderKey(bubble({ id: "m1", status: "failed" }));
+    const annotated = bubbleRenderKey(
+      bubble({ id: "m1", status: "failed", failureReason: "timed out" }),
+    );
+    expect(ok).not.toBe(annotated);
+  });
+
+  it("treats two distinct message ids as different keys", () => {
+    expect(bubbleRenderKey(bubble({ id: "m1" }))).not.toBe(
+      bubbleRenderKey(bubble({ id: "m2" })),
+    );
   });
 });
