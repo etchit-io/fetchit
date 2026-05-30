@@ -217,6 +217,23 @@ If you're auditing fetch>it, the load-bearing security code lives in:
 | `apps/fetchit-desktop/src-tauri/capabilities/default.json` | Tauri capability surface — what the WebView's JS side can invoke |
 | `apps/fetchit-desktop/src-tauri/src/disk_cache.rs` | On-disk cache: file-mtime LRU, policy gating, clear |
 | `apps/fetchit-desktop/src-tauri/src/settings.rs` | Persistence format, defaults |
+| `crates/fetchit-chat/src/lan_direct_transport.rs` | LAN-direct transport: TCP dial, accept loop, handshake-binding verifier, reachability gate |
+| `crates/fetchit-chat/src/lan_noise.rs` | Framed Noise XX + ML-DSA-65 channel-binding signature on handshake msg2/msg3 |
+| `crates/fetchit-chat/src/lan_static.rs` | Sealed at-rest vault for the X25519 static keypair (ChaCha20-Poly1305 + Argon2id) |
+
+**LAN-direct transport** (opt-in, default off): when enabled in
+Settings → Network, fetch>it advertises itself on the local
+network via mDNS (`_fetchit-chat._tcp.local.`) and accepts inbound
+Noise XX connections. The handshake commits to both peers'
+advertised `agent_id`s via the Noise prologue and exchanges
+ML-DSA-65 signatures over `lan_binding_bytes || handshake_hash`
+on messages 2 and 3, verified against the peer's ML-DSA pubkey
+already on the local contact card (from share-URI import). A
+LAN-announced peer that isn't in the contact store fails
+reachability immediately — strangers on the LAN cannot be dialled,
+inbound dials from unknown agents fail the post-handshake
+signature verification and are dropped. Accept-loop is capped at
+32 concurrent handshakes process-wide. No NAT traversal, no WAN.
 
 And the matching `.test.ts` / Rust `#[cfg(test)]` modules: every strip
 step and policy default is covered by a test.
