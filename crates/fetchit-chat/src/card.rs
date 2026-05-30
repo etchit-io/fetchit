@@ -9,7 +9,11 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use fetchit_relay_client::Signer;
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 
 /// Current schema version of the v2 card extension.
 pub const CARD_VERSION: u16 = 1;
@@ -117,20 +121,45 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
     Ok(serde_json::Value::Object(out))
 }
 
-/// Encode an extended-card JSON value as the `x0x://agent/<base64>` URI.
+/// First byte of the URI body identifying the encoding of the rest.
+/// `0x02` = DEFLATE-compressed JSON (current). A leading `b'{'` (0x7B)
+/// or `b'['` is treated as legacy uncompressed JSON for backwards
+/// compatibility — there are no shipped consumers of either form yet,
+/// but the read path stays permissive so an existing test fixture or
+/// pasted URI keeps importing.
+const FORMAT_TAG_DEFLATE: u8 = 0x02;
+
+/// Encode an extended-card JSON value as the `x0x://agent/<base64>`
+/// URI. The body is `0x02 | DEFLATE(JSON)`, URL-safe base64-encoded —
+/// the v2 card carries ~4 KB of redundant ASCII (x0xd ships its KEM
+/// pubkey as a JSON int array AND we re-publish it base64-encoded),
+/// which DEFLATE compresses to a few hundred bytes.
 ///
 /// # Errors
-/// JSON serialization errors.
+/// JSON serialization errors; DEFLATE failures (should not happen in
+/// practice with an in-memory writer).
 pub fn extended_card_to_uri(card_json: &serde_json::Value) -> Result<String, ChatError> {
-    let bytes = serde_json::to_vec(card_json)
+    let json = serde_json::to_vec(card_json)
         .map_err(|e| ChatError::Invalid(format!("card to_vec: {e}")))?;
-    Ok(format!("{URI_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes)))
+    let mut encoder = DeflateEncoder::new(Vec::with_capacity(json.len()), Compression::best());
+    encoder
+        .write_all(&json)
+        .map_err(|e| ChatError::Invalid(format!("deflate write: {e}")))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| ChatError::Invalid(format!("deflate finish: {e}")))?;
+    let mut body = Vec::with_capacity(1 + compressed.len());
+    body.push(FORMAT_TAG_DEFLATE);
+    body.extend_from_slice(&compressed);
+    Ok(format!("{URI_PREFIX}{}", URL_SAFE_NO_PAD.encode(body)))
 }
 
-/// Decode an extended-card URI back into a JSON value.
+/// Decode an extended-card URI back into a JSON value. Accepts both
+/// the DEFLATE-tagged form ([`FORMAT_TAG_DEFLATE`]) and a plain JSON
+/// body so legacy fixtures keep parsing.
 ///
 /// # Errors
-/// Bad URI, base64 errors, JSON errors.
+/// Bad URI, base64 errors, DEFLATE errors, JSON errors.
 pub fn extended_card_from_uri(uri: &str) -> Result<serde_json::Value, ChatError> {
     let body = uri
         .strip_prefix(URI_PREFIX)
@@ -138,9 +167,20 @@ pub fn extended_card_from_uri(uri: &str) -> Result<serde_json::Value, ChatError>
     let bytes = URL_SAFE_NO_PAD
         .decode(body)
         .map_err(|e| ChatError::Invalid(format!("base64: {e}")))?;
-    let value = serde_json::from_slice(&bytes)
-        .map_err(|e| ChatError::Invalid(format!("card from_slice: {e}")))?;
-    Ok(value)
+    let json_bytes = match bytes.first() {
+        Some(&FORMAT_TAG_DEFLATE) => {
+            let mut decoder = DeflateDecoder::new(&bytes[1..]);
+            let mut out = Vec::with_capacity(bytes.len() * 4);
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| ChatError::Invalid(format!("deflate read: {e}")))?;
+            out
+        }
+        // Legacy: no leading tag, body is JSON directly.
+        _ => bytes,
+    };
+    serde_json::from_slice(&json_bytes)
+        .map_err(|e| ChatError::Invalid(format!("card from_slice: {e}")))
 }
 
 /// Verify the fetchit-v2 fields on an extended card.
@@ -345,6 +385,50 @@ mod tests {
         let uri = extended_card_to_uri(&extended).unwrap();
         assert!(uri.starts_with(URI_PREFIX));
         let recovered = extended_card_from_uri(&uri).unwrap();
+        assert_eq!(recovered, extended);
+    }
+
+    #[tokio::test]
+    async fn uri_is_shorter_than_uncompressed() {
+        let signer = MlDsaSigner::generate().unwrap();
+        // Use a card with a JSON int-array kem field — the shape x0xd
+        // actually emits — so the compression win is realistic.
+        let mut card = fake_x0x_card();
+        card["dm_capabilities"] = serde_json::json!({
+            "kem_algorithm": "ML-KEM-768",
+            "kem_public_key": (0..1184_u32).map(|i| u8::try_from(i % 256).expect("modulo 256")).collect::<Vec<u8>>(),
+        });
+        let kem_pub = vec![0xaa; 1184];
+        let extended = extend_with_fetchit_fields(&card, &kem_pub, &signer)
+            .await
+            .unwrap();
+        let compressed_uri = extended_card_to_uri(&extended).unwrap();
+        let raw_json_bytes = serde_json::to_vec(&extended).unwrap();
+        let uncompressed_b64_len =
+            URI_PREFIX.len() + URL_SAFE_NO_PAD.encode(&raw_json_bytes).len();
+        assert!(
+            compressed_uri.len() < uncompressed_b64_len,
+            "compressed={} >= uncompressed={}",
+            compressed_uri.len(),
+            uncompressed_b64_len,
+        );
+        // Round-trips through the decoder.
+        let recovered = extended_card_from_uri(&compressed_uri).unwrap();
+        assert_eq!(recovered, extended);
+    }
+
+    #[tokio::test]
+    async fn legacy_uncompressed_uri_still_decodes() {
+        // A URI from before the DEFLATE format was introduced: plain
+        // JSON, URL-safe base64, no leading format tag.
+        let signer = MlDsaSigner::generate().unwrap();
+        let kem_pub = vec![0xaa; 1184];
+        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+            .await
+            .unwrap();
+        let raw = serde_json::to_vec(&extended).unwrap();
+        let legacy_uri = format!("{URI_PREFIX}{}", URL_SAFE_NO_PAD.encode(raw));
+        let recovered = extended_card_from_uri(&legacy_uri).unwrap();
         assert_eq!(recovered, extended);
     }
 }
