@@ -3076,6 +3076,7 @@ dependencies = [
  "directories",
  "fetchit-relay-client",
  "fetchit-relay-proto",
+ "flate2",
  "futures-util",
  "hex",
  "hkdf",

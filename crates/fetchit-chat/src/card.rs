@@ -195,10 +195,8 @@ pub fn extended_card_from_uri(uri: &str) -> Result<serde_json::Value, ChatError>
             // hitting the cap means the input was either malicious or
             // bigger than we ever expect to handle, so reject rather
             // than truncate.
-            let capped = std::io::Read::take(
-                DeflateDecoder::new(&bytes[1..]),
-                MAX_DECOMPRESSED_BYTES + 1,
-            );
+            let capped =
+                std::io::Read::take(DeflateDecoder::new(&bytes[1..]), MAX_DECOMPRESSED_BYTES + 1);
             let mut decoder = capped;
             let mut out = Vec::with_capacity(bytes.len() * 4);
             decoder
@@ -439,8 +437,7 @@ mod tests {
             .unwrap();
         let compressed_uri = extended_card_to_uri(&extended).unwrap();
         let raw_json_bytes = serde_json::to_vec(&extended).unwrap();
-        let uncompressed_b64_len =
-            URI_PREFIX.len() + URL_SAFE_NO_PAD.encode(&raw_json_bytes).len();
+        let uncompressed_b64_len = URI_PREFIX.len() + URL_SAFE_NO_PAD.encode(&raw_json_bytes).len();
         assert!(
             compressed_uri.len() < uncompressed_b64_len,
             "compressed={} >= uncompressed={}",
@@ -457,8 +454,7 @@ mod tests {
         // 1 MB of identical bytes compresses to a few hundred bytes
         // but blows past MAX_DECOMPRESSED_BYTES on inflate.
         let bomb = vec![b'a'; 1_000_000];
-        let mut encoder =
-            DeflateEncoder::new(Vec::<u8>::new(), Compression::best());
+        let mut encoder = DeflateEncoder::new(Vec::<u8>::new(), Compression::best());
         encoder.write_all(&bomb).unwrap();
         let compressed = encoder.finish().unwrap();
         assert!(
