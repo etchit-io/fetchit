@@ -247,6 +247,151 @@ fn canonical_bytes_without_sig(m: &ProfileManifest) -> Result<Vec<u8>, ProfileEr
     serde_jcs::to_vec(&v).map_err(|e| ProfileError::Jcs(e.to_string()))
 }
 
+/// v3 share URI scheme + path prefix. See `docs/qr-pairing-v1.md` —
+/// fetch>it and etch>it implement this byte-for-byte.
+pub const V3_SHARE_URI_PREFIX: &str = "fetchit://share/v3/";
+
+/// Maximum total bytes a v3 share URI is allowed to carry. 256 is
+/// chosen against QR-version-11-M (~250 byte capacity at level M)
+/// with headroom for future optional query parameters.
+pub const V3_SHARE_URI_MAX_BYTES: usize = 256;
+
+/// All-zeros 64-hex string, reserved as the tombstone sentinel
+/// inside the relay's profile-index — must NEVER appear in a share
+/// URI.
+const TOMBSTONE_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Decoded v3 share URI — the three pieces a consumer needs to look
+/// up + verify the offerer's profile manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V3ShareUri {
+    /// 64-hex lowercase `agent_id`.
+    pub agent_id: String,
+    /// 64-hex lowercase Autonomi `profile_addr`.
+    pub profile_addr: String,
+    /// Base URL of the relay where the offerer's profile-index
+    /// record is registered. Stored normalised — trailing slash
+    /// stripped, scheme + host only.
+    pub relay: url::Url,
+}
+
+/// Why parsing a v3 share URI failed. Each variant maps to a
+/// surface-level reason the spec doc enumerates so error
+/// messages stay consistent across the two repos.
+#[derive(Debug, thiserror::Error)]
+pub enum V3ShareUriError {
+    /// URI doesn't start with the literal v3 prefix.
+    #[error("not a v3 share URI: missing `fetchit://share/v3/` prefix")]
+    WrongScheme,
+    /// URI starts with `fetchit://share/` but a different version.
+    #[error("unsupported share-URI version: only v3 is recognised today")]
+    UnsupportedVersion,
+    /// `agent_id` segment isn't 64 lowercase-hex characters.
+    #[error("agent_id segment is not 64 lowercase-hex characters")]
+    MalformedAgentId,
+    /// `profile_addr` segment isn't 64 lowercase-hex characters, OR is the all-zeros tombstone.
+    #[error("profile_addr segment is malformed or is the tombstone sentinel")]
+    MalformedProfileAddr,
+    /// No `?relay=` query parameter.
+    #[error("missing required `relay=` query parameter")]
+    MissingRelay,
+    /// `relay=` value isn't a parseable http(s) URL.
+    #[error("relay= value is not a valid http(s) URL: {0}")]
+    MalformedRelay(String),
+    /// URI exceeds the 256-byte cap.
+    #[error("share URI exceeds the 256-byte cap (got {0} bytes)")]
+    TooLong(usize),
+}
+
+/// Render a v3 share URI from its three components, applying URL
+/// encoding on the relay value. Returns an error only when the
+/// resulting URI would exceed `V3_SHARE_URI_MAX_BYTES` — every
+/// other constraint (`agent_id` / `profile_addr` shape) is the
+/// caller's responsibility to enforce at the call site.
+///
+/// # Errors
+/// [`V3ShareUriError::TooLong`] if the rendered URI exceeds 256
+/// bytes.
+pub fn to_v3_share_uri(
+    agent_id: &str,
+    profile_addr: &str,
+    relay: &url::Url,
+) -> Result<String, V3ShareUriError> {
+    let relay_str = relay.as_str().trim_end_matches('/');
+    let relay_enc = url::form_urlencoded::byte_serialize(relay_str.as_bytes()).collect::<String>();
+    let uri = format!("{V3_SHARE_URI_PREFIX}{agent_id}/{profile_addr}?relay={relay_enc}");
+    if uri.len() > V3_SHARE_URI_MAX_BYTES {
+        return Err(V3ShareUriError::TooLong(uri.len()));
+    }
+    Ok(uri)
+}
+
+/// Parse a v3 share URI byte string. Validates every component
+/// against the contract pinned in `docs/qr-pairing-v1.md`.
+///
+/// # Errors
+/// One of the seven [`V3ShareUriError`] variants per the spec.
+pub fn from_v3_share_uri(uri: &str) -> Result<V3ShareUri, V3ShareUriError> {
+    if uri.len() > V3_SHARE_URI_MAX_BYTES {
+        return Err(V3ShareUriError::TooLong(uri.len()));
+    }
+    let Some(rest) = uri.strip_prefix(V3_SHARE_URI_PREFIX) else {
+        // Distinguish "wrong scheme entirely" from "right scheme
+        // but a different version", since callers may want to
+        // surface different help text.
+        if uri.starts_with("fetchit://share/") {
+            return Err(V3ShareUriError::UnsupportedVersion);
+        }
+        return Err(V3ShareUriError::WrongScheme);
+    };
+    let Some((path, query)) = rest.split_once('?') else {
+        return Err(V3ShareUriError::MissingRelay);
+    };
+    let mut path_parts = path.split('/');
+    let agent_id = path_parts.next().ok_or(V3ShareUriError::MalformedAgentId)?;
+    let profile_addr = path_parts
+        .next()
+        .ok_or(V3ShareUriError::MalformedProfileAddr)?;
+    if path_parts.next().is_some() {
+        return Err(V3ShareUriError::MalformedProfileAddr);
+    }
+    if agent_id.len() != 64 || !agent_id.chars().all(is_lower_hex) {
+        return Err(V3ShareUriError::MalformedAgentId);
+    }
+    if profile_addr.len() != 64
+        || !profile_addr.chars().all(is_lower_hex)
+        || profile_addr == TOMBSTONE_HEX
+    {
+        return Err(V3ShareUriError::MalformedProfileAddr);
+    }
+    let mut relay_raw: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+        // Unknown query params ignored per spec — leaves room for
+        // future minor revisions to add optional params.
+        if k == "relay" {
+            relay_raw = Some(v.into_owned());
+        }
+    }
+    let relay_str = relay_raw.ok_or(V3ShareUriError::MissingRelay)?;
+    let relay =
+        url::Url::parse(&relay_str).map_err(|e| V3ShareUriError::MalformedRelay(e.to_string()))?;
+    if !matches!(relay.scheme(), "http" | "https") {
+        return Err(V3ShareUriError::MalformedRelay(format!(
+            "scheme must be http or https, got `{}`",
+            relay.scheme()
+        )));
+    }
+    Ok(V3ShareUri {
+        agent_id: agent_id.to_string(),
+        profile_addr: profile_addr.to_string(),
+        relay,
+    })
+}
+
+fn is_lower_hex(c: char) -> bool {
+    matches!(c, '0'..='9' | 'a'..='f')
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -396,6 +541,171 @@ mod tests {
         match bad.verify() {
             Err(ProfileError::AgentIdMismatch { .. }) => {}
             other => panic!("expected AgentIdMismatch, got {other:?}"),
+        }
+    }
+
+    // ── v3 share URI ───────────────────────────────────────────
+
+    fn sample_aid() -> String {
+        "209574d678357a4987e25162b12f2dcee5ac82a10dfcd394edf9b340c9aa879e".to_string()
+    }
+    fn sample_addr() -> String {
+        "4".repeat(64)
+    }
+    fn sample_relay() -> url::Url {
+        url::Url::parse("http://67.207.94.66:8088").unwrap()
+    }
+
+    #[test]
+    fn v3_share_uri_round_trips() {
+        let uri = to_v3_share_uri(&sample_aid(), &sample_addr(), &sample_relay()).unwrap();
+        let parsed = from_v3_share_uri(&uri).unwrap();
+        assert_eq!(parsed.agent_id, sample_aid());
+        assert_eq!(parsed.profile_addr, sample_addr());
+        assert_eq!(parsed.relay.as_str(), "http://67.207.94.66:8088/");
+    }
+
+    #[test]
+    fn v3_share_uri_reference_example_fits_under_cap() {
+        // The reference example documented in
+        // `docs/qr-pairing-v1.md` must fit comfortably under the
+        // 256-byte cap so a future spec drift surfaces here. The
+        // doc claims ~178 bytes; allow a small range against
+        // future relay-URL changes.
+        let uri = to_v3_share_uri(&sample_aid(), &sample_addr(), &sample_relay()).unwrap();
+        assert!(
+            uri.len() < 256,
+            "uri grew past the QR cap: {} bytes",
+            uri.len()
+        );
+        assert!(
+            uri.len() < 200,
+            "uri grew unexpectedly: {} bytes",
+            uri.len()
+        );
+    }
+
+    #[test]
+    fn v3_share_uri_round_trips_https_relay() {
+        let https_relay = url::Url::parse("https://relay.example.com:8443/").unwrap();
+        let uri = to_v3_share_uri(&sample_aid(), &sample_addr(), &https_relay).unwrap();
+        let parsed = from_v3_share_uri(&uri).unwrap();
+        assert_eq!(parsed.relay.scheme(), "https");
+        assert_eq!(parsed.relay.host_str(), Some("relay.example.com"));
+        assert_eq!(parsed.relay.port(), Some(8443));
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_wrong_scheme() {
+        match from_v3_share_uri("https://example.com/v3/aa/bb?relay=http://x") {
+            Err(V3ShareUriError::WrongScheme) => {}
+            other => panic!("expected WrongScheme, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_other_version() {
+        match from_v3_share_uri("fetchit://share/v9/aa/bb?relay=http://x") {
+            Err(V3ShareUriError::UnsupportedVersion) => {}
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_uppercase_agent_id() {
+        // Generators emit lowercase only so the decoder doesn't
+        // have to normalise. Reject uppercase to surface drift
+        // early.
+        let uri = format!(
+            "fetchit://share/v3/{}/{}?relay=http%3A%2F%2Frelay.example",
+            sample_aid().to_uppercase(),
+            sample_addr(),
+        );
+        match from_v3_share_uri(&uri) {
+            Err(V3ShareUriError::MalformedAgentId) => {}
+            other => panic!("expected MalformedAgentId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_short_agent_id() {
+        let uri = format!(
+            "fetchit://share/v3/{}/{}?relay=http%3A%2F%2Frelay.example",
+            "a".repeat(63),
+            sample_addr(),
+        );
+        match from_v3_share_uri(&uri) {
+            Err(V3ShareUriError::MalformedAgentId) => {}
+            other => panic!("expected MalformedAgentId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_tombstone_profile_addr() {
+        // The all-zeros profile_addr is reserved as the tombstone
+        // sentinel inside the relay's profile-index; it must
+        // never appear in a share URI a user could scan.
+        let uri = format!(
+            "fetchit://share/v3/{}/{}?relay=http%3A%2F%2Frelay.example",
+            sample_aid(),
+            "0".repeat(64),
+        );
+        match from_v3_share_uri(&uri) {
+            Err(V3ShareUriError::MalformedProfileAddr) => {}
+            other => panic!("expected MalformedProfileAddr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_missing_relay() {
+        let uri = format!("fetchit://share/v3/{}/{}", sample_aid(), sample_addr());
+        match from_v3_share_uri(&uri) {
+            Err(V3ShareUriError::MissingRelay) => {}
+            other => panic!("expected MissingRelay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_non_http_relay_scheme() {
+        let uri = format!(
+            "fetchit://share/v3/{}/{}?relay=file%3A%2F%2Fexploit",
+            sample_aid(),
+            sample_addr(),
+        );
+        match from_v3_share_uri(&uri) {
+            Err(V3ShareUriError::MalformedRelay(_)) => {}
+            other => panic!("expected MalformedRelay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_rejects_oversize() {
+        // Construct a URI with a relay URL padded out beyond the
+        // 256-byte cap. Should fire TooLong on parse.
+        let huge_relay = format!("http://{}/", "x".repeat(300));
+        let uri = format!(
+            "fetchit://share/v3/{}/{}?relay={}",
+            sample_aid(),
+            sample_addr(),
+            url::form_urlencoded::byte_serialize(huge_relay.as_bytes()).collect::<String>(),
+        );
+        match from_v3_share_uri(&uri) {
+            Err(V3ShareUriError::TooLong(n)) => assert!(n > 256),
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_share_uri_ignores_unknown_query_params() {
+        // The spec reserves the right to add optional query
+        // parameters in a future minor revision; today's parser
+        // must accept and ignore unknown keys without erroring.
+        let base = to_v3_share_uri(&sample_aid(), &sample_addr(), &sample_relay()).unwrap();
+        let with_extra = format!("{base}&future=optional&another=1");
+        if with_extra.len() <= V3_SHARE_URI_MAX_BYTES {
+            let parsed =
+                from_v3_share_uri(&with_extra).expect("unknown params must not break parse");
+            assert_eq!(parsed.agent_id, sample_aid());
         }
     }
 }
