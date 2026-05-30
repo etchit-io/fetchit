@@ -35,6 +35,11 @@ pub struct ChatState {
     // Long-term hardening would route this through a `SecretString`
     // crate that zeroes on drop and resists swap-file leaks.
     passphrase: Arc<Mutex<Option<String>>>,
+    /// Opt-in toggle for the LAN-direct transport. Stored as an atomic
+    /// so `set_lan_direct_enabled` can flip it without holding the
+    /// chat-client lock; the flag is read on next `get()` after an
+    /// `invalidate()`.
+    lan_direct_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatState {
@@ -48,6 +53,7 @@ impl ChatState {
         relay_url: &str,
         data_dir: PathBuf,
         passphrase: Option<String>,
+        lan_direct_enabled: bool,
     ) -> Result<Self, String> {
         let url = Url::parse(relay_url).map_err(|e| format!("invalid relay url: {e}"))?;
         Ok(Self {
@@ -55,6 +61,9 @@ impl ChatState {
             relay_url: url,
             data_dir,
             passphrase: Arc::new(Mutex::new(passphrase)),
+            lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
+                lan_direct_enabled,
+            )),
         })
     }
 
@@ -64,15 +73,36 @@ impl ChatState {
             return Ok(c.clone());
         }
         let passphrase = self.passphrase.lock().await.clone();
+        let lan = self
+            .lan_direct_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut builder = Client::builder()
             .relay_url(self.relay_url.clone())
-            .data_dir(self.data_dir.clone());
+            .data_dir(self.data_dir.clone())
+            .enable_lan_direct(lan);
         if let Some(p) = passphrase {
             builder = builder.passphrase(p);
         }
         let c = builder.build().await.map_err(|e| e.to_string())?;
         *guard = Some(c.clone());
         Ok(c)
+    }
+
+    /// Read the current opt-in flag for LAN-direct delivery. Used by
+    /// the Nearby-section frontend wiring (lands in a follow-up
+    /// commit alongside the sidebar surface).
+    #[allow(dead_code)]
+    pub fn lan_direct_enabled(&self) -> bool {
+        self.lan_direct_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Flip the opt-in flag and force a rebuild on the next chat call
+    /// so the new transport set takes effect.
+    pub async fn set_lan_direct_enabled(&self, enabled: bool) {
+        self.lan_direct_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.invalidate().await;
     }
 
     /// Force the next call to rebuild — used after a daemon restart
@@ -440,9 +470,51 @@ pub async fn chat_confirm_contact(
 ///   responsible for (gossip, contacts, groups).
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_inbound(app.clone(), state.clone());
+    spawn_lan_inbound(app.clone(), state.clone());
     spawn_relay_presence(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
+}
+
+/// Mirror of [`spawn_relay_inbound`] for the LAN-direct transport.
+///
+/// `handle_inbound` is transport-agnostic — it dispatches on
+/// `env.transit`, not `transport_name` — so the same handler covers
+/// both transports verbatim. When LAN-direct is disabled in settings,
+/// `take_transport_inbound("lan-direct")` returns `None` and the pump
+/// reconnects on a backoff until the toggle flips on.
+fn spawn_lan_inbound(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let (Some(identity), Some(registry)) = (client.identity_arc(), client.registry_arc())
+            else {
+                log_pump("[lan-direct] client built without chat state; abandoning pump");
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let Some(mut rx) = client.take_transport_inbound("lan-direct") else {
+                // Either lan-direct isn't wired (toggle off) or the
+                // inbound was already taken. Reconnect after a
+                // backoff; cheap and self-correcting once the toggle
+                // flips on.
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            log_pump("[lan-direct] inbound open");
+            while let Some(env) = rx.recv().await {
+                handle_inbound(&app, &client, identity.as_ref(), registry.as_ref(), env).await;
+            }
+            log_pump("[lan-direct] inbound closed; reconnecting");
+            state.invalidate().await;
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
 }
 
 fn spawn_relay_presence(app: AppHandle, state: ChatState) {

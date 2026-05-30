@@ -69,6 +69,12 @@ pub struct Settings {
     /// `agent-<6-hex>` placeholder.
     #[serde(default)]
     pub display_name: String,
+    /// Opt-in: wire a LAN-direct transport into the chat Router. When
+    /// `true`, sends to peers reachable on the same network skip the
+    /// relay and travel over a local Noise XX channel. Default off
+    /// until the host has tested two-laptop bring-up.
+    #[serde(default)]
+    pub lan_direct_enabled: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +86,7 @@ impl Default for Settings {
             peers: Vec::new(),
             relay_url: default_relay_url(),
             display_name: String::new(),
+            lan_direct_enabled: false,
         }
     }
 }
@@ -283,5 +290,30 @@ mod tests {
         .unwrap();
         let s = Settings::load(&p);
         assert_eq!(s.display_name, "");
+    }
+
+    #[test]
+    fn lan_direct_enabled_defaults_false_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        assert!(!s.lan_direct_enabled);
+        s.lan_direct_enabled = true;
+        s.save(&p).unwrap();
+        let loaded = Settings::load(&p);
+        assert!(loaded.lan_direct_enabled);
+    }
+
+    #[test]
+    fn missing_lan_direct_enabled_field_in_file_defaults_false() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert!(!s.lan_direct_enabled);
     }
 }

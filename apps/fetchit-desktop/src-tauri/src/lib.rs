@@ -406,6 +406,29 @@ fn set_display_name(state: tauri::State<'_, AppState>, name: String) {
     let _ = s.save(&state.settings_path);
 }
 
+/// Read the persisted LAN-direct opt-in flag.
+#[tauri::command]
+fn lan_direct_enabled(state: tauri::State<'_, AppState>) -> bool {
+    state.settings.lock().is_ok_and(|s| s.lan_direct_enabled)
+}
+
+/// Flip the LAN-direct opt-in flag. Persists to disk and invalidates
+/// the chat client so the next operation rebuilds with the new
+/// transport set. No restart required.
+#[tauri::command]
+async fn set_lan_direct_enabled(
+    settings_state: tauri::State<'_, AppState>,
+    chat_state: tauri::State<'_, chat::ChatState>,
+    enabled: bool,
+) -> Result<(), String> {
+    if let Ok(mut s) = settings_state.settings.lock() {
+        s.lan_direct_enabled = enabled;
+        let _ = s.save(&settings_state.settings_path);
+    }
+    chat_state.set_lan_direct_enabled(enabled).await;
+    Ok(())
+}
+
 #[tauri::command]
 fn set_idle_policy(state: tauri::State<'_, AppState>, policy: IdlePolicy) {
     let Ok(mut s) = state.settings.lock() else {
@@ -553,15 +576,24 @@ fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
 /// compile-time constant known to parse as a valid URL. The `expect`
 /// guards a programming error in the fallback constant.
 #[allow(clippy::expect_used)]
-fn build_chat_state(relay_url: &str, data_dir: std::path::PathBuf) -> chat::ChatState {
-    match chat::ChatState::new(relay_url, data_dir.clone(), None) {
+fn build_chat_state(
+    relay_url: &str,
+    data_dir: std::path::PathBuf,
+    lan_direct_enabled: bool,
+) -> chat::ChatState {
+    match chat::ChatState::new(relay_url, data_dir.clone(), None, lan_direct_enabled) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
                 "[fetchit][chat] invalid relay_url ({relay_url}): {e}; falling back to default"
             );
-            chat::ChatState::new(settings::DEFAULT_RELAY_URL, data_dir, None)
-                .expect("default relay url is always valid")
+            chat::ChatState::new(
+                settings::DEFAULT_RELAY_URL,
+                data_dir,
+                None,
+                lan_direct_enabled,
+            )
+            .expect("default relay url is always valid")
         }
     }
 }
@@ -633,12 +665,14 @@ pub fn run() {
             let loaded = Settings::load(&settings_path);
             let disk_cache = Arc::new(DiskCache::new(cache_root, loaded.cache));
             let relay_url = loaded.relay_url.clone();
+            let lan_direct_enabled = loaded.lan_direct_enabled;
 
             let state = AppState::new(disk_cache, loaded, settings_path);
             let server_state = state.clone();
             app.manage(state);
 
-            let chat_state = build_chat_state(&relay_url, app_data.join("chat"));
+            let chat_state =
+                build_chat_state(&relay_url, app_data.join("chat"), lan_direct_enabled);
             app.manage(chat_state.clone());
             chat::spawn_event_pump(app.handle().clone(), chat_state);
 
@@ -684,6 +718,8 @@ pub fn run() {
             idle_disconnect,
             display_name,
             set_display_name,
+            lan_direct_enabled,
+            set_lan_direct_enabled,
             chat::chat_health,
             chat::chat_identity,
             chat::chat_card,
