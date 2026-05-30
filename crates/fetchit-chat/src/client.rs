@@ -12,6 +12,9 @@ use crate::discovery::{discover_local, DaemonEndpoint};
 use crate::error::{ChatError, Result};
 use crate::events::{open_stream, Event, EventStream};
 use crate::http::Http;
+use crate::lan_direct_transport::{ContactPubkeyLookup, LanDirectTransport};
+use crate::lan_discovery::LanPeerTable;
+use crate::lan_static::LanStaticIdentity;
 use crate::local_store::StoreLayout;
 use crate::relay_transport::RelayTransport;
 use crate::transport::{InboundEnvelope, OutboundEnvelope, OutboundKind, Router};
@@ -33,13 +36,38 @@ const AUTO_REKEY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 const IDENTITY_VAULT_FILE: &str = "identity.json.enc";
 
 /// Builder for [`Client`] with optional overrides.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct ClientBuilder {
     base_url: Option<String>,
     token: Option<String>,
     relay_url: Option<Url>,
     data_dir: Option<PathBuf>,
     passphrase: Option<String>,
+    enable_lan_direct: bool,
+    /// Caller-supplied callback that resolves a peer `agent_id` to its
+    /// ML-DSA-65 public key. The desktop wires this through the chat
+    /// contact store / conversation registry; tests can stub it. When
+    /// LAN-direct is enabled and no lookup is supplied, the transport
+    /// is wired with a no-op lookup (always returns `None`), so
+    /// reachability stays `No` and the Router falls through to relay.
+    contact_pubkey_lookup: Option<ContactPubkeyLookup>,
+}
+
+impl std::fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_deref().map(|_| "<redacted>"))
+            .field("relay_url", &self.relay_url)
+            .field("data_dir", &self.data_dir)
+            .field("passphrase", &self.passphrase.as_deref().map(|_| "<redacted>"))
+            .field("enable_lan_direct", &self.enable_lan_direct)
+            .field(
+                "contact_pubkey_lookup",
+                &self.contact_pubkey_lookup.as_ref().map(|_| "<closure>"),
+            )
+            .finish()
+    }
 }
 
 impl ClientBuilder {
@@ -83,6 +111,31 @@ impl ClientBuilder {
         self
     }
 
+    /// Wire a LAN-direct transport into the Router. When `true`, the
+    /// transport is registered **before** the relay so LAN delivery
+    /// wins by reachability priority; sends fall through to relay on
+    /// error per the existing Router contract.
+    ///
+    /// The default is `false` — disabled until the host has tested it.
+    /// Without a paired `contact_pubkey_lookup`, the transport is wired
+    /// with a closure that always returns `None`, so reachability stays
+    /// `No` for every peer and the Router falls through to relay.
+    #[must_use]
+    pub fn enable_lan_direct(mut self, enabled: bool) -> Self {
+        self.enable_lan_direct = enabled;
+        self
+    }
+
+    /// Supply the callback that resolves a peer `agent_id` to its
+    /// ML-DSA-65 public key, used by the LAN-direct transport's Noise
+    /// channel-binding verifier. Only consulted when
+    /// [`Self::enable_lan_direct`] is also `true`.
+    #[must_use]
+    pub fn contact_pubkey_lookup(mut self, lookup: ContactPubkeyLookup) -> Self {
+        self.contact_pubkey_lookup = Some(lookup);
+        self
+    }
+
     /// Build the client. Falls back to [`discover_local`] for any
     /// x0xd connection field not explicitly set.
     ///
@@ -102,6 +155,8 @@ impl ClientBuilder {
             self.relay_url,
             self.data_dir,
             self.passphrase,
+            self.enable_lan_direct,
+            self.contact_pubkey_lookup,
         )
         .await
     }
@@ -144,7 +199,7 @@ impl Client {
 
     /// Build from an already-resolved endpoint, no relay transport.
     pub async fn from_endpoint(ep: DaemonEndpoint) -> Result<Self> {
-        Self::from_parts(ep.base_url, ep.token, None, None, None).await
+        Self::from_parts(ep.base_url, ep.token, None, None, None, false, None).await
     }
 
     /// Start a builder for custom configuration.
@@ -153,18 +208,34 @@ impl Client {
         ClientBuilder::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn from_parts(
         base_url: String,
         token: String,
         relay_url: Option<Url>,
         data_dir: Option<PathBuf>,
         passphrase: Option<String>,
+        enable_lan_direct: bool,
+        contact_pubkey_lookup: Option<ContactPubkeyLookup>,
     ) -> Result<Self> {
         let http = Arc::new(Http::new(base_url.clone(), token.clone())?);
-        let needs_chat = relay_url.is_some() || data_dir.is_some() || passphrase.is_some();
+        let needs_chat = relay_url.is_some()
+            || data_dir.is_some()
+            || passphrase.is_some()
+            || enable_lan_direct;
 
         let (router, chat, relay) = if needs_chat {
-            build_with_chat(&http, &base_url, token, relay_url, data_dir, passphrase).await?
+            build_with_chat(
+                &http,
+                &base_url,
+                token,
+                relay_url,
+                data_dir,
+                passphrase,
+                enable_lan_direct,
+                contact_pubkey_lookup,
+            )
+            .await?
         } else {
             (Router::new(), None, None)
         };
@@ -358,6 +429,7 @@ impl std::fmt::Debug for Client {
 /// `None` for REST-only clients. The chat layer uses this to drive
 /// relay-level capabilities (e.g. the presence watch set) that don't
 /// fit cleanly behind the `Transport` trait.
+#[allow(clippy::too_many_arguments)]
 async fn build_with_chat(
     http: &Http,
     base_url: &str,
@@ -365,6 +437,8 @@ async fn build_with_chat(
     relay_url: Option<Url>,
     data_dir: Option<PathBuf>,
     passphrase: Option<String>,
+    enable_lan_direct: bool,
+    contact_pubkey_lookup: Option<ContactPubkeyLookup>,
 ) -> Result<(Router, Option<ChatState>, Option<Arc<RelayTransport>>)> {
     // Resolve the local agent identity from x0xd. The chat identity
     // vault is bound to this agent_id — rotating the x0xd identity
@@ -394,7 +468,7 @@ async fn build_with_chat(
 
     let registry = Arc::new(ConversationRegistry::new(
         layout.clone(),
-        master,
+        master.clone(),
         kdf_id,
         argon_salt,
     ));
@@ -414,6 +488,41 @@ async fn build_with_chat(
     let signer: Arc<dyn Signer> = x0xd_signer.clone();
 
     let mut router = Router::new();
+
+    // LAN-direct is registered FIRST so `IfReachable` wins over the
+    // relay's `Always` whenever the peer is co-resident on the LAN.
+    if enable_lan_direct {
+        let lan_static = Arc::new(LanStaticIdentity::load_or_create(
+            &layout.root,
+            master.as_ref(),
+            &agent_id_hex,
+            kdf_id,
+            argon_salt.as_ref(),
+        )?);
+        let table = Arc::new(LanPeerTable::new());
+        let lookup: ContactPubkeyLookup = contact_pubkey_lookup
+            .unwrap_or_else(|| Arc::new(|_a: &identity::AgentId| -> Option<Vec<u8>> { None }));
+        let local_aid = identity::AgentId(agent_id_hex.clone());
+        let bind = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            0,
+        );
+        let (lan_transport, _bound) = LanDirectTransport::start(
+            local_aid,
+            lan_static,
+            signer.clone(),
+            table.clone(),
+            lookup,
+            bind,
+        )
+        .await?;
+        // TODO(#100): spawn mDNS announce + browser at the desktop /
+        // peer-binary layer so they can drive the `Nearby` UI surface
+        // and stay alive on the host's tokio runtime. The LanPeerTable
+        // is plumbed through here so the desktop can populate it.
+        router.add(lan_transport);
+    }
+
     let mut relay_handle: Option<Arc<RelayTransport>> = None;
     if let Some(url) = relay_url {
         let relay = RelayTransport::connect(url, x0xd_signer.clone()).await?;
