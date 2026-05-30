@@ -58,3 +58,12 @@ pub enum ChatError {
         path: String,
     },
 }
+
+impl From<x0xd_client::DiscoveryError> for ChatError {
+    fn from(e: x0xd_client::DiscoveryError) -> Self {
+        match e {
+            x0xd_client::DiscoveryError::Io(io) => Self::Io(io),
+            other => Self::NotDiscoverable(other.to_string()),
+        }
+    }
+}

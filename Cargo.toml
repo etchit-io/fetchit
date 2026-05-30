@@ -8,6 +8,7 @@ members = [
     "crates/fetchit-relay-server",
     "crates/fetchit-relay-client",
     "crates/fetchit-trust",
+    "crates/x0xd-client",
 ]
 exclude = ["crates/fetchit-ffi", "apps/fetchit-desktop/src-tauri"]
 resolver = "2"

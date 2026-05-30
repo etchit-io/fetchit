@@ -29,6 +29,7 @@ directories.workspace = true
 fetchit-relay-client = { path = "../fetchit-relay-client" }
 flate2 = "1.0"
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+x0xd-client = { path = "../x0xd-client" }
 futures-util.workspace = true
 hex.workspace = true
 hkdf.workspace = true

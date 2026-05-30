@@ -60,7 +60,10 @@ impl std::fmt::Debug for ClientBuilder {
             .field("token", &self.token.as_deref().map(|_| "<redacted>"))
             .field("relay_url", &self.relay_url)
             .field("data_dir", &self.data_dir)
-            .field("passphrase", &self.passphrase.as_deref().map(|_| "<redacted>"))
+            .field(
+                "passphrase",
+                &self.passphrase.as_deref().map(|_| "<redacted>"),
+            )
             .field("enable_lan_direct", &self.enable_lan_direct)
             .field(
                 "contact_pubkey_lookup",
@@ -227,10 +230,8 @@ impl Client {
         contact_pubkey_lookup: Option<ContactPubkeyLookup>,
     ) -> Result<Self> {
         let http = Arc::new(Http::new(base_url.clone(), token.clone())?);
-        let needs_chat = relay_url.is_some()
-            || data_dir.is_some()
-            || passphrase.is_some()
-            || enable_lan_direct;
+        let needs_chat =
+            relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
 
         let (router, chat, relay, lan, lan_bound_addr) = if needs_chat {
             build_with_chat(
@@ -538,15 +539,11 @@ async fn build_with_chat(
         let table = Arc::new(LanPeerTable::new());
         let lookup: ContactPubkeyLookup = contact_pubkey_lookup.unwrap_or_else(|| {
             let registry_for_lookup = registry.clone();
-            Arc::new(move |aid: &identity::AgentId| {
-                registry_for_lookup.peer_ml_dsa_pubkey(aid)
-            })
+            Arc::new(move |aid: &identity::AgentId| registry_for_lookup.peer_ml_dsa_pubkey(aid))
         });
         let local_aid = identity::AgentId(agent_id_hex.clone());
-        let bind = std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            0,
-        );
+        let bind =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
         let (lan_transport, bound) = LanDirectTransport::start(
             local_aid,
             lan_static,

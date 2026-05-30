@@ -3094,6 +3094,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "url",
+ "x0xd-client",
  "x25519-dalek",
  "zeroize",
 ]
@@ -3184,6 +3185,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+ "x0xd-client",
 ]
 
 [[package]]
@@ -10362,6 +10364,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
+]
+
+[[package]]
+name = "x0xd-client"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "fetchit-relay-proto",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
 ]
 
 [[package]]

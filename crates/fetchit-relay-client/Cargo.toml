@@ -24,6 +24,7 @@ bytes.workspace = true
 clap.workspace = true
 dashmap.workspace = true
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+x0xd-client = { path = "../x0xd-client" }
 futures-util.workspace = true
 hex.workspace = true
 postcard.workspace = true

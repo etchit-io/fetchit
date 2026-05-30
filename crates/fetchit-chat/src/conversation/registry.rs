@@ -433,7 +433,9 @@ mod tests {
     async fn peer_pubkey_lookup_populates_on_save() {
         let (_d, reg) = fresh_registry();
         let pk = vec![0xcd; 64];
-        reg.save(&dm_with_pubkey("aa", LOCAL, PEER, &pk)).await.unwrap();
+        reg.save(&dm_with_pubkey("aa", LOCAL, PEER, &pk))
+            .await
+            .unwrap();
         let aid = AgentId::parse(PEER.to_owned()).unwrap();
         assert_eq!(reg.peer_ml_dsa_pubkey(&aid), Some(pk));
     }
@@ -451,11 +453,16 @@ mod tests {
         let r1 =
             ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));
         let pk = vec![0xef; 64];
-        r1.save(&dm_with_pubkey("aa", LOCAL, PEER, &pk)).await.unwrap();
+        r1.save(&dm_with_pubkey("aa", LOCAL, PEER, &pk))
+            .await
+            .unwrap();
 
         let r2 = ConversationRegistry::new(layout, master, kdf_id_argon2(), Some(salt));
         let aid = AgentId::parse(PEER.to_owned()).unwrap();
-        assert!(r2.peer_ml_dsa_pubkey(&aid).is_none(), "cold cache before lookup");
+        assert!(
+            r2.peer_ml_dsa_pubkey(&aid).is_none(),
+            "cold cache before lookup"
+        );
         let _ = r2.find_dm_with(PEER).await.unwrap();
         assert_eq!(r2.peer_ml_dsa_pubkey(&aid), Some(pk));
     }

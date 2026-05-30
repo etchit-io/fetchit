@@ -286,10 +286,7 @@ async fn x0xd_signer_rejects_wrong_token() {
     let addr = mock_x0xd::start(x0xd_state).await;
     let url = Url::parse(&format!("http://{addr}/")).unwrap();
     let err = X0xdSigner::connect(url, "wrong-token").await.unwrap_err();
-    assert!(matches!(
-        err,
-        fetchit_relay_client::ClientError::AuthRejected(_)
-    ));
+    assert!(matches!(err, x0xd_client::X0xdError::Rejected(_)));
 }
 
 #[tokio::test]

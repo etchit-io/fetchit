@@ -47,3 +47,13 @@ pub enum ClientError {
     #[error("unexpected non-binary message")]
     UnexpectedMessage,
 }
+
+impl From<x0xd_client::X0xdError> for ClientError {
+    fn from(e: x0xd_client::X0xdError) -> Self {
+        match e {
+            x0xd_client::X0xdError::Http(e) => Self::Http(e),
+            x0xd_client::X0xdError::Url(e) => Self::Url(e),
+            x0xd_client::X0xdError::Rejected(s) => Self::AuthRejected(s),
+        }
+    }
+}
