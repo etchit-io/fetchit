@@ -187,6 +187,14 @@ pub struct Client {
     /// shell drive relay-level capabilities (presence watch set) that
     /// don't fit the `Transport` trait shape.
     relay: Option<Arc<RelayTransport>>,
+    /// Direct handle to the LAN-direct transport when it's wired.
+    /// Lets the desktop shell drive transport-adjacent capabilities
+    /// (mDNS announce + browse against `LanPeerTable`) that don't fit
+    /// behind the `Transport` trait.
+    lan: Option<Arc<LanDirectTransport>>,
+    /// The TCP `SocketAddr` the LAN-direct listener bound when wired.
+    /// Desktop publishes this port via mDNS so peers can dial back.
+    lan_bound_addr: Option<std::net::SocketAddr>,
 }
 
 impl Client {
@@ -224,7 +232,7 @@ impl Client {
             || passphrase.is_some()
             || enable_lan_direct;
 
-        let (router, chat, relay) = if needs_chat {
+        let (router, chat, relay, lan, lan_bound_addr) = if needs_chat {
             build_with_chat(
                 &http,
                 &base_url,
@@ -237,7 +245,7 @@ impl Client {
             )
             .await?
         } else {
-            (Router::new(), None, None)
+            (Router::new(), None, None, None, None)
         };
 
         let router = Arc::new(router);
@@ -250,7 +258,27 @@ impl Client {
             router,
             chat,
             relay,
+            lan,
+            lan_bound_addr,
         })
+    }
+
+    /// Borrow the LAN-direct transport handle when one is wired.
+    /// Returns `None` for clients built without
+    /// [`ClientBuilder::enable_lan_direct`]. Desktop callers use this
+    /// to drive the mDNS announce + browse against the transport's
+    /// [`crate::lan_discovery::LanPeerTable`].
+    #[must_use]
+    pub fn lan_transport_arc(&self) -> Option<&Arc<LanDirectTransport>> {
+        self.lan.as_ref()
+    }
+
+    /// The TCP listener address the LAN-direct transport bound to.
+    /// Returns `None` if LAN-direct isn't wired. Desktop publishes this
+    /// `port` via mDNS so co-resident peers can dial back.
+    #[must_use]
+    pub fn lan_bound_addr(&self) -> Option<std::net::SocketAddr> {
+        self.lan_bound_addr
     }
 
     /// Identity endpoint: read your agent, generate cards, import others.
@@ -429,7 +457,7 @@ impl std::fmt::Debug for Client {
 /// `None` for REST-only clients. The chat layer uses this to drive
 /// relay-level capabilities (e.g. the presence watch set) that don't
 /// fit cleanly behind the `Transport` trait.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn build_with_chat(
     http: &Http,
     base_url: &str,
@@ -439,7 +467,13 @@ async fn build_with_chat(
     passphrase: Option<String>,
     enable_lan_direct: bool,
     contact_pubkey_lookup: Option<ContactPubkeyLookup>,
-) -> Result<(Router, Option<ChatState>, Option<Arc<RelayTransport>>)> {
+) -> Result<(
+    Router,
+    Option<ChatState>,
+    Option<Arc<RelayTransport>>,
+    Option<Arc<LanDirectTransport>>,
+    Option<std::net::SocketAddr>,
+)> {
     // Resolve the local agent identity from x0xd. The chat identity
     // vault is bound to this agent_id — rotating the x0xd identity
     // forces a fresh KEM keypair.
@@ -488,6 +522,8 @@ async fn build_with_chat(
     let signer: Arc<dyn Signer> = x0xd_signer.clone();
 
     let mut router = Router::new();
+    let mut lan_handle: Option<Arc<LanDirectTransport>> = None;
+    let mut lan_bound_addr: Option<std::net::SocketAddr> = None;
 
     // LAN-direct is registered FIRST so `IfReachable` wins over the
     // relay's `Always` whenever the peer is co-resident on the LAN.
@@ -511,7 +547,7 @@ async fn build_with_chat(
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             0,
         );
-        let (lan_transport, _bound) = LanDirectTransport::start(
+        let (lan_transport, bound) = LanDirectTransport::start(
             local_aid,
             lan_static,
             signer.clone(),
@@ -520,10 +556,12 @@ async fn build_with_chat(
             bind,
         )
         .await?;
-        // TODO(#100): spawn mDNS announce + browser at the desktop /
-        // peer-binary layer so they can drive the `Nearby` UI surface
-        // and stay alive on the host's tokio runtime. The LanPeerTable
-        // is plumbed through here so the desktop can populate it.
+        // The desktop layer reads `lan_bound_addr()` + `lan_transport_arc()
+        // -> peer_table()` to spawn mDNS announce + browse against the
+        // host's tokio runtime. The LanPeerTable's contents flow back
+        // into the transport's reachability gate.
+        lan_handle = Some(lan_transport.clone());
+        lan_bound_addr = Some(bound);
         router.add(lan_transport);
     }
 
@@ -544,6 +582,8 @@ async fn build_with_chat(
             local_machine_id,
         }),
         relay_handle,
+        lan_handle,
+        lan_bound_addr,
     ))
 }
 
