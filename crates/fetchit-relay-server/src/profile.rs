@@ -34,6 +34,16 @@ pub const SIGN_DOMAIN_PROFILE: &[u8] = b"fetchit/profile-manifest/v1";
 /// with garbage POSTs.
 pub const MAX_PROFILE_BODY_BYTES: usize = 32 * 1024;
 
+/// Raw byte length of an ML-KEM-768 public key. Profile-index
+/// records carry the KEM pubkey base64url-encoded; the relay
+/// length-validates on POST so a malformed client gets a clear
+/// 400 instead of a downstream consumer choking on
+/// `MlKemPublicKey::from_bytes` later.
+pub const ML_KEM_768_PUBKEY_LEN: usize = 1184;
+
+/// Raw byte length of an ML-DSA-65 public key.
+pub const ML_DSA_65_PUBKEY_LEN: usize = 1952;
+
 /// 64 `'0'` characters — the canonical tombstone value for
 /// `profile_addr`. A POST carrying this address marks the record
 /// as deleted; subsequent GETs return 404 until a higher
@@ -192,6 +202,19 @@ pub fn verify_record(
     let pubkey_bytes = B64URL
         .decode(&record.ml_dsa_pubkey)
         .map_err(|_| ProfileError::Malformed("ml_dsa_pubkey: not base64url-no-pad"))?;
+    if pubkey_bytes.len() != ML_DSA_65_PUBKEY_LEN {
+        return Err(ProfileError::Malformed(
+            "ml_dsa_pubkey: must be exactly 1952 bytes raw",
+        ));
+    }
+    let kem_pubkey_bytes = B64URL
+        .decode(&record.kem_pubkey)
+        .map_err(|_| ProfileError::Malformed("kem_pubkey: not base64url-no-pad"))?;
+    if kem_pubkey_bytes.len() != ML_KEM_768_PUBKEY_LEN {
+        return Err(ProfileError::Malformed(
+            "kem_pubkey: must be exactly 1184 bytes raw",
+        ));
+    }
     let sig_bytes = B64URL
         .decode(&record.sig)
         .map_err(|_| ProfileError::Malformed("sig: not base64url-no-pad"))?;
@@ -395,5 +418,45 @@ mod tests {
         // docs/profile-manifest-v1.md § 2.
         assert_eq!(SIGN_DOMAIN_PROFILE, b"fetchit/profile-manifest/v1");
         assert_eq!(SIGN_DOMAIN_PROFILE.len(), 27);
+    }
+
+    #[test]
+    fn verify_rejects_wrong_ml_dsa_pubkey_length() {
+        // Defense in depth per etch>it's recommendation: even with
+        // a sig that an AcceptAllVerifier would happily pass, a
+        // wrong-length ML-DSA pubkey must surface a clear 400
+        // rather than letting a downstream consumer choke on
+        // MlDsaPublicKey::from_bytes far from the offending POST.
+        let mut r = mk_record(0x00, 1, "1".repeat(64).as_str());
+        r.ml_dsa_pubkey = B64URL.encode([2u8; 1951]); // off by one
+        let err = verify_record(&r, &AcceptAllVerifier).unwrap_err();
+        match err {
+            ProfileError::Malformed(why) => {
+                assert!(why.contains("ml_dsa_pubkey"), "got: {why}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_wrong_kem_pubkey_length() {
+        let mut r = mk_record(0x00, 1, "1".repeat(64).as_str());
+        r.kem_pubkey = B64URL.encode([1u8; 1185]); // off by one
+        let err = verify_record(&r, &AcceptAllVerifier).unwrap_err();
+        match err {
+            ProfileError::Malformed(why) => {
+                assert!(why.contains("kem_pubkey"), "got: {why}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pubkey_length_constants_match_pqc_spec() {
+        // Independent assertion of the spec values so a future
+        // typo in the constants surfaces here before it reaches
+        // the verifier.
+        assert_eq!(ML_KEM_768_PUBKEY_LEN, 1184);
+        assert_eq!(ML_DSA_65_PUBKEY_LEN, 1952);
     }
 }
