@@ -4,7 +4,7 @@
 import { bubbleRenderKey, renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
-import type { ChatStore, Conversation } from "./state";
+import { convKey, type ChatStore, type Conversation } from "./state";
 import { dmConnect, groupHistory, sendDm, sendGroupMessage } from "./api";
 import { mountTrustMenu } from "./trustMenu";
 import type { TrustLevel } from "./types";
@@ -62,6 +62,13 @@ export function mountConversation(
   };
 
   let lastConv: Conversation | null = null;
+  /// Signature of the most recent bubble list we rendered, used to
+  /// short-circuit store-subscribe ticks that don't change anything in
+  /// the message column. Without this guard, `replaceChildren` detaches
+  /// + re-attaches every bubble even when the keyed-diff reuses the
+  /// same DOM nodes, which restarts the `chat-bubble-pop` animation
+  /// and produces visible flicker on every presence / nearby tick.
+  let lastStreamKey: string | null = null;
   let groupPollTimer: ReturnType<typeof setInterval> | null = null;
 
   const refreshGroupHistory = (groupId: string): Promise<void> =>
@@ -161,32 +168,38 @@ export function mountConversation(
       trustEl.appendChild(leaveBtn);
     }
 
-    const wasAtBottom = isNearBottom(stream);
-    // Keyed diff: reuse existing bubble elements when their render key
-    // (id + status + failureReason) is unchanged. Without this, every
-    // store mutation — including the chat:nearby 5-second tick —
-    // recreates every .chat-bubble in the thread and the
-    // chat-bubble-pop enter animation re-fires, producing visible
-    // flicker on the message column.
-    const existing = new Map<string, HTMLElement>();
-    for (const child of Array.from(stream.children)) {
-      const key = (child as HTMLElement).dataset.key;
-      if (key) existing.set(key, child as HTMLElement);
-    }
-    const ordered: HTMLElement[] = [];
-    for (const b of conv.messages) {
-      const key = bubbleRenderKey(b);
-      const reused = existing.get(key);
-      if (reused) {
-        existing.delete(key);
-        ordered.push(reused);
-      } else {
-        ordered.push(renderBubble(b, bubbleHandlers));
+    // Bubble list signature: conv identity + ordered bubble keys. When
+    // it matches the previous render, the DOM doesn't need to move at
+    // all. `replaceChildren` would re-attach every bubble and re-fire
+    // chat-bubble-pop even on a keyed-reuse, so we have to short-circuit
+    // *before* touching `stream`.
+    const newStreamKey = `${convKey(conv.key)}|${conv.messages.map(bubbleRenderKey).join("|")}`;
+    if (newStreamKey !== lastStreamKey || lastConv !== conv) {
+      const wasAtBottom = isNearBottom(stream);
+      // Keyed diff: reuse existing bubble elements whose render key
+      // (id + status + failureReason) is unchanged. New bubbles get
+      // built; orphans (removed messages) drop on the floor.
+      const existing = new Map<string, HTMLElement>();
+      for (const child of Array.from(stream.children)) {
+        const key = (child as HTMLElement).dataset.key;
+        if (key) existing.set(key, child as HTMLElement);
       }
-    }
-    stream.replaceChildren(...ordered);
-    if (lastConv !== conv || wasAtBottom) {
-      stream.scrollTop = stream.scrollHeight;
+      const ordered: HTMLElement[] = [];
+      for (const b of conv.messages) {
+        const key = bubbleRenderKey(b);
+        const reused = existing.get(key);
+        if (reused) {
+          existing.delete(key);
+          ordered.push(reused);
+        } else {
+          ordered.push(renderBubble(b, bubbleHandlers));
+        }
+      }
+      stream.replaceChildren(...ordered);
+      lastStreamKey = newStreamKey;
+      if (lastConv !== conv || wasAtBottom) {
+        stream.scrollTop = stream.scrollHeight;
+      }
     }
     if (lastConv !== conv) {
       composer.focus();
