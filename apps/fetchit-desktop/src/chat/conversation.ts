@@ -19,6 +19,10 @@ export interface ConversationHandlers {
   onSetTrust: (agentId: string, level: TrustLevel) => void;
   onRemoveContact: (agentId: string) => void;
   onLeaveGroup: (groupId: string) => void;
+  /// Resolves the user's current display name at send time, so a rename
+  /// in the share-card dialog takes effect on the next outbound DM
+  /// without re-mounting.
+  resolveSenderName: () => string;
 }
 
 export function mountConversation(
@@ -84,7 +88,7 @@ export function mountConversation(
             // Same warmup the driver does for retries — turns a 12s
             // cold-link timeout into a sub-second raw_quic send.
             await dmConnect(peer).catch(() => {});
-            const messageId = await sendDm(peer, body);
+            const messageId = await sendDm(peer, body, handlers.resolveSenderName());
             store.markSent(peer, bubbleId, messageId);
           } catch (e) {
             store.markFailed(peer, bubbleId, (e as Error).message);

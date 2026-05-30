@@ -385,6 +385,27 @@ fn idle_policy(state: tauri::State<'_, AppState>) -> IdlePolicy {
     state.settings.lock().map(|s| s.idle).unwrap_or_default()
 }
 
+/// Read the persisted display name. Empty string = unset.
+#[tauri::command]
+fn display_name(state: tauri::State<'_, AppState>) -> String {
+    state
+        .settings
+        .lock()
+        .map(|s| s.display_name.clone())
+        .unwrap_or_default()
+}
+
+/// Persist a user-chosen display name. Trims whitespace; an empty
+/// string clears the value and reverts to auto-derived placeholders.
+#[tauri::command]
+fn set_display_name(state: tauri::State<'_, AppState>, name: String) {
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
+    s.display_name = name.trim().to_string();
+    let _ = s.save(&state.settings_path);
+}
+
 #[tauri::command]
 fn set_idle_policy(state: tauri::State<'_, AppState>, policy: IdlePolicy) {
     let Ok(mut s) = state.settings.lock() else {
@@ -554,6 +575,7 @@ fn build_chat_state(relay_url: &str, data_dir: std::path::PathBuf) -> chat::Chat
 /// Panics if the Tauri runtime fails to start — an unrecoverable startup
 /// error with nothing to fall back to.
 #[allow(clippy::expect_used)] // entry point: a failed startup is unrecoverable
+#[allow(clippy::too_many_lines)] // dominated by the invoke-handler list
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Two scheme aliases for the same protocol handler. The localhost HTTP
@@ -660,6 +682,8 @@ pub fn run() {
             idle_policy,
             set_idle_policy,
             idle_disconnect,
+            display_name,
+            set_display_name,
             chat::chat_health,
             chat::chat_identity,
             chat::chat_card,

@@ -5,6 +5,7 @@
 
 import {
   dmConnect,
+  getDisplayName,
   health,
   identity,
   leaveGroup,
@@ -13,6 +14,7 @@ import {
   presenceOnline,
   removeContact,
   sendDm,
+  setDisplayName,
   setTrust,
   unwatchPresence,
   watchPresence,
@@ -55,6 +57,17 @@ export function mountChatPanel(
   host.hidden = true;
 
   const store = new ChatStore();
+  // User-chosen display name, persisted in settings. Used for outbound
+  // share cards, group create/join, and the `sender_name` on DMs.
+  // Empty string = unset; callers fall back to `me.user_id` then to
+  // `agent-<6-hex>` so an unconfigured peer still has *something*
+  // legible on the wire.
+  let displayName = "";
+  const resolveName = (): string => {
+    if (displayName.trim() !== "") return displayName.trim();
+    const me = store.identity();
+    return me?.user_id ?? `agent-${me?.agent_id.slice(0, 6) ?? "anon"}`;
+  };
   const layout = document.createElement("div");
   layout.className = "chat-panel__layout";
 
@@ -171,10 +184,18 @@ export function mountChatPanel(
   };
 
   const openShareCard = (): void => {
-    const me = store.identity();
-    const name = me?.user_id ?? `agent-${me?.agent_id.slice(0, 6) ?? "anon"}`;
     showDialog((root) => {
-      void mountCardDialog(root, name, { onClose: hideDialog });
+      void mountCardDialog(
+        root,
+        resolveName(),
+        {
+          onClose: hideDialog,
+          onRename: async (newName) => {
+            displayName = newName;
+            await setDisplayName(newName);
+          },
+        },
+      );
     });
   };
 
@@ -194,10 +215,8 @@ export function mountChatPanel(
   idBadge.addEventListener("click", openShareCard);
 
   const openNewGroup = (): void => {
-    const me = store.identity();
-    const name = me?.user_id ?? `agent-${me?.agent_id.slice(0, 6) ?? "anon"}`;
     showDialog((root) => {
-      mountNewGroup(root, name, {
+      mountNewGroup(root, resolveName(), {
         onClose: hideDialog,
         onCreated: () => {
           void refreshGroups();
@@ -207,12 +226,10 @@ export function mountChatPanel(
   };
 
   const openJoinGroup = (initialUri?: string): void => {
-    const me = store.identity();
-    const name = me?.user_id ?? `agent-${me?.agent_id.slice(0, 6) ?? "anon"}`;
     showDialog((root) => {
       mountJoinGroup(
         root,
-        name,
+        resolveName(),
         {
           onClose: hideDialog,
           onJoined: (group) => {
@@ -294,6 +311,7 @@ export function mountChatPanel(
         }
       })();
     },
+    resolveSenderName: resolveName,
   });
 
   const refreshContacts = async (): Promise<void> => {
@@ -362,7 +380,11 @@ export function mountChatPanel(
     store.setPanelVisible(true);
     try {
       await health();
-      const me = await identity();
+      const [me, persistedName] = await Promise.all([
+        identity(),
+        getDisplayName().catch(() => ""),
+      ]);
+      displayName = persistedName;
       store.setIdentity(me);
       idBadge.textContent = `${me.agent_id.slice(0, 8)}…`;
       const [contacts, online, groups] = await Promise.all([
@@ -387,7 +409,7 @@ export function mountChatPanel(
       }
       if (!outboxDriver) {
         outboxDriver = startOutboxDriver(store, {
-          sendDm,
+          sendDm: (peer, body) => sendDm(peer, body, resolveName()),
           connect: dmConnect,
         });
       }

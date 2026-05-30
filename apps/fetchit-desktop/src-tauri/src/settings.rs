@@ -63,6 +63,12 @@ pub struct Settings {
     /// operated NYC node; advanced users can change it.
     #[serde(default = "default_relay_url")]
     pub relay_url: String,
+    /// User-chosen display name. Embedded in share cards and outbound
+    /// DMs so recipients see a friendly label instead of the raw
+    /// `agent_id`. Empty = fall back to the auto-derived
+    /// `agent-<6-hex>` placeholder.
+    #[serde(default)]
+    pub display_name: String,
 }
 
 impl Default for Settings {
@@ -73,6 +79,7 @@ impl Default for Settings {
             idle: IdlePolicy::default(),
             peers: Vec::new(),
             relay_url: default_relay_url(),
+            display_name: String::new(),
         }
     }
 }
@@ -251,5 +258,30 @@ mod tests {
         .unwrap();
         let s = Settings::load(&p);
         assert!(s.peers.is_empty());
+    }
+
+    #[test]
+    fn display_name_defaults_to_empty_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        assert_eq!(s.display_name, "");
+        s.display_name = "Alice 👋".into();
+        s.save(&p).unwrap();
+        let loaded = Settings::load(&p);
+        assert_eq!(loaded.display_name, "Alice 👋");
+    }
+
+    #[test]
+    fn missing_display_name_field_in_file_defaults_to_empty() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert_eq!(s.display_name, "");
     }
 }

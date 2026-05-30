@@ -114,3 +114,11 @@ export async function groupHistory(groupId: string): Promise<GroupMessage[]> {
 export async function leaveGroup(groupId: string): Promise<void> {
   await invoke("chat_group_leave", { groupId });
 }
+
+export async function getDisplayName(): Promise<string> {
+  return invoke<string>("display_name");
+}
+
+export async function setDisplayName(name: string): Promise<void> {
+  await invoke("set_display_name", { name });
+}
