@@ -45,6 +45,43 @@ pub const SIGN_DOMAIN_ENVELOPE: &[u8] = b"lit/envelope/v1";
 /// Domain string for ML-DSA signing extended share-cards.
 pub const SIGN_DOMAIN_CARD: &[u8] = b"fetchit-chat/v1/card";
 
+/// Domain string for ML-DSA channel-binding signatures exchanged inside
+/// the LAN-direct Noise XX handshake. Binds the X25519 static to the
+/// `agent_id`; verifier reconstructs these bytes (plus the handshake
+/// hash) before calling [`ml_dsa_verify`].
+pub const SIGN_DOMAIN_LAN_NOISE: &[u8] = b"fetchit/lan-noise/v1";
+
+/// Canonical bytes for the LAN-Noise channel-binding signature.
+///
+/// Layout:
+/// ```text
+/// SIGN_DOMAIN_LAN_NOISE
+/// || version_byte
+/// || agent_id (32)
+/// || x25519_static_pub (32)
+/// || created_at_ms (u64 BE)
+/// ```
+///
+/// The signer commits to *these* bytes concatenated with the live Noise
+/// handshake hash (so a relay or MITM that re-runs the handshake against
+/// a different peer changes the hash and the signature fails to verify).
+/// `version_byte = 1` for the v1 binding.
+#[must_use]
+pub fn lan_binding_bytes(
+    agent_id: &[u8; 32],
+    x25519_pub: &[u8; 32],
+    created_at_ms: u64,
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(SIGN_DOMAIN_LAN_NOISE.len() + 1 + 32 + 32 + 8);
+    out.extend_from_slice(SIGN_DOMAIN_LAN_NOISE);
+    out.push(1);
+    out.extend_from_slice(agent_id);
+    out.extend_from_slice(x25519_pub);
+    out.extend_from_slice(&created_at_ms.to_be_bytes());
+    out
+}
+
 // ── KEM ────────────────────────────────────────────────────────────────
 
 /// Encapsulate a fresh symmetric secret against `recipient_kem_pub`.
@@ -310,6 +347,61 @@ mod tests {
         let g2 = [1u8; 32];
         let aad0_g2 = message_aad(&g2, 0);
         assert_ne!(aad0, aad0_g2);
+    }
+
+    #[test]
+    fn lan_binding_bytes_layout() {
+        let agent_id = [0xaa; 32];
+        let x25519_pub = [0x55; 32];
+        let ts: u64 = 0x0123_4567_89ab_cdef;
+        let bytes = lan_binding_bytes(&agent_id, &x25519_pub, ts);
+        let mut want = Vec::new();
+        want.extend_from_slice(SIGN_DOMAIN_LAN_NOISE);
+        want.push(1);
+        want.extend_from_slice(&agent_id);
+        want.extend_from_slice(&x25519_pub);
+        want.extend_from_slice(&ts.to_be_bytes());
+        assert_eq!(bytes, want);
+    }
+
+    #[tokio::test]
+    async fn lan_binding_sign_and_verify_roundtrip() {
+        use fetchit_relay_client::{MlDsaSigner, Signer};
+        let signer = MlDsaSigner::generate().unwrap();
+        let agent_id = [0x11; 32];
+        let x25519_pub = [0x22; 32];
+        let bytes = lan_binding_bytes(&agent_id, &x25519_pub, 1_700_000_000_000);
+        let sig = signer.sign(&bytes).await.unwrap();
+        ml_dsa_verify(&signer.public_key(), &bytes, &sig).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lan_binding_tamper_fails_verify() {
+        use fetchit_relay_client::{MlDsaSigner, Signer};
+        let signer = MlDsaSigner::generate().unwrap();
+        let agent_id = [0x11; 32];
+        let x25519_pub = [0x22; 32];
+        let bytes = lan_binding_bytes(&agent_id, &x25519_pub, 1_700_000_000_000);
+        let sig = signer.sign(&bytes).await.unwrap();
+        let mut tampered = bytes.clone();
+        tampered[SIGN_DOMAIN_LAN_NOISE.len() + 1 + 16] ^= 1;
+        assert!(ml_dsa_verify(&signer.public_key(), &tampered, &sig).is_err());
+    }
+
+    #[tokio::test]
+    async fn lan_binding_wrong_domain_fails_verify() {
+        use fetchit_relay_client::{MlDsaSigner, Signer};
+        let signer = MlDsaSigner::generate().unwrap();
+        let agent_id = [0x33; 32];
+        let x25519_pub = [0x44; 32];
+        let bytes = lan_binding_bytes(&agent_id, &x25519_pub, 0);
+        let sig = signer.sign(&bytes).await.unwrap();
+        // Swap the LAN domain for the envelope domain — same shape, but a
+        // signature over the LAN binding must not validate as an envelope.
+        let mut wrong_domain = Vec::new();
+        wrong_domain.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+        wrong_domain.extend_from_slice(&bytes[SIGN_DOMAIN_LAN_NOISE.len()..]);
+        assert!(ml_dsa_verify(&signer.public_key(), &wrong_domain, &sig).is_err());
     }
 
     #[test]
