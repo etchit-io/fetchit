@@ -24,6 +24,7 @@ pub mod error;
 pub mod events;
 pub mod groups;
 pub mod identity;
+pub mod lan_discovery;
 pub mod lan_noise;
 pub mod lan_static;
 pub mod local_store;
