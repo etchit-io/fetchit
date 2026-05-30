@@ -509,6 +509,7 @@ pub async fn chat_confirm_contact(
 /// - **x0xd unified SSE** — catch-all for events the relay isn't
 ///   responsible for (gossip, contacts, groups).
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
+    spawn_x0xd_supervisor(state.clone());
     spawn_daemon_watcher(app.clone(), state.clone());
     spawn_relay_inbound(app.clone(), state.clone());
     spawn_lan_inbound(app.clone(), state.clone());
@@ -516,6 +517,135 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_presence(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
+}
+
+/// Background task that supervises the local x0xd daemon process.
+///
+/// Polls discovery every 5 s; whenever x0xd isn't reachable, locates
+/// the `x0x` CLI binary and runs `x0x start` to bring the daemon back.
+/// `x0x start` self-daemonises and exits, so this task doesn't own a
+/// long-lived child handle — it just observes and re-invokes.
+///
+/// Why this exists: x0xd 0.19.x auto-upgrades itself in-place and exits
+/// with the comment "for service manager restart" — assuming systemd or
+/// launchd will respawn it. On headless installs, dev shells, and
+/// macOS/Windows machines without a service unit, the daemon stays dead
+/// and the chat panel silently breaks. This task is fetch>it owning
+/// the lifecycle itself so the user never has to know about x0xd's
+/// existence, much less its upgrade lifecycle. See issue #153.
+///
+/// Behaviour:
+///
+/// - On a fresh box where x0xd has never run, `discover_local` errors
+///   out and the supervisor finds an `x0x` binary and starts it.
+/// - On a box where x0xd was running and exited (auto-upgrade or
+///   crash), the supervisor restarts it within ~5 seconds.
+/// - When x0xd is reachable, the supervisor does nothing — no probes,
+///   no restarts, no traffic to /agent. The daemon-watcher
+///   ([`spawn_daemon_watcher`]) handles the credentials-changed case
+///   separately.
+/// - If no `x0x` binary can be located (no PATH entry, no install at
+///   ~/.local/bin), the supervisor logs once and continues polling
+///   silently — no point spamming the log every 5 s.
+fn spawn_x0xd_supervisor(state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        // Brief initial delay so the very first probe doesn't race the
+        // app's own initialisation (build_chat_state may itself trigger
+        // discovery while we're still setting up).
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Locate `x0x` once. If it's not on disk we can't self-heal,
+        // so log once and stop polling rather than thrash. A future
+        // installer that bundles x0xd will write it to a known
+        // location and this becomes a no-op.
+        let Some(bin) = locate_x0x_binary() else {
+            log_pump(
+                "[supervisor] no `x0x` binary found in PATH or ~/.local/bin; \
+                 chat won't self-heal when x0xd dies. install x0x to fix.",
+            );
+            return;
+        };
+        log_pump(&format!("[supervisor] watching x0xd via {}", bin.display()));
+
+        let mut warned_failed_start = false;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            if fetchit_chat::discovery::discover_local().await.is_ok() {
+                warned_failed_start = false;
+                continue;
+            }
+
+            log_pump("[supervisor] x0xd not reachable; invoking `x0x start`");
+
+            // `x0x start` forks the daemon and the foreground process
+            // exits cleanly. We wait for that exit so we don't loop
+            // before the daemon's even bound its API port.
+            let start_result = tokio::process::Command::new(&bin)
+                .arg("start")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+
+            match start_result {
+                Ok(s) if s.success() => {
+                    // Wait up to ~10 s for the daemon to actually publish
+                    // its api.port. Invalidate the cached chat client so
+                    // the next call rebuilds with the fresh credentials.
+                    for _ in 0..20 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if fetchit_chat::discovery::discover_local().await.is_ok() {
+                            state.invalidate().await;
+                            log_pump("[supervisor] x0xd is up");
+                            warned_failed_start = false;
+                            break;
+                        }
+                    }
+                }
+                Ok(s) => {
+                    if !warned_failed_start {
+                        log_pump(&format!(
+                            "[supervisor] `x0x start` exited with status {s}; \
+                             leaving daemon-watcher to surface the failure to the UI"
+                        ));
+                        warned_failed_start = true;
+                    }
+                }
+                Err(e) => {
+                    if !warned_failed_start {
+                        log_pump(&format!("[supervisor] failed to spawn `x0x start`: {e}"));
+                        warned_failed_start = true;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Find the `x0x` CLI binary. Checks `PATH` first via `which`, then a
+/// short list of well-known install locations so the supervisor works
+/// even when `PATH` is missing the user's local bin dir (a common
+/// case when fetch>it is launched from a desktop launcher rather than
+/// a shell that has sourced ~/.bashrc).
+fn locate_x0x_binary() -> Option<std::path::PathBuf> {
+    if let Ok(out) = std::process::Command::new("which").arg("x0x").output() {
+        if out.status.success() {
+            let trimmed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(std::path::PathBuf::from(trimmed));
+            }
+        }
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut candidates = Vec::new();
+    if let Some(h) = home {
+        candidates.push(h.join(".local/bin/x0x"));
+    }
+    candidates.push(std::path::PathBuf::from("/usr/local/bin/x0x"));
+    candidates.push(std::path::PathBuf::from("/opt/x0x/bin/x0x"));
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Tag the chat panel can paint on its daemon-status pill. Emitted

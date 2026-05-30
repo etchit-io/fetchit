@@ -23,7 +23,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "process", "time"] }
 # `CancellationToken` for aborting in-flight fetches when the user
 # closes a tab or restarts the fetch. The token is dropped through
 # `tokio::select!` so the inner network ops cancel at their next
