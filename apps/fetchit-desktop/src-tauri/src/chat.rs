@@ -303,6 +303,19 @@ pub async fn chat_pair_accept(
     let outcome = fetchit_chat::pair::pair_accept(&uri, &http, layout)
         .await
         .map_err(|e| e.to_string())?;
+    // Best-effort dual-write to x0xd's /agent/card/import so the
+    // daemon-backed contact list (`chat_contacts`) surfaces the new
+    // peer. Failure here MUST NOT block the send path — the v3
+    // KEM/DSA keys already live in StoreLayout, which is what the
+    // encrypted-DM transport reads. Closes #155 for the v3 path.
+    match fetchit_chat::pair::record_to_legacy_share_uri(&outcome.record) {
+        Ok(legacy_uri) => {
+            if let Err(e) = client.identity().import_uri(&legacy_uri).await {
+                eprintln!("[fetchit][chat] x0xd contact import (best-effort): {e}");
+            }
+        }
+        Err(e) => eprintln!("[fetchit][chat] build legacy share URI: {e}"),
+    }
     Ok(PairAccepted {
         agent_id_hex: outcome.agent_id_hex,
     })

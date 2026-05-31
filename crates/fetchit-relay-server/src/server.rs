@@ -19,7 +19,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Shared state passed to every axum handler.
 pub struct ServerState {
@@ -124,13 +124,27 @@ impl Server {
 fn spawn_sweeper(state: Arc<ServerState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
+        // Only warn when the eviction count STRICTLY EXCEEDS the
+        // previous sweep — a persistently-offline recipient would
+        // otherwise flood logs at 2 warns/min indefinitely. Bob's
+        // dashboard scrapes the metric (`transit_buffer_envelopes`)
+        // for steady-state; the warn is for spike detection.
+        let mut last_evicted: usize = 0;
         loop {
             interval.tick().await;
-            let _ = state.transit.sweep_expired();
+            let evicted = state.transit.sweep_expired();
             let _ = state.auth.sweep_expired();
             state.ratelimit.sweep_idle(Duration::from_secs(3600));
             let buffered = i64::try_from(state.transit.len()).unwrap_or(i64::MAX);
             state.metrics.set_transit_buffer_envelopes(buffered);
+            if evicted > last_evicted {
+                warn!(
+                    evicted,
+                    transit_buffer = buffered,
+                    "sweeper: transit-eviction count climbed; recipients failing to drain",
+                );
+            }
+            last_evicted = evicted;
         }
     });
 }

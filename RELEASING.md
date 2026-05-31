@@ -6,7 +6,7 @@ A single `v*` tag releases every platform in one pass:
 |----------|--------------------------------------|
 | Android  | `fetchit-<ver>.apk` + `.sha256`, plus stable-named `app-release.apk` |
 | macOS    | Universal `.dmg` + `.app.tar.gz` (Apple Silicon + Intel in one bundle) |
-| Linux    | `.AppImage` + `.deb` (x86_64) |
+| Linux    | `.deb` (x86_64) |
 | Windows  | `.msi` + NSIS `.exe` (x86_64) |
 
 All five artifacts land on the same GitHub Release because both jobs
@@ -96,7 +96,7 @@ the app:
   Privacy & Security → "Open Anyway" once. Notarised builds skip this.
 - **Windows unsigned**: SmartScreen flags as unknown; user clicks
   "More info" → "Run anyway". Authenticode-signed builds skip this.
-- **Linux**: no equivalent gating; `.AppImage` / `.deb` run as-is.
+- **Linux**: no equivalent gating; `.deb` runs as-is.
 
 When (if) you want to remove those warnings, set up the certs and
 upload them as repo secrets.
@@ -180,7 +180,7 @@ configured" and the bundle ships unsigned.
 4. **Watch the workflow**: GitHub Actions → `release` → look for the
    tag. APK job ~5–10 min; desktop matrix ~15–25 min for all three
    runners. Output is one Release on the repo's Releases page with
-   APK + macOS .dmg + Linux .AppImage/.deb + Windows .msi/.exe.
+   APK + macOS .dmg + Linux .deb + Windows .msi/.exe.
 
 5. **Verify the downloads**: pull each artifact, compare APK sha256
    against the `.sha256` file, install on a clean device / VM /

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
 
 /// Query string carrying the bearer token for the WS upgrade.
 #[derive(Debug, Deserialize)]
@@ -92,7 +93,8 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         }
     });
 
-    let _exit = run_io_loop(
+    info!(session = session_id, "ws: session opened");
+    let exit = run_io_loop(
         &mut receiver,
         &mut writer,
         &state,
@@ -103,6 +105,30 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
     )
     .await;
 
+    // Cleanup-trail tracing — operators (Bob's metrics dashboard)
+    // need to distinguish clean client closes from writer-task death
+    // so a flapping-relay outage is visible without grep'ing for
+    // session ids. Per private/metrics-policy.md: NO agent_id or
+    // peer-IP fields land in the log — only the session id (opaque
+    // monotonic) and the LoopExit reason.
+    match exit {
+        LoopExit::ClientClosed => {
+            debug!(session = session_id, reason = "client_closed", "ws: session closing");
+        }
+        LoopExit::ProtocolEnd => {
+            // Voluntary Bye from the client — normal app-close /
+            // navigation lifecycle, fires multiple times per active
+            // user. Stays at DEBUG to keep steady-state logs quiet.
+            debug!(session = session_id, reason = "protocol_end", "ws: session closing");
+        }
+        LoopExit::WriterDied => {
+            warn!(
+                session = session_id,
+                reason = "writer_died",
+                "ws: session closing — writer task exited mid-flight (WS write or encode error)",
+            );
+        }
+    }
     state.sessions.drop_all_watches(session_id);
     state.sessions.unregister(&auth.agent_id, session_id);
     state.metrics.connection_closed();

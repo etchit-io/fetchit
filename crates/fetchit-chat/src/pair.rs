@@ -238,6 +238,35 @@ pub fn record_into_stored_contact(record: &ProfileIndexRecord) -> StoredContactC
     }
 }
 
+/// Build a legacy `x0x://agent/<base64>` share URI from a verified
+/// v3 [`ProfileIndexRecord`] so the desktop shell can hand it to
+/// x0xd's `/agent/card/import` endpoint and populate the
+/// daemon-backed contact list. The synthetic card has an empty
+/// `display_name` and `addresses` — both fields x0xd treats as
+/// optional metadata for its contact-row UX; KEM and ML-DSA keys
+/// live in [`crate::messages::StoredContactCard`] on the layout
+/// side, which is the actual source of truth for the encrypted-DM
+/// send path. This dual-write closes the bug where a v3-paired
+/// contact was invisible to `chat_contacts` (which reads x0xd).
+///
+/// # Errors
+/// Returns [`PairError::Pqc`] if `agent_id` is not 64-char hex,
+/// or [`PairError::Decode`] if `to_share_uri` fails to JSON-encode.
+pub fn record_to_legacy_share_uri(record: &ProfileIndexRecord) -> Result<String, PairError> {
+    use crate::identity::{AgentCard, AgentId};
+    let agent_id =
+        AgentId::parse(record.agent_id.clone()).map_err(|e| PairError::Pqc(e.to_string()))?;
+    let card = AgentCard {
+        agent_id,
+        display_name: String::new(),
+        created_at: None,
+        addresses: Vec::new(),
+        extra: serde_json::Value::Null,
+    };
+    card.to_share_uri()
+        .map_err(|e| PairError::Decode(e.to_string()))
+}
+
 /// Convenience wrapper that maps `PairError` into the
 /// crate-wide [`ChatError`] so the Tauri command layer doesn't
 /// have to know about two error types.
@@ -248,10 +277,16 @@ impl From<PairError> for ChatError {
 }
 
 /// Result of a successful pair-accept — `agent_id` of the imported
-/// contact, ready for the UI to navigate to.
+/// contact (ready for the UI to navigate to) plus the verified
+/// [`ProfileIndexRecord`] so the desktop shell can dual-write the
+/// contact into x0xd via [`record_to_legacy_share_uri`].
 pub struct PairAccepted {
     /// 64-hex lowercase `agent_id` of the new contact.
     pub agent_id_hex: String,
+    /// Verified profile-index record from the relay. Exposed so the
+    /// caller can populate ancillary stores (x0xd's
+    /// `/agent/card/import`) without re-fetching.
+    pub record: ProfileIndexRecord,
 }
 
 /// End-to-end pair-accept: parse → fetch → verify → persist as a
@@ -270,7 +305,10 @@ pub async fn pair_accept(
     let stored = record_into_stored_contact(&record);
     let agent_id_hex = stored.agent_id_hex.clone();
     stored.save(layout)?;
-    Ok(PairAccepted { agent_id_hex })
+    Ok(PairAccepted {
+        agent_id_hex,
+        record,
+    })
 }
 
 #[cfg(test)]
@@ -315,6 +353,42 @@ mod tests {
         let (pk, sk) = dsa.generate_keypair().unwrap();
         let r = mk_signed_record(&dsa, &sk, &pk.to_bytes(), &"a".repeat(64), 1);
         verify_index_record(&r).expect("happy path verify");
+    }
+
+    #[test]
+    fn record_to_legacy_share_uri_round_trips_agent_id() {
+        // Build a record with a fresh keypair, ask the helper for an
+        // x0x:// URI, decode it back via the legacy AgentCard parser,
+        // and confirm the agent_id survives. This is the wire shape
+        // x0xd's /agent/card/import accepts.
+        use crate::identity::AgentCard;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let r = mk_signed_record(&dsa, &sk, &pk.to_bytes(), &"a".repeat(64), 1);
+        let uri = record_to_legacy_share_uri(&r).expect("synthetic uri");
+        assert!(uri.starts_with("x0x://agent/"), "got {uri}");
+        let card = AgentCard::from_share_uri(&uri).expect("decode");
+        assert_eq!(card.agent_id.0, r.agent_id);
+        assert_eq!(card.display_name, "");
+        assert!(card.addresses.is_empty());
+    }
+
+    #[test]
+    fn record_to_legacy_share_uri_rejects_bogus_agent_id() {
+        // Synthetic records that pre-date the validation layer should
+        // surface a parse error rather than panic.
+        let bogus = ProfileIndexRecord {
+            agent_id: "not-hex".into(),
+            profile_addr: "x".into(),
+            kem_pubkey: String::new(),
+            ml_dsa_pubkey: String::new(),
+            issued_at_ms: 0,
+            sig: String::new(),
+        };
+        match record_to_legacy_share_uri(&bogus) {
+            Err(PairError::Pqc(_)) => {}
+            other => panic!("expected Pqc parse error, got {other:?}"),
+        }
     }
 
     #[test]
