@@ -81,6 +81,49 @@ describe("renderBubble — content", () => {
     expect(handlers.onCard).toHaveBeenCalledWith("x0x://agent/xyz");
   });
 
+  it("paints an 'unverified sender' badge under inbound bubbles where verified===false", () => {
+    const handlers = makeHandlers();
+    const row = renderBubble(
+      bubble({ mine: false, body: "hi", verified: false }),
+      handlers,
+    );
+    const badge = row.querySelector(".chat-bubble__unverified");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toContain("unverified");
+  });
+
+  it("does NOT paint the unverified badge on outbound bubbles even with verified===false", () => {
+    const handlers = makeHandlers();
+    const row = renderBubble(
+      bubble({ mine: true, body: "hi", verified: false }),
+      handlers,
+    );
+    expect(row.querySelector(".chat-bubble__unverified")).toBeNull();
+  });
+
+  it("does NOT paint the unverified badge when verified===true (TransitEnvelope path)", () => {
+    const handlers = makeHandlers();
+    const row = renderBubble(
+      bubble({ mine: false, body: "hi", verified: true }),
+      handlers,
+    );
+    expect(row.querySelector(".chat-bubble__unverified")).toBeNull();
+  });
+
+  it("does NOT paint the unverified badge when verified is undefined (outbound default)", () => {
+    const handlers = makeHandlers();
+    const row = renderBubble(bubble({ mine: false, body: "hi" }), handlers);
+    expect(row.querySelector(".chat-bubble__unverified")).toBeNull();
+  });
+
+  it("bubbleRenderKey changes when verified flips so the keyed-diff repaints", () => {
+    const a = bubbleRenderKey(bubble({ id: "m1", verified: undefined }));
+    const b = bubbleRenderKey(bubble({ id: "m1", verified: true }));
+    const c = bubbleRenderKey(bubble({ id: "m1", verified: false }));
+    expect(a).not.toBe(b);
+    expect(b).not.toBe(c);
+  });
+
   it("routes fetchit://share/v3/ to onProfile", () => {
     const handlers = makeHandlers();
     const v3

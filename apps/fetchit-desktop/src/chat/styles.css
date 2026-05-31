@@ -671,6 +671,18 @@ body.chat-docked {
   cursor: help;
 }
 
+/* M0 honesty floor: inbound messages whose per-message signature
+   couldn't be verified by this process get an amber tag pinned to
+   the bubble. Hover-tip explains why. */
+.chat-bubble__unverified {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--copper);
+  font-weight: 600;
+  cursor: help;
+  letter-spacing: 0.02em;
+}
+
 #chat-toggle {
   position: relative;
 }

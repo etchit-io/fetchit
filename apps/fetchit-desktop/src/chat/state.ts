@@ -121,6 +121,14 @@ export interface ChatBubble {
   status?: BubbleStatus;
   failureReason?: string;
   retryAttempts?: number;
+  /// Whether the sender's per-message signature was cryptographically
+  /// verified by the local process against a cached card pubkey.
+  ///
+  /// `true` — TransitEnvelope path, ML-DSA-65 verified in
+  /// `dispatch_inbound`. `false` — legacy plaintext path or no card
+  /// cached; UI surfaces an "unverified sender" badge.
+  /// `undefined` — outbound bubble (verification doesn't apply).
+  verified?: boolean;
 }
 
 
@@ -444,6 +452,10 @@ export class ChatStore {
       body: dm.body,
       timestampMs: ts,
       mine: dm.from === me,
+      // `verified` is meaningful only on inbound bubbles. Outbound
+      // (mine) leaves it undefined — we don't render an unverified
+      // badge on our own messages.
+      verified: dm.from === me ? undefined : dm.verified ?? undefined,
     };
     if (bubble.id && conv.messages.some((m) => m.id === bubble.id)) {
       return;

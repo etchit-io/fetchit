@@ -55,9 +55,21 @@ pub struct DirectMessage {
     /// LAN-direct sequence, …).
     #[serde(default)]
     pub message_id: Option<String>,
-    /// Whether the transport verified the sender's signature. The
-    /// relay always returns `Some(true)` since it verifies ML-DSA-65
-    /// at auth time.
+    /// Whether the sender's per-message signature was cryptographically
+    /// verified by THIS process against a cached card pubkey.
+    ///
+    /// * `Some(true)` — the `TransitEnvelope`'s ML-DSA-65 signature was
+    ///   verified by `conversation::dispatch_inbound` against the
+    ///   sender's cached pubkey. End-to-end signed.
+    /// * `Some(false)` — message lacks an in-process-verifiable
+    ///   signature (legacy plaintext path) OR no card cached for the
+    ///   sender. The UI surfaces this as "unverified sender".
+    /// * `None` — outbound bubble; verification doesn't apply to
+    ///   messages this device sent.
+    ///
+    /// Session-level relay auth (`auth_verify_ok_total`) does NOT
+    /// imply `Some(true)` — that authenticates the relay session,
+    /// not individual messages.
     #[serde(default)]
     pub verified: Option<bool>,
 }
@@ -437,6 +449,12 @@ fn random_message_id() -> String {
 /// the expected envelope shape. Empty payloads decode to a `DirectMessage`
 /// with an empty body — caller does not need to special-case them.
 pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> {
+    // Legacy plaintext schema carries no per-message signature, so the
+    // honest answer here is always `Some(false)`. Production messaging
+    // rides the TransitEnvelope path through `dispatch_inbound`, which
+    // performs real ML-DSA-65 verification and emits `Some(true)`.
+    // The earlier `Some(true)` here was a synthesized claim with no
+    // cryptographic basis — withdrawn per the M0 honesty floor.
     if inbound.payload.is_empty() {
         return Ok(DirectMessage {
             from: inbound.from,
@@ -445,7 +463,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
             sender_name: None,
             timestamp_ms: Some(inbound.timestamp_ms),
             message_id: None,
-            verified: Some(true),
+            verified: Some(false),
         });
     }
     let env: LegacyEnvelope = serde_json::from_slice(&inbound.payload)?;
@@ -456,7 +474,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
         sender_name: env.sender_name,
         timestamp_ms: Some(env.ts),
         message_id: None,
-        verified: Some(true),
+        verified: Some(false),
     })
 }
 
@@ -486,7 +504,11 @@ mod tests {
         assert_eq!(dm.sender_name.as_deref(), Some("Alice"));
         assert_eq!(dm.from.0, "a".repeat(64));
         assert_eq!(dm.timestamp_ms, Some(1_700_000_000_000));
-        assert_eq!(dm.verified, Some(true));
+        // Honesty floor (M0): the legacy plaintext schema carries no
+        // per-message signature, so `verified` MUST surface as
+        // `Some(false)` here. `Some(true)` is the production
+        // TransitEnvelope path through `conversation::dispatch_inbound`.
+        assert_eq!(dm.verified, Some(false));
     }
 
     #[test]
@@ -502,6 +524,8 @@ mod tests {
         let dm = decode_direct_message(inbound).unwrap();
         assert_eq!(dm.body, "");
         assert_eq!(dm.sender_name, None);
+        // Empty payload is still the legacy path — surface honest.
+        assert_eq!(dm.verified, Some(false));
     }
 
     #[test]

@@ -27,7 +27,7 @@ export interface BubbleHandlers {
 /// the `chat-bubble-pop` enter animation from re-firing on every
 /// store mutation.
 export function bubbleRenderKey(b: ChatBubble): string {
-  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}`;
+  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}`;
 }
 
 export function renderBubble(
@@ -72,6 +72,15 @@ export function renderBubble(
 
   if (showStatus && b.status !== "delivered") {
     stack.appendChild(substatusCaption(b.status as BubbleStatusTag, b.failureReason));
+  }
+
+  // Unverified-sender badge — inbound messages whose per-message
+  // signature couldn't be cryptographically verified by THIS process.
+  // The M0 honesty floor: surface it instead of synthesizing
+  // verified=true. Outbound bubbles never carry this since
+  // verification doesn't apply to messages we sent.
+  if (!b.mine && b.verified === false) {
+    stack.appendChild(unverifiedSenderBadge());
   }
 
   const meta = document.createElement("time");
@@ -134,6 +143,22 @@ function linkFor(url: string, h: BubbleHandlers): HTMLElement {
     else if (url.startsWith("fetchit://share/v3/")) h.onProfile(url);
   });
   return a;
+}
+
+/// Inline "unverified sender" tag rendered under a bubble whose
+/// per-message signature couldn't be cryptographically checked against
+/// a cached card pubkey. Pinned to the M0 honesty floor: better an
+/// honest amber "we can't prove this is from them" than a synthesized
+/// "verified" badge that lies.
+function unverifiedSenderBadge(): HTMLElement {
+  const span = document.createElement("div");
+  span.className = "chat-bubble__unverified";
+  span.textContent = "⚠ unverified sender";
+  span.title
+    = "We can't cryptographically verify this message came from the named sender."
+    + " It may be from someone we don't have a contact card for, or from a transport"
+    + " that doesn't carry per-message signatures.";
+  return span;
 }
 
 type BubbleStatusTag = "sending" | "delivered" | "failed";
