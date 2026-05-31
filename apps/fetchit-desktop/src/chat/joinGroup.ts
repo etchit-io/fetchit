@@ -3,7 +3,7 @@
 // gesture: paste a URI, hit confirm.
 
 import { joinGroup } from "./api";
-import { errMsg } from "./errors";
+import { friendlyError } from "./errors";
 import type { Group } from "./types";
 
 export interface JoinGroupHandlers {
@@ -89,7 +89,7 @@ export function mountJoinGroup(
       status.textContent = `Joined ${group.name ?? group.group_id.slice(0, 8)}.`;
       handlers.onJoined(group);
     } catch (e) {
-      status.textContent = `Failed: ${errMsg(e)}`;
+      status.textContent = `Failed: ${friendlyError(e)}`;
       joinBtn.disabled = false;
     }
   });

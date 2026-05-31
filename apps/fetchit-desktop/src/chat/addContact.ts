@@ -3,7 +3,7 @@
 // forwards it to the matching daemon command.
 
 import { importCard, pairAccept } from "./api";
-import { errMsg } from "./errors";
+import { friendlyError } from "./errors";
 
 export interface AddContactHandlers {
   onClose: () => void;
@@ -110,7 +110,7 @@ export function mountAddContact(
         handlers.onImported();
       }
     } catch (e) {
-      status.textContent = `Failed: ${errMsg(e)}`;
+      status.textContent = `Failed: ${friendlyError(e)}`;
       addBtn.disabled = false;
     }
   });

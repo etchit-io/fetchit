@@ -69,6 +69,26 @@ export type BubbleStatus = "sending" | "delivered" | "failed";
 /// self-heals after the daemon auto-upgrades or restarts.
 export type DaemonStatus = "connected" | "reconnecting" | "down";
 
+/// One transient banner in the chat panel — used to surface
+/// otherwise-silent failures (crypto warns, send errors).
+export interface ChatNotice {
+  /// Locally-assigned monotonic id; the renderer keys off this so a
+  /// re-render reuses existing DOM and doesn't restart the fade-in.
+  id: string;
+  /// Plain-English copy already passed through `friendlyError`.
+  body: string;
+  /// "warn" paints amber, "info" paints copper. Defaults to "warn".
+  severity: "warn" | "info";
+  /// Unix-ms the banner appeared. The chat panel auto-clears entries
+  /// older than `TRANSIENT_NOTICE_MS`.
+  createdAtMs: number;
+}
+
+/// Auto-dismiss window for [`ChatNotice`]. Long enough to be read
+/// but short enough to not pile up if a flaky relay drops a few
+/// frames in a row.
+export const TRANSIENT_NOTICE_MS = 6_000;
+
 /// A first-contact welcome the user hasn't yet accepted. The
 /// underlying `Conversation` is already persisted by the backend
 /// (so we can decrypt subsequent messages from the same sender);
@@ -136,6 +156,13 @@ export class ChatStore {
   /// The chat panel surfaces a "X pending contact requests" badge
   /// and the pending-contacts dialog reads from here.
   private pendingContacts = new Map<string, PendingContact>();
+  /// Transient notification banner queue. Each entry is rendered in
+  /// the chat panel's banner row and auto-dismissed after
+  /// `TRANSIENT_NOTICE_MS`. Used to surface inbound `chat:warn`
+  /// events (crypto failures, dropped frames) and outbound action
+  /// errors (group-send failed) that would otherwise vanish silently.
+  private notices = new Map<string, ChatNotice>();
+  private nextNoticeId = 0;
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -215,6 +242,35 @@ export class ChatStore {
   allPendingContacts(): PendingContact[] {
     return [...this.pendingContacts.values()].sort(
       (a, b) => b.arrivedAtMs - a.arrivedAtMs,
+    );
+  }
+
+  /// Append a transient banner. Auto-dismisses after
+  /// `TRANSIENT_NOTICE_MS` via a self-scheduled timer so unrelated
+  /// store ticks don't have to drive the expire.
+  pushNotice(severity: ChatNotice["severity"], body: string): string {
+    const id = `n${this.nextNoticeId++}`;
+    this.notices.set(id, {
+      id,
+      severity,
+      body,
+      createdAtMs: Date.now(),
+    });
+    this.emit();
+    setTimeout(() => this.dismissNotice(id), TRANSIENT_NOTICE_MS);
+    return id;
+  }
+
+  /// Drop a banner by id (user-dismissed or auto-expired). Safe on
+  /// absent key.
+  dismissNotice(id: string): void {
+    if (this.notices.delete(id)) this.emit();
+  }
+
+  /// Snapshot banners, newest first.
+  allNotices(): ChatNotice[] {
+    return [...this.notices.values()].sort(
+      (a, b) => b.createdAtMs - a.createdAtMs,
     );
   }
 

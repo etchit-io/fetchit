@@ -3,7 +3,7 @@
 // for sharing.
 
 import { createGroup, groupInvite } from "./api";
-import { errMsg } from "./errors";
+import { friendlyError } from "./errors";
 
 export interface NewGroupHandlers {
   onClose: () => void;
@@ -125,7 +125,7 @@ export function mountNewGroup(
       handlers.onCreated();
       setTimeout(() => copyBtn.focus(), 0);
     } catch (e) {
-      status.textContent = `Failed: ${errMsg(e)}`;
+      status.textContent = `Failed: ${friendlyError(e)}`;
       createBtn.disabled = false;
     }
   });

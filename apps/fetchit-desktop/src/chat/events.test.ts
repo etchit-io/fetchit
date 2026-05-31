@@ -5,8 +5,8 @@ vi.mock("./notify", () => ({
   maybeNotifyInboundDm: (...args: unknown[]) => maybeNotifyMock(...args),
 }));
 
-import { applyChatEvent, projectPendingContact } from "./events";
-import { ChatStore } from "./state";
+import { applyChatEvent, projectPendingContact, warnEventToCopy } from "./events";
+import { ChatStore, TRANSIENT_NOTICE_MS } from "./state";
 
 const ME = "a".repeat(64);
 const PEER = "b".repeat(64);
@@ -195,5 +195,80 @@ describe("ChatStore — pending contact requests", () => {
     store.subscribe(notify);
     store.removePendingContact("never-added");
     expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe("warnEventToCopy", () => {
+  it("translates stale_epoch into rekey-in-progress copy", () => {
+    expect(warnEventToCopy({ kind: "stale_epoch" })).toContain("refreshing keys");
+  });
+
+  it("translates kem_decap_failed into a sender-rekey hint", () => {
+    expect(warnEventToCopy({ kind: "kem_decap_failed" })).toContain("rekey");
+  });
+
+  it("translates aead_open_failed into an authentication-failed line", () => {
+    expect(warnEventToCopy({ kind: "aead_open_failed" })).toContain("authentication");
+  });
+
+  it("falls back to a generic 'something went wrong' for unknown kinds", () => {
+    expect(warnEventToCopy({ kind: "novel_failure_mode" })).toContain("novel_failure_mode");
+  });
+});
+
+describe("ChatStore — transient notices", () => {
+  it("pushNotice appends a notice and emits subscribers", () => {
+    const notify = vi.fn();
+    store.subscribe(notify);
+    const id = store.pushNotice("warn", "a thing happened");
+    expect(id).toBeTruthy();
+    expect(store.allNotices()).toHaveLength(1);
+    expect(store.allNotices()[0].body).toBe("a thing happened");
+    expect(notify).toHaveBeenCalled();
+  });
+
+  it("dismissNotice on a known id drops the entry and emits", () => {
+    const id = store.pushNotice("warn", "x");
+    const notify = vi.fn();
+    store.subscribe(notify);
+    store.dismissNotice(id);
+    expect(store.allNotices()).toHaveLength(0);
+    expect(notify).toHaveBeenCalled();
+  });
+
+  it("dismissNotice on an unknown id is a silent no-op", () => {
+    const notify = vi.fn();
+    store.subscribe(notify);
+    store.dismissNotice("never-existed");
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("auto-expires a notice after TRANSIENT_NOTICE_MS", () => {
+    vi.useFakeTimers();
+    try {
+      store.pushNotice("warn", "ephemeral");
+      expect(store.allNotices()).toHaveLength(1);
+      vi.advanceTimersByTime(TRANSIENT_NOTICE_MS + 100);
+      expect(store.allNotices()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sorts notices newest first", () => {
+    // Run entirely under fake timers so the auto-expire setTimeouts
+    // scheduled by pushNotice don't leak real wall-clock timers into
+    // subsequent tests (caught in adversarial review).
+    vi.useFakeTimers();
+    try {
+      const id1 = store.pushNotice("info", "first");
+      vi.setSystemTime(Date.now() + 10);
+      const id2 = store.pushNotice("warn", "second");
+      const all = store.allNotices();
+      expect(all[0].id).toBe(id2);
+      expect(all[1].id).toBe(id1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

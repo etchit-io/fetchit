@@ -6,6 +6,7 @@ import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
 import { convKey, type ChatStore, type Conversation } from "./state";
 import { dmConnect, groupHistory, sendDm, sendGroupMessage } from "./api";
+import { friendlyError } from "./errors";
 import { mountTrustMenu } from "./trustMenu";
 import type { TrustLevel } from "./types";
 
@@ -109,7 +110,16 @@ export function mountConversation(
         // own bubble appear without waiting for the next poll tick.
         void sendGroupMessage(groupId, body)
           .then(() => refreshGroupHistory(groupId))
-          .catch((e) => console.warn("[chat] group send failed:", e));
+          .catch((e) => {
+            console.warn("[chat] group send failed:", e);
+            // Surface to the user — silent group-send failure was an
+            // audit-flagged grandma-trap. The notice replaces the
+            // old console-only log.
+            store.pushNotice(
+              "warn",
+              `Couldn't send to group: ${friendlyError(e)}`,
+            );
+          });
       }
     },
   });

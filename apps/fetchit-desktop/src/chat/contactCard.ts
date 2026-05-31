@@ -4,7 +4,7 @@
 // published yet. The user only ever sees the best available payload.
 
 import { myCard, pairShare } from "./api";
-import { errMsg } from "./errors";
+import { friendlyError } from "./errors";
 import { renderQrSvg } from "../qr";
 
 export interface CardDialogHandlers {
@@ -134,7 +134,7 @@ export async function mountCardDialog(
       uriBox.value = result.uri;
       paintQr(result.uri);
     } catch (e) {
-      status.textContent = `Could not generate card: ${errMsg(e)}`;
+      status.textContent = `Could not generate card: ${friendlyError(e)}`;
     }
   };
 

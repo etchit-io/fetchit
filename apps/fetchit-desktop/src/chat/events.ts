@@ -31,6 +31,37 @@ interface NearbyEventPeer {
   lastSeenMsAgo: number;
 }
 
+/// Wire-shape of the daemon's `chat:warn` Tauri event. The `kind`
+/// discriminates the four crypto-layer failure paths the chat
+/// pipeline can hit; the dialog turns each into a grandma-readable
+/// banner via [`warnEventToCopy`].
+interface WarnEvent {
+  kind: string;
+  group_id?: string;
+  epoch?: number;
+  sender?: string;
+}
+
+/// Translate a `chat:warn` payload into user-visible copy. Kept
+/// exported so tests can pin the mapping when the Rust side grows
+/// new warn variants.
+export function warnEventToCopy(ev: WarnEvent): string {
+  switch (ev.kind) {
+    case "stale_epoch":
+      return "A group has new members — refreshing keys…";
+    case "kem_decap_failed":
+      return "Couldn't unlock a message — the sender may need to rekey.";
+    case "aead_open_failed":
+      return "A message failed authentication and was dropped.";
+    case "Dropped":
+      return "A message was dropped.";
+    default:
+      // Surface the raw kind in dev builds so unknown warns surface
+      // at all; production users still get a generic notice.
+      return `Something went wrong: ${ev.kind}`;
+  }
+}
+
 /// Wire-shape of the daemon's `chat:contact-request` Tauri event —
 /// the full `fetchit_chat::conversation::Conversation` serialized as
 /// JSON. We only read the fields the dialog needs.
@@ -97,6 +128,10 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       store.setDaemonStatus(ev.payload);
     },
   );
+  const unsubWarn = await listen<WarnEvent>("chat:warn", (ev) => {
+    console.warn("[chat:warn]", ev.payload);
+    store.pushNotice("warn", warnEventToCopy(ev.payload));
+  });
   const unsubContactReq = await listen<ContactRequestEvent>(
     "chat:contact-request",
     (ev) => {
@@ -117,6 +152,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubPresence();
     unsubNearby();
     unsubDaemon();
+    unsubWarn();
     unsubContactReq();
   };
 }

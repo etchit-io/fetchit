@@ -49,6 +49,12 @@ export interface ChatPanelApi {
 
 const DOCK_KEY = "fetchit-chat:dock";
 
+/// Wait between bootstrap retries when `open()` throws partway —
+/// matches the x0xd supervisor's poll cadence (`spawn_x0xd_supervisor`
+/// in src-tauri/src/chat.rs) so a daemon coming back up is picked up
+/// in the same window.
+const BOOTSTRAP_RETRY_MS = 5_000;
+
 export function mountChatPanel(
   host: HTMLElement,
   handlers: ChatPanelHandlers,
@@ -149,6 +155,15 @@ export function mountChatPanel(
   outboxBanner.appendChild(outboxLabel);
   outboxBanner.appendChild(outboxRetry);
 
+  // Transient notice stack — fed by store.pushNotice. One row per
+  // active notice; the staleness tick expires them after
+  // TRANSIENT_NOTICE_MS. Each row has a manual dismiss button so a
+  // user who clicks first wins over the auto-expire.
+  const noticesEl = document.createElement("div");
+  noticesEl.className = "chat-notices";
+  noticesEl.setAttribute("role", "status");
+  noticesEl.setAttribute("aria-live", "polite");
+
   const sidebarEl = document.createElement("aside");
   const conversationEl = document.createElement("section");
   // dialogHost is mounted on document.body and pre-styled with the
@@ -167,6 +182,7 @@ export function mountChatPanel(
 
   host.appendChild(headerEl);
   host.appendChild(outboxBanner);
+  host.appendChild(noticesEl);
   host.appendChild(layout);
   document.body.appendChild(dialogHost);
 
@@ -271,6 +287,30 @@ export function mountChatPanel(
     });
   };
 
+  const renderNotices = (): void => {
+    const notices = store.allNotices();
+    noticesEl.replaceChildren();
+    for (const n of notices) {
+      const row = document.createElement("div");
+      row.className = `chat-notice chat-notice--${n.severity}`;
+      row.dataset.id = n.id;
+      const body = document.createElement("span");
+      body.className = "chat-notice__body";
+      body.textContent = n.body;
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "chat-notice__dismiss";
+      dismiss.setAttribute("aria-label", "Dismiss");
+      dismiss.textContent = "✕";
+      dismiss.addEventListener("click", () => store.dismissNotice(n.id));
+      row.appendChild(body);
+      row.appendChild(dismiss);
+      noticesEl.appendChild(row);
+    }
+  };
+  store.subscribe(renderNotices);
+  renderNotices();
+
   const renderPendingBadge = (): void => {
     const n = store.allPendingContacts().length;
     pendingBtn.hidden = n === 0;
@@ -284,7 +324,17 @@ export function mountChatPanel(
   pendingBtn.addEventListener("click", openPendingContacts);
 
   shareBtn.addEventListener("click", openShareCard);
-  idBadge.addEventListener("click", openShareCard);
+  idBadge.addEventListener("click", () => {
+    // In the bootstrap-failed state the badge doubles as a manual
+    // "retry now" affordance — the title text is set in the catch
+    // block. The share-card dialog is meaningless without an
+    // identity, so route the click to open() instead of openShareCard.
+    if (store.getDaemonStatus() === "down") {
+      void open();
+      return;
+    }
+    openShareCard();
+  });
 
   const openNewGroup = (): void => {
     showDialog((root) => {
@@ -423,6 +473,16 @@ export function mountChatPanel(
   let eventsBound = false;
   let stalenessTimer: ReturnType<typeof setInterval> | null = null;
   let outboxDriver: OutboxDriver | null = null;
+  /// Set when bootstrap (`open`) fails partway. Re-runs `open` after
+  /// `BOOTSTRAP_RETRY_MS` so a daemon coming back online is picked
+  /// up without forcing the user to re-toggle the panel.
+  let bootstrapRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Re-entrancy guard for `open()`. The retry timer + the idBadge
+  /// click handler can both fire while a previous open is still
+  /// awaiting `health()` / `identity()` — without this, two
+  /// concurrent opens would both pass `eventsBound` guards and
+  /// double-bind the chat listeners.
+  let opening = false;
   const startStalenessTick = (): void => {
     if (stalenessTimer !== null) return;
     // Re-render periodically so views age out stale beacons, AND
@@ -447,6 +507,8 @@ export function mountChatPanel(
     }
   };
   const open = async (): Promise<void> => {
+    if (opening) return;
+    opening = true;
     host.hidden = false;
     applyDock();
     store.setPanelVisible(true);
@@ -486,9 +548,30 @@ export function mountChatPanel(
         });
       }
       startStalenessTick();
+      // Bootstrap succeeded — cancel any retry that the previous
+      // attempt scheduled.
+      if (bootstrapRetryTimer !== null) {
+        clearTimeout(bootstrapRetryTimer);
+        bootstrapRetryTimer = null;
+      }
+      opening = false;
     } catch (e) {
-      idBadge.textContent = "x0xd not running";
+      idBadge.textContent = "Chat unavailable";
+      idBadge.title = "Tap to retry";
+      // Visible signal that something is wrong on top of the badge
+      // text change. Drives the same pill the daemon-status watcher
+      // uses so users get a consistent "something's wrong" cue.
+      store.setDaemonStatus("down");
       console.warn("[chat] bootstrap failed:", e);
+      // Schedule a retry — matches the x0xd supervisor's cadence so
+      // a daemon coming back up is picked up within a few seconds.
+      if (bootstrapRetryTimer === null) {
+        bootstrapRetryTimer = setTimeout(() => {
+          bootstrapRetryTimer = null;
+          if (!host.hidden) void open();
+        }, BOOTSTRAP_RETRY_MS);
+      }
+      opening = false;
     }
   };
 
@@ -497,6 +580,10 @@ export function mountChatPanel(
     document.body.classList.remove("chat-docked");
     store.setPanelVisible(false);
     stopStalenessTick();
+    if (bootstrapRetryTimer !== null) {
+      clearTimeout(bootstrapRetryTimer);
+      bootstrapRetryTimer = null;
+    }
     hideDialog();
     handlers.onClose();
   };
