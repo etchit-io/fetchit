@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountAddContact } from "./addContact";
 
 const importCardMock = vi.fn<(uri: string) => Promise<void>>();
-const pairAcceptMock = vi.fn<(uri: string) => Promise<{ agentIdHex: string }>>();
+const pairAcceptMock = vi.fn<
+  (uri: string) => Promise<{
+    agentIdHex: string;
+    offererRelayUrl?: string;
+    crossRelay?: boolean;
+  }>
+>();
 
 vi.mock("./api", () => ({
   importCard: (uri: string) => importCardMock(uri),

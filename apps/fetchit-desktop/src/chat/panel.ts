@@ -260,14 +260,22 @@ export function mountChatPanel(
 
   // Wire-up for both v2 (chat_import_card) and v3 (chat_pair_accept):
   // for v3, the result carries the imported peer's agent_id so we can
-  // jump straight into the new DM. v2 has no return payload and just
-  // refreshes the contacts list.
+  // jump straight into the new DM, AND a crossRelay hint so we can
+  // surface "you're on different relays" before the user wonders why
+  // their first message disappears into the void.
   const handleImported = (
-    result?: { agentIdHex: string },
+    result?: { agentIdHex: string; offererRelayUrl?: string; crossRelay?: boolean },
   ): void => {
     hideDialog();
     if (result?.agentIdHex) {
       store.setActive({ kind: "dm", peer: result.agentIdHex });
+    }
+    if (result?.crossRelay) {
+      store.pushNotice(
+        "warn",
+        `This contact is on a different relay (${result.offererRelayUrl}). `
+          + "Switch to the same one in Settings → Network or messages won't deliver.",
+      );
     }
     void refreshContacts();
   };

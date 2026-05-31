@@ -26,6 +26,13 @@ pub struct Metrics {
     envelopes_delivered_total: AtomicU64,
     /// Envelopes that went into transit because recipient was offline.
     envelopes_buffered_total: AtomicU64,
+    /// Envelopes the sweeper evicted past TTL without delivering — a
+    /// proxy for "recipient never came back to THIS relay". A rising
+    /// counter is the operator-visible signal that peers are routing
+    /// to relays where their recipients don't live (the cross-relay
+    /// federation gap). Per private/metrics-policy.md: no per-agent
+    /// label — only the aggregate count.
+    envelopes_dropped_ttl_total: AtomicU64,
     /// `/v1/auth/challenge` calls.
     auth_challenges_issued_total: AtomicU64,
     /// Successful `/v1/auth/verify`.
@@ -56,6 +63,7 @@ impl Metrics {
             envelopes_sent_total: AtomicU64::new(0),
             envelopes_delivered_total: AtomicU64::new(0),
             envelopes_buffered_total: AtomicU64::new(0),
+            envelopes_dropped_ttl_total: AtomicU64::new(0),
             auth_challenges_issued_total: AtomicU64::new(0),
             auth_verify_ok_total: AtomicU64::new(0),
             auth_verify_failed_total: AtomicU64::new(0),
@@ -99,6 +107,16 @@ impl Metrics {
     pub fn envelope_buffered(&self) {
         self.envelopes_buffered_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the dropped-by-TTL counter by `count`. Called from the
+    /// sweeper after `sweep_expired` evicts buffered envelopes that
+    /// were never delivered.
+    pub fn envelopes_dropped_ttl(&self, count: u64) {
+        if count > 0 {
+            self.envelopes_dropped_ttl_total
+                .fetch_add(count, Ordering::Relaxed);
+        }
     }
 
     /// Bump the auth-challenge counter.
@@ -176,7 +194,7 @@ impl Metrics {
             self.transit_buffer_envelopes.load(Ordering::Relaxed)
         );
 
-        let counters: [(&str, &str, u64); 9] = [
+        let counters: [(&str, &str, u64); 10] = [
             (
                 "fetchit_relay_envelopes_sent_total",
                 "Send frames accepted into routing",
@@ -191,6 +209,12 @@ impl Metrics {
                 "fetchit_relay_envelopes_buffered_total",
                 "Envelopes routed into the transit buffer (offline recipient)",
                 self.envelopes_buffered_total.load(Ordering::Relaxed),
+            ),
+            (
+                "fetchit_relay_envelopes_dropped_ttl_total",
+                "Envelopes evicted by the sweeper without delivery — \
+                 a proxy for recipients that never came back to this relay",
+                self.envelopes_dropped_ttl_total.load(Ordering::Relaxed),
             ),
             (
                 "fetchit_relay_auth_challenges_issued_total",
@@ -256,6 +280,7 @@ mod tests {
             "fetchit_relay_envelopes_sent_total",
             "fetchit_relay_envelopes_delivered_total",
             "fetchit_relay_envelopes_buffered_total",
+            "fetchit_relay_envelopes_dropped_ttl_total",
             "fetchit_relay_auth_challenges_issued_total",
             "fetchit_relay_auth_verify_ok_total",
             "fetchit_relay_auth_verify_failed_total",

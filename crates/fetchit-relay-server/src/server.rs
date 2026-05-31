@@ -137,6 +137,12 @@ fn spawn_sweeper(state: Arc<ServerState>) {
             state.ratelimit.sweep_idle(Duration::from_secs(3600));
             let buffered = i64::try_from(state.transit.len()).unwrap_or(i64::MAX);
             state.metrics.set_transit_buffer_envelopes(buffered);
+            // Count every TTL-evicted envelope into the dropped-by-TTL
+            // counter so operators get a scrape-able cross-relay
+            // dead-drop signal independent of the log spike warn.
+            state
+                .metrics
+                .envelopes_dropped_ttl(u64::try_from(evicted).unwrap_or(u64::MAX));
             if evicted > last_evicted {
                 warn!(
                     evicted,

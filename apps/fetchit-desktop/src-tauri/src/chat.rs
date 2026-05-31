@@ -273,12 +273,25 @@ pub async fn chat_import_card(
 }
 
 /// Result of a successful `chat_pair_accept` — the imported peer's
-/// `agent_id` so the frontend can navigate to the new DM.
+/// `agent_id` so the frontend can navigate to the new DM, plus a
+/// `cross_relay` hint when the offerer's published relay differs
+/// from the local user's so the UI can warn the user that messages
+/// won't deliver until one of them switches regions.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairAccepted {
     /// 64-hex lowercase `agent_id` of the imported contact.
     pub agent_id_hex: String,
+    /// Offerer's relay URL as embedded in their v3 share URI. The
+    /// frontend uses this to render a "they're on a different relay"
+    /// hint when it differs from the local user's `relay_url`
+    /// setting.
+    pub offerer_relay_url: String,
+    /// True when the offerer's relay URL differs from the local
+    /// user's. Until cross-relay federation lands, messages between
+    /// two peers on different relays silently fail — surfacing this
+    /// at pair time is the only chance to head the failure off.
+    pub cross_relay: bool,
 }
 
 /// Accept a v3 share URI (`fetchit://share/v3/...`) the user pasted
@@ -300,6 +313,11 @@ pub async fn chat_pair_accept(
         .layout()
         .ok_or_else(|| "chat layout not available (REST-only client)".to_string())?;
     let http = reqwest::Client::new();
+    // Re-parse the URI here so we can inspect the offerer's relay
+    // BEFORE the heavy work; pair_accept re-parses internally
+    // anyway, so this is cheap.
+    let offerer_uri = fetchit_chat::profile::from_v3_share_uri(&uri).map_err(|e| e.to_string())?;
+    let offerer_relay_url = offerer_uri.relay.as_str().to_owned();
     let outcome = fetchit_chat::pair::pair_accept(&uri, &http, layout)
         .await
         .map_err(|e| e.to_string())?;
@@ -316,9 +334,26 @@ pub async fn chat_pair_accept(
         }
         Err(e) => eprintln!("[fetchit][chat] build legacy share URI: {e}"),
     }
+    // Cross-relay detection — normalise both sides via Url so trailing
+    // slashes and case differences don't false-positive.
+    let our_relay = state.relay_url();
+    let cross_relay = !urls_same_origin(&our_relay, &offerer_uri.relay);
     Ok(PairAccepted {
         agent_id_hex: outcome.agent_id_hex,
+        offerer_relay_url,
+        cross_relay,
     })
+}
+
+/// True when two relay URLs point at the same origin — that is, same
+/// scheme, host, and port. Trailing-slash differences and
+/// case-insensitive host comparisons are normalised by `url::Url`.
+/// Returns `false` when either side has no host (only possible for a
+/// malformed URL that previously slipped past validation).
+fn urls_same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// Build the local user's v3 share URI by self-looking-up their
@@ -758,27 +793,50 @@ fn spawn_x0xd_supervisor(state: ChatState) {
     });
 }
 
-/// Find the `x0x` CLI binary. Checks `PATH` first via `which`, then a
-/// short list of well-known install locations so the supervisor works
-/// even when `PATH` is missing the user's local bin dir (a common
-/// case when fetch>it is launched from a desktop launcher rather than
-/// a shell that has sourced ~/.bashrc).
+/// Find the `x0x` CLI binary. Walks the PATH env var directly (no
+/// shell-out to `which`, which doesn't exist on Windows) and falls
+/// back to a short list of well-known install locations so the
+/// supervisor works even when PATH is missing the user's local bin
+/// dir — a common case when fetch>it is launched from a desktop
+/// launcher rather than a shell that has sourced `~/.bashrc`.
+///
+/// On Windows the executable carries a `.exe` suffix; both the PATH
+/// walk and the candidate list account for that.
+///
+/// Behaviour divergence from `which`: `path.is_file()` does NOT
+/// check the Unix executable bit. A non-executable `x0x` on PATH
+/// would be returned here, then fail on spawn with `EACCES` — the
+/// supervisor catches that and logs it. Acceptable trade-off: a
+/// non-executable binary on PATH means a broken install, and the
+/// spawn error surfaces a useful diagnostic instead of silently
+/// skipping a misnamed file the user thought was the real binary.
 fn locate_x0x_binary() -> Option<std::path::PathBuf> {
-    if let Ok(out) = std::process::Command::new("which").arg("x0x").output() {
-        if out.status.success() {
-            let trimmed = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(std::path::PathBuf::from(trimmed));
+    let exe_name = if cfg!(windows) { "x0x.exe" } else { "x0x" };
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(exe_name);
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let mut candidates = Vec::new();
-    if let Some(h) = home {
-        candidates.push(h.join(".local/bin/x0x"));
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(std::path::PathBuf::from(local).join("Programs/x0x/x0x.exe"));
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            candidates.push(std::path::PathBuf::from(home).join(".local/bin/x0x.exe"));
+        }
+    } else {
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(std::path::PathBuf::from(home).join(".local/bin/x0x"));
+        }
+        candidates.push(std::path::PathBuf::from("/usr/local/bin/x0x"));
+        candidates.push(std::path::PathBuf::from("/opt/x0x/bin/x0x"));
     }
-    candidates.push(std::path::PathBuf::from("/usr/local/bin/x0x"));
-    candidates.push(std::path::PathBuf::from("/opt/x0x/bin/x0x"));
     candidates.into_iter().find(|p| p.is_file())
 }
 
@@ -1699,6 +1757,60 @@ mod tests {
             assert!(validate_relay_url("http://localhost:8088").is_ok());
             assert!(validate_relay_url("http://[::1]:8088").is_ok());
         });
+    }
+
+    #[test]
+    fn urls_same_origin_normalises_trailing_slash_and_case() {
+        let a = url::Url::parse("http://relay.example:8088").unwrap();
+        let b = url::Url::parse("http://relay.example:8088/").unwrap();
+        assert!(super::urls_same_origin(&a, &b));
+        let c = url::Url::parse("http://RELAY.example:8088/").unwrap();
+        assert!(super::urls_same_origin(&a, &c));
+    }
+
+    #[test]
+    fn urls_same_origin_distinguishes_by_host_port_scheme() {
+        let nyc = url::Url::parse("http://67.207.94.66:8088").unwrap();
+        let fra = url::Url::parse("http://159.89.11.217:8088").unwrap();
+        let nyc_https = url::Url::parse("https://67.207.94.66:8088").unwrap();
+        let nyc_alt_port = url::Url::parse("http://67.207.94.66:9999").unwrap();
+        assert!(!super::urls_same_origin(&nyc, &fra));
+        assert!(!super::urls_same_origin(&nyc, &nyc_https));
+        assert!(!super::urls_same_origin(&nyc, &nyc_alt_port));
+    }
+
+    #[test]
+    fn locate_x0x_binary_finds_executable_in_path() {
+        // Drop a stub binary into a tempdir, set PATH to just that
+        // dir, confirm locate_x0x_binary picks it up — exercises the
+        // direct PATH walk that replaced the `which` shell-out.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let exe_name = if cfg!(windows) { "x0x.exe" } else { "x0x" };
+        let path = dir.path().join(exe_name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"stub").unwrap();
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var_os("PATH");
+        std::env::set_var("PATH", dir.path());
+        let found = super::locate_x0x_binary();
+        match prev {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        let found = found.expect("PATH walk should have located the stub");
+        assert_eq!(found.file_name().unwrap(), exe_name);
     }
 
     #[test]

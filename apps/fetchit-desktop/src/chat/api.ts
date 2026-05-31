@@ -38,6 +38,15 @@ export async function confirmContact(groupIdHex: string): Promise<void> {
 
 export interface PairAccepted {
   agentIdHex: string;
+  /// Offerer's relay URL as embedded in their v3 share URI. The
+  /// frontend renders this in the cross-relay warning so the user
+  /// can see exactly which relay to switch to.
+  offererRelayUrl: string;
+  /// True when the offerer's published relay differs from the
+  /// local user's. Until cross-relay federation lands, peers on
+  /// different relays can't exchange messages — the panel surfaces
+  /// a notice when this is set.
+  crossRelay: boolean;
 }
 
 /// Accept a v3 share URI (`fetchit://share/v3/…`) by fetching the
