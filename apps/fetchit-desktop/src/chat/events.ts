@@ -31,6 +31,15 @@ interface NearbyEventPeer {
   lastSeenMsAgo: number;
 }
 
+/// Wire-shape of the daemon's `chat:relay-status` Tauri event.
+/// Currently emits only the terminal `permanently_disconnected`
+/// transition — transient flaky-network noise stays in-process.
+interface RelayStatusEvent {
+  kind: string;
+  reason?: string;
+  attempts?: number;
+}
+
 /// Wire-shape of the daemon's `chat:warn` Tauri event. The `kind`
 /// discriminates the four crypto-layer failure paths the chat
 /// pipeline can hit; the dialog turns each into a grandma-readable
@@ -132,6 +141,18 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     console.warn("[chat:warn]", ev.payload);
     store.pushNotice("warn", warnEventToCopy(ev.payload));
   });
+  const unsubRelayStatus = await listen<RelayStatusEvent>(
+    "chat:relay-status",
+    (ev) => {
+      console.warn("[chat:relay-status]", ev.payload);
+      if (ev.payload.kind === "permanently_disconnected") {
+        store.pushNotice(
+          "warn",
+          "Lost connection to the chat relay. Close and reopen Chat to reconnect.",
+        );
+      }
+    },
+  );
   const unsubContactReq = await listen<ContactRequestEvent>(
     "chat:contact-request",
     (ev) => {
@@ -153,6 +174,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubNearby();
     unsubDaemon();
     unsubWarn();
+    unsubRelayStatus();
     unsubContactReq();
   };
 }

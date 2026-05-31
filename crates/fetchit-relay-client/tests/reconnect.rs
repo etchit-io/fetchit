@@ -564,3 +564,60 @@ async fn send_returns_send_timeout_when_relay_never_acks() {
         "should have returned promptly after the ack timeout, got {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn supervisor_gives_up_after_max_reconnect_attempts() {
+    // Spin the mock, connect, then kill the server task so every
+    // reconnect attempt fails. With max_reconnect_attempts = 2 the
+    // supervisor must transition to PermanentlyDisconnected after the
+    // backoff floor.
+    let (addr, mock_state, server) = spawn_mock(None).await;
+    let base = Url::parse(&format!("http://{addr}/")).unwrap();
+    let signer = Arc::new(StaticKeySigner::from_public_key(b"perm-disc-key".to_vec()));
+
+    let mut cfg = ClientConfig::new(base);
+    cfg.keepalive = Some(Duration::from_millis(100));
+    cfg.pong_timeout = Some(Duration::from_millis(800));
+    cfg.max_reconnect_attempts = Some(2);
+
+    let client = Client::connect(cfg, signer).await.unwrap();
+    let mut state_rx = client.connection_state();
+    assert!(matches!(*state_rx.borrow(), ConnState::Connected { .. }));
+
+    // Kill the listener so reconnects fail; force the live session
+    // to close.
+    server.abort();
+    mock_state.close_next.store(true, Ordering::SeqCst);
+
+    let saw_permanent = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if matches!(*state_rx.borrow(), ConnState::PermanentlyDisconnected { .. }) {
+                return;
+            }
+            state_rx.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(
+        saw_permanent.is_ok(),
+        "supervisor never reached PermanentlyDisconnected after attempts exhausted",
+    );
+    let state = state_rx.borrow().clone();
+    match state {
+        ConnState::PermanentlyDisconnected { attempts, .. } => {
+            assert_eq!(attempts, 2, "should reflect configured cap");
+        }
+        other => panic!("expected PermanentlyDisconnected, got {other:?}"),
+    }
+}
+
+#[test]
+fn client_config_defaults_cap_reconnects_at_20() {
+    // Pin the shipped default — bumping this changes the wall-clock
+    // window an offline-relay client churns before surfacing the
+    // terminal state to the UI.
+    let base = Url::parse("https://relay.example/").unwrap();
+    let cfg = ClientConfig::new(base);
+    assert_eq!(cfg.max_reconnect_attempts, Some(20));
+    assert_eq!(cfg.max_reconnect_elapsed, None);
+}

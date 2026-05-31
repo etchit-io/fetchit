@@ -59,7 +59,12 @@ impl ChatState {
         passphrase: Option<String>,
         lan_direct_enabled: bool,
     ) -> Result<Self, String> {
-        let url = Url::parse(relay_url).map_err(|e| format!("invalid relay url: {e}"))?;
+        // Go through the same validation path as `set_relay_url` so a
+        // hand-edited `settings.json` with a loopback or reserved
+        // host can't sneak past the SSRF guard. The
+        // FETCHIT_ALLOW_LOCAL_RELAY env bypass still applies for dev
+        // testing.
+        let url = validate_relay_url(relay_url)?;
         Ok(Self {
             client: Arc::new(Mutex::new(None)),
             relay_url: Arc::new(std::sync::Mutex::new(url)),
@@ -630,6 +635,7 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_lan_inbound(app.clone(), state.clone());
     spawn_lan_mdns(app.clone(), state.clone());
     spawn_relay_presence(app.clone(), state.clone());
+    spawn_relay_conn_state(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
 }
@@ -1028,6 +1034,63 @@ fn spawn_lan_inbound(app: AppHandle, state: ChatState) {
     });
 }
 
+/// Pump the relay-client's connection-state watch into a Tauri event
+/// so the frontend can surface a transient "lost connection" notice
+/// when the supervisor hits its reconnect cap and stops trying.
+/// Only emits the terminal `PermanentlyDisconnected` transition —
+/// transient Disconnected / Connecting noise stays in-process so the
+/// notice stack isn't spammed during normal flaky-network operation.
+fn spawn_relay_conn_state(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let Some(mut rx) = client.relay_connection_state() else {
+                // REST-only / no relay configured — nothing to pump.
+                tokio::time::sleep(RECONNECT_BACKOFF * 6).await;
+                continue;
+            };
+            loop {
+                let snapshot = if let fetchit_chat::RelayConnState::PermanentlyDisconnected {
+                    reason,
+                    attempts,
+                } = rx.borrow().clone()
+                {
+                    Some((reason, attempts))
+                } else {
+                    None
+                };
+                if let Some((reason, attempts)) = snapshot {
+                    let _ = app.emit(
+                        "chat:relay-status",
+                        serde_json::json!({
+                            "kind": "permanently_disconnected",
+                            "reason": reason,
+                            "attempts": attempts,
+                        }),
+                    );
+                    // Break the inner loop and fall through to the
+                    // outer loop so the next ChatState::invalidate()
+                    // (from any path — settings change, daemon
+                    // watcher, manual reconnect) rebuilds the chat
+                    // client and re-arms this pump against the new
+                    // supervisor's watch receiver. Returning here
+                    // would orphan all future terminal transitions.
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+            state.invalidate().await;
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
 fn spawn_relay_presence(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1308,6 +1371,14 @@ fn log_pump(msg: &str) {
     eprintln!("[fetchit][chat] {msg}");
 }
 
+/// Opt-in env var that bypasses the loopback / link-local host
+/// guard. Mirrors the precedent set by `FETCHIT_LIVE_ADDR` in
+/// fetchit-net — devs running a local relay during testing can set
+/// this; production builds simply never see it. The check is
+/// per-call so flipping the env var without restarting takes effect
+/// on the next `set_relay_url`.
+const ALLOW_LOCAL_RELAY_ENV: &str = "FETCHIT_ALLOW_LOCAL_RELAY";
+
 fn validate_relay_url(url: &str) -> Result<Url, String> {
     let parsed = Url::parse(url).map_err(|e| format!("invalid relay url: {e}"))?;
     match parsed.scheme() {
@@ -1320,7 +1391,91 @@ fn validate_relay_url(url: &str) -> Result<Url, String> {
             "relay url must be a base URL with no path (got {path:?})"
         ));
     }
+    if std::env::var(ALLOW_LOCAL_RELAY_ENV).is_err() {
+        reject_local_or_reserved(&parsed)?;
+    }
     Ok(parsed)
+}
+
+/// SSRF guard — reject relay URLs whose host resolves to a loopback,
+/// unspecified, link-local, multicast, or broadcast address, or the
+/// literal `localhost` domain. Without this guard, a user-entered
+/// custom relay could point chat traffic at the in-process media
+/// server or any other internal service.
+///
+/// IPv4-mapped IPv6 addresses (e.g. `::ffff:127.0.0.1`) are unwrapped
+/// before classification so the IPv6 disguise doesn't bypass the
+/// IPv4 ruleset. Numeric "dotless" hosts like `127.1` are caught
+/// because the url crate parses them as `Host::Ipv4` after RFC 3986
+/// normalisation.
+fn reject_local_or_reserved(parsed: &Url) -> Result<(), String> {
+    let host = parsed.host().ok_or_else(|| {
+        "relay url must not point at a local or reserved address (host is missing)".to_owned()
+    })?;
+    let blocked = || {
+        "relay url must not point at a local or reserved address \
+         (set FETCHIT_ALLOW_LOCAL_RELAY for dev testing)"
+            .to_owned()
+    };
+    match host {
+        url::Host::Ipv4(addr) => {
+            if addr.is_loopback()
+                || addr.is_unspecified()
+                || addr.is_broadcast()
+                || addr.is_link_local()
+                || addr.is_multicast()
+            {
+                return Err(blocked());
+            }
+        }
+        url::Host::Ipv6(addr) => {
+            if let Some(v4) = ipv6_to_ipv4_mapped(addr) {
+                if v4.is_loopback()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                {
+                    return Err(blocked());
+                }
+            }
+            if addr.is_loopback()
+                || addr.is_unspecified()
+                || addr.is_multicast()
+                || is_ipv6_link_local(addr)
+            {
+                return Err(blocked());
+            }
+        }
+        url::Host::Domain(name) => {
+            let lc = name.to_ascii_lowercase();
+            if lc == "localhost" || lc.ends_with(".localhost") {
+                return Err(blocked());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stable manual check for IPv6 link-local (`fe80::/10`). The
+/// `is_unicast_link_local` method is nightly-only as of Rust 1.78.
+fn is_ipv6_link_local(addr: std::net::Ipv6Addr) -> bool {
+    addr.segments()[0] & 0xffc0 == 0xfe80
+}
+
+/// Stable shim for `Ipv6Addr::to_ipv4_mapped`. We re-implement it
+/// here so the crate's stable-channel build doesn't need the nightly
+/// `ipv6_to_ipv4_mapped` feature.
+fn ipv6_to_ipv4_mapped(addr: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = addr.segments();
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff {
+        let octets = addr.octets();
+        Some(std::net::Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1373,5 +1528,174 @@ mod tests {
     fn rejects_malformed_url() {
         let err = validate_relay_url("not a url").unwrap_err();
         assert!(err.contains("invalid relay url"), "{err}");
+    }
+
+    // The local/reserved-host guard tests must run serially because
+    // they touch the process-global env var. The `#[serial]` attr
+    // from the `serial_test` crate would be the idiomatic answer;
+    // since we don't have that dep pulled in, we keep all env
+    // mutation inside a single guard helper that always sets+unsets.
+    // Serialise env-touching tests — the relay-url loopback guard
+    // reads a process-global env var, so parallel test runs would
+    // race. Acquiring this mutex pins one validator at a time.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_local_relay_env<F: FnOnce() -> R, R>(allowed: bool, f: F) -> R {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = super::ALLOW_LOCAL_RELAY_ENV;
+        let prev = std::env::var_os(key);
+        if allowed {
+            std::env::set_var(key, "1");
+        } else {
+            std::env::remove_var(key);
+        }
+        let out = f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
+
+    #[test]
+    fn rejects_ipv4_loopback_127_0_0_1() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://127.0.0.1:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv4_loopback_127_99_0_1() {
+        // Full /8 is loopback, not just 127.0.0.1.
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://127.99.0.1:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv4_unspecified() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://0.0.0.0:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv4_link_local() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://169.254.0.1:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv4_multicast() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://224.0.0.1:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv6_loopback() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://[::1]:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv6_unspecified() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://[::]:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv6_link_local() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://[fe80::1]:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv6_multicast() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://[ff02::1]:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_ipv6_loopback() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://[::ffff:127.0.0.1]:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_localhost_lowercase() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://localhost:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_localhost_mixed_case() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://LocalHost:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_dotted_localhost_suffix() {
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://my.relay.localhost:8088").unwrap_err();
+            assert!(err.contains("local or reserved"), "{err}");
+        });
+    }
+
+    #[test]
+    fn accepts_public_ipv4_relay() {
+        with_local_relay_env(false, || {
+            // Matches the shipped NYC relay address — must stay
+            // accepted or the shipped default breaks on every install.
+            let p = validate_relay_url("http://67.207.94.66:8088").unwrap();
+            assert_eq!(p.scheme(), "http");
+        });
+    }
+
+    #[test]
+    fn accepts_public_domain_relay() {
+        with_local_relay_env(false, || {
+            assert!(validate_relay_url("https://relay.example.com:8443").is_ok());
+        });
+    }
+
+    #[test]
+    fn env_bypass_allows_loopback() {
+        with_local_relay_env(true, || {
+            assert!(validate_relay_url("http://127.0.0.1:8088").is_ok());
+            assert!(validate_relay_url("http://localhost:8088").is_ok());
+            assert!(validate_relay_url("http://[::1]:8088").is_ok());
+        });
+    }
+
+    #[test]
+    fn error_message_mentions_env_bypass() {
+        // Power users discover the dev-mode bypass via the error
+        // text; pin the substring so we don't drop it on a future
+        // copy-tweak.
+        with_local_relay_env(false, || {
+            let err = validate_relay_url("http://127.0.0.1:8088").unwrap_err();
+            assert!(err.contains("FETCHIT_ALLOW_LOCAL_RELAY"), "{err}");
+        });
     }
 }

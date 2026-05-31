@@ -45,3 +45,8 @@ pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
 pub use events::{Event, EventStream};
 pub use transport::{Reachability, Router, SendReceipt, Transport};
+
+/// Re-export of the relay-client's connection-state enum so downstream
+/// shells (the desktop bridge) can match on it without taking a direct
+/// dependency on `fetchit-relay-client`.
+pub use fetchit_relay_client::ConnState as RelayConnState;

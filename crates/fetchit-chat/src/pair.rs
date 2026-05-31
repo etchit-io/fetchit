@@ -6,11 +6,11 @@
 //! KEM pubkey + ML-DSA pubkey the chat path needs to bootstrap a
 //! Conversation with the new peer.
 //!
-//! The full ProfileManifest (display_name, avatar, bio, links) lives
+//! The full `ProfileManifest` (`display_name`, avatar, bio, links) lives
 //! on Autonomi at `profile_addr` and is fetched in phase 4 via the
 //! `ant-core` integration. For phase 1c we have enough from the
 //! relay-index record alone to add a contact and DM them — the
-//! display_name comes through as empty and the avatar / bio fill
+//! `display_name` comes through as empty and the avatar / bio fill
 //! in once phase 4 lands.
 
 use crate::error::ChatError;
@@ -170,7 +170,7 @@ pub fn verify_index_record(record: &ProfileIndexRecord) -> std::result::Result<V
 /// HTTP GET `{relay}/v1/profile/{agent_id}` and return the
 /// deserialised + verified record. The `agent_id` in the path is
 /// taken from the parsed URI; the relay's response is verified
-/// against itself (sig + derive_agent_id) and then cross-checked
+/// against itself (sig + `derive_agent_id`) and then cross-checked
 /// against the URI's `agent_id` so a man-in-the-middle relay can't
 /// substitute a different identity.
 ///
@@ -225,9 +225,9 @@ pub async fn fetch_from_uri(
 /// Convert a verified [`ProfileIndexRecord`] into the existing
 /// [`StoredContactCard`] shape so the chat path can use it
 /// immediately. `display_name` is empty until phase 4 fetches the
-/// full ProfileManifest from Autonomi (which carries the rich
-/// display fields); for now the agent_id is enough to DM with and
-/// the UI falls back to its existing short-agent-id label.
+/// full `ProfileManifest` from Autonomi (which carries the rich
+/// display fields); for now the `agent_id` is enough to DM with and
+/// the UI falls back to its existing short-`agent_id` label.
 #[must_use]
 pub fn record_into_stored_contact(record: &ProfileIndexRecord) -> StoredContactCard {
     StoredContactCard {
@@ -247,7 +247,7 @@ impl From<PairError> for ChatError {
     }
 }
 
-/// Result of a successful pair-accept — agent_id of the imported
+/// Result of a successful pair-accept — `agent_id` of the imported
 /// contact, ready for the UI to navigate to.
 pub struct PairAccepted {
     /// 64-hex lowercase `agent_id` of the new contact.
@@ -371,9 +371,9 @@ mod tests {
 
     /// Spins a wiremock relay, returns a signed record on GET, and
     /// verifies `fetch_index_record` parses + cross-checks
-    /// agent_id + runs the verifier end-to-end. The negative
-    /// branches (404, agent_id mismatch, tombstone) are covered by
-    /// the unit tests on verify_index_record plus a separate
+    /// `agent_id` + runs the verifier end-to-end. The negative
+    /// branches (404, `agent_id` mismatch, tombstone) are covered by
+    /// the unit tests on `verify_index_record` plus a separate
     /// network-error test below.
     #[tokio::test]
     async fn fetch_index_record_against_wiremock_happy_path() {

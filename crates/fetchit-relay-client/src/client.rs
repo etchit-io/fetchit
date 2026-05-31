@@ -108,6 +108,22 @@ pub struct ClientConfig {
     ///
     /// Defaults to 10 s. Lower in tests.
     pub send_ack_timeout: Duration,
+    /// Cap on consecutive reconnect attempts before the supervisor
+    /// gives up and surfaces a terminal [`ConnState::PermanentlyDisconnected`].
+    /// `Some(n)` stops after `n` failed `open_session` calls; `None`
+    /// retries forever (legacy behaviour).
+    ///
+    /// Defaults to `Some(20)` — at `MAX_BACKOFF=60s` that's roughly
+    /// 20 minutes of wall-clock churn, plenty for transient outages
+    /// without ringing the user's CPU forever on a hard relay outage.
+    pub max_reconnect_attempts: Option<u32>,
+    /// Cap on total elapsed wall-clock time spent in the reconnect
+    /// loop before the supervisor gives up. `None` means no time
+    /// limit (only `max_reconnect_attempts` applies).
+    ///
+    /// Defaults to `None`. Set if a fixed wall-clock budget makes
+    /// more sense than an attempt count for the deployment.
+    pub max_reconnect_elapsed: Option<Duration>,
 }
 
 impl ClientConfig {
@@ -124,6 +140,8 @@ impl ClientConfig {
             pong_timeout: Some(DEFAULT_PONG_TIMEOUT),
             send_write_timeout: SEND_WRITE_TIMEOUT,
             send_ack_timeout: SEND_ACK_TIMEOUT,
+            max_reconnect_attempts: Some(20),
+            max_reconnect_elapsed: None,
         }
     }
 }
@@ -145,6 +163,17 @@ pub enum ConnState {
         reason: String,
         /// Wall-clock instant of the next reconnect attempt, if any.
         retry_at: Option<Instant>,
+    },
+    /// The supervisor exhausted [`ClientConfig::max_reconnect_attempts`]
+    /// or [`ClientConfig::max_reconnect_elapsed`] without a successful
+    /// reconnect and has stopped trying. The application must rebuild
+    /// the [`Client`] to attempt a fresh connection — the UI typically
+    /// surfaces a "lost connection" notice with a manual retry.
+    PermanentlyDisconnected {
+        /// Last failure reason recorded before giving up.
+        reason: String,
+        /// Number of failed reconnect attempts before bailing.
+        attempts: u32,
     },
 }
 
@@ -484,6 +513,18 @@ impl Supervisor {
                             backoff = INITIAL_BACKOFF;
                         }
                         ReconnectOutcome::Shutdown => break,
+                        ReconnectOutcome::PermanentlyDisconnected {
+                            reason,
+                            attempts,
+                        } => {
+                            let _ = self.state_tx.send(ConnState::PermanentlyDisconnected {
+                                reason,
+                                attempts,
+                            });
+                            // Stop the supervisor; the application
+                            // must rebuild Client to reconnect.
+                            break;
+                        }
                     }
                 }
             }
@@ -543,6 +584,11 @@ impl Supervisor {
         backoff: &mut Duration,
         watch_set: &mut HashSet<AgentId>,
     ) -> ReconnectOutcome {
+        let max_attempts = self.config.max_reconnect_attempts;
+        let max_elapsed = self.config.max_reconnect_elapsed;
+        let start = Instant::now();
+        let mut attempts: u32 = 0;
+        let mut last_reason: String;
         loop {
             // Wait for the backoff, but also drain commands so that
             // Send calls during the disconnect fail fast rather than
@@ -578,9 +624,22 @@ impl Supervisor {
             match open_session(&self.config, self.signer.as_ref()).await {
                 Ok(s) => return ReconnectOutcome::Connected(s),
                 Err(e) => {
+                    attempts = attempts.saturating_add(1);
+                    last_reason = format!("reconnect failed: {e}");
                     *backoff = (backoff.saturating_mul(2)).min(MAX_BACKOFF);
+                    // Check caps BEFORE pushing the next "still
+                    // retrying" Disconnected so the terminal state
+                    // is the user's final signal.
+                    let hit_attempts = max_attempts.is_some_and(|m| attempts >= m);
+                    let hit_elapsed = max_elapsed.is_some_and(|d| start.elapsed() >= d);
+                    if hit_attempts || hit_elapsed {
+                        return ReconnectOutcome::PermanentlyDisconnected {
+                            reason: last_reason,
+                            attempts,
+                        };
+                    }
                     let _ = self.state_tx.send(ConnState::Disconnected {
-                        reason: format!("reconnect failed: {e}"),
+                        reason: last_reason.clone(),
                         retry_at: Some(Instant::now() + *backoff),
                     });
                 }
@@ -592,6 +651,7 @@ impl Supervisor {
 enum ReconnectOutcome {
     Connected(OpenSession),
     Shutdown,
+    PermanentlyDisconnected { reason: String, attempts: u32 },
 }
 
 async fn do_send(

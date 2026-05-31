@@ -441,6 +441,19 @@ impl Client {
         let relay = self.relay.as_ref()?;
         relay.relay_client().next_presence().await
     }
+
+    /// Watch the relay connection state. Returns `None` when no relay
+    /// transport is wired (REST-only / LAN-only deployments). The
+    /// desktop bridge subscribes to this so the UI can surface a
+    /// `PermanentlyDisconnected` toast + retry affordance when the
+    /// supervisor gives up.
+    #[must_use]
+    pub fn relay_connection_state(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<fetchit_relay_client::ConnState>> {
+        let relay = self.relay.as_ref()?;
+        Some(relay.relay_client().connection_state())
+    }
 }
 
 impl std::fmt::Debug for Client {
