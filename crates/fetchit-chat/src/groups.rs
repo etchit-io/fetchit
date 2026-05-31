@@ -1,4 +1,17 @@
-//! MLS-encrypted groups — create, invite, send, list.
+//! Public-room groups — create, invite, send, list.
+//!
+//! M1 ships groups as **public rooms** (UI label). On the wire we
+//! send x0xd's existing `public_open` preset value; OUR copy +
+//! docstrings name it "public room" everywhere users / forum readers
+//! / grep-and-screenshot critics will see. Group messages flow
+//! plaintext over the gossip pub/sub — **no MLS**, no forward
+//! secrecy, no membership privacy. The module name "groups" survives;
+//! the "MLS" framing did not.
+//!
+//! MLS-encrypted groups (RFC 9420 `TreeKEM` + ML-KEM-768) are the M2
+//! deliverable. Lighting them up requires either a client-side MLS
+//! state machine in this crate driving x0xd's MLS surface, or a swap
+//! to `OpenMLS`. Neither exists today.
 
 use crate::error::Result;
 use crate::http::Http;
@@ -78,11 +91,13 @@ struct CreateRequest<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<&'a str>,
-    /// Daemon's named-group policy preset. We use `public_open` so
-    /// messages can travel over the standard `/groups/<id>/send` +
-    /// `/messages` plaintext-over-gossip path; the alternative is
-    /// MLS-encrypted, which requires a separate
-    /// `/secure/encrypt` + `/publish` orchestration we don't wire yet.
+    /// Daemon's named-group policy preset. We use x0xd's `public_open`
+    /// wire value so messages travel over the standard
+    /// `/groups/<id>/send` + `/messages` plaintext-over-gossip path.
+    /// In OUR UI + docs this is surfaced as "public room" — the
+    /// announcement-page grep test reads our copy, not x0xd's. MLS
+    /// would require a separate `/secure/encrypt` + `/publish`
+    /// orchestration not wired yet (M2).
     preset: &'static str,
 }
 
@@ -138,11 +153,14 @@ impl<'a> Endpoint<'a> {
         self.http.delete(&path).await
     }
 
-    /// Create a new group with a display name visible to peers. The
-    /// group is created under the `public_open` preset so messages
-    /// flow plain-over-gossip and `/groups/<id>/send` accepts them
-    /// directly. MLS-encrypted groups would require a separate
-    /// encrypt + publish flow that isn't wired through fetchit yet.
+    /// Create a new "public room" — a group whose messages flow
+    /// plaintext-over-gossip on x0xd's side (wire-level preset is
+    /// `public_open`, surfaced to users as "public room"). The
+    /// `/groups/<id>/send` endpoint accepts plaintext directly. MLS
+    /// encryption (RFC 9420 `TreeKEM` + ML-KEM-768) is the M2
+    /// deliverable; it would require a client-side MLS state machine
+    /// in this crate AND a separate `/secure/encrypt` + `/publish`
+    /// flow, neither of which exists today.
     pub async fn create(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
         self.http
             .post_json(

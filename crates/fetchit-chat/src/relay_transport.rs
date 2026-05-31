@@ -2,9 +2,26 @@
 //!
 //! Drives a live WebSocket session against a fetchit relay using the
 //! local x0xd as the signing oracle. Outbound chat envelopes are
-//! wrapped in `TransitEnvelope`s and sent to the relay; inbound
-//! deliveries are decoded and pumped onto an mpsc channel that the
-//! chat layer consumes.
+//! wrapped in [`fetchit_relay_proto::TransitEnvelope`]s and sent to
+//! the relay; inbound deliveries are decoded and pumped onto an mpsc
+//! channel that the chat layer consumes.
+//!
+//! # Sealing status (M0 honesty floor)
+//!
+//! Two send paths exist:
+//!
+//! * **Sealed v2 path** — when [`OutboundEnvelope::transit`] arrives
+//!   already populated (the chat-v2 conversation path), we forward it
+//!   verbatim. `nonce` + `kem_ciphertext` + `sender_signature` are
+//!   set by the conversation layer; this is the production end-to-end
+//!   sealed channel.
+//! * **Fabricated v1 fallback** — when `transit` is `None` (legacy
+//!   callers, integration tests), this module builds a `TransitEnvelope`
+//!   with **empty `nonce` / `kem_ciphertext` / `sender_signature`**.
+//!   The payload bytes ride the wire as-is. Relay-path confidentiality
+//!   on this branch rests on TLS-to-the-relay plus an honest relay; it
+//!   is NOT end-to-end sealed. M2 closes this fallback by requiring all
+//!   senders to go through the sealed v2 path.
 
 use crate::error::{ChatError, Result};
 use crate::identity::AgentId;
@@ -106,11 +123,20 @@ impl Transport for RelayTransport {
     async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
         let to_relay = agent_id_to_relay(to)?;
         let transit = if let Some(prebuilt) = envelope.transit {
-            // The chat-v2 path hands us a fully-sealed envelope —
-            // forward it verbatim so the KEM ciphertext, nonce, epoch,
-            // and signature survive intact.
+            // Sealed v2 path — chat-v2 conversation handed us a fully
+            // sealed envelope. Forward verbatim so the KEM ciphertext,
+            // nonce, epoch, and ML-DSA-65 signature survive intact.
+            // This is the production end-to-end channel.
             prebuilt
         } else {
+            // Fabricated v1 fallback — no caller-supplied sealed
+            // envelope, so we build a TransitEnvelope with EMPTY
+            // nonce / kem_ciphertext / sender_signature. The payload
+            // bytes go through the relay in the clear (modulo TLS to
+            // the relay). Relay-path confidentiality on this branch
+            // rests on the relay being honest; this is NOT end-to-end
+            // sealed and the M0 SECURITY.md names it explicitly. M2
+            // removes this fallback.
             let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
             let (kind, group_id) = match envelope.kind {
                 OutboundKind::Dm => (RelayKind::Dm, None),
