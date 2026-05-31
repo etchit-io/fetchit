@@ -24,6 +24,17 @@ jobs:
       - run: cargo fmt --manifest-path crates/fetchit-ffi/Cargo.toml -- --check
       - run: cargo fmt --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml -- --check
 
+  pins:
+    # Fail CI if Cargo.lock / Cargo.toml / settings.rs drift from
+    # PINS.md. A silent crate bump can land a wire-format change
+    # between releases — historical messages stop decrypting, contact
+    # cards reject. The check is one shell script + cheap to run.
+    name: pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-pins.sh
+
   clippy:
     name: clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
