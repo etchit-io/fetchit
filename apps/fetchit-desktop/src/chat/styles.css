@@ -115,6 +115,59 @@ body.chat-docked {
 }
 .chat-panel__share:hover { background: rgba(201, 115, 43, 0.12); }
 
+/* TOFU contact-request badge — visually distinct (warm amber pill)
+   so first-contact requests stand out from the rest of the header
+   chrome without dominating it. Hidden by default; only painted when
+   the store has at least one pending entry. */
+.chat-panel__pending {
+  background: rgba(201, 115, 43, 0.18);
+  color: var(--copper);
+  border: 1px solid var(--copper);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--dur-micro) ease;
+}
+.chat-panel__pending:hover { background: rgba(201, 115, 43, 0.28); }
+
+.pending-contacts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.pending-contact-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pending-contact-row__id {
+  font-weight: 600;
+  color: var(--bone);
+  font-family: monospace;
+}
+
+.pending-contact-row__full {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--ash);
+  word-break: break-all;
+}
+
+.pending-contact-row__buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .chat-panel__close {
   background: transparent;
   color: var(--ash);

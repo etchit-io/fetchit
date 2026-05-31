@@ -3,7 +3,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { maybeNotifyInboundDm } from "./notify";
-import type { ChatStore, DaemonStatus, NearbyPeer } from "./state";
+import type { ChatStore, DaemonStatus, NearbyPeer, PendingContact } from "./state";
 import type { ChatEvent } from "./types";
 
 /// Wire-shape of the daemon's `chat:receipt` Tauri event.
@@ -29,6 +29,44 @@ interface NearbyEventPeer {
   ip: string;
   port: number;
   lastSeenMsAgo: number;
+}
+
+/// Wire-shape of the daemon's `chat:contact-request` Tauri event —
+/// the full `fetchit_chat::conversation::Conversation` serialized as
+/// JSON. We only read the fields the dialog needs.
+interface ContactRequestEvent {
+  group_id_hex: string;
+  members: Array<{
+    devices?: Array<{ agent_id_hex?: string }>;
+  }>;
+}
+
+/// Project the Rust-side Conversation event into the local
+/// `PendingContact` shape. Exported for tests so we can pin the
+/// member-walk that picks the sender out of the welcome.
+export function projectPendingContact(
+  ev: ContactRequestEvent,
+  myId: string | null,
+  nowMs: number,
+): PendingContact | null {
+  // The welcome payload contains both the local user and the sender
+  // as members. Pick the first member whose first device's
+  // `agent_id_hex` isn't ours.
+  let peer: string | null = null;
+  for (const m of ev.members ?? []) {
+    const dev = m.devices?.[0];
+    const id = dev?.agent_id_hex;
+    if (id && id !== myId) {
+      peer = id;
+      break;
+    }
+  }
+  if (!peer) return null;
+  return {
+    groupIdHex: ev.group_id_hex,
+    peerAgentId: peer,
+    arrivedAtMs: nowMs,
+  };
 }
 
 export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
@@ -59,12 +97,27 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       store.setDaemonStatus(ev.payload);
     },
   );
+  const unsubContactReq = await listen<ContactRequestEvent>(
+    "chat:contact-request",
+    (ev) => {
+      // Identity must be resolved before we project, otherwise the
+      // "first non-self member" walk has no anchor and could pick the
+      // local user as the peer. Safe to drop pre-identity events —
+      // the backend persists the Conversation and will re-emit once
+      // the panel reconnects.
+      const me = store.myId();
+      if (!me) return;
+      const entry = projectPendingContact(ev.payload, me, Date.now());
+      if (entry) store.addPendingContact(entry);
+    },
+  );
   return () => {
     unsubEvent();
     unsubReceipt();
     unsubPresence();
     unsubNearby();
     unsubDaemon();
+    unsubContactReq();
   };
 }
 

@@ -29,6 +29,13 @@ export async function importCard(uri: string): Promise<void> {
   await invoke("chat_import_card", { uri });
 }
 
+/// Flip a TOFU welcome from `TrustState::Pending` to `Confirmed`.
+/// Called from the pending-contacts dialog after the user clicks
+/// Accept on a first-contact request.
+export async function confirmContact(groupIdHex: string): Promise<void> {
+  await invoke("chat_confirm_contact", { groupIdHex });
+}
+
 export interface PairAccepted {
   agentIdHex: string;
 }

@@ -5,7 +5,7 @@ vi.mock("./notify", () => ({
   maybeNotifyInboundDm: (...args: unknown[]) => maybeNotifyMock(...args),
 }));
 
-import { applyChatEvent } from "./events";
+import { applyChatEvent, projectPendingContact } from "./events";
 import { ChatStore } from "./state";
 
 const ME = "a".repeat(64);
@@ -76,5 +76,124 @@ describe("applyChatEvent", () => {
         data: {},
       }),
     ).not.toThrow();
+  });
+});
+
+describe("projectPendingContact", () => {
+  // The chat:contact-request event carries the full Rust Conversation
+  // struct. Pin the field walk so future schema drift surfaces here
+  // before it reaches the UI as a missing badge.
+
+  function welcome(members: Array<{ agentId: string }>): {
+    group_id_hex: string;
+    members: Array<{ devices: Array<{ agent_id_hex: string }> }>;
+  } {
+    return {
+      group_id_hex: "deadbeef".repeat(8),
+      members: members.map((m) => ({
+        devices: [{ agent_id_hex: m.agentId }],
+      })),
+    };
+  }
+
+  it("picks the first non-self member as the peer", () => {
+    const entry = projectPendingContact(
+      welcome([{ agentId: ME }, { agentId: PEER }]),
+      ME,
+      1234,
+    );
+    expect(entry).toEqual({
+      groupIdHex: "deadbeef".repeat(8),
+      peerAgentId: PEER,
+      arrivedAtMs: 1234,
+    });
+  });
+
+  it("returns null when no non-self member is present", () => {
+    // Degenerate welcome with only the local user — should not
+    // generate a self-targeted contact request.
+    const entry = projectPendingContact(welcome([{ agentId: ME }]), ME, 1);
+    expect(entry).toBeNull();
+  });
+
+  it("returns null when members is missing or empty", () => {
+    const a = projectPendingContact(
+      { group_id_hex: "x", members: [] },
+      ME,
+      1,
+    );
+    expect(a).toBeNull();
+  });
+
+  it("with null local identity, the listener drops the event upstream — projection still picks the first member if called", () => {
+    // The events.ts listener guards on myId() and drops pre-identity
+    // events entirely. If projectPendingContact is ever called with
+    // a null `me` directly, it falls back to "first non-self" which
+    // with null === any guard always rejecting is still the first
+    // member. This test pins the helper's behavior; the listener
+    // owns the bootstrap-race guard.
+    const entry = projectPendingContact(
+      welcome([{ agentId: PEER }]),
+      null,
+      1,
+    );
+    expect(entry?.peerAgentId).toBe(PEER);
+  });
+});
+
+describe("ChatStore — pending contact requests", () => {
+  it("addPendingContact + removePendingContact emit subscribers", () => {
+    const notify = vi.fn();
+    store.subscribe(notify);
+    store.addPendingContact({
+      groupIdHex: "g1",
+      peerAgentId: PEER,
+      arrivedAtMs: 1,
+    });
+    expect(store.allPendingContacts()).toHaveLength(1);
+    expect(notify).toHaveBeenCalled();
+    notify.mockClear();
+    store.removePendingContact("g1");
+    expect(store.allPendingContacts()).toHaveLength(0);
+    expect(notify).toHaveBeenCalled();
+  });
+
+  it("addPendingContact is idempotent on groupIdHex (re-emit overwrites)", () => {
+    store.addPendingContact({
+      groupIdHex: "g1",
+      peerAgentId: PEER,
+      arrivedAtMs: 1,
+    });
+    store.addPendingContact({
+      groupIdHex: "g1",
+      peerAgentId: PEER,
+      arrivedAtMs: 99,
+    });
+    const all = store.allPendingContacts();
+    expect(all).toHaveLength(1);
+    expect(all[0].arrivedAtMs).toBe(99);
+  });
+
+  it("sorts pending contacts newest first", () => {
+    store.addPendingContact({
+      groupIdHex: "g1",
+      peerAgentId: PEER,
+      arrivedAtMs: 1,
+    });
+    store.addPendingContact({
+      groupIdHex: "g2",
+      peerAgentId: "c".repeat(64),
+      arrivedAtMs: 100,
+    });
+    const all = store.allPendingContacts();
+    expect(all[0].groupIdHex).toBe("g2");
+    expect(all[1].groupIdHex).toBe("g1");
+  });
+
+  it("removePendingContact on absent key is a silent no-op", () => {
+    const notify = vi.fn();
+    store.subscribe(notify);
+    store.removePendingContact("never-added");
+    expect(notify).not.toHaveBeenCalled();
   });
 });

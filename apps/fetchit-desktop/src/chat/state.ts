@@ -69,6 +69,25 @@ export type BubbleStatus = "sending" | "delivered" | "failed";
 /// self-heals after the daemon auto-upgrades or restarts.
 export type DaemonStatus = "connected" | "reconnecting" | "down";
 
+/// A first-contact welcome the user hasn't yet accepted. The
+/// underlying `Conversation` is already persisted by the backend
+/// (so we can decrypt subsequent messages from the same sender);
+/// surfacing this entry to the UI is the only way the user can
+/// confirm or refuse the contact. Wire shape mirrors a subset of
+/// the Rust `Conversation` struct — we only project what the dialog
+/// needs to render the request.
+export interface PendingContact {
+  /// 32-byte hex group identifier — opaque to the user, used by
+  /// `chat_confirm_contact` to flip the trust state.
+  groupIdHex: string;
+  /// 64-hex agent id of the sender. Identifies them in the dialog
+  /// and serves as the argument to `chat_remove_contact` on reject.
+  peerAgentId: AgentId;
+  /// Unix-ms when the welcome arrived. Pending requests sort newest
+  /// first.
+  arrivedAtMs: number;
+}
+
 export interface ChatBubble {
   id: string;
   /// Chat-layer logical message id assigned by the daemon. Populated
@@ -110,6 +129,13 @@ export class ChatStore {
   /// right now. `null` means the watcher hasn't reported yet (early
   /// boot); UI should treat that as "connected" until proved otherwise.
   private daemonStatus: DaemonStatus | null = null;
+  /// First-contact welcomes from previously-unknown senders, fed by
+  /// the `chat:contact-request` Tauri event. Keyed by `group_id_hex`
+  /// so a duplicate event for the same conversation overwrites
+  /// (the registry only emits one Pending welcome per peer).
+  /// The chat panel surfaces a "X pending contact requests" badge
+  /// and the pending-contacts dialog reads from here.
+  private pendingContacts = new Map<string, PendingContact>();
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -165,6 +191,31 @@ export class ChatStore {
 
   contact(id: AgentId): Contact | undefined {
     return this.contacts.get(id);
+  }
+
+  /// Record a first-contact TOFU welcome. Idempotent on `groupIdHex`
+  /// — re-emitted events for the same conversation update the
+  /// `arrivedAtMs` without spawning a duplicate badge entry.
+  addPendingContact(entry: PendingContact): void {
+    this.pendingContacts.set(entry.groupIdHex, entry);
+    this.emit();
+  }
+
+  /// Drop a pending request once the user has accepted or rejected
+  /// it. Safe to call on an absent key (no-op).
+  removePendingContact(groupIdHex: string): void {
+    if (this.pendingContacts.delete(groupIdHex)) {
+      this.emit();
+    }
+  }
+
+  /// Snapshot pending requests, newest first. Used by the chat
+  /// panel header to render the badge count and by the pending
+  /// dialog to render the list.
+  allPendingContacts(): PendingContact[] {
+    return [...this.pendingContacts.values()].sort(
+      (a, b) => b.arrivedAtMs - a.arrivedAtMs,
+    );
   }
 
   /// Replace the entire Nearby table with `peers`. Called on every

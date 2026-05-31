@@ -27,6 +27,7 @@ import { mountCardDialog } from "./contactCard";
 import { mountAddContact } from "./addContact";
 import { mountNewGroup } from "./newGroup";
 import { mountJoinGroup } from "./joinGroup";
+import { mountPendingContactsDialog } from "./pendingContacts";
 import { ChatStore } from "./state";
 
 export interface ChatPanelHandlers {
@@ -99,6 +100,16 @@ export function mountChatPanel(
   shareBtn.className = "chat-panel__share";
   shareBtn.textContent = "Share my card";
 
+  // First-contact request badge — hidden until the store has at least
+  // one pending TOFU welcome to surface. Clicking opens the dialog
+  // that lets the user accept/reject the request.
+  const pendingBtn = document.createElement("button");
+  pendingBtn.type = "button";
+  pendingBtn.className = "chat-panel__pending";
+  pendingBtn.hidden = true;
+  pendingBtn.setAttribute("aria-label", "Pending contact requests");
+  pendingBtn.title = "Pending contact requests";
+
   const dockBtn = document.createElement("button");
   dockBtn.type = "button";
   dockBtn.className = "chat-panel__dock";
@@ -116,6 +127,7 @@ export function mountChatPanel(
   headerEl.appendChild(daemonPill);
   headerEl.appendChild(idBadge);
   headerEl.appendChild(shareBtn);
+  headerEl.appendChild(pendingBtn);
   headerEl.appendChild(dockBtn);
   headerEl.appendChild(closeBtn);
 
@@ -252,6 +264,24 @@ export function mountChatPanel(
       });
     });
   };
+
+  const openPendingContacts = (): void => {
+    showDialog((root) => {
+      mountPendingContactsDialog(root, store, { onClose: hideDialog });
+    });
+  };
+
+  const renderPendingBadge = (): void => {
+    const n = store.allPendingContacts().length;
+    pendingBtn.hidden = n === 0;
+    pendingBtn.textContent = n > 0 ? `${n} new` : "";
+    pendingBtn.title = n === 1
+      ? "1 pending contact request"
+      : `${n} pending contact requests`;
+  };
+  store.subscribe(renderPendingBadge);
+  renderPendingBadge();
+  pendingBtn.addEventListener("click", openPendingContacts);
 
   shareBtn.addEventListener("click", openShareCard);
   idBadge.addEventListener("click", openShareCard);
