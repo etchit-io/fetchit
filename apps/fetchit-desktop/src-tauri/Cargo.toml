@@ -61,7 +61,7 @@ url = "2.5"
 # Used only by refresh_peers_from_upstream to GET WithAutonomi's
 # canonical bootstrap_peers.toml. rustls-tls keeps us off the system
 # OpenSSL dep tree on Linux.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # Parse the upstream bootstrap_peers.toml. Tolerant scan over any TOML
 # string leaves that pass parse_bootstrap_peer, so a future minor
 # schema rotation at WithAutonomi doesn't blow up the refresh.

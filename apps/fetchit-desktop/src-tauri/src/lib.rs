@@ -725,6 +725,8 @@ pub fn run() {
             chat::chat_identity,
             chat::chat_card,
             chat::chat_import_card,
+            chat::chat_pair_accept,
+            chat::chat_pair_share,
             chat::chat_contacts,
             chat::chat_set_trust,
             chat::chat_remove_contact,

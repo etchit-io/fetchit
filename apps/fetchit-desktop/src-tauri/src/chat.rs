@@ -86,6 +86,14 @@ impl ChatState {
         Ok(c)
     }
 
+    /// Borrow the relay URL configured at build time. Used by the
+    /// pair-share command to assemble the v3 share URI from the
+    /// same relay the chat client is talking to.
+    #[must_use]
+    pub fn relay_url(&self) -> &Url {
+        &self.relay_url
+    }
+
     /// Read the current opt-in flag for LAN-direct delivery. Used by
     /// the Nearby-section frontend wiring (lands in a follow-up
     /// commit alongside the sidebar surface).
@@ -228,6 +236,84 @@ pub async fn chat_import_card(
         }
     }
     Ok(())
+}
+
+/// Result of a successful `chat_pair_accept` — the imported peer's
+/// `agent_id` so the frontend can navigate to the new DM.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairAccepted {
+    /// 64-hex lowercase `agent_id` of the imported contact.
+    pub agent_id_hex: String,
+}
+
+/// Accept a v3 share URI (`fetchit://share/v3/...`) the user pasted
+/// or scanned. Parses, fetches the offerer's profile-index record
+/// from the relay in the URI, verifies the ML-DSA-65 signature,
+/// and persists a [`fetchit_chat::messages::StoredContactCard`] so
+/// the chat path can immediately DM the new peer.
+///
+/// `display_name` is left empty until phase 4 (Autonomi fetch of
+/// the full `ProfileManifest`) lands; the UI falls back to the
+/// `agent_id` prefix label until then.
+#[tauri::command]
+pub async fn chat_pair_accept(
+    state: tauri::State<'_, ChatState>,
+    uri: String,
+) -> Result<PairAccepted, String> {
+    let client = state.get().await?;
+    let layout = client
+        .layout()
+        .ok_or_else(|| "chat layout not available (REST-only client)".to_string())?;
+    let http = reqwest::Client::new();
+    let outcome = fetchit_chat::pair::pair_accept(&uri, &http, layout)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(PairAccepted {
+        agent_id_hex: outcome.agent_id_hex,
+    })
+}
+
+/// Build the local user's v3 share URI by self-looking-up their
+/// profile-index record on the relay.
+///
+/// Returns an error when the local user hasn't published a profile
+/// yet — the relay has no record under their `agent_id`. Once
+/// etch>it's Profile-tab has run a publish, this command succeeds
+/// and the frontend renders the result as a QR code.
+#[tauri::command]
+pub async fn chat_pair_share(state: tauri::State<'_, ChatState>) -> Result<String, String> {
+    let client = state.get().await?;
+    let me = client.identity().me().await.map_err(|e| e.to_string())?;
+    // Build the relay's profile-index URL from the client's
+    // configured relay. The chat ClientBuilder stores it on the
+    // state, not on the Client surface; re-read from the source of
+    // truth here.
+    let relay = state.relay_url();
+    let http = reqwest::Client::new();
+    let url = relay
+        .join(&format!("v1/profile/{}", me.agent_id.0))
+        .map_err(|e| format!("build relay URL: {e}"))?;
+    let resp = http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("relay fetch: {e}"))?;
+    if resp.status().as_u16() == 404 {
+        return Err(
+            "Publish your profile first — open the Profile tab in etch>it and click Publish."
+                .to_string(),
+        );
+    }
+    if !resp.status().is_success() {
+        return Err(format!("relay returned {}", resp.status()));
+    }
+    let record: fetchit_chat::pair::ProfileIndexRecord =
+        resp.json().await.map_err(|e| format!("relay JSON: {e}"))?;
+    let parsed_relay = relay.clone();
+    fetchit_chat::profile::to_v3_share_uri(&record.agent_id, &record.profile_addr, &parsed_relay)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
