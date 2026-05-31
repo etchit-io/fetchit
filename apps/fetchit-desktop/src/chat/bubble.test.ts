@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { bubbleRenderKey, renderBubble } from "./bubble";
+import { bubbleRenderKey, renderBubble, type BubbleHandlers } from "./bubble";
 import type { ChatBubble } from "./state";
 
 const ME = "a".repeat(64);
@@ -16,9 +16,18 @@ function bubble(overrides: Partial<ChatBubble> = {}): ChatBubble {
   };
 }
 
+function makeHandlers(): BubbleHandlers {
+  return {
+    onAutonomi: vi.fn(),
+    onCard: vi.fn(),
+    onInvite: vi.fn(),
+    onProfile: vi.fn(),
+  };
+}
+
 describe("renderBubble — content", () => {
   it("renders plain text as a single text node inside the bubble", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(bubble({ body: "no urls here" }), handlers);
     const b = row.querySelector(".chat-bubble");
     expect(b?.textContent).toBe("no urls here");
@@ -26,7 +35,7 @@ describe("renderBubble — content", () => {
   });
 
   it("strips autonomi:// URLs from the text bubble (preview card represents them)", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(
       bubble({ body: `check autonomi://${ADDR} please` }),
       handlers,
@@ -42,14 +51,14 @@ describe("renderBubble — content", () => {
   });
 
   it("for an autonomi-only body, hides the text bubble entirely", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(bubble({ body: `autonomi://${ADDR}` }), handlers);
     expect(row.querySelector(".chat-bubble")).toBeNull();
     expect(row.querySelectorAll(".chat-preview")).toHaveLength(1);
   });
 
   it("clicking the preview card's Open button fires onAutonomi", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(bubble({ body: `autonomi://${ADDR}` }), handlers);
     const openBtn = row.querySelectorAll<HTMLButtonElement>(
       ".chat-preview__btn",
@@ -59,7 +68,7 @@ describe("renderBubble — content", () => {
   });
 
   it("routes x0x://invite/ to onInvite, x0x://agent/ to onCard", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(
       bubble({ body: "x0x://invite/abc x0x://agent/xyz" }),
       handlers,
@@ -72,8 +81,25 @@ describe("renderBubble — content", () => {
     expect(handlers.onCard).toHaveBeenCalledWith("x0x://agent/xyz");
   });
 
+  it("routes fetchit://share/v3/ to onProfile", () => {
+    const handlers = makeHandlers();
+    const v3
+      = "fetchit://share/v3/"
+        + "aa".repeat(32)
+        + "/"
+        + "bb".repeat(32)
+        + "?relay=https://relay.example/";
+    const row = renderBubble(bubble({ body: `look at this ${v3}` }), handlers);
+    const links = row.querySelectorAll<HTMLAnchorElement>("a.chat-link");
+    expect(links).toHaveLength(1);
+    links[0].click();
+    expect(handlers.onProfile).toHaveBeenCalledWith(v3);
+    expect(handlers.onCard).not.toHaveBeenCalled();
+    expect(handlers.onInvite).not.toHaveBeenCalled();
+  });
+
   it("preserves text around URIs", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(
       bubble({ body: `look: autonomi://${ADDR} now!` }),
       handlers,
@@ -84,7 +110,7 @@ describe("renderBubble — content", () => {
   });
 
   it("keeps the text bubble visible for an autonomi-only message that's still sending (mine)", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(
       bubble({ body: `autonomi://${ADDR}`, mine: true, status: "sending" }),
       handlers,
@@ -95,7 +121,7 @@ describe("renderBubble — content", () => {
 
 describe("renderBubble — outbound status", () => {
   it("shows a Sending… caption while the bubble is in flight", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(
       bubble({ mine: true, status: "sending" }),
       handlers,
@@ -105,7 +131,7 @@ describe("renderBubble — outbound status", () => {
   });
 
   it("shows an explicit 'Not delivered' caption when the send failed", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(
       bubble({ mine: true, status: "failed", failureReason: "timeout" }),
       handlers,
@@ -118,7 +144,7 @@ describe("renderBubble — outbound status", () => {
   });
 
   it("shows ⏳ + Sending caption while in flight", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const sending = renderBubble(
       bubble({ mine: true, status: "sending" }),
       handlers,
@@ -132,7 +158,7 @@ describe("renderBubble — outbound status", () => {
   });
 
   it("shows ✓ for delivered with no substatus caption", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const delivered = renderBubble(
       bubble({ mine: true, status: "delivered" }),
       handlers,
@@ -144,7 +170,7 @@ describe("renderBubble — outbound status", () => {
   });
 
   it("never decorates inbound bubbles", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const inbound = renderBubble(
       bubble({ mine: false, status: "sending" }),
       handlers,
@@ -155,13 +181,13 @@ describe("renderBubble — outbound status", () => {
 
 describe("renderBubble — direction", () => {
   it("uses chat-row--out for my own messages", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(bubble({ mine: true }), handlers);
     expect(row.className).toContain("chat-row--out");
   });
 
   it("uses chat-row--in for incoming messages", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(bubble({ mine: false }), handlers);
     expect(row.className).toContain("chat-row--in");
   });
@@ -177,7 +203,7 @@ describe("bubbleRenderKey — keyed diff for flicker-free re-renders", () => {
   // before users see the screen flash again.
 
   it("renders the key onto the row's data-key attribute", () => {
-    const handlers = { onAutonomi: vi.fn(), onCard: vi.fn(), onInvite: vi.fn() };
+    const handlers = makeHandlers();
     const row = renderBubble(bubble({ id: "m1", status: "delivered" }), handlers);
     expect(row.dataset.key).toBe(bubbleRenderKey(bubble({ id: "m1", status: "delivered" })));
   });

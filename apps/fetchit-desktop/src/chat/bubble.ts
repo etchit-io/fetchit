@@ -1,17 +1,23 @@
-// Render a single chat-message bubble. Detects `autonomi://` and
-// `x0x://` links in the body and turns them into clickable affordances
-// — autonomi addresses open a new fetch>it tab; x0x cards / invites
-// route to the appropriate chat dialog.
+// Render a single chat-message bubble. Detects `autonomi://`, `x0x://`,
+// and `fetchit://share/v3/` links in the body and turns them into
+// clickable affordances — autonomi addresses open a new fetch>it tab;
+// x0x cards / invites and v3 share URIs route to the appropriate
+// chat dialog.
 
 import type { ChatBubble } from "./state";
 import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
 
-const URL_RE = /(autonomi:\/\/[0-9a-fA-F]{64}|x0x:\/\/(?:agent|invite)\/[A-Za-z0-9_-]+)/g;
+const URL_RE
+  = /(autonomi:\/\/[0-9a-fA-F]{64}|x0x:\/\/(?:agent|invite)\/[A-Za-z0-9_-]+|fetchit:\/\/share\/v3\/[0-9a-fA-F]{64}\/[0-9a-fA-F]{64}\?relay=\S+)/g;
 
 export interface BubbleHandlers {
   onAutonomi: (addr: string) => void;
   onCard: (uri: string) => void;
   onInvite: (uri: string) => void;
+  /// v3 share URI — routes through the same add-contact dialog as
+  /// `onCard` but the dialog will dispatch the import to the v3
+  /// pair-accept command instead of the legacy import path.
+  onProfile: (uri: string) => void;
 }
 
 /// A signature that uniquely identifies the rendered shape of a
@@ -125,6 +131,7 @@ function linkFor(url: string, h: BubbleHandlers): HTMLElement {
     if (url.startsWith("autonomi://")) h.onAutonomi(url);
     else if (url.startsWith("x0x://invite/")) h.onInvite(url);
     else if (url.startsWith("x0x://agent/")) h.onCard(url);
+    else if (url.startsWith("fetchit://share/v3/")) h.onProfile(url);
   });
   return a;
 }

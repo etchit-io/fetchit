@@ -230,14 +230,25 @@ export function mountChatPanel(
     });
   };
 
+  // Wire-up for both v2 (chat_import_card) and v3 (chat_pair_accept):
+  // for v3, the result carries the imported peer's agent_id so we can
+  // jump straight into the new DM. v2 has no return payload and just
+  // refreshes the contacts list.
+  const handleImported = (
+    result?: { agentIdHex: string },
+  ): void => {
+    hideDialog();
+    if (result?.agentIdHex) {
+      store.setActive({ kind: "dm", peer: result.agentIdHex });
+    }
+    void refreshContacts();
+  };
+
   const openAddContact = (): void => {
     showDialog((root) => {
       mountAddContact(root, {
         onClose: hideDialog,
-        onImported: async () => {
-          hideDialog();
-          await refreshContacts();
-        },
+        onImported: handleImported,
       });
     });
   };
@@ -283,26 +294,26 @@ export function mountChatPanel(
     onJoinGroup: () => openJoinGroup(),
   });
 
+  const openPrefilledAddContact = (uri: string): void => {
+    showDialog((root) => {
+      mountAddContact(root, {
+        onClose: hideDialog,
+        onImported: handleImported,
+      });
+      const input = root.querySelector<HTMLTextAreaElement>(
+        ".chat-dialog__uri",
+      );
+      if (input) {
+        input.value = uri;
+        input.dispatchEvent(new Event("input"));
+      }
+    });
+  };
+
   mountConversation(conversationEl, store, {
     onAutonomi: (addr) => handlers.onAutonomi(addr),
-    onCard: (uri) => {
-      showDialog((root) => {
-        mountAddContact(root, {
-          onClose: hideDialog,
-          onImported: () => {
-            hideDialog();
-            void refreshContacts();
-          },
-        });
-        const input = root.querySelector<HTMLTextAreaElement>(
-          ".chat-dialog__uri",
-        );
-        if (input) {
-          input.value = uri;
-          input.dispatchEvent(new Event("input"));
-        }
-      });
-    },
+    onCard: openPrefilledAddContact,
+    onProfile: openPrefilledAddContact,
     onInvite: (uri) => {
       openJoinGroup(uri);
     },

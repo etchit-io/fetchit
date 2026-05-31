@@ -1,9 +1,9 @@
-// "Share your card" dialog — generates a fresh card from the daemon
-// and displays the share URI + a QR. The user can rename themselves
-// inline; saving regenerates the URI so the QR/copy buttons reflect
-// the new label immediately.
+// "Share your card" dialog. Tries the v3 profile share URI first (short,
+// always-scannable, anchored to the user's Autonomi profile); falls back
+// silently to the v2 extended share URI when no v3 profile has been
+// published yet. The user only ever sees the best available payload.
 
-import { myCard } from "./api";
+import { myCard, pairShare } from "./api";
 import { errMsg } from "./errors";
 import { renderQrSvg } from "../qr";
 
@@ -11,6 +11,8 @@ export interface CardDialogHandlers {
   onClose: () => void;
   /// Persist a user-typed display name. Called after the input loses
   /// focus or the user hits Enter. Resolves once settings is written.
+  /// Only fires in v2 mode — v3 display name lives in the published
+  /// profile and is edited in etch>it.
   onRename: (name: string) => Promise<void>;
 }
 
@@ -39,6 +41,12 @@ export async function mountCardDialog(
   nameInput.spellcheck = false;
   nameInput.placeholder = "How you appear to others";
   nameInput.setAttribute("aria-label", "Display name");
+
+  const v3Note = document.createElement("p");
+  v3Note.className = "chat-dialog__help";
+  v3Note.textContent
+    = "Sharing your Autonomi profile — edit your display name and bio in etch>it.";
+  v3Note.hidden = true;
 
   const status = document.createElement("p");
   status.className = "chat-dialog__status";
@@ -78,6 +86,7 @@ export async function mountCardDialog(
   inner.appendChild(title);
   inner.appendChild(nameLabel);
   inner.appendChild(nameInput);
+  inner.appendChild(v3Note);
   inner.appendChild(status);
   inner.appendChild(qrHost);
   inner.appendChild(uriBox);
@@ -89,32 +98,48 @@ export async function mountCardDialog(
   });
 
   let currentName = displayName;
+  let mode: "v2" | "v3" = "v2";
 
-  const regenerate = async (name: string): Promise<void> => {
+  const paintQr = (uri: string): void => {
+    qrHost.replaceChildren();
+    // QR is best-effort. v2 cards carry a KEM pubkey + sigs and can
+    // exceed any QR version's capacity; in that case fall back to a
+    // textual notice so the URI itself stays usable.
+    try {
+      qrHost.replaceChildren(renderQrSvg(uri));
+    } catch {
+      const notice = document.createElement("p");
+      notice.className = "chat-dialog__help";
+      notice.textContent = "URI too large for a QR — use Copy URI instead.";
+      qrHost.replaceChildren(notice);
+    }
+  };
+
+  const applyMode = (next: "v2" | "v3"): void => {
+    mode = next;
+    const v3 = next === "v3";
+    nameLabel.hidden = v3;
+    nameInput.hidden = v3;
+    v3Note.hidden = !v3;
+  };
+
+  const regenerateV2 = async (name: string): Promise<void> => {
     status.textContent = "Generating…";
     qrHost.replaceChildren();
     uriBox.value = "";
     try {
       const result = await myCard(name);
-      status.textContent = `${result.card.display_name} · ${result.card.agent_id.slice(0, 8)}…`;
+      status.textContent
+        = `${result.card.display_name} · ${result.card.agent_id.slice(0, 8)}…`;
       uriBox.value = result.uri;
-      // QR is best-effort. v2 cards carry a KEM pubkey + sigs and
-      // can exceed any QR version's capacity; in that case fall back
-      // to a textual notice so the URI itself stays usable.
-      try {
-        qrHost.replaceChildren(renderQrSvg(result.uri));
-      } catch {
-        const notice = document.createElement("p");
-        notice.className = "chat-dialog__help";
-        notice.textContent = "URI too large for a QR — use Copy URI instead.";
-        qrHost.replaceChildren(notice);
-      }
+      paintQr(result.uri);
     } catch (e) {
       status.textContent = `Could not generate card: ${errMsg(e)}`;
     }
   };
 
   const applyRename = async (): Promise<void> => {
+    if (mode !== "v2") return;
     const next = nameInput.value.trim();
     if (next === currentName.trim()) return;
     currentName = next;
@@ -123,7 +148,7 @@ export async function mountCardDialog(
     } catch (e) {
       console.warn("[chat] save display name:", e);
     }
-    await regenerate(next);
+    await regenerateV2(next);
   };
 
   nameInput.addEventListener("change", () => {
@@ -150,5 +175,19 @@ export async function mountCardDialog(
     }
   });
 
-  await regenerate(displayName);
+  // Feature-detect v3 first. Any failure (404 "publish your profile",
+  // network error, malformed record, empty payload) falls back to v2
+  // silently — the user gets the best payload the local state can
+  // produce, and never sees a "success" state with nothing to share.
+  try {
+    const v3Uri = await pairShare();
+    if (!v3Uri) throw new Error("empty v3 share URI");
+    applyMode("v3");
+    status.textContent = "Pointed at your Autonomi profile.";
+    uriBox.value = v3Uri;
+    paintQr(v3Uri);
+  } catch {
+    applyMode("v2");
+    await regenerateV2(displayName);
+  }
 }

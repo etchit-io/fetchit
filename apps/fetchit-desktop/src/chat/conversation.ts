@@ -15,6 +15,7 @@ export interface ConversationHandlers {
   onAutonomi: (addr: string) => void;
   onCard: (uri: string) => void;
   onInvite: (uri: string) => void;
+  onProfile: (uri: string) => void;
   onAddContact: () => void;
   onSetTrust: (agentId: string, level: TrustLevel) => void;
   onRemoveContact: (agentId: string) => void;
@@ -59,6 +60,7 @@ export function mountConversation(
     onAutonomi: handlers.onAutonomi,
     onCard: handlers.onCard,
     onInvite: handlers.onInvite,
+    onProfile: handlers.onProfile,
   };
 
   let lastConv: Conversation | null = null;

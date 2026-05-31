@@ -2,17 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountAddContact } from "./addContact";
 
 const importCardMock = vi.fn<(uri: string) => Promise<void>>();
+const pairAcceptMock = vi.fn<(uri: string) => Promise<{ agentIdHex: string }>>();
 
 vi.mock("./api", () => ({
   importCard: (uri: string) => importCardMock(uri),
+  pairAccept: (uri: string) => pairAcceptMock(uri),
 }));
 
 const VALID = "x0x://agent/abcdefghijklmnop";
+const VALID_V3
+  = "fetchit://share/v3/"
+    + "aa".repeat(32)
+    + "/"
+    + "bb".repeat(32)
+    + "?relay=https://relay.example/";
 
 let host: HTMLElement;
 
 beforeEach(() => {
   importCardMock.mockReset();
+  pairAcceptMock.mockReset();
   host = document.createElement("div");
   document.body.appendChild(host);
 });
@@ -34,7 +43,7 @@ function getStatus(): HTMLElement {
 }
 
 describe("mountAddContact", () => {
-  it("only enables Add once the trimmed value starts with x0x://agent/", () => {
+  it("only enables Add for a v2 x0x://agent/ or v3 fetchit://share/v3/ prefix", () => {
     mountAddContact(host, { onClose: () => {}, onImported: () => {} });
     const btn = getAddBtn();
     const input = getInput();
@@ -56,6 +65,50 @@ describe("mountAddContact", () => {
     input.value = VALID;
     input.dispatchEvent(new Event("input"));
     expect(btn.disabled).toBe(false);
+
+    input.value = VALID_V3;
+    input.dispatchEvent(new Event("input"));
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("dispatches v3 URIs to pairAccept and surfaces the returned agentIdHex", async () => {
+    pairAcceptMock.mockResolvedValueOnce({ agentIdHex: "deadbeef" });
+    const onImported = vi.fn();
+    mountAddContact(host, { onClose: () => {}, onImported });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = `  ${VALID_V3}\n`;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pairAcceptMock).toHaveBeenCalledWith(VALID_V3);
+    expect(importCardMock).not.toHaveBeenCalled();
+    expect(onImported).toHaveBeenCalledWith({ agentIdHex: "deadbeef" });
+    expect(getStatus().textContent).toBe("Imported.");
+  });
+
+  it("shows 'Fetching profile…' (not 'Importing…') while a v3 accept is in flight", async () => {
+    let resolveAccept: ((v: { agentIdHex: string }) => void) | undefined;
+    pairAcceptMock.mockImplementationOnce(
+      () =>
+        new Promise<{ agentIdHex: string }>((resolve) => {
+          resolveAccept = resolve;
+        }),
+    );
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = VALID_V3;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+
+    expect(getStatus().textContent).toBe("Fetching profile…");
+    resolveAccept?.({ agentIdHex: "ff" });
   });
 
   it("accepts a card URI with surrounding whitespace", () => {

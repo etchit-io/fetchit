@@ -1,12 +1,29 @@
-// Add-contact dialog — accepts a pasted `x0x://agent/…` card URI and
-// forwards it to the daemon's import endpoint.
+// Add-contact dialog — accepts either a pasted v2 `x0x://agent/…`
+// card URI or a v3 `fetchit://share/v3/…` profile share URI and
+// forwards it to the matching daemon command.
 
-import { importCard } from "./api";
+import { importCard, pairAccept } from "./api";
 import { errMsg } from "./errors";
 
 export interface AddContactHandlers {
   onClose: () => void;
-  onImported: () => void;
+  /// Called after a successful add. The optional `agentIdHex` is set
+  /// for v3 accepts so the caller can navigate to the new DM; v2
+  /// imports get `undefined` (the daemon emits the contact through
+  /// the normal refresh path either way).
+  onImported: (result?: { agentIdHex: string }) => void;
+}
+
+type UriKind = "v2" | "v3";
+
+const V2_PREFIX = "x0x://agent/";
+const V3_PREFIX = "fetchit://share/v3/";
+
+function detectUriKind(value: string): UriKind | null {
+  const t = value.trim();
+  if (t.startsWith(V2_PREFIX)) return "v2";
+  if (t.startsWith(V3_PREFIX)) return "v3";
+  return null;
 }
 
 export function mountAddContact(
@@ -25,7 +42,7 @@ export function mountAddContact(
   const help = document.createElement("p");
   help.className = "chat-dialog__help";
   help.textContent
-    = "Paste an x0x://agent/… card URI from someone you trust.";
+    = "Paste a share URI from someone you trust — either x0x://agent/… or fetchit://share/v3/…";
 
   // Share URIs are long (KEM/ML-DSA keys + signature add up to ~17KB).
   // A single-line <input> forces the text engine to lay out the entire
@@ -33,7 +50,7 @@ export function mountAddContact(
   // past 65535 px; textarea wraps visually and keeps the box bounded.
   const input = document.createElement("textarea");
   input.className = "chat-dialog__uri";
-  input.placeholder = "x0x://agent/…";
+  input.placeholder = "x0x://agent/… or fetchit://share/v3/…";
   input.spellcheck = false;
   input.rows = 4;
   input.wrap = "soft";
@@ -72,17 +89,26 @@ export function mountAddContact(
   });
 
   input.addEventListener("input", () => {
-    addBtn.disabled = !input.value.trim().startsWith("x0x://agent/");
+    addBtn.disabled = detectUriKind(input.value) === null;
     status.textContent = "";
   });
 
   addBtn.addEventListener("click", async () => {
+    const kind = detectUriKind(input.value);
+    if (kind === null) return;
     addBtn.disabled = true;
-    status.textContent = "Importing…";
+    status.textContent = kind === "v3" ? "Fetching profile…" : "Importing…";
     try {
-      await importCard(input.value.trim());
-      status.textContent = "Imported.";
-      handlers.onImported();
+      const uri = input.value.trim();
+      if (kind === "v3") {
+        const result = await pairAccept(uri);
+        status.textContent = "Imported.";
+        handlers.onImported(result);
+      } else {
+        await importCard(uri);
+        status.textContent = "Imported.";
+        handlers.onImported();
+      }
     } catch (e) {
       status.textContent = `Failed: ${errMsg(e)}`;
       addBtn.disabled = false;

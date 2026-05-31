@@ -29,6 +29,26 @@ export async function importCard(uri: string): Promise<void> {
   await invoke("chat_import_card", { uri });
 }
 
+export interface PairAccepted {
+  agentIdHex: string;
+}
+
+/// Accept a v3 share URI (`fetchit://share/v3/…`) by fetching the
+/// offerer's profile-index record from the embedded relay, verifying
+/// the ML-DSA-65 signature, and persisting a `StoredContactCard`
+/// locally. The returned `agentIdHex` lets the caller navigate to
+/// the new DM.
+export async function pairAccept(uri: string): Promise<PairAccepted> {
+  return invoke<PairAccepted>("chat_pair_accept", { uri });
+}
+
+/// Build a v3 share URI for the local identity by looking up its own
+/// profile-index record on the relay. Rejects with a 'Publish your
+/// profile first…' message when the relay has no record yet.
+export async function pairShare(): Promise<string> {
+  return invoke<string>("chat_pair_share");
+}
+
 export async function listContacts(): Promise<Contact[]> {
   return invoke<Contact[]>("chat_contacts");
 }
