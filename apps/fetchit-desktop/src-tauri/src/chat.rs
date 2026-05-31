@@ -28,7 +28,11 @@ const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5)
 #[derive(Clone)]
 pub struct ChatState {
     client: Arc<Mutex<Option<Client>>>,
-    relay_url: Url,
+    /// Mutable relay URL — switched at runtime by `set_relay_url` when
+    /// the user picks a different region in Settings. Reads are
+    /// infrequent (only on client rebuild), so a plain `std::sync::Mutex`
+    /// is fine; never held across an `.await` point.
+    relay_url: Arc<std::sync::Mutex<Url>>,
     data_dir: PathBuf,
     // Plain heap memory — no `zeroize` wrapper because the slot is
     // rebuilt on every set and the UX target accepts the trade-off.
@@ -58,7 +62,7 @@ impl ChatState {
         let url = Url::parse(relay_url).map_err(|e| format!("invalid relay url: {e}"))?;
         Ok(Self {
             client: Arc::new(Mutex::new(None)),
-            relay_url: url,
+            relay_url: Arc::new(std::sync::Mutex::new(url)),
             data_dir,
             passphrase: Arc::new(Mutex::new(passphrase)),
             lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(lan_direct_enabled)),
@@ -74,8 +78,13 @@ impl ChatState {
         let lan = self
             .lan_direct_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
+        let relay_url = self
+            .relay_url
+            .lock()
+            .map_err(|e| format!("relay_url lock poisoned: {e}"))?
+            .clone();
         let mut builder = Client::builder()
-            .relay_url(self.relay_url.clone())
+            .relay_url(relay_url)
             .data_dir(self.data_dir.clone())
             .enable_lan_direct(lan);
         if let Some(p) = passphrase {
@@ -86,12 +95,32 @@ impl ChatState {
         Ok(c)
     }
 
-    /// Borrow the relay URL configured at build time. Used by the
-    /// pair-share command to assemble the v3 share URI from the
-    /// same relay the chat client is talking to.
+    /// Snapshot the current relay URL. Used by the pair-share command
+    /// to assemble the v3 share URI from the same relay the chat
+    /// client is talking to. Lock is held for a clone-and-drop only.
     #[must_use]
-    pub fn relay_url(&self) -> &Url {
-        &self.relay_url
+    pub fn relay_url(&self) -> Url {
+        self.relay_url
+            .lock()
+            .map_or_else(|p| p.into_inner().clone(), |g| g.clone())
+    }
+
+    /// Swap the relay URL and force a client rebuild so the next chat
+    /// call connects to the new region. Delegates to
+    /// [`validate_relay_url`] for the parse + scheme + path checks.
+    ///
+    /// # Errors
+    /// Returns an error if the URL is malformed, uses an unsupported
+    /// scheme (anything other than `http`/`https`), or has a non-root
+    /// path component.
+    pub async fn set_relay_url(&self, url: &str) -> Result<(), String> {
+        let parsed = validate_relay_url(url)?;
+        match self.relay_url.lock() {
+            Ok(mut g) => *g = parsed,
+            Err(p) => *p.into_inner() = parsed,
+        }
+        self.invalidate().await;
+        Ok(())
     }
 
     /// Read the current opt-in flag for LAN-direct delivery. Used by
@@ -1277,4 +1306,72 @@ fn emit(app: &AppHandle, ev: &Event) {
 
 fn log_pump(msg: &str) {
     eprintln!("[fetchit][chat] {msg}");
+}
+
+fn validate_relay_url(url: &str) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("invalid relay url: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("relay url must use http or https, got {other}")),
+    }
+    let path = parsed.path();
+    if !path.is_empty() && path != "/" {
+        return Err(format!(
+            "relay url must be a base URL with no path (got {path:?})"
+        ));
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::validate_relay_url;
+
+    #[test]
+    fn accepts_http_with_port_no_path() {
+        let p = validate_relay_url("http://relay.example:8088").unwrap();
+        assert_eq!(p.scheme(), "http");
+    }
+
+    #[test]
+    fn accepts_https_with_trailing_slash() {
+        let p = validate_relay_url("https://relay.example:8443/").unwrap();
+        assert_eq!(p.scheme(), "https");
+        assert_eq!(p.path(), "/");
+    }
+
+    #[test]
+    fn rejects_unsupported_scheme() {
+        let err = validate_relay_url("file:///etc/passwd").unwrap_err();
+        assert!(err.contains("http or https"), "{err}");
+    }
+
+    #[test]
+    fn rejects_javascript_scheme() {
+        let err = validate_relay_url("javascript:alert(1)").unwrap_err();
+        assert!(err.contains("http or https"), "{err}");
+    }
+
+    #[test]
+    fn rejects_url_with_non_root_path() {
+        let err = validate_relay_url("http://relay.example:8088/prefix/").unwrap_err();
+        assert!(err.contains("no path"), "{err}");
+    }
+
+    #[test]
+    fn rejects_url_with_v1_profile_path() {
+        // The exact path `chat_pair_share` would later `Url::join` would
+        // collide with — this would silently produce the wrong URL if
+        // we let it through.
+        let err =
+            validate_relay_url("http://relay.example:8088/v1/profile/abc").unwrap_err();
+        assert!(err.contains("no path"), "{err}");
+    }
+
+    #[test]
+    fn rejects_malformed_url() {
+        let err = validate_relay_url("not a url").unwrap_err();
+        assert!(err.contains("invalid relay url"), "{err}");
+    }
 }

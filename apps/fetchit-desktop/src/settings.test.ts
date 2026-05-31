@@ -44,6 +44,12 @@ function makeRouter(
     lan_direct_enabled: () => false,
     peers_override: () => [],
     default_peers: () => [],
+    relay_regions: () => [
+      { tag: "nyc", label: "NYC (US East)", url: "http://67.207.94.66:8088" },
+      { tag: "fra", label: "Frankfurt (EU)", url: "http://159.89.11.217:8088" },
+    ],
+    relay_url: () => "http://67.207.94.66:8088",
+    set_relay_url: () => undefined,
     set_idle_policy: () => undefined,
     set_lan_direct_enabled: () => undefined,
     set_cache_policy: () => undefined,
@@ -138,6 +144,122 @@ describe("LAN-direct toggle", () => {
     box!.dispatchEvent(new Event("change"));
     await flush();
     expect(box!.checked).toBe(true);
+  });
+});
+
+describe("relay region picker", () => {
+  function selectEl(): HTMLSelectElement {
+    return host.querySelector<HTMLSelectElement>("#relay-region")!;
+  }
+  function descEl(): HTMLElement {
+    return host.querySelector<HTMLElement>("#relay-region-desc")!;
+  }
+  function customInput(): HTMLInputElement {
+    return host.querySelector<HTMLInputElement>("#relay-custom-url")!;
+  }
+  function customSaveBtn(): HTMLButtonElement {
+    return host.querySelector<HTMLButtonElement>("#relay-custom-save")!;
+  }
+  function customErr(): HTMLElement {
+    return host.querySelector<HTMLElement>("#relay-custom-error")!;
+  }
+
+  it("renders KNOWN_RELAYS as options plus a Custom… entry, and picks the current URL", async () => {
+    const api = mountSettings(host, defaultHooks());
+    await api.open();
+    await flush();
+    const opts = Array.from(selectEl().options).map((o) => o.value);
+    expect(opts).toEqual(["nyc", "fra", "__custom__"]);
+    expect(selectEl().value).toBe("nyc");
+    expect(descEl().textContent).toContain("67.207.94.66:8088");
+  });
+
+  it("invokes set_relay_url with the canonical URL when a region is picked", async () => {
+    (invoke as unknown as InvokeMock).mockImplementation(makeRouter());
+    const api = mountSettings(host, defaultHooks());
+    await api.open();
+    await flush();
+
+    selectEl().value = "fra";
+    selectEl().dispatchEvent(new Event("change"));
+    await flush();
+
+    const calls = (invoke as unknown as InvokeMock).mock.calls.filter(
+      ([cmd]) => cmd === "set_relay_url",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toEqual({ url: "http://159.89.11.217:8088" });
+    expect(descEl().textContent).toContain("159.89.11.217:8088");
+  });
+
+  it("treats a URL not in KNOWN_RELAYS as Custom and prefills the input", async () => {
+    (invoke as unknown as InvokeMock).mockImplementation(
+      makeRouter({
+        relay_url: () => "http://my-vps.example:8443",
+      }),
+    );
+    const api = mountSettings(host, defaultHooks());
+    await api.open();
+    await flush();
+    expect(selectEl().value).toBe("__custom__");
+    expect(customInput().value).toBe("http://my-vps.example:8443");
+    expect(descEl().textContent).toContain("my-vps.example:8443");
+  });
+
+  it("validates the custom URL field and shows the backend error on rejection", async () => {
+    (invoke as unknown as InvokeMock).mockImplementation(
+      makeRouter({
+        set_relay_url: () => {
+          throw new Error("invalid relay url: bad scheme");
+        },
+      }),
+    );
+    const api = mountSettings(host, defaultHooks());
+    await api.open();
+    await flush();
+
+    customInput().value = "not a url";
+    customSaveBtn().click();
+    await flush();
+    expect(customErr().hidden).toBe(false);
+    expect(customErr().textContent).toContain("bad scheme");
+    // Dropdown should not have flipped to Custom — original NYC stays.
+    expect(selectEl().value).toBe("nyc");
+  });
+
+  it("surfaces backend rejection of a path-bearing custom URL", async () => {
+    (invoke as unknown as InvokeMock).mockImplementation(
+      makeRouter({
+        set_relay_url: () => {
+          throw new Error(
+            "relay url must be a base URL with no path (got \"/v1/profile\")",
+          );
+        },
+      }),
+    );
+    const api = mountSettings(host, defaultHooks());
+    await api.open();
+    await flush();
+
+    customInput().value = "http://relay.example:8088/v1/profile";
+    customSaveBtn().click();
+    await flush();
+    expect(customErr().hidden).toBe(false);
+    expect(customErr().textContent).toContain("no path");
+  });
+
+  it("never invokes set_relay_url with an empty trimmed URL", async () => {
+    const api = mountSettings(host, defaultHooks());
+    await api.open();
+    await flush();
+    customInput().value = "   ";
+    customSaveBtn().click();
+    await flush();
+    const calls = (invoke as unknown as InvokeMock).mock.calls.filter(
+      ([cmd]) => cmd === "set_relay_url",
+    );
+    expect(calls).toHaveLength(0);
+    expect(customErr().textContent).toContain("Enter a URL");
   });
 });
 

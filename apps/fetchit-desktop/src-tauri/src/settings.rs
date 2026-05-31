@@ -38,10 +38,38 @@ impl Default for IdlePolicy {
     }
 }
 
-/// Default fetchit-operated relay URL. The desktop ships pointing at
-/// this; users can change it from Settings → Advanced when more
-/// regions land.
-pub const DEFAULT_RELAY_URL: &str = "http://67.207.94.66:8088";
+/// One fetchit-operated relay node, advertised in Settings → Network
+/// as a region option. Custom URLs go through the same UI but skip
+/// this table.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownRelay {
+    /// Wire tag (matches `fetchit_relay_proto::Region::tag()`).
+    pub tag: &'static str,
+    /// Human-facing label rendered in the Settings dropdown.
+    pub label: &'static str,
+    /// Base URL the desktop client connects to.
+    pub url: &'static str,
+}
+
+/// Fetchit-operated relay nodes. The first entry is the shipped default.
+/// Add a new row when a region comes online — the frontend reads this
+/// table verbatim so no separate JS update is needed.
+pub const KNOWN_RELAYS: &[KnownRelay] = &[
+    KnownRelay {
+        tag: "nyc",
+        label: "NYC (US East)",
+        url: "http://67.207.94.66:8088",
+    },
+    KnownRelay {
+        tag: "fra",
+        label: "Frankfurt (EU)",
+        url: "http://159.89.11.217:8088",
+    },
+];
+
+/// Default fetchit-operated relay URL. First entry of [`KNOWN_RELAYS`].
+pub const DEFAULT_RELAY_URL: &str = KNOWN_RELAYS[0].url;
 
 fn default_relay_url() -> String {
     DEFAULT_RELAY_URL.to_owned()

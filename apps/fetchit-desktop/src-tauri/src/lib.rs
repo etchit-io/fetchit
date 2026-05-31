@@ -429,6 +429,45 @@ async fn set_lan_direct_enabled(
     Ok(())
 }
 
+/// Snapshot the fetchit-operated relay nodes the desktop knows about.
+/// The frontend reads this once and renders a region dropdown; entries
+/// are added by appending to [`settings::KNOWN_RELAYS`] without a JS
+/// update.
+#[tauri::command]
+fn relay_regions() -> Vec<settings::KnownRelay> {
+    settings::KNOWN_RELAYS.to_vec()
+}
+
+/// Read the persisted relay URL the chat client points at.
+#[tauri::command]
+fn relay_url(state: tauri::State<'_, AppState>) -> String {
+    state
+        .settings
+        .lock()
+        .map_or_else(
+            |_| settings::DEFAULT_RELAY_URL.to_owned(),
+            |s| s.relay_url.clone(),
+        )
+}
+
+/// Switch to a new relay URL (either a `KNOWN_RELAYS` entry or a custom
+/// URL the user typed in). Persists to disk and invalidates the chat
+/// client so the next chat op reconnects against the new relay. No
+/// restart required.
+#[tauri::command]
+async fn set_relay_url(
+    settings_state: tauri::State<'_, AppState>,
+    chat_state: tauri::State<'_, chat::ChatState>,
+    url: String,
+) -> Result<(), String> {
+    chat_state.set_relay_url(&url).await?;
+    if let Ok(mut s) = settings_state.settings.lock() {
+        s.relay_url = url;
+        let _ = s.save(&settings_state.settings_path);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn set_idle_policy(state: tauri::State<'_, AppState>, policy: IdlePolicy) {
     let Ok(mut s) = state.settings.lock() else {
@@ -720,6 +759,9 @@ pub fn run() {
             set_display_name,
             lan_direct_enabled,
             set_lan_direct_enabled,
+            relay_regions,
+            relay_url,
+            set_relay_url,
             chat::chat_health,
             chat::chat_list_nearby,
             chat::chat_identity,

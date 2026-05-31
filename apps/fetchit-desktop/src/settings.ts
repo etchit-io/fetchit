@@ -58,6 +58,18 @@ export interface IdlePolicy {
   timeoutMinutes: number;
 }
 
+/// Fetchit-operated relay region surfaced by the Network → "Chat relay
+/// region" dropdown. The list comes from the `relay_regions` Tauri
+/// command (which reads `settings::KNOWN_RELAYS`) so adding a new
+/// region in Rust auto-populates the dropdown without a JS update.
+export interface RelayRegion {
+  tag: string;
+  label: string;
+  url: string;
+}
+
+const CUSTOM_RELAY_TAG = "__custom__";
+
 const IDLE_CHOICES: { value: number; label: string }[] = [
   { value: 0, label: "Never" },
   { value: 5, label: "After 5 minutes" },
@@ -105,6 +117,12 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   const shareSelectedBtn = root.querySelector<HTMLButtonElement>("#bookmarks-share-selected");
   const idleSelect = root.querySelector<HTMLSelectElement>("#idle-timeout");
   const lanDirectBox = root.querySelector<HTMLInputElement>("#lan-direct-enabled");
+  const relaySelect = root.querySelector<HTMLSelectElement>("#relay-region");
+  const relayDesc = root.querySelector<HTMLElement>("#relay-region-desc");
+  const relayCustomDetails = root.querySelector<HTMLDetailsElement>("#relay-custom-details");
+  const relayCustomInput = root.querySelector<HTMLInputElement>("#relay-custom-url");
+  const relayCustomSaveBtn = root.querySelector<HTMLButtonElement>("#relay-custom-save");
+  const relayCustomError = root.querySelector<HTMLElement>("#relay-custom-error");
 
   if (
     !close ||
@@ -118,7 +136,13 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     !shareAllBtn ||
     !shareSelectedBtn ||
     !idleSelect ||
-    !lanDirectBox
+    !lanDirectBox ||
+    !relaySelect ||
+    !relayDesc ||
+    !relayCustomDetails ||
+    !relayCustomInput ||
+    !relayCustomSaveBtn ||
+    !relayCustomError
   ) {
     throw new Error("settings: missing form element");
   }
@@ -149,6 +173,69 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     });
   });
 
+  // Region picker state — KNOWN_RELAYS comes from Rust (see
+  // `settings::KNOWN_RELAYS`) so a new region added there shows up in
+  // the dropdown on the next render with no JS change.
+  let relayRegions: RelayRegion[] = [];
+  let lastRelayUrl = "";
+
+  const renderRelayChoice = (
+    url: string,
+    regions: RelayRegion[],
+  ): void => {
+    const known = regions.find((r) => r.url === url);
+    if (known) {
+      relaySelect.value = known.tag;
+      relayDesc.textContent = `Chat routes through ${known.url}.`;
+      relayCustomDetails.open = false;
+    } else {
+      relaySelect.value = CUSTOM_RELAY_TAG;
+      relayDesc.textContent = `Custom relay: ${url}`;
+      relayCustomInput.value = url;
+      relayCustomDetails.open = true;
+    }
+  };
+
+  const applyRelay = async (url: string): Promise<void> => {
+    try {
+      await invoke("set_relay_url", { url });
+      lastRelayUrl = url;
+      relayCustomError.hidden = true;
+      relayCustomError.textContent = "";
+      renderRelayChoice(url, relayRegions);
+    } catch (e) {
+      relayCustomError.textContent = String(e);
+      relayCustomError.hidden = false;
+      // Revert dropdown to whatever the daemon currently knows about.
+      renderRelayChoice(lastRelayUrl, relayRegions);
+    }
+  };
+
+  relaySelect.addEventListener("change", () => {
+    const tag = relaySelect.value;
+    if (tag === CUSTOM_RELAY_TAG) {
+      relayCustomDetails.open = true;
+      relayCustomInput.focus();
+      // Snap back the dropdown so it doesn't claim "Custom" until the
+      // user actually saves a URL.
+      renderRelayChoice(lastRelayUrl, relayRegions);
+      return;
+    }
+    const picked = relayRegions.find((r) => r.tag === tag);
+    if (!picked) return;
+    void applyRelay(picked.url);
+  });
+
+  relayCustomSaveBtn.addEventListener("click", () => {
+    const url = relayCustomInput.value.trim();
+    if (!url) {
+      relayCustomError.textContent = "Enter a URL first.";
+      relayCustomError.hidden = false;
+      return;
+    }
+    void applyRelay(url);
+  });
+
   const refreshIdle = async (): Promise<void> => {
     try {
       const p = await invoke<IdlePolicy>("idle_policy");
@@ -164,6 +251,43 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
       lanDirectBox!.checked = !!on;
     } catch {
       lanDirectBox!.checked = false;
+    }
+  };
+
+  const refreshRelay = async (): Promise<void> => {
+    // Disable the dropdown until we've heard from the backend so a
+    // pre-refresh click can't fire `applyRelay` against the empty
+    // initial `lastRelayUrl` (which would flip the UI to "Custom" with
+    // a blank URL on the revert path).
+    relaySelect!.disabled = true;
+    relayCustomSaveBtn!.disabled = true;
+    try {
+      const [regions, url] = await Promise.all([
+        invoke<RelayRegion[]>("relay_regions"),
+        invoke<string>("relay_url"),
+      ]);
+      relayRegions = regions;
+      lastRelayUrl = url;
+      relaySelect!.replaceChildren();
+      for (const r of regions) {
+        const opt = document.createElement("option");
+        opt.value = r.tag;
+        opt.textContent = r.label;
+        relaySelect!.appendChild(opt);
+      }
+      const custom = document.createElement("option");
+      custom.value = CUSTOM_RELAY_TAG;
+      custom.textContent = "Custom…";
+      relaySelect!.appendChild(custom);
+      renderRelayChoice(url, regions);
+    } catch {
+      // Backend unavailable — leave the dropdown empty and the desc
+      // line blank rather than rendering misleading state.
+      relaySelect!.replaceChildren();
+      relayDesc!.textContent = "";
+    } finally {
+      relaySelect!.disabled = false;
+      relayCustomSaveBtn!.disabled = false;
     }
   };
 
@@ -262,6 +386,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
         refreshBookmarks(),
         refreshIdle(),
         refreshLanDirect(),
+        refreshRelay(),
       ]);
       if (peersTimer === null) {
         peersTimer = window.setInterval(() => void refreshPeers(), 5_000);
@@ -515,6 +640,25 @@ function buildPage(): HTMLElement {
         <span>Connected peers</span>
         <span id="net-peers" data-state="off">—</span>
       </div>
+      <label class="setting-row">
+        <span>Chat relay region</span>
+        <select id="relay-region"></select>
+      </label>
+      <p class="setting-desc" id="relay-region-desc"></p>
+      <details class="setting-collapsible" id="relay-custom-details">
+        <summary>Use a custom relay</summary>
+        <p class="setting-desc">
+          Point chat at your own relay. The URL must be the base (no path), e.g.
+          <code>http://relay.example:8088</code>.
+        </p>
+        <div class="setting-row setting-row--stack">
+          <input type="text" id="relay-custom-url" spellcheck="false"
+                 placeholder="http://relay.example:8088"
+                 aria-label="Custom relay URL">
+          <button type="button" class="setting-action" id="relay-custom-save">Use this relay</button>
+        </div>
+        <p class="setting-error" id="relay-custom-error" role="alert" hidden></p>
+      </details>
       <label class="setting-row">
         <span>Disconnect when idle</span>
         <select id="idle-timeout"></select>
