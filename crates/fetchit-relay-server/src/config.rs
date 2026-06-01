@@ -28,6 +28,14 @@ pub struct ServerConfig {
     pub bearer_ttl: Duration,
     /// Trust anchors: issuer key id → ML-DSA-65 public key bytes.
     pub issuer_keys: HashMap<String, Vec<u8>>,
+    /// Loopback-only listener for sensitive metrics (`/v1/metrics/internal`).
+    ///
+    /// Defaults to `127.0.0.1:9088`. Set to `None` to disable the
+    /// internal channel entirely. Any non-loopback address is rejected
+    /// when the config is loaded from environment or when the server
+    /// starts — the kernel-level loopback bind is the security boundary,
+    /// not a request-time check.
+    pub internal_bind: Option<SocketAddr>,
 }
 
 impl ServerConfig {
@@ -48,13 +56,17 @@ impl ServerConfig {
             challenge_ttl: Duration::from_secs(60),
             bearer_ttl: Duration::from_secs(15 * 60),
             issuer_keys: HashMap::new(),
+            internal_bind: Some(SocketAddr::from(([127, 0, 0, 1], 9088))),
         }
     }
 
     /// Load from environment variables, falling back to defaults.
     ///
     /// Recognised variables: `FETCHIT_RELAY_BIND` (default `127.0.0.1:8088`),
-    /// `FETCHIT_RELAY_REGION` (default `nyc`).
+    /// `FETCHIT_RELAY_REGION` (default `nyc`),
+    /// `FETCHIT_RELAY_INTERNAL_BIND` (default `127.0.0.1:9088`; literal
+    /// `none` / `disabled` / empty turns the internal channel off; any
+    /// non-loopback address is rejected).
     ///
     /// # Errors
     /// Returns `ServerError::Config` if any variable is malformed.
@@ -65,15 +77,44 @@ impl ServerConfig {
             .map_err(|e| ServerError::Config(format!("bad bind address: {e}")))?;
         let region_raw = std::env::var("FETCHIT_RELAY_REGION").unwrap_or_else(|_| "nyc".to_owned());
         let region = Region::from_str(&region_raw).unwrap_or(Region::Nyc);
-        Ok(Self::defaults(bind, region))
+        let mut cfg = Self::defaults(bind, region);
+        if let Ok(raw) = std::env::var("FETCHIT_RELAY_INTERNAL_BIND") {
+            cfg.internal_bind = parse_internal_bind(&raw)?;
+        }
+        Ok(cfg)
     }
+}
+
+/// Parse the `FETCHIT_RELAY_INTERNAL_BIND` override, enforcing the
+/// loopback-only invariant. Accepts an empty string or the literals
+/// `none` / `disabled` (case-insensitive) to turn the endpoint off.
+///
+/// # Errors
+/// Returns `ServerError::Config` if the value is not parseable as a
+/// socket address, or if the address is not loopback.
+pub fn parse_internal_bind(raw: &str) -> Result<Option<SocketAddr>, ServerError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("disabled")
+    {
+        return Ok(None);
+    }
+    let addr = SocketAddr::from_str(trimmed)
+        .map_err(|e| ServerError::Config(format!("bad internal bind address {trimmed:?}: {e}")))?;
+    if !addr.ip().is_loopback() {
+        return Err(ServerError::Config(format!(
+            "FETCHIT_RELAY_INTERNAL_BIND must be loopback (127.0.0.0/8 or ::1), got {addr}"
+        )));
+    }
+    Ok(Some(addr))
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Region, ServerConfig};
+    use super::{parse_internal_bind, Region, ServerConfig};
     use std::net::SocketAddr;
 
     #[test]
@@ -91,5 +132,50 @@ mod tests {
                 || (suffix.len() == 7 && suffix.chars().all(|c| c.is_ascii_hexdigit())),
             "expected 7-hex-char short SHA or \"unknown\", got {suffix:?}"
         );
+    }
+
+    #[test]
+    fn internal_bind_defaults_to_loopback() {
+        let cfg = ServerConfig::defaults(SocketAddr::from(([127, 0, 0, 1], 0)), Region::Nyc);
+        let addr = cfg.internal_bind.expect("internal_bind defaulted on");
+        assert!(addr.ip().is_loopback(), "default internal bind must be loopback");
+        assert_eq!(addr.port(), 9088);
+    }
+
+    #[test]
+    fn parse_internal_bind_accepts_ipv4_loopback() {
+        let parsed = parse_internal_bind("127.0.0.1:9088").unwrap().unwrap();
+        assert_eq!(parsed, SocketAddr::from(([127, 0, 0, 1], 9088)));
+    }
+
+    #[test]
+    fn parse_internal_bind_accepts_ipv6_loopback() {
+        let parsed = parse_internal_bind("[::1]:9088").unwrap().unwrap();
+        assert!(parsed.ip().is_loopback());
+    }
+
+    #[test]
+    fn parse_internal_bind_disable_keywords_return_none() {
+        for raw in ["", "none", "NONE", "disabled", " DISABLED "] {
+            assert!(
+                parse_internal_bind(raw).unwrap().is_none(),
+                "expected disable for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_internal_bind_rejects_non_loopback() {
+        let err = parse_internal_bind("10.0.0.1:9088").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("loopback"),
+            "expected loopback rejection, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn parse_internal_bind_rejects_garbage() {
+        assert!(parse_internal_bind("not-a-socket").is_err());
     }
 }

@@ -105,17 +105,61 @@ impl Server {
         (router, state)
     }
 
+    /// Build the internal-only router served on the loopback listener.
+    ///
+    /// Hosts `/v1/metrics/internal` — a separate channel for aggregates
+    /// the public scrape must not expose. Today the body is identical
+    /// to `/v1/metrics`; future sensitive counters
+    /// (`profile_index_size`, denylist-health, agent-id cardinality)
+    /// land here without re-shaping the public surface.
+    ///
+    /// Defense-in-depth: the route is structurally absent from the
+    /// public router, so even if loopback binding were misconfigured a
+    /// request to `/v1/metrics/internal` on the public listener returns
+    /// 404. The kernel-level loopback bind is the primary boundary; the
+    /// route-absence is the secondary.
+    pub fn internal_router(state: Arc<ServerState>) -> Router {
+        Router::new()
+            .route("/v1/metrics/internal", get(metrics_internal_handler))
+            .with_state(state)
+    }
+
     /// Bind, spawn the background sweeper, and serve forever.
     ///
+    /// Also binds the loopback-only internal listener when
+    /// `config.internal_bind` is `Some`. A non-loopback internal bind
+    /// is refused before the listener is opened — defense in depth on
+    /// top of `ServerConfig::from_env`'s validation, in case the config
+    /// was constructed in code rather than from environment.
+    ///
     /// # Errors
-    /// Returns any IO error from binding or serving.
+    /// Returns any IO error from binding or serving, or
+    /// `anyhow::Error` when `internal_bind` is set to a non-loopback
+    /// address.
     pub async fn run(self) -> Result<()> {
         let bind = self.config.bind;
         let region = self.config.region.clone();
+        let internal_bind = self.config.internal_bind;
         let (router, state) = self.router();
         let listener = TcpListener::bind(bind).await?;
         info!(%bind, %region, "fetchit-relay-server listening");
-        spawn_sweeper(state);
+        spawn_sweeper(state.clone());
+        if let Some(internal) = internal_bind {
+            if !internal.ip().is_loopback() {
+                anyhow::bail!(
+                    "internal bind must be loopback (127.0.0.0/8 or ::1), got {internal}"
+                );
+            }
+            let internal_listener = TcpListener::bind(internal).await?;
+            let actual = internal_listener.local_addr().unwrap_or(internal);
+            info!(%actual, "internal-metrics listener bound (loopback only)");
+            let internal_router = Self::internal_router(state);
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(internal_listener, internal_router).await {
+                    warn!(error = ?e, "internal-metrics listener exited");
+                }
+            });
+        }
         axum::serve(listener, router).await?;
         Ok(())
     }
@@ -180,6 +224,22 @@ async fn health(State(state): State<Arc<ServerState>>) -> Json<Health> {
 async fn metrics_handler(
     State(state): State<Arc<ServerState>>,
 ) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        state.metrics.render_prometheus(),
+    )
+}
+
+async fn metrics_internal_handler(
+    State(state): State<Arc<ServerState>>,
+) -> impl axum::response::IntoResponse {
+    // Body parity with /v1/metrics today; future loopback-only
+    // counters (profile_index_size, denylist health, agent-id
+    // cardinality) get added here without re-shaping the public
+    // surface.
     (
         [(
             axum::http::header::CONTENT_TYPE,
