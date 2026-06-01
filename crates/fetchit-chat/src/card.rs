@@ -20,8 +20,19 @@ pub const CARD_VERSION: u16 = 1;
 /// User-facing scheme prefix for the share URI.
 pub const URI_PREFIX: &str = "x0x://agent/";
 
+/// Schema-freeze contract (M0 honesty floor): the v1 fields below
+/// are wire-stable forever. Bumping `CARD_VERSION` is forbidden
+/// without a coordinated migration across etchit-desktop +
+/// etchit-android (per `PINS.md`). New fields go through the
+/// reserved [`CardExtension::v2_rendezvous_hints`] slot, which is
+/// designed to be ignorable by v1 readers and populated by M2+
+/// writers without changing `version`. Schema churn destroys the
+/// social graph permanently — every paste-imported contact carries
+/// the schema version it was signed under.
+///
 /// The fetchit-namespaced fields tucked into an x0x share-card's JSON.
-/// All four fields together form the v2 extension.
+/// All four required fields together form the v2 extension; the
+/// reserved hints field is forward-compat only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardExtension {
     /// Card v2 schema version. Currently 1.
@@ -37,6 +48,41 @@ pub struct CardExtension {
     /// ML-DSA-65 signature over canonical card bytes excluding this signature.
     #[serde(rename = "fetchit_card_signature_b64")]
     pub signature_b64: String,
+    /// Reserved v2-rendezvous-hints slot (M2 Direct mode populates).
+    /// v1 readers ignore this; v2 writers may populate without
+    /// bumping `version`. Forward-compatible by construction.
+    /// `None` and an empty `RendezvousHints` are wire-distinct —
+    /// `serde(default, skip_serializing_if = "Option::is_none")`
+    /// means a card minted without the field round-trips identically.
+    #[serde(
+        rename = "fetchit_rendezvous_hints",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub v2_rendezvous_hints: Option<RendezvousHints>,
+}
+
+/// Forward-compat rendezvous hints reserved for M2 Direct mode.
+/// In M1 this slot is always `None`; M2 writers may populate it with
+/// ant-quic NAT-traversal hints (last-seen IP:port, STUN data, etc.).
+/// The on-wire shape is intentionally minimal: a version byte plus an
+/// opaque JSON payload so the schema can grow without a re-issued
+/// card.
+///
+/// v1 readers MUST ignore unknown hint payloads. Adding required
+/// fields to this struct in the future is permitted only if
+/// `RendezvousHints.v` bumps to 2 AND the old `RendezvousHints { v: 1, .. }`
+/// shape remains deserializable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RendezvousHints {
+    /// Hint-schema version. Currently always 1 when populated;
+    /// future M2 hint shapes bump this without touching
+    /// `CARD_VERSION`.
+    pub v: u8,
+    /// Opaque hint payload. Specific keys are defined alongside the
+    /// M2 Direct mode work; v1 readers leave this untouched.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 }
 
 /// Bytes signed for `CardExtension.signature_b64`:
@@ -288,6 +334,11 @@ pub fn verify_card_extension(
         kem_public_key_b64: kem_b64.to_owned(),
         agent_public_key_b64: agent_pk_b64.to_owned(),
         signature_b64: sig_b64.to_owned(),
+        // The verify path does NOT cover the reserved hints field —
+        // hints are forward-compat opaque payload not part of the
+        // signed body. v1 readers materialise hints as None; v2
+        // writers will populate after re-signing.
+        v2_rendezvous_hints: None,
     })
 }
 
@@ -491,5 +542,105 @@ mod tests {
         let legacy_uri = format!("{URI_PREFIX}{}", URL_SAFE_NO_PAD.encode(raw));
         let recovered = extended_card_from_uri(&legacy_uri).unwrap();
         assert_eq!(recovered, extended);
+    }
+
+    /// M0 schema-freeze contract: a v1 card minted without the
+    /// reserved v2-rendezvous-hints slot serialises to the EXACT
+    /// same JSON it always did — no `fetchit_rendezvous_hints` key
+    /// appears on the wire. Forward-compat by absence.
+    #[tokio::test]
+    async fn schema_freeze_v1_card_omits_hints_field_on_wire() {
+        let signer = MlDsaSigner::generate().unwrap();
+        let kem_pub = vec![0xaa; 1184];
+        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&extended).unwrap();
+        // The wire output of a v1 card must not include the reserved
+        // M2 field — a downstream consumer that's never heard of
+        // hints must be able to decode the body byte-for-byte
+        // identically to the pre-freeze shape.
+        assert!(
+            !json.contains("fetchit_rendezvous_hints"),
+            "v1 card must omit hints field on wire, got: {json}"
+        );
+    }
+
+    /// M0 schema-freeze contract: a v2 card with populated hints
+    /// can be decoded by any reader that knows the v1 shape — the
+    /// hints field is opaque to v1 and falls into the `extra` JSON.
+    /// We exercise the strict `CardExtension` parser separately and
+    /// confirm it round-trips when the field is present.
+    #[tokio::test]
+    async fn schema_freeze_v2_card_round_trips_through_strict_parser() {
+        let kem_pub_b64 = B64.encode(vec![0xaa; 1184]);
+        let agent_pk_b64 = B64.encode(vec![0xbb; 1952]);
+        let sig_b64 = B64.encode(vec![0xcc; 3309]);
+        let v2_with_hints = CardExtension {
+            version: 1,
+            kem_public_key_b64: kem_pub_b64.clone(),
+            agent_public_key_b64: agent_pk_b64.clone(),
+            signature_b64: sig_b64.clone(),
+            v2_rendezvous_hints: Some(RendezvousHints {
+                v: 1,
+                data: serde_json::json!({ "future_quic_hint": "ignored-by-v1" }),
+            }),
+        };
+        let wire = serde_json::to_string(&v2_with_hints).unwrap();
+        // Round-trip through strict parser: hints survive.
+        let parsed: CardExtension = serde_json::from_str(&wire).unwrap();
+        assert_eq!(parsed.v2_rendezvous_hints, v2_with_hints.v2_rendezvous_hints);
+        // And the wire DOES carry the field when populated.
+        assert!(
+            wire.contains("fetchit_rendezvous_hints"),
+            "populated hints must serialise to the wire"
+        );
+    }
+
+    /// M0 schema-freeze contract: a v1-shape wire JSON (no hints
+    /// field) parses into a `CardExtension` with `v2_rendezvous_hints
+    /// == None`. Backward-compat in.
+    #[test]
+    fn schema_freeze_v1_wire_parses_into_default_none_hints() {
+        let v1_wire = serde_json::json!({
+            "fetchit_card_version": 1,
+            "fetchit_kem_public_key_b64": B64.encode(vec![0xaa; 1184]),
+            "fetchit_agent_public_key_b64": B64.encode(vec![0xbb; 1952]),
+            "fetchit_card_signature_b64": B64.encode(vec![0xcc; 3309]),
+        });
+        let parsed: CardExtension = serde_json::from_value(v1_wire).unwrap();
+        assert_eq!(parsed.v2_rendezvous_hints, None);
+    }
+
+    /// M0 schema-freeze contract: a v2-shape wire JSON with hints
+    /// parses by code that knows the field; importantly, the hints
+    /// field's payload is opaque-by-construction (free-form
+    /// `serde_json::Value`), so future hint schema additions don't
+    /// require this code to know about them.
+    #[test]
+    fn schema_freeze_opaque_hint_payload_round_trips() {
+        let future_shape = serde_json::json!({
+            "fetchit_card_version": 1,
+            "fetchit_kem_public_key_b64": B64.encode(vec![0xaa; 1184]),
+            "fetchit_agent_public_key_b64": B64.encode(vec![0xbb; 1952]),
+            "fetchit_card_signature_b64": B64.encode(vec![0xcc; 3309]),
+            "fetchit_rendezvous_hints": {
+                "v": 1,
+                "data": {
+                    // Imagined M2 fields the v1 code has never heard of
+                    "stun_observed_ipv4": "203.0.113.7:51820",
+                    "last_seen_ms": 1_730_000_000_000_u64,
+                    "supported_protocols": ["ant-quic-v0", "ant-quic-v1"]
+                }
+            }
+        });
+        let parsed: CardExtension = serde_json::from_value(future_shape).unwrap();
+        let hints = parsed.v2_rendezvous_hints.expect("hints present");
+        assert_eq!(hints.v, 1);
+        // The opaque payload survived round-trip untouched.
+        assert_eq!(
+            hints.data["stun_observed_ipv4"],
+            serde_json::Value::String("203.0.113.7:51820".into())
+        );
     }
 }
