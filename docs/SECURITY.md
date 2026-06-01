@@ -26,6 +26,16 @@ content is allowed to do.
 If you find a vulnerability, see [Reporting](#reporting) below. **Please
 do not file public issues for security-impacting bugs.**
 
+> **Scope of this document.** This file covers the *reader* surface:
+> the iframe sandbox, the host process, the on-disk cache, and the
+> LAN-direct chat handshake. The chat surface has additional
+> caveats — relay-path confidentiality, group encryption, per-message
+> signature verification, KEM-keypair backup — that are documented
+> separately in
+> [`crates/fetchit-chat/SECURITY.md`](../crates/fetchit-chat/SECURITY.md).
+> If the two documents appear to disagree, both are bugs; please
+> [report](#reporting) the divergence.
+
 ---
 
 ## What fetch>it is
@@ -220,6 +230,7 @@ If you're auditing fetch>it, the load-bearing security code lives in:
 | `crates/fetchit-chat/src/lan_direct_transport.rs` | LAN-direct transport: TCP dial, accept loop, handshake-binding verifier, reachability gate |
 | `crates/fetchit-chat/src/lan_noise.rs` | Framed Noise XX + ML-DSA-65 channel-binding signature on handshake msg2/msg3 |
 | `crates/fetchit-chat/src/lan_static.rs` | Sealed at-rest vault for the X25519 static keypair (ChaCha20-Poly1305 + Argon2id) |
+| [`crates/fetchit-chat/SECURITY.md`](../crates/fetchit-chat/SECURITY.md) | Chat-specific v1 caveats: relay-path confidentiality, group plaintext, per-message signature verification, KEM-keypair backup, crypto-deps pinning |
 
 **LAN-direct transport** (opt-in, default off): when enabled in
 Settings → Network, fetch>it advertises itself on the local

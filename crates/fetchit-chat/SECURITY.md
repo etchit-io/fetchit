@@ -8,6 +8,13 @@ text below.
 If a claim in the announcement or the UI contradicts something here,
 the claim is wrong — fix the claim, not this document.
 
+> **Scope.** This file covers the *chat* surface only. The reader
+> surface — iframe sandbox, host process, on-disk cache, neutered
+> web APIs — is documented in
+> [`docs/SECURITY.md`](../../docs/SECURITY.md). If the two appear
+> to disagree, both are bugs; report the divergence via the channel
+> in [Reporting](#reporting-a-security-issue) below.
+
 ## The threat model in one paragraph
 
 LIT Chat v1 protects message **contents and metadata against a passive
@@ -161,7 +168,10 @@ order:
 
 ## Reporting a security issue
 
-Open an issue at `https://github.com/etchit-io/fetchit/issues` with
-the `security` label, or — for issues that should not be public until
-fixed — email the maintainers via the contact listed at
-`https://etchit.io/security`.
+Please report security-impacting issues **privately** via GitHub's
+private security advisory flow at
+<https://github.com/etchit-io/fetchit/security/advisories/new> rather
+than as a public issue. We'll acknowledge within a few days, agree on
+a disclosure timeline, and credit you in the fix's release notes.
+
+For non-security bugs, open a regular issue.
