@@ -1,0 +1,85 @@
+name: cla
+
+# Contributor License Agreement bot. Posts a sign-the-CLA comment on
+# every external PR; merges are blocked until the contributor types
+# the consent phrase. Internal commits (the org's own accounts) sail
+# through.
+#
+# Activation status:
+#   - DCO check (workflows/dco.yml) is live and gates every PR today.
+#   - This CLA workflow requires two manual setup steps before it
+#     does anything useful. Until then it runs without effect — the
+#     `secrets.CLA_BOT_TOKEN` lookup short-circuits if the secret is
+#     missing. See "Setup" below.
+#
+# Setup (one-time, when ready to enforce):
+#   1. Create a signatures storage repo (private or public — content
+#      is the signers' GitHub handles + timestamps). Suggested name:
+#      `josh-clsn/cla-signatures`. Initial state: one commit with an
+#      empty `signatures/version1/cla.json`.
+#   2. Generate a fine-grained Personal Access Token scoped to that
+#      repo with `Contents: read+write` permission.
+#   3. Add it as a repository secret named `CLA_BOT_TOKEN` in this
+#      repo's Settings → Secrets and variables → Actions.
+#   4. Update the `path-to-signatures` and `path-to-document` inputs
+#      below if you used different filenames.
+#
+# Once the secret lands the bot starts gating PRs automatically; no
+# code change to this file required.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    name: CLA signed
+    # NOTE: github.event.comment.body is used here ONLY in a workflow
+    # expression equality check (compared against a fixed literal in
+    # the workflow-engine context). It is never interpolated into a
+    # `run:` shell command. Workflow expressions are not shell-evaluated
+    # so this comparison is not a command-injection vector. The action
+    # downstream reads comment.body via the GitHub API, not via shell.
+    if: >-
+      (github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA' &&
+       github.event_name == 'issue_comment') ||
+      github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        # Skip silently when the bot token isn't configured yet. The
+        # secret name is `CLA_BOT_TOKEN`; see the "Setup" block at
+        # the top of this file. We don't reference secrets directly
+        # in the `if` (GitHub does not allow secrets there); test
+        # via env instead.
+        env:
+          BOT_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
+        if: env.BOT_TOKEN != ''
+        uses: contributor-assistant/github-action@v2.6.1
+        with:
+          # Phrase a contributor types to record consent.
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          # CLA text rendered to the PR comment. We point at the in-
+          # repo CONTRIBUTING.md section so the legal text travels with
+          # the code, doesn't live in a separate doc that can drift.
+          path-to-document: 'https://github.com/etchit-io/fetchit/blob/main/CONTRIBUTING.md#contributor-license-agreement-cla'
+          # Where signatures land. Same org/account, separate repo.
+          # Update `branch` if the storage repo's default isn't `main`.
+          remote-organization-name: josh-clsn
+          remote-repository-name: cla-signatures
+          path-to-signatures: 'signatures/version1/cla.json'
+          branch: main
+          # Members listed here are treated as having pre-signed; their
+          # PRs skip the bot prompt. josh-clsn is the maintainer.
+          allowlist: josh-clsn,bot*,dependabot[bot]
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
