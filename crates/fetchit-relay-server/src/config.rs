@@ -37,7 +37,11 @@ impl ServerConfig {
         Self {
             bind,
             region,
-            server_version: format!("fetchit-relay-server/{}", env!("CARGO_PKG_VERSION")),
+            server_version: format!(
+                "fetchit-relay-server/{}-{}",
+                env!("CARGO_PKG_VERSION"),
+                env!("FETCHIT_RELAY_GIT_SHORT"),
+            ),
             max_envelope_bytes: fetchit_relay_proto::DEFAULT_MAX_ENVELOPE_BYTES,
             transit_ttl: Duration::from_secs(15 * 60),
             transit_per_recipient: 256,
@@ -62,5 +66,30 @@ impl ServerConfig {
         let region_raw = std::env::var("FETCHIT_RELAY_REGION").unwrap_or_else(|_| "nyc".to_owned());
         let region = Region::from_str(&region_raw).unwrap_or(Region::Nyc);
         Ok(Self::defaults(bind, region))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::{Region, ServerConfig};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn server_version_carries_semver_and_git_short() {
+        let cfg = ServerConfig::defaults(SocketAddr::from(([127, 0, 0, 1], 0)), Region::Nyc);
+        let prefix = format!("fetchit-relay-server/{}-", env!("CARGO_PKG_VERSION"));
+        assert!(
+            cfg.server_version.starts_with(&prefix),
+            "expected version to start with {prefix:?}, got {:?}",
+            cfg.server_version
+        );
+        let suffix = cfg.server_version.strip_prefix(&prefix).unwrap();
+        assert!(
+            suffix == "unknown"
+                || (suffix.len() == 7 && suffix.chars().all(|c| c.is_ascii_hexdigit())),
+            "expected 7-hex-char short SHA or \"unknown\", got {suffix:?}"
+        );
     }
 }
