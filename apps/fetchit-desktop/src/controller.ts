@@ -16,7 +16,7 @@ import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } f
 import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
-import { mountChatPanel } from "./chat";
+import { mountChatPanel, type ChatPanelApi } from "./chat";
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 
@@ -88,46 +88,63 @@ export async function init(): Promise<void> {
   };
   shareBtn.addEventListener("click", openShare);
 
-  const chatBadge = document.createElement("span");
-  chatBadge.className = "chat-toggle__badge";
-  chatBadge.hidden = true;
-  chatBtn.appendChild(chatBadge);
-  const renderChatBadge = (count: number): void => {
-    // Hide entirely while the panel is open — the user is plainly
-    // already reading, no need to nag with a count.
-    if (chat.isOpen() || count <= 0) {
-      chatBadge.hidden = true;
-      chatBtn.removeAttribute("data-unread");
-      return;
-    }
-    chatBadge.hidden = false;
-    chatBadge.textContent = count > 99 ? "99+" : String(count);
-    chatBtn.setAttribute("data-unread", "true");
-  };
-
-  const chat = mountChatPanel(chatHost, {
-    onAutonomi: (uri) => {
-      const parsed = parseAutonomiUrl(uri);
-      if (parsed) {
-        chat.close();
-        submit(parsed.address, store, stageEl, parsed.query);
+  // Master feature gate for the chat surface. The Tauri backend
+  // returns `false` for v1 release builds unless FETCHIT_CHAT_ENABLED
+  // is set or chatEnabled is true in settings.json. Failing the
+  // query defaults to the build-time DEV flavour so `npm run tauri
+  // dev` keeps the panel visible without extra config.
+  const chatOn = await invoke<boolean>("chat_feature_enabled").catch(
+    () => import.meta.env.DEV,
+  );
+  // Captured at module level (within the closure) so the keyboard
+  // shortcut handler below can call into the panel when it's mounted
+  // and no-op when it isn't.
+  let chat: ChatPanelApi | null = null;
+  if (!chatOn) {
+    chatBtn.hidden = true;
+    chatHost.hidden = true;
+  } else {
+    const chatBadge = document.createElement("span");
+    chatBadge.className = "chat-toggle__badge";
+    chatBadge.hidden = true;
+    chatBtn.appendChild(chatBadge);
+    let lastUnread = 0;
+    const renderChatBadge = (count: number): void => {
+      // Hide entirely while the panel is open — the user is plainly
+      // already reading, no need to nag with a count.
+      if (chat?.isOpen() || count <= 0) {
+        chatBadge.hidden = true;
+        chatBtn.removeAttribute("data-unread");
+        return;
       }
-    },
-    onClose: () => {
-      // Re-render badge in case unread accrued while the panel was
-      // open (user could've left the panel on a different conv).
-      // Defer one tick so chat.isOpen() reports the new state first.
-      setTimeout(() => renderChatBadge(lastUnread), 0);
-    },
-    onUnreadChange: (n) => {
-      lastUnread = n;
-      renderChatBadge(n);
-    },
-  });
-  let lastUnread = 0;
-  chatBtn.addEventListener("click", () => {
-    void chat.toggle().then(() => renderChatBadge(lastUnread));
-  });
+      chatBadge.hidden = false;
+      chatBadge.textContent = count > 99 ? "99+" : String(count);
+      chatBtn.setAttribute("data-unread", "true");
+    };
+
+    chat = mountChatPanel(chatHost, {
+      onAutonomi: (uri) => {
+        const parsed = parseAutonomiUrl(uri);
+        if (parsed) {
+          chat?.close();
+          submit(parsed.address, store, stageEl, parsed.query);
+        }
+      },
+      onClose: () => {
+        // Re-render badge in case unread accrued while the panel was
+        // open (user could've left the panel on a different conv).
+        // Defer one tick so chat.isOpen() reports the new state first.
+        setTimeout(() => renderChatBadge(lastUnread), 0);
+      },
+      onUnreadChange: (n) => {
+        lastUnread = n;
+        renderChatBadge(n);
+      },
+    });
+    chatBtn.addEventListener("click", () => {
+      void chat?.toggle().then(() => renderChatBadge(lastUnread));
+    });
+  }
 
   const toggleBookmark = async (): Promise<void> => {
     const active = store.active();
@@ -221,7 +238,7 @@ export async function init(): Promise<void> {
     openSettings: () => void settings.open(),
     openShare,
     toggleBookmark: () => void toggleBookmark(),
-    toggleChat: () => void chat.toggle(),
+    toggleChat: () => void chat?.toggle(),
   });
 
   let lastBookmarkAddr: string | null = null;

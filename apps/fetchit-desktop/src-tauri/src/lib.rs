@@ -612,6 +612,18 @@ fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
 ///
 /// # Panics
 /// Cannot panic in practice — `settings::DEFAULT_RELAY_URL` is a
+/// Read-only Tauri command surfacing the resolved chat feature flag
+/// to the frontend so the chat panel + toolbar toggle can hide
+/// themselves when chat is off. Frontend queries this once at
+/// startup. Resolver lives in [`settings::resolve_chat_enabled`].
+#[tauri::command]
+fn chat_feature_enabled(state: tauri::State<'_, AppState>) -> bool {
+    state.settings.lock().map_or_else(
+        |_| cfg!(debug_assertions),
+        |s| settings::resolve_chat_enabled(&s),
+    )
+}
+
 /// compile-time constant known to parse as a valid URL. The `expect`
 /// guards a programming error in the fallback constant.
 #[allow(clippy::expect_used)]
@@ -705,15 +717,33 @@ pub fn run() {
             let disk_cache = Arc::new(DiskCache::new(cache_root, loaded.cache));
             let relay_url = loaded.relay_url.clone();
             let lan_direct_enabled = loaded.lan_direct_enabled;
+            // Resolve the chat feature flag once at boot. Env var
+            // override is rechecked here so a settings.json default-off
+            // doesn't fight a `FETCHIT_CHAT_ENABLED=1` invocation.
+            let chat_enabled_at_boot = settings::resolve_chat_enabled(&loaded);
 
             let state = AppState::new(disk_cache, loaded, settings_path);
             let server_state = state.clone();
             app.manage(state);
 
+            // Build + manage the chat client even when the feature is
+            // off, so dev builds that flip the env var post-launch can
+            // see the panel without restart. The expensive bit —
+            // spawn_event_pump — is gated: it pulls x0xd, opens a WS
+            // to the relay, and starts background tasks. Skip when
+            // chat is off so the v1 release ships cold.
             let chat_state =
                 build_chat_state(&relay_url, app_data.join("chat"), lan_direct_enabled);
             app.manage(chat_state.clone());
-            chat::spawn_event_pump(app.handle().clone(), chat_state);
+            if chat_enabled_at_boot {
+                chat::spawn_event_pump(app.handle().clone(), chat_state);
+            } else {
+                eprintln!(
+                    "[fetchit][chat] feature gated off (set {}=1 or Settings → \
+                     Advanced → chatEnabled=true to enable)",
+                    settings::CHAT_ENABLED_ENV,
+                );
+            }
 
             tauri::async_runtime::spawn(async move {
                 match server::spawn(server_state).await {
@@ -759,6 +789,7 @@ pub fn run() {
             set_display_name,
             lan_direct_enabled,
             set_lan_direct_enabled,
+            chat_feature_enabled,
             relay_regions,
             relay_url,
             set_relay_url,

@@ -103,6 +103,47 @@ pub struct Settings {
     /// until the host has tested two-laptop bring-up.
     #[serde(default)]
     pub lan_direct_enabled: bool,
+    /// Master feature gate for the LIT Chat surface. M0 ships this
+    /// default OFF in release builds so the fetch>it v1 release does
+    /// not leak chat scope to non-testers; debug builds default ON so
+    /// `npm run tauri dev` keeps the chat panel visible for active
+    /// development. The `FETCHIT_CHAT_ENABLED` env var overrides
+    /// either default at startup. M1 announcement flips the release
+    /// default to ON.
+    #[serde(default = "default_chat_enabled")]
+    pub chat_enabled: bool,
+}
+
+/// Build-flavor-dependent default for the chat feature flag.
+/// Release builds: false (M0 ship discipline — no chat scope leak).
+/// Debug builds: true (devs keep the chat panel visible by default).
+fn default_chat_enabled() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Env var that forces the chat feature on or off at startup,
+/// bypassing the persisted setting. Values: `0/false/no/off` → off,
+/// `1/true/yes/on` → on, anything else → fall through to the setting.
+///
+/// M0 contract: the v1 fetch>it release ships with chat hidden by
+/// default. Testers flip via env or Settings → Advanced.
+pub const CHAT_ENABLED_ENV: &str = "FETCHIT_CHAT_ENABLED";
+
+/// Resolve the effective chat-enabled flag from (env override,
+/// persisted setting). Env wins when set to a recognised value;
+/// otherwise the setting wins. Settings' own default is
+/// `cfg!(debug_assertions)`, so an unconfigured release build
+/// returns `false` here.
+#[must_use]
+pub fn resolve_chat_enabled(settings: &Settings) -> bool {
+    if let Ok(raw) = std::env::var(CHAT_ENABLED_ENV) {
+        match raw.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {} // unrecognised — fall through to the persisted setting
+        }
+    }
+    settings.chat_enabled
 }
 
 impl Default for Settings {
@@ -115,6 +156,7 @@ impl Default for Settings {
             relay_url: default_relay_url(),
             display_name: String::new(),
             lan_direct_enabled: false,
+            chat_enabled: default_chat_enabled(),
         }
     }
 }
@@ -318,6 +360,116 @@ mod tests {
         .unwrap();
         let s = Settings::load(&p);
         assert_eq!(s.display_name, "");
+    }
+
+    // The chat-flag resolver reads a process-global env var, so the
+    // tests serialise via a mutex to keep parallel runs deterministic.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_chat_env<F: FnOnce() -> R, R>(set_to: Option<&str>, f: F) -> R {
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var_os(CHAT_ENABLED_ENV);
+        match set_to {
+            Some(v) => std::env::set_var(CHAT_ENABLED_ENV, v),
+            None => std::env::remove_var(CHAT_ENABLED_ENV),
+        }
+        let out = f();
+        match prev {
+            Some(v) => std::env::set_var(CHAT_ENABLED_ENV, v),
+            None => std::env::remove_var(CHAT_ENABLED_ENV),
+        }
+        out
+    }
+
+    #[test]
+    fn chat_enabled_default_follows_build_flavor() {
+        // The default field initialiser matches the build-flavor
+        // helper. In debug builds the test runs with
+        // `debug_assertions` on, so this fires `true`. A future
+        // release-test mode would invert; the assertion stays
+        // honest because both sides resolve via the same helper.
+        let s = Settings::default();
+        assert_eq!(s.chat_enabled, default_chat_enabled());
+    }
+
+    #[test]
+    fn resolve_env_unset_returns_setting() {
+        with_chat_env(None, || {
+            let s = Settings { chat_enabled: true, ..Settings::default() };
+            assert!(resolve_chat_enabled(&s));
+            let s = Settings { chat_enabled: false, ..Settings::default() };
+            assert!(!resolve_chat_enabled(&s));
+        });
+    }
+
+    #[test]
+    fn resolve_env_overrides_setting_to_true() {
+        with_chat_env(Some("1"), || {
+            let s = Settings { chat_enabled: false, ..Settings::default() };
+            assert!(resolve_chat_enabled(&s));
+        });
+        with_chat_env(Some("true"), || {
+            let s = Settings { chat_enabled: false, ..Settings::default() };
+            assert!(resolve_chat_enabled(&s));
+        });
+        with_chat_env(Some("ON"), || {
+            // Case-insensitive.
+            let s = Settings { chat_enabled: false, ..Settings::default() };
+            assert!(resolve_chat_enabled(&s));
+        });
+    }
+
+    #[test]
+    fn resolve_env_overrides_setting_to_false() {
+        with_chat_env(Some("0"), || {
+            let s = Settings { chat_enabled: true, ..Settings::default() };
+            assert!(!resolve_chat_enabled(&s));
+        });
+        with_chat_env(Some("FALSE"), || {
+            let s = Settings { chat_enabled: true, ..Settings::default() };
+            assert!(!resolve_chat_enabled(&s));
+        });
+        with_chat_env(Some("off"), || {
+            let s = Settings { chat_enabled: true, ..Settings::default() };
+            assert!(!resolve_chat_enabled(&s));
+        });
+    }
+
+    #[test]
+    fn resolve_unrecognised_env_falls_through_to_setting() {
+        // "maybe" isn't on the recognised list, so the setting wins.
+        with_chat_env(Some("maybe"), || {
+            let s = Settings { chat_enabled: true, ..Settings::default() };
+            assert!(resolve_chat_enabled(&s));
+            let s = Settings { chat_enabled: false, ..Settings::default() };
+            assert!(!resolve_chat_enabled(&s));
+        });
+    }
+
+    #[test]
+    fn chat_enabled_round_trips_through_settings_json() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let s = Settings { chat_enabled: !default_chat_enabled(), ..Settings::default() };
+        s.save(&p).unwrap();
+        let loaded = Settings::load(&p);
+        assert_eq!(loaded.chat_enabled, !default_chat_enabled());
+    }
+
+    #[test]
+    fn missing_chat_enabled_field_in_file_defaults_to_build_flavor() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        // settings.json from before the field landed.
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert_eq!(s.chat_enabled, default_chat_enabled());
     }
 
     #[test]
