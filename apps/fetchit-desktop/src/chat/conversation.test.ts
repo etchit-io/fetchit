@@ -275,12 +275,15 @@ describe("mountConversation — pendingScrollForKey is conv-scoped", () => {
   });
 });
 
-describe("mountConversation — else-if anchor write is gated by justBecameVisible", () => {
-  it("does NOT re-anchor scroll on a subsequent visible store-emit", () => {
-    // Round-5 test-fidelity gap: a future mutation that drops the
-    // `justBecameVisible &&` guard on the else-if scroll path would
-    // cause every visible emit-with-pendingForThisConv to keep
-    // yanking the user. This test pins the once-per-flip behaviour.
+describe("mountConversation — pendingScrollForKey clears after apply", () => {
+  it("clears the deferred anchor on first apply so a subsequent hide/show with no new content does NOT re-anchor", () => {
+    // Round-6 P1: my previous once-per-flip test used tickPresence
+    // (a visible emit), but the `justBecameVisible` guard only
+    // matters across a visibility transition — a visible emit
+    // already has `justBecameVisible = false`. The real invariant
+    // to pin is "pendingScrollForKey is cleared on apply" so a
+    // SECOND hide/show with no new content stays put. If apply
+    // forgot to clear, the second show would re-yank the user.
     handle = mountConversation(host, store, noopHandlers);
     store.setPanelVisible(true);
     const peer = "c".repeat(64);
@@ -294,8 +297,7 @@ describe("mountConversation — else-if anchor write is gated by justBecameVisib
       get: () => scrollHeightValue,
     });
 
-    // Hide, new content while hidden, reopen — first visible render
-    // applies the deferred anchor (clears pendingScrollForKey).
+    // Hide, new content while hidden, reopen → first apply.
     store.setPanelVisible(false);
     scrollHeightValue = 500;
     store.recordDirectMessage({
@@ -308,12 +310,15 @@ describe("mountConversation — else-if anchor write is gated by justBecameVisib
     store.setPanelVisible(true);
     expect(stream.scrollTop).toBe(500);
 
-    // Now the user scrolls up (simulate via direct assignment) and
-    // an UNRELATED store emit fires — e.g. a presence change or
-    // unread-count tick. The else-if anchor must NOT fire again.
+    // User reads back, scrolls up.
     stream.scrollTop = 100;
-    scrollHeightValue = 500;
-    store.tickPresence(); // fires emit() without changing conv.messages
+
+    // Hide and show again with no new content for this conv. If
+    // pendingScrollForKey persists past the first apply, this second
+    // hide/show would force-anchor again. With the clear, the user's
+    // scroll position is preserved.
+    store.setPanelVisible(false);
+    store.setPanelVisible(true);
 
     expect(stream.scrollTop).toBe(100);
   });

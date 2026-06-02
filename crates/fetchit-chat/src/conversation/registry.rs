@@ -402,6 +402,13 @@ impl ConversationRegistry {
             guard.insert(group_id_hex.to_owned(), conv);
         }
 
+        // Snapshot for the persist-failure restore — symmetric with
+        // mutate_in_place's Persist arm. If seal_to_path fails after
+        // we recorded the nonce in the cache, restore from snapshot
+        // so the next observation doesn't see a drifted window that
+        // disk doesn't have. Same forward-decrypt-loss class round-5
+        // closed for mutate_in_place.
+        let snapshot = guard.get(group_id_hex).cloned();
         let Some(conv) = guard.get_mut(group_id_hex) else {
             // Defensive: hydrate above should have inserted this key.
             // If we got here without it, the cache invariant has been
@@ -419,17 +426,27 @@ impl ConversationRegistry {
         // record_nonce on this group blocks on `guard` and observes
         // our updated window on its retry.
         let path = self.layout.conversation_path(group_id_hex);
-        let bytes = serde_json::to_vec(conv)
-            .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
-        seal_to_path(
-            &path,
-            &bytes,
-            &self.master,
-            self.kdf_id,
-            self.argon_salt.as_ref(),
-        )?;
-
-        Ok(NonceCheckOutcome::Recorded)
+        let persist = (|| -> Result<(), ChatError> {
+            let bytes = serde_json::to_vec(conv)
+                .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
+            seal_to_path(
+                &path,
+                &bytes,
+                &self.master,
+                self.kdf_id,
+                self.argon_salt.as_ref(),
+            )?;
+            Ok(())
+        })();
+        match persist {
+            Ok(()) => Ok(NonceCheckOutcome::Recorded),
+            Err(e) => {
+                if let Some(s) = snapshot {
+                    *conv = s;
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -878,6 +895,45 @@ mod tests {
         assert_eq!(
             after.last_rekey_at_ms, 100,
             "cache must NOT carry mutated last_rekey_at_ms on persist failure",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_nonce_restores_cache_on_persist_failure() {
+        // Round-6 P2: symmetric with the mutate_in_place fix. If
+        // seal_to_path fails after we recorded the nonce in cache,
+        // the snapshot restore reverts seen_nonces so a subsequent
+        // re-delivery of the same envelope can be re-attempted (and
+        // disk is consistent with cache).
+        let (dir, reg) = fresh_registry();
+        reg.save(&dm("aa", LOCAL, PEER, 0, 0, 0)).await.unwrap();
+        let nonce = [0xEF; 12];
+
+        // Block writes by replacing the conversations dir with a file.
+        let conv_dir = dir.path().join("conversations");
+        std::fs::remove_dir_all(&conv_dir).unwrap();
+        std::fs::write(&conv_dir, b"blocker").unwrap();
+
+        let result = reg.record_nonce("aa", PEER, nonce).await;
+        assert!(
+            result.is_err(),
+            "expected Err on missing dir, got {result:?}"
+        );
+
+        // Restore dir for TempDir cleanup.
+        std::fs::remove_file(&conv_dir).unwrap();
+        std::fs::create_dir_all(&conv_dir).unwrap();
+
+        // Cache MUST read back the pre-record state — the nonce must
+        // NOT be in seen_nonces, so a retry of the same envelope can
+        // succeed once disk is back.
+        let after = reg.get("aa").await.unwrap().unwrap();
+        assert!(
+            after
+                .seen_nonces
+                .get(PEER)
+                .is_none_or(|w| !w.contains(&nonce)),
+            "cache must NOT carry the recorded nonce after persist failure",
         );
     }
 

@@ -316,9 +316,7 @@ where
             Err(e) => {
                 attempt = attempt.saturating_add(1);
                 if attempt >= SEND_MAX_ATTEMPTS {
-                    eprintln!(
-                        "[peer] {label} permanently failed after {attempt} attempts: {e}"
-                    );
+                    eprintln!("[peer] {label} permanently failed after {attempt} attempts: {e}");
                     return Err(e);
                 }
                 let delay = SEND_BASE_DELAY_MS.saturating_mul(1u64 << (attempt - 1));
@@ -383,10 +381,8 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         // Bind `messages()` to a local for the same lifetime reason
         // as in `run_echo` — see comment there.
         let messages = client.messages();
-        let send_result = send_with_retry("chat send", || {
-            messages.send(&peer, &line, display_name)
-        })
-        .await;
+        let send_result =
+            send_with_retry("chat send", || messages.send(&peer, &line, display_name)).await;
         match send_result {
             Ok(id) => eprintln!("[peer] sent — id={id:?}"),
             Err(e) => eprintln!("[peer] send error: {e}"),

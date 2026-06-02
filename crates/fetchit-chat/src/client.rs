@@ -925,6 +925,187 @@ mod tests {
         (dir, err_signer, identity, registry, conv)
     }
 
+    /// Build a fixture with a real ML-KEM peer key so
+    /// `build_welcome_outbox` can succeed end-to-end. Used by the
+    /// successful-rekey and peer-preemption tests.
+    async fn fixture_real_peer_conv() -> (
+        TempDir,
+        MlDsaSigner,
+        FetchitIdentity,
+        Arc<ConversationRegistry>,
+        Conversation,
+    ) {
+        use crate::chat_crypto::kem_keygen;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".to_owned())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+
+        let alice_signer = MlDsaSigner::generate().unwrap();
+        let aid_a = hex::encode(alice_signer.agent_id());
+        let identity = FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &aid_a,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+
+        let bob_signer = MlDsaSigner::generate().unwrap();
+        let aid_b = hex::encode(bob_signer.agent_id());
+        let (bob_kem_pub, _bob_kem_sec) = kem_keygen().unwrap();
+
+        let alice_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: aid_a.clone(),
+                kem_public_key_b64: B64.encode(identity.kem_public_key()),
+                agent_public_key_b64: Some(B64.encode(alice_signer.public_key())),
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let bob_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: aid_b,
+                kem_public_key_b64: B64.encode(&bob_kem_pub),
+                agent_public_key_b64: Some(B64.encode(bob_signer.public_key())),
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let mut conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+        conv.auto_rekey_interval_ms = 1;
+
+        let registry = Arc::new(ConversationRegistry::new(
+            layout,
+            master,
+            kdf_id_argon2(),
+            Some(salt),
+        ));
+        registry.save(&conv).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        (dir, alice_signer, identity, registry, conv)
+    }
+
+    /// Round-6 P2: successful rekey advances epoch by exactly 1,
+    /// pushes the old key into `prior_keys`, and produces welcomes
+    /// for each peer device.
+    #[tokio::test]
+    async fn try_rekey_and_build_welcomes_advances_and_pushes_prior_key() {
+        let (_dir, signer, identity, registry, conv_before) = fixture_real_peer_conv().await;
+        let prior_keys_before = conv_before.prior_keys.len();
+        let key_before = conv_before.current_key_b64.clone();
+        let epoch_before = conv_before.current_epoch;
+
+        let result = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &conv_before,
+            &identity,
+            [0u8; 32],
+            &signer,
+        )
+        .await
+        .expect("helper must not error on the happy path");
+        let welcomes = result.expect("happy path must commit and return welcomes");
+        assert!(
+            !welcomes.is_empty(),
+            "welcomes must include the peer's device",
+        );
+
+        let conv_after = registry
+            .get(&conv_before.group_id_hex)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            conv_after.current_epoch,
+            epoch_before + 1,
+            "current_epoch must advance by exactly 1",
+        );
+        assert_ne!(
+            conv_after.current_key_b64, key_before,
+            "current_key_b64 must change to a fresh symmetric key",
+        );
+        assert_eq!(
+            conv_after.prior_keys.len(),
+            prior_keys_before + 1,
+            "exactly one prior_keys entry must be pushed",
+        );
+        assert_eq!(
+            conv_after.prior_keys.last().unwrap().key_b64,
+            key_before,
+            "the pushed prior key must be the pre-advance current key",
+        );
+    }
+
+    /// Round-6 P2: a peer-driven rekey that lands between our
+    /// snapshot read and our commit must preempt. We simulate this by
+    /// running the helper once successfully, then calling it again
+    /// with the original (now-stale) snapshot — the second call's
+    /// closure observes `current_epoch != snapshot_epoch` and returns
+    /// Skip(false), so the welcomes built against the stale
+    /// prospective state are dropped.
+    #[tokio::test]
+    async fn try_rekey_and_build_welcomes_skips_when_peer_preempts() {
+        let (_dir, signer, identity, registry, snapshot) = fixture_real_peer_conv().await;
+        let _first = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &snapshot,
+            &identity,
+            [0u8; 32],
+            &signer,
+        )
+        .await
+        .expect("first call must succeed");
+
+        let epoch_after_first = registry
+            .get(&snapshot.group_id_hex)
+            .await
+            .unwrap()
+            .unwrap()
+            .current_epoch;
+        assert_eq!(epoch_after_first, snapshot.current_epoch + 1);
+
+        // Second call replays the stale snapshot, simulating a sweep
+        // tick that started before a peer/local rekey landed. The
+        // re-check in the helper's closure must catch the epoch drift.
+        let second = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &snapshot,
+            &identity,
+            [0u8; 32],
+            &signer,
+        )
+        .await
+        .expect("second call must not error");
+        assert!(
+            second.is_none(),
+            "stale-snapshot replay must return Ok(None), got Some(_) (would have committed stale welcomes)",
+        );
+        let epoch_after_second = registry
+            .get(&snapshot.group_id_hex)
+            .await
+            .unwrap()
+            .unwrap()
+            .current_epoch;
+        assert_eq!(
+            epoch_after_second, epoch_after_first,
+            "preempted second call must NOT advance the epoch further",
+        );
+    }
+
     /// Regression: round-4 `d5886a8` re-ordered sweep to build-before-
     /// commit so a transient signer outage couldn't silently brick the
     /// conversation. Without this test, a future refactor reversing
