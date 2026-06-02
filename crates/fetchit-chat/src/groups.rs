@@ -19,9 +19,27 @@ use crate::identity::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// Opaque group identifier.
+///
+/// `serde(try_from)` routes incoming JSON through [`GroupId::parse`] so
+/// daemon responses can't carry an unvalidated string into the same
+/// type that gates HTTP-path interpolation. `serde(into)` keeps wire
+/// serialization byte-identical to the prior `transparent` shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(into = "String", try_from = "String")]
 pub struct GroupId(String);
+
+impl From<GroupId> for String {
+    fn from(g: GroupId) -> Self {
+        g.0
+    }
+}
+
+impl TryFrom<String> for GroupId {
+    type Error = ChatError;
+    fn try_from(s: String) -> Result<Self> {
+        Self::parse(&s)
+    }
+}
 
 impl GroupId {
     /// Parse and validate a group ID. Only non-empty strings of
@@ -315,6 +333,11 @@ mod tests {
         assert!(GroupId::parse("valid-group_123").is_ok());
         assert!(GroupId::parse("a").is_ok());
         assert!(GroupId::parse("ABC-123_def").is_ok());
+        // Lock the accessor round-trip so future refactors can't drift.
+        assert_eq!(
+            GroupId::parse("valid-group_123").unwrap().as_str(),
+            "valid-group_123"
+        );
     }
 
     #[test]
@@ -332,6 +355,20 @@ mod tests {
         ] {
             assert!(GroupId::parse(bad).is_err(), "expected reject for {bad:?}");
         }
+        // Pin the error variant so a future refactor surfacing a
+        // different variant (e.g. ChatError::Io) doesn't pass this test.
+        let err = GroupId::parse("/").unwrap_err();
+        assert!(matches!(err, ChatError::Invalid(_)));
+    }
+
+    #[test]
+    fn group_id_deserialize_rejects_traversal() {
+        // serde must route through parse — a JSON string containing
+        // `/` must fail decode rather than landing in the private field.
+        let bad = "\"with/slash\"";
+        let parsed: Result<GroupId> =
+            serde_json::from_str::<GroupId>(bad).map_err(|e| ChatError::Invalid(e.to_string()));
+        assert!(parsed.is_err());
     }
 
     #[test]
