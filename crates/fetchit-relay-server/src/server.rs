@@ -141,16 +141,22 @@ impl Server {
         let bind = self.config.bind;
         let region = self.config.region.clone();
         let internal_bind = self.config.internal_bind;
-        let (router, state) = self.router();
-        let listener = TcpListener::bind(bind).await?;
-        info!(%bind, %region, "fetchit-relay-server listening");
-        spawn_sweeper(state.clone());
+        // Validate the internal-bind loopback constraint before any
+        // listener bind or background task spawn. A non-loopback bind
+        // must be refused without leaking the sweeper task that would
+        // otherwise outlive the failed `run()` call.
         if let Some(internal) = internal_bind {
             if !internal.ip().is_loopback() {
                 anyhow::bail!(
                     "internal bind must be loopback (127.0.0.0/8 or ::1), got {internal}"
                 );
             }
+        }
+        let (router, state) = self.router();
+        let listener = TcpListener::bind(bind).await?;
+        info!(%bind, %region, "fetchit-relay-server listening");
+        spawn_sweeper(state.clone());
+        if let Some(internal) = internal_bind {
             let internal_listener = TcpListener::bind(internal).await?;
             let actual = internal_listener.local_addr().unwrap_or(internal);
             info!(%actual, "internal-metrics listener bound (loopback only)");
