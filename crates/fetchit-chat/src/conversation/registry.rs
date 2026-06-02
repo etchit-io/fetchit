@@ -295,8 +295,10 @@ impl ConversationRegistry {
             guard.insert(group_id_hex.to_owned(), conv);
         }
 
-        // Snapshot for the Skip-path restore. Cheap relative to the
-        // disk seal that's the alternative.
+        // Snapshot for the restore paths — Skip always restores; the
+        // Persist arm restores on a serialize / seal failure so the
+        // in-cache conv doesn't drift ahead of disk. Cheap relative
+        // to the disk seal that's the alternative.
         let snapshot = guard.get(group_id_hex).cloned();
         let Some(conv) = guard.get_mut(group_id_hex) else {
             return Err(ChatError::Invalid(format!(
@@ -306,18 +308,42 @@ impl ConversationRegistry {
 
         match mutate(conv) {
             MutateAction::Persist(value) => {
+                // Persist the closure's mutation. Run serialize + seal
+                // inside a fallible block so a failure on either step
+                // restores the pre-mutation snapshot before propagating
+                // the error — otherwise the in-cache conv would carry
+                // the mutation while disk still has the pre-mutation
+                // state, and the next observation by record_nonce /
+                // mutate_in_place / save would write that drift forward
+                // (the same forward-decrypt-loss class
+                // sweep_auto_rekey's build-before-commit defends
+                // against, just gated on a write failure instead of a
+                // build failure).
                 let path = self.layout.conversation_path(group_id_hex);
-                let bytes = serde_json::to_vec(conv)
-                    .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
-                seal_to_path(
-                    &path,
-                    &bytes,
-                    &self.master,
-                    self.kdf_id,
-                    self.argon_salt.as_ref(),
-                )?;
-                self.refresh_pubkey_cache(conv);
-                Ok(value)
+                let persist = (|| -> Result<(), ChatError> {
+                    let bytes = serde_json::to_vec(conv)
+                        .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
+                    seal_to_path(
+                        &path,
+                        &bytes,
+                        &self.master,
+                        self.kdf_id,
+                        self.argon_salt.as_ref(),
+                    )?;
+                    Ok(())
+                })();
+                match persist {
+                    Ok(()) => {
+                        self.refresh_pubkey_cache(conv);
+                        Ok(value)
+                    }
+                    Err(e) => {
+                        if let Some(s) = snapshot {
+                            *conv = s;
+                        }
+                        Err(e)
+                    }
+                }
             }
             MutateAction::Skip(value) => {
                 // Restore the cached entry so cache == disk regardless
@@ -768,11 +794,11 @@ mod tests {
         // Simulate a rekey-style RMW that previously would have used
         // `let mut c = registry.get(...); c.current_epoch += 1; save(&c)`.
         reg.mutate_in_place("aa", |conv| {
-                conv.current_epoch = conv.current_epoch.saturating_add(1);
-                MutateAction::Persist(())
-            })
-            .await
-            .unwrap();
+            conv.current_epoch = conv.current_epoch.saturating_add(1);
+            MutateAction::Persist(())
+        })
+        .await
+        .unwrap();
         // The same nonce MUST still register as a replay; if save() had
         // overwritten the cache with a pre-record_nonce clone the
         // recorded N would be gone and we'd see Recorded here.
@@ -791,17 +817,68 @@ mod tests {
         let (_d, reg) = fresh_registry();
         reg.save(&dm("aa", LOCAL, PEER, 7, 100, 100)).await.unwrap();
         reg.mutate_in_place("aa", |conv| {
-                // Partial mutation, then change our mind:
-                conv.current_epoch = 999;
-                conv.last_rekey_at_ms = 8_888_888;
-                MutateAction::Skip(())
-            })
-            .await
-            .unwrap();
+            // Partial mutation, then change our mind:
+            conv.current_epoch = 999;
+            conv.last_rekey_at_ms = 8_888_888;
+            MutateAction::Skip(())
+        })
+        .await
+        .unwrap();
         // Cache must read back the pre-mutation values.
         let after = reg.get("aa").await.unwrap().unwrap();
         assert_eq!(after.current_epoch, 7);
         assert_eq!(after.last_rekey_at_ms, 100);
+    }
+
+    #[tokio::test]
+    async fn mutate_in_place_restores_cache_on_persist_failure() {
+        // Round-5 P2 regression: if seal_to_path fails after the
+        // closure mutated the cached conv, the cache must be restored
+        // from the pre-mutation snapshot. Without the restore the
+        // cache drifts ahead of disk and any subsequent observation
+        // (record_nonce / next save) writes the drift through — the
+        // same forward-decrypt-loss class round-4 was supposed to
+        // eliminate.
+        let (dir, reg) = fresh_registry();
+        reg.save(&dm("aa", LOCAL, PEER, 7, 100, 100)).await.unwrap();
+
+        // Replace the conversations dir with a regular file so
+        // seal_to_path's `create_dir_all(parent)` cannot proceed —
+        // forcing the write path to surface an IO error.
+        let conv_dir = dir.path().join("conversations");
+        std::fs::remove_dir_all(&conv_dir).unwrap();
+        std::fs::write(&conv_dir, b"blocker").unwrap();
+
+        let result = reg
+            .mutate_in_place("aa", |conv| {
+                conv.current_epoch = 999;
+                conv.last_rekey_at_ms = 8_888_888;
+                MutateAction::Persist(())
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "expected Err on missing conversations dir, got Ok",
+        );
+
+        // Remove the file blocker + restore the dir for clean TempDir
+        // teardown.
+        std::fs::remove_file(&conv_dir).unwrap();
+        std::fs::create_dir_all(&conv_dir).unwrap();
+
+        // The in-cache entry MUST read back the pre-mutation state.
+        // (We call `get` which returns the cached clone — the disk
+        // file is gone but the cache should be the un-mutated copy
+        // that the Persist arm restored on the seal failure.)
+        let after = reg.get("aa").await.unwrap().unwrap();
+        assert_eq!(
+            after.current_epoch, 7,
+            "cache must NOT carry mutated current_epoch on persist failure",
+        );
+        assert_eq!(
+            after.last_rekey_at_ms, 100,
+            "cache must NOT carry mutated last_rekey_at_ms on persist failure",
+        );
     }
 
     #[tokio::test]

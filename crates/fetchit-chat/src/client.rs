@@ -7,7 +7,7 @@ use crate::at_rest::{
     MasterKeySource, ARGON_SALT_LEN,
 };
 use crate::chat_identity::FetchitIdentity;
-use crate::conversation::{build_welcome_outbox, ConversationRegistry, MutateAction};
+use crate::conversation::{build_welcome_outbox, Conversation, ConversationRegistry, MutateAction};
 use crate::discovery::{discover_local, DaemonEndpoint};
 use crate::error::{ChatError, Result};
 use crate::events::{open_stream, Event, EventStream};
@@ -643,6 +643,78 @@ fn spawn_auto_rekey_sweeper(router: &Arc<Router>, chat: &ChatState) {
     });
 }
 
+/// Try to rotate one conversation's epoch and build the welcomes that
+/// announce the new key to peers. Pure read-then-commit shape:
+///
+/// 1. Generate a fresh symmetric key.
+/// 2. Build the would-be post-advance conversation in memory only.
+/// 3. Call `build_welcome_outbox` against that prospective state. If
+///    it fails (signer/x0xd offline, KEM-encap, AEAD seal, recipient
+///    hex parse), we drop the prospective state on the floor and the
+///    next sweep tick retries — the registry's on-disk + cached state
+///    is unchanged.
+/// 4. Only after welcomes are known good, commit the advance via
+///    `mutate_in_place`. Re-check `auto_rekey_due` AND
+///    `current_epoch == snapshot_epoch` inside the lock so a
+///    peer-driven rekey landing between snapshot and commit can
+///    preempt; the welcomes we built are for the (now-stale)
+///    prospective epoch and would be rejected by peers, so we drop
+///    them.
+///
+/// Returns:
+/// * `Ok(Some(welcomes))` — committed, caller should fanout-send the
+///   welcomes.
+/// * `Ok(None)` — skipped (build failed, or peer-driven rekey
+///   preempted, or no longer `auto_rekey_due`). Local state unchanged.
+/// * `Err(_)` — persistence-layer failure (vault open, AEAD seal,
+///   serde error). Caller should propagate; the next sweep retries.
+///
+/// Pulled out of `sweep_auto_rekey` so test code can drive the
+/// build-then-commit invariant directly with a stub `Signer` —
+/// without that test, the d5886a8 round-4 fix had zero coverage and
+/// a future refactor reordering advance-before-build would silently
+/// brick the conversation again.
+async fn try_rekey_and_build_welcomes(
+    registry: &ConversationRegistry,
+    snapshot: &Conversation,
+    identity: &FetchitIdentity,
+    machine_id: [u8; 32],
+    signer: &dyn Signer,
+) -> Result<Option<Vec<crate::conversation::OutboundEnvelope>>> {
+    use crate::chat_crypto::random_symmetric_key;
+    use rand::rngs::OsRng;
+
+    let group_id_hex = snapshot.group_id_hex.clone();
+    let snapshot_epoch = snapshot.current_epoch;
+
+    let new_key = random_symmetric_key(&mut OsRng);
+    let mut prospective = snapshot.clone();
+    prospective.advance_epoch(new_key);
+    let welcomes = match build_welcome_outbox(&prospective, identity, machine_id, signer).await {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!(
+                    "[chat] auto-rekey: build welcomes for {group_id_hex} failed: {e}; will retry next sweep",
+                );
+            return Ok(None);
+        }
+    };
+
+    let committed = registry
+        .mutate_in_place(&group_id_hex, |conv| {
+            if !conv.auto_rekey_due() || conv.current_epoch != snapshot_epoch {
+                return MutateAction::Skip(false);
+            }
+            conv.advance_epoch(new_key);
+            MutateAction::Persist(true)
+        })
+        .await?;
+    if !committed {
+        return Ok(None);
+    }
+    Ok(Some(welcomes))
+}
+
 /// Walk the in-memory conversation cache, rotating every Admin
 /// conversation whose `auto_rekey_due()` returns true. Returns the
 /// count of rotated conversations.
@@ -657,70 +729,23 @@ async fn sweep_auto_rekey(
     machine_id: [u8; 32],
     signer: &Arc<dyn Signer>,
 ) -> Result<usize> {
-    use crate::chat_crypto::random_symmetric_key;
-    use rand::rngs::OsRng;
-
-    // Snapshot to find candidates. The actual advance + persist runs
-    // ONLY after the welcomes are built successfully — a transient
-    // signer / KEM / AEAD failure during build must leave the conv
-    // untouched so the next sweep retries; otherwise the local epoch
-    // moves forward, peers stay on the old key, and every subsequent
-    // message we send becomes undecryptable to them with no automatic
-    // recovery.
     let cached = registry.snapshot_cached().await;
     let mut rekeyed = 0usize;
     for snapshot in cached {
         if !snapshot.auto_rekey_due() {
             continue;
         }
-        let group_id_hex = snapshot.group_id_hex.clone();
-        let snapshot_epoch = snapshot.current_epoch;
-
-        // Build the prospective post-advance conversation in memory
-        // only — no cache mutation, no disk write — and try to build
-        // welcomes for it. If anything fails we drop the prospective
-        // state on the floor and the next sweep tick retries.
-        let new_key = random_symmetric_key(&mut OsRng);
-        let mut prospective = snapshot.clone();
-        prospective.advance_epoch(new_key);
-        let welcomes = match build_welcome_outbox(
-            &prospective,
+        let Some(welcomes) = try_rekey_and_build_welcomes(
+            registry,
+            &snapshot,
             identity,
             machine_id,
             signer.as_ref(),
         )
-        .await
-        {
-            Ok(w) => w,
-            Err(e) => {
-                log::warn!(
-                        "[chat] auto-rekey: build welcomes for {group_id_hex} failed: {e}; will retry next sweep",
-                    );
-                continue;
-            }
-        };
-
-        // Welcomes built — now commit the advance atomically. Re-check
-        // inside the lock so a peer-driven rekey landing between our
-        // snapshot and our commit can preempt: both `auto_rekey_due`
-        // (a fresh peer rekey just stamped last_rekey_at_ms) and the
-        // current_epoch match guard the race.
-        let committed = registry
-            .mutate_in_place(&group_id_hex, |conv| {
-                if !conv.auto_rekey_due() || conv.current_epoch != snapshot_epoch {
-                    return MutateAction::Skip(false);
-                }
-                conv.advance_epoch(new_key);
-                MutateAction::Persist(true)
-            })
-            .await?;
-        if !committed {
-            // Peer-driven rekey preempted us. The welcomes we built
-            // are for OUR (now-stale) prospective epoch and peers
-            // would reject them — drop on the floor.
+        .await?
+        else {
             continue;
-        }
-
+        };
         for ob in welcomes {
             let recipient = identity::AgentId(hex::encode(ob.recipient_agent_id.as_bytes()));
             let timestamp_ms = ob.envelope.timestamp_ms;
@@ -775,5 +800,178 @@ fn resolve_master_key(
     } else {
         let master = MasterKey::resolve(&MasterKeySource::Keychain, None)?;
         Ok((master, kdf_id_keychain(), None))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+    use crate::conversation::{Member, MemberDevice, MemberDeviceStatus};
+    use crate::local_store::StoreLayout;
+    use async_trait::async_trait;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use fetchit_relay_client::{MlDsaSigner, Signer};
+    use tempfile::TempDir;
+
+    /// Signer stub whose `sign` always returns Err — simulates a
+    /// transient x0xd `/agent/sign` outage so we can exercise the
+    /// build-failure-preserves-epoch invariant inside
+    /// `try_rekey_and_build_welcomes`.
+    struct ErrSigner {
+        pubkey: Vec<u8>,
+        aid: [u8; 32],
+    }
+
+    #[async_trait]
+    impl Signer for ErrSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            self.aid
+        }
+        fn public_key(&self) -> Vec<u8> {
+            self.pubkey.clone()
+        }
+        async fn sign(&self, _message: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Err("test: signer offline".to_owned())
+        }
+    }
+
+    /// Build a minimal `(registry, identity, conv)` fixture for a DM
+    /// between two fresh ML-DSA identities. The conv is set up with
+    /// `auto_rekey_interval_ms = 1` so `auto_rekey_due()` returns true
+    /// without any wall-clock manipulation.
+    async fn fixture_rekey_due_conv() -> (
+        TempDir,
+        ErrSigner,
+        FetchitIdentity,
+        Arc<ConversationRegistry>,
+        Conversation,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".to_owned())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+
+        let alice_signer = MlDsaSigner::generate().unwrap();
+        let aid_a = hex::encode(alice_signer.agent_id());
+        let identity = FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &aid_a,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+
+        // ErrSigner replaces alice_signer for the actual sweep call so
+        // the build always fails; pubkey/agent_id must still match the
+        // identity for `build_welcome_outbox` to accept us as a member.
+        let err_signer = ErrSigner {
+            pubkey: alice_signer.public_key(),
+            aid: alice_signer.agent_id(),
+        };
+
+        let bob_signer = MlDsaSigner::generate().unwrap();
+        let aid_b = hex::encode(bob_signer.agent_id());
+
+        let alice_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: aid_a.clone(),
+                kem_public_key_b64: B64.encode(identity.kem_public_key()),
+                agent_public_key_b64: Some(B64.encode(alice_signer.public_key())),
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let bob_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: aid_b,
+                kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+                agent_public_key_b64: Some(B64.encode(bob_signer.public_key())),
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let mut conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+        // Trip auto_rekey_due immediately — interval=1ms is well below
+        // any clock skew the test runner can produce.
+        conv.auto_rekey_interval_ms = 1;
+
+        let registry = Arc::new(ConversationRegistry::new(
+            layout,
+            master,
+            kdf_id_argon2(),
+            Some(salt),
+        ));
+        registry.save(&conv).await.unwrap();
+
+        // Refresh the snapshot from disk so the auto_rekey_due check
+        // observes a `last_rekey_at_ms` that's at least 1ms in the
+        // past relative to `now_ms()`.
+        tokio::time::sleep(Duration::from_millis(3)).await;
+
+        (dir, err_signer, identity, registry, conv)
+    }
+
+    /// Regression: round-4 `d5886a8` re-ordered sweep to build-before-
+    /// commit so a transient signer outage couldn't silently brick the
+    /// conversation. Without this test, a future refactor reversing
+    /// the order would slip past CI — the original round-3 bug only
+    /// surfaced under live conditions.
+    #[tokio::test]
+    async fn try_rekey_and_build_welcomes_does_not_advance_on_signer_failure() {
+        let (_dir, err_signer, identity, registry, conv_before) = fixture_rekey_due_conv().await;
+        assert!(
+            conv_before.auto_rekey_due(),
+            "fixture must satisfy auto_rekey_due() to exercise the path",
+        );
+
+        let result = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &conv_before,
+            &identity,
+            [0u8; 32],
+            &err_signer,
+        )
+        .await
+        .expect("sweep helper itself must not error on signer failure");
+        assert!(
+            result.is_none(),
+            "signer-error must yield Ok(None), got Some(_) — the rekey was committed",
+        );
+
+        let conv_after = registry
+            .get(&conv_before.group_id_hex)
+            .await
+            .unwrap()
+            .expect("conv must still be on disk");
+        assert_eq!(
+            conv_after.current_epoch, conv_before.current_epoch,
+            "current_epoch must NOT advance when build_welcome_outbox fails",
+        );
+        assert_eq!(
+            conv_after.current_key_b64, conv_before.current_key_b64,
+            "current_key_b64 must NOT change when build_welcome_outbox fails",
+        );
+        assert_eq!(
+            conv_after.last_rekey_at_ms, conv_before.last_rekey_at_ms,
+            "last_rekey_at_ms must NOT move when build_welcome_outbox fails",
+        );
+        assert!(
+            conv_after.prior_keys.is_empty(),
+            "no prior_keys entry should accumulate from a failed rekey",
+        );
     }
 }
