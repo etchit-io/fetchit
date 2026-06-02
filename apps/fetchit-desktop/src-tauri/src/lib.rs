@@ -818,6 +818,20 @@ pub fn run() {
             chat::chat_watch_presence,
             chat::chat_unwatch_presence,
         ])
+        .on_window_event(|win, event| {
+            // ClearMode::OnClose: wipe the on-disk cache when the user
+            // closes the window. Counterpart to the OnIdle branch in
+            // `idle_disconnect`. Tolerant of missing state — partial
+            // shutdowns (e.g. setup hadn't finished) must not panic.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                use tauri::Manager;
+                if let Some(state) = win.try_state::<AppState>() {
+                    if state.disk_cache.policy().mode == ClearMode::OnClose {
+                        state.disk_cache.clear();
+                    }
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
