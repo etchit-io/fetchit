@@ -88,14 +88,6 @@ export function mountConversation(
   /// and produces visible flicker on every presence / nearby tick.
   let lastStreamKey: string | null = null;
   let groupPollTimer: ReturnType<typeof setInterval> | null = null;
-  /// Panel-visibility state we last observed at render time. Lets us
-  /// detect the hidden → visible transition so we can force a full diff
-  /// pass against real layout the moment the panel comes back, and
-  /// (re)start the group-history poll on every show — not just the
-  /// first selection of a group conv. The reopen test in
-  /// `panel.test.ts` and the dedicated `conversation.test.ts` pin both
-  /// behaviours.
-  let lastPanelVisible = false;
   /// New messages that landed while the panel was hidden need a
   /// scroll-to-bottom on reopen — `isNearBottom` reads scrollHeight /
   /// scrollTop / clientHeight, all of which return 0 on a hidden
@@ -241,12 +233,8 @@ export function mountConversation(
       // refresh, no one to observe stale beacons. setPanelVisible(false)
       // is the canonical "go quiet" signal.
       stopGroupPoll();
-      lastPanelVisible = false;
       return;
     }
-
-    const justBecameVisible = !lastPanelVisible;
-    lastPanelVisible = true;
 
     // Bubble list signature: conv identity + ordered bubble keys. When
     // it matches the previous render, the DOM doesn't need to move at
@@ -256,6 +244,19 @@ export function mountConversation(
     // reason to re-diff — only an actual content change is. The deferred
     // scroll anchor below handles the show-after-new-content case
     // without re-detaching DOM nodes.
+    // Note: there is no `else if (justBecameVisible && pending…)`
+    // branch. By construction the hidden branch only sets
+    // `pendingScrollForKey` when `newStreamKey !== lastStreamKey`,
+    // so the same content-change condition that set the flag also
+    // fires the diff branch below on the next visible render —
+    // which clears the flag. The flag can only outlive a visible
+    // render when it was set for a conv DIFFERENT from the active
+    // one (hidden-time pivot to B → back to A with no A content
+    // change). In that case the next render that DOES affect conv-B
+    // (an explicit `setActive(B)` or B-side content) hits the diff
+    // branch and the stale flag is cleared there. So a content-
+    // unchanged visible render legitimately leaves the user's
+    // scroll position alone.
     if (newStreamKey !== lastStreamKey || lastConv !== conv) {
       const wasAtBottom = isNearBottom(stream);
       // Keyed diff: reuse existing bubble elements whose render key
@@ -286,21 +287,6 @@ export function mountConversation(
       // Clear regardless once the diff fired — any pending anchor
       // for this conv is satisfied; any pending anchor for a
       // different conv is stale.
-      pendingScrollForKey = null;
-    } else if (
-      justBecameVisible
-      && pendingScrollForKey === convKey(conv.key)
-    ) {
-      // Content is unchanged from what was last visibly rendered (the
-      // panel was hidden and nothing happened to THIS conv), but we
-      // tracked a pending scroll-to-bottom from messages that arrived
-      // earlier while hidden. Apply the anchor here without disturbing
-      // the existing DOM — re-running the diff would re-attach every
-      // bubble and replay the pop animation. Guard on
-      // `justBecameVisible` so a subsequent visible store-emit with
-      // an already-applied pending flag (set true again across the
-      // same conv's hidden window) doesn't keep yanking the user.
-      stream.scrollTop = stream.scrollHeight;
       pendingScrollForKey = null;
     }
     if (lastConv !== conv) {

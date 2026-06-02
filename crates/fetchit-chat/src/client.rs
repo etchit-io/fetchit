@@ -1048,6 +1048,11 @@ mod tests {
             key_before,
             "the pushed prior key must be the pre-advance current key",
         );
+        assert_eq!(
+            conv_after.prior_keys.last().unwrap().epoch,
+            epoch_before,
+            "the pushed prior key must carry the pre-advance epoch tag",
+        );
     }
 
     /// Round-6 P2: a peer-driven rekey that lands between our
