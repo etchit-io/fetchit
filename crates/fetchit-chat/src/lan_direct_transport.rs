@@ -37,6 +37,7 @@ use fetchit_relay_proto::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
@@ -51,6 +52,11 @@ pub const PROLOGUE_PREFIX: &[u8] = b"fetchit-lan-v1";
 /// Maximum inbound handshakes in flight process-wide before
 /// `accept` starts dropping new connections. Conservative v1 cap.
 pub const INBOUND_HANDSHAKE_CAP: usize = 32;
+
+/// Per-handshake budget for the LAN-direct transport: covers TCP
+/// connect on outbound, plus the Noise-XX handshake itself, on both
+/// sides. An unresponsive peer cannot stall a slot longer than this.
+const LAN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Closure that resolves a peer `agent_id` to its ML-DSA-65 public key
 /// (as stored on the local contact card). `None` for unknown peers —
@@ -162,9 +168,15 @@ impl Transport for LanDirectTransport {
             .lookup(to)
             .ok_or_else(|| ChatError::MessageTransport(format!("lan peer {to:?} stale")))?;
 
-        let mut stream = TcpStream::connect((rec.ip, rec.port))
-            .await
-            .map_err(io_err)?;
+        // Bound TCP connect: an unrouted/silent peer must not stall
+        // the caller. Mirrored on the inbound side via the same const.
+        let mut stream = tokio::time::timeout(
+            LAN_HANDSHAKE_TIMEOUT,
+            TcpStream::connect((rec.ip, rec.port)),
+        )
+        .await
+        .map_err(|_| ChatError::MessageTransport("lan handshake timeout".into()))?
+        .map_err(io_err)?;
         let local_aid_bytes = agent_id_bytes(&self.local_agent_id)?;
         let peer_aid_bytes = agent_id_bytes(to)?;
         // Header: unauthenticated initiator aid hint so the responder
@@ -178,20 +190,24 @@ impl Transport for LanDirectTransport {
         let static_sec = *self.local_static.x25519_secret();
         let created_at = self.local_static.created_at_ms();
 
-        let (mut ts, _verified) = run_initiator_bound(
-            &mut stream,
-            &prologue,
-            &static_sec,
-            &local_aid_bytes,
-            &static_pub,
-            created_at,
-            sign_blob(signer),
-            &move |q: &[u8; 32]| {
-                let aid = AgentId::parse(hex::encode(q)).ok()?;
-                lookup(&aid)
-            },
+        let (mut ts, _verified) = tokio::time::timeout(
+            LAN_HANDSHAKE_TIMEOUT,
+            run_initiator_bound(
+                &mut stream,
+                &prologue,
+                &static_sec,
+                &local_aid_bytes,
+                &static_pub,
+                created_at,
+                sign_blob(signer),
+                &move |q: &[u8; 32]| {
+                    let aid = AgentId::parse(hex::encode(q)).ok()?;
+                    lookup(&aid)
+                },
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| ChatError::MessageTransport("lan handshake timeout".into()))??;
 
         let transit = materialise_transit(&self.local_agent_id, &envelope)?;
         let bytes = postcard::to_allocvec(&transit)
@@ -239,10 +255,18 @@ fn spawn_accept_loop(
             let lookup = contact_pubkey_lookup.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(e) =
-                    handle_inbound_conn(stream, tx, local_aid, local_static, signer, lookup).await
+                // Bound the handshake — without this, a slow peer can
+                // pin a semaphore slot forever and a flood of 32 stalls
+                // wedges the listener entirely.
+                match tokio::time::timeout(
+                    LAN_HANDSHAKE_TIMEOUT,
+                    handle_inbound_conn(stream, tx, local_aid, local_static, signer, lookup),
+                )
+                .await
                 {
-                    log::debug!("lan-direct inbound conn ended: {e}");
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::debug!("lan-direct inbound conn ended: {e}"),
+                    Err(_) => log::warn!("lan-direct inbound handshake timed out"),
                 }
             });
         }
@@ -294,6 +318,16 @@ async fn handle_inbound_conn(
         };
         let transit: TransitEnvelope = postcard::from_bytes(&bytes)
             .map_err(|e| ChatError::Invalid(format!("transit decode: {e}")))?;
+        // The TransitEnvelope is encrypted+framed but its sender field
+        // is plaintext-from-the-peer: bind it to the identity the
+        // handshake actually proved, or downstream sees a spoofed sender.
+        if transit.sender_agent_id.as_bytes() != &verified.agent_id {
+            return Err(ChatError::Invalid(format!(
+                "transit sender_agent_id mismatch: claimed {}, authenticated {}",
+                hex::encode(transit.sender_agent_id.as_bytes()),
+                verified_aid.0
+            )));
+        }
         let inbound = inbound_envelope_from_transit(verified_aid.clone(), transit);
         if tx.send(inbound).is_err() {
             return Ok(());
@@ -325,10 +359,20 @@ fn materialise_transit(
     local_agent_id: &AgentId,
     envelope: &OutboundEnvelope,
 ) -> Result<TransitEnvelope> {
+    let local_aid = agent_id_bytes(local_agent_id)?;
     if let Some(prebuilt) = &envelope.transit {
+        // A buggy conversation layer could hand us a TransitEnvelope
+        // whose sender_agent_id doesn't match this device — refuse
+        // rather than impersonate.
+        if prebuilt.sender_agent_id.as_bytes() != &local_aid {
+            return Err(ChatError::Invalid(format!(
+                "prebuilt envelope sender_agent_id mismatch: claimed {}, local {}",
+                hex::encode(prebuilt.sender_agent_id.as_bytes()),
+                local_agent_id.0
+            )));
+        }
         return Ok(prebuilt.clone());
     }
-    let local_aid = agent_id_bytes(local_agent_id)?;
     let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
     let (kind, group_id) = match &envelope.kind {
         OutboundKind::Dm => (RelayKind::Dm, None),
@@ -642,5 +686,287 @@ mod tests {
         };
         let err = transport_a.send(&aid_b, outbound).await.unwrap_err();
         assert!(matches!(err, ChatError::MessageTransport(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn materialise_transit_rejects_mismatched_sender_agent_id() {
+        // Outbound -002: a prebuilt TransitEnvelope whose sender doesn't
+        // match the local device must be refused rather than forwarded.
+        let local = aid(0xa1);
+        let foreign = aid(0xb2);
+        let foreign_bytes = agent_id_bytes(&foreign).unwrap();
+        let bad = TransitEnvelope {
+            version: 2,
+            kind: RelayKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes(foreign_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 0,
+            epoch: 0,
+            ciphertext: vec![1, 2, 3],
+            nonce: Vec::new(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let envelope = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: vec![1, 2, 3],
+            timestamp_ms: 0,
+            transit: Some(bad),
+        };
+        let err = materialise_transit(&local, &envelope).unwrap_err();
+        match err {
+            ChatError::Invalid(msg) => assert!(msg.contains("mismatch"), "msg: {msg}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn materialise_transit_accepts_matching_prebuilt() {
+        let local = aid(0xc3);
+        let local_bytes = agent_id_bytes(&local).unwrap();
+        let good = TransitEnvelope {
+            version: 2,
+            kind: RelayKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes(local_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 0,
+            epoch: 0,
+            ciphertext: vec![9],
+            nonce: Vec::new(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let envelope = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: vec![9],
+            timestamp_ms: 0,
+            transit: Some(good.clone()),
+        };
+        let out = materialise_transit(&local, &envelope).unwrap();
+        assert_eq!(
+            out.sender_agent_id.as_bytes(),
+            good.sender_agent_id.as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn send_tcp_connect_timeout() {
+        // Outbound -003: an unrouted peer must not stall the caller.
+        // 192.0.2.1 is TEST-NET-1 (RFC 5737), guaranteed unrouted on
+        // the public internet; SYN goes into the void.
+        let aid_a = aid(0x55);
+        let aid_b = aid(0x66);
+
+        let signer_a = Arc::new(MlDsaSigner::generate().unwrap()) as Arc<dyn Signer>;
+        let static_a = fresh_static(&aid_a.0);
+        let table_a = Arc::new(LanPeerTable::new());
+        table_a.upsert(LanPeerRecord {
+            agent_id: aid_b.clone(),
+            ip: "192.0.2.1".parse().unwrap(),
+            port: 1,
+            last_seen: Instant::now(),
+        });
+        let lookup_a: ContactPubkeyLookup =
+            Arc::new(|_q: &AgentId| -> Option<Vec<u8>> { Some(vec![0xaa; 64]) });
+
+        let (transport_a, _) = LanDirectTransport::start(
+            aid_a,
+            static_a,
+            signer_a,
+            table_a,
+            lookup_a,
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let outbound = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: b"hi".to_vec(),
+            timestamp_ms: 0,
+            transit: None,
+        };
+        let started = tokio::time::Instant::now();
+        let err = transport_a.send(&aid_b, outbound).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "send took {elapsed:?} — timeout not enforced"
+        );
+        match err {
+            ChatError::MessageTransport(msg) => {
+                assert!(msg.contains("timeout"), "msg: {msg}");
+            }
+            other => panic!("expected MessageTransport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_conn_rejects_spoofed_sender_agent_id() {
+        // Inbound -001: A connects to B with a proven handshake but
+        // embeds sender_agent_id = C in the TransitEnvelope body. B
+        // must refuse to forward the spoofed envelope.
+        use crate::lan_noise::run_initiator_bound;
+
+        let aid_a = aid(0x77);
+        let aid_b = aid(0x88);
+        let aid_c = aid(0x99); // a third identity — the spoof target
+
+        let signer_a = Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_b = Arc::new(MlDsaSigner::generate().unwrap());
+        let pk_a = signer_a.public_key();
+        let pk_b = signer_b.public_key();
+
+        let lookup_a: ContactPubkeyLookup = {
+            let aid_b = aid_b.clone();
+            let pk_b = pk_b.clone();
+            Arc::new(move |q: &AgentId| {
+                if *q == aid_b {
+                    Some(pk_b.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        let lookup_b: ContactPubkeyLookup = {
+            let aid_a = aid_a.clone();
+            let pk_a = pk_a.clone();
+            Arc::new(move |q: &AgentId| {
+                if *q == aid_a {
+                    Some(pk_a.clone())
+                } else {
+                    None
+                }
+            })
+        };
+
+        let static_a = fresh_static(&aid_a.0);
+        let static_b = fresh_static(&aid_b.0);
+
+        let (transport_b, bound_b) = LanDirectTransport::start(
+            aid_b.clone(),
+            static_b,
+            signer_b.clone() as Arc<dyn Signer>,
+            Arc::new(LanPeerTable::new()),
+            lookup_b,
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut rx_b = transport_b.take_inbound().expect("inbound rx");
+
+        // Manually run the initiator side so we can inject a forged
+        // TransitEnvelope after the handshake.
+        let local_aid_bytes = agent_id_bytes(&aid_a).unwrap();
+        let peer_aid_bytes = agent_id_bytes(&aid_b).unwrap();
+        let mut stream = TcpStream::connect(bound_b).await.unwrap();
+        stream.write_all(&local_aid_bytes).await.unwrap();
+        let prologue = make_prologue(&local_aid_bytes, &peer_aid_bytes);
+        let static_pub = *static_a.x25519_public();
+        let static_sec = *static_a.x25519_secret();
+        let created_at = static_a.created_at_ms();
+        let lookup_for_handshake = lookup_a.clone();
+        let signer_for_handshake = signer_a.clone() as Arc<dyn Signer>;
+        let (mut ts, _verified) = run_initiator_bound(
+            &mut stream,
+            &prologue,
+            &static_sec,
+            &local_aid_bytes,
+            &static_pub,
+            created_at,
+            sign_blob(signer_for_handshake),
+            &move |q: &[u8; 32]| {
+                let aid = AgentId::parse(hex::encode(q)).ok()?;
+                lookup_for_handshake(&aid)
+            },
+        )
+        .await
+        .unwrap();
+
+        // Forge a TransitEnvelope claiming aid_c is the sender (not A).
+        let forged = TransitEnvelope {
+            version: 2,
+            kind: RelayKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes(agent_id_bytes(&aid_c).unwrap()),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 0,
+            epoch: 0,
+            ciphertext: b"spoofed".to_vec(),
+            nonce: Vec::new(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&forged).unwrap();
+        write_app_frame(&mut stream, &mut ts, &bytes).await.unwrap();
+        let _ = stream.shutdown().await;
+
+        // The spoofed envelope must NOT be forwarded. Wait briefly and
+        // assert nothing arrives.
+        let res = tokio::time::timeout(Duration::from_millis(500), rx_b.recv()).await;
+        assert!(
+            res.is_err(),
+            "spoofed envelope was forwarded as {:?}",
+            res.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_times_out_and_releases_slot() {
+        // Inbound -004: a raw TCP connection that never writes the
+        // 32-byte init header must be torn down within the handshake
+        // budget, freeing the semaphore slot for a subsequent legit
+        // handshake.
+        let aid_b = aid(0xee);
+        let signer_b = Arc::new(MlDsaSigner::generate().unwrap()) as Arc<dyn Signer>;
+        let static_b = fresh_static(&aid_b.0);
+        let lookup_b: ContactPubkeyLookup =
+            Arc::new(|_q: &AgentId| -> Option<Vec<u8>> { Some(vec![0xaa; 64]) });
+
+        let (transport_b, bound_b) = LanDirectTransport::start(
+            aid_b.clone(),
+            static_b,
+            signer_b,
+            Arc::new(LanPeerTable::new()),
+            lookup_b,
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let _ = transport_b; // keep the listener alive
+
+        // Open a TCP connection that goes silent forever — never
+        // writes the 32-byte init aid header. The listener task should
+        // give up after LAN_HANDSHAKE_TIMEOUT (10s) and drop the conn.
+        let started = tokio::time::Instant::now();
+        let stalled = TcpStream::connect(bound_b).await.unwrap();
+
+        // Wait for the responder to drop us. The server never writes,
+        // so reading either yields EOF (Ok(0)) when the listener task
+        // closes the socket, or an Err on RST — both signal teardown.
+        let read_result = tokio::time::timeout(Duration::from_secs(12), async {
+            let mut buf = [0u8; 1];
+            let mut s = stalled;
+            let _ = s.read(&mut buf).await;
+        })
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            read_result.is_ok(),
+            "stalled inbound was not closed within 12s (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(9),
+            "stalled inbound closed too early ({elapsed:?}) — timeout may be wrong"
+        );
     }
 }
