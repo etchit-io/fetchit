@@ -299,22 +299,23 @@ async fn dispatch_welcome(
         Err(d) => return Ok(d),
     };
 
-    // Determine trust posture and TOFU-install the sender's card.
     let prior_card_exists = registry.contact_path(&verified.sender_agent_hex).exists();
     let trust_state = if prior_card_exists {
         TrustState::Confirmed
     } else {
-        let card = StoredContactCard {
-            agent_id_hex: verified.sender_agent_hex.clone(),
-            display_name: String::new(),
-            kem_public_key_b64: verified.sender_kem_pub_b64,
-            agent_public_key_b64: Some(verified.sender_pk_b64),
-        };
-        write_json_atomic(&registry.contact_path(&verified.sender_agent_hex), &card)?;
         TrustState::Pending
     };
 
-    install_or_rekey_conversation(
+    // Stash the would-be card before install_or_rekey moves
+    // `verified.sender_agent_hex` into the conversation record.
+    let pending_card = (!prior_card_exists).then(|| StoredContactCard {
+        agent_id_hex: verified.sender_agent_hex.clone(),
+        display_name: String::new(),
+        kem_public_key_b64: verified.sender_kem_pub_b64,
+        agent_public_key_b64: Some(verified.sender_pk_b64),
+    });
+
+    let result = install_or_rekey_conversation(
         envelope,
         verified.payload,
         verified.sender_agent_hex,
@@ -322,7 +323,16 @@ async fn dispatch_welcome(
         group_id_hex,
         trust_state,
     )
-    .await
+    .await?;
+
+    // Only TOFU-install the card when the welcome actually created a
+    // fresh pending-trust conversation. Stale or rejected welcomes
+    // (WelcomeIgnored / Dropped) must leave the contact store untouched.
+    if let (InboundDispatch::WelcomedPending { .. }, Some(card)) = (&result, pending_card) {
+        write_json_atomic(&registry.contact_path(&card.agent_id_hex), &card)?;
+    }
+
+    Ok(result)
 }
 
 /// Run the welcome-path crypto preamble: KEM-decap, AEAD-open, decode
@@ -853,6 +863,67 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(r2, InboundDispatch::WelcomeIgnored));
+    }
+
+    #[tokio::test]
+    async fn stale_welcome_does_not_install_contact_card() {
+        // Replay-attack defence: a stale welcome (same envelope, second
+        // delivery) installs the conversation on the first pass and is
+        // rejected as WelcomeIgnored on the second. The TOFU card-install
+        // MUST be gated on the install actually succeeding — if we wipe
+        // the card and re-deliver the stale welcome, the contact store
+        // must stay empty.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        // No card pre-installed for Alice on Bob's side — first delivery
+        // is a TOFU path.
+
+        let outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let r1 = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        assert!(
+            matches!(r1, InboundDispatch::WelcomedPending { .. }),
+            "first delivery should TOFU-install Pending, got {r1:?}",
+        );
+        let card_path = registry_b.contact_path(&aid_a);
+        assert!(
+            card_path.exists(),
+            "first delivery must have written Alice's card",
+        );
+
+        // Delete the card to simulate a clean-slate replay attack — an
+        // attacker re-delivers the stale welcome hoping to reinstall
+        // themselves into the contact store even though the install path
+        // will reject the welcome as stale.
+        std::fs::remove_file(&card_path).unwrap();
+        assert!(!card_path.exists(), "card removal precondition");
+
+        let r2 = dispatch_inbound(outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        assert!(
+            matches!(r2, InboundDispatch::WelcomeIgnored),
+            "stale-epoch replay must surface WelcomeIgnored, got {r2:?}",
+        );
+        assert!(
+            !card_path.exists(),
+            "WelcomeIgnored must NOT reinstall the contact card",
+        );
     }
 
     #[tokio::test]
