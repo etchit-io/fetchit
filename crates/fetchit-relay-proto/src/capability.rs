@@ -82,6 +82,15 @@ impl From<FeatureFlag> for u32 {
 /// Each claim widens what the relay will accept on the session
 /// beyond the default profile. Servers ignore claims they don't
 /// recognise so newer issuers stay forward-compatible.
+///
+/// Forward-compat convention: any capability introduced after the
+/// initial six typed variants is emitted as [`Capability::Unknown`]
+/// carrying an opaque `tag` (the semantic capability id) and a
+/// `payload` (its postcard-encoded body). Older binaries decode it
+/// as `Unknown`, surface it through token round-trips intact, and
+/// silently skip it during [`EffectiveCapabilities::from_claims`] so
+/// it never widens the session for a binary that can't reason
+/// about it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
     /// Override per-minute send rate cap.
@@ -96,6 +105,15 @@ pub enum Capability {
     AdminFor(TenantId),
     /// Enable a feature flag.
     Feature(FeatureFlag),
+    /// Forward-compat carrier for capability tags this binary does not
+    /// yet recognise (see type docstring).
+    Unknown {
+        /// Semantic capability identifier assigned by the issuer
+        /// (M2+ catalogue).
+        tag: u8,
+        /// Postcard-encoded payload for the unknown capability.
+        payload: Vec<u8>,
+    },
 }
 
 /// Issuer-signed claims envelope.
@@ -193,6 +211,7 @@ impl EffectiveCapabilities {
                         eff.features.insert(*f);
                     }
                 }
+                Capability::Unknown { .. } => {}
             }
         }
         eff
@@ -291,6 +310,39 @@ mod tests {
         // flag.
         let re_encoded = postcard::to_allocvec(&decoded).unwrap();
         assert_eq!(bytes, re_encoded);
+    }
+
+    #[test]
+    fn unknown_capability_round_trips_unchanged() {
+        let claim = Capability::Unknown {
+            tag: 200,
+            payload: vec![0xde, 0xad, 0xbe, 0xef, 0x42],
+        };
+        let bytes = postcard::to_allocvec(&claim).unwrap();
+        let decoded: Capability = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, claim);
+        let re_encoded = postcard::to_allocvec(&decoded).unwrap();
+        assert_eq!(
+            bytes, re_encoded,
+            "unknown capability round-trip must be byte-stable so issuer signatures still verify",
+        );
+    }
+
+    #[test]
+    fn from_claims_silently_skips_unknown_capability() {
+        let eff = EffectiveCapabilities::from_claims(&[
+            Capability::MaxGroupSize(50),
+            Capability::Unknown {
+                tag: 9,
+                payload: b"future-capability".to_vec(),
+            },
+        ]);
+        assert_eq!(eff.max_group_size, 50);
+        assert!(
+            eff.features.is_empty(),
+            "unknown capability must not widen any session field",
+        );
+        assert!(eff.admin_for.is_empty());
     }
 
     #[test]
