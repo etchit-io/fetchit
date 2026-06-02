@@ -66,6 +66,16 @@ pub enum ProfileError {
     #[error("ml-dsa verify failed (manifest sig does not match canonical || pubkey)")]
     SigVerifyFailed,
 
+    /// `issued_at_ms` is older than the minimum acceptable timestamp.
+    /// Indicates an attempted downgrade replay.
+    #[error("manifest stale: issued_at_ms {issued} < minimum {minimum}")]
+    Stale {
+        /// `issued_at_ms` carried by the manifest under test.
+        issued: u64,
+        /// Minimum acceptable `issued_at_ms` the caller supplied.
+        minimum: u64,
+    },
+
     /// saorsa-pqc rejected the encoded public key or signature bytes.
     #[error("pqc: {0}")]
     Pqc(String),
@@ -177,13 +187,21 @@ impl ProfileManifest {
     /// 3. Re-derive `agent_id` from `ml_dsa_pubkey` and cross-check
     ///    against the embedded `agent_id`.
     /// 4. ML-DSA-65 verify against (pubkey, `sign_input`, sig).
+    /// 5. If `min_issued_at_ms` is `Some(min)`, require
+    ///    `self.issued_at_ms >= min` — defends against an adversary
+    ///    re-serving a stale-but-validly-signed manifest to downgrade
+    ///    `display_name`, `kem_pubkey`, or `profile_addr`. `None`
+    ///    skips the freshness check (first-fetch case where no prior
+    ///    manifest is on file). The check runs *after* signature
+    ///    verification so timing differences don't leak whether a
+    ///    forgery attempt was fresh-but-bad-sig vs stale-and-good-sig.
     ///
     /// Returns the embedded ML-DSA-65 raw public-key bytes on success
     /// so callers don't have to decode them again.
     ///
     /// # Errors
     /// Returns the matching [`ProfileError`] variant for every step.
-    pub fn verify(&self) -> Result<Vec<u8>, ProfileError> {
+    pub fn verify(&self, min_issued_at_ms: Option<u64>) -> Result<Vec<u8>, ProfileError> {
         let pubkey_bytes = B64URL
             .decode(&self.ml_dsa_pubkey)
             .map_err(|e| ProfileError::Decode(format!("ml_dsa_pubkey b64url: {e}")))?;
@@ -224,6 +242,14 @@ impl ProfileManifest {
             .map_err(|e| ProfileError::Pqc(e.to_string()))?;
         if !ok {
             return Err(ProfileError::SigVerifyFailed);
+        }
+        if let Some(min_ts) = min_issued_at_ms {
+            if self.issued_at_ms < min_ts {
+                return Err(ProfileError::Stale {
+                    issued: self.issued_at_ms,
+                    minimum: min_ts,
+                });
+            }
         }
         Ok(pubkey_bytes)
     }
@@ -463,14 +489,14 @@ mod tests {
     #[test]
     fn minimal_verify_passes() {
         let (m, _canon, _sig) = load_fixture("minimal");
-        m.verify().expect("minimal fixture must verify");
+        m.verify(None).expect("minimal fixture must verify");
     }
 
     /// Spec § 5 assertion (b) + (c) for the maximal manifest.
     #[test]
     fn maximal_verify_passes() {
         let (m, _canon, _sig) = load_fixture("maximal");
-        m.verify().expect("maximal fixture must verify");
+        m.verify(None).expect("maximal fixture must verify");
     }
 
     /// Spec § 5 assertion (e): the tampered manifest carries the
@@ -481,7 +507,7 @@ mod tests {
     #[test]
     fn tampered_maximal_verify_rejects() {
         let (m, _canon, _sig) = load_fixture("tampered-maximal");
-        match m.verify() {
+        match m.verify(None) {
             Err(ProfileError::SigVerifyFailed) => {}
             other => panic!("tampered fixture must fail verify, got {other:?}"),
         }
@@ -538,9 +564,67 @@ mod tests {
             .unwrap()
             .insert("agent_id".into(), serde_json::json!("0".repeat(64)));
         let bad: ProfileManifest = serde_json::from_value(v).unwrap();
-        match bad.verify() {
+        match bad.verify(None) {
             Err(ProfileError::AgentIdMismatch { .. }) => {}
             other => panic!("expected AgentIdMismatch, got {other:?}"),
+        }
+    }
+
+    /// P1 profile-001: an adversary re-serving a stale-but-validly-signed
+    /// manifest must not be able to downgrade a contact's `display_name`,
+    /// `kem_pubkey`, or `profile_addr`. `verify(Some(min))` rejects with
+    /// `Stale` when the manifest's `issued_at_ms` is below `min`.
+    #[test]
+    fn verify_rejects_stale_manifest() {
+        let (m, _canon, _sig) = load_fixture("minimal");
+        let issued = m.issued_at_ms;
+        let minimum = issued.saturating_add(1);
+        match m.verify(Some(minimum)) {
+            Err(ProfileError::Stale {
+                issued: i,
+                minimum: mi,
+            }) => {
+                assert_eq!(i, issued);
+                assert_eq!(mi, minimum);
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    /// Mirror of the rejection test: when the manifest's `issued_at_ms`
+    /// is at or above the supplied minimum, verify still succeeds.
+    #[test]
+    fn verify_accepts_fresh_manifest() {
+        let (m, _canon, _sig) = load_fixture("minimal");
+        let minimum = m.issued_at_ms.saturating_sub(1);
+        m.verify(Some(minimum))
+            .expect("issued_at_ms > minimum must verify");
+    }
+
+    /// Backward-compat: `None` skips the freshness check entirely.
+    /// Same fixture as the existing happy path, but the test exists
+    /// in its own right so a future refactor can't accidentally
+    /// flip the default behaviour.
+    #[test]
+    fn verify_with_none_skips_freshness_check() {
+        let (m, _canon, _sig) = load_fixture("minimal");
+        m.verify(None)
+            .expect("None must preserve verify-as-today behavior");
+    }
+
+    /// Boundary documentation: the freshness check is strict `<`,
+    /// so `issued_at_ms == minimum` is accepted but
+    /// `issued_at_ms == minimum - 1` is rejected.
+    #[test]
+    fn verify_freshness_boundary_is_strict_less_than() {
+        let (m, _canon, _sig) = load_fixture("minimal");
+        // Equal-to-minimum → accepted.
+        m.verify(Some(m.issued_at_ms))
+            .expect("issued_at_ms == minimum must verify (boundary is strict <)");
+        // One above issued_at_ms → rejected.
+        match m.verify(Some(m.issued_at_ms + 1)) {
+            Err(ProfileError::Stale { .. }) => {}
+            other => panic!("expected Stale at minimum = issued + 1, got {other:?}"),
         }
     }
 
