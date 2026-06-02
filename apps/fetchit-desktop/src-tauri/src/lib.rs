@@ -607,11 +607,6 @@ fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
     state.cancel_fetch(&tab_id);
 }
 
-/// Build the chat state from a relay URL, falling back to the default
-/// URL when the user-supplied one is malformed.
-///
-/// # Panics
-/// Cannot panic in practice — `settings::DEFAULT_RELAY_URL` is a
 /// Read-only Tauri command surfacing the resolved chat feature flag
 /// to the frontend so the chat panel + toolbar toggle can hide
 /// themselves when chat is off. Frontend queries this once at
@@ -624,6 +619,11 @@ fn chat_feature_enabled(state: tauri::State<'_, AppState>) -> bool {
     )
 }
 
+/// Build the chat state from a relay URL, falling back to the default
+/// URL when the user-supplied one is malformed.
+///
+/// # Panics
+/// Cannot panic in practice — `settings::DEFAULT_RELAY_URL` is a
 /// compile-time constant known to parse as a valid URL. The `expect`
 /// guards a programming error in the fallback constant.
 #[allow(clippy::expect_used)]
