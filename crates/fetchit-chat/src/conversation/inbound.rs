@@ -8,7 +8,7 @@ use super::types::{
 };
 use crate::chat_crypto::{
     aead_open, canonical_envelope_bytes, derive_aead_key, kem_decapsulate, message_aad,
-    ml_dsa_verify, KDF_INFO_WELCOME, SIGN_DOMAIN_ENVELOPE,
+    ml_dsa_verify, AEAD_KEY_LEN, KDF_INFO_WELCOME, SIGN_DOMAIN_ENVELOPE,
 };
 use crate::chat_identity::FetchitIdentity;
 use crate::error::ChatError;
@@ -412,6 +412,21 @@ fn decrypt_and_verify_welcome(
             kind: "welcome-epoch-mismatch".to_owned(),
             sender: sender_agent_hex,
         }));
+    }
+
+    // Validate the inner symmetric key is well-formed BEFORE any state
+    // mutation. A peer that ships a non-AEAD_KEY_LEN key would otherwise
+    // poison the local conversation: every AEAD-open afterwards fails
+    // because the key length is wrong — a permanent local DoS from a
+    // single signed welcome.
+    match B64.decode(&payload.current_key_b64) {
+        Ok(k) if k.len() == AEAD_KEY_LEN => {}
+        _ => {
+            return Ok(Err(InboundDispatch::Dropped {
+                kind: "welcome-invalid-key-length".to_owned(),
+                sender: sender_agent_hex,
+            }));
+        }
     }
 
     // Locate the sender's device in the payload member list and extract
@@ -1312,6 +1327,120 @@ mod tests {
                 InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-epoch-mismatch"
             ),
             "expected Dropped(welcome-epoch-mismatch), got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_with_short_key_dropped() {
+        // A welcome whose inner current_key_b64 decodes to fewer than
+        // AEAD_KEY_LEN (32) bytes would poison the conversation: every
+        // subsequent AEAD-open would fail because the key length is
+        // wrong. Drop before any state mutation.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let mut alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        alice_member.devices[0].agent_public_key_b64 = Some(B64.encode(alice_signer.public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let payload = WelcomePayload {
+            group_id_hex: "0".repeat(64),
+            current_key_b64: B64.encode([7u8; 16]),
+            epoch: 0,
+            members: vec![alice_member, bob_member],
+            name: None,
+        };
+        let env =
+            seal_welcome_envelope(&payload, &aid_a, bob_id.kem_public_key(), &alice_signer).await;
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-invalid-key-length"
+            ),
+            "expected Dropped(welcome-invalid-key-length), got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_with_long_key_dropped() {
+        // Symmetric to the short-key case: a payload key that decodes
+        // to MORE than AEAD_KEY_LEN bytes is equally malformed.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let mut alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        alice_member.devices[0].agent_public_key_b64 = Some(B64.encode(alice_signer.public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let payload = WelcomePayload {
+            group_id_hex: "0".repeat(64),
+            current_key_b64: B64.encode([7u8; 48]),
+            epoch: 0,
+            members: vec![alice_member, bob_member],
+            name: None,
+        };
+        let env =
+            seal_welcome_envelope(&payload, &aid_a, bob_id.kem_public_key(), &alice_signer).await;
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-invalid-key-length"
+            ),
+            "expected Dropped(welcome-invalid-key-length), got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_with_non_base64_key_dropped() {
+        // A non-base64 current_key_b64 must drop the welcome before
+        // any state mutation. The check fails closed on decode error
+        // — no ChatError propagates.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let mut alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        alice_member.devices[0].agent_public_key_b64 = Some(B64.encode(alice_signer.public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let payload = WelcomePayload {
+            group_id_hex: "0".repeat(64),
+            current_key_b64: "not!!!base64!!!".to_owned(),
+            epoch: 0,
+            members: vec![alice_member, bob_member],
+            name: None,
+        };
+        let env =
+            seal_welcome_envelope(&payload, &aid_a, bob_id.kem_public_key(), &alice_signer).await;
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-invalid-key-length"
+            ),
+            "expected Dropped(welcome-invalid-key-length), got {result:?}",
         );
     }
 
