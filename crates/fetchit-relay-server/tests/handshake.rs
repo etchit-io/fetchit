@@ -146,6 +146,51 @@ async fn auth_handshake_yields_bearer_token() {
 }
 
 #[tokio::test]
+async fn auth_verify_failure_returns_generic_body_without_leaking_variant_detail() {
+    // SEC-001: drive auth_verify into the AgentMismatch rejection
+    // path (agent_id does not derive from the supplied public key)
+    // and assert the response body is exactly "authentication
+    // failed" — not the variant-specific reason string.
+    let addr = start_test_server().await;
+    let http = reqwest::Client::new();
+    let challenge: AuthChallenge = http
+        .post(format!("http://{addr}/v1/auth/challenge"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let bogus_agent_id = AgentId::from_bytes([0xffu8; 32]);
+    let req = AuthVerifyRequest {
+        agent_id: bogus_agent_id,
+        agent_public_key: b"alice-pubkey-bytes".to_vec(),
+        challenge: challenge.challenge,
+        signature: vec![0u8; 16],
+    };
+    let resp = http
+        .post(format!("http://{addr}/v1/auth/verify"))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        body, "authentication failed",
+        "response body must be the canned generic message — got: {body:?}",
+    );
+    let lower = body.to_ascii_lowercase();
+    for needle in ["pubkey", "public_key", "agent", "challenge", "signature"] {
+        assert!(
+            !lower.contains(needle),
+            "leak: response body contains {needle:?} ({body:?})",
+        );
+    }
+}
+
+#[tokio::test]
 async fn send_between_two_connected_clients_delivers() {
     let addr = start_test_server().await;
 

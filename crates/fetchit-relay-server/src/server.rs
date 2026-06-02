@@ -266,7 +266,11 @@ async fn auth_verify(
         }
         Err(e) => {
             state.metrics.auth_verify_failed();
-            Err((axum::http::StatusCode::UNAUTHORIZED, e.to_string()))
+            warn!(error = ?e, "auth_verify rejected");
+            Err((
+                axum::http::StatusCode::UNAUTHORIZED,
+                "authentication failed".to_owned(),
+            ))
         }
     }
 }
