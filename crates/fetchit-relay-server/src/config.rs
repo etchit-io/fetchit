@@ -22,6 +22,12 @@ pub struct ServerConfig {
     pub transit_ttl: Duration,
     /// Per-recipient transit buffer capacity (envelope count).
     pub transit_per_recipient: usize,
+    /// Global cap on bytes the transit buffer may hold across all
+    /// recipients. The per-recipient envelope count alone allows
+    /// `cap_per_recipient × max_envelope_bytes × N` worst-case RAM —
+    /// this caps the total so a fanned-out attacker can't push the
+    /// process toward OOM.
+    pub transit_total_bytes_cap: usize,
     /// Lifetime of an issued auth challenge before it must be redeemed.
     pub challenge_ttl: Duration,
     /// Lifetime of a minted bearer token for the WebSocket upgrade.
@@ -53,6 +59,7 @@ impl ServerConfig {
             max_envelope_bytes: fetchit_relay_proto::DEFAULT_MAX_ENVELOPE_BYTES,
             transit_ttl: Duration::from_secs(15 * 60),
             transit_per_recipient: 256,
+            transit_total_bytes_cap: 1 << 30,
             challenge_ttl: Duration::from_secs(60),
             bearer_ttl: Duration::from_secs(15 * 60),
             issuer_keys: HashMap::new(),

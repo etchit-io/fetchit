@@ -81,6 +81,7 @@ impl Server {
             transit: Arc::new(TransitBuffer::new(
                 self.config.transit_ttl,
                 self.config.transit_per_recipient,
+                self.config.transit_total_bytes_cap,
             )),
             sessions: Arc::new(SessionRegistry::new()),
             verifier: self.verifier,
