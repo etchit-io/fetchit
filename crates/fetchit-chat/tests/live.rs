@@ -75,7 +75,7 @@ async fn live_group_create_decodes() {
         .create("live-decode-probe", Some("me"))
         .await
         .expect("create");
-    println!("created group {} ({:?})", g.group_id.0, g.name);
+    println!("created group {} ({:?})", g.group_id.as_str(), g.name);
     // Clean up.
     c.groups().leave(&g.group_id).await.expect("leave");
 }

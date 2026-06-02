@@ -13,7 +13,7 @@
 //! state machine in this crate driving x0xd's MLS surface, or a swap
 //! to `OpenMLS`. Neither exists today.
 
-use crate::error::Result;
+use crate::error::{ChatError, Result};
 use crate::http::Http;
 use crate::identity::AgentId;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,39 @@ use serde::{Deserialize, Serialize};
 /// Opaque group identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct GroupId(pub String);
+pub struct GroupId(String);
+
+impl GroupId {
+    /// Parse and validate a group ID. Only non-empty strings of
+    /// `[a-zA-Z0-9_-]` are accepted. Rejecting `/`, `..`, and other
+    /// characters prevents path traversal against the x0xd daemon
+    /// when the ID is interpolated into HTTP path segments.
+    ///
+    /// # Errors
+    /// Returns [`ChatError::Invalid`] when `s` is empty or contains
+    /// any character outside `[a-zA-Z0-9_-]`.
+    pub fn parse(s: &str) -> Result<Self> {
+        if s.is_empty() {
+            return Err(ChatError::Invalid("GroupId is empty".into()));
+        }
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(ChatError::Invalid(
+                "GroupId contains characters outside [a-zA-Z0-9_-]".into(),
+            ));
+        }
+        Ok(GroupId(s.to_string()))
+    }
+
+    /// String view of the group id, safe to interpolate into URL path
+    /// segments because `parse` enforces `[a-zA-Z0-9_-]`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A group as seen from the local agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,7 +181,7 @@ impl<'a> Endpoint<'a> {
     /// the creator's call removes the group for everyone in the
     /// roster; a non-creator's call leaves it locally only.
     pub async fn leave(&self, group: &GroupId) -> Result<()> {
-        let path = format!("/groups/{}", group.0);
+        let path = format!("/groups/{}", group.as_str());
         self.http.delete(&path).await
     }
 
@@ -176,7 +208,7 @@ impl<'a> Endpoint<'a> {
 
     /// Generate a fresh invite link for a group.
     pub async fn invite(&self, group: &GroupId) -> Result<GroupInvite> {
-        let path = format!("/groups/{}/invite", group.0);
+        let path = format!("/groups/{}/invite", group.as_str());
         let resp: InviteResponse = self.http.post_json(&path, &serde_json::json!({})).await?;
         Ok(GroupInvite(resp.invite_link))
     }
@@ -196,7 +228,7 @@ impl<'a> Endpoint<'a> {
 
     /// Send a message into a group.
     pub async fn send(&self, group: &GroupId, body: &str) -> Result<Option<String>> {
-        let path = format!("/groups/{}/send", group.0);
+        let path = format!("/groups/{}/send", group.as_str());
         let resp: serde_json::Value = self
             .http
             .post_json(&path, &SendGroupRequest { body, kind: "chat" })
@@ -212,7 +244,7 @@ impl<'a> Endpoint<'a> {
     /// we synthesise one from the cryptographic signature (which is
     /// per-message-unique) when the daemon omits it.
     pub async fn history(&self, group: &GroupId) -> Result<Vec<GroupMessage>> {
-        let path = format!("/groups/{}/messages", group.0);
+        let path = format!("/groups/{}/messages", group.as_str());
         let resp: GroupMessagesResponse = self.http.get_json(&path).await?;
         let messages = resp
             .messages
@@ -276,6 +308,30 @@ mod tests {
         assert_eq!(m.kind, "chat");
         assert!(m.from.0.starts_with("4dc0f2f6"));
         assert_eq!(m.signature, "3f429c004adb");
+    }
+
+    #[test]
+    fn group_id_parse_accepts_valid_chars() {
+        assert!(GroupId::parse("valid-group_123").is_ok());
+        assert!(GroupId::parse("a").is_ok());
+        assert!(GroupId::parse("ABC-123_def").is_ok());
+    }
+
+    #[test]
+    fn group_id_parse_rejects_invalid() {
+        for bad in [
+            "",
+            "/",
+            "..",
+            "with space",
+            "a/b",
+            "with.dot",
+            "with:colon",
+            "with%encoded",
+            "unicode-é",
+        ] {
+            assert!(GroupId::parse(bad).is_err(), "expected reject for {bad:?}");
+        }
     }
 
     #[test]

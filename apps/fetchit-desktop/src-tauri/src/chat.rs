@@ -521,11 +521,12 @@ pub async fn chat_group_invite(
     state: tauri::State<'_, ChatState>,
     group_id: String,
 ) -> Result<String, String> {
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     let invite = state
         .get()
         .await?
         .groups()
-        .invite(&GroupId(group_id))
+        .invite(&gid)
         .await
         .map_err(|e| e.to_string())?;
     Ok(invite.0)
@@ -552,11 +553,12 @@ pub async fn chat_group_send(
     group_id: String,
     body: String,
 ) -> Result<Option<String>, String> {
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     state
         .get()
         .await?
         .groups()
-        .send(&GroupId(group_id), &body)
+        .send(&gid, &body)
         .await
         .map_err(|e| e.to_string())
 }
@@ -566,11 +568,12 @@ pub async fn chat_group_leave(
     state: tauri::State<'_, ChatState>,
     group_id: String,
 ) -> Result<(), String> {
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     state
         .get()
         .await?
         .groups()
-        .leave(&GroupId(group_id))
+        .leave(&gid)
         .await
         .map_err(|e| e.to_string())
 }
@@ -580,11 +583,12 @@ pub async fn chat_group_messages(
     state: tauri::State<'_, ChatState>,
     group_id: String,
 ) -> Result<Vec<fetchit_chat::groups::GroupMessage>, String> {
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     state
         .get()
         .await?
         .groups()
-        .history(&GroupId(group_id))
+        .history(&gid)
         .await
         .map_err(|e| e.to_string())
 }

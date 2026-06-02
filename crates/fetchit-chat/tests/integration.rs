@@ -311,7 +311,7 @@ async fn groups_create_and_invite() {
         .await;
     let c = client_against(&server).await;
     let group = c.groups().create("Team", Some("Alice")).await.unwrap();
-    assert_eq!(group.group_id.0, "g-1");
+    assert_eq!(group.group_id.as_str(), "g-1");
     assert!(group.is_owner);
     let invite = c.groups().invite(&group.group_id).await.unwrap();
     assert_eq!(invite.0, "x0x://invite/zzz");
@@ -334,7 +334,7 @@ async fn groups_join_returns_group() {
         .join(&GroupInvite("x0x://invite/zzz".into()), None)
         .await
         .unwrap();
-    assert_eq!(g.group_id, GroupId("g-2".into()));
+    assert_eq!(g.group_id, GroupId::parse("g-2").unwrap());
 }
 
 #[tokio::test]
@@ -351,7 +351,7 @@ async fn groups_send_returns_id() {
     let id = client_against(&server)
         .await
         .groups()
-        .send(&GroupId("g-1".into()), "team msg")
+        .send(&GroupId::parse("g-1").unwrap(), "team msg")
         .await
         .unwrap();
     assert_eq!(id.as_deref(), Some("gm-1"));
