@@ -403,6 +403,17 @@ fn decrypt_and_verify_welcome(
     let payload: WelcomePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("welcome payload parse: {e}")))?;
 
+    // Belt-and-suspenders against epoch downgrade: AEAD binds to
+    // envelope.epoch in the AAD, but install_or_rekey installs
+    // payload.epoch into conv.current_epoch. A mismatch indicates
+    // tampering or a crafted payload — drop without state change.
+    if payload.epoch != envelope.epoch {
+        return Ok(Err(InboundDispatch::Dropped {
+            kind: "welcome-epoch-mismatch".to_owned(),
+            sender: sender_agent_hex,
+        }));
+    }
+
     // Locate the sender's device in the payload member list and extract
     // the self-attested pubkey.
     let Some(sender_device) = payload
@@ -1253,6 +1264,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn welcome_with_payload_epoch_mismatch_dropped() {
+        // Belt-and-suspenders: AEAD binds envelope.epoch into the AAD,
+        // but install_or_rekey installs payload.epoch into
+        // conv.current_epoch. A crafted envelope where envelope.epoch
+        // and payload.epoch disagree must drop without state change,
+        // otherwise a payload.epoch=0 inside an envelope.epoch=N seal
+        // would regress the victim's conversation epoch on install or
+        // rekey.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let mut alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        alice_member.devices[0].agent_public_key_b64 = Some(B64.encode(alice_signer.public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        // Inner payload claims epoch 0 — what install_or_rekey would
+        // write into conv.current_epoch if the cross-check were missing.
+        let payload = WelcomePayload {
+            group_id_hex: "0".repeat(64),
+            current_key_b64: B64.encode([7u8; 32]),
+            epoch: 0,
+            members: vec![alice_member, bob_member],
+            name: None,
+        };
+        // Envelope is sealed at epoch 5 — AEAD opens because the AAD
+        // matches, but the cross-check on payload.epoch must fail.
+        let env = seal_welcome_envelope_with_epoch(
+            &payload,
+            5,
+            &aid_a,
+            bob_id.kem_public_key(),
+            &alice_signer,
+        )
+        .await;
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                InboundDispatch::Dropped { ref kind, .. } if kind == "welcome-epoch-mismatch"
+            ),
+            "expected Dropped(welcome-epoch-mismatch), got {result:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn welcome_missing_sender_member_drops() {
         // If the welcome payload omits the sender's agent_id from its
         // member list there's nothing to bind the pubkey to. Drop.
@@ -1433,6 +1496,26 @@ mod tests {
         recipient_kem_pub: &[u8],
         signer: &MlDsaSigner,
     ) -> TransitEnvelope {
+        seal_welcome_envelope_with_epoch(
+            payload,
+            payload.epoch,
+            sender_aid_hex,
+            recipient_kem_pub,
+            signer,
+        )
+        .await
+    }
+
+    /// Variant of `seal_welcome_envelope` that lets the caller set a
+    /// distinct envelope.epoch (used in the AAD) from the inner
+    /// `payload.epoch`. Exercises the cross-validation drop path.
+    async fn seal_welcome_envelope_with_epoch(
+        payload: &WelcomePayload,
+        envelope_epoch: u32,
+        sender_aid_hex: &str,
+        recipient_kem_pub: &[u8],
+        signer: &MlDsaSigner,
+    ) -> TransitEnvelope {
         use crate::chat_crypto::{
             aead_seal, derive_aead_key, kem_encapsulate, message_aad, random_nonce,
             KDF_INFO_WELCOME,
@@ -1445,7 +1528,7 @@ mod tests {
         let (kem_ct, ss) = kem_encapsulate(recipient_kem_pub).unwrap();
         let aead_key = derive_aead_key(&ss, KDF_INFO_WELCOME);
         let nonce = random_nonce(&mut OsRng);
-        let aad = message_aad(&group_id_bytes, payload.epoch);
+        let aad = message_aad(&group_id_bytes, envelope_epoch);
         let ciphertext = aead_seal(&aead_key, &nonce, &payload_bytes, &aad).unwrap();
         let mut sender_bytes = [0u8; 32];
         hex::decode_to_slice(sender_aid_hex, &mut sender_bytes).unwrap();
@@ -1457,7 +1540,7 @@ mod tests {
             sender_agent_id: AgentId::from_bytes(sender_bytes),
             sender_machine_id: MachineId::from_bytes([0; 32]),
             timestamp_ms: 1,
-            epoch: payload.epoch,
+            epoch: envelope_epoch,
             ciphertext,
             nonce: nonce.to_vec(),
             kem_ciphertext: kem_ct,
