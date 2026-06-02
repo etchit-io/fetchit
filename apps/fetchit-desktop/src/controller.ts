@@ -17,6 +17,7 @@ import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
 import { mountChatPanel, type ChatPanelApi } from "./chat";
+import { DEMO_CITY_INDEX, buildEmptyState } from "./emptyState";
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
 
@@ -187,7 +188,7 @@ export async function init(): Promise<void> {
 
   const newTab = (): void => {
     const root = buildStageRoot(stageEl);
-    root.appendChild(buildEmptyState());
+    root.appendChild(buildEmptyState(() => submit(DEMO_CITY_INDEX, store, stageEl)));
     store.createEmpty(root);
     bar.focus();
   };
@@ -429,13 +430,6 @@ function buildStageRoot(stage: HTMLElement): HTMLElement {
   root.setAttribute("role", "tabpanel");
   stage.appendChild(root);
   return root;
-}
-
-function buildEmptyState(): HTMLElement {
-  const e = document.createElement("div");
-  e.className = "tab-empty";
-  e.textContent = "paste an address above to fetch";
-  return e;
 }
 
 function buildErrorState(msg: string): HTMLElement {
