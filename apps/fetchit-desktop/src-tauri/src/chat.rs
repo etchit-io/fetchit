@@ -8,6 +8,8 @@
 //! (`chat:event`, `chat:presence`, `chat:dm`, `chat:conversation`,
 //! `chat:warn`).
 
+use crate::settings::resolve_chat_enabled;
+use crate::state::AppState;
 use fetchit_chat::contacts::TrustLevel;
 use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
 use fetchit_chat::groups::{GroupId, GroupInvite};
@@ -21,6 +23,35 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use url::Url;
+
+/// Specific error string returned by every gated chat command when
+/// the M0.2 feature flag resolves to off. Pinned as a constant so the
+/// frontend (and the unit test below) can rely on the exact text.
+pub const CHAT_FEATURE_DISABLED_ERR: &str = "chat feature disabled";
+
+/// Resolve the M0.2 chat feature flag from the live `AppState`
+/// settings + env override. The chat UI is hidden when off, but the
+/// IPC surface stays registered with Tauri's `invoke_handler`. Each
+/// `chat_*` command calls this at the top so a caller reaching
+/// `__TAURI_INTERNALS__.invoke` (`DevTools`, malicious renderer code,
+/// extension surface) cannot drive the chat stack while the user-
+/// facing toggle is off.
+///
+/// The check re-resolves per call so a runtime flip via Settings →
+/// Advanced or a `FETCHIT_CHAT_ENABLED` env change takes effect on
+/// the very next IPC, matching the existing
+/// [`crate::chat_feature_enabled`] command's behaviour.
+fn ensure_chat_enabled(app_state: &AppState) -> Result<(), String> {
+    let enabled = app_state
+        .settings
+        .lock()
+        .map_or_else(|_| cfg!(debug_assertions), |s| resolve_chat_enabled(&s));
+    if enabled {
+        Ok(())
+    } else {
+        Err(CHAT_FEATURE_DISABLED_ERR.to_owned())
+    }
+}
 
 const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -183,8 +214,10 @@ pub struct NearbyPeer {
 /// Returns an empty list when LAN-direct is disabled.
 #[tauri::command]
 pub async fn chat_list_nearby(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
 ) -> Result<Vec<NearbyPeer>, String> {
+    ensure_chat_enabled(&app_state)?;
     let client = state.get().await?;
     let Some(lan) = client.lan_transport_arc() else {
         return Ok(Vec::new());
@@ -203,7 +236,11 @@ pub async fn chat_list_nearby(
 }
 
 #[tauri::command]
-pub async fn chat_health(state: tauri::State<'_, ChatState>) -> Result<bool, String> {
+pub async fn chat_health(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<bool, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -215,8 +252,10 @@ pub async fn chat_health(state: tauri::State<'_, ChatState>) -> Result<bool, Str
 
 #[tauri::command]
 pub async fn chat_identity(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
 ) -> Result<fetchit_chat::identity::AgentIdentity, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -228,9 +267,11 @@ pub async fn chat_identity(
 
 #[tauri::command]
 pub async fn chat_card(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     display_name: String,
 ) -> Result<CardWithUri, String> {
+    ensure_chat_enabled(&app_state)?;
     let client = state.get().await?;
     let card = client
         .identity()
@@ -247,9 +288,11 @@ pub async fn chat_card(
 
 #[tauri::command]
 pub async fn chat_import_card(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     uri: String,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     // Validate the URI client-side so a malformed paste surfaces a
     // clear error before we hit the daemon.
     AgentCard::from_share_uri(&uri).map_err(|e| e.to_string())?;
@@ -305,9 +348,11 @@ pub struct PairAccepted {
 /// `agent_id` prefix label until then.
 #[tauri::command]
 pub async fn chat_pair_accept(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     uri: String,
 ) -> Result<PairAccepted, String> {
+    ensure_chat_enabled(&app_state)?;
     let client = state.get().await?;
     let layout = client
         .layout()
@@ -364,7 +409,11 @@ fn urls_same_origin(a: &Url, b: &Url) -> bool {
 /// etch>it's Profile-tab has run a publish, this command succeeds
 /// and the frontend renders the result as a QR code.
 #[tauri::command]
-pub async fn chat_pair_share(state: tauri::State<'_, ChatState>) -> Result<String, String> {
+pub async fn chat_pair_share(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<String, String> {
+    ensure_chat_enabled(&app_state)?;
     let client = state.get().await?;
     let me = client.identity().me().await.map_err(|e| e.to_string())?;
     // Build the relay's profile-index URL from the client's
@@ -400,8 +449,10 @@ pub async fn chat_pair_share(state: tauri::State<'_, ChatState>) -> Result<Strin
 
 #[tauri::command]
 pub async fn chat_contacts(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
 ) -> Result<Vec<fetchit_chat::contacts::Contact>, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -413,10 +464,12 @@ pub async fn chat_contacts(
 
 #[tauri::command]
 pub async fn chat_set_trust(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     agent_id: String,
     level: TrustLevel,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(agent_id).map_err(|e| e.to_string())?;
     state
         .get()
@@ -429,9 +482,11 @@ pub async fn chat_set_trust(
 
 #[tauri::command]
 pub async fn chat_remove_contact(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     agent_id: String,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(agent_id).map_err(|e| e.to_string())?;
     state
         .get()
@@ -444,11 +499,13 @@ pub async fn chat_remove_contact(
 
 #[tauri::command]
 pub async fn chat_send_dm(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     to: String,
     body: String,
     sender_name: Option<String>,
 ) -> Result<Option<String>, String> {
+    ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(to).map_err(|e| e.to_string())?;
     let name = sender_name.unwrap_or_else(|| "fetchit".to_string());
     state
@@ -462,9 +519,11 @@ pub async fn chat_send_dm(
 
 #[tauri::command]
 pub async fn chat_dm_connect(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     agent_id: String,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(agent_id).map_err(|e| e.to_string())?;
     state
         .get()
@@ -477,8 +536,10 @@ pub async fn chat_dm_connect(
 
 #[tauri::command]
 pub async fn chat_presence_online(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
 ) -> Result<Vec<fetchit_chat::presence::OnlineAgent>, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -490,8 +551,10 @@ pub async fn chat_presence_online(
 
 #[tauri::command]
 pub async fn chat_groups_list(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
 ) -> Result<Vec<fetchit_chat::groups::Group>, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -503,10 +566,12 @@ pub async fn chat_groups_list(
 
 #[tauri::command]
 pub async fn chat_group_create(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     name: String,
     display_name: Option<String>,
 ) -> Result<fetchit_chat::groups::Group, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -518,9 +583,11 @@ pub async fn chat_group_create(
 
 #[tauri::command]
 pub async fn chat_group_invite(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     group_id: String,
 ) -> Result<String, String> {
+    ensure_chat_enabled(&app_state)?;
     let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     let invite = state
         .get()
@@ -534,10 +601,12 @@ pub async fn chat_group_invite(
 
 #[tauri::command]
 pub async fn chat_group_join(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     invite: String,
     display_name: Option<String>,
 ) -> Result<fetchit_chat::groups::Group, String> {
+    ensure_chat_enabled(&app_state)?;
     state
         .get()
         .await?
@@ -549,10 +618,12 @@ pub async fn chat_group_join(
 
 #[tauri::command]
 pub async fn chat_group_send(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     group_id: String,
     body: String,
 ) -> Result<Option<String>, String> {
+    ensure_chat_enabled(&app_state)?;
     let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     state
         .get()
@@ -565,9 +636,11 @@ pub async fn chat_group_send(
 
 #[tauri::command]
 pub async fn chat_group_leave(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     group_id: String,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     state
         .get()
@@ -580,9 +653,11 @@ pub async fn chat_group_leave(
 
 #[tauri::command]
 pub async fn chat_group_messages(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     group_id: String,
 ) -> Result<Vec<fetchit_chat::groups::GroupMessage>, String> {
+    ensure_chat_enabled(&app_state)?;
     let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
     state
         .get()
@@ -599,9 +674,11 @@ pub async fn chat_group_messages(
 /// `Client` so the new passphrase takes effect.
 #[tauri::command]
 pub async fn chat_set_passphrase(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     passphrase: String,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     *state.passphrase.lock().await = Some(passphrase);
     state.invalidate().await;
     Ok(())
@@ -623,9 +700,11 @@ pub async fn chat_set_passphrase(
 /// and rehydrated automatically on reconnect.
 #[tauri::command]
 pub async fn chat_watch_presence(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     agent_ids: Vec<String>,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let parsed = parse_relay_agent_ids(&agent_ids)?;
     let client = state.get().await?;
     client
@@ -636,9 +715,11 @@ pub async fn chat_watch_presence(
 /// Drop the relay-level presence subscription for `agent_ids` (hex).
 #[tauri::command]
 pub async fn chat_unwatch_presence(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     agent_ids: Vec<String>,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let parsed = parse_relay_agent_ids(&agent_ids)?;
     let client = state.get().await?;
     client
@@ -658,9 +739,11 @@ fn parse_relay_agent_ids(hex_ids: &[String]) -> Result<Vec<RelayAgentId>, String
 
 #[tauri::command]
 pub async fn chat_confirm_contact(
+    app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     group_id_hex: String,
 ) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
     let client = state.get().await?;
     let registry = client.registry_arc().ok_or("no chat state")?;
     let mut conv = registry
@@ -1827,5 +1910,62 @@ mod tests {
             let err = validate_relay_url("http://127.0.0.1:8088").unwrap_err();
             assert!(err.contains("FETCHIT_ALLOW_LOCAL_RELAY"), "{err}");
         });
+    }
+
+    /// Build a minimal `AppState` carrying a `Settings` with the
+    /// chat-enabled flag set as requested. Used by the M0.2 gate tests
+    /// below; the disk-cache + settings-path arguments are placeholders
+    /// — the gate only ever reads `state.settings`.
+    fn make_app_state(chat_enabled: bool) -> super::AppState {
+        use crate::disk_cache::{DiskCache, Policy};
+        use crate::settings::Settings;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let disk = std::sync::Arc::new(DiskCache::new(tmp.path().join("disk"), Policy::default()));
+        let s = Settings {
+            chat_enabled,
+            ..Settings::default()
+        };
+        super::AppState::new(disk, s, tmp.path().join("settings.json"))
+    }
+
+    /// Pin the M0.2 gate: when the chat feature flag is off, the
+    /// helper every `chat_*` Tauri command calls at the top returns
+    /// the canonical disabled error so callers reaching the IPC
+    /// surface directly (`DevTools`, malicious renderer code, extension)
+    /// cannot drive the chat stack while the user-facing toggle is
+    /// off. Serialised against the env-touching guard tests above so
+    /// a concurrent `FETCHIT_CHAT_ENABLED=1` set never races us.
+    #[test]
+    fn ensure_chat_enabled_rejects_when_flag_off() {
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = crate::settings::CHAT_ENABLED_ENV;
+        let prev = std::env::var_os(key);
+        std::env::remove_var(key);
+        let app_state = make_app_state(false);
+        let err = super::ensure_chat_enabled(&app_state).unwrap_err();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(err, super::CHAT_FEATURE_DISABLED_ERR);
+    }
+
+    #[test]
+    fn ensure_chat_enabled_passes_when_flag_on() {
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = crate::settings::CHAT_ENABLED_ENV;
+        let prev = std::env::var_os(key);
+        std::env::remove_var(key);
+        let app_state = make_app_state(true);
+        let result = super::ensure_chat_enabled(&app_state);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }
