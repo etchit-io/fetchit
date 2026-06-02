@@ -325,9 +325,6 @@ async fn dispatch_welcome(
     )
     .await?;
 
-    // Only TOFU-install the card when the welcome actually created a
-    // fresh pending-trust conversation. Stale or rejected welcomes
-    // (WelcomeIgnored / Dropped) must leave the contact store untouched.
     if let (InboundDispatch::WelcomedPending { .. }, Some(card)) = (&result, pending_card) {
         write_json_atomic(&registry.contact_path(&card.agent_id_hex), &card)?;
     }
