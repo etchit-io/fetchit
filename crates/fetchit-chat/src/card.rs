@@ -589,7 +589,10 @@ mod tests {
         let wire = serde_json::to_string(&v2_with_hints).unwrap();
         // Round-trip through strict parser: hints survive.
         let parsed: CardExtension = serde_json::from_str(&wire).unwrap();
-        assert_eq!(parsed.v2_rendezvous_hints, v2_with_hints.v2_rendezvous_hints);
+        assert_eq!(
+            parsed.v2_rendezvous_hints,
+            v2_with_hints.v2_rendezvous_hints
+        );
         // And the wire DOES carry the field when populated.
         assert!(
             wire.contains("fetchit_rendezvous_hints"),

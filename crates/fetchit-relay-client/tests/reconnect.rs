@@ -591,7 +591,10 @@ async fn supervisor_gives_up_after_max_reconnect_attempts() {
 
     let saw_permanent = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if matches!(*state_rx.borrow(), ConnState::PermanentlyDisconnected { .. }) {
+            if matches!(
+                *state_rx.borrow(),
+                ConnState::PermanentlyDisconnected { .. }
+            ) {
                 return;
             }
             state_rx.changed().await.unwrap();

@@ -81,12 +81,7 @@ async fn public_metrics_not_served_on_internal_listener() {
     let (_public_addr, internal_addr) = start_pair().await;
     let http = reqwest::Client::new();
 
-    for path in [
-        "/v1/metrics",
-        "/v1/health",
-        "/v1/auth/challenge",
-        "/v1/ws",
-    ] {
+    for path in ["/v1/metrics", "/v1/health", "/v1/auth/challenge", "/v1/ws"] {
         let resp = http
             .get(format!("http://{internal_addr}{path}"))
             .send()
@@ -111,7 +106,10 @@ async fn server_run_refuses_non_loopback_internal_bind() {
     cfg.internal_bind = Some(SocketAddr::from(([10, 0, 0, 1], 9088)));
 
     let server = Server::new(cfg);
-    let err = server.run().await.expect_err("run() must reject non-loopback internal bind");
+    let err = server
+        .run()
+        .await
+        .expect_err("run() must reject non-loopback internal bind");
     let msg = err.to_string();
     assert!(
         msg.contains("loopback"),

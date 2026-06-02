@@ -513,14 +513,10 @@ impl Supervisor {
                             backoff = INITIAL_BACKOFF;
                         }
                         ReconnectOutcome::Shutdown => break,
-                        ReconnectOutcome::PermanentlyDisconnected {
-                            reason,
-                            attempts,
-                        } => {
-                            let _ = self.state_tx.send(ConnState::PermanentlyDisconnected {
-                                reason,
-                                attempts,
-                            });
+                        ReconnectOutcome::PermanentlyDisconnected { reason, attempts } => {
+                            let _ = self
+                                .state_tx
+                                .send(ConnState::PermanentlyDisconnected { reason, attempts });
                             // Stop the supervisor; the application
                             // must rebuild Client to reconnect.
                             break;

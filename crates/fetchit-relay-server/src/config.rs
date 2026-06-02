@@ -145,7 +145,10 @@ mod tests {
     fn internal_bind_defaults_to_loopback() {
         let cfg = ServerConfig::defaults(SocketAddr::from(([127, 0, 0, 1], 0)), Region::Nyc);
         let addr = cfg.internal_bind.expect("internal_bind defaulted on");
-        assert!(addr.ip().is_loopback(), "default internal bind must be loopback");
+        assert!(
+            addr.ip().is_loopback(),
+            "default internal bind must be loopback"
+        );
         assert_eq!(addr.port(), 9088);
     }
 
