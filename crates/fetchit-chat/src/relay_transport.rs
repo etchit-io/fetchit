@@ -129,37 +129,7 @@ impl Transport for RelayTransport {
             // This is the production end-to-end channel.
             prebuilt
         } else {
-            // Fabricated v1 fallback — no caller-supplied sealed
-            // envelope, so we build a TransitEnvelope with EMPTY
-            // nonce / kem_ciphertext / sender_signature. The payload
-            // bytes go through the relay in the clear (modulo TLS to
-            // the relay). Relay-path confidentiality on this branch
-            // rests on the relay being honest; this is NOT end-to-end
-            // sealed and the M0 SECURITY.md names it explicitly. M2
-            // removes this fallback.
-            let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
-            let (kind, group_id) = match envelope.kind {
-                OutboundKind::Dm => (RelayKind::Dm, None),
-                OutboundKind::Group { ref group_id } => {
-                    let bytes = parse_hex_32(group_id)
-                        .map_err(|e| ChatError::Invalid(format!("group id: {e}")))?;
-                    (RelayKind::GroupChat, Some(RelayGroupId::from_bytes(bytes)))
-                }
-            };
-            TransitEnvelope {
-                version: 2,
-                kind,
-                group_id,
-                tenant_id: None,
-                sender_agent_id: self.local_agent_id,
-                sender_machine_id: machine_id,
-                timestamp_ms: envelope.timestamp_ms,
-                epoch: 0,
-                ciphertext: envelope.payload,
-                nonce: Vec::new(),
-                kem_ciphertext: Vec::new(),
-                sender_signature: Vec::new(),
-            }
+            fabricate_v1_envelope(self.local_agent_id, envelope)?
         };
         let dedupe_key = self.next_dedupe_key();
         let receipt = self
@@ -177,6 +147,42 @@ impl Transport for RelayTransport {
     fn take_inbound(&self) -> Option<mpsc::UnboundedReceiver<InboundEnvelope>> {
         self.inbound.lock().ok().and_then(|mut g| g.take())
     }
+}
+
+/// Build a fabricated v1 `TransitEnvelope` from an `OutboundEnvelope`
+/// that didn't carry a prebuilt sealed envelope. The result has empty
+/// `nonce` / `kem_ciphertext` / `sender_signature`; the payload bytes
+/// ride the wire as-is. Relay-path confidentiality on this branch
+/// rests on the relay being honest — it is NOT end-to-end sealed and
+/// `docs/SECURITY.md` names it explicitly.
+// M2: remove this entire branch
+fn fabricate_v1_envelope(
+    local_agent_id: RelayAgentId,
+    envelope: OutboundEnvelope,
+) -> Result<TransitEnvelope> {
+    let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
+    let (kind, group_id) = match envelope.kind {
+        OutboundKind::Dm => (RelayKind::Dm, None),
+        OutboundKind::Group { ref group_id } => {
+            let bytes =
+                parse_hex_32(group_id).map_err(|e| ChatError::Invalid(format!("group id: {e}")))?;
+            (RelayKind::GroupChat, Some(RelayGroupId::from_bytes(bytes)))
+        }
+    };
+    Ok(TransitEnvelope {
+        version: 1,
+        kind,
+        group_id,
+        tenant_id: None,
+        sender_agent_id: local_agent_id,
+        sender_machine_id: machine_id,
+        timestamp_ms: envelope.timestamp_ms,
+        epoch: 0,
+        ciphertext: envelope.payload,
+        nonce: Vec::new(),
+        kem_ciphertext: Vec::new(),
+        sender_signature: Vec::new(),
+    })
 }
 
 fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<InboundEnvelope>) {
@@ -246,5 +252,31 @@ mod tests {
     #[test]
     fn parse_hex_32_rejects_wrong_length() {
         assert!(parse_hex_32("ab").is_err());
+    }
+
+    #[test]
+    fn fabricated_envelope_version_is_one() {
+        let local = RelayAgentId::from_bytes([0x11; 32]);
+        let outbound = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: Some([0x22; 32]),
+            payload: b"hello".to_vec(),
+            timestamp_ms: 1_700_000_000_000,
+            transit: None,
+        };
+        let env = fabricate_v1_envelope(local, outbound).unwrap();
+        assert_eq!(env.version, 1, "fallback envelope must wear its v1 shape");
+        assert!(
+            env.nonce.is_empty(),
+            "fallback envelope has no AEAD nonce on the wire"
+        );
+        assert!(
+            env.kem_ciphertext.is_empty(),
+            "fallback envelope carries no KEM ciphertext"
+        );
+        assert!(
+            env.sender_signature.is_empty(),
+            "fallback envelope is unsigned"
+        );
     }
 }
