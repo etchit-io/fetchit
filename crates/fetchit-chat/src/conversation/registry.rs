@@ -286,6 +286,7 @@ mod tests {
             last_rekey_at_ms,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
+            seen_nonces: std::collections::BTreeMap::new(),
         }
     }
 
@@ -426,6 +427,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
+            seen_nonces: std::collections::BTreeMap::new(),
         }
     }
 

@@ -8,6 +8,7 @@ use base64::Engine as _;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default auto-rekey interval (7 days in ms).
@@ -120,6 +121,12 @@ pub struct Conversation {
     /// untrusted and require explicit confirmation.
     #[serde(default)]
     pub trust_state: TrustState,
+    /// Replay-protection window: most recent 64 distinct nonces per
+    /// sender. Bounded LRU keyed by hex-encoded `sender_agent_id`; on
+    /// the 65th distinct nonce the oldest entry is evicted. Persists
+    /// across restarts so a process-bounce can't reset the window.
+    #[serde(default)]
+    pub seen_nonces: BTreeMap<String, Vec<[u8; 12]>>,
 }
 
 impl Conversation {
@@ -151,6 +158,7 @@ impl Conversation {
             // The local user initiated the conversation, so it is
             // trusted by construction.
             trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
         })
     }
 
@@ -174,6 +182,7 @@ impl Conversation {
             last_rekey_at_ms: now,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state,
+            seen_nonces: BTreeMap::new(),
         }
     }
 
@@ -271,6 +280,31 @@ impl Conversation {
             return false;
         }
         now_ms().saturating_sub(self.last_rekey_at_ms) > self.auto_rekey_interval_ms
+    }
+
+    /// Check if `nonce` was recently observed from `sender_agent_hex`,
+    /// and record it as seen if not. Returns `true` when the nonce is
+    /// a replay (caller must drop without processing), `false` when it
+    /// is fresh (caller continues).
+    ///
+    /// Maintains a 64-entry per-sender LRU: on the 65th distinct nonce
+    /// the oldest is evicted.
+    #[must_use]
+    pub fn check_and_record_nonce(&mut self, sender_agent_hex: &str, nonce: [u8; 12]) -> bool {
+        /// Spec §7: 64-message sliding window keyed by `(sender, nonce)`.
+        const WINDOW_SIZE: usize = 64;
+        let entry = self
+            .seen_nonces
+            .entry(sender_agent_hex.to_owned())
+            .or_default();
+        if entry.contains(&nonce) {
+            return true;
+        }
+        if entry.len() >= WINDOW_SIZE {
+            entry.remove(0);
+        }
+        entry.push(nonce);
+        false
     }
 
     /// Iterate every recipient device — every Active device of every
@@ -378,6 +412,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -402,6 +437,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -421,6 +457,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: 1,
             trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
         };
         assert!(conv.auto_rekey_due());
     }
@@ -439,6 +476,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: 1,
             trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -457,6 +495,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: 1,
             trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -466,6 +505,90 @@ mod tests {
             !conv.auto_rekey_due(),
             "advance_epoch should reset last_rekey_at_ms to now"
         );
+    }
+
+    #[test]
+    fn check_and_record_nonce_returns_true_on_replay() {
+        let mut conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
+        };
+        let nonce = [0xAB; 12];
+        assert!(!conv.check_and_record_nonce("alice", nonce));
+        assert!(
+            conv.check_and_record_nonce("alice", nonce),
+            "second observation of the same nonce must be flagged as replay",
+        );
+        assert!(
+            !conv.check_and_record_nonce("alice", [0xCD; 12]),
+            "different nonce same sender is fresh",
+        );
+        assert!(
+            !conv.check_and_record_nonce("bob", nonce),
+            "different sender same nonce is fresh — keying is per-sender",
+        );
+    }
+
+    #[test]
+    fn check_and_record_nonce_evicts_oldest_at_65th() {
+        let mut conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
+        };
+        for i in 0..64u8 {
+            assert!(!conv.check_and_record_nonce("alice", [i; 12]));
+        }
+        // Window is now [0..63]; replay of any one is detected.
+        assert!(conv.check_and_record_nonce("alice", [0; 12]));
+        // 65th distinct nonce — evicts [0; 12] (the oldest).
+        assert!(!conv.check_and_record_nonce("alice", [0xFF; 12]));
+        // [0; 12] should now be re-acceptable (was evicted).
+        assert!(!conv.check_and_record_nonce("alice", [0; 12]));
+        // [2; 12] is still in the window (only [0] and [1] have been
+        // evicted by the two extra inserts).
+        assert!(conv.check_and_record_nonce("alice", [2; 12]));
+    }
+
+    #[test]
+    fn conversation_without_seen_nonces_field_deserializes() {
+        // Backward-compat: pre-replay-window conversations on disk
+        // don't carry `seen_nonces`. They must still load — the
+        // serde(default) gives them an empty window.
+        let json = serde_json::json!({
+            "group_id_hex": "0".repeat(64),
+            "name": null,
+            "members": [],
+            "current_epoch": 0,
+            "current_key_b64": B64.encode([1u8; 32]),
+            "prior_keys": [],
+            "own_role": "Admin",
+            "created_at_ms": 0,
+            "last_rekey_at_ms": 0,
+            "auto_rekey_interval_ms": DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            "trust_state": "Confirmed",
+        });
+        let conv: Conversation = serde_json::from_value(json).unwrap();
+        assert!(conv.seen_nonces.is_empty());
     }
 
     #[test]
@@ -482,6 +605,7 @@ mod tests {
             last_rekey_at_ms: 0,
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Pending,
+            seen_nonces: BTreeMap::new(),
         };
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);

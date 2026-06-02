@@ -1247,8 +1247,9 @@ async fn handle_inbound(
                 // conversation.
                 let _ = app.emit("chat:contact-request", &conversation);
             }
-            Ok(InboundDispatch::WelcomeIgnored) => {
-                // Stale or duplicate welcome — no UI signal.
+            Ok(InboundDispatch::WelcomeIgnored | InboundDispatch::ReplayDetected { .. }) => {
+                // Stale or duplicate welcome, or spec §7 replay drop —
+                // observers' problem, not the user's. Silent.
             }
             Ok(InboundDispatch::Message {
                 group_id_hex,

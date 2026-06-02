@@ -80,6 +80,15 @@ pub enum InboundDispatch {
         /// The envelope epoch.
         epoch: u32,
     },
+    /// Replay detected — the `(sender, nonce)` pair is in the
+    /// conversation's sliding window. Dropped without AEAD-open; no
+    /// state change beyond the no-op window touch.
+    ReplayDetected {
+        /// Hex group id.
+        group_id_hex: String,
+        /// Hex sender agent id.
+        sender_agent_id_hex: String,
+    },
     /// Envelope dropped without decryption. `kind` is one of:
     /// `"no-card"` (sender's card isn't on file — message path only),
     /// `"no-pubkey"` (card exists but doesn't carry an ML-DSA pubkey —
@@ -205,7 +214,7 @@ async fn dispatch_receipt(
     group_id_bytes: [u8; 32],
     group_id_hex: String,
 ) -> Result<InboundDispatch, ChatError> {
-    let Some(conv) = registry.get(&group_id_hex).await? else {
+    let Some(mut conv) = registry.get(&group_id_hex).await? else {
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -222,8 +231,22 @@ async fn dispatch_receipt(
     }
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&envelope.nonce);
+    // Replay-protection (spec §7). Record before AEAD-open per the
+    // spec's letter — relies on transit confidentiality (TLS to relay
+    // + KEM/AEAD end-to-end) to bound the DoS surface that a wire
+    // observer could otherwise exploit by burning legitimate nonces.
+    let sender_hex = hex::encode(envelope.sender_agent_id.as_bytes());
+    if conv.check_and_record_nonce(&sender_hex, nonce) {
+        return Ok(InboundDispatch::ReplayDetected {
+            group_id_hex,
+            sender_agent_id_hex: sender_hex,
+        });
+    }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
+        // Persist the nonce-window mutation even on AEAD failure so a
+        // crafted-shape replay can't keep retrying the same nonce.
+        registry.save(&conv).await?;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
@@ -231,9 +254,10 @@ async fn dispatch_receipt(
     };
     let payload: DeliveryReceiptPayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("receipt payload parse: {e}")))?;
+    registry.save(&conv).await?;
     Ok(InboundDispatch::Receipt {
         group_id_hex,
-        sender_agent_id_hex: hex::encode(envelope.sender_agent_id.as_bytes()),
+        sender_agent_id_hex: sender_hex,
         message_id: payload.message_id,
         received_at_ms: payload.received_at_ms,
     })
@@ -245,7 +269,7 @@ async fn dispatch_message(
     group_id_bytes: [u8; 32],
     group_id_hex: String,
 ) -> Result<InboundDispatch, ChatError> {
-    let Some(conv) = registry.get(&group_id_hex).await? else {
+    let Some(mut conv) = registry.get(&group_id_hex).await? else {
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -262,8 +286,22 @@ async fn dispatch_message(
     }
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&envelope.nonce);
+    // Replay-protection (spec §7). Record before AEAD-open per the
+    // spec's letter — relies on transit confidentiality (TLS to relay
+    // + KEM/AEAD end-to-end) to bound the DoS surface that a wire
+    // observer could otherwise exploit by burning legitimate nonces.
+    let sender_hex = hex::encode(envelope.sender_agent_id.as_bytes());
+    if conv.check_and_record_nonce(&sender_hex, nonce) {
+        return Ok(InboundDispatch::ReplayDetected {
+            group_id_hex,
+            sender_agent_id_hex: sender_hex,
+        });
+    }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
+        // Persist the nonce-window mutation even on AEAD failure so a
+        // crafted-shape replay can't keep retrying the same nonce.
+        registry.save(&conv).await?;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
@@ -271,9 +309,10 @@ async fn dispatch_message(
     };
     let payload: MessagePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("message payload parse: {e}")))?;
+    registry.save(&conv).await?;
     Ok(InboundDispatch::Message {
         group_id_hex,
-        sender_agent_id_hex: hex::encode(envelope.sender_agent_id.as_bytes()),
+        sender_agent_id_hex: sender_hex,
         payload,
     })
 }
@@ -1247,6 +1286,141 @@ mod tests {
             ),
             "expected Dropped(welcome-sender-not-member), got {result:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn replay_message_returns_replay_detected() {
+        // Spec §7: redelivering a previously-decrypted Message envelope
+        // must surface ReplayDetected without re-running AEAD-open
+        // against the conversation key.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        let msg_outbox = build_message_outbox(
+            &conv,
+            "hello bob",
+            "Alice",
+            "msg-id-1",
+            &alice_id,
+            [0u8; 32],
+            &alice_signer,
+        )
+        .await
+        .unwrap();
+        let first = dispatch_inbound(msg_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, InboundDispatch::Message { .. }),
+            "first delivery should decrypt as Message, got {first:?}",
+        );
+
+        let replay = dispatch_inbound(msg_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        match replay {
+            InboundDispatch::ReplayDetected {
+                group_id_hex,
+                sender_agent_id_hex,
+            } => {
+                assert_eq!(group_id_hex, conv.group_id_hex);
+                assert_eq!(sender_agent_id_hex, aid_a);
+            }
+            other => panic!("expected ReplayDetected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_receipt_returns_replay_detected() {
+        // Spec §7: the receipt path has the same window — replaying a
+        // DeliveryReceipt envelope must surface ReplayDetected.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        // Bob installs the conversation via the welcome.
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Alice's side: install Bob's card and the conversation so the
+        // receipt's verify prelude + dispatch find their fixtures.
+        let tmp_a_store = tempdir().unwrap();
+        let layout_a = StoreLayout::ensure(tmp_a_store.path().join("store")).unwrap();
+        install_card(&layout_a, &aid_b, &bob_signer, bob_id.kem_public_key());
+        let (_, master_a2, salt_a2) = fixture_identity(tmp_a_store.path(), &aid_a);
+        let registry_a = ConversationRegistry::new(
+            layout_a,
+            Arc::new(master_a2),
+            kdf_id_argon2(),
+            Some(salt_a2),
+        );
+        registry_a.save(&conv).await.unwrap();
+
+        let receipt_outbox = build_receipt_outbox(
+            &conv,
+            "deadbeef",
+            1_700_000_000_001,
+            &aid_a,
+            &bob_id,
+            [0u8; 32],
+            &bob_signer,
+        )
+        .await
+        .unwrap();
+        let first = dispatch_inbound(receipt_outbox[0].envelope.clone(), &alice_id, &registry_a)
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, InboundDispatch::Receipt { .. }),
+            "first receipt delivery should decrypt, got {first:?}",
+        );
+
+        let replay = dispatch_inbound(receipt_outbox[0].envelope.clone(), &alice_id, &registry_a)
+            .await
+            .unwrap();
+        match replay {
+            InboundDispatch::ReplayDetected {
+                group_id_hex,
+                sender_agent_id_hex,
+            } => {
+                assert_eq!(group_id_hex, conv.group_id_hex);
+                assert_eq!(sender_agent_id_hex, aid_b);
+            }
+            other => panic!("expected ReplayDetected, got {other:?}"),
+        }
     }
 
     /// Hand-roll a welcome envelope around a caller-supplied
