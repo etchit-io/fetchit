@@ -22,10 +22,12 @@ pub const DEFAULT_MAX_GROUP_SIZE: u32 = 10;
 
 /// Extensible feature flags a token can light up for a session.
 ///
-/// Added as the relay learns new capabilities; old binaries reject
-/// unknown flags safely because the relay applies only the flags it
-/// recognises.
+/// Serialised over the wire as a `u32` discriminant. Unknown
+/// discriminants from newer issuers decode to [`FeatureFlag::Unknown`]
+/// so an older binary can still parse the token; capability resolution
+/// silently skips `Unknown` so it never widens the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(from = "u32", into = "u32")]
 pub enum FeatureFlag {
     /// Connection may upload sealed-to-user-key backups to the
     /// backup service (handled out of band; relay just lights up
@@ -41,6 +43,38 @@ pub enum FeatureFlag {
     AuditPublish,
     /// Connection may consume a tenant's audit-event topic.
     AuditConsume,
+    /// Forward-compat fallback for discriminants this binary does not
+    /// yet recognise. Carries the raw wire value so a round-trip
+    /// re-emits the same bytes.
+    Unknown(u32),
+}
+
+impl From<u32> for FeatureFlag {
+    fn from(v: u32) -> Self {
+        match v {
+            0 => Self::EncryptedBackup,
+            1 => Self::Voice,
+            2 => Self::Video,
+            3 => Self::FileTransfer,
+            4 => Self::AuditPublish,
+            5 => Self::AuditConsume,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<FeatureFlag> for u32 {
+    fn from(f: FeatureFlag) -> u32 {
+        match f {
+            FeatureFlag::EncryptedBackup => 0,
+            FeatureFlag::Voice => 1,
+            FeatureFlag::Video => 2,
+            FeatureFlag::FileTransfer => 3,
+            FeatureFlag::AuditPublish => 4,
+            FeatureFlag::AuditConsume => 5,
+            FeatureFlag::Unknown(v) => v,
+        }
+    }
 }
 
 /// One concrete capability claim.
@@ -155,7 +189,9 @@ impl EffectiveCapabilities {
                     eff.admin_for.insert(t.clone());
                 }
                 Capability::Feature(f) => {
-                    eff.features.insert(*f);
+                    if !matches!(f, FeatureFlag::Unknown(_)) {
+                        eff.features.insert(*f);
+                    }
                 }
             }
         }
@@ -232,6 +268,54 @@ mod tests {
         assert!(eff.admin_for.contains(&TenantId::new("globex")));
         assert!(eff.features.contains(&FeatureFlag::EncryptedBackup));
         assert!(eff.features.contains(&FeatureFlag::Voice));
+    }
+
+    #[test]
+    fn unknown_feature_flag_wire_discriminant_decodes_to_unknown() {
+        // A discriminant past the named variants — what M2.5 or later
+        // issuers will emit — must decode to FeatureFlag::Unknown
+        // rather than failing the whole token parse.
+        let bytes = postcard::to_allocvec(&42u32).unwrap();
+        let decoded: FeatureFlag = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, FeatureFlag::Unknown(42));
+    }
+
+    #[test]
+    fn unknown_feature_flag_round_trips_unchanged() {
+        let flag = FeatureFlag::Unknown(99);
+        let bytes = postcard::to_allocvec(&flag).unwrap();
+        let decoded: FeatureFlag = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(flag, decoded);
+        // Re-encoding must be byte-identical so the token's signature
+        // still verifies after a forwarder that doesn't recognise the
+        // flag.
+        let re_encoded = postcard::to_allocvec(&decoded).unwrap();
+        assert_eq!(bytes, re_encoded);
+    }
+
+    #[test]
+    fn known_feature_flag_wire_format_unchanged_by_unknown_variant() {
+        // Wire-compat guard: adding Unknown(u32) must NOT change the
+        // bytes emitted for the named variants. M0 clients and M2.5
+        // clients must still interoperate.
+        let bytes = postcard::to_allocvec(&FeatureFlag::EncryptedBackup).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&0u32).unwrap());
+        let bytes = postcard::to_allocvec(&FeatureFlag::AuditConsume).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&5u32).unwrap());
+    }
+
+    #[test]
+    fn from_claims_silently_skips_unknown_feature_flag() {
+        let eff = EffectiveCapabilities::from_claims(&[
+            Capability::Feature(FeatureFlag::Voice),
+            Capability::Feature(FeatureFlag::Unknown(99)),
+        ]);
+        assert!(eff.features.contains(&FeatureFlag::Voice));
+        assert_eq!(
+            eff.features.len(),
+            1,
+            "unknown feature flag must not widen the session"
+        );
     }
 
     #[test]
