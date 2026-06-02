@@ -8,7 +8,7 @@ use base64::Engine as _;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default auto-rekey interval (7 days in ms).
@@ -125,8 +125,11 @@ pub struct Conversation {
     /// sender. Bounded LRU keyed by hex-encoded `sender_agent_id`; on
     /// the 65th distinct nonce the oldest entry is evicted. Persists
     /// across restarts so a process-bounce can't reset the window.
+    /// On upgrade from a pre-window disk image, the field deserialises
+    /// empty and the first 64 inbounds per sender are not replay-protected;
+    /// acceptable for the M0 deployment shape.
     #[serde(default)]
-    pub seen_nonces: BTreeMap<String, Vec<[u8; 12]>>,
+    pub seen_nonces: BTreeMap<String, VecDeque<[u8; 12]>>,
 }
 
 impl Conversation {
@@ -293,17 +296,21 @@ impl Conversation {
     pub fn check_and_record_nonce(&mut self, sender_agent_hex: &str, nonce: [u8; 12]) -> bool {
         /// Spec §7: 64-message sliding window keyed by `(sender, nonce)`.
         const WINDOW_SIZE: usize = 64;
+        // Replay fast-path: borrow-only lookup avoids the String alloc
+        // that BTreeMap::entry would force on every inbound.
+        if let Some(window) = self.seen_nonces.get(sender_agent_hex) {
+            if window.contains(&nonce) {
+                return true;
+            }
+        }
         let entry = self
             .seen_nonces
             .entry(sender_agent_hex.to_owned())
             .or_default();
-        if entry.contains(&nonce) {
-            return true;
-        }
         if entry.len() >= WINDOW_SIZE {
-            entry.remove(0);
+            entry.pop_front();
         }
-        entry.push(nonce);
+        entry.push_back(nonce);
         false
     }
 
@@ -567,6 +574,34 @@ mod tests {
         // [2; 12] is still in the window (only [0] and [1] have been
         // evicted by the two extra inserts).
         assert!(conv.check_and_record_nonce("alice", [2; 12]));
+    }
+
+    #[test]
+    fn check_and_record_nonce_windows_are_independent_per_sender() {
+        let mut conv = Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
+        };
+        // Fill Alice's window completely.
+        for i in 0..64u8 {
+            assert!(!conv.check_and_record_nonce("alice", [i; 12]));
+        }
+        // Bob can still record [0; 12] — independent window.
+        assert!(!conv.check_and_record_nonce("bob", [0; 12]));
+        // Evicting Alice's oldest doesn't touch Bob's.
+        assert!(!conv.check_and_record_nonce("alice", [0xFF; 12]));
+        // Bob's [0; 12] is still recorded (replays).
+        assert!(conv.check_and_record_nonce("bob", [0; 12]));
     }
 
     #[test]
