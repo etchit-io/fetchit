@@ -129,6 +129,7 @@ impl Transport for RelayTransport {
             // This is the production end-to-end channel.
             prebuilt
         } else {
+            // M2: remove this entire branch
             fabricate_v1_envelope(self.local_agent_id, envelope)?
         };
         let dedupe_key = self.next_dedupe_key();
@@ -155,7 +156,10 @@ impl Transport for RelayTransport {
 /// ride the wire as-is. Relay-path confidentiality on this branch
 /// rests on the relay being honest — it is NOT end-to-end sealed and
 /// `docs/SECURITY.md` names it explicitly.
-// M2: remove this entire branch
+///
+/// # Errors
+/// Returns [`ChatError::Invalid`] when `envelope.kind` is `Group` and
+/// the `group_id` string is not 64 hex characters encoding 32 bytes.
 fn fabricate_v1_envelope(
     local_agent_id: RelayAgentId,
     envelope: OutboundEnvelope,
