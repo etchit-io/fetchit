@@ -1,7 +1,7 @@
 //! Inbound envelope dispatch: distinguish Welcome vs Message, decrypt,
 //! and surface a typed result.
 
-use super::registry::ConversationRegistry;
+use super::registry::{ConversationRegistry, NonceCheckOutcome};
 use super::types::{
     now_ms, Conversation, DeliveryReceiptPayload, MessagePayload, PriorKey, TrustState,
     WelcomePayload, PRIOR_KEY_WINDOW_MS,
@@ -214,7 +214,7 @@ async fn dispatch_receipt(
     group_id_bytes: [u8; 32],
     group_id_hex: String,
 ) -> Result<InboundDispatch, ChatError> {
-    let Some(mut conv) = registry.get(&group_id_hex).await? else {
+    let Some(conv) = registry.get(&group_id_hex).await? else {
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -231,22 +231,29 @@ async fn dispatch_receipt(
     }
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&envelope.nonce);
-    // Replay-protection (spec §7). Record before AEAD-open per the
-    // spec's letter — relies on transit confidentiality (TLS to relay
-    // + KEM/AEAD end-to-end) to bound the DoS surface that a wire
-    // observer could otherwise exploit by burning legitimate nonces.
     let sender_hex = hex::encode(envelope.sender_agent_id.as_bytes());
-    if conv.check_and_record_nonce(&sender_hex, nonce) {
-        return Ok(InboundDispatch::ReplayDetected {
-            group_id_hex,
-            sender_agent_id_hex: sender_hex,
-        });
+    // Replay-protection (spec §7). The atomic registry.record_nonce
+    // call holds the by-group_id mutex across the check + persist so
+    // a concurrent inbound pump (relay + LAN run side-by-side) can't
+    // race past an empty window. Recording before AEAD-open also
+    // means a crafted-shape replay can't keep retrying the same
+    // nonce; the relay TLS + KEM/AEAD end-to-end bound the DoS
+    // surface that a wire observer could otherwise exploit by
+    // burning legitimate nonces.
+    match registry
+        .record_nonce(&group_id_hex, &sender_hex, nonce)
+        .await?
+    {
+        NonceCheckOutcome::Replay => {
+            return Ok(InboundDispatch::ReplayDetected {
+                group_id_hex,
+                sender_agent_id_hex: sender_hex,
+            });
+        }
+        NonceCheckOutcome::Recorded => {}
     }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
-        // Persist the nonce-window mutation even on AEAD failure so a
-        // crafted-shape replay can't keep retrying the same nonce.
-        registry.save(&conv).await?;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
@@ -254,7 +261,6 @@ async fn dispatch_receipt(
     };
     let payload: DeliveryReceiptPayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("receipt payload parse: {e}")))?;
-    registry.save(&conv).await?;
     Ok(InboundDispatch::Receipt {
         group_id_hex,
         sender_agent_id_hex: sender_hex,
@@ -269,7 +275,7 @@ async fn dispatch_message(
     group_id_bytes: [u8; 32],
     group_id_hex: String,
 ) -> Result<InboundDispatch, ChatError> {
-    let Some(mut conv) = registry.get(&group_id_hex).await? else {
+    let Some(conv) = registry.get(&group_id_hex).await? else {
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -286,22 +292,24 @@ async fn dispatch_message(
     }
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&envelope.nonce);
-    // Replay-protection (spec §7). Record before AEAD-open per the
-    // spec's letter — relies on transit confidentiality (TLS to relay
-    // + KEM/AEAD end-to-end) to bound the DoS surface that a wire
-    // observer could otherwise exploit by burning legitimate nonces.
     let sender_hex = hex::encode(envelope.sender_agent_id.as_bytes());
-    if conv.check_and_record_nonce(&sender_hex, nonce) {
-        return Ok(InboundDispatch::ReplayDetected {
-            group_id_hex,
-            sender_agent_id_hex: sender_hex,
-        });
+    // Replay-protection (spec §7) — see dispatch_receipt for the full
+    // commentary on why the atomic record_nonce path matters and why
+    // we record before AEAD-open.
+    match registry
+        .record_nonce(&group_id_hex, &sender_hex, nonce)
+        .await?
+    {
+        NonceCheckOutcome::Replay => {
+            return Ok(InboundDispatch::ReplayDetected {
+                group_id_hex,
+                sender_agent_id_hex: sender_hex,
+            });
+        }
+        NonceCheckOutcome::Recorded => {}
     }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
-        // Persist the nonce-window mutation even on AEAD failure so a
-        // crafted-shape replay can't keep retrying the same nonce.
-        registry.save(&conv).await?;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
@@ -309,7 +317,6 @@ async fn dispatch_message(
     };
     let payload: MessagePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("message payload parse: {e}")))?;
-    registry.save(&conv).await?;
     Ok(InboundDispatch::Message {
         group_id_hex,
         sender_agent_id_hex: sender_hex,

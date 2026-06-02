@@ -11,6 +11,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::Mutex;
 
+/// Outcome of [`ConversationRegistry::record_nonce`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonceCheckOutcome {
+    /// `(sender, nonce)` was fresh; the registry recorded it in the
+    /// sliding window and persisted the mutation under its mutex.
+    Recorded,
+    /// `(sender, nonce)` was already present in the sender's sliding
+    /// window. The caller MUST drop the envelope without further
+    /// processing — both the persisted window and the on-disk record
+    /// stay exactly as they were.
+    Replay,
+}
+
 /// In-memory registry of open conversations, persisted via `at_rest`.
 pub struct ConversationRegistry {
     layout: StoreLayout,
@@ -218,6 +231,81 @@ impl ConversationRegistry {
             .await
             .insert(conv.group_id_hex.clone(), conv.clone());
         Ok(())
+    }
+
+    /// Atomically check `(sender, nonce)` against the conversation's
+    /// replay window and record it if fresh. The whole read-modify-write
+    /// runs under [`Self::by_group_id`], so concurrent inbound pumps on
+    /// the same group serialise rather than both observing an empty
+    /// window before either persists — closing the relay/LAN dual-pump
+    /// TOCTOU that the conversation-level
+    /// [`crate::conversation::types::Conversation::check_and_record_nonce`]
+    /// can't defend against on its own (each caller mutates a clone).
+    ///
+    /// This is the only entry point inbound dispatch should use to
+    /// touch `seen_nonces`; the per-conversation primitive remains
+    /// available for unit tests of the sliding-window mechanics.
+    ///
+    /// # Errors
+    /// Returns [`ChatError::Invalid`] when no conversation exists for
+    /// `group_id_hex` (programmer-bug case — the inbound dispatch
+    /// looks the conversation up before calling this, so a missing
+    /// group means stale orchestration rather than a real envelope).
+    ///
+    /// Surfaces vault open / AEAD seal / JSON parse errors from the
+    /// hydrate-or-persist path.
+    pub async fn record_nonce(
+        &self,
+        group_id_hex: &str,
+        sender_agent_hex: &str,
+        nonce: [u8; 12],
+    ) -> Result<NonceCheckOutcome, ChatError> {
+        let mut guard = self.by_group_id.lock().await;
+
+        // Hydrate into the cache under the lock so a concurrent caller
+        // never observes a stale clone of `seen_nonces`.
+        if !guard.contains_key(group_id_hex) {
+            let path = self.layout.conversation_path(group_id_hex);
+            if !path.exists() {
+                return Err(ChatError::Invalid(format!(
+                    "record_nonce: no conversation for group_id {group_id_hex}"
+                )));
+            }
+            let bytes = open_from_path(&path, &self.master)?;
+            let conv: Conversation = serde_json::from_slice(&bytes)
+                .map_err(|e| ChatError::Invalid(format!("conv parse: {e}")))?;
+            self.refresh_pubkey_cache(&conv);
+            guard.insert(group_id_hex.to_owned(), conv);
+        }
+
+        let Some(conv) = guard.get_mut(group_id_hex) else {
+            // Defensive: hydrate above should have inserted this key.
+            // If we got here without it, the cache invariant has been
+            // violated.
+            return Err(ChatError::Invalid(format!(
+                "record_nonce: cache miss after hydrate for {group_id_hex}"
+            )));
+        };
+
+        if conv.check_and_record_nonce(sender_agent_hex, nonce) {
+            return Ok(NonceCheckOutcome::Replay);
+        }
+
+        // Persist while still holding the lock — a concurrent
+        // record_nonce on this group blocks on `guard` and observes
+        // our updated window on its retry.
+        let path = self.layout.conversation_path(group_id_hex);
+        let bytes = serde_json::to_vec(conv)
+            .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
+        seal_to_path(
+            &path,
+            &bytes,
+            &self.master,
+            self.kdf_id,
+            self.argon_salt.as_ref(),
+        )?;
+
+        Ok(NonceCheckOutcome::Recorded)
     }
 }
 
@@ -498,6 +586,107 @@ mod tests {
         reg.save(&dm("aa", LOCAL, PEER, 0, 0, 0)).await.unwrap();
         let aid = AgentId::parse(PEER.to_owned()).unwrap();
         assert!(reg.peer_ml_dsa_pubkey(&aid).is_none());
+    }
+
+    #[tokio::test]
+    async fn record_nonce_first_call_is_recorded_second_is_replay() {
+        let (_d, reg) = fresh_registry();
+        let conv = dm("aa", LOCAL, PEER, 0, 0, 0);
+        reg.save(&conv).await.unwrap();
+        let nonce = [0xAB; 12];
+        assert_eq!(
+            reg.record_nonce("aa", PEER, nonce).await.unwrap(),
+            NonceCheckOutcome::Recorded,
+        );
+        assert_eq!(
+            reg.record_nonce("aa", PEER, nonce).await.unwrap(),
+            NonceCheckOutcome::Replay,
+        );
+        // Same nonce, different sender — independent window.
+        assert_eq!(
+            reg.record_nonce("aa", LOCAL, nonce).await.unwrap(),
+            NonceCheckOutcome::Recorded,
+        );
+    }
+
+    #[tokio::test]
+    async fn record_nonce_errors_on_unknown_group() {
+        let (_d, reg) = fresh_registry();
+        let err = reg.record_nonce("aa", PEER, [0; 12]).await;
+        assert!(
+            err.is_err(),
+            "expected Invalid error for unknown group, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_nonce_persists_across_cold_restart() {
+        // A recorded nonce on registry r1 must still be flagged as
+        // replay when r2 reopens the same on-disk store. Catches a
+        // regression where the in-memory cache update fires but the
+        // disk seal doesn't.
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let r1 =
+            ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));
+        r1.save(&dm("aa", LOCAL, PEER, 0, 0, 0)).await.unwrap();
+        let nonce = [0xCD; 12];
+        assert_eq!(
+            r1.record_nonce("aa", PEER, nonce).await.unwrap(),
+            NonceCheckOutcome::Recorded,
+        );
+        let r2 = ConversationRegistry::new(layout, master, kdf_id_argon2(), Some(salt));
+        assert_eq!(
+            r2.record_nonce("aa", PEER, nonce).await.unwrap(),
+            NonceCheckOutcome::Replay,
+            "nonce window must survive a cold restart",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_nonce_serialises_concurrent_calls_on_same_group() {
+        // Two concurrent record_nonce calls on the same (group, sender,
+        // nonce) — the OLD code, where dispatch_message did its own
+        // registry.get → check_and_record → save round-trip on a clone,
+        // could let both observe an empty window and both surface the
+        // message. The atomic record_nonce closes that race: exactly
+        // one survives as Recorded, the other sees Replay.
+        let (_d, reg) = fresh_registry();
+        let conv = dm("aa", LOCAL, PEER, 0, 0, 0);
+        reg.save(&conv).await.unwrap();
+        let reg = Arc::new(reg);
+
+        // Run the race many times so a thread-scheduling lucky path
+        // can't accidentally pass.
+        for round in 0..32u8 {
+            let nonce = [round; 12];
+            let r1 = reg.clone();
+            let r2 = reg.clone();
+            let h1 = tokio::spawn(async move { r1.record_nonce("aa", PEER, nonce).await });
+            let h2 = tokio::spawn(async move { r2.record_nonce("aa", PEER, nonce).await });
+            let o1 = h1.await.unwrap().unwrap();
+            let o2 = h2.await.unwrap().unwrap();
+            let mut sorted = [o1, o2];
+            sorted.sort_by_key(|o| matches!(o, NonceCheckOutcome::Replay));
+            assert_eq!(
+                sorted[0],
+                NonceCheckOutcome::Recorded,
+                "round {round}: exactly one call must record",
+            );
+            assert_eq!(
+                sorted[1],
+                NonceCheckOutcome::Replay,
+                "round {round}: the loser must surface Replay",
+            );
+        }
     }
 
     #[tokio::test]
