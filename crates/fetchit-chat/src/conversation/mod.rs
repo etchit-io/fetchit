@@ -10,7 +10,7 @@ pub use inbound::{dispatch_inbound, InboundDispatch};
 pub use outbound::{
     build_message_outbox, build_receipt_outbox, build_welcome_outbox, OutboundEnvelope,
 };
-pub use registry::ConversationRegistry;
+pub use registry::{ConversationRegistry, MutateAction, NonceCheckOutcome};
 pub use types::{
     Conversation, DeliveryReceiptPayload, Member, MemberDevice, MemberDeviceStatus, MessagePayload,
     PriorKey, Role, TrustState, WelcomePayload, DEFAULT_AUTO_REKEY_INTERVAL_MS,

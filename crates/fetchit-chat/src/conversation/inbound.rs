@@ -1,7 +1,7 @@
 //! Inbound envelope dispatch: distinguish Welcome vs Message, decrypt,
 //! and surface a typed result.
 
-use super::registry::{ConversationRegistry, NonceCheckOutcome};
+use super::registry::{ConversationRegistry, MutateAction, NonceCheckOutcome};
 use super::types::{
     now_ms, Conversation, DeliveryReceiptPayload, MessagePayload, PriorKey, TrustState,
     WelcomePayload, PRIOR_KEY_WINDOW_MS,
@@ -493,6 +493,23 @@ fn decrypt_and_verify_welcome(
     }))
 }
 
+/// What `install_or_rekey_conversation` decided inside the registry's
+/// atomic `mutate_in_place` closure. Lifts the variant choice out of
+/// the closure so the surrounding async fn can pick the right
+/// `InboundDispatch` and own moved values like `sender_agent_hex`.
+enum RekeyResolution {
+    /// Welcome's epoch is not strictly higher than the cached one —
+    /// no state change.
+    Ignored,
+    /// The welcome's sender was not a member of the cached
+    /// conversation, so we refused the rekey even though everything
+    /// else verified.
+    NotMember,
+    /// Rekey applied. Carries the post-mutation clone so the caller
+    /// can surface it in [`InboundDispatch::Rekeyed`].
+    Rekeyed(Conversation),
+}
+
 /// Install the welcome's conversation on first contact, or fold a
 /// higher-epoch welcome into an existing conversation as a rekey.
 async fn install_or_rekey_conversation(
@@ -503,35 +520,45 @@ async fn install_or_rekey_conversation(
     group_id_hex: String,
     trust_state: TrustState,
 ) -> Result<InboundDispatch, ChatError> {
-    let existing = registry.get(&group_id_hex).await?;
-    match existing {
-        Some(conv) if envelope.epoch <= conv.current_epoch => {
-            // Drop `conv` explicitly — we read it just to check the epoch
-            // comparison; no caller-visible payload is needed for an
-            // ignored welcome.
-            let _ = conv;
-            Ok(InboundDispatch::WelcomeIgnored)
-        }
-        Some(mut conv) => {
-            // Higher epoch — adopt new key and member list. Don't
-            // advance_epoch(); we're not generating a fresh key here,
-            // we're adopting the one carried in the welcome. We do
-            // push the OLD key into prior_keys so in-flight messages
-            // can still decrypt for up to PRIOR_KEY_WINDOW_MS.
-            //
-            // Defence in depth: even a valid signature isn't enough
-            // to swap the conversation key. The sender must already
-            // be a member of the conversation they're rekeying.
+    let existing_epoch = registry.get(&group_id_hex).await?.map(|c| c.current_epoch);
+    let Some(_) = existing_epoch else {
+        // New install — no concurrent record_nonce can race a cache
+        // entry that doesn't exist yet, so the existing `save` is
+        // safe here.
+        let conv = Conversation::from_welcome(payload, trust_state);
+        registry.save(&conv).await?;
+        return if trust_state == TrustState::Pending {
+            Ok(InboundDispatch::WelcomedPending { conversation: conv })
+        } else {
+            Ok(InboundDispatch::Welcomed { conversation: conv })
+        };
+    };
+
+    // Existing conversation — the rekey path runs through
+    // `mutate_in_place` so we hold `by_group_id` across the entire
+    // check + mutation + persist. The old shape (clone → mutate →
+    // save) clobbered any concurrently-recorded `seen_nonces`
+    // because save() replaces the cached entry wholesale with the
+    // stale clone, undoing what a parallel record_nonce had
+    // committed.
+    //
+    // Defence in depth: even a valid signature isn't enough to swap
+    // the conversation key. The sender must already be a member of
+    // the conversation they're rekeying — and the membership check
+    // happens INSIDE the closure so a concurrent rekey between our
+    // read and our write can't sneak in.
+    let resolution = registry
+        .mutate_in_place(&group_id_hex, |conv| {
+            if envelope.epoch <= conv.current_epoch {
+                return MutateAction::Skip(RekeyResolution::Ignored);
+            }
             let sender_already_member = conv
                 .members
                 .iter()
                 .flat_map(|m| m.devices.iter())
                 .any(|d| d.agent_id_hex == sender_agent_hex);
             if !sender_already_member {
-                return Ok(InboundDispatch::Dropped {
-                    kind: "rekey-from-non-member".to_owned(),
-                    sender: sender_agent_hex,
-                });
+                return MutateAction::Skip(RekeyResolution::NotMember);
             }
             let now = now_ms();
             conv.prior_keys.push(PriorKey {
@@ -540,23 +567,22 @@ async fn install_or_rekey_conversation(
                 expires_at_ms: now + PRIOR_KEY_WINDOW_MS,
             });
             conv.current_epoch = payload.epoch;
-            conv.current_key_b64 = payload.current_key_b64.clone();
-            conv.members = payload.members.clone();
-            conv.name = payload.name.clone();
+            conv.current_key_b64.clone_from(&payload.current_key_b64);
+            conv.members.clone_from(&payload.members);
+            conv.name.clone_from(&payload.name);
             conv.last_rekey_at_ms = now;
             conv.sweep_prior_keys();
-            registry.save(&conv).await?;
-            Ok(InboundDispatch::Rekeyed { conversation: conv })
-        }
-        None => {
-            let conv = Conversation::from_welcome(payload, trust_state);
-            registry.save(&conv).await?;
-            if trust_state == TrustState::Pending {
-                Ok(InboundDispatch::WelcomedPending { conversation: conv })
-            } else {
-                Ok(InboundDispatch::Welcomed { conversation: conv })
-            }
-        }
+            MutateAction::Persist(RekeyResolution::Rekeyed(conv.clone()))
+        })
+        .await?;
+
+    match resolution {
+        RekeyResolution::Ignored => Ok(InboundDispatch::WelcomeIgnored),
+        RekeyResolution::NotMember => Ok(InboundDispatch::Dropped {
+            kind: "rekey-from-non-member".to_owned(),
+            sender: sender_agent_hex,
+        }),
+        RekeyResolution::Rekeyed(conv) => Ok(InboundDispatch::Rekeyed { conversation: conv }),
     }
 }
 

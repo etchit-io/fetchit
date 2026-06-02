@@ -11,6 +11,25 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::Mutex;
 
+/// Decision returned by the closure handed to
+/// [`ConversationRegistry::mutate_in_place`]: whether to persist the
+/// (possibly-empty) mutation to disk, along with the value to return.
+///
+/// `Skip` causes the registry to **restore the cached entry from a
+/// pre-mutation snapshot** before returning — that way callers that
+/// branch midway through and decide not to commit can leave the
+/// cached state byte-for-byte consistent with disk regardless of
+/// any partial mutation they performed.
+pub enum MutateAction<T> {
+    /// Persist the mutated conversation to disk under the same
+    /// `by_group_id` lock that `record_nonce` uses. Returns `T` to
+    /// the caller.
+    Persist(T),
+    /// Do not persist. The registry restores the cached conversation
+    /// from its pre-mutation snapshot. Returns `T` to the caller.
+    Skip(T),
+}
+
 /// Outcome of [`ConversationRegistry::record_nonce`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NonceCheckOutcome {
@@ -231,6 +250,85 @@ impl ConversationRegistry {
             .await
             .insert(conv.group_id_hex.clone(), conv.clone());
         Ok(())
+    }
+
+    /// Run a closure against the cached `Conversation` for
+    /// `group_id_hex` while holding the [`Self::by_group_id`] mutex,
+    /// then optionally persist the result to disk.
+    ///
+    /// This is the right entry point for any caller that does
+    /// `registry.get → mutate the clone → registry.save` against an
+    /// existing group, because the old shape leaks every concurrently
+    /// recorded change to `seen_nonces` (and any other field) — the
+    /// save replaces the cache entry wholesale with the caller's stale
+    /// clone, undoing whatever a parallel [`Self::record_nonce`] just
+    /// committed. The atomic `mutate_in_place` keeps the cache, the
+    /// disk image, and the persisted `seen_nonces` consistent because
+    /// the lock is held across the whole RMW.
+    ///
+    /// The closure returns a [`MutateAction`] that tells the registry
+    /// whether to persist or skip. On `Skip` the cached entry is
+    /// restored from a pre-mutation snapshot so callers that decided
+    /// midway not to commit still leave the cache byte-equal to disk.
+    ///
+    /// # Errors
+    /// Same shape as [`Self::record_nonce`]: `ChatError::Invalid` when
+    /// the group is not on disk or the cache invariant has been
+    /// violated; IO / AEAD / JSON errors from hydrate-or-persist.
+    pub async fn mutate_in_place<F, T>(&self, group_id_hex: &str, mutate: F) -> Result<T, ChatError>
+    where
+        F: FnOnce(&mut Conversation) -> MutateAction<T>,
+    {
+        let mut guard = self.by_group_id.lock().await;
+
+        if !guard.contains_key(group_id_hex) {
+            let path = self.layout.conversation_path(group_id_hex);
+            if !path.exists() {
+                return Err(ChatError::Invalid(format!(
+                    "mutate_in_place: no conversation for group_id {group_id_hex}"
+                )));
+            }
+            let bytes = open_from_path(&path, &self.master)?;
+            let conv: Conversation = serde_json::from_slice(&bytes)
+                .map_err(|e| ChatError::Invalid(format!("conv parse: {e}")))?;
+            self.refresh_pubkey_cache(&conv);
+            guard.insert(group_id_hex.to_owned(), conv);
+        }
+
+        // Snapshot for the Skip-path restore. Cheap relative to the
+        // disk seal that's the alternative.
+        let snapshot = guard.get(group_id_hex).cloned();
+        let Some(conv) = guard.get_mut(group_id_hex) else {
+            return Err(ChatError::Invalid(format!(
+                "mutate_in_place: cache miss after hydrate for {group_id_hex}"
+            )));
+        };
+
+        match mutate(conv) {
+            MutateAction::Persist(value) => {
+                let path = self.layout.conversation_path(group_id_hex);
+                let bytes = serde_json::to_vec(conv)
+                    .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
+                seal_to_path(
+                    &path,
+                    &bytes,
+                    &self.master,
+                    self.kdf_id,
+                    self.argon_salt.as_ref(),
+                )?;
+                self.refresh_pubkey_cache(conv);
+                Ok(value)
+            }
+            MutateAction::Skip(value) => {
+                // Restore the cached entry so cache == disk regardless
+                // of any partial mutation the closure performed before
+                // deciding to skip.
+                if let Some(s) = snapshot {
+                    *conv = s;
+                }
+                Ok(value)
+            }
+        }
     }
 
     /// Atomically check `(sender, nonce)` against the conversation's
@@ -649,6 +747,61 @@ mod tests {
             NonceCheckOutcome::Replay,
             "nonce window must survive a cold restart",
         );
+    }
+
+    #[tokio::test]
+    async fn rekey_via_mutate_in_place_preserves_recorded_nonces() {
+        // The save()-clone-roundtrip clobber the old install_or_rekey
+        // path was vulnerable to: record_nonce records nonce N, then
+        // a "rekey via get → mutate clone → save" round-trip would
+        // overwrite the cache with the pre-record_nonce clone, leaving
+        // N missing and a replay-able. mutate_in_place running the
+        // entire RMW under the lock closes that — a re-record of the
+        // same nonce must still surface as Replay.
+        let (_d, reg) = fresh_registry();
+        reg.save(&dm("aa", LOCAL, PEER, 0, 0, 0)).await.unwrap();
+        let nonce = [0xDE; 12];
+        assert_eq!(
+            reg.record_nonce("aa", PEER, nonce).await.unwrap(),
+            NonceCheckOutcome::Recorded,
+        );
+        // Simulate a rekey-style RMW that previously would have used
+        // `let mut c = registry.get(...); c.current_epoch += 1; save(&c)`.
+        reg.mutate_in_place("aa", |conv| {
+                conv.current_epoch = conv.current_epoch.saturating_add(1);
+                MutateAction::Persist(())
+            })
+            .await
+            .unwrap();
+        // The same nonce MUST still register as a replay; if save() had
+        // overwritten the cache with a pre-record_nonce clone the
+        // recorded N would be gone and we'd see Recorded here.
+        assert_eq!(
+            reg.record_nonce("aa", PEER, nonce).await.unwrap(),
+            NonceCheckOutcome::Replay,
+            "concurrent rekey-style RMW must not clobber recorded seen_nonces",
+        );
+    }
+
+    #[tokio::test]
+    async fn mutate_in_place_skip_restores_pre_mutation_state() {
+        // A closure that mutates fields then decides Skip must not
+        // leak the partial mutation into the cache — the registry
+        // snapshots before calling the closure and restores on Skip.
+        let (_d, reg) = fresh_registry();
+        reg.save(&dm("aa", LOCAL, PEER, 7, 100, 100)).await.unwrap();
+        reg.mutate_in_place("aa", |conv| {
+                // Partial mutation, then change our mind:
+                conv.current_epoch = 999;
+                conv.last_rekey_at_ms = 8_888_888;
+                MutateAction::Skip(())
+            })
+            .await
+            .unwrap();
+        // Cache must read back the pre-mutation values.
+        let after = reg.get("aa").await.unwrap().unwrap();
+        assert_eq!(after.current_epoch, 7);
+        assert_eq!(after.last_rekey_at_ms, 100);
     }
 
     #[tokio::test]

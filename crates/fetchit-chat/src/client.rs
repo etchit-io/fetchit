@@ -7,7 +7,7 @@ use crate::at_rest::{
     MasterKeySource, ARGON_SALT_LEN,
 };
 use crate::chat_identity::FetchitIdentity;
-use crate::conversation::{build_welcome_outbox, ConversationRegistry};
+use crate::conversation::{build_welcome_outbox, ConversationRegistry, MutateAction};
 use crate::discovery::{discover_local, DaemonEndpoint};
 use crate::error::{ChatError, Result};
 use crate::events::{open_stream, Event, EventStream};
@@ -660,14 +660,34 @@ async fn sweep_auto_rekey(
     use crate::chat_crypto::random_symmetric_key;
     use rand::rngs::OsRng;
 
+    // Snapshot only to find candidates — the actual epoch advance
+    // runs under the registry mutex via mutate_in_place so a
+    // concurrent record_nonce can't be clobbered by our save.
     let cached = registry.snapshot_cached().await;
     let mut rekeyed = 0usize;
-    for mut conv in cached {
-        if !conv.auto_rekey_due() {
+    for snapshot in cached {
+        if !snapshot.auto_rekey_due() {
             continue;
         }
-        let new_key = random_symmetric_key(&mut OsRng);
-        conv.advance_epoch(new_key);
+        let group_id_hex = snapshot.group_id_hex.clone();
+        let advanced = registry
+            .mutate_in_place(&group_id_hex, |conv| {
+                // Re-check inside the lock — a concurrent rekey from
+                // a higher-epoch welcome (install_or_rekey_conversation
+                // also mutates_in_place) may have already advanced
+                // this group's epoch while we were iterating the
+                // snapshot.
+                if !conv.auto_rekey_due() {
+                    return MutateAction::Skip(None);
+                }
+                let new_key = random_symmetric_key(&mut OsRng);
+                conv.advance_epoch(new_key);
+                MutateAction::Persist(Some(conv.clone()))
+            })
+            .await?;
+        let Some(conv) = advanced else {
+            continue;
+        };
         let welcomes = build_welcome_outbox(&conv, identity, machine_id, signer.as_ref()).await?;
         for ob in welcomes {
             let recipient = identity::AgentId(hex::encode(ob.recipient_agent_id.as_bytes()));
@@ -686,7 +706,6 @@ async fn sweep_auto_rekey(
                 );
             }
         }
-        registry.save(&conv).await?;
         rekeyed += 1;
     }
     Ok(rekeyed)
