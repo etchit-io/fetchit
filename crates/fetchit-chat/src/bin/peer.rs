@@ -274,6 +274,63 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
     }
 }
 
+/// Maximum number of attempts `send_with_retry` makes before giving up
+/// and propagating the last error to the caller. Five attempts at the
+/// default 200ms base delay caps total stall at roughly 6.2 seconds —
+/// long enough to ride out a daemon restart, short enough that a
+/// genuinely-down peer still surfaces quickly.
+const SEND_MAX_ATTEMPTS: u32 = 5;
+
+/// Initial delay between retries; doubles per attempt (200, 400, 800,
+/// 1600, 3200 ms). Picked to overlap the typical x0xd cold-start time
+/// without introducing a perceivable pause on the happy path (first
+/// attempt fires before any sleep).
+const SEND_BASE_DELAY_MS: u64 = 200;
+
+/// Bounded retry with exponential backoff. The pair-rig (chat-pipe
+/// driven `tail -F ... | peer chat`) used to drop a send when x0xd's
+/// `/agent/sign` was momentarily unreachable — log the error, move on,
+/// the queued line was gone forever. This helper retries the operation
+/// up to [`SEND_MAX_ATTEMPTS`] times so a transient daemon hiccup
+/// doesn't silently shred chat messages.
+///
+/// All errors are treated as potentially transient. For a dev rig that
+/// trade-off is the right one: a genuinely-permanent failure surfaces
+/// once we exhaust attempts; nothing about the workflow is rate-bounded
+/// hard enough to make over-retry an issue.
+async fn send_with_retry<F, Fut, T, E>(label: &str, mut op: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        match op().await {
+            Ok(v) => {
+                if attempt > 0 {
+                    eprintln!("[peer] {label} ok after {attempt} retries");
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                if attempt >= SEND_MAX_ATTEMPTS {
+                    eprintln!(
+                        "[peer] {label} permanently failed after {attempt} attempts: {e}"
+                    );
+                    return Err(e);
+                }
+                let delay = SEND_BASE_DELAY_MS.saturating_mul(1u64 << (attempt - 1));
+                eprintln!(
+                    "[peer] {label} attempt {attempt}/{SEND_MAX_ATTEMPTS} failed ({e}); retrying in {delay}ms"
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+        }
+    }
+}
+
 async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
     let mut inbound = client
         .take_transport_inbound("relay")
@@ -285,7 +342,15 @@ async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
         };
         eprintln!("[peer] in: from={} body={:?}", short(&dm.from.0), dm.body);
         let reply = format!("[echo] {}", dm.body);
-        let sender = client.messages().send(&dm.from, &reply, display_name).await;
+        // Bind `messages()` to a local so the closure captures the
+        // handle by reference — the per-call temporary
+        // `client.messages()` returns is dropped before the future
+        // it produces awaits, which the borrow checker rejects.
+        let messages = client.messages();
+        let sender = send_with_retry("echo send", || {
+            messages.send(&dm.from, &reply, display_name)
+        })
+        .await;
         match sender {
             Ok(id) => eprintln!("[peer] out: {reply:?} (message_id={id:?})"),
             Err(e) => eprintln!("[peer] echo send error: {e}"),
@@ -315,7 +380,14 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         if line.is_empty() {
             continue;
         }
-        match client.messages().send(&peer, &line, display_name).await {
+        // Bind `messages()` to a local for the same lifetime reason
+        // as in `run_echo` — see comment there.
+        let messages = client.messages();
+        let send_result = send_with_retry("chat send", || {
+            messages.send(&peer, &line, display_name)
+        })
+        .await;
+        match send_result {
             Ok(id) => eprintln!("[peer] sent — id={id:?}"),
             Err(e) => eprintln!("[peer] send error: {e}"),
         }
@@ -331,4 +403,58 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
 
 fn short(id_hex: &str) -> &str {
     &id_hex[..id_hex.len().min(8)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn send_with_retry_returns_first_ok() {
+        let calls = Cell::new(0u32);
+        let out = send_with_retry::<_, _, &'static str, &'static str>("test", || {
+            let c = calls.get();
+            calls.set(c + 1);
+            async move { Ok("payload") }
+        })
+        .await;
+        assert_eq!(out, Ok("payload"));
+        assert_eq!(calls.get(), 1, "happy path must not retry");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn send_with_retry_retries_until_success() {
+        let calls = Cell::new(0u32);
+        let out = send_with_retry::<_, _, u32, &'static str>("test", || {
+            let n = calls.get();
+            calls.set(n + 1);
+            async move {
+                if n < 3 {
+                    Err("flake")
+                } else {
+                    Ok(n)
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Ok(3));
+        assert_eq!(calls.get(), 4, "three retries then success on the fourth");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn send_with_retry_gives_up_after_max_attempts() {
+        let calls = Cell::new(0u32);
+        let out = send_with_retry::<_, _, (), &'static str>("test", || {
+            calls.set(calls.get() + 1);
+            async move { Err("dead") }
+        })
+        .await;
+        assert_eq!(out, Err("dead"));
+        assert_eq!(
+            calls.get(),
+            SEND_MAX_ATTEMPTS,
+            "every attempt must have run before surfacing the error",
+        );
+    }
 }
