@@ -2,13 +2,14 @@
 
 use crate::auth::AuthTokenState;
 use crate::server::ServerState;
+use crate::transit::Entry;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Ping, Pong,
-    Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, WatchPresence,
+    Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, TransitEnvelope, WatchPresence,
 };
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::Deserialize;
@@ -83,16 +84,25 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
     let session_id = state.sessions.register(auth.agent_id, tx.clone());
     state.metrics.connection_opened();
 
-    for (seq, entry) in state.transit.drain(&auth.agent_id).into_iter().enumerate() {
-        let frame = ServerFrame::Deliver(Deliver {
-            envelope: entry.envelope,
-            transit_seq: seq as u64,
-            delivered_at_ms: now_ms(),
-        });
-        if tx.try_send(frame).is_err() {
-            break;
-        }
+    // Drain the transit buffer into the freshly-built outbound
+    // channel. Anything that can't land because the channel is
+    // already saturated (a contended watcher set publishing
+    // presence updates can consume capacity between register and
+    // drain) is replayed back into transit instead of being
+    // dropped — otherwise we'd silently lose messages the
+    // recipient had been promised TTL-bounded durability for.
+    let drained = state.transit.drain(&auth.agent_id);
+    let ReplayOutcome {
+        delivered,
+        undelivered,
+    } = replay_transit(drained, &tx, now_ms());
+    for _ in 0..delivered {
         state.metrics.envelope_delivered();
+    }
+    for env in undelivered {
+        if state.transit.enqueue(auth.agent_id, env).is_err() {
+            state.metrics.throttle_per_recipient();
+        }
     }
 
     let mut writer: JoinHandle<()> = tokio::spawn(async move {
@@ -325,6 +335,62 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Outcome of replaying a drained transit batch onto a fresh
+/// per-connection outbound channel.
+struct ReplayOutcome {
+    /// Number of envelopes that landed on the channel successfully.
+    delivered: usize,
+    /// Envelopes that did NOT land — either the channel was already
+    /// full (a watcher set publishing presence updates can consume
+    /// capacity in the window between `register` and `drain`) or the
+    /// writer task had already died. Callers should re-enqueue these
+    /// back to transit so a future reconnect picks them up.
+    undelivered: Vec<TransitEnvelope>,
+}
+
+/// Push every drained entry onto `tx` and collect the ones that
+/// don't make it. Stops on the first `try_send` error, returning
+/// every remaining entry (including the rejected one) as
+/// `undelivered` — the caller decides whether to re-enqueue, log,
+/// or drop. Treats `Full` and `Closed` symmetrically: in both cases
+/// no further sends will succeed on this channel, so we collect and
+/// hand back so the caller can preserve durability.
+fn replay_transit(
+    drained: Vec<Entry>,
+    tx: &mpsc::Sender<ServerFrame>,
+    delivered_at_ms: u64,
+) -> ReplayOutcome {
+    let mut delivered = 0usize;
+    let mut undelivered = Vec::new();
+    let mut iter = drained.into_iter().enumerate();
+    while let Some((seq, entry)) = iter.next() {
+        let frame = ServerFrame::Deliver(Deliver {
+            envelope: entry.envelope,
+            transit_seq: seq as u64,
+            delivered_at_ms,
+        });
+        match tx.try_send(frame) {
+            Ok(()) => delivered += 1,
+            Err(e) => {
+                let rejected = match e {
+                    mpsc::error::TrySendError::Full(f) | mpsc::error::TrySendError::Closed(f) => f,
+                };
+                if let ServerFrame::Deliver(d) = rejected {
+                    undelivered.push(d.envelope);
+                }
+                for (_, remaining) in iter {
+                    undelivered.push(remaining.envelope);
+                }
+                break;
+            }
+        }
+    }
+    ReplayOutcome {
+        delivered,
+        undelivered,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -335,15 +401,101 @@ mod tests {
     //! receiver + writer to prove the writer-exit arm fires promptly — a
     //! regression here would re-introduce ghosted sessions that linger until
     //! the client-side keepalive eventually triggers a reconnect.
-    use super::{await_hello_inner, LoopExit, HELLO_TIMEOUT, WS_OUTBOUND_CAPACITY};
+    use super::{await_hello_inner, replay_transit, LoopExit, HELLO_TIMEOUT, WS_OUTBOUND_CAPACITY};
+    use crate::transit::Entry;
     use axum::extract::ws::Message;
-    use fetchit_relay_proto::{to_bytes, ClientFrame, Hello, Pong, ServerFrame};
+    use fetchit_relay_proto::{
+        to_bytes, AgentId, ClientFrame, EnvelopeKind, Hello, MachineId, Pong, ServerFrame,
+        TransitEnvelope,
+    };
     use futures_util::stream::{self, StreamExt};
     use std::convert::Infallible;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
+
+    fn marked_envelope(tag: u8) -> TransitEnvelope {
+        TransitEnvelope {
+            version: 2,
+            kind: EnvelopeKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: AgentId::from_bytes([tag; 32]),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 1,
+            epoch: 0,
+            ciphertext: vec![tag],
+            nonce: vec![0u8; 12],
+            kem_ciphertext: vec![0u8; 32],
+            sender_signature: vec![0u8; 32],
+        }
+    }
+
+    fn drained_with_tags(tags: &[u8]) -> Vec<Entry> {
+        tags.iter()
+            .map(|&t| Entry {
+                envelope: marked_envelope(t),
+                enqueued_at: Instant::now(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn replay_transit_delivers_everything_when_channel_has_room() {
+        let (tx, mut rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+        let outcome = replay_transit(drained_with_tags(&[1, 2, 3]), &tx, 0);
+        assert_eq!(outcome.delivered, 3);
+        assert!(outcome.undelivered.is_empty());
+        // Receiver gets all three Deliver frames in order.
+        for tag in [1u8, 2, 3] {
+            match rx.try_recv().expect("frame available") {
+                ServerFrame::Deliver(d) => assert_eq!(d.envelope.ciphertext, vec![tag]),
+                other => panic!("expected Deliver, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_transit_returns_undelivered_when_channel_fills_mid_drain() {
+        // Channel sized to exactly two frames. Drain three. The third
+        // try_send must surface as Full; replay_transit must hand it
+        // back rather than drop it, preserving the durability
+        // contract WS-001 was supposed to keep.
+        let (tx, _rx) = mpsc::channel::<ServerFrame>(2);
+        let outcome = replay_transit(drained_with_tags(&[1, 2, 3]), &tx, 0);
+        assert_eq!(outcome.delivered, 2);
+        assert_eq!(outcome.undelivered.len(), 1);
+        assert_eq!(outcome.undelivered[0].ciphertext, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn replay_transit_returns_remaining_when_first_send_full() {
+        // Watcher set saturated the channel BEFORE the drain loop
+        // starts — every entry is undelivered and the order is
+        // preserved so re-enqueue keeps FIFO semantics.
+        let (tx, _rx) = mpsc::channel::<ServerFrame>(1);
+        tx.try_send(ServerFrame::Pong(fetchit_relay_proto::Pong { nonce: 0 }))
+            .unwrap();
+        let outcome = replay_transit(drained_with_tags(&[1, 2, 3]), &tx, 0);
+        assert_eq!(outcome.delivered, 0);
+        assert_eq!(outcome.undelivered.len(), 3);
+        for (env, expected) in outcome.undelivered.iter().zip([1u8, 2, 3]) {
+            assert_eq!(env.ciphertext, vec![expected]);
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_transit_returns_all_when_channel_closed() {
+        // Writer task died before drain — receiver dropped, every
+        // try_send fails Closed. Caller still gets every envelope
+        // back so durability is preserved instead of silently lost.
+        let (tx, rx) = mpsc::channel::<ServerFrame>(8);
+        drop(rx);
+        let outcome = replay_transit(drained_with_tags(&[7, 8, 9]), &tx, 0);
+        assert_eq!(outcome.delivered, 0);
+        assert_eq!(outcome.undelivered.len(), 3);
+    }
 
     /// Same `tokio::select!` shape as `run_io_loop`, kept generic so we can
     /// drive it with a synthetic receiver + writer.
