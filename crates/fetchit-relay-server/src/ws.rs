@@ -18,6 +18,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+/// Per-connection outbound queue depth. Bounded to cap RAM under a
+/// slow or unresponsive WebSocket sink — a flooded queue surfaces as
+/// `try_send` failures upstream rather than unbounded allocation.
+const WS_OUTBOUND_CAPACITY: usize = 512;
+
 /// Query string carrying the bearer token for the WS upgrade.
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
@@ -39,7 +44,7 @@ pub async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<ServerState>) {
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let (tx, mut rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
 
     let Some(hello) = await_hello(&mut receiver).await else {
         let _ = sender.send(Message::Close(None)).await;
@@ -78,7 +83,7 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
             transit_seq: seq as u64,
             delivered_at_ms: now_ms(),
         });
-        if tx.send(frame).is_err() {
+        if tx.try_send(frame).is_err() {
             break;
         }
         state.metrics.envelope_delivered();
@@ -113,13 +118,21 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
     // monotonic) and the LoopExit reason.
     match exit {
         LoopExit::ClientClosed => {
-            debug!(session = session_id, reason = "client_closed", "ws: session closing");
+            debug!(
+                session = session_id,
+                reason = "client_closed",
+                "ws: session closing"
+            );
         }
         LoopExit::ProtocolEnd => {
             // Voluntary Bye from the client — normal app-close /
             // navigation lifecycle, fires multiple times per active
             // user. Stays at DEBUG to keep steady-state logs quiet.
-            debug!(session = session_id, reason = "protocol_end", "ws: session closing");
+            debug!(
+                session = session_id,
+                reason = "protocol_end",
+                "ws: session closing"
+            );
         }
         LoopExit::WriterDied => {
             warn!(
@@ -165,7 +178,7 @@ async fn run_io_loop(
     state: &Arc<ServerState>,
     auth: &AuthTokenState,
     effective_caps: &EffectiveCapabilities,
-    tx: &mpsc::UnboundedSender<ServerFrame>,
+    tx: &mpsc::Sender<ServerFrame>,
     session_id: crate::session::SessionId,
 ) -> LoopExit {
     loop {
@@ -207,14 +220,14 @@ fn handle_client_frame(
     state: &Arc<ServerState>,
     auth: &AuthTokenState,
     caps: &EffectiveCapabilities,
-    self_tx: &mpsc::UnboundedSender<ServerFrame>,
+    self_tx: &mpsc::Sender<ServerFrame>,
     session_id: crate::session::SessionId,
     frame: ClientFrame,
 ) -> bool {
     match frame {
         ClientFrame::Hello(_) | ClientFrame::Subscribe(_) => true,
         ClientFrame::Ping(Ping { nonce }) => {
-            self_tx.send(ServerFrame::Pong(Pong { nonce })).is_ok()
+            self_tx.try_send(ServerFrame::Pong(Pong { nonce })).is_ok()
         }
         ClientFrame::Bye(_) => false,
         ClientFrame::WatchPresence(WatchPresence { add, remove }) => {
@@ -234,7 +247,7 @@ fn handle_client_frame(
             let encoded = envelope.encoded_len().unwrap_or(usize::MAX);
             if encoded > caps.max_envelope_bytes as usize {
                 state.metrics.throttle_envelope_too_large();
-                let _ = self_tx.send(ServerFrame::Throttle(Throttle {
+                let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
                     retry_after_ms: 0,
                     reason: ThrottleReason::EnvelopeTooLarge,
                 }));
@@ -245,7 +258,7 @@ fn handle_client_frame(
                 .allow(&auth.agent_id, caps.max_envelopes_per_min)
             {
                 state.metrics.throttle_per_sender();
-                let _ = self_tx.send(ServerFrame::Throttle(Throttle {
+                let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
                     retry_after_ms: 1_000,
                     reason: ThrottleReason::PerSenderRate,
                 }));
@@ -267,7 +280,7 @@ fn handle_client_frame(
                 state.metrics.envelope_delivered();
             } else if state.transit.enqueue(to, envelope).is_err() {
                 state.metrics.throttle_per_recipient();
-                let _ = self_tx.send(ServerFrame::Throttle(Throttle {
+                let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
                     retry_after_ms: 5_000,
                     reason: ThrottleReason::PerRecipientCapacity,
                 }));
@@ -276,7 +289,7 @@ fn handle_client_frame(
                 state.metrics.envelope_buffered();
             }
             state.metrics.envelope_sent();
-            let _ = self_tx.send(ServerFrame::Ack(Ack {
+            let _ = self_tx.try_send(ServerFrame::Ack(Ack {
                 dedupe_key,
                 accepted_at_ms: now_ms(),
             }));
@@ -303,9 +316,11 @@ mod tests {
     //! receiver + writer to prove the writer-exit arm fires promptly — a
     //! regression here would re-introduce ghosted sessions that linger until
     //! the client-side keepalive eventually triggers a reconnect.
-    use super::LoopExit;
+    use super::{LoopExit, WS_OUTBOUND_CAPACITY};
+    use fetchit_relay_proto::{Pong, ServerFrame};
     use futures_util::stream::{self, StreamExt};
     use std::time::Duration;
+    use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
 
@@ -360,6 +375,25 @@ mod tests {
             .expect("loop must exit promptly when the writer task is aborted")
             .unwrap();
         assert_eq!(exit, LoopExit::WriterDied);
+    }
+
+    #[tokio::test]
+    async fn bounded_channel_backpressure_slow_receiver() {
+        // Slow receiver: never reads. Bounded channel must reject the
+        // (WS_OUTBOUND_CAPACITY + 1)-th send instead of growing without
+        // bound. This is the load-bearing invariant for WS-001.
+        let (tx, _rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+        for i in 0..WS_OUTBOUND_CAPACITY {
+            tx.try_send(ServerFrame::Pong(Pong { nonce: i as u64 }))
+                .expect("first WS_OUTBOUND_CAPACITY sends must succeed");
+        }
+        let err = tx
+            .try_send(ServerFrame::Pong(Pong { nonce: u64::MAX }))
+            .expect_err("send beyond capacity must error rather than grow heap");
+        assert!(
+            matches!(err, mpsc::error::TrySendError::Full(_)),
+            "expected Full when receiver hasn't drained, got {err:?}",
+        );
     }
 
     #[tokio::test]

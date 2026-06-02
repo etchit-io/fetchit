@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use fetchit_relay_proto::{AgentId, Bye, ByeReason, PresenceUpdate, ServerFrame};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 /// Monotonic per-registration token.
 ///
@@ -18,12 +18,12 @@ pub type SessionId = u64;
 /// presence watch index.
 #[derive(Default)]
 pub struct SessionRegistry {
-    by_agent: DashMap<AgentId, (SessionId, UnboundedSender<ServerFrame>)>,
+    by_agent: DashMap<AgentId, (SessionId, Sender<ServerFrame>)>,
     next_id: AtomicU64,
     /// For each watched agent, the live watchers subscribed to its
     /// presence transitions. Stored alongside each watcher's outbound
     /// channel so broadcasts don't need a second lookup.
-    watchers: DashMap<AgentId, Vec<(SessionId, UnboundedSender<ServerFrame>)>>,
+    watchers: DashMap<AgentId, Vec<(SessionId, Sender<ServerFrame>)>>,
     /// Reverse index: agents each session is currently watching. Used to
     /// drop a session's subscriptions in O(watch-set-size) when the
     /// connection disconnects.
@@ -48,11 +48,11 @@ impl SessionRegistry {
     /// Emits `PresenceUpdate { online: true }` to all subscribed watchers
     /// only when this is a transition from "no entry" to "live entry"
     /// — a displacement leaves the agent's online state unchanged.
-    pub fn register(&self, agent: AgentId, tx: UnboundedSender<ServerFrame>) -> SessionId {
+    pub fn register(&self, agent: AgentId, tx: Sender<ServerFrame>) -> SessionId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let prior = self.by_agent.insert(agent, (id, tx));
         if let Some((_, prior_tx)) = prior {
-            let _ = prior_tx.send(ServerFrame::Bye(Bye {
+            let _ = prior_tx.try_send(ServerFrame::Bye(Bye {
                 reason: ByeReason::DisplacedByNewSession,
             }));
         } else {
@@ -79,13 +79,17 @@ impl SessionRegistry {
     }
 
     /// Push a frame to `agent` if connected. Returns true if delivered.
+    ///
+    /// Returns `false` when the agent has no live session OR when the
+    /// per-connection outbound queue is full — both signal "could not
+    /// deliver inline; caller should fall back to transit buffering".
     #[must_use]
     pub fn send(&self, agent: &AgentId, frame: ServerFrame) -> bool {
         let Some(entry) = self.by_agent.get(agent) else {
             return false;
         };
         let (_, tx) = entry.value();
-        tx.send(frame).is_ok()
+        tx.try_send(frame).is_ok()
     }
 
     /// Count of currently-connected agents.
@@ -110,7 +114,7 @@ impl SessionRegistry {
     pub fn add_watches(
         &self,
         watcher_id: SessionId,
-        watcher_tx: &UnboundedSender<ServerFrame>,
+        watcher_tx: &Sender<ServerFrame>,
         agents: &[AgentId],
     ) {
         let mut session_watches = self.watches_by_session.entry(watcher_id).or_default();
@@ -121,7 +125,7 @@ impl SessionRegistry {
             let mut entry = self.watchers.entry(*agent).or_default();
             entry.push((watcher_id, watcher_tx.clone()));
             let online = self.by_agent.contains_key(agent);
-            let _ = watcher_tx.send(ServerFrame::PresenceUpdate(PresenceUpdate {
+            let _ = watcher_tx.try_send(ServerFrame::PresenceUpdate(PresenceUpdate {
                 agent_id: *agent,
                 online,
             }));
@@ -167,7 +171,7 @@ impl SessionRegistry {
             online,
         });
         for (_, tx) in entry.iter() {
-            let _ = tx.send(frame.clone());
+            let _ = tx.try_send(frame.clone());
         }
     }
 }
@@ -187,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn send_routes_to_registered_agent() {
         let r = SessionRegistry::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(16);
         let a = AgentId::from_bytes([1u8; 32]);
         let _id = r.register(a, tx);
 
@@ -211,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn unregister_with_matching_id_removes() {
         let r = SessionRegistry::new();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         let a = AgentId::from_bytes([3u8; 32]);
         let id = r.register(a, tx);
         assert_eq!(r.connection_count(), 1);
@@ -222,8 +226,8 @@ mod tests {
     #[tokio::test]
     async fn register_twice_displaces_first_with_bye() {
         let r = SessionRegistry::new();
-        let (tx1, mut rx1) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let (tx1, mut rx1) = mpsc::channel(16);
+        let (tx2, _rx2) = mpsc::channel(16);
         let a = AgentId::from_bytes([4u8; 32]);
 
         let _id1 = r.register(a, tx1);
@@ -241,8 +245,8 @@ mod tests {
     #[tokio::test]
     async fn unregister_with_stale_id_is_noop() {
         let r = SessionRegistry::new();
-        let (tx1, _rx1) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(16);
+        let (tx2, _rx2) = mpsc::channel(16);
         let a = AgentId::from_bytes([5u8; 32]);
 
         let id1 = r.register(a, tx1);
@@ -256,8 +260,8 @@ mod tests {
     #[tokio::test]
     async fn send_still_routes_after_displaced_unregister() {
         let r = SessionRegistry::new();
-        let (tx1, _rx1) = mpsc::unbounded_channel();
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(16);
+        let (tx2, mut rx2) = mpsc::channel(16);
         let a = AgentId::from_bytes([6u8; 32]);
 
         let id1 = r.register(a, tx1);
@@ -277,10 +281,10 @@ mod tests {
         let watched = AgentId::from_bytes([10u8; 32]);
         let watcher = AgentId::from_bytes([11u8; 32]);
 
-        let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel();
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(16);
         let watcher_id = r.register(watcher, watcher_tx.clone());
 
-        let (watched_tx, _watched_rx) = mpsc::unbounded_channel();
+        let (watched_tx, _watched_rx) = mpsc::channel(16);
         let _watched_id = r.register(watched, watched_tx);
 
         r.add_watches(watcher_id, &watcher_tx, &[watched]);
@@ -300,7 +304,7 @@ mod tests {
         let watcher = AgentId::from_bytes([20u8; 32]);
         let offline = AgentId::from_bytes([21u8; 32]);
 
-        let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel();
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(16);
         let watcher_id = r.register(watcher, watcher_tx.clone());
 
         r.add_watches(watcher_id, &watcher_tx, &[offline]);
@@ -320,12 +324,12 @@ mod tests {
         let watched = AgentId::from_bytes([30u8; 32]);
         let watcher = AgentId::from_bytes([31u8; 32]);
 
-        let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel();
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(16);
         let watcher_id = r.register(watcher, watcher_tx.clone());
         r.add_watches(watcher_id, &watcher_tx, &[watched]);
         let _ = watcher_rx.recv().await.unwrap();
 
-        let (watched_tx, _watched_rx) = mpsc::unbounded_channel();
+        let (watched_tx, _watched_rx) = mpsc::channel(16);
         let _watched_id = r.register(watched, watched_tx);
 
         match watcher_rx.recv().await.expect("transition update") {
@@ -343,9 +347,9 @@ mod tests {
         let watched = AgentId::from_bytes([40u8; 32]);
         let watcher = AgentId::from_bytes([41u8; 32]);
 
-        let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel();
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(16);
         let watcher_id = r.register(watcher, watcher_tx.clone());
-        let (watched_tx, _watched_rx) = mpsc::unbounded_channel();
+        let (watched_tx, _watched_rx) = mpsc::channel(16);
         let watched_id = r.register(watched, watched_tx);
 
         r.add_watches(watcher_id, &watcher_tx, &[watched]);
@@ -368,14 +372,14 @@ mod tests {
         let watched = AgentId::from_bytes([50u8; 32]);
         let watcher = AgentId::from_bytes([51u8; 32]);
 
-        let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel();
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(16);
         let watcher_id = r.register(watcher, watcher_tx.clone());
         r.add_watches(watcher_id, &watcher_tx, &[watched]);
         let _ = watcher_rx.recv().await.unwrap();
 
         r.drop_all_watches(watcher_id);
 
-        let (watched_tx, _watched_rx) = mpsc::unbounded_channel();
+        let (watched_tx, _watched_rx) = mpsc::channel(16);
         let _watched_id = r.register(watched, watched_tx);
 
         let res =
@@ -389,15 +393,15 @@ mod tests {
         let watched = AgentId::from_bytes([60u8; 32]);
         let watcher = AgentId::from_bytes([61u8; 32]);
 
-        let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel();
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(16);
         let watcher_id = r.register(watcher, watcher_tx.clone());
-        let (first_tx, _first_rx) = mpsc::unbounded_channel();
+        let (first_tx, _first_rx) = mpsc::channel(16);
         let _first_id = r.register(watched, first_tx);
 
         r.add_watches(watcher_id, &watcher_tx, &[watched]);
         let _ = watcher_rx.recv().await.unwrap();
 
-        let (second_tx, _second_rx) = mpsc::unbounded_channel();
+        let (second_tx, _second_rx) = mpsc::channel(16);
         let _second_id = r.register(watched, second_tx);
 
         let res =
