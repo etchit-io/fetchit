@@ -46,6 +46,13 @@ pub enum FeatureFlag {
     /// Forward-compat fallback for discriminants this binary does not
     /// yet recognise. Carries the raw wire value so a round-trip
     /// re-emits the same bytes.
+    ///
+    /// Constructors must pass a tag at or above the lowest unknown
+    /// wire discriminant (currently 6). Constructing
+    /// `Unknown(0..=5)` produces a value that does **not** round-trip
+    /// through postcard — the wire bytes are indistinguishable from
+    /// the typed variant at that discriminant and decode back to the
+    /// typed variant instead.
     Unknown(u32),
 }
 
@@ -310,6 +317,31 @@ mod tests {
         // flag.
         let re_encoded = postcard::to_allocvec(&decoded).unwrap();
         assert_eq!(bytes, re_encoded);
+    }
+
+    #[test]
+    fn unknown_feature_flag_in_typed_range_collapses_to_typed_variant_on_round_trip() {
+        // Documents the wire-conflict invariant called out in the
+        // Unknown variant docstring. Unknown(0..=5) shares its wire
+        // representation with the typed variant at that discriminant
+        // and therefore cannot round-trip through postcard. Pinning
+        // this prevents an unwitting caller from relying on
+        // Unknown(0) carrying a distinct identity across the wire.
+        for (tag, expected) in [
+            (0u32, FeatureFlag::EncryptedBackup),
+            (1u32, FeatureFlag::Voice),
+            (2u32, FeatureFlag::Video),
+            (3u32, FeatureFlag::FileTransfer),
+            (4u32, FeatureFlag::AuditPublish),
+            (5u32, FeatureFlag::AuditConsume),
+        ] {
+            let bytes = postcard::to_allocvec(&FeatureFlag::Unknown(tag)).unwrap();
+            let decoded: FeatureFlag = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(
+                decoded, expected,
+                "Unknown({tag}) shares wire bytes with {expected:?} and must decode as the typed variant",
+            );
+        }
     }
 
     #[test]
