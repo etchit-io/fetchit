@@ -90,14 +90,32 @@ impl From<FeatureFlag> for u32 {
 /// beyond the default profile. Servers ignore claims they don't
 /// recognise so newer issuers stay forward-compatible.
 ///
-/// Forward-compat convention: any capability introduced after the
-/// initial six typed variants is emitted as [`Capability::Unknown`]
-/// carrying an opaque `tag` (the semantic capability id) and a
-/// `payload` (its postcard-encoded body). Older binaries decode it
-/// as `Unknown`, surface it through token round-trips intact, and
-/// silently skip it during [`EffectiveCapabilities::from_claims`] so
-/// it never widens the session for a binary that can't reason
-/// about it.
+/// # Forward-compat: DO NOT ADD NEW TYPED VARIANTS
+///
+/// Unlike [`FeatureFlag`] (which uses `#[serde(from = "u32", into =
+/// "u32")]` and is wire-stable under variant additions), `Capability`
+/// carries typed payloads — postcard's enum encoding has no
+/// recovery path for a discriminant the decoder doesn't know.
+/// Adding a 7th typed variant here makes every older relay AND
+/// every older client fail token parse with `SerdeDeCustom` the
+/// first time an issuer mints a token containing it. Tokens are
+/// signed envelopes; the failure mode is total — no partial
+/// decode, no per-claim skip.
+///
+/// **Any new capability introduced after the initial six typed
+/// variants must be emitted as [`Capability::Unknown`]** carrying
+/// an opaque `tag` (the semantic capability id assigned in the
+/// M2+ catalogue) and `payload` (its postcard-encoded body).
+/// Older binaries decode it as `Unknown`, round-trip its bytes
+/// intact so issuer signatures still verify after a forwarder
+/// that doesn't recognise the tag, and silently skip it during
+/// [`EffectiveCapabilities::from_claims`] so it never widens the
+/// session for a binary that can't reason about it.
+///
+/// A compile-time trip-wire below (`_CAPABILITY_VARIANT_TRIPWIRE`)
+/// fires if any future PR adds a typed variant — the non-exhaustive
+/// match fails to compile, forcing the author to read this docstring
+/// before proceeding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
     /// Override per-minute send rate cap.
@@ -122,6 +140,24 @@ pub enum Capability {
         payload: Vec<u8>,
     },
 }
+
+/// Compile-time trip-wire on the [`Capability`] variant set.
+///
+/// If you arrived here because rustc reports this match as
+/// non-exhaustive — STOP and read the "Forward-compat" section on
+/// the [`Capability`] docstring. The new variant you want to add
+/// is almost certainly a wire-format break for every older binary
+/// in the field. Emit it via [`Capability::Unknown`] with a
+/// catalogue-assigned `tag` instead.
+const _CAPABILITY_VARIANT_TRIPWIRE: fn(&Capability) = |c| match c {
+    Capability::MaxEnvelopesPerMin(_)
+    | Capability::MaxEnvelopeBytes(_)
+    | Capability::MaxGroupSize(_)
+    | Capability::AllowedRegions(_)
+    | Capability::AdminFor(_)
+    | Capability::Feature(_)
+    | Capability::Unknown { .. } => (),
+};
 
 /// Issuer-signed claims envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
