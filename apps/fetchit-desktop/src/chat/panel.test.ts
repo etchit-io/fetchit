@@ -7,12 +7,18 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: () => Promise.resolve(() => {}),
 }));
 
+const conversationDispose = vi.fn();
+vi.mock("./conversation", () => ({
+  mountConversation: vi.fn(() => ({ dispose: conversationDispose })),
+}));
+
 import { mountChatPanel } from "./panel";
 
 let host: HTMLElement;
 
 beforeEach(() => {
   localStorage.clear();
+  conversationDispose.mockClear();
   host = document.createElement("section");
   document.body.appendChild(host);
 });
@@ -65,5 +71,17 @@ describe("mountChatPanel — dock mode", () => {
     expect(document.body.classList.contains("chat-docked")).toBe(true);
     api.close();
     expect(document.body.classList.contains("chat-docked")).toBe(false);
+  });
+});
+
+describe("mountChatPanel — lifecycle cleanup", () => {
+  it("close() disposes the mountConversation handle", () => {
+    const api = mountChatPanel(host, {
+      onAutonomi: () => {},
+      onClose: () => {},
+    });
+    expect(conversationDispose).not.toHaveBeenCalled();
+    api.close();
+    expect(conversationDispose).toHaveBeenCalledTimes(1);
   });
 });

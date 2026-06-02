@@ -398,7 +398,7 @@ export function mountChatPanel(
     });
   };
 
-  mountConversation(conversationEl, store, {
+  const convHandle = mountConversation(conversationEl, store, {
     onAutonomi: (addr) => handlers.onAutonomi(addr),
     onCard: openPrefilledAddContact,
     onProfile: openPrefilledAddContact,
@@ -592,6 +592,7 @@ export function mountChatPanel(
       clearTimeout(bootstrapRetryTimer);
       bootstrapRetryTimer = null;
     }
+    convHandle.dispose();
     hideDialog();
     handlers.onClose();
   };
