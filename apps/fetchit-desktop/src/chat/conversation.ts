@@ -27,11 +27,26 @@ export interface ConversationHandlers {
   resolveSenderName: () => string;
 }
 
+/// Handle returned by [`mountConversation`]. Lifecycle is two-tier:
+///
+/// * `stopPolling` halts the group-message poll timer only. Safe to
+///   call when the chat panel hides — the render subscription stays
+///   alive so a later panel-show resumes against fresh store state
+///   without re-mounting the pane.
+/// * `dispose` is the full teardown: stops the poll AND unsubscribes
+///   from the store. Use only when the host element itself goes away;
+///   panel-show/hide must not call this, or the next show will paint
+///   stale DOM that never re-renders.
+export interface ConversationHandle {
+  stopPolling: () => void;
+  dispose: () => void;
+}
+
 export function mountConversation(
   root: HTMLElement,
   store: ChatStore,
   handlers: ConversationHandlers,
-): { dispose: () => void } {
+): ConversationHandle {
   root.replaceChildren();
   root.className = "chat-conversation";
 
@@ -247,6 +262,9 @@ export function mountConversation(
   const unsub = store.subscribe(render);
   render();
   return {
+    stopPolling: () => {
+      stopGroupPoll();
+    },
     dispose: () => {
       stopGroupPoll();
       unsub();

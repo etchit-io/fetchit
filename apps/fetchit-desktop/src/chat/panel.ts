@@ -592,7 +592,12 @@ export function mountChatPanel(
       clearTimeout(bootstrapRetryTimer);
       bootstrapRetryTimer = null;
     }
-    convHandle.dispose();
+    // Stop the group-poll timer but keep the render subscription
+    // alive — `mountConversation` is called once at panel construction
+    // and the panel can be re-opened many times. Calling `dispose()`
+    // here would unsubscribe the render listener permanently and
+    // every subsequent open() would paint stale DOM.
+    convHandle.stopPolling();
     hideDialog();
     handlers.onClose();
   };
