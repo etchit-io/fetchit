@@ -574,6 +574,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use zeroize::Zeroizing;
 
     fn install_card(
         layout: &StoreLayout,
@@ -609,8 +610,11 @@ mod tests {
         agent_id_hex: &str,
     ) -> (FetchitIdentity, MasterKey, [u8; ARGON_SALT_LEN]) {
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let id = FetchitIdentity::load_or_create(
             tmp,
             &master,

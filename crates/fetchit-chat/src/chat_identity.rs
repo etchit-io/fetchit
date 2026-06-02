@@ -183,8 +183,11 @@ mod tests {
     fn first_launch_creates_identity() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let id = FetchitIdentity::load_or_create(
             dir.path(),
             &master,
@@ -202,8 +205,11 @@ mod tests {
     fn second_load_returns_same_identity() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let aid = "deadbeef00000000000000000000000000000000000000000000000000000000";
         let a =
             FetchitIdentity::load_or_create(dir.path(), &master, aid, kdf_id_argon2(), Some(&salt))
@@ -219,8 +225,11 @@ mod tests {
     fn agent_id_rotation_regenerates() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let a = FetchitIdentity::load_or_create(
             dir.path(),
             &master,

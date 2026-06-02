@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
+use zeroize::Zeroizing;
 
 /// How often the auto-rekey sweeper fires.
 const AUTO_REKEY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
@@ -704,8 +705,10 @@ fn resolve_master_key(
             let pass = passphrase.ok_or_else(|| {
                 ChatError::Invalid("vault is passphrase-mode but no passphrase was supplied".into())
             })?;
-            let master =
-                MasterKey::resolve(&MasterKeySource::Passphrase(pass.to_owned()), Some(&salt))?;
+            let master = MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new(pass.to_owned())),
+                Some(&salt),
+            )?;
             Ok((master, kdf_id, Some(salt)))
         } else {
             let master = MasterKey::resolve(&MasterKeySource::Keychain, None)?;
@@ -713,8 +716,10 @@ fn resolve_master_key(
         }
     } else if let Some(pass) = passphrase {
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase(pass.to_owned()), Some(&salt))?;
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new(pass.to_owned())),
+            Some(&salt),
+        )?;
         Ok((master, kdf_id_argon2(), Some(salt)))
     } else {
         let master = MasterKey::resolve(&MasterKeySource::Keychain, None)?;

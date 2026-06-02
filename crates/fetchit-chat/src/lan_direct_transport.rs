@@ -413,6 +413,7 @@ mod tests {
     use fetchit_relay_client::MlDsaSigner;
     use std::time::Instant;
     use tempfile::tempdir;
+    use zeroize::Zeroizing;
 
     fn aid(byte: u8) -> AgentId {
         AgentId::parse(hex::encode([byte; 32])).unwrap()
@@ -421,8 +422,11 @@ mod tests {
     fn fresh_static(aid_hex: &str) -> Arc<LanStaticIdentity> {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         Arc::new(
             LanStaticIdentity::load_or_create(
                 dir.path(),

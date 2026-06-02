@@ -199,8 +199,11 @@ mod tests {
     fn first_launch_creates_x25519_keypair() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let id = LanStaticIdentity::load_or_create(
             dir.path(),
             &master,
@@ -218,8 +221,11 @@ mod tests {
     fn pub_key_matches_secret_derivation() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let id = LanStaticIdentity::load_or_create(
             dir.path(),
             &master,
@@ -236,8 +242,11 @@ mod tests {
     fn second_load_returns_same_keypair() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let aid = "deadbeef00000000000000000000000000000000000000000000000000000000";
         let a = LanStaticIdentity::load_or_create(
             dir.path(),
@@ -263,8 +272,11 @@ mod tests {
     fn agent_id_rotation_regenerates_keypair() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let a = LanStaticIdentity::load_or_create(
             dir.path(),
             &master,
@@ -297,8 +309,11 @@ mod tests {
     fn debug_redacts_secret() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let id = LanStaticIdentity::load_or_create(
             dir.path(),
             &master,

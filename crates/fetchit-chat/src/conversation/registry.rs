@@ -253,6 +253,7 @@ mod tests {
         DEFAULT_AUTO_REKEY_INTERVAL_MS,
     };
     use tempfile::tempdir;
+    use zeroize::Zeroizing;
 
     fn dm(
         group_id_hex: &str,
@@ -295,7 +296,11 @@ mod tests {
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
         let salt = fresh_argon_salt();
         let master = Arc::new(
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap(),
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+                Some(&salt),
+            )
+            .unwrap(),
         );
         let reg = ConversationRegistry::new(layout, master, kdf_id_argon2(), Some(salt));
         (dir, reg)
@@ -377,7 +382,11 @@ mod tests {
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
         let salt = fresh_argon_salt();
         let master = Arc::new(
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap(),
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+                Some(&salt),
+            )
+            .unwrap(),
         );
         let r1 =
             ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));
@@ -450,7 +459,11 @@ mod tests {
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
         let salt = fresh_argon_salt();
         let master = Arc::new(
-            MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap(),
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+                Some(&salt),
+            )
+            .unwrap(),
         );
         let r1 =
             ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));

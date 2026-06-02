@@ -23,6 +23,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
 use std::fs;
 use std::path::Path;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// File magic identifying a FCV1 vault.
 pub const VAULT_MAGIC: &[u8; 4] = b"FCV1";
@@ -44,12 +45,16 @@ pub enum MasterKeySource {
     /// Windows DPAPI). Created on first use, fetched thereafter.
     Keychain,
     /// Derived from a passphrase via Argon2id. Used when no keystore is
-    /// available.
-    Passphrase(String),
+    /// available. The inner `Zeroizing<String>` clears its heap bytes
+    /// when dropped so the user's passphrase doesn't linger in memory.
+    Passphrase(Zeroizing<String>),
 }
 
 /// 32-byte symmetric key used for vault seal/open.
-#[derive(Clone)]
+///
+/// Derives `ZeroizeOnDrop` so the key material is wiped from memory the
+/// moment the value (or any clone) goes out of scope.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey([u8; AEAD_KEY_LEN]);
 
 impl MasterKey {
@@ -288,15 +293,50 @@ pub fn kdf_id_argon2() -> u8 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+    #[test]
+    fn master_key_implements_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<MasterKey>();
+    }
+
+    #[test]
+    fn master_key_zeroize_clears_bytes() {
+        let salt = fresh_argon_salt();
+        let mut master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        // Sanity: the derived key is not already all-zero.
+        assert_ne!(master.as_bytes(), &[0u8; AEAD_KEY_LEN]);
+        master.zeroize();
+        assert_eq!(master.as_bytes(), &[0u8; AEAD_KEY_LEN]);
+    }
+
+    #[test]
+    fn passphrase_source_carries_zeroizing_string() {
+        let src = MasterKeySource::Passphrase(Zeroizing::new("hunter2".to_owned()));
+        match src {
+            MasterKeySource::Passphrase(z) => {
+                let _: &Zeroizing<String> = &z;
+                assert_eq!(&*z, "hunter2");
+            }
+            MasterKeySource::Keychain => panic!("expected Passphrase"),
+        }
+    }
 
     #[test]
     fn passphrase_round_trip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let master =
-            MasterKey::resolve(&MasterKeySource::Passphrase("hunter2".into()), Some(&salt))
-                .unwrap();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("hunter2".into())),
+            Some(&salt),
+        )
+        .unwrap();
         let plaintext = b"top secret bytes";
         seal_to_path(&path, plaintext, &master, kdf_id_argon2(), Some(&salt)).unwrap();
         let opened = open_from_path(&path, &master).unwrap();
@@ -308,9 +348,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m1 = MasterKey::resolve(&MasterKeySource::Passphrase("a".into()), Some(&salt)).unwrap();
+        let m1 = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("a".into())),
+            Some(&salt),
+        )
+        .unwrap();
         seal_to_path(&path, b"x", &m1, kdf_id_argon2(), Some(&salt)).unwrap();
-        let m2 = MasterKey::resolve(&MasterKeySource::Passphrase("b".into()), Some(&salt)).unwrap();
+        let m2 = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("b".into())),
+            Some(&salt),
+        )
+        .unwrap();
         assert!(open_from_path(&path, &m2).is_err());
     }
 
@@ -319,7 +367,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let m = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         seal_to_path(&path, b"x", &m, kdf_id_argon2(), Some(&salt)).unwrap();
         assert_eq!(read_kdf_id(&path).unwrap(), kdf_id_argon2());
     }
@@ -329,7 +381,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let m = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         seal_to_path(&path, b"x", &m, kdf_id_argon2(), Some(&salt)).unwrap();
         let recovered = read_argon_salt(&path).unwrap();
         assert_eq!(recovered, salt);
@@ -340,7 +396,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.enc");
         let salt = fresh_argon_salt();
-        let m = MasterKey::resolve(&MasterKeySource::Passphrase("p".into()), Some(&salt)).unwrap();
+        let m = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
         seal_to_path(
             &path,
             b"some_bytes_for_testing",
