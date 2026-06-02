@@ -101,7 +101,12 @@ export function mountConversation(
   /// scrollTop / clientHeight, all of which return 0 on a hidden
   /// subtree, so the in-place anchor write would land at scrollTop=0
   /// (off-screen). Defer the scroll anchor to the next visible render.
-  let pendingScrollToBottom = false;
+  ///
+  /// Scoped to a specific conversation key so a hidden-time pivot
+  /// (A → B → A) doesn't cause B's deferred-anchor flag to fire a
+  /// scroll-to-bottom on A's reopen when A's content was unchanged.
+  /// Null means no pending anchor for any conv.
+  let pendingScrollForKey: string | null = null;
 
   const refreshGroupHistory = (groupId: string): Promise<void> =>
     groupHistory(groupId)
@@ -225,8 +230,12 @@ export function mountConversation(
       // while the panel is hidden, the visible branch's `lastConv !==
       // conv` gate must still fire on reopen so focus + DM warmup +
       // group-poll lifecycle run for the conv the user returns to.
+      //
+      // Tag the deferred anchor with the current conv key so a later
+      // hidden-time pivot doesn't carry a flag set for a different
+      // conv through to reopen.
       if (newStreamKey !== lastStreamKey) {
-        pendingScrollToBottom = true;
+        pendingScrollForKey = convKey(conv.key);
       }
       // The group-poll timer has no purpose while hidden — no UI to
       // refresh, no one to observe stale beacons. setPanelVisible(false)
@@ -270,23 +279,29 @@ export function mountConversation(
       }
       stream.replaceChildren(...ordered);
       lastStreamKey = newStreamKey;
-      if (
-        lastConv !== conv
-        || wasAtBottom
-        || pendingScrollToBottom
-      ) {
+      const pendingForThisConv = pendingScrollForKey === convKey(conv.key);
+      if (lastConv !== conv || wasAtBottom || pendingForThisConv) {
         stream.scrollTop = stream.scrollHeight;
-        pendingScrollToBottom = false;
       }
-    } else if (justBecameVisible && pendingScrollToBottom) {
+      // Clear regardless once the diff fired — any pending anchor
+      // for this conv is satisfied; any pending anchor for a
+      // different conv is stale.
+      pendingScrollForKey = null;
+    } else if (
+      justBecameVisible
+      && pendingScrollForKey === convKey(conv.key)
+    ) {
       // Content is unchanged from what was last visibly rendered (the
-      // panel was hidden and nothing happened), but we tracked a
-      // pending scroll-to-bottom from messages that arrived earlier
-      // while hidden. Apply the anchor here without disturbing the
-      // existing DOM — re-running the diff would re-attach every
-      // bubble and replay the pop animation.
+      // panel was hidden and nothing happened to THIS conv), but we
+      // tracked a pending scroll-to-bottom from messages that arrived
+      // earlier while hidden. Apply the anchor here without disturbing
+      // the existing DOM — re-running the diff would re-attach every
+      // bubble and replay the pop animation. Guard on
+      // `justBecameVisible` so a subsequent visible store-emit with
+      // an already-applied pending flag (set true again across the
+      // same conv's hidden window) doesn't keep yanking the user.
       stream.scrollTop = stream.scrollHeight;
-      pendingScrollToBottom = false;
+      pendingScrollForKey = null;
     }
     if (lastConv !== conv) {
       composer.focus();

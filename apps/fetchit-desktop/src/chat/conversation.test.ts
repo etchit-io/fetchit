@@ -197,7 +197,14 @@ describe("mountConversation — hidden-time conv change still fires conv-change 
 });
 
 describe("mountConversation — reopen with no new messages reuses DOM (no animation flicker)", () => {
-  it("does NOT re-attach bubbles on visibility flip when content is unchanged", () => {
+  it("does NOT call stream.replaceChildren on visibility flip when content is unchanged", () => {
+    // Bob's P1#B: the previous assertion compared Node identity
+    // before/after, but `replaceChildren(...ordered)` with keyed
+    // reuse preserves Node refs through detach+reattach — Node
+    // identity is unchanged, but the detach is what restarts
+    // chat-bubble-pop. Spy directly on `replaceChildren` so the
+    // mutation "lastStreamKey=null on visibility flip" gets caught
+    // by the suite.
     handle = mountConversation(host, store, noopHandlers);
     store.setPanelVisible(true);
     const peer = "b".repeat(64);
@@ -211,20 +218,104 @@ describe("mountConversation — reopen with no new messages reuses DOM (no anima
       timestamp_ms: 1,
     });
     const stream = host.querySelector(".chat-stream") as HTMLElement;
-    const bubblesBefore = Array.from(stream.children);
-    expect(bubblesBefore.length).toBeGreaterThan(0);
+    expect(stream.children.length).toBeGreaterThan(0);
+    // Spy AFTER initial mount + render so we only observe the
+    // hide/show cycle.
+    const spy = vi.spyOn(stream, "replaceChildren");
 
-    // Hide, do nothing, reopen.
     store.setPanelVisible(false);
     store.setPanelVisible(true);
 
-    const bubblesAfter = Array.from(stream.children);
-    // Same element references — no replaceChildren means no
-    // detach/reattach means no chat-bubble-pop animation replay.
-    expect(bubblesAfter.length).toBe(bubblesBefore.length);
-    bubblesAfter.forEach((el, i) => {
-      expect(el).toBe(bubblesBefore[i]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("mountConversation — pendingScrollForKey is conv-scoped", () => {
+  it("does NOT apply a deferred scroll-to-bottom from a different conv on reopen", () => {
+    // Round-5 P2 / Bob's NOTE: pendingScroll set for DM-B during a
+    // hidden-time pivot must not fire when reopening on DM-A whose
+    // content is unchanged.
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    const peerA = "a".repeat(63) + "1";
+    const peerB = "b".repeat(63) + "2";
+    store.ensureDm(peerA);
+    store.ensureDm(peerB);
+    store.setActive({ kind: "dm", peer: peerA });
+
+    const stream = host.querySelector(".chat-stream") as HTMLElement;
+    let scrollHeightValue = 0;
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeightValue,
     });
+    stream.scrollTop = 42; // a "user scrolled up" baseline
+
+    store.setPanelVisible(false);
+    scrollHeightValue = 1000;
+    // Message lands for DM-B (active is still A — the message has
+    // from=peerB, to=me, so it's recorded into the DM with peerB).
+    // The hidden render sees conv=A unchanged, so pendingScrollForKey
+    // would not even be set in this path. Force the divergent state
+    // by setActive(B) while hidden, which makes the hidden render
+    // tag pendingScrollForKey="dm:peerB".
+    store.setActive({ kind: "dm", peer: peerB });
+    // Pivot back to A while still hidden. A's content is unchanged
+    // since the last visible render, so pendingScrollForKey stays
+    // tagged for B.
+    store.setActive({ kind: "dm", peer: peerA });
+
+    // Reopen on A.
+    store.setPanelVisible(true);
+
+    // A's content was unchanged → the else-if path checks
+    // `pendingScrollForKey === convKey(A)`. Pending is for B; the
+    // anchor must NOT fire.
+    expect(stream.scrollTop).toBe(42);
+  });
+});
+
+describe("mountConversation — else-if anchor write is gated by justBecameVisible", () => {
+  it("does NOT re-anchor scroll on a subsequent visible store-emit", () => {
+    // Round-5 test-fidelity gap: a future mutation that drops the
+    // `justBecameVisible &&` guard on the else-if scroll path would
+    // cause every visible emit-with-pendingForThisConv to keep
+    // yanking the user. This test pins the once-per-flip behaviour.
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    const peer = "c".repeat(64);
+    store.ensureDm(peer);
+    store.setActive({ kind: "dm", peer });
+
+    const stream = host.querySelector(".chat-stream") as HTMLElement;
+    let scrollHeightValue = 0;
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeightValue,
+    });
+
+    // Hide, new content while hidden, reopen — first visible render
+    // applies the deferred anchor (clears pendingScrollForKey).
+    store.setPanelVisible(false);
+    scrollHeightValue = 500;
+    store.recordDirectMessage({
+      from: peer,
+      to: store.myId() ?? "",
+      body: "anchor me",
+      message_id: "c1",
+      timestamp_ms: 1,
+    });
+    store.setPanelVisible(true);
+    expect(stream.scrollTop).toBe(500);
+
+    // Now the user scrolls up (simulate via direct assignment) and
+    // an UNRELATED store emit fires — e.g. a presence change or
+    // unread-count tick. The else-if anchor must NOT fire again.
+    stream.scrollTop = 100;
+    scrollHeightValue = 500;
+    store.tickPresence(); // fires emit() without changing conv.messages
+
+    expect(stream.scrollTop).toBe(100);
   });
 });
 
