@@ -660,9 +660,13 @@ async fn sweep_auto_rekey(
     use crate::chat_crypto::random_symmetric_key;
     use rand::rngs::OsRng;
 
-    // Snapshot only to find candidates — the actual epoch advance
-    // runs under the registry mutex via mutate_in_place so a
-    // concurrent record_nonce can't be clobbered by our save.
+    // Snapshot to find candidates. The actual advance + persist runs
+    // ONLY after the welcomes are built successfully — a transient
+    // signer / KEM / AEAD failure during build must leave the conv
+    // untouched so the next sweep retries; otherwise the local epoch
+    // moves forward, peers stay on the old key, and every subsequent
+    // message we send becomes undecryptable to them with no automatic
+    // recovery.
     let cached = registry.snapshot_cached().await;
     let mut rekeyed = 0usize;
     for snapshot in cached {
@@ -670,25 +674,53 @@ async fn sweep_auto_rekey(
             continue;
         }
         let group_id_hex = snapshot.group_id_hex.clone();
-        let advanced = registry
+        let snapshot_epoch = snapshot.current_epoch;
+
+        // Build the prospective post-advance conversation in memory
+        // only — no cache mutation, no disk write — and try to build
+        // welcomes for it. If anything fails we drop the prospective
+        // state on the floor and the next sweep tick retries.
+        let new_key = random_symmetric_key(&mut OsRng);
+        let mut prospective = snapshot.clone();
+        prospective.advance_epoch(new_key);
+        let welcomes = match build_welcome_outbox(
+            &prospective,
+            identity,
+            machine_id,
+            signer.as_ref(),
+        )
+        .await
+        {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!(
+                        "[chat] auto-rekey: build welcomes for {group_id_hex} failed: {e}; will retry next sweep",
+                    );
+                continue;
+            }
+        };
+
+        // Welcomes built — now commit the advance atomically. Re-check
+        // inside the lock so a peer-driven rekey landing between our
+        // snapshot and our commit can preempt: both `auto_rekey_due`
+        // (a fresh peer rekey just stamped last_rekey_at_ms) and the
+        // current_epoch match guard the race.
+        let committed = registry
             .mutate_in_place(&group_id_hex, |conv| {
-                // Re-check inside the lock — a concurrent rekey from
-                // a higher-epoch welcome (install_or_rekey_conversation
-                // also mutates_in_place) may have already advanced
-                // this group's epoch while we were iterating the
-                // snapshot.
-                if !conv.auto_rekey_due() {
-                    return MutateAction::Skip(None);
+                if !conv.auto_rekey_due() || conv.current_epoch != snapshot_epoch {
+                    return MutateAction::Skip(false);
                 }
-                let new_key = random_symmetric_key(&mut OsRng);
                 conv.advance_epoch(new_key);
-                MutateAction::Persist(Some(conv.clone()))
+                MutateAction::Persist(true)
             })
             .await?;
-        let Some(conv) = advanced else {
+        if !committed {
+            // Peer-driven rekey preempted us. The welcomes we built
+            // are for OUR (now-stale) prospective epoch and peers
+            // would reject them — drop on the floor.
             continue;
-        };
-        let welcomes = build_welcome_outbox(&conv, identity, machine_id, signer.as_ref()).await?;
+        }
+
         for ob in welcomes {
             let recipient = identity::AgentId(hex::encode(ob.recipient_agent_id.as_bytes()));
             let timestamp_ms = ob.envelope.timestamp_ms;

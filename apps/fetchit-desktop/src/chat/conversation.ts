@@ -209,7 +209,7 @@ export function mountConversation(
       trustEl.appendChild(leaveBtn);
     }
 
-    // Panel visibility gates the DOM write + scroll anchor: while the
+    // Panel visibility gates the DOM diff + scroll anchor: while the
     // host is hidden, `stream.scrollHeight / scrollTop / clientHeight`
     // all report 0 and `isNearBottom` returns a spurious "yes", so any
     // scroll-anchor write lands at 0 (the top of the rebuilt stream).
@@ -220,14 +220,14 @@ export function mountConversation(
     const newStreamKey = `${convKey(conv.key)}|${conv.messages.map(bubbleRenderKey).join("|")}`;
 
     if (!panelVisible) {
-      // Track that the bubble list will need a diff once we become
-      // visible again (force the visible branch below to rerun, even
-      // if the store didn't tick), and remember messages arrived so
-      // the reopen scrolls past them.
+      // Defer scroll-to-bottom until we're visible again. Don't touch
+      // `lastConv` from here — if the user pivots to a different conv
+      // while the panel is hidden, the visible branch's `lastConv !==
+      // conv` gate must still fire on reopen so focus + DM warmup +
+      // group-poll lifecycle run for the conv the user returns to.
       if (newStreamKey !== lastStreamKey) {
         pendingScrollToBottom = true;
       }
-      lastConv = conv;
       // The group-poll timer has no purpose while hidden — no UI to
       // refresh, no one to observe stale beacons. setPanelVisible(false)
       // is the canonical "go quiet" signal.
@@ -236,20 +236,17 @@ export function mountConversation(
       return;
     }
 
-    // Just became visible — force the next diff to run even when the
-    // bubble list hasn't logically changed, so reopening picks up
-    // anything we deferred above and recomputes scroll against real
-    // layout.
-    if (!lastPanelVisible) {
-      lastStreamKey = null;
-      lastPanelVisible = true;
-    }
+    const justBecameVisible = !lastPanelVisible;
+    lastPanelVisible = true;
 
     // Bubble list signature: conv identity + ordered bubble keys. When
     // it matches the previous render, the DOM doesn't need to move at
     // all. `replaceChildren` would re-attach every bubble and re-fire
     // chat-bubble-pop even on a keyed-reuse, so we have to short-circuit
-    // *before* touching `stream`.
+    // *before* touching `stream`. The visibility flip alone is NOT a
+    // reason to re-diff — only an actual content change is. The deferred
+    // scroll anchor below handles the show-after-new-content case
+    // without re-detaching DOM nodes.
     if (newStreamKey !== lastStreamKey || lastConv !== conv) {
       const wasAtBottom = isNearBottom(stream);
       // Keyed diff: reuse existing bubble elements whose render key
@@ -281,14 +278,24 @@ export function mountConversation(
         stream.scrollTop = stream.scrollHeight;
         pendingScrollToBottom = false;
       }
+    } else if (justBecameVisible && pendingScrollToBottom) {
+      // Content is unchanged from what was last visibly rendered (the
+      // panel was hidden and nothing happened), but we tracked a
+      // pending scroll-to-bottom from messages that arrived earlier
+      // while hidden. Apply the anchor here without disturbing the
+      // existing DOM — re-running the diff would re-attach every
+      // bubble and replay the pop animation.
+      stream.scrollTop = stream.scrollHeight;
+      pendingScrollToBottom = false;
     }
     if (lastConv !== conv) {
       composer.focus();
-      // Entering a DM is a cheap chance to probe reachability — if the
-      // QUIC handshake succeeds, treat the peer as freshly online even
-      // when their gossip beacon to the daemon is lagging.
+      // Conv changed — tear down whatever conv-specific machinery was
+      // running so we can start fresh below. Group→group switch was
+      // previously buggy: the line below was inside a DM-only branch,
+      // so a group A → group B selection left the closure polling A.
+      stopGroupPoll();
       if (conv.key.kind === "dm") {
-        stopGroupPoll();
         const peer = conv.key.peer;
         // Best-effort warmup so the first send doesn't pay the cold-link
         // latency. The relay's PresenceUpdate stream — not this probe —
@@ -296,11 +303,13 @@ export function mountConversation(
         void dmConnect(peer).catch(() => {});
       }
     }
-    // Group-poll lifecycle is driven on every visible render, not just
-    // on the conv-changed transition. That way the timer comes back on
-    // the panel-show after a close — staying on the same group across
-    // the close/reopen would otherwise leave the right pane stale until
-    // the user manually picks a different conv and comes back.
+    // Group-poll lifecycle is driven on every visible render that
+    // finds an active group conv with no timer, not just on the
+    // conv-changed transition. That way the timer comes back on the
+    // panel-show after a close — staying on the same group across
+    // close/reopen would otherwise leave the right pane stale. Also
+    // covers the group→group switch above, where stopGroupPoll() just
+    // cleared the timer.
     if (conv.key.kind === "group" && groupPollTimer === null) {
       const groupId = conv.key.groupId;
       void refreshGroupHistory(groupId);

@@ -35,6 +35,11 @@ const noopHandlers = {
 };
 
 beforeEach(() => {
+  // ChatStore.persistDms writes to localStorage and rehydrates from it on
+  // setIdentity. Without this clear, a `recordDirectMessage` from a prior
+  // test sticks around in localStorage and re-loads into the next test's
+  // fresh store — the DOM ends up with bubbles the test didn't put there.
+  localStorage.clear();
   vi.useFakeTimers();
   vi.mocked(groupHistoryMock).mockClear();
   store = new ChatStore();
@@ -50,6 +55,9 @@ beforeEach(() => {
 afterEach(() => {
   handle?.dispose();
   host.remove();
+  // Clear any setInterval/setTimeout that fake-timer-mode tests
+  // leaked so they don't bleed into the next test's render loop.
+  vi.clearAllTimers();
   vi.useRealTimers();
 });
 
@@ -129,11 +137,103 @@ describe("mountConversation — group poll lifecycle across panel visibility", (
   });
 });
 
+describe("mountConversation — group→group poll redirect", () => {
+  it("switches the poll to the new group when the active group changes while visible", () => {
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    store.loadGroups([
+      { group_id: "gA", name: "A" },
+      { group_id: "gB", name: "B" },
+    ]);
+
+    // Enter A — initial refresh fires.
+    store.setActive({ kind: "group", groupId: "gA" });
+    expect(groupHistoryMock).toHaveBeenLastCalledWith("gA");
+
+    // Switch to B — must redirect: an immediate refresh for B, and
+    // the interval closure must now point at B. The pre-fix bug left
+    // the timer non-null so the line-304 restart guard skipped and the
+    // closure kept polling A.
+    vi.mocked(groupHistoryMock).mockClear();
+    store.setActive({ kind: "group", groupId: "gB" });
+    expect(groupHistoryMock).toHaveBeenLastCalledWith("gB");
+
+    // Advance the timer past the interval — next tick must be for B.
+    vi.mocked(groupHistoryMock).mockClear();
+    vi.advanceTimersByTime(5_000);
+    expect(groupHistoryMock).toHaveBeenLastCalledWith("gB");
+    expect(groupHistoryMock).not.toHaveBeenCalledWith("gA");
+  });
+});
+
+describe("mountConversation — hidden-time conv change still fires conv-change handlers on reopen", () => {
+  it("DM warmup runs on reopen when the active DM changed while panel was hidden", async () => {
+    // Track dmConnect calls — it's the canonical conv-change side effect.
+    const apiModule = await import("./api");
+    vi.mocked(apiModule.dmConnect).mockClear();
+
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    const peerA = "a".repeat(64);
+    const peerB = "b".repeat(64);
+    store.ensureDm(peerA);
+    store.ensureDm(peerB);
+    store.setActive({ kind: "dm", peer: peerA });
+    // Initial entry into peerA fires dmConnect once.
+    expect(apiModule.dmConnect).toHaveBeenCalledWith(peerA);
+    vi.mocked(apiModule.dmConnect).mockClear();
+
+    // Hide, then pivot to peerB while hidden (the sidebar / restored
+    // state can call setActive from outside panel.open()/close()).
+    store.setPanelVisible(false);
+    store.setActive({ kind: "dm", peer: peerB });
+
+    // Reopen — dmConnect MUST fire for peerB. The hidden branch
+    // previously updated lastConv = conv, so the visible-branch
+    // conv-change gate saw lastConv === conv and skipped the warmup.
+    store.setPanelVisible(true);
+    expect(apiModule.dmConnect).toHaveBeenCalledWith(peerB);
+  });
+});
+
+describe("mountConversation — reopen with no new messages reuses DOM (no animation flicker)", () => {
+  it("does NOT re-attach bubbles on visibility flip when content is unchanged", () => {
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    const peer = "b".repeat(64);
+    store.ensureDm(peer);
+    store.setActive({ kind: "dm", peer });
+    store.recordDirectMessage({
+      from: peer,
+      to: store.myId() ?? "",
+      body: "hello",
+      message_id: "m1",
+      timestamp_ms: 1,
+    });
+    const stream = host.querySelector(".chat-stream") as HTMLElement;
+    const bubblesBefore = Array.from(stream.children);
+    expect(bubblesBefore.length).toBeGreaterThan(0);
+
+    // Hide, do nothing, reopen.
+    store.setPanelVisible(false);
+    store.setPanelVisible(true);
+
+    const bubblesAfter = Array.from(stream.children);
+    // Same element references — no replaceChildren means no
+    // detach/reattach means no chat-bubble-pop animation replay.
+    expect(bubblesAfter.length).toBe(bubblesBefore.length);
+    bubblesAfter.forEach((el, i) => {
+      expect(el).toBe(bubblesBefore[i]);
+    });
+  });
+});
+
 describe("mountConversation — scroll anchor across hide / show", () => {
   it("defers the scroll-to-bottom write while hidden and applies it on reopen", () => {
     handle = mountConversation(host, store, noopHandlers);
     store.setPanelVisible(true);
     const peer = "b".repeat(64);
+    store.ensureDm(peer);
     store.setActive({ kind: "dm", peer });
 
     const stream = host.querySelector(".chat-stream") as HTMLElement;
