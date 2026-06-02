@@ -34,8 +34,15 @@ on:
     types: [opened, closed, synchronize]
 
 permissions:
-  actions: write
-  contents: write
+  # Minimum needed by contributor-assistant/github-action:
+  #   pull-requests: write  → post / update the CLA sign comment
+  #   statuses: write       → set the CLA commit status
+  # Pushing signatures to the storage repo uses PERSONAL_ACCESS_TOKEN
+  # against a *separate* repo, so the source repo grants only `read`
+  # on contents. `actions: write` was not used by the action and is
+  # dropped to keep the pull_request_target-from-fork blast radius
+  # to the minimum the action actually needs.
+  contents: read
   pull-requests: write
   statuses: write
 
