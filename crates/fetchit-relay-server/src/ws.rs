@@ -13,7 +13,7 @@ use fetchit_relay_proto::{
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -22,6 +22,12 @@ use tracing::{debug, info, warn};
 /// slow or unresponsive WebSocket sink — a flooded queue surfaces as
 /// `try_send` failures upstream rather than unbounded allocation.
 const WS_OUTBOUND_CAPACITY: usize = 512;
+
+/// Maximum wait for the client's opening Hello frame before the
+/// connection is dropped. A client sending only non-Binary frames (or
+/// nothing at all) must not be able to pin a connection handler open
+/// indefinitely.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Query string carrying the bearer token for the WS upgrade.
 #[derive(Debug, Deserialize)]
@@ -204,7 +210,20 @@ async fn run_io_loop(
     }
 }
 
-async fn await_hello(receiver: &mut SplitStream<WebSocket>) -> Option<Hello> {
+async fn await_hello<S, E>(receiver: &mut S) -> Option<Hello>
+where
+    S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+{
+    tokio::time::timeout(HELLO_TIMEOUT, await_hello_inner(receiver))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn await_hello_inner<S, E>(receiver: &mut S) -> Option<Hello>
+where
+    S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+{
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Binary(b) = msg {
             if let Ok(ClientFrame::Hello(h)) = from_bytes::<ClientFrame>(&b) {
@@ -316,9 +335,11 @@ mod tests {
     //! receiver + writer to prove the writer-exit arm fires promptly — a
     //! regression here would re-introduce ghosted sessions that linger until
     //! the client-side keepalive eventually triggers a reconnect.
-    use super::{LoopExit, WS_OUTBOUND_CAPACITY};
-    use fetchit_relay_proto::{Pong, ServerFrame};
+    use super::{await_hello_inner, LoopExit, HELLO_TIMEOUT, WS_OUTBOUND_CAPACITY};
+    use axum::extract::ws::Message;
+    use fetchit_relay_proto::{to_bytes, ClientFrame, Hello, Pong, ServerFrame};
     use futures_util::stream::{self, StreamExt};
+    use std::convert::Infallible;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
@@ -375,6 +396,59 @@ mod tests {
             .expect("loop must exit promptly when the writer task is aborted")
             .unwrap();
         assert_eq!(exit, LoopExit::WriterDied);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_hello_times_out_when_no_hello_arrives() {
+        // Pending stream models a client that connects and then sends
+        // nothing (or only non-Binary keepalives that the loop skips).
+        // The timeout wrapper must reclaim the connection within
+        // HELLO_TIMEOUT — without it, the handler pins memory forever.
+        let mut stream = stream::pending::<Result<Message, Infallible>>();
+        let result = tokio::time::timeout(
+            HELLO_TIMEOUT + Duration::from_secs(1),
+            super::await_hello(&mut stream),
+        )
+        .await
+        .expect("await_hello wrapper must complete within its own timeout + slack");
+        assert!(
+            result.is_none(),
+            "no Hello arrived; await_hello must surface None",
+        );
+    }
+
+    #[tokio::test]
+    async fn await_hello_inner_returns_hello_from_first_binary_frame() {
+        let hello = Hello {
+            client_version: "test".into(),
+            tenant_id: None,
+            preferred_region: None,
+            capabilities: None,
+        };
+        let bytes = to_bytes(&ClientFrame::Hello(hello.clone())).unwrap();
+        let mut stream = stream::iter([Ok::<Message, Infallible>(Message::Binary(bytes))]);
+        let got = await_hello_inner(&mut stream).await.expect("hello arrives");
+        assert_eq!(got.client_version, hello.client_version);
+    }
+
+    #[tokio::test]
+    async fn await_hello_inner_skips_leading_text_frames() {
+        let hello = Hello {
+            client_version: "skip-text".into(),
+            tenant_id: None,
+            preferred_region: None,
+            capabilities: None,
+        };
+        let bytes = to_bytes(&ClientFrame::Hello(hello.clone())).unwrap();
+        let mut stream = stream::iter([
+            Ok::<Message, Infallible>(Message::Text("not hello".into())),
+            Ok::<Message, Infallible>(Message::Text("still not".into())),
+            Ok::<Message, Infallible>(Message::Binary(bytes)),
+        ]);
+        let got = await_hello_inner(&mut stream)
+            .await
+            .expect("text frames are skipped; hello eventually arrives");
+        assert_eq!(got.client_version, hello.client_version);
     }
 
     #[tokio::test]
