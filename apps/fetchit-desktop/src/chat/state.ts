@@ -544,6 +544,15 @@ export class ChatStore {
     this.emit();
   }
 
+  /// True when the chat panel host is currently shown. Conversation
+  /// renderers gate scroll anchoring and the group-history poll on
+  /// this so they don't fire DOM writes against a hidden subtree
+  /// (where scrollHeight/scrollTop are 0 and `isNearBottom` returns a
+  /// useless "yes"). The flag is driven by [`Self::setPanelVisible`].
+  isPanelVisible(): boolean {
+    return this.panelVisible;
+  }
+
   /// The panel reports its visibility so the store can decide what
   /// counts as "seen" for unread tracking and unread-reset logic.
   setPanelVisible(visible: boolean): void {
