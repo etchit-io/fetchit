@@ -230,13 +230,14 @@ pub fn random_symmetric_key(rng: &mut impl RngCore) -> [u8; AEAD_KEY_LEN] {
 // ── AAD construction ───────────────────────────────────────────────────
 
 /// Canonical AAD for a message ciphertext bound to a conversation + epoch.
-/// `concat(AAD_DOMAIN, group_id, epoch.to_le_bytes())`.
+/// `concat(AAD_DOMAIN, group_id, epoch.to_be_bytes())`.
+/// epoch is encoded big-endian to match other wire-signed integers (`lan_binding_bytes`).
 #[must_use]
 pub fn message_aad(group_id: &[u8; 32], epoch: u32) -> Vec<u8> {
     let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 32 + 4);
     aad.extend_from_slice(AAD_DOMAIN);
     aad.extend_from_slice(group_id);
-    aad.extend_from_slice(&epoch.to_le_bytes());
+    aad.extend_from_slice(&epoch.to_be_bytes());
     aad
 }
 
@@ -346,6 +347,13 @@ mod tests {
         let g2 = [1u8; 32];
         let aad0_g2 = message_aad(&g2, 0);
         assert_ne!(aad0, aad0_g2);
+    }
+
+    #[test]
+    fn test_message_aad_epoch_big_endian() {
+        let epoch: u32 = 0x0123_4567;
+        let aad = message_aad(&[0u8; 32], epoch);
+        assert_eq!(&aad[aad.len() - 4..], &epoch.to_be_bytes());
     }
 
     #[test]
