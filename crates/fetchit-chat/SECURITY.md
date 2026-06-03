@@ -52,9 +52,8 @@ exist) and removes the v1 fallback.
 
 The group surface in `groups.rs` uses x0xd's `public_open` preset, which
 routes group messages over the daemon's gossip pub/sub **without any
-group-level encryption**. There is no MLS state machine in this
-crate. There is no `OpenMLS` in `Cargo.toml`. There is no
-`/secure/encrypt` + `/publish` wiring.
+group-level encryption**. fetch>it does not run an MLS state machine
+in-process; we drive x0xd's MLS surface via REST.
 
 Group messages in v1 should be treated as **public**. The UI surfaces
 them as "public rooms" (the wire value is `public_open` for x0xd's
@@ -63,9 +62,22 @@ labels every group as "plaintext on relay — encrypted groups coming
 M2" — distinct from DMs which run the encrypted v2 path when the
 conversation layer drives the send.
 
-M2 ships MLS (RFC 9420 TreeKEM + ML-KEM-768), replacing `public_open`
-for private groups. Public rooms keep the v1 path as an explicit
-opt-in.
+M2 ships PQ TreeKEM groups via x0xd v0.20.x's MLS surface
+(`preset=private_secure` + `discoverability=Hidden`), which the daemon
+backs with `saorsa-mls v0.3.x` (ML-KEM-768 + ML-DSA-65 +
+ChaCha20-Poly1305 + BLAKE3 — pure PQ, RFC-9420-subset wire format).
+`groups.rs` rewires off `public_open` onto `/secure/encrypt` +
+`/secure/decrypt` + `/publish` + `/subscribe`. Public rooms keep the
+v1 plaintext path as an explicit opt-in.
+
+**Honest-claim caveat:** the underlying `saorsa-mls` README still
+self-flags as upstream-prototype ("Do not use this crate to protect
+sensitive data in production systems"). We ship what upstream ships
+and harden in tandem — our copy mirrors that framing rather than
+overclaim "audited final crypto." We are also NOT IETF
+`draft-ietf-mls-pq-ciphersuites` wire-compatible; saorsa-mls is an
+RFC-9420 *subset* with PQ primitives substituted in, not the IETF PQ
+codepoint. LIT Chat does not need cross-vendor MLS interop for v1.0.
 
 ### 3. DirectMessage.verified is honest about per-message signatures
 

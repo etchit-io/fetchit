@@ -8,10 +8,15 @@
 //! secrecy, no membership privacy. The module name "groups" survives;
 //! the "MLS" framing did not.
 //!
-//! MLS-encrypted groups (RFC 9420 `TreeKEM` + ML-KEM-768) are the M2
-//! deliverable. Lighting them up requires either a client-side MLS
-//! state machine in this crate driving x0xd's MLS surface, or a swap
-//! to `OpenMLS`. Neither exists today.
+//! PQ-encrypted groups (`TreeKEM` + ML-KEM-768 + ML-DSA-65) are the M2
+//! deliverable, consumed from x0xd v0.20.x's MLS surface
+//! (`preset=private_secure` + `discoverability=Hidden`, backed by
+//! `saorsa-mls v0.3.x`). The M2 design lives at
+//! `docs/superpowers/specs/2026-06-02-m2-x0xd-mls-adapter-design.md`.
+//! fetch>it does not run an in-process MLS state machine; the chat
+//! crate drives x0xd's `/secure/encrypt` + `/secure/decrypt` +
+//! `/publish` + `/subscribe` endpoints via REST, with the daemon
+//! owning the `TreeKEM` ratchet.
 
 use crate::error::{ChatError, Result};
 use crate::http::Http;
