@@ -2045,8 +2045,14 @@ mod tests {
     }
 
     #[test]
-    fn is_private_group_envelope_false_when_admin_event() {
+    fn is_private_group_envelope_false_when_delivery_receipt() {
         let env = synth_env(EnvelopeKind::DeliveryReceipt, Vec::new());
+        assert!(!is_private_group_envelope(&env));
+    }
+
+    #[test]
+    fn is_private_group_envelope_false_when_admin_event() {
+        let env = synth_env(EnvelopeKind::AdminEvent, Vec::new());
         assert!(!is_private_group_envelope(&env));
     }
 
