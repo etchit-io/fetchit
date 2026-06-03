@@ -58,12 +58,19 @@ pub enum ChatError {
         path: String,
     },
 
-    /// Caller invoked `RelayTransport::send` without supplying a
+    /// Caller invoked a transport's `send` without supplying a
     /// prebuilt sealed envelope. After M2, the v1 fabricated path is
     /// gone — every send must go through the conversation/group
-    /// layer that produces a sealed `TransitEnvelope`.
-    #[error("sealed envelope required: caller did not supply a prebuilt sealed envelope")]
-    SealedRequired,
+    /// layer that produces a sealed `TransitEnvelope`. The `caller`
+    /// field names the specific transport surface that refused the
+    /// unsealed envelope so a misbehaving caller can be pinpointed
+    /// from a log line.
+    #[error("sealed envelope required: {caller} did not supply a prebuilt sealed envelope")]
+    SealedRequired {
+        /// Descriptive name of the transport surface that rejected
+        /// the unsealed envelope, e.g. `"RelayTransport::send"`.
+        caller: &'static str,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {
@@ -92,9 +99,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sealed_required_displays_descriptive_message() {
-        let e: ChatError = ChatError::SealedRequired;
+    fn sealed_required_displays_descriptive_message_with_caller_context() {
+        let e: ChatError = ChatError::SealedRequired {
+            caller: "RelayTransport::send",
+        };
         let msg = e.to_string();
         assert!(msg.contains("sealed envelope required"));
+        assert!(
+            msg.contains("RelayTransport::send"),
+            "caller context must surface in Display: {msg}",
+        );
     }
 }

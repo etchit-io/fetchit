@@ -114,7 +114,9 @@ impl Transport for RelayTransport {
         // Sealed-only post-M2 — every caller must hand us a fully
         // sealed envelope produced by the conversation/group layer.
         // The v1 fabricated escape hatch has been removed.
-        let transit = envelope.transit.ok_or(ChatError::SealedRequired)?;
+        let transit = envelope.transit.ok_or(ChatError::SealedRequired {
+            caller: "RelayTransport::send",
+        })?;
         let dedupe_key = self.next_dedupe_key();
         let receipt = self
             .client
@@ -244,8 +246,11 @@ mod tests {
 
         let err = transport.send(&to, outbound).await.unwrap_err();
         assert!(
-            matches!(err, ChatError::SealedRequired),
-            "expected SealedRequired, got {err:?}"
+            matches!(
+                err,
+                ChatError::SealedRequired { caller } if caller == "RelayTransport::send",
+            ),
+            "expected SealedRequired{{caller=RelayTransport::send}}, got {err:?}",
         );
     }
 }

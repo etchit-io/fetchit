@@ -921,11 +921,20 @@ async fn build_private_group_envelope<S: Signer + ?Sized>(
     Ok(env)
 }
 
+/// Wall-clock millis since the Unix epoch. On a broken clock
+/// (`SystemTime::duration_since(UNIX_EPOCH)` returning `Err`)
+/// saturates to `u64::MAX` so the value falls OUTSIDE any sliding
+/// window — matches the relay-transport convention so the two timers
+/// don't diverge under clock skew. Returning `0` (the previous
+/// behaviour) would let a broken clock accidentally land inside a
+/// window, which is the opposite of what we want.
 fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .map_or(u64::MAX, |d| {
+            u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Build a `Conversation` shell for a private-secure group containing
