@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side implementation of the fetchit relay protocol.
 //!
 //! Routes opaque envelopes between connected clients via WebSocket.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Wire types shared between the fetchit relay server and its clients.
 //!
 //! The relay is a transient pass-through router: it sees opaque envelopes

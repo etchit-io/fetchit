@@ -19,6 +19,17 @@ LICENSE.
 - **clap** -- MIT/Apache-2.0 -- the CLI viewer's argument parsing.
 - **android_logger** -- MIT/Apache-2.0 -- routes Rust `log` to Android logcat.
 
+## Relay-server stack (`crates/fetchit-relay-server` + `crates/fetchit-relay-proto`)
+- **saorsa-pqc** — MIT/Apache-2.0 — https://github.com/dirvine/saorsa-pqc — ML-DSA-65 / ML-KEM-768 PQ signature + KEM (used for relay-side auth verify + profile-manifest signing).
+- **axum** + **tower-http** — MIT — the relay's HTTP/WebSocket transport.
+- **dashmap** — MIT — concurrent connection registry.
+- **postcard** — MIT/Apache-2.0 — compact binary wire encoding for protocol frames.
+- **serde_jcs** — Apache-2.0 — canonical JSON (RFC 8785) for profile-manifest signing-input bytes.
+- **tracing** + **tracing-subscriber** — MIT — structured logging.
+- **base64**, **rand**, **futures-util** — MIT (or MIT/Apache-2.0 dual) — small utility crates.
+
+The relay-server crate ships AGPL-3.0-only (network-use trigger applies to the running daemon); the proto crate ships Apache-2.0 so third-party SDKs can implement compatible wire clients without AGPL contagion. None of the above introduce GPL/LGPL transitive obligations.
+
 ## Android app
 - **Android WebView / Chromium** -- BSD-3-Clause (and others) -- the system component fetch>it uses to render HTML pages fetched from Autonomi. Part of the platform; not bundled.
 - **AndroidX** -- appcompat, core-ktx, activity-ktx, fragment-ktx, lifecycle (runtime + process), constraintlayout, recyclerview, swiperefreshlayout -- Apache-2.0 -- https://developer.android.com/jetpack

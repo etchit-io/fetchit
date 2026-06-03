@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Binary entrypoint — bootstrap config, init tracing, run the server.
 
 use anyhow::Result;
