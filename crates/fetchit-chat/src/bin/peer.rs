@@ -252,6 +252,20 @@ async fn decode_private_group(
                 short(&group_id_hex),
                 entry.body
             );
+            // M2 live-test echo handler. Bounces the body back into
+            // the same group so the test asserter sees an inbound
+            // from us. Self-source filter at the top of this fn drops
+            // our own re-receipt. Wrap as fire-and-forget — a send
+            // failure during a test run should log + continue so we
+            // don't wedge the inbound pump.
+            let echo_body = format!("echo: {}", entry.body);
+            if let Err(e) = client
+                .messages()
+                .send_private_group(&group_id_hex, &echo_body, "bob")
+                .await
+            {
+                eprintln!("[peer] echo send error: {e}");
+            }
             let from = AgentId::parse(entry.sender_agent_id_hex).ok()?;
             Some(PeerInbound {
                 from,
