@@ -19,9 +19,12 @@ use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Domain-separation prefix used as the first input to ML-DSA-65 when
-/// signing a profile manifest. Mirrors etch>it's publisher exactly.
-pub const SIGN_DOMAIN_PROFILE: &[u8] = b"fetchit/profile-manifest/v1";
+// `SIGN_DOMAIN_PROFILE` re-exported from `fetchit_relay_proto`
+// — single source of truth for the profile-manifest signing-input
+// prefix shared by chat client, relay server, and etch>it publisher.
+// Existing call sites (`crate::profile::SIGN_DOMAIN_PROFILE`) keep
+// resolving via this re-export.
+pub use fetchit_relay_proto::SIGN_DOMAIN_PROFILE;
 
 /// Reasons a manifest can fail to parse / verify.
 #[derive(Debug, Error)]

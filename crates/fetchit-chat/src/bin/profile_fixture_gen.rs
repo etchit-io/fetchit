@@ -23,14 +23,12 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
-use fetchit_relay_proto::derive_agent_id;
+use fetchit_relay_proto::{derive_agent_id, SIGN_DOMAIN_PROFILE};
 use saorsa_pqc::api::kem::{MlKem, MlKemPublicKey, MlKemVariant};
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature, MlDsaVariant};
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-const SIGN_DOMAIN_PROFILE: &[u8] = b"fetchit/profile-manifest/v1";
 
 /// `issued_at_ms` baked into the fixture — a fixed Unix epoch ms
 /// (2026-05-30T00:00:00Z) so the manifests + sigs are deterministic.

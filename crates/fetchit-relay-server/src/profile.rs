@@ -17,15 +17,16 @@ use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use dashmap::DashMap;
+// `SIGN_DOMAIN_PROFILE` re-exported here so existing call sites
+// (relay-server::profile::SIGN_DOMAIN_PROFILE) keep resolving;
+// the constant itself now lives in `fetchit_relay_proto::sign_domains`
+// so the relay, the chat client, and any future SDK share one
+// byte literal via the type system rather than by docstring
+// social contract.
+pub use fetchit_relay_proto::SIGN_DOMAIN_PROFILE;
 use fetchit_relay_proto::derive_agent_id;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-/// Domain-separation prefix on profile-manifest + profile-index
-/// signatures. Must byte-match `fetchit_chat::profile::SIGN_DOMAIN_PROFILE`
-/// and the relay-envelope signing prefix in etch>it's `profile_publish`.
-/// Drift between any of these three breaks the whole v3 chain.
-pub const SIGN_DOMAIN_PROFILE: &[u8] = b"fetchit/profile-manifest/v1";
 
 /// Hard ceiling on the POST body. v3 envelopes are ~5 KB once
 /// base64-encoded; the cap is set well above that to absorb any

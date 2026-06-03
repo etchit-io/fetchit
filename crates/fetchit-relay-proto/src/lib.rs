@@ -20,6 +20,7 @@ pub mod pair_record;
 pub mod pair_record_push;
 pub mod public_post;
 pub mod region;
+pub mod sign_domains;
 
 pub use auth::{
     auth_signing_bytes, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, AUTH_CHALLENGE_DOMAIN,
@@ -42,6 +43,7 @@ pub use identity::{
 pub use pair_record_push::PairRecordPushPayload;
 pub use public_post::{PublicPostPayload, FEDIVERSE_BRIDGE_SENDER};
 pub use region::Region;
+pub use sign_domains::SIGN_DOMAIN_PROFILE;
 
 /// Protocol version negotiated in the `Hello` / `Ready` exchange.
 pub const PROTOCOL_VERSION: u16 = 2;
