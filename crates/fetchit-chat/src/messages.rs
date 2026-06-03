@@ -620,17 +620,6 @@ impl<'a> Endpoint<'a> {
         ml_dsa_verify(&agent_pub, &sign_bytes, &env.sender_signature)
             .map_err(|_| ChatError::Invalid("envelope signature verify failed".into()))?;
 
-        // Lazy conversation creation: if Bob accepted an invite via
-        // x0xd but his local has no Conversation yet, seed a shell
-        // before the dedup+history mutation runs. Use the same
-        // self-only constructor `create_private_group` uses so the
-        // on-disk shape matches.
-        if registry.get(group_id_hex).await?.is_none() {
-            let conv =
-                self_only_private_group_conversation(group_id_hex, None, identity, signer.as_ref());
-            registry.save(&conv).await?;
-        }
-
         // Validate the nonce shape BEFORE we touch x0xd's /secure/decrypt
         // — a malformed nonce is unrecoverable and a wasted daemon
         // round-trip would just surface the same error noisier.
@@ -665,19 +654,38 @@ impl<'a> Endpoint<'a> {
         };
         let entry_for_closure = entry.clone();
 
-        // Atomic dedup + history mutation. The mutate_in_place closure
-        // holds the by-group_id mutex across the check + push + persist
-        // so a concurrent inbound on the same group can't slip an extra
-        // copy past the window. Replay surfaces as `Skip(None)`; fresh
-        // surfaces as `Persist(Some(entry))`.
+        // Atomic lazy-create + dedup + history mutation. The
+        // `mutate_in_place_or_init` closure runs the bootstrap of a
+        // fresh self-only conversation UNDER the per-group mutex iff
+        // none exists yet, then runs the dedup check + history push
+        // in the same locked critical section. Two concurrent receive
+        // paths on the same brand-new group_id can therefore not both
+        // observe `None` and race duplicate `save(empty_shell)` calls
+        // that wipe each other's recorded nonce + history entry. The
+        // bootstrap-then-mutate is atomic: the second receiver
+        // observes the entry the first inserted.
+        let group_id_owned = group_id_hex.to_owned();
+        let identity_for_init = identity.clone();
+        let signer_for_init = signer.clone();
         let outcome = registry
-            .mutate_in_place(group_id_hex, |conv| {
-                if conv.check_and_record_nonce(&sender_agent_id_hex, nonce_bytes) {
-                    return MutateAction::Skip(None);
-                }
-                conv.push_history(entry_for_closure.clone());
-                MutateAction::Persist(Some(entry_for_closure.clone()))
-            })
+            .mutate_in_place_or_init(
+                group_id_hex,
+                move || {
+                    self_only_private_group_conversation(
+                        &group_id_owned,
+                        None,
+                        &identity_for_init,
+                        signer_for_init.as_ref(),
+                    )
+                },
+                |conv| {
+                    if conv.check_and_record_nonce(&sender_agent_id_hex, nonce_bytes) {
+                        return MutateAction::Skip(None);
+                    }
+                    conv.push_history(entry_for_closure.clone());
+                    MutateAction::Persist(Some(entry_for_closure.clone()))
+                },
+            )
             .await?;
 
         match outcome {
@@ -1888,6 +1896,171 @@ mod tests {
         let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
         assert_eq!(conv.history.len(), 1);
         assert_eq!(conv.history.back().unwrap().body, "hi from peer");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)] // table-style concurrent fixture; clearer inline than helper-extracted
+    async fn receive_private_group_envelope_concurrent_lazy_create_is_atomic() {
+        // P0 from Bob's adversarial multi-lens review: two concurrent
+        // receives for a brand-new group both observed
+        // `registry.get == None`, both called `registry.save(empty)`,
+        // and the second save clobbered the first's recorded nonce +
+        // history entry. The fix routes the receive path through
+        // `ConversationRegistry::mutate_in_place_or_init`, which
+        // bootstraps the empty shell UNDER the per-group mutex.
+        //
+        // Test shape: N distinct senders (so each has a distinct
+        // per-sender replay window and the entries genuinely
+        // accumulate rather than collapsing into a single replay),
+        // each emits one envelope, all five receivers fire in
+        // parallel on a multi-thread runtime against a fresh
+        // (cache-empty + disk-empty) registry. Post-condition:
+        // exactly one Conversation exists in the registry with all
+        // N entries in history, and each sender's per-sender
+        // sliding window holds exactly one nonce.
+        const N: usize = 5;
+        let server = MockServer::start().await;
+        // The receive path calls /secure/decrypt — return the same
+        // plaintext for every call so each envelope decrypts to a
+        // distinct body via its distinct ciphertext.
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": B64.encode(b"concurrent receive"),
+            })))
+            .mount(&server)
+            .await;
+        let rig = build_rig();
+
+        // Build N independent senders, install N cards, craft N
+        // envelopes with distinct nonces+timestamps so dedupe keys
+        // differ.
+        let mut envelopes = Vec::with_capacity(N);
+        for i in 0..N {
+            let sender_signer = MlDsaSigner::generate().unwrap();
+            let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+                &sender_signer.public_key(),
+            ));
+            install_card_for(&rig, &sender_signer, &sender_aid);
+            // Distinct nonce per envelope — same wire-level shape as
+            // x0xd would emit if every encrypt landed under a fresh
+            // ratchet step.
+            let mut raw_nonce = [0u8; 12];
+            raw_nonce[0] = u8::try_from(i + 1).unwrap();
+            let frame = EncryptedFrame {
+                ciphertext_b64: B64.encode([u8::try_from(i + 1).unwrap()]),
+                nonce_b64: B64.encode(raw_nonce),
+                secret_epoch: 9,
+            };
+            let frame_bytes = postcard::to_allocvec(&frame).unwrap();
+            let mut group_id_bytes = [0u8; 32];
+            hex::decode_to_slice(TEST_GROUP_HEX, &mut group_id_bytes).unwrap();
+            let mut sender_bytes = [0u8; 32];
+            hex::decode_to_slice(&sender_aid, &mut sender_bytes).unwrap();
+            let mut env = TransitEnvelope {
+                version: WIRE_VERSION,
+                kind: EnvelopeKind::GroupChat,
+                group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
+                tenant_id: None,
+                sender_agent_id: ProtoAgentId::from_bytes(sender_bytes),
+                sender_machine_id: MachineId::from_bytes([0u8; 32]),
+                timestamp_ms: u64::try_from(1_000 + i).unwrap(),
+                epoch: 9,
+                ciphertext: frame_bytes,
+                nonce: raw_nonce.to_vec(),
+                kem_ciphertext: Vec::new(),
+                sender_signature: Vec::new(),
+            };
+            let canonical = canonical_envelope_bytes(&env).unwrap();
+            let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+            sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+            sign_bytes.extend_from_slice(&canonical);
+            env.sender_signature = sender_signer.sign(&sign_bytes).await.unwrap();
+            envelopes.push((sender_aid, env));
+        }
+
+        // Pre-condition: registry is empty on disk + in memory.
+        assert!(rig.registry.get(TEST_GROUP_HEX).await.unwrap().is_none());
+
+        // Spawn N concurrent receives. Each task takes owned clones
+        // of the rig's Arc-shaped state, builds its own Endpoint
+        // referencing those local Arcs, and rendezvouses at a barrier
+        // before entering the receive path — without the barrier
+        // serial spawn overhead can let task 0 finish its lazy
+        // bootstrap before task 1 even starts, and the race window
+        // collapses.
+        let server_uri = server.uri();
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let mut handles = Vec::with_capacity(N);
+        for (_sender_aid, env) in &envelopes {
+            let env = env.clone();
+            let identity = rig.identity.clone();
+            let registry = rig.registry.clone();
+            let signer_arc: Arc<dyn Signer> = rig.signer.clone();
+            let layout = rig.layout.clone();
+            let server_uri = server_uri.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let http = Http::new(server_uri, "tok".to_owned()).unwrap();
+                let router = Router::new();
+                let endpoint = Endpoint::new(
+                    &http,
+                    &router,
+                    Some(&identity),
+                    Some(&registry),
+                    Some(&signer_arc),
+                    Some(&layout),
+                    [0u8; 32],
+                );
+                barrier.wait().await;
+                endpoint
+                    .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+                    .await
+            }));
+        }
+
+        let mut persisted = 0usize;
+        for h in handles {
+            let outcome = h.await.unwrap().unwrap();
+            if matches!(outcome, PrivateGroupReceive::Persisted(_)) {
+                persisted += 1;
+            }
+        }
+        assert_eq!(
+            persisted, N,
+            "all {N} distinct envelopes must surface Persisted, got {persisted}",
+        );
+
+        // Post-condition: exactly one conversation in the registry
+        // carrying all N history entries and N independent per-sender
+        // replay-window entries.
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        assert_eq!(
+            conv.history.len(),
+            N,
+            "history must hold one entry per concurrent receive — \
+             a TOCTOU clobber would lose entries here",
+        );
+        assert_eq!(
+            conv.seen_nonces.len(),
+            N,
+            "each distinct sender must own a sliding window — \
+             a clobber would have collapsed per-sender state",
+        );
+        for (sender_aid, _env) in &envelopes {
+            let window = conv
+                .seen_nonces
+                .get(sender_aid)
+                .expect("per-sender window must exist for every sender");
+            assert_eq!(
+                window.len(),
+                1,
+                "exactly one recorded nonce per sender — duplicates \
+                 indicate the dedup ran on a stale clone",
+            );
+        }
     }
 
     // ---- Round-trip integration ----------------------------------------

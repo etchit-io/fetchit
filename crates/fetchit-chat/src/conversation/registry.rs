@@ -271,28 +271,101 @@ impl ConversationRegistry {
     /// restored from a pre-mutation snapshot so callers that decided
     /// midway not to commit still leave the cache byte-equal to disk.
     ///
+    /// Callers that may legitimately operate on a not-yet-installed
+    /// `group_id` (e.g. receive paths racing the first envelope into
+    /// a freshly-joined private group) MUST use
+    /// [`Self::mutate_in_place_or_init`] instead, which bootstraps an
+    /// empty shell UNDER the per-group mutex so two concurrent
+    /// receives can't both race past `get → None → save(empty)` and
+    /// clobber each other's recorded state.
+    ///
     /// # Errors
-    /// Same shape as [`Self::record_nonce`]: `ChatError::Invalid` when
-    /// the group is not on disk or the cache invariant has been
-    /// violated; IO / AEAD / JSON errors from hydrate-or-persist.
+    /// `ChatError::Invalid` when the group is not on disk or the
+    /// cache invariant has been violated; IO / AEAD / JSON errors
+    /// from hydrate-or-persist.
     pub async fn mutate_in_place<F, T>(&self, group_id_hex: &str, mutate: F) -> Result<T, ChatError>
     where
         F: FnOnce(&mut Conversation) -> MutateAction<T>,
+    {
+        self.mutate_in_place_impl::<F, fn() -> Conversation, T>(group_id_hex, None, mutate)
+            .await
+    }
+
+    /// Variant of [`Self::mutate_in_place`] that bootstraps a fresh
+    /// `Conversation` via `init_if_missing` when the group is absent
+    /// from BOTH the in-memory cache and disk, all under the
+    /// per-group mutex.
+    ///
+    /// This closes the lazy-create TOCTOU on receive paths: two
+    /// concurrent inbound envelopes for a brand-new group both
+    /// arrive, the FIRST observes "no cache, no disk" and runs the
+    /// bootstrap + the mutation; the SECOND blocks on the mutex,
+    /// then observes the cache entry the first installed and skips
+    /// the bootstrap. Without this, the old shape —
+    /// `if get().is_none() { save(empty_shell) }` followed by a
+    /// separate `mutate_in_place` — let both races call
+    /// `save(empty_shell)`, with the second wiping the first's
+    /// recorded nonce + history.
+    ///
+    /// On the bootstrap path the pre-mutation snapshot is the
+    /// freshly-built shell, so a `Skip` after bootstrap leaves the
+    /// shell in cache (matching the existing semantics of a
+    /// hydrate-then-skip on an on-disk conversation). On a `Persist`
+    /// seal failure the cache restores to the bootstrapped shell —
+    /// the in-flight mutation rolls back the same way the on-disk
+    /// path does.
+    ///
+    /// # Errors
+    /// Same shape as [`Self::mutate_in_place`]; `init_if_missing` is
+    /// purely a bootstrap shim and surfaces no errors of its own.
+    pub async fn mutate_in_place_or_init<F, Init, T>(
+        &self,
+        group_id_hex: &str,
+        init_if_missing: Init,
+        mutate: F,
+    ) -> Result<T, ChatError>
+    where
+        F: FnOnce(&mut Conversation) -> MutateAction<T>,
+        Init: FnOnce() -> Conversation,
+    {
+        self.mutate_in_place_impl::<F, Init, T>(group_id_hex, Some(init_if_missing), mutate)
+            .await
+    }
+
+    async fn mutate_in_place_impl<F, Init, T>(
+        &self,
+        group_id_hex: &str,
+        init_if_missing: Option<Init>,
+        mutate: F,
+    ) -> Result<T, ChatError>
+    where
+        F: FnOnce(&mut Conversation) -> MutateAction<T>,
+        Init: FnOnce() -> Conversation,
     {
         let mut guard = self.by_group_id.lock().await;
 
         if !guard.contains_key(group_id_hex) {
             let path = self.layout.conversation_path(group_id_hex);
-            if !path.exists() {
+            if path.exists() {
+                let bytes = open_from_path(&path, &self.master)?;
+                let conv: Conversation = serde_json::from_slice(&bytes)
+                    .map_err(|e| ChatError::Invalid(format!("conv parse: {e}")))?;
+                self.refresh_pubkey_cache(&conv);
+                guard.insert(group_id_hex.to_owned(), conv);
+            } else if let Some(init) = init_if_missing {
+                // Lazy bootstrap under the lock — two concurrent
+                // receive paths racing on the same brand-new group_id
+                // both see this branch fire exactly once (the second
+                // observes the freshly-inserted entry on its retry of
+                // the contains_key check above).
+                let conv = init();
+                self.refresh_pubkey_cache(&conv);
+                guard.insert(group_id_hex.to_owned(), conv);
+            } else {
                 return Err(ChatError::Invalid(format!(
                     "mutate_in_place: no conversation for group_id {group_id_hex}"
                 )));
             }
-            let bytes = open_from_path(&path, &self.master)?;
-            let conv: Conversation = serde_json::from_slice(&bytes)
-                .map_err(|e| ChatError::Invalid(format!("conv parse: {e}")))?;
-            self.refresh_pubkey_cache(&conv);
-            guard.insert(group_id_hex.to_owned(), conv);
         }
 
         // Snapshot for the restore paths — Skip always restores; the
@@ -975,6 +1048,83 @@ mod tests {
                 "round {round}: the loser must surface Replay",
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mutate_in_place_or_init_atomic_under_concurrent_first_touch() {
+        // P0 round-7: receive_private_group_envelope's lazy-create
+        // step used to be `if get().is_none() { save(empty) }` outside
+        // the mutate_in_place lock. Two concurrent receives on the
+        // same brand-new group_id could both observe `None`, both
+        // save(empty) — the second wiping the first's recorded state.
+        //
+        // `mutate_in_place_or_init` closes that by running the
+        // bootstrap UNDER the per-group mutex. Test: spawn N=8
+        // tokio tasks, each appending one distinct entry to a
+        // shared brand-new group via `mutate_in_place_or_init`. The
+        // first task whose init fires installs the shell; every
+        // other task observes the cache entry and skips init.
+        // Post-condition: exactly N history entries land in the
+        // registry.
+        const N: usize = 8;
+        let (_d, reg) = fresh_registry();
+        let reg = Arc::new(reg);
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let group = "aa";
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let reg = reg.clone();
+            let barrier = barrier.clone();
+            let entry = crate::conversation::HistoryEntry {
+                sender_agent_id_hex: format!("{i:064x}"),
+                sender_name: None,
+                body: format!("body-{i}"),
+                ts_ms: u64::try_from(i + 1).unwrap(),
+                message_id: format!("{i:032x}"),
+            };
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                reg.mutate_in_place_or_init(
+                    group,
+                    || dm(group, LOCAL, PEER, 0, 0, 0),
+                    |conv| {
+                        conv.push_history(entry.clone());
+                        MutateAction::Persist(())
+                    },
+                )
+                .await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        let conv = reg.get(group).await.unwrap().unwrap();
+        assert_eq!(
+            conv.history.len(),
+            N,
+            "every concurrent push must land — a TOCTOU clobber would \
+             drop entries when the second init's save() ran",
+        );
+    }
+
+    #[tokio::test]
+    async fn mutate_in_place_without_init_errors_when_absent() {
+        // The no-init API surface must still surface Invalid when the
+        // group doesn't exist on disk + cache — callers like the rekey
+        // path explicitly require an existing conv, and we don't want
+        // a silent shell-bootstrap on the wrong code path.
+        let (_d, reg) = fresh_registry();
+        let err = reg
+            .mutate_in_place("aa", |conv| {
+                conv.current_epoch = 1;
+                MutateAction::Persist(())
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("no conversation for group_id")),
+            "expected Invalid, got {err:?}",
+        );
     }
 
     #[tokio::test]
