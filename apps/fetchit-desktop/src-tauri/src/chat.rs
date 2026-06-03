@@ -564,21 +564,40 @@ pub async fn chat_groups_list(
         .map_err(|e| e.to_string())
 }
 
+/// Which group-creation surface the dialog routed through.
+///
+/// `PrivateSecure` is the default user-facing path — it calls
+/// `groups::create_private`, producing a PQ-encrypted x0x MLS room with
+/// `Hidden` visibility. `PublicOpen` preserves the legacy plaintext-on-relay
+/// path for opt-in public rooms.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateGroupPreset {
+    /// PQ-encrypted via x0x MLS; routes to `groups::create_private`.
+    PrivateSecure,
+    /// Plaintext on relay; routes to the legacy `groups::create`.
+    PublicOpen,
+}
+
 #[tauri::command]
 pub async fn chat_group_create(
     app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     name: String,
     display_name: Option<String>,
+    preset: CreateGroupPreset,
 ) -> Result<fetchit_chat::groups::Group, String> {
     ensure_chat_enabled(&app_state)?;
-    state
-        .get()
-        .await?
-        .groups()
-        .create(&name, display_name.as_deref())
-        .await
-        .map_err(|e| e.to_string())
+    let chat = state.get().await?;
+    match preset {
+        CreateGroupPreset::PrivateSecure => {
+            chat.groups()
+                .create_private(&name, display_name.as_deref())
+                .await
+        }
+        CreateGroupPreset::PublicOpen => chat.groups().create(&name, display_name.as_deref()).await,
+    }
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

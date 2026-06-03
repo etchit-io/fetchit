@@ -3,7 +3,35 @@
 // for sharing.
 
 import { createGroup, groupInvite } from "./api";
+import type { CreateGroupPreset } from "./api";
 import { friendlyError } from "./errors";
+
+function makePresetRadio(
+  value: CreateGroupPreset,
+  labelText: string,
+  detailText: string,
+  checked: boolean,
+): HTMLLabelElement {
+  const label = document.createElement("label");
+  label.className = "chat-dialog__radio";
+  const input = document.createElement("input");
+  input.type = "radio";
+  input.name = "group-preset";
+  input.value = value;
+  input.checked = checked;
+  label.appendChild(input);
+  const text = document.createElement("span");
+  text.className = "chat-dialog__radio-text";
+  const strong = document.createElement("strong");
+  strong.textContent = labelText;
+  text.appendChild(strong);
+  const detail = document.createElement("small");
+  detail.className = "chat-dialog__radio-detail";
+  detail.textContent = detailText;
+  text.appendChild(detail);
+  label.appendChild(text);
+  return label;
+}
 
 export interface NewGroupHandlers {
   onClose: () => void;
@@ -27,6 +55,24 @@ export function mountNewGroup(
   const help = document.createElement("p");
   help.className = "chat-dialog__help";
   help.textContent = "Name the group. You can invite members afterwards.";
+
+  const presetFieldset = document.createElement("fieldset");
+  presetFieldset.className = "chat-dialog__fieldset";
+  const presetLegend = document.createElement("legend");
+  presetLegend.textContent = "Group type";
+  presetFieldset.appendChild(presetLegend);
+  presetFieldset.appendChild(makePresetRadio(
+    "private_secure",
+    "Private group",
+    "PQ-encrypted via x0x MLS — only members can read.",
+    true,
+  ));
+  presetFieldset.appendChild(makePresetRadio(
+    "public_open",
+    "Public room",
+    "Plaintext on relay — see security docs before using.",
+    false,
+  ));
 
   const nameInput = document.createElement("input");
   nameInput.className = "chat-dialog__uri";
@@ -74,6 +120,7 @@ export function mountNewGroup(
 
   inner.appendChild(title);
   inner.appendChild(help);
+  inner.appendChild(presetFieldset);
   inner.appendChild(nameInput);
   inner.appendChild(inviteBox);
   inner.appendChild(status);
@@ -87,6 +134,13 @@ export function mountNewGroup(
   nameInput.addEventListener("input", () => {
     createBtn.disabled = nameInput.value.trim().length === 0;
   });
+
+  function getSelectedPreset(): CreateGroupPreset {
+    const checked = inner.querySelector<HTMLInputElement>(
+      'input[name="group-preset"]:checked',
+    );
+    return checked?.value === "public_open" ? "public_open" : "private_secure";
+  }
 
   copyBtn.addEventListener("click", async () => {
     const invite = inviteBox.value;
@@ -106,20 +160,26 @@ export function mountNewGroup(
   createBtn.addEventListener("click", async () => {
     const name = nameInput.value.trim();
     if (!name) return;
+    const preset = getSelectedPreset();
     createBtn.disabled = true;
     status.textContent = "Creating…";
     try {
-      const group = await createGroup(name, myDisplayName);
+      const group = await createGroup(name, myDisplayName, preset);
       const invite = await groupInvite(group.group_id);
       // Swap into the post-create state: hide the name input + Create
       // button (the dialog has done its one job); show the invite,
       // the Copy button, and let the user close when ready.
       nameInput.hidden = true;
+      presetFieldset.hidden = true;
       createBtn.hidden = true;
       inviteBox.value = invite;
       inviteBox.hidden = false;
       copyBtn.hidden = false;
-      title.textContent = `Group "${group.name ?? group.group_id.slice(0, 8)}" created`;
+      const label = group.name ?? group.group_id.slice(0, 8);
+      title.textContent
+        = preset === "private_secure"
+          ? `Group "${label}" created — PQ-encrypted via x0x MLS`
+          : `Group "${label}" created — public room (plaintext on relay)`;
       help.textContent = "Share this invite with members. They'll join when they paste it.";
       status.textContent = "";
       handlers.onCreated();

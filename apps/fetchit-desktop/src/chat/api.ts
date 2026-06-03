@@ -112,13 +112,23 @@ export async function listGroups(): Promise<Group[]> {
   return invoke<Group[]>("chat_groups_list");
 }
 
+/// Which create-group surface to invoke on the daemon.
+///
+/// `"private_secure"` routes to `groups::create_private` (PQ-encrypted x0x
+/// MLS, Hidden visibility); `"public_open"` routes to the legacy
+/// `groups::create` (plaintext on relay). The frontend dialog defaults to
+/// `"private_secure"`.
+export type CreateGroupPreset = "private_secure" | "public_open";
+
 export async function createGroup(
   name: string,
-  displayName?: string,
+  displayName: string | undefined,
+  preset: CreateGroupPreset,
 ): Promise<Group> {
   return invoke<Group>("chat_group_create", {
     name,
     displayName: displayName ?? null,
+    preset,
   });
 }
 
