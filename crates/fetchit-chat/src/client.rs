@@ -423,6 +423,15 @@ impl Client {
                 return;
             }
         }
+        if matches!(
+            transit.kind,
+            fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent
+        ) {
+            if let Err(e) = self.dispatch_inbound_bridge(&transit).await {
+                log::warn!("bridge dispatch dropped envelope: {e}");
+            }
+            return;
+        }
         if messages::is_private_group_envelope(&transit) {
             let group_id_hex = transit
                 .group_id
@@ -445,6 +454,44 @@ impl Client {
             )
             .await;
         }
+    }
+
+    /// Build a [`x0xd_client::SecureGroupsEndpoint`] against the same
+    /// x0xd this client dials. Used by the M2.5 bridge dispatch to
+    /// `POST /publish` the inner JSON event so pubsub-loopback advances
+    /// local MLS state via the standard apply path.
+    fn secure_groups(&self) -> Result<x0xd_client::SecureGroupsEndpoint> {
+        let base = url::Url::parse(self.http.base_url())
+            .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
+        x0xd_client::SecureGroupsEndpoint::new(base, self.http.token().to_owned())
+            .map_err(ChatError::from)
+    }
+
+    /// Unseal an inbound M2.5 bridge envelope
+    /// (`EnvelopeKind::X0xdGroupMetadataEvent`) and POST the inner
+    /// JSON payload to local x0xd `/publish`. Saorsa pubsub's
+    /// local-loopback then advances local MLS state via the standard
+    /// `apply_named_group_metadata_event` path.
+    ///
+    /// The dispatch pump spawned by [`Client::spawn_default_dispatcher`]
+    /// calls this automatically; external binaries (chat-peer) call it
+    /// directly from their inbound loop.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] when the envelope kind doesn't match,
+    ///   the chat-state isn't built, or the seal can't be opened.
+    /// - [`ChatError::MessageTransport`] forwarded from x0xd's
+    ///   `/publish` rejection.
+    pub async fn dispatch_inbound_bridge(
+        &self,
+        transit: &fetchit_relay_proto::TransitEnvelope,
+    ) -> Result<()> {
+        let identity = self
+            .identity_arc()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let secure = self.secure_groups()?;
+        crate::groups::bridge::handle_inbound_bridge_envelope(&secure, identity.as_ref(), transit)
+            .await
     }
 
     /// Open the unified SSE event stream from x0xd — presence,

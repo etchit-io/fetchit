@@ -18,11 +18,19 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use crate::chat_crypto::{
+    aead_open, aead_seal, derive_aead_key, kem_decapsulate, kem_encapsulate, random_nonce,
+    AAD_DOMAIN, AEAD_NONCE_LEN, KDF_INFO_BRIDGE, KEM_PUBLIC_KEY_LEN,
+};
+use crate::chat_identity::FetchitIdentity;
 use crate::error::{ChatError, Result};
 use crate::local_store::StoreLayout;
 use crate::messages::StoredContactCard;
+use fetchit_relay_proto::{EnvelopeKind, TransitEnvelope};
+use x0xd_client::SecureGroupsEndpoint;
 
 /// Domain tag for the `MemberJoined` canonical-bytes formula. Must
 /// match upstream x0xd `MEMBER_JOINED_DOMAIN` (rev `6d96ca5`, source
@@ -248,10 +256,156 @@ pub fn recipient_kem_key(layout: &StoreLayout, agent_id_hex: &str) -> Result<Vec
         .map_err(|e| ChatError::Invalid(format!("share-card KEM pubkey b64 decode: {e}")))
 }
 
+/// AAD bytes used when sealing / unsealing a bridge envelope's
+/// ciphertext. Domain-separated from the welcome / message paths so a
+/// sealed bridge wrapper cannot be replayed against either of those
+/// AEAD contexts. The other binding (sender, kind, timestamp,
+/// ciphertext) lives on the envelope's ML-DSA-65 signature over
+/// `canonical_envelope_bytes`.
+#[must_use]
+pub fn bridge_aad() -> Vec<u8> {
+    let mut out = Vec::with_capacity(AAD_DOMAIN.len() + 12);
+    out.extend_from_slice(AAD_DOMAIN);
+    out.extend_from_slice(b"|bridge-v1|");
+    out
+}
+
+/// Output of [`seal_bridge_wrapper`] — the three byte arrays the caller
+/// stamps onto `TransitEnvelope.kem_ciphertext`, `.nonce`, and
+/// `.ciphertext` for the M2.5 bridge send shape.
+#[derive(Debug, Clone)]
+pub struct SealedBridgeParts {
+    /// ML-KEM-768 ciphertext encapsulating the AEAD secret to the
+    /// recipient's KEM public key (`KEM_CIPHERTEXT_LEN` bytes).
+    pub kem_ciphertext: Vec<u8>,
+    /// ChaCha20-Poly1305 nonce (12 bytes).
+    pub nonce: Vec<u8>,
+    /// AEAD ciphertext of the postcard-encoded
+    /// [`X0xdGroupMetadataEventWrapper`].
+    pub ciphertext: Vec<u8>,
+}
+
+/// Seal an [`X0xdGroupMetadataEventWrapper`] for delivery to a peer
+/// whose ML-KEM-768 public key is `recipient_kem_pub` (typically pulled
+/// from their stored share-card via [`recipient_kem_key`]).
+///
+/// The output is one-shot: a fresh KEM encapsulation, a fresh nonce,
+/// derived AEAD key under [`KDF_INFO_BRIDGE`], AEAD-sealed over
+/// [`bridge_aad`]. The caller is responsible for stamping the parts
+/// onto a `TransitEnvelope` (`kind = X0xdGroupMetadataEvent`, recipient
+/// `to`, ML-DSA-65 envelope signature) and pushing it to the outbox.
+///
+/// # Errors
+/// - [`ChatError::Invalid`] if `recipient_kem_pub` is not
+///   `KEM_PUBLIC_KEY_LEN` bytes.
+/// - KEM encapsulation or AEAD seal errors (no realistic path on
+///   correctly-shaped inputs).
+pub fn seal_bridge_wrapper(
+    recipient_kem_pub: &[u8],
+    wrapper: &X0xdGroupMetadataEventWrapper,
+) -> Result<SealedBridgeParts> {
+    if recipient_kem_pub.len() != KEM_PUBLIC_KEY_LEN {
+        return Err(ChatError::Invalid(format!(
+            "bridge recipient KEM pub key length: expected {KEM_PUBLIC_KEY_LEN}, got {}",
+            recipient_kem_pub.len()
+        )));
+    }
+    let plaintext = wrapper.to_postcard()?;
+    let (kem_ciphertext, ss) = kem_encapsulate(recipient_kem_pub)?;
+    let aead_key = derive_aead_key(&ss, KDF_INFO_BRIDGE);
+    let nonce = random_nonce(&mut OsRng);
+    let aad = bridge_aad();
+    let ciphertext = aead_seal(&aead_key, &nonce, &plaintext, &aad)?;
+    Ok(SealedBridgeParts {
+        kem_ciphertext,
+        nonce: nonce.to_vec(),
+        ciphertext,
+    })
+}
+
+/// Unseal a bridge envelope and recover the inner
+/// [`X0xdGroupMetadataEventWrapper`]. Used by the receiving chat-peer
+/// before handing the wrapper's `payload_b64` to local x0xd
+/// `POST /publish`.
+///
+/// `our_kem_sec` is the recipient's ML-KEM-768 secret key
+/// ([`FetchitIdentity::kem_secret_key`]).
+///
+/// # Errors
+/// - [`ChatError::Invalid`] when the nonce length is wrong, KEM
+///   decapsulation fails (wrong recipient or corrupted KEM ciphertext),
+///   AEAD-open fails (tampered ciphertext, mismatched recipient, wrong
+///   domain), or the inner postcard wrapper is malformed.
+pub fn unseal_bridge_wrapper(
+    our_kem_sec: &[u8],
+    kem_ciphertext: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<X0xdGroupMetadataEventWrapper> {
+    if nonce.len() != AEAD_NONCE_LEN {
+        return Err(ChatError::Invalid(format!(
+            "bridge nonce length: expected {AEAD_NONCE_LEN}, got {}",
+            nonce.len()
+        )));
+    }
+    let ss = kem_decapsulate(our_kem_sec, kem_ciphertext)
+        .map_err(|e| ChatError::Invalid(format!("bridge kem decap: {e}")))?;
+    let aead_key = derive_aead_key(&ss, KDF_INFO_BRIDGE);
+    let mut nonce_arr = [0u8; AEAD_NONCE_LEN];
+    nonce_arr.copy_from_slice(nonce);
+    let aad = bridge_aad();
+    let plaintext = aead_open(&aead_key, &nonce_arr, ciphertext, &aad)
+        .map_err(|e| ChatError::Invalid(format!("bridge aead open: {e}")))?;
+    X0xdGroupMetadataEventWrapper::from_postcard(&plaintext)
+}
+
+/// Receive-side glue: unseal a bridge envelope and POST its inner JSON
+/// payload to local x0xd `/publish`. Pubsub-loopback then advances
+/// local MLS state via the standard
+/// `apply_named_group_metadata_event` path.
+///
+/// Designed to be called from the inbound dispatch loop
+/// ([`crate::Client::default_dispatch_one`] and the chat-peer binary)
+/// for any `TransitEnvelope` with
+/// `kind == EnvelopeKind::X0xdGroupMetadataEvent`.
+///
+/// Retry / persistence on `/publish` failure is intentionally not
+/// handled here; callers that need it should wrap this fn and pump
+/// failures into the outbox-style replay queue (P2 follow-up). The
+/// returned error is descriptive enough to drive that decision.
+///
+/// # Errors
+/// - [`ChatError::Invalid`] when the envelope kind doesn't match,
+///   unseal fails (tampered ciphertext, wrong recipient KEM key,
+///   nonce length, malformed wrapper).
+/// - Forwarded `x0xd_client::X0xdError` when local `/publish` rejects
+///   the payload (mapped to [`ChatError::MessageTransport`]).
+pub async fn handle_inbound_bridge_envelope(
+    secure: &SecureGroupsEndpoint,
+    identity: &FetchitIdentity,
+    transit: &TransitEnvelope,
+) -> Result<()> {
+    if transit.kind != EnvelopeKind::X0xdGroupMetadataEvent {
+        return Err(ChatError::Invalid(format!(
+            "handle_inbound_bridge_envelope called on kind={:?}",
+            transit.kind
+        )));
+    }
+    let wrapper = unseal_bridge_wrapper(
+        identity.kem_secret_key(),
+        &transit.kem_ciphertext,
+        &transit.nonce,
+        &transit.ciphertext,
+    )?;
+    secure.publish(&wrapper.topic, &wrapper.payload_b64).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::chat_crypto::kem_keygen;
     use crate::messages::StoredContactCard;
 
     /// Hand-derived parity fixture for `canonical_member_joined_bytes`.
@@ -428,6 +582,97 @@ mod tests {
         card.save(&layout).unwrap();
         let got = recipient_kem_key(&layout, &aid_hex).unwrap();
         assert_eq!(got, raw);
+    }
+
+    #[test]
+    fn seal_unseal_roundtrip_with_real_kem_keypair() {
+        let (pk, sk) = kem_keygen().unwrap();
+        let original = X0xdGroupMetadataEventWrapper {
+            topic: "x0x.named_group/group-abc/metadata".into(),
+            payload_b64: "eyJldmVudCI6Im1lbWJlcl9qb2luZWQifQ==".into(),
+        };
+        let parts = seal_bridge_wrapper(&pk, &original).unwrap();
+        assert_eq!(parts.nonce.len(), AEAD_NONCE_LEN);
+        assert!(!parts.kem_ciphertext.is_empty());
+        assert!(!parts.ciphertext.is_empty());
+
+        let recovered =
+            unseal_bridge_wrapper(&sk, &parts.kem_ciphertext, &parts.nonce, &parts.ciphertext)
+                .unwrap();
+        assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn seal_rejects_wrong_recipient_kem_key_length() {
+        let wrapper = X0xdGroupMetadataEventWrapper {
+            topic: "t".into(),
+            payload_b64: "x".into(),
+        };
+        let err = seal_bridge_wrapper(&[0u8; 64], &wrapper).unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref s) if s.contains("KEM pub key length")),
+            "expected length error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unseal_rejects_wrong_recipient_secret() {
+        let (pk_a, _sk_a) = kem_keygen().unwrap();
+        let (_pk_b, sk_b) = kem_keygen().unwrap();
+        let wrapper = X0xdGroupMetadataEventWrapper {
+            topic: "t".into(),
+            payload_b64: "x".into(),
+        };
+        let parts = seal_bridge_wrapper(&pk_a, &wrapper).unwrap();
+        // sk_b is NOT the matching secret for pk_a — decap should
+        // either fail or produce a different shared secret which then
+        // fails AEAD-open.
+        let err = unseal_bridge_wrapper(
+            &sk_b,
+            &parts.kem_ciphertext,
+            &parts.nonce,
+            &parts.ciphertext,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(_)),
+            "expected Invalid, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unseal_rejects_tampered_ciphertext() {
+        let (pk, sk) = kem_keygen().unwrap();
+        let wrapper = X0xdGroupMetadataEventWrapper {
+            topic: "t".into(),
+            payload_b64: "x".into(),
+        };
+        let parts = seal_bridge_wrapper(&pk, &wrapper).unwrap();
+        let mut bad_ct = parts.ciphertext.clone();
+        bad_ct[0] ^= 0xff;
+        let err =
+            unseal_bridge_wrapper(&sk, &parts.kem_ciphertext, &parts.nonce, &bad_ct).unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref s) if s.contains("aead open")),
+            "expected aead open error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unseal_rejects_wrong_nonce_length() {
+        let (_pk, sk) = kem_keygen().unwrap();
+        let err = unseal_bridge_wrapper(&sk, &[0u8; 1088], &[0u8; 11], &[0u8; 32]).unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref s) if s.contains("nonce length")),
+            "expected nonce-length error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bridge_aad_is_domain_separated_from_welcome() {
+        let aad = bridge_aad();
+        assert!(aad.starts_with(AAD_DOMAIN));
+        assert!(aad.windows(11).any(|w| w == b"|bridge-v1|"));
     }
 
     #[test]

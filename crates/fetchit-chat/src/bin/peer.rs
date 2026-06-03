@@ -313,6 +313,21 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
             transit.kem_ciphertext.len(),
             transit.epoch,
         );
+        // M2.5 bridge path: `EnvelopeKind::X0xdGroupMetadataEvent`
+        // tunnels a signed x0xd `NamedGroupMetadataEvent` through the
+        // relay when the gossip mesh can't reach a peer. The client
+        // helper unseals, postcards out the wrapper, and POSTs the
+        // inner JSON payload to local x0xd `/publish`; pubsub-loopback
+        // then advances local MLS state via the normal apply path.
+        if matches!(
+            transit.kind,
+            fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent
+        ) {
+            if let Err(e) = client.dispatch_inbound_bridge(&transit).await {
+                eprintln!("[peer] bridge dispatch error: {e}");
+            }
+            return None;
+        }
         // M2 private-group path: GroupChat envelopes whose
         // kem_ciphertext is empty are PQ-TreeKEM frames produced by
         // x0xd's /secure/encrypt. Routed via the shared

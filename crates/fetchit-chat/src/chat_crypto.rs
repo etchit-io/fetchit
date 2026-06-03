@@ -34,6 +34,12 @@ pub const AAD_DOMAIN: &[u8] = b"lit/v1";
 /// fresh KEM shared secret.
 pub const KDF_INFO_WELCOME: &[u8] = b"lit/welcome/v1";
 
+/// Domain string for HKDF when deriving the AEAD key for an M2.5
+/// `EnvelopeKind::X0xdGroupMetadataEvent` bridge envelope.
+/// Domain-separates from welcome so a sealed bridge wrapper cannot be
+/// replayed against the conversation welcome path (and vice-versa).
+pub const KDF_INFO_BRIDGE: &[u8] = b"lit/bridge/v1";
+
 /// Domain string for HKDF when deriving the master key from a
 /// passphrase via Argon2id (used by `at_rest` module; defined here for
 /// the single source of truth).
