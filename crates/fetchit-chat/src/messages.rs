@@ -11,10 +11,11 @@
 //! wire format (and for the live-relay self-DM test).
 
 use crate::card::{extended_card_from_uri, verify_card_extension};
+use crate::chat_crypto::{canonical_envelope_bytes, SIGN_DOMAIN_ENVELOPE};
 use crate::chat_identity::FetchitIdentity;
 use crate::conversation::{
     build_message_outbox, build_receipt_outbox, build_welcome_outbox, Conversation,
-    ConversationRegistry, Member, MemberDevice, MemberDeviceStatus,
+    ConversationRegistry, HistoryEntry, Member, MemberDevice, MemberDeviceStatus,
     OutboundEnvelope as ChatOutbound,
 };
 use crate::error::{ChatError, Result};
@@ -27,10 +28,15 @@ use crate::transport::{
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use fetchit_relay_client::Signer;
+use fetchit_relay_proto::{
+    AgentId as ProtoAgentId, EnvelopeKind, GroupId as ProtoGroupId, MachineId, TransitEnvelope,
+    WIRE_VERSION,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use x0xd_client::{EncryptedFrame, SecureGroupsEndpoint};
 
 /// A direct message — inbound or outbound, after the JSON envelope
 /// has been unwrapped. Used only by transports that still speak the
@@ -382,6 +388,143 @@ impl<'a> Endpoint<'a> {
         Ok(())
     }
 
+    /// Send `body` into a private-secure (PQ `TreeKEM`) group.
+    ///
+    /// Encrypts the plaintext via x0xd's `/secure/encrypt`, postcard-
+    /// encodes the resulting [`EncryptedFrame`] into
+    /// [`TransitEnvelope::ciphertext`], signs the envelope with the
+    /// local ML-DSA-65 key, and routes it through the message
+    /// [`Router`]. x0xd owns the `TreeKEM` ratchet — the wire-level
+    /// `TransitEnvelope` is the routing-and-signing tunnel.
+    ///
+    /// The envelope is addressed at the routing layer to the local
+    /// agent (loopback through the relay): per
+    /// `private/m2-decisions.md` the v1 group fanout layer is deferred
+    /// and the chat layer does not yet maintain a member roster here.
+    /// Per-recipient fanout will replace the loopback target without
+    /// changing this method's signature.
+    ///
+    /// `group_id` is the x0xd group id as returned by
+    /// `groups::create_private` (64-char hex). The 32-byte
+    /// [`ProtoGroupId`] on the wire is the hex-decoded value.
+    ///
+    /// Returns the transport-assigned message id of the sent envelope.
+    ///
+    /// # Errors
+    /// * [`ChatError::NoTransportAvailable`] — no transport registered.
+    /// * [`ChatError::Invalid`] — client built without chat state, the
+    ///   `group_id` isn't 64-char hex, or postcard / base64 decode of
+    ///   the x0xd-returned frame failed.
+    /// * [`ChatError::MessageTransport`] — x0xd refused `/secure/encrypt`
+    ///   or the transport failed to deliver.
+    pub async fn send_private_group(
+        &self,
+        group_id: &str,
+        body: &str,
+        _sender_name: &str,
+    ) -> Result<Option<String>> {
+        if self.router.is_empty() {
+            return Err(ChatError::NoTransportAvailable);
+        }
+        let identity = self
+            .identity
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let signer = self
+            .signer
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        let group_id_bytes = parse_group_id_hex(group_id)?;
+        let secure = self.secure_groups()?;
+        let frame = secure.encrypt(group_id, body.as_bytes()).await?;
+        let envelope = build_private_group_envelope(
+            &frame,
+            group_id_bytes,
+            identity.agent_id_hex(),
+            self.local_machine_id,
+            signer.as_ref(),
+        )
+        .await?;
+
+        let message_id = random_message_id();
+        // M2 simplification: loopback the envelope through the routing
+        // layer addressed to the local agent. The plaintext route into
+        // the recipient's inbox is in the envelope's `group_id`; a
+        // future fanout layer will replace this loopback target with
+        // one envelope per peer device per Decision 1 of
+        // `private/m2-decisions.md`.
+        let recipient = AgentId(identity.agent_id_hex().to_owned());
+        let timestamp_ms = envelope.timestamp_ms;
+        let transport_out = TransportOutbound {
+            kind: OutboundKind::Group {
+                group_id: group_id.to_owned(),
+            },
+            from_machine_id: Some(self.local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms,
+            transit: Some(envelope),
+        };
+        let receipt = self.router.send(&recipient, transport_out).await?;
+        Ok(receipt.message_id.or(Some(message_id)))
+    }
+
+    /// Process an inbound private-group [`TransitEnvelope`]: decode the
+    /// postcard'd [`EncryptedFrame`] out of `ciphertext`, drive x0xd's
+    /// `/secure/decrypt` to recover the plaintext, and surface a
+    /// [`HistoryEntry`] that callers can fold into their conversation
+    /// vault.
+    ///
+    /// `group_id_hex` is the x0xd group id as a 64-char hex string —
+    /// the same value passed to [`Self::send_private_group`]. It is
+    /// supplied separately (rather than derived from `env.group_id`)
+    /// because callers typically resolve it from a local conversation
+    /// lookup and pass it through verbatim, avoiding a round-trip
+    /// through `hex::encode` on the hot path.
+    ///
+    /// Persistence of the returned entry is the caller's
+    /// responsibility — the registry update API is left to the
+    /// chat-state owner so this method stays usable from contexts
+    /// (e.g. the headless peer) that don't carry a Conversation
+    /// to mutate in place.
+    ///
+    /// # Errors
+    /// * [`ChatError::Invalid`] — client built without chat state, the
+    ///   ciphertext doesn't postcard-decode as an [`EncryptedFrame`],
+    ///   or the recovered plaintext is not valid UTF-8.
+    /// * [`ChatError::MessageTransport`] — x0xd refused
+    ///   `/secure/decrypt` (stale epoch, wrong group, sender mismatch).
+    pub async fn receive_private_group_envelope(
+        &self,
+        env: &TransitEnvelope,
+        group_id_hex: &str,
+    ) -> Result<HistoryEntry> {
+        let frame: EncryptedFrame = postcard::from_bytes(&env.ciphertext)
+            .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
+        let sender_agent_id_hex = hex::encode(env.sender_agent_id.as_bytes());
+        let secure = self.secure_groups()?;
+        let plaintext = secure
+            .decrypt(group_id_hex, &frame, Some(&sender_agent_id_hex))
+            .await?;
+        let body = String::from_utf8(plaintext)
+            .map_err(|e| ChatError::Invalid(format!("body utf8: {e}")))?;
+        Ok(HistoryEntry {
+            sender_agent_id_hex,
+            sender_name: None,
+            body,
+            ts_ms: env.timestamp_ms,
+            message_id: hex::encode(envelope_dedupe_bytes(env)),
+        })
+    }
+
+    /// Build a [`SecureGroupsEndpoint`] against the same x0xd that
+    /// `self.http` dials. Constructed lazily — `Http` owns the base
+    /// URL + token, and the endpoint is cheap (one `reqwest::Client`
+    /// builder call).
+    fn secure_groups(&self) -> Result<SecureGroupsEndpoint> {
+        let base = url::Url::parse(self.http.base_url())
+            .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
+        SecureGroupsEndpoint::new(base, self.http.token().to_owned()).map_err(ChatError::from)
+    }
+
     async fn dispatch_outbox(&self, outbox: Vec<ChatOutbound>) -> Result<Option<String>> {
         let mut last_id = None;
         for ob in outbox {
@@ -439,6 +582,94 @@ fn random_message_id() -> String {
     hex::encode(bytes)
 }
 
+/// Decode the 64-char hex x0xd group id into the 32-byte wire shape
+/// carried in [`TransitEnvelope::group_id`].
+fn parse_group_id_hex(group_id_hex: &str) -> Result<[u8; 32]> {
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(group_id_hex, &mut out)
+        .map_err(|e| ChatError::Invalid(format!("group_id hex: {e}")))?;
+    Ok(out)
+}
+
+/// Compute a 16-byte dedupe-style id for an envelope. Used as the
+/// [`HistoryEntry::message_id`] for inbound private-group messages
+/// when the transport hasn't already minted one.
+fn envelope_dedupe_bytes(env: &TransitEnvelope) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"lit/group/dedupe/v1\0");
+    h.update(env.sender_agent_id.as_bytes());
+    h.update(env.timestamp_ms.to_be_bytes());
+    h.update(env.epoch.to_be_bytes());
+    h.update(&env.ciphertext);
+    let digest = h.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+/// Construct a signed [`TransitEnvelope`] wrapping an x0xd
+/// [`EncryptedFrame`]. Factored out of [`Endpoint::send_private_group`]
+/// so the test module can drive envelope shape assertions without a
+/// live router.
+async fn build_private_group_envelope<S: Signer + ?Sized>(
+    frame: &EncryptedFrame,
+    group_id_bytes: [u8; 32],
+    local_agent_hex: &str,
+    local_machine_id: [u8; 32],
+    signer: &S,
+) -> Result<TransitEnvelope> {
+    let ciphertext = postcard::to_allocvec(frame)
+        .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
+    // x0xd's nonce travels INSIDE the EncryptedFrame (and thus inside
+    // `ciphertext`); the wire-level `nonce` is informational only here
+    // — relays do not look at it for the private-group path. We carry
+    // the same bytes so wire observers see a consistent shape and a
+    // future cross-check can fail closed if they ever disagree.
+    let nonce_bytes = B64
+        .decode(&frame.nonce_b64)
+        .map_err(|e| ChatError::Invalid(format!("frame nonce b64: {e}")))?;
+    let mut local_agent_bytes = [0u8; 32];
+    hex::decode_to_slice(local_agent_hex, &mut local_agent_bytes)
+        .map_err(|e| ChatError::Invalid(format!("local agent_id hex: {e}")))?;
+
+    let mut env = TransitEnvelope {
+        version: WIRE_VERSION,
+        kind: EnvelopeKind::GroupChat,
+        group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
+        tenant_id: None,
+        sender_agent_id: ProtoAgentId::from_bytes(local_agent_bytes),
+        sender_machine_id: MachineId::from_bytes(local_machine_id),
+        timestamp_ms: now_ms(),
+        epoch: frame.secret_epoch,
+        ciphertext,
+        nonce: nonce_bytes,
+        // No envelope-layer KEM: x0xd's TreeKEM rides inside the frame.
+        // The empty kem_ciphertext also signals the inbound path to
+        // route through `receive_private_group_envelope` rather than
+        // the welcome-decrypt branch in `dispatch_inbound`.
+        kem_ciphertext: Vec::new(),
+        sender_signature: Vec::new(),
+    };
+    let canonical = canonical_envelope_bytes(&env)?;
+    let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+    sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+    sign_bytes.extend_from_slice(&canonical);
+    let sig = signer
+        .sign(&sign_bytes)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("envelope sign: {e}")))?;
+    env.sender_signature = sig;
+    Ok(env)
+}
+
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Decode an [`InboundEnvelope`] (raw bytes from a transport) into a
 /// [`DirectMessage`]. Used by transports that don't speak the v2
 /// conversation wire format (e.g. the legacy x0xd direct path and the
@@ -482,6 +713,250 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::transport::{Reachability, SendReceipt, Transport};
+    use async_trait::async_trait;
+    use fetchit_relay_client::MlDsaSigner;
+    use std::sync::Mutex as StdMutex;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Capturing transport: stores the most recent `TransitEnvelope` it
+    /// was asked to send, then returns a synthetic receipt. Used by the
+    /// `send_private_group` test to assert envelope shape without a
+    /// live relay session.
+    struct CapturingTransport {
+        captured: Arc<StdMutex<Option<TransitEnvelope>>>,
+    }
+
+    impl CapturingTransport {
+        fn new() -> (Arc<Self>, Arc<StdMutex<Option<TransitEnvelope>>>) {
+            let captured = Arc::new(StdMutex::new(None));
+            (
+                Arc::new(Self {
+                    captured: captured.clone(),
+                }),
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Transport for CapturingTransport {
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+        fn reachability(&self, _: &AgentId) -> Reachability {
+            Reachability::Always
+        }
+        async fn send(&self, _: &AgentId, envelope: TransportOutbound) -> Result<SendReceipt> {
+            *self.captured.lock().unwrap() = envelope.transit.clone();
+            Ok(SendReceipt {
+                accepted_at_ms: 1,
+                message_id: Some("captured-msg-id".to_owned()),
+                transport_name: "capture",
+            })
+        }
+        fn take_inbound(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>> {
+            None
+        }
+    }
+
+    /// Build a minimal identity bound to `signer`'s ML-DSA public key —
+    /// the same `AUTONOMI_PEER_ID_V2` derivation `dispatch_inbound`'s
+    /// welcome path checks against. No on-disk vault is required for
+    /// the private-group send path because the envelope's signature is
+    /// the only thing keyed off the identity.
+    fn fixture_identity(signer: &Arc<MlDsaSigner>) -> (FetchitIdentity, std::path::PathBuf) {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use fetchit_relay_proto::derive_agent_id;
+        use zeroize::Zeroizing;
+        let dir = tempfile::tempdir().unwrap();
+        let aid = hex::encode(derive_agent_id(&signer.public_key()));
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let id = FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &aid,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+        let path = dir.keep();
+        (id, path)
+    }
+
+    /// 64-hex group id matching the wire-shape x0xd returns from
+    /// `POST /groups`. Doubles as a known value for envelope assertions.
+    const TEST_GROUP_HEX: &str = "4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e";
+
+    #[tokio::test]
+    async fn send_private_group_encrypts_then_signs_and_postcards_frame() {
+        // Wiremock x0xd's POST /groups/<G>/secure/encrypt — return a
+        // synthetic EncryptedFrame and assert downstream the envelope
+        // captured by the transport carries the postcard-encoded frame
+        // in `ciphertext`, version=WIRE_VERSION, kind=GroupChat,
+        // epoch=secret_epoch, sender_signature non-empty.
+        let server = MockServer::start().await;
+        let expected_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&expected_path))
+            .and(body_partial_json(serde_json::json!({
+                "payload_b64": B64.encode(b"hello group"),
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y2lwaGVydGV4dA==",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 7,
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(format!("{}/", server.uri()), "tok".to_owned()).unwrap();
+        let (transport, captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_concrete = Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_arc: Arc<dyn Signer> = signer_concrete.clone();
+        let (identity, _tmp) = fixture_identity(&signer_concrete);
+        let identity = Arc::new(identity);
+        // The send_private_group path only consults `identity`,
+        // `signer`, and `router`; the registry + layout slots are
+        // unused for the secure-group send, so we leave them None.
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&identity),
+            None,
+            Some(&signer_arc),
+            None,
+            [0u8; 32],
+        );
+
+        let msg_id = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hello group", "Alice")
+            .await
+            .unwrap();
+        assert!(msg_id.is_some(), "send must surface a message id");
+
+        let env = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("transport must have captured a TransitEnvelope");
+
+        assert_eq!(env.version, WIRE_VERSION);
+        assert!(matches!(env.kind, EnvelopeKind::GroupChat));
+        assert_eq!(env.epoch, 7, "envelope epoch must echo secret_epoch");
+        assert!(
+            env.kem_ciphertext.is_empty(),
+            "no envelope-layer KEM on private-group path",
+        );
+        assert!(
+            !env.sender_signature.is_empty(),
+            "ML-DSA-65 signature must be populated",
+        );
+        let frame: EncryptedFrame = postcard::from_bytes(&env.ciphertext)
+            .expect("envelope ciphertext must postcard-decode as EncryptedFrame");
+        assert_eq!(frame.secret_epoch, 7);
+        assert_eq!(frame.ciphertext_b64, "Y2lwaGVydGV4dA==");
+        assert_eq!(frame.nonce_b64, "MTIzNDU2Nzg5MGFi");
+        // Wire-level nonce mirrors the frame's nonce per the build
+        // helper's contract; a future cross-check would otherwise have
+        // no shape to assert against.
+        assert_eq!(env.nonce, B64.decode("MTIzNDU2Nzg5MGFi").unwrap());
+        let group_id = env.group_id.expect("envelope must carry group_id");
+        assert_eq!(hex::encode(group_id.as_bytes()), TEST_GROUP_HEX);
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_decrypts_via_x0xd_and_yields_history_entry() {
+        // Wiremock x0xd's POST /groups/<G>/secure/decrypt — return the
+        // recovered plaintext as base64. Construct an inbound
+        // TransitEnvelope carrying a postcard'd EncryptedFrame in
+        // `ciphertext` and feed it through receive_private_group_envelope.
+        // Assert the HistoryEntry fields match the wire shape.
+        let server = MockServer::start().await;
+        let expected_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        let sender_bytes = [0xAA; 32];
+        let sender_hex = hex::encode(sender_bytes);
+        Mock::given(method("POST"))
+            .and(path(&expected_path))
+            .and(body_partial_json(serde_json::json!({
+                "sender_agent_id": sender_hex,
+                "secret_epoch": 9,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": B64.encode(b"hi from peer"),
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(format!("{}/", server.uri()), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32]);
+
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y2lwaGVydGV4dA==".to_owned(),
+            nonce_b64: "MTIzNDU2Nzg5MGFi".to_owned(),
+            secret_epoch: 9,
+        };
+        let frame_bytes = postcard::to_allocvec(&frame).unwrap();
+        let mut group_id_bytes = [0u8; 32];
+        hex::decode_to_slice(TEST_GROUP_HEX, &mut group_id_bytes).unwrap();
+        let inbound = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::GroupChat,
+            group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
+            tenant_id: None,
+            sender_agent_id: ProtoAgentId::from_bytes(sender_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 1_700_000_000_000,
+            epoch: 9,
+            ciphertext: frame_bytes,
+            nonce: B64.decode("MTIzNDU2Nzg5MGFi").unwrap(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: vec![0u8; 64],
+        };
+
+        let entry = endpoint
+            .receive_private_group_envelope(&inbound, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+
+        assert_eq!(entry.sender_agent_id_hex, sender_hex);
+        assert_eq!(entry.body, "hi from peer");
+        assert_eq!(entry.ts_ms, 1_700_000_000_000);
+        assert_eq!(entry.sender_name, None);
+        assert!(
+            !entry.message_id.is_empty(),
+            "message_id must be a synthesized dedupe key",
+        );
+        // Determinism check on the synthesized id — same envelope must
+        // map to the same id so callers' dedupe paths can rely on it.
+        let entry2 = endpoint
+            .receive_private_group_envelope(&inbound, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        assert_eq!(entry.message_id, entry2.message_id);
+    }
+
+    #[test]
+    fn parse_group_id_hex_rejects_short_input() {
+        assert!(parse_group_id_hex("abcd").is_err());
+    }
+
+    #[test]
+    fn parse_group_id_hex_round_trips_real_x0xd_id() {
+        let bytes = parse_group_id_hex(TEST_GROUP_HEX).unwrap();
+        assert_eq!(hex::encode(bytes), TEST_GROUP_HEX);
+    }
 
     #[test]
     fn decode_round_trip_extracts_fields() {

@@ -28,6 +28,7 @@ use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::decode_direct_message;
 use fetchit_chat::transport::InboundEnvelope;
 use fetchit_chat::Client;
+use fetchit_relay_proto::EnvelopeKind;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -212,6 +213,47 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
     // Chat-v2 envelopes (TransitEnvelope present) go through the
     // conversation dispatcher so we get a decrypted MessagePayload.
     if let Some(transit) = env.transit.take() {
+        // M2 private-group path: GroupChat envelopes whose
+        // kem_ciphertext is empty are PQ-TreeKEM frames produced by
+        // x0xd's /secure/encrypt. Drive them through the new
+        // receive_private_group_envelope path rather than the
+        // conversation dispatcher (which expects ML-KEM-768 + AEAD).
+        if matches!(transit.kind, EnvelopeKind::GroupChat) && transit.kem_ciphertext.is_empty() {
+            let group_id_hex = transit
+                .group_id
+                .as_ref()
+                .map(|g| hex::encode(g.as_bytes()))
+                .unwrap_or_default();
+            if group_id_hex.is_empty() {
+                eprintln!("[peer] private-group envelope without group_id");
+                return None;
+            }
+            let messages = client.messages();
+            match messages
+                .receive_private_group_envelope(&transit, &group_id_hex)
+                .await
+            {
+                Ok(entry) => {
+                    eprintln!(
+                        "[peer] private-group: from={} group={} body={:?}",
+                        short(&entry.sender_agent_id_hex),
+                        short(&group_id_hex),
+                        entry.body
+                    );
+                    let Ok(from) = AgentId::parse(entry.sender_agent_id_hex) else {
+                        return None;
+                    };
+                    return Some(PeerInbound {
+                        from,
+                        body: entry.body,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[peer] private-group decrypt error: {e}");
+                    return None;
+                }
+            }
+        }
         let identity = client.identity_arc()?;
         let registry = client.registry_arc()?;
         match dispatch_inbound(transit, identity.as_ref(), registry.as_ref()).await {

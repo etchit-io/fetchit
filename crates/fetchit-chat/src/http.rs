@@ -39,6 +39,21 @@ impl Http {
         })
     }
 
+    /// Base URL the wrapper dials (e.g. `http://127.0.0.1:12700`).
+    /// Visible inside the crate so endpoint modules can construct
+    /// x0xd-client sub-endpoints (`SecureGroupsEndpoint`) that don't
+    /// share this wrapper's `reqwest` client.
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Bearer token forwarded on every `Http` request. Same use as
+    /// [`Self::base_url`] — letting sibling x0xd-client endpoints
+    /// share the auth without re-deriving it.
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
     pub(crate) async fn get_json<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
         self.request_json(Method::GET, path, None::<&()>).await
     }

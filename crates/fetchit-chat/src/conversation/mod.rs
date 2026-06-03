@@ -12,7 +12,7 @@ pub use outbound::{
 };
 pub use registry::{ConversationRegistry, MutateAction, NonceCheckOutcome};
 pub use types::{
-    Conversation, DeliveryReceiptPayload, Member, MemberDevice, MemberDeviceStatus, MessagePayload,
-    PriorKey, Role, TrustState, WelcomePayload, DEFAULT_AUTO_REKEY_INTERVAL_MS,
+    Conversation, DeliveryReceiptPayload, HistoryEntry, Member, MemberDevice, MemberDeviceStatus,
+    MessagePayload, PriorKey, Role, TrustState, WelcomePayload, DEFAULT_AUTO_REKEY_INTERVAL_MS,
     PRIOR_KEY_WINDOW_MS,
 };

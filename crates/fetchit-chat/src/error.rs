@@ -75,6 +75,16 @@ impl From<x0xd_client::DiscoveryError> for ChatError {
     }
 }
 
+impl From<x0xd_client::X0xdError> for ChatError {
+    fn from(e: x0xd_client::X0xdError) -> Self {
+        match e {
+            x0xd_client::X0xdError::Http(re) => Self::Transport(re),
+            x0xd_client::X0xdError::Url(u) => Self::Invalid(format!("x0xd url: {u}")),
+            x0xd_client::X0xdError::Rejected(s) => Self::MessageTransport(s),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
