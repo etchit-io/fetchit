@@ -463,16 +463,30 @@ impl<'a> Endpoint<'a> {
     /// `groups::create_private` (64-char hex). The 32-byte
     /// [`ProtoGroupId`] on the wire is the hex-decoded value.
     ///
-    /// Returns the transport-assigned message id of the LAST envelope
-    /// sent (mirrors the fanout semantics of [`Self::dispatch_outbox`]).
+    /// **Partial-delivery semantics.** Per-recipient transport failures
+    /// do NOT short-circuit the fanout. The loop attempts every
+    /// recipient; failures are logged via `eprintln!` with the failing
+    /// `agent_id` but the loop continues. Outcome:
+    /// * at least one delivery succeeded → returns `Ok(Some(id))`
+    ///   where `id` is the last successful transport receipt (or a
+    ///   locally-minted id if no transport surfaced one). The caller's
+    ///   "sending → sent" state machine fires for the originating
+    ///   message even when some recipients were unreachable.
+    /// * every delivery failed → returns the FIRST per-recipient error
+    ///   verbatim. Picked because subsequent failures often correlate
+    ///   (one router-wide cause) and the first one is the most
+    ///   diagnostic.
+    /// * 1-member fanout (sender only) → returns `Ok(Some(locally-minted))`
+    ///   as the no-op case above.
     ///
     /// # Errors
     /// * [`ChatError::NoTransportAvailable`] — no transport registered.
     /// * [`ChatError::Invalid`] — client built without chat state, the
     ///   `group_id` isn't 64-char hex, or postcard / base64 decode of
     ///   the x0xd-returned frame failed.
-    /// * [`ChatError::MessageTransport`] — x0xd refused `/secure/encrypt`
-    ///   or the transport failed to deliver.
+    /// * [`ChatError::MessageTransport`] — x0xd refused `/secure/encrypt`.
+    ///   Per-recipient transport errors only surface when ALL recipients
+    ///   failed (see partial-delivery semantics above).
     pub async fn send_private_group(
         &self,
         group_id: &str,
@@ -506,13 +520,24 @@ impl<'a> Endpoint<'a> {
         // receiver uses to look up the conversation; the routing-layer
         // recipient on each hop just steers the relay's per-recipient
         // queue.
+        //
+        // Partial-delivery loop (P2 from Bob's adversarial review): a
+        // `?` short-circuit on per-recipient `Router::send` failures
+        // hid the fact that the first N-1 recipients had been
+        // delivered to before the Nth failed — the caller saw `Err`
+        // with no signal that anything went out. Collect per-member
+        // results, log failures via eprintln!, and only surface an
+        // error when EVERY recipient failed. At least-one-success
+        // returns Ok so the user's "sending → sent" UI fires.
         let groups = crate::groups::Endpoint::new(self.http);
         let chat_group_id = ChatGroupId::parse(group_id)?;
         let roster = groups.members(&chat_group_id).await?;
         let local_agent_hex = identity.agent_id_hex();
         let timestamp_ms = envelope.timestamp_ms;
         let mut last_receipt_id: Option<String> = None;
-        let mut delivered = false;
+        let mut first_err: Option<ChatError> = None;
+        let mut delivered = 0usize;
+        let mut attempted = 0usize;
         for member in roster {
             // `identity.agent_id_hex()` is lowercase by construction
             // but `AgentId` is `#[serde(transparent)]`, so roster
@@ -525,6 +550,7 @@ impl<'a> Endpoint<'a> {
             if member.0.eq_ignore_ascii_case(local_agent_hex) {
                 continue;
             }
+            attempted += 1;
             let transport_out = TransportOutbound {
                 kind: OutboundKind::Group {
                     group_id: group_id.to_owned(),
@@ -534,17 +560,40 @@ impl<'a> Endpoint<'a> {
                 timestamp_ms,
                 transit: Some(envelope.clone()),
             };
-            let receipt = self.router.send(&member, transport_out).await?;
-            last_receipt_id = receipt.message_id.or(last_receipt_id);
-            delivered = true;
+            match self.router.send(&member, transport_out).await {
+                Ok(receipt) => {
+                    last_receipt_id = receipt.message_id.or(last_receipt_id);
+                    delivered += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[chat] private-group fanout: recipient {} failed: {e}",
+                        &member.0[..8.min(member.0.len())],
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
         }
         // 1-member group (just the sender) is a legitimate state — no
         // peers to address. Surface a locally-minted message id so the
         // caller's UI bookkeeping (sending → sent state machine) still
         // has a stable anchor.
-        if !delivered {
+        if attempted == 0 {
             return Ok(Some(random_message_id()));
         }
+        // Every recipient failed: surface the first per-recipient
+        // error verbatim. (Picked the first because failures often
+        // correlate — one router-wide cause — and the first one is
+        // the most diagnostic.)
+        if delivered == 0 {
+            // Safety: attempted > 0 && delivered == 0 ⇒ first_err set.
+            return Err(first_err.unwrap_or_else(|| {
+                ChatError::MessageTransport("fanout: every recipient failed".into())
+            }));
+        }
+        // Partial success or full success: caller's UI fires "sent".
         Ok(last_receipt_id.or_else(|| Some(random_message_id())))
     }
 
@@ -1588,6 +1637,200 @@ mod tests {
         assert!(
             !recipients.contains(&local_hex),
             "self must be excluded from fanout",
+        );
+    }
+
+    /// Per-recipient failure-injection transport: records every
+    /// recipient (matching the success case) and returns Err for the
+    /// recipient hexes named in `fail_for`. Drives the partial-
+    /// delivery semantics test without touching the real router /
+    /// network.
+    struct SelectiveFailureTransport {
+        captured: CapturedSends,
+        fail_for: std::collections::HashSet<String>,
+    }
+
+    impl SelectiveFailureTransport {
+        fn new(fail_for: std::collections::HashSet<String>) -> (Arc<Self>, CapturedSends) {
+            let captured: CapturedSends = Arc::new(StdMutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    captured: captured.clone(),
+                    fail_for,
+                }),
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Transport for SelectiveFailureTransport {
+        fn name(&self) -> &'static str {
+            "selective-fail"
+        }
+        fn reachability(&self, _: &AgentId) -> Reachability {
+            Reachability::Always
+        }
+        async fn send(&self, to: &AgentId, envelope: TransportOutbound) -> Result<SendReceipt> {
+            if let Some(t) = envelope.transit {
+                self.captured.lock().unwrap().push((to.clone(), t));
+            }
+            if self.fail_for.contains(&to.0) {
+                return Err(ChatError::MessageTransport(format!(
+                    "synthetic failure for {}",
+                    &to.0[..8]
+                )));
+            }
+            Ok(SendReceipt {
+                accepted_at_ms: 1,
+                message_id: Some("captured-msg-id".to_owned()),
+                transport_name: "selective-fail",
+            })
+        }
+        fn take_inbound(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn send_private_group_partial_delivery_returns_ok_and_logs_failures() {
+        // P2 from Bob's review: per-recipient `?` short-circuit hid
+        // partial success. Mock 3 active members, fail member 2,
+        // succeed members 1 + 3. Assert send returns Ok, the
+        // capturing transport saw all 3 attempts (not just up to the
+        // first failure), and stderr carries the failing recipient.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer1 = "b".repeat(64);
+        let peer2 = "c".repeat(64); // <- failure recipient
+        let peer3 = "d".repeat(64);
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex, "state": "active"},
+                    {"agent_id": peer1, "state": "active"},
+                    {"agent_id": peer2, "state": "active"},
+                    {"agent_id": peer3, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let mut fail_for = std::collections::HashSet::new();
+        fail_for.insert(peer2.clone());
+        let (transport, captured) = SelectiveFailureTransport::new(fail_for);
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let msg_id = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .expect("partial success must still return Ok so caller UI shows 'sent'");
+        assert!(msg_id.is_some());
+
+        let captured = captured.lock().unwrap();
+        let recipients: Vec<String> = captured.iter().map(|(a, _)| a.0.clone()).collect();
+        assert_eq!(
+            captured.len(),
+            3,
+            "fanout must attempt ALL non-self recipients even if one fails; \
+             saw {recipients:?}",
+        );
+        assert!(recipients.contains(&peer1));
+        assert!(recipients.contains(&peer2));
+        assert!(recipients.contains(&peer3));
+    }
+
+    #[tokio::test]
+    async fn send_private_group_total_failure_returns_first_error() {
+        // P2 corollary: when EVERY recipient fails the caller's UI
+        // needs to surface "not delivered" rather than the false
+        // success that a swallowed-Err Ok would produce. Pick the
+        // first per-recipient error verbatim.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer1 = "b".repeat(64);
+        let peer2 = "c".repeat(64);
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex, "state": "active"},
+                    {"agent_id": peer1, "state": "active"},
+                    {"agent_id": peer2, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let mut fail_for = std::collections::HashSet::new();
+        fail_for.insert(peer1.clone());
+        fail_for.insert(peer2.clone());
+        let (transport, _captured) = SelectiveFailureTransport::new(fail_for);
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChatError::MessageTransport(ref m) if m.contains("synthetic failure"),
+            ),
+            "expected MessageTransport(synthetic failure), got {err:?}",
         );
     }
 
