@@ -15,6 +15,19 @@ use serde::{Deserialize, Serialize};
 /// emitted on send paths post-M2.
 pub const WIRE_VERSION: u16 = 3;
 
+/// Sunset date for the v2-accept transition window in
+/// [`crate::envelope::TransitEnvelope::version`] / the relay-server's
+/// inbound gate. Once `SystemTime::now()` is past this point CI fails
+/// loudly via the trip-wire test in this module, forcing a revisit:
+/// either confirm the active-peer set has fully migrated and narrow
+/// the relay's `matches!(envelope.version, 2 | 3)` gate to v3-only,
+/// or push the date forward with rationale.
+///
+/// NOT a runtime gate — the relay staying up must not depend on the
+/// wall clock — but a CI signal so the v2-accept window can't drift
+/// indefinitely while every other PR turns green.
+pub const WIRE_VERSION_V2_SUNSET: &str = "2026-12-01";
+
 /// Discriminator for what the ciphertext payload represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnvelopeKind {
@@ -129,6 +142,60 @@ mod tests {
         let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.kind, EnvelopeKind::AdminEvent);
         assert_eq!(decoded.tenant_id, Some(TenantId::new("acme")));
+    }
+
+    #[test]
+    fn v2_accept_window_sunset_has_not_passed() {
+        // P1 trip-wire from Bob's review: the relay-server accepts
+        // both v2 and v3 envelopes "during a transition window" but
+        // nothing in code forces the window to actually sunset. When
+        // a future maintainer reads the gate they have no signal
+        // that the transition is over. This test fails CI once
+        // `WIRE_VERSION_V2_SUNSET` is past — by then the relay-side
+        // burn-down metric (`envelope_accepted_legacy_v2`) should
+        // show v2 traffic has drained and the gate can be narrowed
+        // to v3-only. NOT a runtime check; the relay must not depend
+        // on wall-clock for liveness.
+        //
+        // Sunset string is parsed in-place rather than via chrono so
+        // fetchit-relay-proto's deps stay minimal.
+        let (year, month, day) = parse_iso_date(WIRE_VERSION_V2_SUNSET);
+        let sunset_unix = days_from_civil(year, month, day) * 86_400;
+        let sunset = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(u64::try_from(sunset_unix).unwrap());
+        let now = std::time::SystemTime::now();
+        assert!(
+            now < sunset,
+            "WIRE_VERSION_V2_SUNSET ({WIRE_VERSION_V2_SUNSET}) has passed — \
+             confirm the relay-side v2-accept burn-down metric has drained, \
+             then narrow the ws.rs version gate to v3-only and bump this date",
+        );
+    }
+
+    /// Parse `YYYY-MM-DD` into `(year, month, day)`. Test-only helper
+    /// for the v2-sunset trip-wire.
+    fn parse_iso_date(s: &str) -> (i32, u32, u32) {
+        let bytes = s.as_bytes();
+        assert_eq!(bytes.len(), 10, "expected YYYY-MM-DD");
+        assert_eq!(bytes[4], b'-');
+        assert_eq!(bytes[7], b'-');
+        let year: i32 = s[0..4].parse().unwrap();
+        let month: u32 = s[5..7].parse().unwrap();
+        let day: u32 = s[8..10].parse().unwrap();
+        (year, month, day)
+    }
+
+    /// Howard Hinnant's days-from-civil algorithm: returns days since
+    /// 1970-01-01 for a Gregorian (year, month, day) triple. Avoids
+    /// pulling in chrono just for one CI trip-wire.
+    #[allow(clippy::cast_sign_loss)] // (y - era*400) is in [0, 399] by construction
+    fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = (y - era * 400) as u32;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        i64::from(era) * 146_097 + i64::from(doe) - 719_468
     }
 
     #[test]

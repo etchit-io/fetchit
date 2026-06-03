@@ -301,6 +301,11 @@ fn handle_client_frame(
             // emitted on send paths after M2; v2 stays accepted until
             // all live peers upgrade. Anything else is silently dropped
             // — the relay never decrypts, but it gates schema drift.
+            //
+            // Sunset date: `fetchit_relay_proto::WIRE_VERSION_V2_SUNSET`.
+            // CI fails (via the trip-wire test on that constant) once
+            // the date is past — forcing a deliberate revisit instead
+            // of letting the v2-accept window drift indefinitely.
             if !matches!(envelope.version, 2 | 3) {
                 state.metrics.envelope_dropped_version_gate();
                 return true;
