@@ -22,14 +22,16 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::chat_crypto::{
-    aead_open, aead_seal, derive_aead_key, kem_decapsulate, kem_encapsulate, random_nonce,
-    AAD_DOMAIN, AEAD_NONCE_LEN, KDF_INFO_BRIDGE, KEM_PUBLIC_KEY_LEN,
+    aead_open, aead_seal, canonical_envelope_bytes, derive_aead_key, kem_decapsulate,
+    kem_encapsulate, random_nonce, AAD_DOMAIN, AEAD_NONCE_LEN, KDF_INFO_BRIDGE, KEM_PUBLIC_KEY_LEN,
+    SIGN_DOMAIN_ENVELOPE,
 };
 use crate::chat_identity::FetchitIdentity;
+use crate::conversation::OutboundEnvelope;
 use crate::error::{ChatError, Result};
 use crate::local_store::StoreLayout;
 use crate::messages::StoredContactCard;
-use fetchit_relay_proto::{EnvelopeKind, TransitEnvelope};
+use fetchit_relay_proto::{AgentId, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION};
 use x0xd_client::SecureGroupsEndpoint;
 
 /// Domain tag for the `MemberJoined` canonical-bytes formula. Must
@@ -359,6 +361,67 @@ pub fn unseal_bridge_wrapper(
     X0xdGroupMetadataEventWrapper::from_postcard(&plaintext)
 }
 
+/// Build a signed, sealed `TransitEnvelope` carrying an
+/// [`X0xdGroupMetadataEventWrapper`] for delivery to a single
+/// recipient.
+///
+/// The envelope shape mirrors the welcome path
+/// ([`crate::conversation::build_welcome_outbox`]): KEM-encapsulate to
+/// the recipient's KEM pubkey, AEAD-seal the wrapper bytes,
+/// ML-DSA-65 sign the canonical envelope bytes. No conversation /
+/// registry state is touched — bridge envelopes are one-shot.
+///
+/// # Errors
+/// - [`ChatError::Invalid`] when `recipient_kem_pub` length is wrong,
+///   AEAD seal fails, or postcard encoding fails.
+/// - Forwarded signer errors when ML-DSA-65 signing the envelope.
+pub async fn build_bridge_outbox<S: fetchit_relay_client::Signer + ?Sized>(
+    recipient_agent_id: &[u8; 32],
+    recipient_kem_pub: &[u8],
+    topic: String,
+    payload_b64: String,
+    local_agent_id: &[u8; 32],
+    local_machine_id: &[u8; 32],
+    signer: &S,
+) -> Result<OutboundEnvelope> {
+    let wrapper = X0xdGroupMetadataEventWrapper { topic, payload_b64 };
+    let parts = seal_bridge_wrapper(recipient_kem_pub, &wrapper)?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+
+    let mut env = TransitEnvelope {
+        version: WIRE_VERSION,
+        kind: EnvelopeKind::X0xdGroupMetadataEvent,
+        group_id: None,
+        tenant_id: None,
+        sender_agent_id: AgentId::from_bytes(*local_agent_id),
+        sender_machine_id: MachineId::from_bytes(*local_machine_id),
+        timestamp_ms: now_ms,
+        epoch: 0,
+        ciphertext: parts.ciphertext,
+        nonce: parts.nonce,
+        kem_ciphertext: parts.kem_ciphertext,
+        sender_signature: Vec::new(),
+    };
+
+    let canonical = canonical_envelope_bytes(&env)?;
+    let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+    sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+    sign_bytes.extend_from_slice(&canonical);
+    let sig = signer
+        .sign(&sign_bytes)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("bridge envelope sign: {e}")))?;
+    env.sender_signature = sig;
+
+    Ok(OutboundEnvelope {
+        recipient_agent_id: AgentId::from_bytes(*recipient_agent_id),
+        envelope: env,
+    })
+}
+
 /// Receive-side glue: unseal a bridge envelope and POST its inner JSON
 /// payload to local x0xd `/publish`. Pubsub-loopback then advances
 /// local MLS state via the standard
@@ -665,6 +728,65 @@ mod tests {
         assert!(
             matches!(err, ChatError::Invalid(ref s) if s.contains("nonce length")),
             "expected nonce-length error, got {err:?}"
+        );
+    }
+
+    /// Stub signer used only to exercise `build_bridge_outbox` —
+    /// returns a fixed-length zero "signature" so the envelope shape is
+    /// well-formed without depending on real ML-DSA.
+    struct StubSigner;
+
+    #[async_trait::async_trait]
+    impl fetchit_relay_client::Signer for StubSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            [0u8; 32]
+        }
+        fn public_key(&self) -> Vec<u8> {
+            vec![0u8; 32]
+        }
+        async fn sign(&self, _message: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Ok(vec![0u8; 64])
+        }
+    }
+
+    #[tokio::test]
+    async fn build_bridge_outbox_produces_signed_x0xd_envelope() {
+        let (pk, _sk) = kem_keygen().unwrap();
+        let recipient = [1u8; 32];
+        let local_aid = [2u8; 32];
+        let local_machine = [3u8; 32];
+
+        let out = build_bridge_outbox(
+            &recipient,
+            &pk,
+            "x0x.named_group/g/metadata".into(),
+            "eyJldmVudCI6Im1lbWJlcl9qb2luZWQifQ==".into(),
+            &local_aid,
+            &local_machine,
+            &StubSigner,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            out.envelope.kind,
+            EnvelopeKind::X0xdGroupMetadataEvent,
+            "kind must mark this as a bridge envelope so the receiver dispatch hits the right arm"
+        );
+        assert!(
+            out.envelope.group_id.is_none(),
+            "bridge envelope group_id is intentionally None — wrapper.topic carries the routing"
+        );
+        assert_eq!(out.envelope.epoch, 0);
+        assert_eq!(out.envelope.sender_agent_id.as_bytes(), &local_aid);
+        assert_eq!(out.recipient_agent_id.as_bytes(), &recipient);
+        assert!(!out.envelope.kem_ciphertext.is_empty());
+        assert!(!out.envelope.ciphertext.is_empty());
+        assert_eq!(out.envelope.nonce.len(), AEAD_NONCE_LEN);
+        assert_eq!(
+            out.envelope.sender_signature.len(),
+            64,
+            "stub signature length"
         );
     }
 

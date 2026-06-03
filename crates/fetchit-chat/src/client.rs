@@ -19,6 +19,7 @@ use crate::local_store::StoreLayout;
 use crate::relay_transport::RelayTransport;
 use crate::transport::{InboundEnvelope, OutboundEnvelope, OutboundKind, Router};
 use crate::{contacts, groups, identity, messages, presence};
+use base64::Engine as _;
 use fetchit_relay_client::{Signer, X0xdSigner};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -465,6 +466,70 @@ impl Client {
             .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
         x0xd_client::SecureGroupsEndpoint::new(base, self.http.token().to_owned())
             .map_err(ChatError::from)
+    }
+
+    /// Send an M2.5 bridge envelope — a signed x0xd
+    /// `NamedGroupMetadataEvent` JSON body — to a single peer over the
+    /// relay path. Look up the peer's ML-KEM-768 public key from their
+    /// stored share-card (the P1.A gate), seal the wrapper, build a
+    /// signed `TransitEnvelope` with `kind = X0xdGroupMetadataEvent`,
+    /// and hand it to the router.
+    ///
+    /// The caller is responsible for constructing the signed event
+    /// body (canonical bytes → `POST /agent/sign` → JSON event). The
+    /// helpers in [`crate::groups::bridge`] expose the canonical-bytes
+    /// formula + JSON shape for each event variant.
+    ///
+    /// # Errors
+    /// - [`ChatError::ShareCardMissing`] when no contact card exists
+    ///   for the recipient — UI should route to "Import contact card
+    ///   first".
+    /// - [`ChatError::Invalid`] when the chat state is missing, the
+    ///   recipient hex is malformed, or the seal/sign path fails.
+    /// - Router errors forwarded as [`ChatError::MessageTransport`].
+    pub async fn send_x0xd_metadata_event(
+        &self,
+        recipient_agent_id_hex: &str,
+        topic: String,
+        signed_event_json_bytes: &[u8],
+    ) -> Result<()> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let recipient_kem_pub =
+            crate::groups::bridge::recipient_kem_key(&chat.layout, recipient_agent_id_hex)?;
+        let mut recipient_aid = [0u8; 32];
+        hex::decode_to_slice(recipient_agent_id_hex, &mut recipient_aid)
+            .map_err(|e| ChatError::Invalid(format!("recipient agent_id hex: {e}")))?;
+        let mut local_aid = [0u8; 32];
+        hex::decode_to_slice(chat.identity.agent_id_hex(), &mut local_aid)
+            .map_err(|e| ChatError::Invalid(format!("local agent_id hex: {e}")))?;
+
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(signed_event_json_bytes);
+
+        let outbound = crate::groups::bridge::build_bridge_outbox(
+            &recipient_aid,
+            &recipient_kem_pub,
+            topic,
+            payload_b64,
+            &local_aid,
+            &chat.local_machine_id,
+            chat.signer.as_ref(),
+        )
+        .await?;
+
+        let recipient =
+            crate::identity::AgentId(hex::encode(outbound.recipient_agent_id.as_bytes()));
+        let transport_out = crate::transport::OutboundEnvelope {
+            kind: crate::transport::OutboundKind::Dm,
+            from_machine_id: Some(chat.local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms: outbound.envelope.timestamp_ms,
+            transit: Some(outbound.envelope),
+        };
+        self.router.send(&recipient, transport_out).await?;
+        Ok(())
     }
 
     /// Unseal an inbound M2.5 bridge envelope
@@ -974,7 +1039,6 @@ mod tests {
     use crate::local_store::StoreLayout;
     use async_trait::async_trait;
     use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
     use fetchit_relay_client::{MlDsaSigner, Signer};
     use tempfile::TempDir;
 
