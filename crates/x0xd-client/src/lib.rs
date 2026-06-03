@@ -23,4 +23,5 @@ pub mod signer;
 
 pub use discovery::{discover_in, discover_local, DaemonEndpoint};
 pub use error::{DiscoveryError, X0xdError};
+pub use secure::EncryptedFrame;
 pub use signer::{Signer, X0xdSigner};
