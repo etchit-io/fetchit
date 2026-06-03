@@ -1,10 +1,17 @@
-//! Semver probe against x0xd's `/version` endpoint.
+//! Semver probe against x0xd's `/health` endpoint.
 //!
 //! Used at fetchit-chat startup to gate on the minimum daemon
 //! version that ships PQ `TreeKEM`. x0xd v0.20.0 over-included
 //! `TreeKEM` activation; v0.20.1 narrowed it correctly to
 //! `private_secure` + `Hidden` discoverability. We refuse to talk
 //! to anything older.
+//!
+//! Upstream surface: x0xd 0.20.x exposes process metadata via
+//! `GET /health` returning
+//! `{"ok": true, "status": "healthy", "version": "0.20.x",
+//! "peers": N, "uptime_secs": N}`. There is no separate `/version`
+//! route, so the gate consumes the embedded `version` field
+//! directly rather than asking upstream for a parallel endpoint.
 
 use crate::error::X0xdError;
 use reqwest::Client as HttpClient;
@@ -33,8 +40,8 @@ impl X0xdVersion {
         patch: 1,
     };
 
-    /// Probe `GET /version` on a running x0xd daemon and parse the
-    /// semver `version` field.
+    /// Probe `GET /health` on a running x0xd daemon and parse the
+    /// embedded semver `version` field.
     ///
     /// # Errors
     /// Returns [`X0xdError::Http`] on transport failure,
@@ -43,7 +50,7 @@ impl X0xdVersion {
     /// semver strings.
     pub async fn probe(base_url: &Url, api_token: &str) -> Result<X0xdVersion, X0xdError> {
         #[derive(Deserialize)]
-        struct VersionResponse {
+        struct HealthResponse {
             #[serde(default)]
             ok: bool,
             #[serde(default)]
@@ -55,24 +62,24 @@ impl X0xdVersion {
         let http = HttpClient::builder()
             .timeout(Duration::from_secs(10))
             .build()?;
-        let url = base_url.join("version").map_err(X0xdError::Url)?;
+        let url = base_url.join("health").map_err(X0xdError::Url)?;
         let raw = http.get(url).bearer_auth(api_token).send().await?;
         if !raw.status().is_success() {
             let status = raw.status();
             let body = raw.text().await.unwrap_or_default();
             return Err(X0xdError::Rejected(format!(
-                "x0xd /version returned {status}: {body}"
+                "x0xd /health returned {status}: {body}"
             )));
         }
-        let resp: VersionResponse = raw.json().await?;
+        let resp: HealthResponse = raw.json().await?;
         if !resp.ok {
             return Err(X0xdError::Rejected(resp.error.unwrap_or_else(|| {
-                "x0xd /version returned ok=false without error message".into()
+                "x0xd /health returned ok=false without error message".into()
             })));
         }
         let version = resp
             .version
-            .ok_or_else(|| X0xdError::Rejected("/version response missing version field".into()))?;
+            .ok_or_else(|| X0xdError::Rejected("/health response missing version field".into()))?;
         Self::parse_semver(&version)
     }
 
@@ -165,13 +172,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_parses_live_version_response() {
+    async fn probe_parses_live_health_response() {
+        // Mirrors the actual x0xd 0.20.2 /health response shape:
+        // {"ok": true, "status": "healthy", "version": "0.20.2",
+        //  "peers": N, "uptime_secs": N}. Extra fields are tolerated
+        // by serde — only `version` is load-bearing for the gate.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/version"))
+            .and(path("/health"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
+                "status": "healthy",
                 "version": "0.20.2",
+                "peers": 8,
+                "uptime_secs": 12302,
             })))
             .mount(&server)
             .await;
@@ -191,7 +205,7 @@ mod tests {
     async fn probe_surfaces_4xx_body_in_rejected_error() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/version"))
+            .and(path("/health"))
             .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"bad token"}"#))
             .mount(&server)
             .await;

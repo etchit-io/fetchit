@@ -1202,10 +1202,13 @@ mod tests {
     }
 
     /// Builder gate: an x0xd that reports a pre-M2 version on
-    /// `/version` is refused at chat-build time. The probe runs at the
+    /// `/health` is refused at chat-build time. The probe runs at the
     /// top of `build_with_chat`, so we never touch `/agent`, the
     /// signer, or any chat state — the wiremock only needs to answer
-    /// `/version`.
+    /// `/health` with x0xd's standard shape (the `version` field is
+    /// the load-bearing piece; the surrounding `status`/`peers`/
+    /// `uptime_secs` fields are ignored by the probe but kept here
+    /// so the fixture mirrors a real daemon response).
     #[tokio::test]
     async fn build_rejects_x0xd_below_m2_treekem_minimum() {
         use wiremock::matchers::{method, path};
@@ -1213,10 +1216,13 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/version"))
+            .and(path("/health"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
+                "status": "healthy",
                 "version": "0.19.53",
+                "peers": 8,
+                "uptime_secs": 1234,
             })))
             .mount(&server)
             .await;
