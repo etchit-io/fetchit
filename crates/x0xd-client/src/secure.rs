@@ -103,7 +103,7 @@ impl SecureGroupsEndpoint {
         display_name: Option<&str>,
     ) -> Result<CreatedGroup, X0xdError> {
         let url = self.base_url.join("groups").map_err(X0xdError::Url)?;
-        let resp: CreatedGroupResponse = self
+        let raw = self
             .http
             .post(url)
             .bearer_auth(&self.api_token)
@@ -114,10 +114,15 @@ impl SecureGroupsEndpoint {
                 discoverability: "Hidden",
             })
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        if !raw.status().is_success() {
+            let status = raw.status();
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd /groups returned {status}: {body}"
+            )));
+        }
+        let resp: CreatedGroupResponse = raw.json().await?;
         if !resp.ok {
             return Err(X0xdError::Rejected(resp.error.unwrap_or_else(|| {
                 "x0xd returned ok=false without error message".into()
@@ -211,5 +216,34 @@ mod tests {
             .create_private_secure("alpha", Some("Alice"))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_private_secure_surfaces_4xx_body_in_rejected_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_string(r#"{"ok":false,"error":"name already taken"}"#),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .create_private_secure("dup", None)
+            .await
+            .unwrap_err();
+        match err {
+            X0xdError::Rejected(msg) => {
+                assert!(msg.contains("422"), "status code not in error: {msg}");
+                assert!(
+                    msg.contains("name already taken"),
+                    "body not in error: {msg}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
     }
 }
