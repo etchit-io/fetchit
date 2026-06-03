@@ -189,6 +189,25 @@ struct GroupsResponse {
     groups: Vec<Group>,
 }
 
+/// One entry in the response from `GET /groups/<id>/members`. Mirrors
+/// the x0xd shape: `agent_id` is the 64-char hex id, `state` is one of
+/// `active` | `pending` | `removed`, `role` is `owner` | `admin` |
+/// `member`. We surface only what private-group fanout needs (the
+/// agent id) and ignore the rest so wire-shape drift is silent for
+/// fields we don't consume.
+#[derive(Debug, Clone, Deserialize)]
+struct GroupMemberEntry {
+    agent_id: AgentId,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GroupMembersResponse {
+    #[serde(default)]
+    members: Vec<GroupMemberEntry>,
+}
+
 #[derive(Deserialize)]
 struct GroupMessagesResponse {
     #[serde(default)]
@@ -294,6 +313,31 @@ impl<'a> Endpoint<'a> {
             .get("message_id")
             .and_then(|v| v.as_str())
             .map(String::from))
+    }
+
+    /// Fetch the agent ids of every currently-active member of `group`.
+    /// Drives private-group fanout in
+    /// [`crate::messages::Endpoint::send_private_group`] — one envelope
+    /// per recipient, addressed at the routing layer to each member's
+    /// agent id. The local agent is included in the response and the
+    /// caller is responsible for filtering itself out.
+    ///
+    /// Hits `GET /groups/<id>/members`, which returns members along with
+    /// `role` and `state`. We surface only `state == "active"` entries
+    /// — pending / removed members must not receive new envelopes.
+    ///
+    /// # Errors
+    /// Returns whatever the underlying HTTP layer surfaces. A 404 from
+    /// x0xd (unknown group) lands as [`ChatError::Daemon`].
+    pub async fn members(&self, group: &GroupId) -> Result<Vec<AgentId>> {
+        let path = format!("/groups/{}/members", group.as_str());
+        let resp: GroupMembersResponse = self.http.get_json(&path).await?;
+        Ok(resp
+            .members
+            .into_iter()
+            .filter(|m| m.state.as_deref().is_none_or(|s| s == "active"))
+            .map(|m| m.agent_id)
+            .collect())
     }
 
     /// Fetch the recent message history for a group. Daemon-side
@@ -460,6 +504,163 @@ mod tests {
         assert!(
             json.contains("\"display_name\":\"Alice\""),
             "display_name: {json}"
+        );
+    }
+
+    #[test]
+    fn group_member_entry_decodes_real_x0xd_shape() {
+        // Real shape from `GET /groups/<id>/members` on a 1-member
+        // private_secure group — captured live during the Task 12
+        // roster probe. Confirms the decode survives the extra fields
+        // (added_by, display_name, joined_at, role) we ignore.
+        let json = r#"{
+            "added_by": null,
+            "agent_id": "a48e8af11d8f76a73e59acda012caa4977ecfad91a232aa7e4eebd9537fcc947",
+            "display_name": "a48e8af1…",
+            "joined_at": 1780455374550,
+            "role": "owner",
+            "state": "active"
+        }"#;
+        let m: GroupMemberEntry = serde_json::from_str(json).expect("decode");
+        assert_eq!(m.state.as_deref(), Some("active"));
+        assert!(m.agent_id.0.starts_with("a48e8af1"));
+    }
+
+    #[tokio::test]
+    async fn members_returns_active_agent_ids() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{gid}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "group_id": gid,
+                "member_count": 3,
+                "members": [
+                    {"agent_id": "a".repeat(64), "role": "owner",  "state": "active"},
+                    {"agent_id": "b".repeat(64), "role": "member", "state": "active"},
+                    {"agent_id": "c".repeat(64), "role": "member", "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let http =
+            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        let ids = endpoint
+            .members(&GroupId::parse(gid).unwrap())
+            .await
+            .expect("members");
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0].0, "a".repeat(64));
+        assert_eq!(ids[2].0, "c".repeat(64));
+    }
+
+    #[tokio::test]
+    async fn members_filters_out_non_active_entries() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{gid}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "group_id": gid,
+                "member_count": 3,
+                "members": [
+                    {"agent_id": "a".repeat(64), "state": "active"},
+                    {"agent_id": "b".repeat(64), "state": "pending"},
+                    {"agent_id": "c".repeat(64), "state": "removed"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let http =
+            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        let ids = endpoint
+            .members(&GroupId::parse(gid).unwrap())
+            .await
+            .expect("members");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].0, "a".repeat(64));
+    }
+
+    #[tokio::test]
+    async fn members_treats_missing_state_field_as_active() {
+        // Backward-compat: older x0xd revisions may have omitted `state`
+        // on the single-member self entry. Treat absent state as active
+        // so the fanout doesn't suddenly start dropping the owner.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{gid}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [{"agent_id": "a".repeat(64)}]
+            })))
+            .mount(&server)
+            .await;
+        let http =
+            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        let ids = endpoint
+            .members(&GroupId::parse(gid).unwrap())
+            .await
+            .expect("members");
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn members_returns_empty_for_empty_roster() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{gid}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [],
+            })))
+            .mount(&server)
+            .await;
+        let http =
+            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        let ids = endpoint
+            .members(&GroupId::parse(gid).unwrap())
+            .await
+            .expect("members");
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn members_surfaces_4xx_as_daemon_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{gid}/members")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("group not found"))
+            .mount(&server)
+            .await;
+        let http =
+            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        let err = endpoint
+            .members(&GroupId::parse(gid).unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Daemon { status: 404, .. }),
+            "expected Daemon(404), got {err:?}",
         );
     }
 }
