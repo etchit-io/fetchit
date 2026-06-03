@@ -81,6 +81,7 @@ impl From<x0xd_client::X0xdError> for ChatError {
             x0xd_client::X0xdError::Http(re) => Self::Transport(re),
             x0xd_client::X0xdError::Url(u) => Self::Invalid(format!("x0xd url: {u}")),
             x0xd_client::X0xdError::Rejected(s) => Self::MessageTransport(s),
+            x0xd_client::X0xdError::Invalid(s) => Self::Invalid(s),
         }
     }
 }

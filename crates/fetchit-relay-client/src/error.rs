@@ -62,7 +62,13 @@ impl From<x0xd_client::X0xdError> for ClientError {
         match e {
             x0xd_client::X0xdError::Http(e) => Self::Http(e),
             x0xd_client::X0xdError::Url(e) => Self::Url(e),
-            x0xd_client::X0xdError::Rejected(s) => Self::AuthRejected(s),
+            x0xd_client::X0xdError::Rejected(s) | x0xd_client::X0xdError::Invalid(s) => {
+                // Caller-side validation failures and daemon refusals
+                // share the AuthRejected surface here — relay-client
+                // doesn't yet distinguish them and adding a new variant
+                // would ripple into every consumer.
+                Self::AuthRejected(s)
+            }
         }
     }
 }

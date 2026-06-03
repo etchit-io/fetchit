@@ -60,4 +60,11 @@ pub enum X0xdError {
     /// unexpected algorithm tag, or refused to sign.
     #[error("x0xd rejected: {0}")]
     Rejected(String),
+
+    /// Caller-supplied input failed local validation before any HTTP
+    /// round-trip — malformed group id, non-hex characters, wrong
+    /// length, etc. Distinct from `Rejected` (daemon-side refusal) so
+    /// callers can branch on "the bytes never left this process".
+    #[error("invalid input: {0}")]
+    Invalid(String),
 }

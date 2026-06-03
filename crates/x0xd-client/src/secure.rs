@@ -10,6 +10,29 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use url::Url;
 
+/// Validate that `group_id` is the 64-hex shape every x0xd
+/// `/groups/{group_id}/secure/*` endpoint expects, BEFORE the value
+/// is interpolated into a URL path. Without this, an external caller
+/// could pass `../` or other path-traversal sequences and target
+/// arbitrary x0xd HTTP endpoints from this process — fetchit-chat's
+/// `messages::send_private_group` already filters upstream, but
+/// etch>it / future tooling consuming `SecureGroupsEndpoint` doesn't.
+///
+/// Returns the validated `&str` so callsites can chain straight into
+/// `format!`. Ascii-hex characters only; any non-hex byte rejects.
+fn validate_group_id_hex(s: &str) -> Result<&str, X0xdError> {
+    if s.len() != 64 {
+        return Err(X0xdError::Invalid(format!(
+            "group_id must be 64 hex chars, got {}",
+            s.len()
+        )));
+    }
+    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(X0xdError::Invalid("group_id must be ASCII hex".into()));
+    }
+    Ok(s)
+}
+
 /// One encrypted application-data frame returned by `/secure/encrypt`
 /// and accepted by `/secure/decrypt`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +231,7 @@ impl SecureGroupsEndpoint {
         group_id: &str,
         plaintext: &[u8],
     ) -> Result<EncryptedFrame, X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
         let payload_b64 = B64.encode(plaintext);
         let path = format!("groups/{group_id}/secure/encrypt");
         let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
@@ -263,6 +287,7 @@ impl SecureGroupsEndpoint {
         frame: &EncryptedFrame,
         sender_agent_id: Option<&str>,
     ) -> Result<Vec<u8>, X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
         let path = format!("groups/{group_id}/secure/decrypt");
         let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
         let raw = self
@@ -343,6 +368,110 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 64-hex group id matching the wire shape x0xd's `POST /groups`
+    /// returns. Doubles as a stable URL-path component for the
+    /// wiremock matchers below.
+    const TEST_GROUP_HEX: &str = "4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e";
+
+    #[tokio::test]
+    async fn encrypt_rejects_empty_group_id_before_http() {
+        // P2 from Bob's review: path-traversal via free-form group_id
+        // would otherwise let an external caller target arbitrary
+        // x0xd HTTP endpoints from this process. `validate_group_id_hex`
+        // rejects locally — no HTTP traffic on a malformed id.
+        let server = MockServer::start().await;
+        // Mount nothing — any attempted HTTP call would surface as a
+        // wiremock-side 404, which is a different X0xdError shape.
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint.encrypt("", b"hi").await.unwrap_err();
+        match err {
+            X0xdError::Invalid(msg) => {
+                assert!(
+                    msg.contains("64 hex chars"),
+                    "expected length message, got: {msg}",
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypt_rejects_wrong_length_group_id() {
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        // 63 chars — one short of the expected 64.
+        let almost = "a".repeat(63);
+        let err = endpoint.encrypt(&almost, b"hi").await.unwrap_err();
+        match err {
+            X0xdError::Invalid(msg) => {
+                assert!(msg.contains("64 hex chars"), "got: {msg}");
+                assert!(msg.contains("63"), "should report observed length: {msg}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypt_rejects_non_hex_group_id_including_path_traversal() {
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        // Length 64 but containing `../` — the exact path-traversal
+        // shape the validator is here to refuse.
+        let traversal = format!("../{}", "a".repeat(61));
+        assert_eq!(traversal.len(), 64);
+        let err = endpoint.encrypt(&traversal, b"hi").await.unwrap_err();
+        match err {
+            X0xdError::Invalid(msg) => {
+                assert!(msg.contains("ASCII hex"), "got: {msg}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decrypt_rejects_wrong_length_group_id() {
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: "bm9uY2U=".into(),
+            secret_epoch: 3,
+        };
+        let err = endpoint.decrypt("short", &frame, None).await.unwrap_err();
+        match err {
+            X0xdError::Invalid(msg) => {
+                assert!(msg.contains("64 hex chars"), "got: {msg}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decrypt_rejects_non_hex_group_id() {
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: "bm9uY2U=".into(),
+            secret_epoch: 3,
+        };
+        // 64 chars but contains a Z (non-hex).
+        let mut bad = "a".repeat(63);
+        bad.push('Z');
+        let err = endpoint.decrypt(&bad, &frame, None).await.unwrap_err();
+        match err {
+            X0xdError::Invalid(msg) => {
+                assert!(msg.contains("ASCII hex"), "got: {msg}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
 
     #[test]
     fn encrypted_frame_round_trips_via_serde_json() {
@@ -447,7 +576,7 @@ mod tests {
     async fn encrypt_posts_payload_b64_and_parses_frame() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/groups/G/secure/encrypt"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/encrypt"))
             .and(body_partial_json(serde_json::json!({
                 "payload_b64": "aGk=",
             })))
@@ -461,7 +590,7 @@ mod tests {
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
-        let f = endpoint.encrypt("G", b"hi").await.unwrap();
+        let f = endpoint.encrypt(TEST_GROUP_HEX, b"hi").await.unwrap();
         assert_eq!(f.secret_epoch, 3);
         assert_eq!(f.ciphertext_b64, "Y3Q=");
         assert_eq!(f.nonce_b64, "bm9uY2U=");
@@ -471,7 +600,7 @@ mod tests {
     async fn encrypt_surfaces_4xx_body_in_rejected_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/groups/G/secure/encrypt"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/encrypt"))
             .respond_with(
                 ResponseTemplate::new(403)
                     .set_body_string(r#"{"ok":false,"error":"not a member"}"#),
@@ -480,7 +609,7 @@ mod tests {
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
-        let err = endpoint.encrypt("G", b"hi").await.unwrap_err();
+        let err = endpoint.encrypt(TEST_GROUP_HEX, b"hi").await.unwrap_err();
         match err {
             X0xdError::Rejected(msg) => {
                 assert!(msg.contains("403"));
@@ -494,7 +623,7 @@ mod tests {
     async fn decrypt_posts_full_frame_and_returns_plaintext_bytes() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/groups/G/secure/decrypt"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/decrypt"))
             .and(body_partial_json(serde_json::json!({
                 "ciphertext_b64": "Y3Q=",
                 "nonce_b64": "bm9uY2U=",
@@ -513,7 +642,10 @@ mod tests {
             nonce_b64: "bm9uY2U=".into(),
             secret_epoch: 3,
         };
-        let plaintext = endpoint.decrypt("G", &frame, None).await.unwrap();
+        let plaintext = endpoint
+            .decrypt(TEST_GROUP_HEX, &frame, None)
+            .await
+            .unwrap();
         assert_eq!(plaintext, b"hi");
     }
 
@@ -521,7 +653,7 @@ mod tests {
     async fn decrypt_passes_sender_agent_id_when_supplied() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/groups/G/secure/decrypt"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/decrypt"))
             .and(body_partial_json(serde_json::json!({
                 "sender_agent_id": "abcd1234",
             })))
@@ -539,7 +671,7 @@ mod tests {
             secret_epoch: 3,
         };
         endpoint
-            .decrypt("G", &frame, Some("abcd1234"))
+            .decrypt(TEST_GROUP_HEX, &frame, Some("abcd1234"))
             .await
             .unwrap();
     }
@@ -548,7 +680,7 @@ mod tests {
     async fn decrypt_surfaces_4xx_body_in_rejected_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/groups/G/secure/decrypt"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/decrypt"))
             .respond_with(
                 ResponseTemplate::new(403).set_body_string(r#"{"ok":false,"error":"stale epoch"}"#),
             )
@@ -561,7 +693,10 @@ mod tests {
             nonce_b64: "bm9uY2U=".into(),
             secret_epoch: 3,
         };
-        let err = endpoint.decrypt("G", &frame, None).await.unwrap_err();
+        let err = endpoint
+            .decrypt(TEST_GROUP_HEX, &frame, None)
+            .await
+            .unwrap_err();
         match err {
             X0xdError::Rejected(msg) => {
                 assert!(msg.contains("403"), "status code missing: {msg}");
@@ -575,7 +710,7 @@ mod tests {
     async fn decrypt_returns_rejected_when_response_payload_b64_is_malformed() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/groups/G/secure/decrypt"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/decrypt"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "payload_b64": "!!!not-valid-base64!!!",
@@ -589,7 +724,10 @@ mod tests {
             nonce_b64: "bm9uY2U=".into(),
             secret_epoch: 3,
         };
-        let err = endpoint.decrypt("G", &frame, None).await.unwrap_err();
+        let err = endpoint
+            .decrypt(TEST_GROUP_HEX, &frame, None)
+            .await
+            .unwrap_err();
         match err {
             X0xdError::Rejected(msg) => {
                 assert!(
