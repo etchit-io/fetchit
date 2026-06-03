@@ -6,22 +6,14 @@
 //! the relay; inbound deliveries are decoded and pumped onto an mpsc
 //! channel that the chat layer consumes.
 //!
-//! # Sealing status (M0 honesty floor)
+//! # Sealing status (M2 floor)
 //!
-//! Two send paths exist:
-//!
-//! * **Sealed v2 path** — when [`OutboundEnvelope::transit`] arrives
-//!   already populated (the chat-v2 conversation path), we forward it
-//!   verbatim. `nonce` + `kem_ciphertext` + `sender_signature` are
-//!   set by the conversation layer; this is the production end-to-end
-//!   sealed channel.
-//! * **Fabricated v1 fallback** — when `transit` is `None` (legacy
-//!   callers, integration tests), this module builds a `TransitEnvelope`
-//!   with **empty `nonce` / `kem_ciphertext` / `sender_signature`**.
-//!   The payload bytes ride the wire as-is. Relay-path confidentiality
-//!   on this branch rests on TLS-to-the-relay plus an honest relay; it
-//!   is NOT end-to-end sealed. M2 closes this fallback by requiring all
-//!   senders to go through the sealed v2 path.
+//! Every send MUST carry a prebuilt sealed `TransitEnvelope` on
+//! [`OutboundEnvelope::transit`]; the conversation/group layer is the
+//! only sanctioned producer. Callers that pass `transit: None` get
+//! [`ChatError::SealedRequired`] — the legacy v1 fabricated escape
+//! hatch has been removed at M2 so there is no unsealed wire shape
+//! left in this module.
 
 use crate::error::{ChatError, Result};
 use crate::identity::AgentId;
@@ -29,11 +21,8 @@ use crate::transport::{
     InboundEnvelope, OutboundEnvelope, OutboundKind, Reachability, SendReceipt, Transport,
 };
 use async_trait::async_trait;
-use fetchit_relay_client::{Client as RelayClient, ClientConfig, X0xdSigner};
-use fetchit_relay_proto::{
-    AgentId as RelayAgentId, DedupeKey, EnvelopeKind as RelayKind, GroupId as RelayGroupId,
-    MachineId, TransitEnvelope,
-};
+use fetchit_relay_client::{Client as RelayClient, ClientConfig, Signer};
+use fetchit_relay_proto::{AgentId as RelayAgentId, DedupeKey, EnvelopeKind as RelayKind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -57,8 +46,9 @@ pub struct RelayTransport {
 }
 
 impl RelayTransport {
-    /// Connect to a relay at `base_url`, using a previously-built
-    /// [`X0xdSigner`] for ML-DSA-65 auth.
+    /// Connect to a relay at `base_url`, using any [`Signer`]
+    /// implementation for ML-DSA-65 auth (production: `X0xdSigner`;
+    /// tests can use `StaticKeySigner`).
     ///
     /// Spawns a background task that pumps inbound deliveries from the
     /// relay into the channel exposed via [`Transport::take_inbound`].
@@ -66,8 +56,10 @@ impl RelayTransport {
     /// # Errors
     /// Returns [`ChatError::MessageTransport`] on any handshake or
     /// connection failure.
-    pub async fn connect(base_url: Url, signer: Arc<X0xdSigner>) -> Result<Arc<Self>> {
-        use fetchit_relay_client::Signer;
+    pub async fn connect(
+        base_url: Url,
+        signer: Arc<dyn Signer + Send + Sync>,
+    ) -> Result<Arc<Self>> {
         let local_agent_id = RelayAgentId::from_bytes(signer.agent_id());
         let config = ClientConfig::new(base_url);
         let relay_client = RelayClient::connect(config, signer)
@@ -122,16 +114,10 @@ impl Transport for RelayTransport {
 
     async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
         let to_relay = agent_id_to_relay(to)?;
-        let transit = if let Some(prebuilt) = envelope.transit {
-            // Sealed v2 path — chat-v2 conversation handed us a fully
-            // sealed envelope. Forward verbatim so the KEM ciphertext,
-            // nonce, epoch, and ML-DSA-65 signature survive intact.
-            // This is the production end-to-end channel.
-            prebuilt
-        } else {
-            // M2: remove this entire branch
-            fabricate_v1_envelope(self.local_agent_id, envelope)?
-        };
+        // Sealed-only post-M2 — every caller must hand us a fully
+        // sealed envelope produced by the conversation/group layer.
+        // The v1 fabricated escape hatch has been removed.
+        let transit = envelope.transit.ok_or(ChatError::SealedRequired)?;
         let dedupe_key = self.next_dedupe_key();
         let receipt = self
             .client
@@ -148,45 +134,6 @@ impl Transport for RelayTransport {
     fn take_inbound(&self) -> Option<mpsc::UnboundedReceiver<InboundEnvelope>> {
         self.inbound.lock().ok().and_then(|mut g| g.take())
     }
-}
-
-/// Build a fabricated v1 `TransitEnvelope` from an `OutboundEnvelope`
-/// that didn't carry a prebuilt sealed envelope. The result has empty
-/// `nonce` / `kem_ciphertext` / `sender_signature`; the payload bytes
-/// ride the wire as-is. Relay-path confidentiality on this branch
-/// rests on the relay being honest — it is NOT end-to-end sealed and
-/// `docs/SECURITY.md` names it explicitly.
-///
-/// # Errors
-/// Returns [`ChatError::Invalid`] when `envelope.kind` is `Group` and
-/// the `group_id` string is not 64 hex characters encoding 32 bytes.
-fn fabricate_v1_envelope(
-    local_agent_id: RelayAgentId,
-    envelope: OutboundEnvelope,
-) -> Result<TransitEnvelope> {
-    let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
-    let (kind, group_id) = match envelope.kind {
-        OutboundKind::Dm => (RelayKind::Dm, None),
-        OutboundKind::Group { ref group_id } => {
-            let bytes =
-                parse_hex_32(group_id).map_err(|e| ChatError::Invalid(format!("group id: {e}")))?;
-            (RelayKind::GroupChat, Some(RelayGroupId::from_bytes(bytes)))
-        }
-    };
-    Ok(TransitEnvelope {
-        version: 1,
-        kind,
-        group_id,
-        tenant_id: None,
-        sender_agent_id: local_agent_id,
-        sender_machine_id: machine_id,
-        timestamp_ms: envelope.timestamp_ms,
-        epoch: 0,
-        ciphertext: envelope.payload,
-        nonce: Vec::new(),
-        kem_ciphertext: Vec::new(),
-        sender_signature: Vec::new(),
-    })
 }
 
 fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<InboundEnvelope>) {
@@ -258,29 +205,50 @@ mod tests {
         assert!(parse_hex_32("ab").is_err());
     }
 
-    #[test]
-    fn fabricated_envelope_version_is_one() {
-        let local = RelayAgentId::from_bytes([0x11; 32]);
+    use fetchit_relay_client::StaticKeySigner;
+    use fetchit_relay_proto::Region;
+    use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    async fn start_relay_server() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = ServerConfig::defaults(addr, Region::Nyc);
+        let server = Server::new(cfg).with_verifier(Arc::new(AcceptAllVerifier));
+        let (router, _state) = server.router();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        addr
+    }
+
+    /// `RelayTransport::send` MUST reject any envelope that doesn't
+    /// carry a prebuilt sealed `TransitEnvelope`. The v1 fabricated
+    /// fallback was removed at M2 — there is no wire-level escape
+    /// hatch left, and this is the contract callers see.
+    #[tokio::test]
+    async fn send_without_prebuilt_envelope_returns_sealed_required() {
+        let addr = start_relay_server().await;
+        let base = url::Url::parse(&format!("http://{addr}/")).unwrap();
+        let signer: Arc<dyn Signer + Send + Sync> =
+            Arc::new(StaticKeySigner::from_public_key(b"alice-pubkey".to_vec()));
+        let transport = RelayTransport::connect(base, signer).await.unwrap();
+
+        let to = AgentId(hex::encode([0x33u8; 32]));
         let outbound = OutboundEnvelope {
             kind: OutboundKind::Dm,
             from_machine_id: Some([0x22; 32]),
-            payload: b"hello".to_vec(),
+            payload: b"unsealed".to_vec(),
             timestamp_ms: 1_700_000_000_000,
             transit: None,
         };
-        let env = fabricate_v1_envelope(local, outbound).unwrap();
-        assert_eq!(env.version, 1, "fallback envelope must wear its v1 shape");
+
+        let err = transport.send(&to, outbound).await.unwrap_err();
         assert!(
-            env.nonce.is_empty(),
-            "fallback envelope has no AEAD nonce on the wire"
-        );
-        assert!(
-            env.kem_ciphertext.is_empty(),
-            "fallback envelope carries no KEM ciphertext"
-        );
-        assert!(
-            env.sender_signature.is_empty(),
-            "fallback envelope is unsigned"
+            matches!(err, ChatError::SealedRequired),
+            "expected SealedRequired, got {err:?}"
         );
     }
 }
