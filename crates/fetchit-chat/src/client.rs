@@ -178,6 +178,18 @@ struct ChatState {
     signer: Arc<dyn Signer>,
     layout: StoreLayout,
     local_machine_id: [u8; 32],
+    /// M2.5 bridge — per-`(group, member)` direct-gossip reachability
+    /// cache. The chat-peer dispatcher feeds [`ReachabilityCache::record`]
+    /// from inbound gossip events; sender routing consults
+    /// [`crate::groups_reachability::decide_route`] before wrapping.
+    /// In-memory only at C4; persistence under the conversation-registry
+    /// at-rest key is a follow-up.
+    reachability: Arc<tokio::sync::Mutex<crate::groups_reachability::ReachabilityCache>>,
+    /// M2.5 bridge — per-group consent state (default-OFF per Q4).
+    /// Desktop "Use relay if direct gossip fails" toggle writes through
+    /// [`BridgeConsentStore::set`]; sender routing reads via
+    /// [`BridgeConsentStore::lookup`].
+    bridge_consent: Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeConsentStore>>,
 }
 
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
@@ -468,12 +480,44 @@ impl Client {
             .map_err(ChatError::from)
     }
 
+    /// Cloneable handle to the M2.5 reachability cache. Mutated by the
+    /// chat-peer dispatcher whenever an x0xd group event arrives via
+    /// the direct gossip path, queried by [`Self::send_x0xd_metadata_event`]
+    /// before deciding whether to bridge.
+    #[must_use]
+    pub fn reachability_cache(
+        &self,
+    ) -> Option<Arc<tokio::sync::Mutex<crate::groups_reachability::ReachabilityCache>>> {
+        self.chat.as_ref().map(|c| c.reachability.clone())
+    }
+
+    /// Cloneable handle to the M2.5 bridge-consent store. Desktop UI
+    /// writes through this when the consent modal resolves.
+    #[must_use]
+    pub fn bridge_consent(
+        &self,
+    ) -> Option<Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeConsentStore>>> {
+        self.chat.as_ref().map(|c| c.bridge_consent.clone())
+    }
+
     /// Send an M2.5 bridge envelope — a signed x0xd
     /// `NamedGroupMetadataEvent` JSON body — to a single peer over the
-    /// relay path. Look up the peer's ML-KEM-768 public key from their
-    /// stored share-card (the P1.A gate), seal the wrapper, build a
-    /// signed `TransitEnvelope` with `kind = X0xdGroupMetadataEvent`,
-    /// and hand it to the router.
+    /// relay path, gated by the per-group consent + reachability rule
+    /// from §5 of the bridge spec.
+    ///
+    /// Routing flow:
+    /// - If direct gossip can reach `recipient_agent_id_hex` for
+    ///   `group_id` (via [`ReachabilityCache::lookup`]), returns
+    ///   `Ok(BridgeDecision::LetGossipCarry)` without sending — the
+    ///   caller is expected to publish the event to local x0xd
+    ///   (gossip will deliver it).
+    /// - Otherwise consults [`BridgeConsentStore::lookup`] for
+    ///   `group_id`:
+    ///   * `ConsentedOptIn` → seal + send via relay; returns
+    ///     `Ok(BridgeDecision::WrapAndSend)`.
+    ///   * `DeclinedOptOut` → returns [`ChatError::BridgeDeclined`].
+    ///   * `NotAsked` → returns [`ChatError::BridgeNeedsConsent`] so
+    ///     the desktop UI can surface the consent modal.
     ///
     /// The caller is responsible for constructing the signed event
     /// body (canonical bytes → `POST /agent/sign` → JSON event). The
@@ -484,19 +528,53 @@ impl Client {
     /// - [`ChatError::ShareCardMissing`] when no contact card exists
     ///   for the recipient — UI should route to "Import contact card
     ///   first".
+    /// - [`ChatError::BridgeNeedsConsent`] / [`ChatError::BridgeDeclined`]
+    ///   per the routing rule above.
     /// - [`ChatError::Invalid`] when the chat state is missing, the
     ///   recipient hex is malformed, or the seal/sign path fails.
     /// - Router errors forwarded as [`ChatError::MessageTransport`].
     pub async fn send_x0xd_metadata_event(
         &self,
         recipient_agent_id_hex: &str,
+        group_id: &crate::groups::GroupId,
         topic: String,
         signed_event_json_bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<crate::groups_reachability::BridgeDecision> {
         let chat = self
             .chat
             .as_ref()
             .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        let recipient_aid_obj = crate::identity::AgentId(recipient_agent_id_hex.to_owned());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let decision = {
+            let cache = chat.reachability.lock().await;
+            let consent = chat.bridge_consent.lock().await;
+            crate::groups_reachability::decide_route(
+                &cache,
+                &consent,
+                group_id,
+                &recipient_aid_obj,
+                now_ms,
+            )
+        };
+        match decision {
+            crate::groups_reachability::BridgeDecision::LetGossipCarry => return Ok(decision),
+            crate::groups_reachability::BridgeDecision::DropDeclined => {
+                return Err(ChatError::BridgeDeclined {
+                    group_id: group_id.as_str().to_owned(),
+                });
+            }
+            crate::groups_reachability::BridgeDecision::PromptConsent => {
+                return Err(ChatError::BridgeNeedsConsent {
+                    group_id: group_id.as_str().to_owned(),
+                });
+            }
+            crate::groups_reachability::BridgeDecision::WrapAndSend => {}
+        }
+
         let recipient_kem_pub =
             crate::groups::bridge::recipient_kem_key(&chat.layout, recipient_agent_id_hex)?;
         let mut recipient_aid = [0u8; 32];
@@ -529,7 +607,7 @@ impl Client {
             transit: Some(outbound.envelope),
         };
         self.router.send(&recipient, transport_out).await?;
-        Ok(())
+        Ok(decision)
     }
 
     /// Unseal an inbound M2.5 bridge envelope
@@ -818,6 +896,12 @@ async fn build_with_chat(
             signer,
             layout,
             local_machine_id,
+            reachability: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::ReachabilityCache::new(),
+            )),
+            bridge_consent: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::BridgeConsentStore::new(),
+            )),
         }),
         relay_handle,
         lan_handle,

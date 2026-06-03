@@ -84,6 +84,24 @@ pub enum ChatError {
         /// user-visible message. Truncated to keep log lines tractable.
         agent_id_short: String,
     },
+
+    /// The M2.5 bridge needs per-group consent (default-OFF per Q4)
+    /// before it will relay-mediate a metadata event, and the user has
+    /// never been asked for this group. The desktop UI catches this and
+    /// surfaces the consent modal; on opt-in the call is re-issued.
+    #[error("bridge consent not yet requested for group {group_id} — desktop UI surfaces the consent modal")]
+    BridgeNeedsConsent {
+        /// Group id whose consent hasn't been resolved.
+        group_id: String,
+    },
+
+    /// The user previously declined bridging for this group. Drop the
+    /// event and surface "group unreachable" in the chat UI.
+    #[error("bridge declined for group {group_id} — metadata event dropped, peer unreachable via direct gossip")]
+    BridgeDeclined {
+        /// Group id whose consent is `DeclinedOptOut`.
+        group_id: String,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {
