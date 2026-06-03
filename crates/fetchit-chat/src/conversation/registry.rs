@@ -517,6 +517,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: std::collections::BTreeMap::new(),
+            history: std::collections::VecDeque::new(),
         }
     }
 
@@ -666,6 +667,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: std::collections::BTreeMap::new(),
+            history: std::collections::VecDeque::new(),
         }
     }
 

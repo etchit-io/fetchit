@@ -130,6 +130,13 @@ pub struct Conversation {
     /// acceptable for the M0 deployment shape.
     #[serde(default)]
     pub seen_nonces: BTreeMap<String, VecDeque<[u8; 12]>>,
+    /// Local history cache for `MlsEncrypted` groups — x0xd's `/messages`
+    /// returns an error for those, so the client persists here. Cap
+    /// at 1000 entries (oldest evicted) per
+    /// `private/m2-decisions.md` Decision 2. `#[serde(default)]` for
+    /// backward compat with pre-M2 vault files.
+    #[serde(default)]
+    pub history: VecDeque<HistoryEntry>,
 }
 
 impl Conversation {
@@ -162,6 +169,7 @@ impl Conversation {
             // trusted by construction.
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         })
     }
 
@@ -186,6 +194,7 @@ impl Conversation {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         }
     }
 
@@ -259,6 +268,18 @@ impl Conversation {
     pub fn sweep_prior_keys(&mut self) {
         let now = now_ms();
         self.prior_keys.retain(|p| p.expires_at_ms > now);
+    }
+
+    /// Maximum entries kept in `history` before the oldest is evicted.
+    pub const HISTORY_CAP: usize = 1000;
+
+    /// Append a history entry, evicting the oldest if at capacity.
+    /// Use in the receive path after a successful decrypt.
+    pub fn push_history(&mut self, entry: HistoryEntry) {
+        if self.history.len() >= Self::HISTORY_CAP {
+            self.history.pop_front();
+        }
+        self.history.push_back(entry);
     }
 
     /// Bump epoch + install a new `current_key`. Pushes the old key into
@@ -376,6 +397,26 @@ pub struct DeliveryReceiptPayload {
     pub received_at_ms: u64,
 }
 
+/// One persisted message in a private-secure group's local history.
+/// Plaintext at rest is acceptable because the vault file is AEAD-
+/// sealed under the FCV1 master key per `at_rest.rs`. x0xd refuses
+/// `GET /messages` for `MlsEncrypted` groups, so the client is the
+/// source of truth for the user's group transcript.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    /// Hex sender agent id.
+    pub sender_agent_id_hex: String,
+    /// Optional display name from the sender at send time.
+    pub sender_name: Option<String>,
+    /// Plaintext body.
+    pub body: String,
+    /// Sender-asserted Unix-ms timestamp (mirrors envelope `timestamp_ms`).
+    pub ts_ms: u64,
+    /// Logical message id (hex). Same value future delivery-receipts
+    /// will echo back.
+    pub message_id: String,
+}
+
 pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -420,6 +461,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -445,6 +487,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -465,6 +508,7 @@ mod tests {
             auto_rekey_interval_ms: 1,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         assert!(conv.auto_rekey_due());
     }
@@ -484,6 +528,7 @@ mod tests {
             auto_rekey_interval_ms: 1,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -503,6 +548,7 @@ mod tests {
             auto_rekey_interval_ms: 1,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -529,6 +575,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         let nonce = [0xAB; 12];
         assert!(!conv.check_and_record_nonce("alice", nonce));
@@ -561,6 +608,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         for i in 0..64u8 {
             assert!(!conv.check_and_record_nonce("alice", [i; 12]));
@@ -591,6 +639,7 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         // Fill Alice's window completely.
         for i in 0..64u8 {
@@ -641,11 +690,66 @@ mod tests {
             auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
             trust_state: TrustState::Pending,
             seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
         };
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);
         // Idempotent: a second call leaves it Confirmed.
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);
+    }
+
+    fn make_minimal_conversation_for_history_test() -> Conversation {
+        Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: 0,
+            current_key_b64: B64.encode([1u8; 32]),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn push_history_caps_at_thousand_entries() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        for i in 0..1001u64 {
+            conv.push_history(HistoryEntry {
+                sender_agent_id_hex: "a".repeat(64),
+                sender_name: None,
+                body: format!("m{i}"),
+                ts_ms: i,
+                message_id: format!("id{i}"),
+            });
+        }
+        assert_eq!(conv.history.len(), Conversation::HISTORY_CAP);
+        assert_eq!(conv.history.front().unwrap().body, "m1");
+        assert_eq!(conv.history.back().unwrap().body, "m1000");
+    }
+
+    #[test]
+    fn conversation_without_history_field_deserializes_to_empty() {
+        let json = serde_json::json!({
+            "group_id_hex": "0".repeat(64),
+            "name": null,
+            "members": [],
+            "current_epoch": 0,
+            "current_key_b64": B64.encode([1u8; 32]),
+            "prior_keys": [],
+            "own_role": "Admin",
+            "created_at_ms": 0,
+            "last_rekey_at_ms": 0,
+            "auto_rekey_interval_ms": DEFAULT_AUTO_REKEY_INTERVAL_MS,
+            "trust_state": "Confirmed",
+        });
+        let conv: Conversation = serde_json::from_value(json).unwrap();
+        assert!(conv.history.is_empty());
     }
 }

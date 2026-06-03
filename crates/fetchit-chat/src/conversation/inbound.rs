@@ -113,6 +113,7 @@ pub enum InboundDispatch {
 
 /// Outcome of the verify prelude: either an early `Dropped` result, or
 /// a green light that the message-path dispatcher can proceed.
+#[allow(clippy::large_enum_variant)] // InboundDispatch contains Conversation; boxing here would force every call site to dereference.
 enum VerifyOutcome {
     Drop(InboundDispatch),
     Ok,
@@ -497,6 +498,7 @@ fn decrypt_and_verify_welcome(
 /// atomic `mutate_in_place` closure. Lifts the variant choice out of
 /// the closure so the surrounding async fn can pick the right
 /// `InboundDispatch` and own moved values like `sender_agent_hex`.
+#[allow(clippy::large_enum_variant)] // Rekeyed carries an owned Conversation by design; the producer would otherwise reallocate.
 enum RekeyResolution {
     /// Welcome's epoch is not strictly higher than the cached one —
     /// no state change.
