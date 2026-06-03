@@ -16,7 +16,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fetchit_relay_client::{Client, ClientConfig, MlDsaSigner, Signer};
-use fetchit_relay_proto::{AgentId, DedupeKey, EnvelopeKind, MachineId, TransitEnvelope};
+use fetchit_relay_proto::{
+    AgentId, DedupeKey, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -175,7 +177,7 @@ async fn send_loop(client: &Client, me: AgentId, peer_id: AgentId) -> Result<()>
             continue;
         }
         let env = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,

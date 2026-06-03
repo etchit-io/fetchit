@@ -204,12 +204,12 @@ pub enum ByeReason {
 mod tests {
     use super::*;
     use crate::capability::EffectiveCapabilities;
-    use crate::envelope::{EnvelopeKind, TransitEnvelope};
+    use crate::envelope::{EnvelopeKind, TransitEnvelope, WIRE_VERSION};
     use crate::identity::{AGENT_ID_LEN, DEDUPE_KEY_LEN, MACHINE_ID_LEN};
 
     fn sample_envelope() -> TransitEnvelope {
         TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,

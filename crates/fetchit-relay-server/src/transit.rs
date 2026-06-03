@@ -157,11 +157,11 @@ impl TransitBuffer {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use fetchit_relay_proto::{EnvelopeKind, MachineId};
+    use fetchit_relay_proto::{EnvelopeKind, MachineId, WIRE_VERSION};
 
     fn env_for(sender: u8) -> TransitEnvelope {
         TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,

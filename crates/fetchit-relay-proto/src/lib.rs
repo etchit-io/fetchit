@@ -23,7 +23,7 @@ pub use capability::{
     Capability, CapabilityClaims, CapabilityToken, EffectiveCapabilities, FeatureFlag,
     DEFAULT_MAX_ENVELOPES_PER_MIN, DEFAULT_MAX_ENVELOPE_BYTES, DEFAULT_MAX_GROUP_SIZE,
 };
-pub use envelope::{EnvelopeKind, TransitEnvelope};
+pub use envelope::{EnvelopeKind, TransitEnvelope, WIRE_VERSION};
 pub use error::ProtoError;
 pub use frame::{
     Ack, Bye, ByeReason, ClientFrame, Deliver, Hello, Ping, Pong, PresenceUpdate, Ready, SendFrame,

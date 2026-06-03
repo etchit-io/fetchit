@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use fetchit_relay_client::Signer;
 use fetchit_relay_proto::{
     AgentId as RelayAgentId, EnvelopeKind as RelayKind, GroupId as RelayGroupId, MachineId,
-    TransitEnvelope,
+    TransitEnvelope, WIRE_VERSION,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -383,7 +383,7 @@ fn materialise_transit(
         }
     };
     Ok(TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind,
         group_id,
         tenant_id: None,
@@ -696,7 +696,7 @@ mod tests {
         let foreign = aid(0xb2);
         let foreign_bytes = agent_id_bytes(&foreign).unwrap();
         let bad = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: RelayKind::Dm,
             group_id: None,
             tenant_id: None,
@@ -728,7 +728,7 @@ mod tests {
         let local = aid(0xc3);
         let local_bytes = agent_id_bytes(&local).unwrap();
         let good = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: RelayKind::Dm,
             group_id: None,
             tenant_id: None,
@@ -893,7 +893,7 @@ mod tests {
 
         // Forge a TransitEnvelope claiming aid_c is the sender (not A).
         let forged = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: RelayKind::Dm,
             group_id: None,
             tenant_id: None,

@@ -602,7 +602,7 @@ mod tests {
     use crate::messages::StoredContactCard;
     use base64::engine::general_purpose::STANDARD as B64;
     use fetchit_relay_client::{MlDsaSigner, Signer};
-    use fetchit_relay_proto::{AgentId, EnvelopeKind, GroupId, MachineId};
+    use fetchit_relay_proto::{AgentId, EnvelopeKind, GroupId, MachineId, WIRE_VERSION};
     use rand::rngs::OsRng;
     use std::path::Path;
     use std::sync::Arc;
@@ -855,7 +855,7 @@ mod tests {
         let registry_b =
             ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
         let mut env = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::GroupChat,
             group_id: Some(GroupId::from_bytes([0xee; 32])),
             tenant_id: None,
@@ -1079,7 +1079,7 @@ mod tests {
         group_id: [u8; 32],
     ) -> TransitEnvelope {
         TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::GroupChat,
             group_id: Some(GroupId::from_bytes(group_id)),
             tenant_id: None,
@@ -1699,7 +1699,7 @@ mod tests {
         let mut sender_bytes = [0u8; 32];
         hex::decode_to_slice(sender_aid_hex, &mut sender_bytes).unwrap();
         let mut env = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::GroupChat,
             group_id: Some(GroupId::from_bytes(group_id_bytes)),
             tenant_id: None,

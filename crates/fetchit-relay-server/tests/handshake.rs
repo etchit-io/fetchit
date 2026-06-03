@@ -11,7 +11,7 @@
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
     ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, PresenceUpdate,
-    Ready, Region, SendFrame, ServerFrame, TenantId, TransitEnvelope, WatchPresence,
+    Ready, Region, SendFrame, ServerFrame, TenantId, TransitEnvelope, WatchPresence, WIRE_VERSION,
 };
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
 use futures_util::{SinkExt, StreamExt};
@@ -80,7 +80,7 @@ async fn connect_ws(
 
 fn envelope_from(sender: AgentId, body: &[u8]) -> TransitEnvelope {
     TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind: EnvelopeKind::Dm,
         group_id: None,
         tenant_id: None,
@@ -508,6 +508,152 @@ async fn next_presence(
         if let Message::Binary(b) = msg {
             if let ServerFrame::PresenceUpdate(p) = from_bytes::<ServerFrame>(&b).unwrap() {
                 return p;
+            }
+        }
+    }
+}
+
+/// Build an envelope at an explicit wire version (bypasses
+/// `envelope_from`'s `WIRE_VERSION` default) so the version-gate tests
+/// can pin v2/v3/other independently of which version is current.
+fn envelope_at(sender: AgentId, body: &[u8], version: u16) -> TransitEnvelope {
+    let mut e = envelope_from(sender, body);
+    e.version = version;
+    e
+}
+
+async fn send_envelope_to(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    to: AgentId,
+    envelope: TransitEnvelope,
+    dedupe_key: [u8; 16],
+) {
+    let frame = ClientFrame::Send(SendFrame {
+        to,
+        envelope,
+        dedupe_key: DedupeKey::from_bytes(dedupe_key),
+    });
+    ws.send(Message::Binary(to_bytes(&frame).unwrap()))
+        .await
+        .unwrap();
+}
+
+async fn next_server_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    timeout: Duration,
+) -> Option<ServerFrame> {
+    let msg = tokio::time::timeout(timeout, ws.next()).await.ok()??;
+    let msg = msg.ok()?;
+    if let Message::Binary(b) = msg {
+        return Some(from_bytes::<ServerFrame>(&b).unwrap());
+    }
+    None
+}
+
+#[tokio::test]
+async fn relay_accepts_wire_versions_2_and_3() {
+    // Both v2 (pre-M2) and v3 (post-M2) envelopes must traverse the
+    // relay during the transition window — old peers stay reachable
+    // while new sends emit v3.
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-v2v3-key";
+    let bob_pk = b"bob-v2v3-keybob";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let bob_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(bob_pk));
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let bob_tok = obtain_bearer(addr, bob_pk).await;
+
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    let mut bob = connect_ws(addr, &bob_tok).await;
+    send_hello(&mut alice).await;
+    send_hello(&mut bob).await;
+    let _ = expect_ready(&mut alice).await;
+    let _ = expect_ready(&mut bob).await;
+
+    for (version, dedupe) in [(2u16, [0xa2u8; 16]), (3u16, [0xa3u8; 16])] {
+        send_envelope_to(
+            &mut alice,
+            bob_id,
+            envelope_at(alice_id, b"hi", version),
+            dedupe,
+        )
+        .await;
+
+        let mut got_deliver = false;
+        let mut got_ack = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while (!got_deliver || !got_ack) && std::time::Instant::now() < deadline {
+            tokio::select! {
+                frame = next_server_frame(&mut bob, Duration::from_millis(200)) => {
+                    if let Some(ServerFrame::Deliver(d)) = frame {
+                        assert_eq!(d.envelope.version, version);
+                        got_deliver = true;
+                    }
+                }
+                frame = next_server_frame(&mut alice, Duration::from_millis(200)) => {
+                    if let Some(ServerFrame::Ack(a)) = frame {
+                        assert_eq!(a.dedupe_key, DedupeKey::from_bytes(dedupe));
+                        got_ack = true;
+                    }
+                }
+            }
+        }
+        assert!(got_deliver, "v{version} envelope was not delivered to Bob");
+        assert!(got_ack, "v{version} envelope was not acked to Alice");
+    }
+}
+
+#[tokio::test]
+async fn relay_rejects_unknown_wire_version() {
+    // Any envelope.version outside {2, 3} is dropped at the gate —
+    // Bob sees no Deliver and Alice sees no Ack. Future versions go
+    // through the same cutover dance (widen the match, ship, then
+    // narrow).
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-unknown-v";
+    let bob_pk = b"bob-unknown-vvv";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let bob_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(bob_pk));
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let bob_tok = obtain_bearer(addr, bob_pk).await;
+
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    let mut bob = connect_ws(addr, &bob_tok).await;
+    send_hello(&mut alice).await;
+    send_hello(&mut bob).await;
+    let _ = expect_ready(&mut alice).await;
+    let _ = expect_ready(&mut bob).await;
+
+    send_envelope_to(
+        &mut alice,
+        bob_id,
+        envelope_at(alice_id, b"v99", 99),
+        [0x99; 16],
+    )
+    .await;
+
+    // Drain a brief window — Bob must NOT receive a Deliver, and
+    // Alice must NOT receive an Ack for this dedupe key.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
+        tokio::select! {
+            frame = next_server_frame(&mut bob, Duration::from_millis(100)) => {
+                if let Some(ServerFrame::Deliver(d)) = frame {
+                    panic!("relay forwarded an unknown-version envelope: {d:?}");
+                }
+            }
+            frame = next_server_frame(&mut alice, Duration::from_millis(100)) => {
+                if let Some(ServerFrame::Ack(a)) = frame {
+                    panic!("relay acked an unknown-version send: {a:?}");
+                }
             }
         }
     }

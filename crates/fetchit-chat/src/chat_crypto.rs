@@ -417,9 +417,11 @@ mod tests {
 
     #[test]
     fn canonical_envelope_zeroes_signature() {
-        use fetchit_relay_proto::{AgentId, EnvelopeKind, MachineId, TransitEnvelope};
+        use fetchit_relay_proto::{
+            AgentId, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION,
+        };
         let env_a = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::GroupChat,
             group_id: None,
             tenant_id: None,

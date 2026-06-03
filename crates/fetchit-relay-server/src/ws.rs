@@ -296,6 +296,14 @@ fn handle_client_frame(
             if envelope.sender_agent_id != auth.agent_id {
                 return true;
             }
+            // Accept v2 (pre-M2 sealed wire) and v3 (M2 post-cut wire)
+            // during the transition window. v3 is the only version
+            // emitted on send paths after M2; v2 stays accepted until
+            // all live peers upgrade. Anything else is silently dropped
+            // — the relay never decrypts, but it gates schema drift.
+            if !matches!(envelope.version, 2 | 3) {
+                return true;
+            }
 
             let direct_pushed = state.sessions.send(
                 &to,
@@ -406,7 +414,7 @@ mod tests {
     use axum::extract::ws::Message;
     use fetchit_relay_proto::{
         to_bytes, AgentId, ClientFrame, EnvelopeKind, Hello, MachineId, Pong, ServerFrame,
-        TransitEnvelope,
+        TransitEnvelope, WIRE_VERSION,
     };
     use futures_util::stream::{self, StreamExt};
     use std::convert::Infallible;
@@ -417,7 +425,7 @@ mod tests {
 
     fn marked_envelope(tag: u8) -> TransitEnvelope {
         TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,

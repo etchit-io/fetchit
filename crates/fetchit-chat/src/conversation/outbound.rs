@@ -9,7 +9,9 @@ use crate::chat_identity::FetchitIdentity;
 use crate::error::ChatError;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use fetchit_relay_proto::{AgentId, EnvelopeKind, GroupId, MachineId, TransitEnvelope};
+use fetchit_relay_proto::{
+    AgentId, EnvelopeKind, GroupId, MachineId, TransitEnvelope, WIRE_VERSION,
+};
 use rand::rngs::OsRng;
 
 /// Tuple convenience: an outbound envelope paired with its recipient.
@@ -83,7 +85,7 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
             .map_err(|e| ChatError::Invalid(format!("recipient agent_id hex: {e}")))?;
 
         let mut env = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::GroupChat,
             group_id: Some(GroupId::from_bytes(group_id_bytes)),
             tenant_id: None,
@@ -160,7 +162,7 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
             .map_err(|e| ChatError::Invalid(format!("recipient hex: {e}")))?;
 
         let mut env = TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::GroupChat,
             group_id: Some(GroupId::from_bytes(group_id_bytes)),
             tenant_id: None,
@@ -231,7 +233,7 @@ pub async fn build_receipt_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     let nonce = random_nonce(&mut OsRng);
     let ciphertext = aead_seal(&key, &nonce, &payload_bytes, &aad)?;
     let mut env = TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind: EnvelopeKind::DeliveryReceipt,
         group_id: Some(GroupId::from_bytes(group_id_bytes)),
         tenant_id: None,

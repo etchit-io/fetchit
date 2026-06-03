@@ -6,7 +6,9 @@
 use fetchit_relay_client::{
     Client, ClientConfig, MlDsaSigner, Signer, StaticKeySigner, X0xdSigner,
 };
-use fetchit_relay_proto::{AgentId, DedupeKey, EnvelopeKind, MachineId, Region, TransitEnvelope};
+use fetchit_relay_proto::{
+    AgentId, DedupeKey, EnvelopeKind, MachineId, Region, TransitEnvelope, WIRE_VERSION,
+};
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,7 +31,7 @@ async fn start_server() -> SocketAddr {
 
 fn envelope_from(sender: AgentId, body: &[u8]) -> TransitEnvelope {
     TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind: EnvelopeKind::Dm,
         group_id: None,
         tenant_id: None,

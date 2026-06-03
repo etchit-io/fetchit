@@ -7,13 +7,13 @@ use fetchit_relay_proto::{
     ByeReason, Capability, CapabilityClaims, CapabilityToken, ClientFrame, DedupeKey, Deliver,
     EffectiveCapabilities, EnvelopeKind, FeatureFlag, GroupId, Hello, MachineId, Ping, Pong,
     PresenceUpdate, Ready, Region, SendFrame, ServerFrame, Subscribe, TenantId, Throttle,
-    ThrottleReason, TransitEnvelope, WatchPresence,
+    ThrottleReason, TransitEnvelope, WatchPresence, WIRE_VERSION,
 };
 use std::collections::BTreeSet;
 
 fn envelope() -> TransitEnvelope {
     TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind: EnvelopeKind::GroupChat,
         group_id: Some(GroupId::from_bytes([0x33; 32])),
         tenant_id: Some(TenantId::new("acme")),

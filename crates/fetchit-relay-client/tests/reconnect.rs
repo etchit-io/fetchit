@@ -329,7 +329,7 @@ async fn supervisor_reconnects_after_explicit_close() {
 #[tokio::test]
 async fn send_during_disconnect_returns_disconnected_error() {
     use fetchit_relay_client::ClientError;
-    use fetchit_relay_proto::{DedupeKey, EnvelopeKind, MachineId, TransitEnvelope};
+    use fetchit_relay_proto::{DedupeKey, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION};
 
     let (addr, mock_state, server) = spawn_mock(None).await;
     let base = Url::parse(&format!("http://{addr}/")).unwrap();
@@ -364,7 +364,7 @@ async fn send_during_disconnect_returns_disconnected_error() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let env = TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind: EnvelopeKind::Dm,
         group_id: None,
         tenant_id: None,
@@ -500,7 +500,9 @@ async fn send_returns_send_timeout_when_relay_never_acks() {
     // surfaces `ClientError::SendTimeout` so the outbox can flip the
     // bubble to a clear failed state.
     use fetchit_relay_client::ClientError;
-    use fetchit_relay_proto::{AgentId, DedupeKey, EnvelopeKind, MachineId, TransitEnvelope};
+    use fetchit_relay_proto::{
+        AgentId, DedupeKey, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION,
+    };
 
     let (addr, _state, _server) = spawn_mock(None).await;
     let base = Url::parse(&format!("http://{addr}/")).unwrap();
@@ -518,7 +520,7 @@ async fn send_returns_send_timeout_when_relay_never_acks() {
 
     let client = Client::connect(cfg, signer).await.unwrap();
     let envelope = TransitEnvelope {
-        version: 2,
+        version: WIRE_VERSION,
         kind: EnvelopeKind::Dm,
         group_id: None,
         tenant_id: None,

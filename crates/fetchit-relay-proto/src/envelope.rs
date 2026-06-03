@@ -8,6 +8,13 @@
 use crate::identity::{AgentId, GroupId, MachineId, TenantId};
 use serde::{Deserialize, Serialize};
 
+/// Wire-protocol version. Bumped to 3 at M2 (2026-06-02) when the
+/// v1 unsealed-fabricated escape hatch was removed and every send
+/// is required to be sealed. Relay servers accept both 2 and 3
+/// inbound during a transition window; v3 is the only version
+/// emitted on send paths post-M2.
+pub const WIRE_VERSION: u16 = 3;
+
 /// Discriminator for what the ciphertext payload represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnvelopeKind {
@@ -35,9 +42,10 @@ pub enum EnvelopeKind {
 /// (sender id, timestamp, signature) are inspected.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitEnvelope {
-    /// Envelope-format version. Bumped to 2 when `epoch` was added for
-    /// PQ-sealed chat. v1 envelopes did not carry an epoch; the field is
-    /// required in v2.
+    /// Envelope-format version. v2 added `epoch` for PQ-sealed chat;
+    /// v3 (M2, 2026-06-02) marks the wire shape after the unsealed
+    /// fabricated send path was removed. New sends always emit
+    /// [`WIRE_VERSION`]; relays accept v2 + v3 during the transition.
     pub version: u16,
     /// Which conversation surface this envelope belongs to.
     pub kind: EnvelopeKind,
@@ -89,7 +97,7 @@ mod tests {
 
     fn sample_envelope() -> TransitEnvelope {
         TransitEnvelope {
-            version: 2,
+            version: WIRE_VERSION,
             kind: EnvelopeKind::Dm,
             group_id: None,
             tenant_id: None,
