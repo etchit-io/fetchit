@@ -20,8 +20,10 @@ pub mod discovery;
 pub mod error;
 pub mod secure;
 pub mod signer;
+pub mod version;
 
 pub use discovery::{discover_in, discover_local, DaemonEndpoint};
 pub use error::{DiscoveryError, X0xdError};
 pub use secure::{CreatedGroup, EncryptedFrame, SecureGroupsEndpoint};
 pub use signer::{Signer, X0xdSigner};
+pub use version::X0xdVersion;

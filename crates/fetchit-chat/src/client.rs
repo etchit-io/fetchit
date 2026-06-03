@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
+use x0xd_client::X0xdVersion;
 use zeroize::Zeroizing;
 
 /// How often the auto-rekey sweeper fires.
@@ -468,10 +469,44 @@ impl std::fmt::Debug for Client {
     }
 }
 
-/// Borrow the live relay transport when one is wired. Returns
-/// `None` for REST-only clients. The chat layer uses this to drive
-/// relay-level capabilities (e.g. the presence watch set) that don't
-/// fit cleanly behind the `Transport` trait.
+/// Probe x0xd's `/version` endpoint and refuse to proceed when the
+/// daemon is older than [`X0xdVersion::M2_TREEKEM_MIN`].
+///
+/// Transport failures surface as
+/// [`ChatError::MessageTransport`]; an outdated daemon surfaces as
+/// [`ChatError::Invalid`] with a message that names both the live
+/// version and the upgrade target.
+async fn enforce_m2_treekem_minimum(base_url: &str, token: &str) -> Result<()> {
+    let parsed_base =
+        Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
+    let version = X0xdVersion::probe(&parsed_base, token)
+        .await
+        .map_err(|e| ChatError::MessageTransport(format!("x0xd /version probe: {e}")))?;
+    if !version.satisfies_m2_treekem() {
+        return Err(ChatError::Invalid(format!(
+            "x0xd {}.{}.{} does not support PQ TreeKEM groups; upgrade to >= {}.{}.{}",
+            version.major,
+            version.minor,
+            version.patch,
+            X0xdVersion::M2_TREEKEM_MIN.major,
+            X0xdVersion::M2_TREEKEM_MIN.minor,
+            X0xdVersion::M2_TREEKEM_MIN.patch,
+        )));
+    }
+    Ok(())
+}
+
+/// Wire chat state, signer, and transports against a reachable x0xd.
+///
+/// Only runs in the chat-needing build path (`needs_chat` true in
+/// [`Client::from_parts`]); REST-only clients skip this entirely.
+///
+/// Gates on `x0xd >= 0.20.1` before doing any chat work: v0.20.0
+/// over-included `TreeKEM` activation; v0.20.1 narrowed it correctly to
+/// `private_secure` + `Hidden`. The probe fires here (after the HTTP
+/// wrapper is built, so transport errors stay as transport errors)
+/// but before `/agent` or any chat state, so an outdated daemon fails
+/// fast with a typed error that names the upgrade target.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn build_with_chat(
     http: &Http,
@@ -489,6 +524,11 @@ async fn build_with_chat(
     Option<Arc<LanDirectTransport>>,
     Option<std::net::SocketAddr>,
 )> {
+    // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
+    // chat-side work so an outdated daemon never gets a chance to
+    // mis-handle a `private_secure` group.
+    enforce_m2_treekem_minimum(base_url, &token).await?;
+
     // Resolve the local agent identity from x0xd. The chat identity
     // vault is bound to this agent_id — rotating the x0xd identity
     // forces a fresh KEM keypair.
@@ -1159,5 +1199,54 @@ mod tests {
             conv_after.prior_keys.is_empty(),
             "no prior_keys entry should accumulate from a failed rekey",
         );
+    }
+
+    /// Builder gate: an x0xd that reports a pre-M2 version on
+    /// `/version` is refused at chat-build time. The probe runs at the
+    /// top of `build_with_chat`, so we never touch `/agent`, the
+    /// signer, or any chat state — the wiremock only needs to answer
+    /// `/version`.
+    #[tokio::test]
+    async fn build_rejects_x0xd_below_m2_treekem_minimum() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "version": "0.19.53",
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = Client::builder()
+            .base_url(server.uri())
+            .token("test-token")
+            .data_dir(dir.path().to_path_buf())
+            .passphrase("p".to_owned())
+            .build()
+            .await
+            .expect_err("pre-M2 x0xd must fail the version gate");
+
+        match err {
+            ChatError::Invalid(msg) => {
+                assert!(
+                    msg.contains("does not support PQ TreeKEM"),
+                    "expected TreeKEM gate message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("0.19.53"),
+                    "expected daemon version in error, got: {msg}"
+                );
+                assert!(
+                    msg.contains("0.20.1"),
+                    "expected upgrade target in error, got: {msg}"
+                );
+            }
+            other => panic!("expected ChatError::Invalid, got {other:?}"),
+        }
     }
 }
