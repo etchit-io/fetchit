@@ -23,6 +23,7 @@ pub mod discovery;
 pub mod error;
 pub mod events;
 pub mod groups;
+pub mod groups_reachability;
 pub mod identity;
 pub mod lan_direct_transport;
 pub mod lan_discovery;
