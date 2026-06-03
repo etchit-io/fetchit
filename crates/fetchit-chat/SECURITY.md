@@ -57,10 +57,10 @@ in-process; we drive x0xd's MLS surface via REST.
 
 Group messages in v1 should be treated as **public**. The UI surfaces
 them as "public rooms" (the wire value is `public_open` for x0xd's
-benefit, but no copy users see uses that string). A visible badge
-labels every group as "plaintext on relay — encrypted groups coming
-M2" — distinct from DMs which run the encrypted v2 path when the
-conversation layer drives the send.
+benefit, but no copy users see uses that string). No per-group
+encryption badge exists yet; the M2 UI work (plan Task 14) adds the
+private/public radio in the create-group dialog alongside the
+caveat 2 closure.
 
 M2 ships PQ TreeKEM groups via x0xd v0.20.x's MLS surface
 (`preset=private_secure` + `discoverability=Hidden`), which the daemon

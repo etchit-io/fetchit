@@ -208,12 +208,10 @@ it. Out-of-band: nothing about this flow is fetchit-built.
 5. relay_transport.send(envelope) — wire
 ```
 
-Alternative simpler shape (TBD impl): route entirely via x0xd's own
-`/publish` to a chat topic; the relay path becomes specific to the
-DM-style direct-deliver semantics, and group fan-out happens via
-gossip on x0xd's pubsub. This is the shape closer to "x0xd does the
-networking" and avoids dual-channelling. Decision deferred to
-implementation plan once tested live.
+**Decision recorded.** `private/m2-decisions.md` Decision 1 selects
+Path A (TransitEnvelope-wrapped through our relay). x0xd's `/publish`
++ `/subscribe` endpoints are wired in `x0xd-client::secure` for
+completeness but are NOT on the v1.0 group chat path.
 
 ### 4.4 Receive message
 
@@ -323,9 +321,9 @@ no; match David's framing exactly, no BS in launch copy."
 - Spec drives MILESTONES.md M2 gate (post-pivot 2026-06-02)
 - Pairs with `[[feedback-rely-on-x0x]]` memory (the rule that
   produced this pivot)
-- Replaces the placeholder spec path
-  `docs/superpowers/specs/2026-06-XX-mls-openmls-groups-design.md`
-  in the previous MILESTONES text
+- Supersedes the `2026-06-XX-mls-openmls-groups-design.md`
+  placeholder named in MILESTONES.md (file was named but never
+  created)
 - M0/M1 PQ DM spec at
   `docs/superpowers/specs/2026-05-28-pq-content-and-groups-design.md`
   (historical; describes the DM-side work that already shipped)

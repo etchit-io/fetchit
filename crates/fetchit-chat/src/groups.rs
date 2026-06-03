@@ -1,9 +1,8 @@
 //! Public-room groups — create, invite, send, list.
 //!
 //! M1 ships groups as **public rooms** (UI label). On the wire we
-//! send x0xd's existing `public_open` preset value; OUR copy +
-//! docstrings name it "public room" everywhere users / forum readers
-//! / grep-and-screenshot critics will see. Group messages flow
+//! send x0xd's existing `public_open` preset value; user-facing copy
+//! says "public room". Group messages flow
 //! plaintext over the gossip pub/sub — **no MLS**, no forward
 //! secrecy, no membership privacy. The module name "groups" survives;
 //! the "MLS" framing did not.

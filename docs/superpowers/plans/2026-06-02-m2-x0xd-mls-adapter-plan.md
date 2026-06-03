@@ -1404,6 +1404,12 @@ In `groups.rs` `impl<'a> Endpoint<'a>`:
     }
 ```
 
+> **Verify before compiling:** The scaffold above uses `sender_signature`
+> and `kem_ciphertext` as `TransitEnvelope` field names. These names
+> are correct as of `crates/fetchit-relay-proto/src/envelope.rs` lines
+> 67-69, but if a future schema change renames them the scaffold
+> won't compile. Grep that file before pasting.
+
 - [ ] **Step 3: Implement `receive_private`**
 
 In `groups.rs` `impl<'a> Endpoint<'a>`:
