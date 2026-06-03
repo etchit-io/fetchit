@@ -1697,8 +1697,7 @@ mod tests {
         // The exact path `chat_pair_share` would later `Url::join` would
         // collide with — this would silently produce the wrong URL if
         // we let it through.
-        let err =
-            validate_relay_url("http://relay.example:8088/v1/profile/abc").unwrap_err();
+        let err = validate_relay_url("http://relay.example:8088/v1/profile/abc").unwrap_err();
         assert!(err.contains("no path"), "{err}");
     }
 
@@ -1719,7 +1718,9 @@ mod tests {
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_local_relay_env<F: FnOnce() -> R, R>(allowed: bool, f: F) -> R {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = super::ALLOW_LOCAL_RELAY_ENV;
         let prev = std::env::var_os(key);
         if allowed {

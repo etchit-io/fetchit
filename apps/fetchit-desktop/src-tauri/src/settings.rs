@@ -397,9 +397,15 @@ mod tests {
     #[test]
     fn resolve_env_unset_returns_setting() {
         with_chat_env(None, || {
-            let s = Settings { chat_enabled: true, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: true,
+                ..Settings::default()
+            };
             assert!(resolve_chat_enabled(&s));
-            let s = Settings { chat_enabled: false, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: false,
+                ..Settings::default()
+            };
             assert!(!resolve_chat_enabled(&s));
         });
     }
@@ -407,16 +413,25 @@ mod tests {
     #[test]
     fn resolve_env_overrides_setting_to_true() {
         with_chat_env(Some("1"), || {
-            let s = Settings { chat_enabled: false, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: false,
+                ..Settings::default()
+            };
             assert!(resolve_chat_enabled(&s));
         });
         with_chat_env(Some("true"), || {
-            let s = Settings { chat_enabled: false, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: false,
+                ..Settings::default()
+            };
             assert!(resolve_chat_enabled(&s));
         });
         with_chat_env(Some("ON"), || {
             // Case-insensitive.
-            let s = Settings { chat_enabled: false, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: false,
+                ..Settings::default()
+            };
             assert!(resolve_chat_enabled(&s));
         });
     }
@@ -424,15 +439,24 @@ mod tests {
     #[test]
     fn resolve_env_overrides_setting_to_false() {
         with_chat_env(Some("0"), || {
-            let s = Settings { chat_enabled: true, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: true,
+                ..Settings::default()
+            };
             assert!(!resolve_chat_enabled(&s));
         });
         with_chat_env(Some("FALSE"), || {
-            let s = Settings { chat_enabled: true, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: true,
+                ..Settings::default()
+            };
             assert!(!resolve_chat_enabled(&s));
         });
         with_chat_env(Some("off"), || {
-            let s = Settings { chat_enabled: true, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: true,
+                ..Settings::default()
+            };
             assert!(!resolve_chat_enabled(&s));
         });
     }
@@ -441,9 +465,15 @@ mod tests {
     fn resolve_unrecognised_env_falls_through_to_setting() {
         // "maybe" isn't on the recognised list, so the setting wins.
         with_chat_env(Some("maybe"), || {
-            let s = Settings { chat_enabled: true, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: true,
+                ..Settings::default()
+            };
             assert!(resolve_chat_enabled(&s));
-            let s = Settings { chat_enabled: false, ..Settings::default() };
+            let s = Settings {
+                chat_enabled: false,
+                ..Settings::default()
+            };
             assert!(!resolve_chat_enabled(&s));
         });
     }
@@ -452,7 +482,10 @@ mod tests {
     fn chat_enabled_round_trips_through_settings_json() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("settings.json");
-        let s = Settings { chat_enabled: !default_chat_enabled(), ..Settings::default() };
+        let s = Settings {
+            chat_enabled: !default_chat_enabled(),
+            ..Settings::default()
+        };
         s.save(&p).unwrap();
         let loaded = Settings::load(&p);
         assert_eq!(loaded.chat_enabled, !default_chat_enabled());

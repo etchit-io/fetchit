@@ -441,13 +441,10 @@ fn relay_regions() -> Vec<settings::KnownRelay> {
 /// Read the persisted relay URL the chat client points at.
 #[tauri::command]
 fn relay_url(state: tauri::State<'_, AppState>) -> String {
-    state
-        .settings
-        .lock()
-        .map_or_else(
-            |_| settings::DEFAULT_RELAY_URL.to_owned(),
-            |s| s.relay_url.clone(),
-        )
+    state.settings.lock().map_or_else(
+        |_| settings::DEFAULT_RELAY_URL.to_owned(),
+        |s| s.relay_url.clone(),
+    )
 }
 
 /// Switch to a new relay URL (either a `KNOWN_RELAYS` entry or a custom
