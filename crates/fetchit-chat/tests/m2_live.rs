@@ -15,6 +15,13 @@
 //!
 //! - `M2_LIVE_PEER_AGENT` — Bob's 64-hex `agent_id` (REQUIRED, no
 //!   sensible default).
+//! - `M2_LIVE_PEER_SHARE_URI` — Bob's `x0x://agent/<base64>` v2/v3
+//!   share card URI (REQUIRED). The test imports this into the
+//!   hermetic `TempDir` vault before sending so
+//!   `receive_private_group_envelope` can load Bob's
+//!   `StoredContactCard` and ML-DSA-verify his echoes. Without it, the
+//!   sender-verify step fails closed with `no card for envelope
+//!   sender …` and Bob's echoes never reach `Conversation.history`.
 //! - `M2_LIVE_VAULT_PASS` — at-rest vault passphrase (REQUIRED; the
 //!   test refuses to invent a default so a stale on-disk vault doesn't
 //!   get silently unlocked under a sentinel value).
@@ -29,6 +36,7 @@
 //!
 //! ```text
 //! M2_LIVE_PEER_AGENT=<bob-hex> \
+//! M2_LIVE_PEER_SHARE_URI='x0x://agent/<base64>' \
 //! M2_LIVE_VAULT_PASS=<test-passphrase> \
 //!     cargo test -p fetchit-chat --test m2_live \
 //!         -- --ignored --nocapture
@@ -42,9 +50,9 @@
 //!   received in the group back into the same group" handler in his
 //!   chat-peer (Task 16 wires this).
 //! - Bob has imported Alice's v2/v3 share card so envelope-signature
-//!   verify succeeds on his side; Alice imports Bob's card via the
-//!   normal pairing flow before this test runs (today: pasted by hand,
-//!   pending automation).
+//!   verify succeeds on his side; Alice imports Bob's card directly
+//!   in-test by passing `M2_LIVE_PEER_SHARE_URI` (see env contract
+//!   above).
 //!
 //! # Hermeticity
 //!
@@ -132,6 +140,7 @@ async fn m2_live_private_group_round_trip() {
         format!("{home}/.local/share/x0x-claude-here/api-token")
     });
     let peer_agent_hex = env_required("M2_LIVE_PEER_AGENT");
+    let peer_share_uri = env_required("M2_LIVE_PEER_SHARE_URI");
     let vault_pass = env_required("M2_LIVE_VAULT_PASS");
     let group_name = env_or("M2_LIVE_GROUP_NAME", || format!("m2-live-{}", now_ms()));
 
@@ -140,6 +149,11 @@ async fn m2_live_private_group_round_trip() {
         64,
         "M2_LIVE_PEER_AGENT must be 64 hex chars; got {} chars",
         peer_agent_hex.len()
+    );
+    assert!(
+        peer_share_uri.starts_with("x0x://agent/"),
+        "M2_LIVE_PEER_SHARE_URI must be an x0x://agent/ URI; got {} bytes",
+        peer_share_uri.len()
     );
 
     let base_url = read_x0xd_base_url(&port_file);
@@ -170,6 +184,31 @@ async fn m2_live_private_group_round_trip() {
 
     let me = client.identity().me().await.expect("/agent must succeed");
     eprintln!("[m2-live] local agent_id = {}", me.agent_id);
+
+    // Import Bob's share card into the hermetic TempDir vault. Without
+    // this, `receive_private_group_envelope` fails closed on
+    // `StoredContactCard::load(layout, sender) == None` for every echo
+    // Bob sends, so his replies never reach `Conversation.history`.
+    // Mirrors `peer.rs::run_import` — the same code path the real shell
+    // uses — so the test exercises the production import flow rather
+    // than constructing a card by hand.
+    client
+        .identity()
+        .import_uri(&peer_share_uri)
+        .await
+        .expect("import Bob's share URI into x0xd's /cards");
+    let layout = client
+        .layout()
+        .expect("client built with data_dir must expose a layout");
+    let stored = fetchit_chat::messages::StoredContactCard::from_share_uri(&peer_share_uri)
+        .expect("Bob's share URI must parse as v2/v3 StoredContactCard");
+    stored
+        .save(layout)
+        .expect("persist Bob's card to TempDir vault");
+    eprintln!(
+        "[m2-live] imported peer card for {}",
+        &peer_agent_hex[..8.min(peer_agent_hex.len())]
+    );
 
     // Create the private group + seed the local Conversation in one
     // step. The bare `groups::create_private` would skip the seed and
