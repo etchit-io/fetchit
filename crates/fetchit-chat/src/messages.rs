@@ -531,7 +531,22 @@ impl<'a> Endpoint<'a> {
         // returns Ok so the user's "sending → sent" UI fires.
         let groups = crate::groups::Endpoint::new(self.http);
         let chat_group_id = ChatGroupId::parse(group_id)?;
-        let roster = groups.members(&chat_group_id).await?;
+        let raw_roster = groups.members(&chat_group_id).await?;
+        // Roster dedup: `groups::Endpoint::members` returns `Vec<AgentId>`
+        // verbatim from `x0xd`'s `/members` response. If the daemon ever
+        // emits the same `agent_id` twice in the roster (shouldn't, but
+        // the wire shape doesn't enforce uniqueness), the fan-out loop
+        // would address the same peer twice — double-delivery on the
+        // wire + double-history on the receiver's side. Case-insensitive
+        // BTreeSet drop matches the self-exclusion convention from
+        // `a3c48dd`.
+        let roster = {
+            let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            raw_roster
+                .into_iter()
+                .filter(|m| seen.insert(m.0.to_ascii_lowercase()))
+                .collect::<Vec<_>>()
+        };
         let local_agent_hex = identity.agent_id_hex();
         let timestamp_ms = envelope.timestamp_ms;
         let mut last_receipt_id: Option<String> = None;
@@ -813,9 +828,19 @@ impl<'a> Endpoint<'a> {
     /// member are rejected before any disk write.
     ///
     /// Comparison is case-insensitive to match
-    /// `send_private_group`'s self-exclusion: x0xd's roster shape
+    /// `send_private_group`'s self-exclusion: `x0xd`'s roster shape
     /// has historically returned mixed-case agent IDs and the wire
     /// `AgentId` is `#[serde(transparent)]`.
+    ///
+    /// **Failure mode.** If `x0xd` is down or the `/members` endpoint
+    /// returns non-2xx, this method propagates the error and the
+    /// receiver becomes deaf to bootstrap of new groups until the
+    /// daemon recovers. That is the pragmatic shape — `fetchit-chat`
+    /// cannot operate without `x0xd` regardless (signing, decrypt,
+    /// roster all live there) so a `/members` outage is observable
+    /// upstream too. Existing conversations are unaffected (their
+    /// receive path skips the gate per the `registry.get().is_some()`
+    /// check at the call site).
     async fn verify_group_membership(
         &self,
         group_id_hex: &str,
@@ -1199,6 +1224,13 @@ mod tests {
     /// 64-hex group id matching the wire-shape x0xd returns from
     /// `POST /groups`. Doubles as a known value for envelope assertions.
     const TEST_GROUP_HEX: &str = "4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e";
+
+    /// 64-hex agent id for a peer that is NOT the test's local
+    /// identity. Used by tests that need a stand-in "other" agent in
+    /// a roster or sender slot. 64 `c`'s — chosen for visual
+    /// distinctness from the all-`a` / all-`b` patterns elsewhere.
+    const OTHER_AGENT_HEX: &str =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     /// Mount `POST /groups/<G>/secure/encrypt` returning a fixed
     /// `EncryptedFrame` and `GET /groups/<G>/members` returning
@@ -2012,6 +2044,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_private_group_dedupes_duplicate_roster_entries() {
+        // NOTE from Bob's cross-review: `groups::Endpoint::members`
+        // returns `Vec<AgentId>` verbatim from x0xd's `/members`
+        // response — the wire shape doesn't enforce uniqueness. If
+        // the daemon ever emits the same `agent_id` twice (shouldn't,
+        // but defensive), the fan-out loop would address the same
+        // peer twice: double-delivery on the wire, double-history on
+        // the receiver. Dedup case-insensitively before iterating
+        // (same case-fold convention as `a3c48dd` self-exclusion).
+        //
+        // Test shape: roster lists the same peer agent_id twice
+        // (once lowercase, once uppercase to also pin the case-fold).
+        // Expect exactly one envelope captured for that peer.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer = "b".repeat(64);
+        let peer_upper = peer.to_ascii_uppercase();
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex, "state": "active"},
+                    {"agent_id": peer, "state": "active"},
+                    {"agent_id": peer_upper, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        let recipients: Vec<String> = captured.iter().map(|(a, _)| a.0.clone()).collect();
+        assert_eq!(
+            captured.len(),
+            1,
+            "duplicate roster entry must be deduped; saw recipients {recipients:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn send_private_group_empty_roster_returns_no_envelopes_sent() {
         let server = MockServer::start().await;
         let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
@@ -2363,8 +2468,7 @@ mod tests {
         mount_decrypt(&server, b"hi from peer").await;
         let rig = build_rig();
         // Mount a roster that does NOT contain the receiver.
-        let other_hex = "c".repeat(64);
-        mount_members_without_self(&server, &other_hex).await;
+        mount_members_without_self(&server, OTHER_AGENT_HEX).await;
         let sender_signer = MlDsaSigner::generate().unwrap();
         let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
             &sender_signer.public_key(),
