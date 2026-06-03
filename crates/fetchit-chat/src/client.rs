@@ -372,6 +372,81 @@ impl Client {
             .and_then(|t| t.take_inbound())
     }
 
+    /// Spawn a background dispatcher that drains the relay transport's
+    /// inbound channel and routes every envelope through the right
+    /// receive path. This is the piece every consumer of relay inbound
+    /// needs but that `Client::build` does NOT wire automatically —
+    /// without it, `Conversation::history` never gains entries from
+    /// remote sends because nothing pulls envelopes off the mpsc and
+    /// nothing calls [`messages::Endpoint::receive_private_group_envelope`]
+    /// or [`crate::conversation::dispatch_inbound`].
+    ///
+    /// Routing mirrors `crates/fetchit-chat/src/bin/peer.rs::decode_inbound`:
+    /// - [`crate::messages::is_private_group_envelope`] matches the M2
+    ///   `EnvelopeKind::PrivateGroupChat` shape and goes through
+    ///   `receive_private_group_envelope` (which calls x0xd
+    ///   `/secure/decrypt`, ML-DSA verifies, dedups, persists via
+    ///   `push_history`).
+    /// - Anything else goes through `dispatch_inbound` (the legacy
+    ///   chat-v2 path).
+    /// - Self-source filter at the top drops own-sends that round-trip
+    ///   over the relay (same logic as `peer.rs` line ~230).
+    ///
+    /// Errors from individual envelopes are swallowed silently — a
+    /// single bad envelope must not wedge the dispatch pump. Callers
+    /// that need richer behaviour (logging, echo, receipt-send) should
+    /// drive their own dispatch loop and reserve this helper for the
+    /// "I just need history to update" path (`m2_live` tests, future
+    /// tooling that wants drop-in chat dispatch).
+    ///
+    /// Returns `None` if the `"relay"` transport is not wired or its
+    /// inbound has already been taken (the channel is single-consumer).
+    /// The returned [`tokio::task::JoinHandle`] should be held by the
+    /// caller; dropping it cancels the dispatcher.
+    #[must_use]
+    pub fn spawn_default_dispatcher(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let mut rx = self.take_transport_inbound("relay")?;
+        let client = self.clone();
+        Some(tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                client.default_dispatch_one(env).await;
+            }
+        }))
+    }
+
+    async fn default_dispatch_one(&self, mut env: InboundEnvelope) {
+        let Some(transit) = env.transit.take() else {
+            return;
+        };
+        if let Some(identity) = self.identity_arc() {
+            if hex::encode(transit.sender_agent_id.as_bytes()) == identity.agent_id_hex() {
+                return;
+            }
+        }
+        if messages::is_private_group_envelope(&transit) {
+            let group_id_hex = transit
+                .group_id
+                .as_ref()
+                .map(|g| hex::encode(g.as_bytes()))
+                .unwrap_or_default();
+            if group_id_hex.is_empty() {
+                return;
+            }
+            let _ = self
+                .messages()
+                .receive_private_group_envelope(&transit, &group_id_hex)
+                .await;
+        } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
+        {
+            let _ = crate::conversation::dispatch_inbound(
+                transit,
+                identity.as_ref(),
+                registry.as_ref(),
+            )
+            .await;
+        }
+    }
+
     /// Open the unified SSE event stream from x0xd — presence,
     /// contacts, group state, gossip. Direct messages do not flow here
     /// in the relay-routed deployment; subscribe to the relay's

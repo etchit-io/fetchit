@@ -295,6 +295,24 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
     // Chat-v2 envelopes (TransitEnvelope present) go through the
     // conversation dispatcher so we get a decrypted MessagePayload.
     if let Some(transit) = env.transit.take() {
+        // Diagnostic — pre-routing peek at envelope shape so the rig
+        // can be debugged when a sender's classification drifts (e.g.
+        // when Alice's pipe started routing chat-pipe DMs through
+        // send_private_group and my peer mis-routed them via
+        // `is_private_group_envelope`, leaving them to fail postcard
+        // decode with no visibility into WHY). Metadata only; the
+        // body is sealed and never touched at this layer.
+        let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+        let group_hex = transit.group_id.as_ref().map(|g| hex::encode(g.as_bytes()));
+        eprintln!(
+            "[peer] inbound: kind={:?} sender={} group_id={} ct_len={} kem_len={} epoch={}",
+            transit.kind,
+            short(&sender_hex),
+            group_hex.as_deref().map_or("none", short),
+            transit.ciphertext.len(),
+            transit.kem_ciphertext.len(),
+            transit.epoch,
+        );
         // M2 private-group path: GroupChat envelopes whose
         // kem_ciphertext is empty are PQ-TreeKEM frames produced by
         // x0xd's /secure/encrypt. Routed via the shared

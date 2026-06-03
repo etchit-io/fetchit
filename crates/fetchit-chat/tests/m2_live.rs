@@ -182,6 +182,24 @@ async fn m2_live_private_group_round_trip() {
         .await
         .expect("Client::build must succeed against live x0xd + relay");
 
+    // Spawn the default inbound dispatcher BEFORE any send so Bob's
+    // echoes (or any other relay-inbound) land in
+    // `Conversation.history` instead of piling up on the relay
+    // transport's mpsc until the test times out.
+    //
+    // Without this, `receive_private_group_envelope` is never called
+    // and the `MIN_HISTORY_FROM_BOB` assertion at the bottom of the
+    // test will trivially fail with `0 from-Bob entries` regardless of
+    // Bob's echo handler being correct, regardless of join timing, and
+    // regardless of card-import being in place. Discovered the hard
+    // way during Round 2 (autopsy 2026-06-03): the cleanest fix is one
+    // helper on `Client` that mirrors `peer.rs::decode_inbound`'s
+    // routing logic — `is_private_group_envelope` → x0xd
+    // `/secure/decrypt`; else → legacy `dispatch_inbound`.
+    let _dispatcher = client
+        .spawn_default_dispatcher()
+        .expect("relay transport must be wired and inbound channel must be takeable exactly once");
+
     let me = client.identity().me().await.expect("/agent must succeed");
     eprintln!("[m2-live] local agent_id = {}", me.agent_id);
 
