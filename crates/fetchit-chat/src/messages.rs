@@ -1170,6 +1170,886 @@ mod tests {
         assert_eq!(hex::encode(group_id.as_bytes()), TEST_GROUP_HEX);
     }
 
+    // ===================================================================
+    // Private-group send/receive — failure paths + round-trip integration.
+    // ===================================================================
+
+    /// Full rig for the private-group receive tests: layout on a temp
+    /// dir, a `FetchitIdentity` bound to a freshly-generated ML-DSA
+    /// signer, a `ConversationRegistry`, and the in-memory pieces a
+    /// `messages::Endpoint` needs at call time. Held by-value so each
+    /// test's tempdir stays alive across the whole test; the
+    /// `_tempdir` field is intentionally a guard.
+    struct PrivateGroupRig {
+        _tempdir: tempfile::TempDir,
+        layout: crate::local_store::StoreLayout,
+        identity: Arc<FetchitIdentity>,
+        signer: Arc<MlDsaSigner>,
+        registry: Arc<crate::conversation::ConversationRegistry>,
+    }
+
+    impl PrivateGroupRig {
+        fn signer_arc(&self) -> Arc<dyn Signer> {
+            self.signer.clone()
+        }
+
+        fn agent_hex(&self) -> &str {
+            self.identity.agent_id_hex()
+        }
+    }
+
+    /// Build a fresh rig. Each call mints a distinct ML-DSA identity so
+    /// adversarial tests can produce mismatched-sender cards without
+    /// stomping on a shared fixture.
+    fn build_rig() -> PrivateGroupRig {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use crate::conversation::ConversationRegistry;
+        use crate::local_store::StoreLayout;
+        use fetchit_relay_proto::derive_agent_id;
+        use zeroize::Zeroizing;
+        let tempdir = tempfile::tempdir().unwrap();
+        let signer = Arc::new(MlDsaSigner::generate().unwrap());
+        let aid = hex::encode(derive_agent_id(&signer.public_key()));
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let layout = StoreLayout::ensure(tempdir.path().join("store")).unwrap();
+        let id = FetchitIdentity::load_or_create(
+            tempdir.path(),
+            &master,
+            &aid,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+        let registry = Arc::new(ConversationRegistry::new(
+            layout.clone(),
+            Arc::new(master),
+            kdf_id_argon2(),
+            Some(salt),
+        ));
+        PrivateGroupRig {
+            _tempdir: tempdir,
+            layout,
+            identity: Arc::new(id),
+            signer,
+            registry,
+        }
+    }
+
+    /// Install `sender_signer`'s share card into `rig.layout` so that
+    /// `receive_private_group_envelope` can resolve the sender's
+    /// ML-DSA pubkey for signature verification.
+    fn install_card_for(rig: &PrivateGroupRig, sender_signer: &MlDsaSigner, sender_hex: &str) {
+        let card = StoredContactCard {
+            agent_id_hex: sender_hex.to_owned(),
+            display_name: "Peer".to_owned(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(sender_signer.public_key())),
+        };
+        card.save(&rig.layout).unwrap();
+    }
+
+    /// Build + sign a private-group envelope addressed to the test
+    /// group. Signature is over the canonical envelope bytes using
+    /// `sender_signer`, so the receive path's verify-prelude will
+    /// accept it iff the matching card is installed.
+    async fn craft_inbound_envelope(
+        sender_signer: &MlDsaSigner,
+        sender_hex: &str,
+        body: &[u8],
+        timestamp_ms: u64,
+    ) -> TransitEnvelope {
+        let frame = EncryptedFrame {
+            ciphertext_b64: B64.encode(body),
+            nonce_b64: "MTIzNDU2Nzg5MGFi".to_owned(),
+            secret_epoch: 9,
+        };
+        let frame_bytes = postcard::to_allocvec(&frame).unwrap();
+        let mut group_id_bytes = [0u8; 32];
+        hex::decode_to_slice(TEST_GROUP_HEX, &mut group_id_bytes).unwrap();
+        let mut sender_bytes = [0u8; 32];
+        hex::decode_to_slice(sender_hex, &mut sender_bytes).unwrap();
+        let mut env = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::GroupChat,
+            group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
+            tenant_id: None,
+            sender_agent_id: ProtoAgentId::from_bytes(sender_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms,
+            epoch: 9,
+            ciphertext: frame_bytes,
+            nonce: B64.decode("MTIzNDU2Nzg5MGFi").unwrap(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let canonical = canonical_envelope_bytes(&env).unwrap();
+        let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        env.sender_signature = sender_signer.sign(&sign_bytes).await.unwrap();
+        env
+    }
+
+    /// Mount `POST /groups/<G>/secure/decrypt` returning `payload_b64`
+    /// — the receive path drives this to recover the plaintext.
+    async fn mount_decrypt(server: &MockServer, plaintext: &[u8]) {
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": B64.encode(plaintext),
+            })))
+            .mount(server)
+            .await;
+    }
+
+    // ---- send: trivial failure-path tests --------------------------------
+
+    #[tokio::test]
+    async fn send_private_group_returns_no_transport_when_router_empty() {
+        let server = MockServer::start().await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChatError::NoTransportAvailable));
+    }
+
+    #[tokio::test]
+    async fn send_private_group_returns_invalid_when_chat_state_missing() {
+        let server = MockServer::start().await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32]);
+        let err = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("chat state")),
+            "expected Invalid(chat state), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_private_group_surfaces_encrypt_4xx_as_message_transport_error() {
+        let server = MockServer::start().await;
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_string(r#"{"ok":false,"error":"daemon down"}"#),
+            )
+            .mount(&server)
+            .await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::MessageTransport(ref m) if m.contains("503")),
+            "expected MessageTransport(503), got {err:?}",
+        );
+    }
+
+    /// A `Signer` that always fails. Drives the
+    /// `send_private_group_surfaces_signer_failure` test without
+    /// poisoning the ambient `MlDsaSigner` fixture.
+    struct FailingSigner {
+        pk: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl Signer for FailingSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            fetchit_relay_proto::derive_agent_id(&self.pk)
+        }
+        fn public_key(&self) -> Vec<u8> {
+            self.pk.clone()
+        }
+        async fn sign(&self, _bytes: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Err("signer-down".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_private_group_surfaces_signer_failure() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let peer_hex = "b".repeat(64);
+        mount_encrypt_and_two_member_roster(&server, rig.agent_hex(), &peer_hex).await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let failing: Arc<dyn Signer> = Arc::new(FailingSigner {
+            pk: rig.signer.public_key(),
+        });
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&failing),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("envelope sign")),
+            "expected Invalid(envelope sign), got {err:?}",
+        );
+    }
+
+    /// Capturing transport variant that records EVERY recipient + envelope
+    /// pair so a fanout test can assert N distinct addressing.
+    type CapturedSends = Arc<StdMutex<Vec<(AgentId, TransitEnvelope)>>>;
+
+    struct ManyCapturingTransport {
+        captured: CapturedSends,
+    }
+
+    impl ManyCapturingTransport {
+        fn new() -> (Arc<Self>, CapturedSends) {
+            let captured: CapturedSends = Arc::new(StdMutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    captured: captured.clone(),
+                }),
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Transport for ManyCapturingTransport {
+        fn name(&self) -> &'static str {
+            "many-capture"
+        }
+        fn reachability(&self, _: &AgentId) -> Reachability {
+            Reachability::Always
+        }
+        async fn send(&self, to: &AgentId, envelope: TransportOutbound) -> Result<SendReceipt> {
+            if let Some(t) = envelope.transit {
+                self.captured.lock().unwrap().push((to.clone(), t));
+            }
+            Ok(SendReceipt {
+                accepted_at_ms: 1,
+                message_id: Some("captured-msg-id".to_owned()),
+                transport_name: "many-capture",
+            })
+        }
+        fn take_inbound(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn send_private_group_fans_out_one_envelope_per_roster_member_excluding_self() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer1 = "b".repeat(64);
+        let peer2 = "c".repeat(64);
+
+        // Encrypt mock — single response covers every send.
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        // 3-member roster: local + two peers; only peers should receive.
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex, "state": "active"},
+                    {"agent_id": peer1, "state": "active"},
+                    {"agent_id": peer2, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        let recipients: std::collections::HashSet<String> =
+            captured.iter().map(|(a, _)| a.0.clone()).collect();
+        assert_eq!(
+            captured.len(),
+            2,
+            "fanout must produce N-1 envelopes for an N-member roster",
+        );
+        assert!(recipients.contains(&peer1));
+        assert!(recipients.contains(&peer2));
+        assert!(
+            !recipients.contains(&local_hex),
+            "self must be excluded from fanout",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_private_group_empty_roster_returns_no_envelopes_sent() {
+        let server = MockServer::start().await;
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": []
+            })))
+            .mount(&server)
+            .await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let msg_id = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap();
+        // Empty roster — no transport hops. Still surface a message id
+        // so caller UI state-machines have a stable anchor.
+        assert!(msg_id.is_some());
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "0-peer fanout must NOT send any envelope",
+        );
+    }
+
+    // ---- receive: failure paths ----------------------------------------
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_invalid_signature() {
+        let server = MockServer::start().await;
+        // Decrypt mount is unnecessary — verify rejects before x0xd
+        // is contacted. We don't mount it so a regression that bypasses
+        // the verify-first invariant surfaces as a different error.
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let mut env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+        // Mangle the signature so verify fails.
+        if let Some(last) = env.sender_signature.last_mut() {
+            *last ^= 0x01;
+        }
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("envelope signature verify")),
+            "expected Invalid(envelope signature verify), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_unknown_sender() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        // No card installed — verify can't even start.
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("no card for envelope sender")),
+            "expected Invalid(no card), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_detects_replay() {
+        let server = MockServer::start().await;
+        mount_decrypt(&server, b"hi from peer").await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 100).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+
+        let first = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        assert!(matches!(first, PrivateGroupReceive::Persisted(_)));
+        let second = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, PrivateGroupReceive::Replay),
+            "second receipt of the same envelope must surface Replay, got {second:?}",
+        );
+        // History length is 1 — replay must NOT have appended.
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        assert_eq!(conv.history.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_malformed_postcard_ciphertext() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let mut env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+        // Replace ciphertext with bytes that won't postcard-decode as
+        // EncryptedFrame, then RE-SIGN so the verify-first invariant
+        // doesn't bail before the postcard check fires.
+        env.ciphertext = b"not-a-valid-postcard-frame".to_vec();
+        let canonical = canonical_envelope_bytes(&env).unwrap();
+        let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        env.sender_signature = sender_signer.sign(&sign_bytes).await.unwrap();
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("postcard frame")),
+            "expected Invalid(postcard frame), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_decrypt_4xx() {
+        let server = MockServer::start().await;
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string(r#"{"ok":false,"error":"stale epoch"}"#),
+            )
+            .mount(&server)
+            .await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::MessageTransport(ref m) if m.contains("403")),
+            "expected MessageTransport(403), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_non_utf8_plaintext() {
+        let server = MockServer::start().await;
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        // Surface bytes that aren't valid UTF-8.
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": B64.encode([0xff_u8, 0xff, 0xff, 0xff]),
+            })))
+            .mount(&server)
+            .await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("body utf8")),
+            "expected Invalid(body utf8), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_pushes_to_conversation_history() {
+        let server = MockServer::start().await;
+        mount_decrypt(&server, b"hi from peer").await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 555).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+
+        // Pre-condition: registry has no conversation yet (lazy create).
+        assert!(rig.registry.get(TEST_GROUP_HEX).await.unwrap().is_none());
+        let out = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        let PrivateGroupReceive::Persisted(entry) = out else {
+            panic!("expected Persisted, got {out:?}");
+        };
+        assert_eq!(entry.body, "hi from peer");
+        assert_eq!(entry.sender_agent_id_hex, sender_aid);
+        assert_eq!(entry.ts_ms, 555);
+        // Conversation was lazily created + the entry was pushed.
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        assert_eq!(conv.history.len(), 1);
+        assert_eq!(conv.history.back().unwrap().body, "hi from peer");
+    }
+
+    // ---- Round-trip integration ----------------------------------------
+
+    /// Wiremock that echoes the input plaintext from /secure/encrypt
+    /// directly back as the /secure/decrypt payload — wires the loop so
+    /// `send_private_group` + `receive_private_group_envelope` can be
+    /// composed end-to-end against a single `MockServer`.
+    async fn mount_echo_encrypt_decrypt(server: &MockServer, plaintext_b64: &str) {
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": plaintext_b64,
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn send_then_receive_private_group_roundtrip() {
+        // Alice rig sends; the wire envelope is captured. Bob rig
+        // receives the captured envelope against the SAME mock server
+        // (it both encrypts and decrypts). Asserting the HistoryEntry
+        // body matches the input proves the wire is healable end-to-end.
+        let server = MockServer::start().await;
+        let alice_rig = build_rig();
+        let bob_rig = build_rig();
+
+        // Alice fans out to Bob.
+        let alice_hex = alice_rig.agent_hex().to_owned();
+        let bob_hex = bob_rig.agent_hex().to_owned();
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": alice_hex, "state": "active"},
+                    {"agent_id": bob_hex, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        mount_echo_encrypt_decrypt(&server, &B64.encode(b"hello bob")).await;
+
+        // Wire Alice up to send.
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let alice_signer_arc = alice_rig.signer_arc();
+        let alice_endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&alice_rig.identity),
+            Some(&alice_rig.registry),
+            Some(&alice_signer_arc),
+            Some(&alice_rig.layout),
+            [0u8; 32],
+        );
+        alice_endpoint
+            .send_private_group(TEST_GROUP_HEX, "hello bob", "Alice")
+            .await
+            .unwrap();
+
+        // Drop the guard before the next await so clippy's
+        // await_holding_lock check is satisfied.
+        let (recipient, envelope) = {
+            let guard = captured.lock().unwrap();
+            assert_eq!(guard.len(), 1);
+            guard[0].clone()
+        };
+        assert_eq!(recipient.0, bob_hex);
+        assert!(is_private_group_envelope(&envelope));
+
+        // Bob needs Alice's card on file for the receive verify.
+        install_card_for(&bob_rig, &alice_rig.signer, &alice_hex);
+
+        // Bob receives. Re-use the same MockServer so the decrypt mock
+        // is hit by the receive path.
+        let bob_router = Router::new();
+        let bob_signer_arc = bob_rig.signer_arc();
+        let bob_endpoint = Endpoint::new(
+            &http,
+            &bob_router,
+            Some(&bob_rig.identity),
+            Some(&bob_rig.registry),
+            Some(&bob_signer_arc),
+            Some(&bob_rig.layout),
+            [0u8; 32],
+        );
+        let out = bob_endpoint
+            .receive_private_group_envelope(&envelope, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        let PrivateGroupReceive::Persisted(entry) = out else {
+            panic!("expected Persisted, got {out:?}");
+        };
+        assert_eq!(entry.body, "hello bob");
+        assert_eq!(entry.sender_agent_id_hex, alice_hex);
+    }
+
+    // ---- Routing predicate (table-driven) ------------------------------
+
+    fn synth_env(kind: EnvelopeKind, kem_ct: Vec<u8>) -> TransitEnvelope {
+        TransitEnvelope {
+            version: WIRE_VERSION,
+            kind,
+            group_id: Some(ProtoGroupId::from_bytes([0u8; 32])),
+            tenant_id: None,
+            sender_agent_id: ProtoAgentId::from_bytes([0u8; 32]),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 0,
+            epoch: 0,
+            ciphertext: Vec::new(),
+            nonce: vec![0u8; 12],
+            kem_ciphertext: kem_ct,
+            sender_signature: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn is_private_group_envelope_true_when_groupchat_and_empty_kem() {
+        let env = synth_env(EnvelopeKind::GroupChat, Vec::new());
+        assert!(is_private_group_envelope(&env));
+    }
+
+    #[test]
+    fn is_private_group_envelope_false_when_groupchat_with_kem() {
+        // Legacy welcome / message path encapsulates ML-KEM-768 in
+        // `kem_ciphertext`. Misrouting that into the private-group
+        // decoder would mean handing kem_ciphertext-encrypted bytes
+        // to x0xd's /secure/decrypt and getting nothing useful back.
+        let env = synth_env(EnvelopeKind::GroupChat, vec![0u8; 1088]);
+        assert!(!is_private_group_envelope(&env));
+    }
+
+    #[test]
+    fn is_private_group_envelope_false_when_dm() {
+        let env = synth_env(EnvelopeKind::Dm, Vec::new());
+        assert!(!is_private_group_envelope(&env));
+    }
+
+    #[test]
+    fn is_private_group_envelope_false_when_admin_event() {
+        let env = synth_env(EnvelopeKind::DeliveryReceipt, Vec::new());
+        assert!(!is_private_group_envelope(&env));
+    }
+
     #[test]
     fn parse_group_id_hex_rejects_short_input() {
         assert!(parse_group_id_hex("abcd").is_err());
