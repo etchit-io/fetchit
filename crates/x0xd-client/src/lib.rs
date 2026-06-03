@@ -18,6 +18,7 @@
 
 pub mod discovery;
 pub mod error;
+pub mod secure;
 pub mod signer;
 
 pub use discovery::{discover_in, discover_local, DaemonEndpoint};
