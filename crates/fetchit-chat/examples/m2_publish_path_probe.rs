@@ -1,10 +1,28 @@
 //! Measure encrypt-only latency for Path A and publish-only latency for
 //! Path B against a live x0xd. Decision 1 of M2 spec was settled by
 //! architectural reasoning (transport unification), not by this measure
-//! — this binary is a future-reproducibility tool. Set
-//! `X0XD_PROBE_GROUP_ID` and `X0XD_PROBE_TOPIC` to a pre-created
-//! private-secure group + its chat topic, then:
-//!     cargo run -p fetchit-chat --example `m2_publish_path_probe`
+//! — this binary is a future-reproducibility tool.
+//!
+//! Environment variables:
+//! - `HOME` — required, used to default `X0XD_PORT_FILE` /
+//!   `X0XD_TOKEN_PATH`.
+//! - `X0XD_PORT_FILE` — optional; defaults to
+//!   `$HOME/.local/share/x0x-claude-here/api.port`.
+//! - `X0XD_TOKEN_PATH` — optional; defaults to
+//!   `$HOME/.local/share/x0x-claude-here/api-token`.
+//! - `X0XD_PROBE_GROUP_ID` — required, the id of a pre-created
+//!   `private_secure` group on the running x0xd.
+//! - `X0XD_PROBE_TOPIC` — required, the chat topic that group
+//!   publishes on (e.g. `x0x.group.<id>.chat/general`).
+//!
+//! Path B uses `error_for_status()?` without consuming the response
+//! body — a non-2xx publish surfaces as bare HTTP status without
+//! x0xd's JSON error detail. Path A consumes the body and reports
+//! both status and detail.
+//!
+//! ```text
+//! cargo run -p fetchit-chat --example m2_publish_path_probe
+//! ```
 
 use std::time::Instant;
 
