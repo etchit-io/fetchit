@@ -104,19 +104,19 @@ fn env_required(name: &str) -> String {
     })
 }
 
-/// Read `127.0.0.1:<port>` (or bare `<port>`) from x0xd's `api.port`,
-/// return just the port as a string. Matches the parse the
-/// `m2_publish_path_probe` example uses.
-fn read_x0xd_port(port_file: &str) -> String {
+/// Read x0xd's `api.port` and return the normalised HTTP base URL.
+///
+/// Delegates to [`x0xd_client::base_url_from_api_port_line`] so this
+/// scaffold, the `m2_publish_path_probe` example, and the production
+/// `discover_in` path all share ONE definition of the file format. A
+/// future change to what x0xd writes to `api.port` only has to land
+/// in the discovery helper, not in three separate ad-hoc parsers.
+fn read_x0xd_base_url(port_file: &str) -> String {
     let raw = std::fs::read_to_string(port_file)
         .unwrap_or_else(|e| panic!("read x0xd port file at {port_file}: {e}"));
     let line = raw.trim();
-    // x0xd may emit `host:port` (systemd rig) or bare `port`.
-    line.rsplit(':')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| panic!("malformed api.port at {port_file}: {line:?}"))
-        .to_owned()
+    assert!(!line.is_empty(), "malformed api.port at {port_file}: empty");
+    x0xd_client::base_url_from_api_port_line(line)
 }
 
 #[tokio::test]
@@ -142,8 +142,7 @@ async fn m2_live_private_group_round_trip() {
         peer_agent_hex.len()
     );
 
-    let port = read_x0xd_port(&port_file);
-    let base_url = format!("http://127.0.0.1:{port}");
+    let base_url = read_x0xd_base_url(&port_file);
     let token = std::fs::read_to_string(&token_path)
         .unwrap_or_else(|e| panic!("read x0xd token at {token_path}: {e}"))
         .trim()

@@ -64,7 +64,7 @@ pub async fn discover_in(dir: &Path) -> Result<DaemonEndpoint, DiscoveryError> {
             dir.display()
         )));
     }
-    let base_url = build_base_url(&raw);
+    let base_url = base_url_from_api_port_line(&raw);
     Ok(DaemonEndpoint {
         base_url,
         token,
@@ -84,10 +84,28 @@ async fn read_field(dir: &Path, name: &'static str) -> Result<String, DiscoveryE
     }
 }
 
-/// The `api.port` file is sometimes a bare port (e.g. `12700`) and
-/// sometimes a full `host:port` authority (e.g. `127.0.0.1:12700`).
-/// Normalise both to a usable HTTP base URL.
-fn build_base_url(raw: &str) -> String {
+/// Normalise the contents of x0xd's `api.port` file into an HTTP base
+/// URL (`http://<host>:<port>`).
+///
+/// `api.port` is sometimes a bare port (e.g. `12700`, the legacy
+/// shape) and sometimes a full `host:port` authority (e.g.
+/// `127.0.0.1:12700`, the systemd-rig shape). Both must be handled
+/// uniformly: bare ports default to loopback (`127.0.0.1`),
+/// host:port values pass through verbatim, and IPv6 authorities
+/// (`[::1]:12700`) survive intact because the rule is "presence of a
+/// colon means the whole line is already an authority."
+///
+/// This is the SINGLE point of normalization for the file format.
+/// Downstream callers — `discover_in`, the test scaffold at
+/// `crates/fetchit-chat/tests/m2_live.rs`, the publish-path probe at
+/// `crates/fetchit-chat/examples/m2_publish_path_probe.rs` — all
+/// route through here so a future rig change to the file shape only
+/// has to update one place.
+///
+/// The input MUST already have been `str::trim`med; this function
+/// does not strip whitespace.
+#[must_use]
+pub fn base_url_from_api_port_line(raw: &str) -> String {
     if raw.contains(':') {
         format!("http://{raw}")
     } else {
@@ -214,5 +232,42 @@ mod tests {
             .unwrap();
         let ep = discover_in(dir.path()).await.unwrap();
         assert_eq!(ep.base_url, "http://127.0.0.1:12700");
+    }
+
+    #[test]
+    fn base_url_from_api_port_line_bare_port_defaults_to_loopback() {
+        assert_eq!(
+            base_url_from_api_port_line("12700"),
+            "http://127.0.0.1:12700",
+        );
+    }
+
+    #[test]
+    fn base_url_from_api_port_line_host_port_passes_through() {
+        assert_eq!(
+            base_url_from_api_port_line("127.0.0.1:8080"),
+            "http://127.0.0.1:8080",
+        );
+        assert_eq!(
+            base_url_from_api_port_line("192.168.1.5:45031"),
+            "http://192.168.1.5:45031",
+        );
+    }
+
+    #[test]
+    fn base_url_from_api_port_line_ipv6_authority_survives() {
+        // Cross-review note: the prior `split(':').nth(1)` parser
+        // returned the empty segment between `::` for an IPv6 like
+        // `[::1]:12700`. The colon-presence rule preserves the whole
+        // authority because any string with a `:` is taken to
+        // already be a full host:port (or [v6]:port).
+        assert_eq!(
+            base_url_from_api_port_line("[::1]:12700"),
+            "http://[::1]:12700",
+        );
+        assert_eq!(
+            base_url_from_api_port_line("[fe80::1]:8080"),
+            "http://[fe80::1]:8080",
+        );
     }
 }

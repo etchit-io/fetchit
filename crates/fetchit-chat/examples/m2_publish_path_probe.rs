@@ -50,13 +50,16 @@ async fn main() -> anyhow::Result<()> {
 
     let token = std::fs::read_to_string(&token_path)?.trim().to_string();
     let port_line = std::fs::read_to_string(&port_file)?;
-    let port = port_line
-        .trim()
-        .split(':')
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("malformed api.port: expected host:port"))?
-        .to_string();
-    let base = format!("http://127.0.0.1:{port}");
+    let trimmed = port_line.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("malformed api.port at {port_file}: empty");
+    }
+    // Single source of truth for the api.port file format —
+    // accepts bare port ("12700") and full authority ("127.0.0.1:12700"
+    // or "[::1]:12700") uniformly. Mirrors what the
+    // `m2_live` test scaffold and production `discover_in` use, so a
+    // future change to what x0xd writes lands in ONE place.
+    let base = x0xd_client::base_url_from_api_port_line(trimmed);
     let http = reqwest::Client::new();
 
     let path_a_start = Instant::now();

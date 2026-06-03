@@ -22,7 +22,7 @@ pub mod secure;
 pub mod signer;
 pub mod version;
 
-pub use discovery::{discover_in, discover_local, DaemonEndpoint};
+pub use discovery::{base_url_from_api_port_line, discover_in, discover_local, DaemonEndpoint};
 pub use error::{DiscoveryError, X0xdError};
 pub use secure::{CreatedGroup, EncryptedFrame, SecureGroupsEndpoint};
 pub use signer::{Signer, X0xdSigner};
