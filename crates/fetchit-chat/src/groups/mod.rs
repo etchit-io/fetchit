@@ -16,6 +16,16 @@
 //! crate drives x0xd's `/secure/encrypt` + `/secure/decrypt` +
 //! `/publish` + `/subscribe` endpoints via REST, with the daemon
 //! owning the `TreeKEM` ratchet.
+//!
+//! ## Submodules
+//!
+//! - [`bridge`] — M2.5 relay-mediated NAT-traversal helpers. Wraps a
+//!   signed `NamedGroupMetadataEvent` as an
+//!   `EnvelopeKind::X0xdGroupMetadataEvent` payload so the receiving
+//!   daemon can `POST /publish` it locally and advance MLS state via
+//!   Saorsa pubsub's loopback semantics.
+
+pub mod bridge;
 
 use crate::error::{ChatError, Result};
 use crate::http::Http;

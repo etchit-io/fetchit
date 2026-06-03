@@ -71,6 +71,19 @@ pub enum ChatError {
         /// the unsealed envelope, e.g. `"RelayTransport::send"`.
         caller: &'static str,
     },
+
+    /// The M2.5 bridge needs a stored share-card for the recipient so
+    /// it can pull their ML-KEM-768 public key for the seal. When the
+    /// card hasn't been imported (peer has never been DM-paired with
+    /// this device), surface this typed error so the desktop UI can
+    /// route to "Import their contact card first" instead of a
+    /// generic invalid-input toast.
+    #[error("no stored share-card for {agent_id_short} — exchange contact cards before adding them to a private group")]
+    ShareCardMissing {
+        /// Short prefix of the recipient's agent id (hex) for the
+        /// user-visible message. Truncated to keep log lines tractable.
+        agent_id_short: String,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {
