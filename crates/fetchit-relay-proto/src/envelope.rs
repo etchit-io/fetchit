@@ -61,6 +61,29 @@ pub enum EnvelopeKind {
     /// (and therefore the postcard byte representation of every prior
     /// variant) stable.
     PrivateGroupChat,
+    /// M2.5 bridge — x0xd group-metadata event (`MemberJoined`,
+    /// `MemberAdded`, `Welcome`, `Commit`, …) wrapped as a DM payload so
+    /// the receiving daemon can `POST /publish` the inner JSON event
+    /// on the group's `metadata_topic`, advancing local MLS state via
+    /// Saorsa pubsub's local-loopback. Used when the gossip mesh
+    /// between sender and recipient is unreachable (symmetric NAT,
+    /// CGNAT, etc.).
+    ///
+    /// `TransitEnvelope.ciphertext` carries a postcard-encoded
+    /// `X0xdGroupMetadataEventWrapper { topic, payload_b64 }` sealed
+    /// under the recipient's ML-KEM-768 key per the existing PQ DM
+    /// path. Recipient unwraps and POSTs to local x0xd `/publish`;
+    /// the inner JSON event carries its own ML-DSA-65 signature
+    /// (binding the original group authority) which x0xd verifies via
+    /// `apply_named_group_metadata_event` — the bridge is pure
+    /// transport, the inner-event signature is the only authority.
+    ///
+    /// Appended at the end of the enum to keep existing variant indices
+    /// stable for postcard wire-compat.
+    ///
+    /// See `private/m2.5-bridge-collapsed-spec.md` on the `m2.5-design`
+    /// branch for the full spec.
+    X0xdGroupMetadataEvent,
 }
 
 /// One ciphertext-carrying message routed by the relay.
@@ -237,5 +260,27 @@ mod tests {
         let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.kind, EnvelopeKind::PrivateGroupChat);
         assert!(decoded.kem_ciphertext.is_empty());
+    }
+
+    #[test]
+    fn x0xd_group_metadata_event_kind_roundtrips() {
+        // C1 from private/m2.5-bridge-collapsed-spec.md — the bridge
+        // discriminator so the inbound chat-peer dispatcher can route
+        // an x0xd-group-metadata-event-wrapped DM (carrying a
+        // postcard-encoded { topic, payload_b64 } in the sealed
+        // ciphertext) to the local /publish POST path instead of the
+        // chat / group-chat / receipt paths.
+        let mut env = sample_envelope();
+        env.kind = EnvelopeKind::X0xdGroupMetadataEvent;
+        // Plausible wrapper-sized ciphertext: a small metadata_topic
+        // string plus a base64-encoded MemberJoined JSON event would
+        // typically land in the low single-digit KiB range. This
+        // assertion only checks the wire-shape carry, so any sealed
+        // payload size works.
+        env.ciphertext = vec![0xee; 1024];
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.kind, EnvelopeKind::X0xdGroupMetadataEvent);
+        assert_eq!(decoded.ciphertext, vec![0xee; 1024]);
     }
 }

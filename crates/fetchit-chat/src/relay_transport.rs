@@ -143,7 +143,13 @@ fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<Inboun
             };
             let env = delivery.envelope;
             let kind = match env.kind {
-                RelayKind::Dm => OutboundKind::Dm,
+                // X0xdGroupMetadataEvent: M2.5 bridge variant —
+                // wire-shape carry only at C1; the dispatcher in
+                // peer.rs discriminates on `transit.kind` and routes
+                // to the local /publish path in C3. Rides the Dm
+                // shape because the chat-layer routing predicate
+                // doesn't yet model bridge events.
+                RelayKind::Dm | RelayKind::X0xdGroupMetadataEvent => OutboundKind::Dm,
                 // PrivateGroupChat rides the same inbound shape as
                 // GroupChat — peer.rs's `is_private_group_envelope`
                 // predicate is what discriminates the two downstream.
