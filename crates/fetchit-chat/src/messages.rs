@@ -629,6 +629,30 @@ impl<'a> Endpoint<'a> {
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes.copy_from_slice(&env.nonce);
 
+        // Defence-in-depth: the AEAD-bound nonce lives INSIDE the
+        // postcard'd `EncryptedFrame.nonce_b64`. The outer envelope's
+        // `env.nonce` MUST match the inner one byte-for-byte. An
+        // attacker who has a captured envelope could otherwise mint a
+        // new envelope with a fresh `env.nonce` while leaving
+        // `frame.nonce_b64` unchanged — the per-sender replay window
+        // tracks `env.nonce`, so the fresh outer nonce sails past
+        // dedup; x0xd's `/secure/decrypt` is stateless within an
+        // epoch (`TreeKEM` epoch key + frame.nonce_b64 fully
+        // determine the AEAD key/nonce) so it accepts the same frame
+        // and the plaintext re-appears in history. Rejecting the
+        // mismatch BEFORE the replay check + the daemon round-trip
+        // closes the entire outer-vs-inner-nonce-mismatch class.
+        let frame: EncryptedFrame = postcard::from_bytes(&env.ciphertext)
+            .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
+        let frame_nonce = B64
+            .decode(&frame.nonce_b64)
+            .map_err(|e| ChatError::Invalid(format!("frame nonce b64: {e}")))?;
+        if frame_nonce != env.nonce {
+            return Err(ChatError::Invalid(
+                "envelope nonce vs frame nonce mismatch".into(),
+            ));
+        }
+
         // x0xd's /secure/decrypt is the only path that can fail with
         // remote state we don't control (stale epoch, KEM mismatch).
         // Run it BEFORE the dedup mutation so a replay-detection close
@@ -636,8 +660,6 @@ impl<'a> Endpoint<'a> {
         // failure. The replay surface here is bounded — x0xd's TreeKEM
         // gates the decrypt key, so re-decrypting the same ciphertext
         // can't escalate beyond the post-dedup drop.
-        let frame: EncryptedFrame = postcard::from_bytes(&env.ciphertext)
-            .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
         let secure = self.secure_groups()?;
         let plaintext = secure
             .decrypt(group_id_hex, &frame, Some(&sender_agent_id_hex))
@@ -1896,6 +1918,90 @@ mod tests {
         let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
         assert_eq!(conv.history.len(), 1);
         assert_eq!(conv.history.back().unwrap().body, "hi from peer");
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_outer_vs_inner_nonce_mismatch() {
+        // P1 from Bob's review: the receiver dedupe window keys off
+        // `env.nonce` (the outer 12-byte field), but the AEAD-bound
+        // nonce that x0xd's `/secure/decrypt` actually uses lives
+        // INSIDE the postcard'd `EncryptedFrame.nonce_b64`. An
+        // attacker who captured a delivered envelope can mint a new
+        // envelope with a fresh-random `env.nonce` while keeping
+        // `frame.nonce_b64` unchanged — the per-sender replay window
+        // misses, the daemon happily re-decrypts (TreeKEM is
+        // stateless within an epoch), and the plaintext re-surfaces.
+        // The fix rejects mismatching outer/inner nonces BEFORE the
+        // dedup check and BEFORE any x0xd round-trip.
+        let server = MockServer::start().await;
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        // `expect(0)`: any /secure/decrypt traffic is a regression —
+        // the mismatch check must trip first and short-circuit the
+        // receive path entirely.
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+
+        // Build the envelope normally, then swap `env.nonce` for a
+        // fresh-random value while leaving the postcard'd
+        // EncryptedFrame.nonce_b64 untouched — the wire shape an
+        // attacker minting from a captured envelope would produce.
+        let mut env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+        let mut fresh_outer_nonce = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut fresh_outer_nonce);
+        env.nonce = fresh_outer_nonce.to_vec();
+        // Re-sign over the canonical bytes so the verify-first
+        // invariant doesn't bail before the mismatch check fires.
+        let canonical = canonical_envelope_bytes(&env).unwrap();
+        let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        env.sender_signature = sender_signer.sign(&sign_bytes).await.unwrap();
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChatError::Invalid(ref m) if m.contains("envelope nonce vs frame nonce mismatch"),
+            ),
+            "expected Invalid(envelope nonce vs frame nonce mismatch), got {err:?}",
+        );
+        // History must NOT have grown — the entry was rejected
+        // before the mutate path ran.
+        assert!(
+            rig.registry
+                .get(TEST_GROUP_HEX)
+                .await
+                .unwrap()
+                .is_none_or(|c| c.history.is_empty()),
+            "rejected envelope must not append to history",
+        );
+        // wiremock's expect(0) asserts on Mock drop / verify().
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
