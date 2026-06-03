@@ -47,6 +47,20 @@ pub enum EnvelopeKind {
     /// route it like any other payload — receipts are not special-cased
     /// in the routing path.
     DeliveryReceipt,
+    /// M2 PQ-`TreeKEM` private-group send. Distinct from
+    /// [`EnvelopeKind::GroupChat`] because the legacy chat-v2 path uses
+    /// `GroupChat` with empty `kem_ciphertext` for subsequent-message
+    /// envelopes (the ML-KEM-768 payload only travels on Welcome) —
+    /// wire-identical to a private-group send if we discriminated on
+    /// `kind == GroupChat && kem_ciphertext.is_empty()`. The dedicated
+    /// variant makes the discriminator unambiguous so the inbound
+    /// router never misroutes a legacy chat-v2 Message into x0xd's
+    /// `EncryptedFrame` decode path.
+    ///
+    /// Appended at the end of the enum to keep existing variant indices
+    /// (and therefore the postcard byte representation of every prior
+    /// variant) stable.
+    PrivateGroupChat,
 }
 
 /// One ciphertext-carrying message routed by the relay.
@@ -206,6 +220,22 @@ mod tests {
         let bytes = postcard::to_allocvec(&env).unwrap();
         let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.kind, EnvelopeKind::DeliveryReceipt);
+        assert!(decoded.kem_ciphertext.is_empty());
+    }
+
+    #[test]
+    fn private_group_chat_kind_roundtrips() {
+        // The discriminator added for M2: wire-shape carry confirmed so
+        // the inbound router can rely on `kind == PrivateGroupChat` to
+        // route x0xd-sealed frames without confusing them with legacy
+        // chat-v2 `GroupChat` Message envelopes that happen to ship an
+        // empty `kem_ciphertext`.
+        let mut env = sample_envelope();
+        env.kind = EnvelopeKind::PrivateGroupChat;
+        env.kem_ciphertext = Vec::new();
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.kind, EnvelopeKind::PrivateGroupChat);
         assert!(decoded.kem_ciphertext.is_empty());
     }
 }

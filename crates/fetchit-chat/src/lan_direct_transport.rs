@@ -338,12 +338,16 @@ async fn handle_inbound_conn(
 fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> InboundEnvelope {
     let kind = match env.kind {
         RelayKind::Dm | RelayKind::AdminEvent => OutboundKind::Dm,
-        RelayKind::GroupChat | RelayKind::DeliveryReceipt => OutboundKind::Group {
-            group_id: env
-                .group_id
-                .map(|g| hex::encode(g.as_bytes()))
-                .unwrap_or_default(),
-        },
+        // PrivateGroupChat rides the same inbound shape as GroupChat —
+        // downstream `is_private_group_envelope` discriminates the two.
+        RelayKind::GroupChat | RelayKind::PrivateGroupChat | RelayKind::DeliveryReceipt => {
+            OutboundKind::Group {
+                group_id: env
+                    .group_id
+                    .map(|g| hex::encode(g.as_bytes()))
+                    .unwrap_or_default(),
+            }
+        }
     };
     InboundEnvelope {
         kind,

@@ -972,7 +972,11 @@ async fn build_private_group_envelope<S: Signer + ?Sized>(
 
     let mut env = TransitEnvelope {
         version: WIRE_VERSION,
-        kind: EnvelopeKind::GroupChat,
+        // M2 private-group sends carry their own envelope-kind so the
+        // inbound router can discriminate them from legacy chat-v2
+        // group Message envelopes without inspecting `kem_ciphertext`
+        // (the two were wire-identical under the old discriminator).
+        kind: EnvelopeKind::PrivateGroupChat,
         group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
         tenant_id: None,
         sender_agent_id: ProtoAgentId::from_bytes(local_agent_bytes),
@@ -982,9 +986,6 @@ async fn build_private_group_envelope<S: Signer + ?Sized>(
         ciphertext,
         nonce: nonce_bytes,
         // No envelope-layer KEM: x0xd's TreeKEM rides inside the frame.
-        // The empty kem_ciphertext also signals the inbound path to
-        // route through `receive_private_group_envelope` rather than
-        // the welcome-decrypt branch in `dispatch_inbound`.
         kem_ciphertext: Vec::new(),
         sender_signature: Vec::new(),
     };
@@ -1070,19 +1071,23 @@ fn self_only_private_group_conversation<S: Signer + ?Sized>(
 /// Routing predicate: is this `TransitEnvelope` a private-secure group
 /// frame produced by [`Endpoint::send_private_group`]?
 ///
-/// The discriminator is `kind == GroupChat && kem_ciphertext.is_empty()`.
-/// The legacy chat-layer group path always populates `kem_ciphertext`
-/// (per-recipient ML-KEM-768 encapsulation); the private-group path
-/// does NOT, because x0xd's `TreeKEM` rides inside `ciphertext` instead.
+/// Discriminator is the dedicated [`EnvelopeKind::PrivateGroupChat`]
+/// variant. The earlier `kind == GroupChat && kem_ciphertext.is_empty()`
+/// shape was ambiguous: legacy chat-v2 Message envelopes (subsequent
+/// messages after a Welcome) also use `kind == GroupChat` with empty
+/// `kem_ciphertext` because the per-recipient ML-KEM-768 ride travels
+/// on Welcome only. A receiver running that predicate misrouted
+/// legacy DMs into [`Endpoint::receive_private_group_envelope`], where
+/// the postcard-`EncryptedFrame` decode failed because the bytes are
+/// an AEAD-sealed `MessagePayload` from the chat-v2 path.
 ///
-/// This predicate is the sole gate that peer.rs uses to route between
-/// `conversation::dispatch_inbound` (legacy KEM path) and
-/// [`Endpoint::receive_private_group_envelope`] (x0xd /secure/decrypt
-/// path). A future DM transport that legitimately leaves
-/// `kem_ciphertext` empty would misroute — guard the invariant.
+/// This predicate is the sole gate peer.rs uses to route between
+/// [`crate::conversation::dispatch_inbound`] (legacy chat-v2 path)
+/// and [`Endpoint::receive_private_group_envelope`] (x0xd
+/// /secure/decrypt path).
 #[must_use]
 pub fn is_private_group_envelope(env: &TransitEnvelope) -> bool {
-    matches!(env.kind, EnvelopeKind::GroupChat) && env.kem_ciphertext.is_empty()
+    matches!(env.kind, EnvelopeKind::PrivateGroupChat)
 }
 
 /// Outcome of [`Endpoint::receive_private_group_envelope`]: either a
@@ -1309,7 +1314,7 @@ mod tests {
         // Wiremock x0xd's POST /groups/<G>/secure/encrypt — return a
         // synthetic EncryptedFrame and assert downstream the envelope
         // captured by the transport carries the postcard-encoded frame
-        // in `ciphertext`, version=WIRE_VERSION, kind=GroupChat,
+        // in `ciphertext`, version=WIRE_VERSION, kind=PrivateGroupChat,
         // epoch=secret_epoch, sender_signature non-empty. Also mount
         // GET /members so the fanout layer has a real peer to address.
         let server = MockServer::start().await;
@@ -1366,7 +1371,7 @@ mod tests {
             .expect("transport must have captured a TransitEnvelope");
 
         assert_eq!(env.version, WIRE_VERSION);
-        assert!(matches!(env.kind, EnvelopeKind::GroupChat));
+        assert!(matches!(env.kind, EnvelopeKind::PrivateGroupChat));
         assert_eq!(env.epoch, 7, "envelope epoch must echo secret_epoch");
         assert!(
             env.kem_ciphertext.is_empty(),
@@ -1494,7 +1499,7 @@ mod tests {
         hex::decode_to_slice(sender_hex, &mut sender_bytes).unwrap();
         let mut env = TransitEnvelope {
             version: WIRE_VERSION,
-            kind: EnvelopeKind::GroupChat,
+            kind: EnvelopeKind::PrivateGroupChat,
             group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
             tenant_id: None,
             sender_agent_id: ProtoAgentId::from_bytes(sender_bytes),
@@ -2721,7 +2726,7 @@ mod tests {
             hex::decode_to_slice(&sender_aid, &mut sender_bytes).unwrap();
             let mut env = TransitEnvelope {
                 version: WIRE_VERSION,
-                kind: EnvelopeKind::GroupChat,
+                kind: EnvelopeKind::PrivateGroupChat,
                 group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
                 tenant_id: None,
                 sender_agent_id: ProtoAgentId::from_bytes(sender_bytes),
@@ -2956,19 +2961,35 @@ mod tests {
     }
 
     #[test]
-    fn is_private_group_envelope_true_when_groupchat_and_empty_kem() {
-        let env = synth_env(EnvelopeKind::GroupChat, Vec::new());
+    fn is_private_group_envelope_true_when_private_group_chat_kind() {
+        let env = synth_env(EnvelopeKind::PrivateGroupChat, Vec::new());
         assert!(is_private_group_envelope(&env));
     }
 
     #[test]
     fn is_private_group_envelope_false_when_groupchat_with_kem() {
-        // Legacy welcome / message path encapsulates ML-KEM-768 in
-        // `kem_ciphertext`. Misrouting that into the private-group
-        // decoder would mean handing kem_ciphertext-encrypted bytes
-        // to x0xd's /secure/decrypt and getting nothing useful back.
+        // Legacy chat-v2 Welcome envelopes carry ML-KEM-768 in
+        // `kem_ciphertext`. They route through `dispatch_inbound`,
+        // never through the private-group decoder.
         let env = synth_env(EnvelopeKind::GroupChat, vec![0u8; 1088]);
         assert!(!is_private_group_envelope(&env));
+    }
+
+    #[test]
+    fn is_private_group_envelope_false_for_legacy_groupchat_with_empty_kem() {
+        // Legacy chat-v2 DM/group Message envelopes use kind=GroupChat
+        // with empty `kem_ciphertext` (the ML-KEM-768 payload only
+        // travels on Welcome; subsequent Messages don't carry it).
+        // The old predicate `kind == GroupChat && kem.is_empty()` was
+        // AMBIGUOUS — it matched these too and shoved an AEAD-sealed
+        // MessagePayload into the postcard-EncryptedFrame decoder.
+        // The new discriminator (kind == PrivateGroupChat) is
+        // unambiguous: this case must reject.
+        let env = synth_env(EnvelopeKind::GroupChat, Vec::new());
+        assert!(
+            !is_private_group_envelope(&env),
+            "legacy chat-v2 Message shape (GroupChat + empty kem) must NOT match private-group predicate",
+        );
     }
 
     #[test]
