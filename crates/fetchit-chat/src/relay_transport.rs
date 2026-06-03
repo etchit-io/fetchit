@@ -147,14 +147,14 @@ fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<Inboun
                 // PrivateGroupChat rides the same inbound shape as
                 // GroupChat — peer.rs's `is_private_group_envelope`
                 // predicate is what discriminates the two downstream.
-                RelayKind::GroupChat
-                | RelayKind::PrivateGroupChat
-                | RelayKind::DeliveryReceipt => OutboundKind::Group {
-                    group_id: env
-                        .group_id
-                        .map(|g| hex::encode(g.as_bytes()))
-                        .unwrap_or_default(),
-                },
+                RelayKind::GroupChat | RelayKind::PrivateGroupChat | RelayKind::DeliveryReceipt => {
+                    OutboundKind::Group {
+                        group_id: env
+                            .group_id
+                            .map(|g| hex::encode(g.as_bytes()))
+                            .unwrap_or_default(),
+                    }
+                }
                 RelayKind::AdminEvent => continue,
             };
             let from = AgentId(hex::encode(env.sender_agent_id.as_bytes()));
