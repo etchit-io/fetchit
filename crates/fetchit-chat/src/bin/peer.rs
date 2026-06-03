@@ -25,10 +25,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
 use fetchit_chat::identity::AgentId;
-use fetchit_chat::messages::decode_direct_message;
+use fetchit_chat::messages::{
+    decode_direct_message, is_private_group_envelope, PrivateGroupReceive,
+};
 use fetchit_chat::transport::InboundEnvelope;
 use fetchit_chat::Client;
-use fetchit_relay_proto::EnvelopeKind;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -209,50 +210,78 @@ fn resolve_passphrase(cli: &Cli) -> Result<Option<String>> {
     Ok(cli.passphrase_env.clone().map(|s| s.trim().to_owned()))
 }
 
+/// Decode + dispatch a private-secure-group envelope. Returns Some
+/// when the body is fresh and should be surfaced to the user; None on
+/// self-source, replay, decrypt failure, or any of the verify/lookup
+/// edge cases.
+async fn decode_private_group(
+    client: &Client,
+    transit: &fetchit_relay_proto::TransitEnvelope,
+) -> Option<PeerInbound> {
+    // Self-source filter: our own sends fan out via the relay and can
+    // echo back to us (especially when running both ends of a test).
+    // Drop self-as-sender envelopes BEFORE the decrypt path so a
+    // same-machine Alice<->Alice loop can't produce phantom history
+    // entries. The signature check inside
+    // `receive_private_group_envelope` would also fail if our
+    // card-cache didn't carry our own card — but short-circuiting
+    // here is cheaper and clearer.
+    if let Some(identity) = client.identity_arc() {
+        if hex::encode(transit.sender_agent_id.as_bytes()) == identity.agent_id_hex() {
+            return None;
+        }
+    }
+    let group_id_hex = transit
+        .group_id
+        .as_ref()
+        .map(|g| hex::encode(g.as_bytes()))
+        .unwrap_or_default();
+    if group_id_hex.is_empty() {
+        eprintln!("[peer] private-group envelope without group_id");
+        return None;
+    }
+    let messages = client.messages();
+    match messages
+        .receive_private_group_envelope(transit, &group_id_hex)
+        .await
+    {
+        Ok(PrivateGroupReceive::Persisted(entry)) => {
+            eprintln!(
+                "[peer] private-group: from={} group={} body={:?}",
+                short(&entry.sender_agent_id_hex),
+                short(&group_id_hex),
+                entry.body
+            );
+            let from = AgentId::parse(entry.sender_agent_id_hex).ok()?;
+            Some(PeerInbound {
+                from,
+                body: entry.body,
+            })
+        }
+        Ok(PrivateGroupReceive::Replay) => {
+            eprintln!("[peer] private-group: replay dropped");
+            None
+        }
+        Err(e) => {
+            eprintln!("[peer] private-group decrypt error: {e}");
+            None
+        }
+    }
+}
+
 async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<PeerInbound> {
     // Chat-v2 envelopes (TransitEnvelope present) go through the
     // conversation dispatcher so we get a decrypted MessagePayload.
     if let Some(transit) = env.transit.take() {
         // M2 private-group path: GroupChat envelopes whose
         // kem_ciphertext is empty are PQ-TreeKEM frames produced by
-        // x0xd's /secure/encrypt. Drive them through the new
-        // receive_private_group_envelope path rather than the
-        // conversation dispatcher (which expects ML-KEM-768 + AEAD).
-        if matches!(transit.kind, EnvelopeKind::GroupChat) && transit.kem_ciphertext.is_empty() {
-            let group_id_hex = transit
-                .group_id
-                .as_ref()
-                .map(|g| hex::encode(g.as_bytes()))
-                .unwrap_or_default();
-            if group_id_hex.is_empty() {
-                eprintln!("[peer] private-group envelope without group_id");
-                return None;
-            }
-            let messages = client.messages();
-            match messages
-                .receive_private_group_envelope(&transit, &group_id_hex)
-                .await
-            {
-                Ok(entry) => {
-                    eprintln!(
-                        "[peer] private-group: from={} group={} body={:?}",
-                        short(&entry.sender_agent_id_hex),
-                        short(&group_id_hex),
-                        entry.body
-                    );
-                    let Ok(from) = AgentId::parse(entry.sender_agent_id_hex) else {
-                        return None;
-                    };
-                    return Some(PeerInbound {
-                        from,
-                        body: entry.body,
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[peer] private-group decrypt error: {e}");
-                    return None;
-                }
-            }
+        // x0xd's /secure/encrypt. Routed via the shared
+        // `is_private_group_envelope` predicate so the discriminator
+        // lives in one place (the messages module) and a future DM
+        // transport that legitimately leaves kem_ciphertext empty
+        // doesn't silently start misrouting here.
+        if is_private_group_envelope(&transit) {
+            return decode_private_group(client, &transit).await;
         }
         let identity = client.identity_arc()?;
         let registry = client.registry_arc()?;

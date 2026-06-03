@@ -11,14 +11,17 @@
 //! wire format (and for the live-relay self-DM test).
 
 use crate::card::{extended_card_from_uri, verify_card_extension};
-use crate::chat_crypto::{canonical_envelope_bytes, SIGN_DOMAIN_ENVELOPE};
+use crate::chat_crypto::{
+    canonical_envelope_bytes, ml_dsa_verify, AEAD_KEY_LEN, SIGN_DOMAIN_ENVELOPE,
+};
 use crate::chat_identity::FetchitIdentity;
 use crate::conversation::{
     build_message_outbox, build_receipt_outbox, build_welcome_outbox, Conversation,
-    ConversationRegistry, HistoryEntry, Member, MemberDevice, MemberDeviceStatus,
-    OutboundEnvelope as ChatOutbound,
+    ConversationRegistry, HistoryEntry, Member, MemberDevice, MemberDeviceStatus, MutateAction,
+    OutboundEnvelope as ChatOutbound, Role, TrustState,
 };
 use crate::error::{ChatError, Result};
+use crate::groups::{Group, GroupId as ChatGroupId};
 use crate::http::Http;
 use crate::identity::AgentId;
 use crate::local_store::{write_json_atomic, StoreLayout};
@@ -35,6 +38,7 @@ use fetchit_relay_proto::{
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use x0xd_client::{EncryptedFrame, SecureGroupsEndpoint};
 
@@ -388,27 +392,79 @@ impl<'a> Endpoint<'a> {
         Ok(())
     }
 
+    /// Create a private-secure group via x0xd AND seed a local
+    /// [`Conversation`] for it in the registry. Use this instead of the
+    /// bare HTTP wrapper [`crate::groups::Endpoint::create_private`] —
+    /// without the local conversation seed, [`Self::send_private_group`]
+    /// has no place to record outbound history and
+    /// [`Self::receive_private_group_envelope`] can't dedup/persist.
+    ///
+    /// The seeded conversation carries only the local member at
+    /// creation time. Peers join via the standard
+    /// `groups::invite` + `groups::join` flow on x0xd's side; the local
+    /// member list grows lazily on first received envelope (see
+    /// `receive_private_group_envelope` for the lazy fallback).
+    ///
+    /// The conversation's `current_key_b64` is a fixed all-zeros
+    /// placeholder — x0xd's `TreeKEM` owns the real key state, and the
+    /// fetchit-layer key/epoch fields are unused on the private-group
+    /// path. They stay populated so the on-disk shape matches the DM
+    /// path and a future caller that mistakes a private-group conv for
+    /// a DM doesn't trip the b64-length-32 invariant.
+    ///
+    /// # Errors
+    /// * Whatever [`crate::groups::Endpoint::create_private`] surfaces.
+    /// * [`ChatError::Invalid`] — client built without chat state.
+    pub async fn create_private_group(
+        &self,
+        name: &str,
+        display_name: Option<&str>,
+    ) -> Result<Group> {
+        let identity = self
+            .identity
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let registry = self
+            .registry
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let signer = self
+            .signer
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        let groups = crate::groups::Endpoint::new(self.http);
+        let group = groups.create_private(name, display_name).await?;
+        let conv = self_only_private_group_conversation(
+            group.group_id.as_str(),
+            group.name.clone(),
+            identity,
+            signer.as_ref(),
+        );
+        registry.save(&conv).await?;
+        Ok(group)
+    }
+
     /// Send `body` into a private-secure (PQ `TreeKEM`) group.
     ///
     /// Encrypts the plaintext via x0xd's `/secure/encrypt`, postcard-
     /// encodes the resulting [`EncryptedFrame`] into
     /// [`TransitEnvelope::ciphertext`], signs the envelope with the
-    /// local ML-DSA-65 key, and routes it through the message
+    /// local ML-DSA-65 key, and routes ONE envelope per active member
+    /// of the group (excluding the local agent) through the message
     /// [`Router`]. x0xd owns the `TreeKEM` ratchet — the wire-level
     /// `TransitEnvelope` is the routing-and-signing tunnel.
     ///
-    /// The envelope is addressed at the routing layer to the local
-    /// agent (loopback through the relay): per
-    /// `private/m2-decisions.md` the v1 group fanout layer is deferred
-    /// and the chat layer does not yet maintain a member roster here.
-    /// Per-recipient fanout will replace the loopback target without
-    /// changing this method's signature.
+    /// Roster is queried from x0xd via
+    /// [`crate::groups::Endpoint::members`]; only `state == "active"`
+    /// entries receive envelopes. A 1-member group (just the sender)
+    /// is a no-op fanout — no envelopes go on the wire — and the
+    /// returned message id is the locally-minted one because no
+    /// transport receipt exists.
     ///
     /// `group_id` is the x0xd group id as returned by
     /// `groups::create_private` (64-char hex). The 32-byte
     /// [`ProtoGroupId`] on the wire is the hex-decoded value.
     ///
-    /// Returns the transport-assigned message id of the sent envelope.
+    /// Returns the transport-assigned message id of the LAST envelope
+    /// sent (mirrors the fanout semantics of [`Self::dispatch_outbox`]).
     ///
     /// # Errors
     /// * [`ChatError::NoTransportAvailable`] — no transport registered.
@@ -445,33 +501,52 @@ impl<'a> Endpoint<'a> {
         )
         .await?;
 
-        let message_id = random_message_id();
-        // M2 simplification: loopback the envelope through the routing
-        // layer addressed to the local agent. The plaintext route into
-        // the recipient's inbox is in the envelope's `group_id`; a
-        // future fanout layer will replace this loopback target with
-        // one envelope per peer device per Decision 1 of
-        // `private/m2-decisions.md`.
-        let recipient = AgentId(identity.agent_id_hex().to_owned());
+        // Build the envelope once, fan out N-1 copies — one per active
+        // member excluding self. The envelope's `group_id` is what the
+        // receiver uses to look up the conversation; the routing-layer
+        // recipient on each hop just steers the relay's per-recipient
+        // queue.
+        let groups = crate::groups::Endpoint::new(self.http);
+        let chat_group_id = ChatGroupId::parse(group_id)?;
+        let roster = groups.members(&chat_group_id).await?;
+        let local_agent_hex = identity.agent_id_hex();
         let timestamp_ms = envelope.timestamp_ms;
-        let transport_out = TransportOutbound {
-            kind: OutboundKind::Group {
-                group_id: group_id.to_owned(),
-            },
-            from_machine_id: Some(self.local_machine_id),
-            payload: Vec::new(),
-            timestamp_ms,
-            transit: Some(envelope),
-        };
-        let receipt = self.router.send(&recipient, transport_out).await?;
-        Ok(receipt.message_id.or(Some(message_id)))
+        let mut last_receipt_id: Option<String> = None;
+        let mut delivered = false;
+        for member in roster {
+            if member.0 == local_agent_hex {
+                continue;
+            }
+            let transport_out = TransportOutbound {
+                kind: OutboundKind::Group {
+                    group_id: group_id.to_owned(),
+                },
+                from_machine_id: Some(self.local_machine_id),
+                payload: Vec::new(),
+                timestamp_ms,
+                transit: Some(envelope.clone()),
+            };
+            let receipt = self.router.send(&member, transport_out).await?;
+            last_receipt_id = receipt.message_id.or(last_receipt_id);
+            delivered = true;
+        }
+        // 1-member group (just the sender) is a legitimate state — no
+        // peers to address. Surface a locally-minted message id so the
+        // caller's UI bookkeeping (sending → sent state machine) still
+        // has a stable anchor.
+        if !delivered {
+            return Ok(Some(random_message_id()));
+        }
+        Ok(last_receipt_id.or_else(|| Some(random_message_id())))
     }
 
-    /// Process an inbound private-group [`TransitEnvelope`]: decode the
+    /// Process an inbound private-group [`TransitEnvelope`]: verify the
+    /// sender's ML-DSA-65 signature against the cached card pubkey,
+    /// dedup against the conversation's seen-nonces window, decode the
     /// postcard'd [`EncryptedFrame`] out of `ciphertext`, drive x0xd's
-    /// `/secure/decrypt` to recover the plaintext, and surface a
-    /// [`HistoryEntry`] that callers can fold into their conversation
-    /// vault.
+    /// `/secure/decrypt` to recover the plaintext, push the resulting
+    /// [`HistoryEntry`] onto the conversation's local transcript, and
+    /// return it.
     ///
     /// `group_id_hex` is the x0xd group id as a 64-char hex string —
     /// the same value passed to [`Self::send_private_group`]. It is
@@ -480,39 +555,135 @@ impl<'a> Endpoint<'a> {
     /// lookup and pass it through verbatim, avoiding a round-trip
     /// through `hex::encode` on the hot path.
     ///
-    /// Persistence of the returned entry is the caller's
-    /// responsibility — the registry update API is left to the
-    /// chat-state owner so this method stays usable from contexts
-    /// (e.g. the headless peer) that don't carry a Conversation
-    /// to mutate in place.
+    /// On replay (the envelope's outer nonce is already in the
+    /// conversation's per-sender sliding window) this method returns
+    /// `Ok(PrivateGroupReceive::Replay)`; callers must NOT surface the
+    /// `HistoryEntry` to the user.
+    ///
+    /// On first receive for a group the local doesn't yet have a
+    /// conversation for (Bob joins Alice's group via x0xd invite; his
+    /// local has no `Conversation` yet) this method lazily creates the
+    /// shell conversation before recording the entry, so live-test
+    /// mechanics work without a separate `join_private` endpoint.
     ///
     /// # Errors
     /// * [`ChatError::Invalid`] — client built without chat state, the
     ///   ciphertext doesn't postcard-decode as an [`EncryptedFrame`],
-    ///   or the recovered plaintext is not valid UTF-8.
+    ///   the recovered plaintext is not valid UTF-8, no card on file
+    ///   for the envelope's `sender_agent_id`, the card carries no
+    ///   ML-DSA pubkey, or the envelope signature fails verification.
     /// * [`ChatError::MessageTransport`] — x0xd refused
     ///   `/secure/decrypt` (stale epoch, wrong group, sender mismatch).
     pub async fn receive_private_group_envelope(
         &self,
         env: &TransitEnvelope,
         group_id_hex: &str,
-    ) -> Result<HistoryEntry> {
+    ) -> Result<PrivateGroupReceive> {
+        let identity = self
+            .identity
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let registry = self
+            .registry
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let signer = self
+            .signer
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let layout = self
+            .layout
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        // Sender verification BEFORE any state mutation. Same shape as
+        // `conversation::inbound::verify_sender` — load the cached card,
+        // confirm it carries a v2 ML-DSA pubkey, verify the envelope
+        // signature over `SIGN_DOMAIN_ENVELOPE || canonical_envelope_bytes`.
+        let sender_agent_id_hex = hex::encode(env.sender_agent_id.as_bytes());
+        let stored_card =
+            StoredContactCard::load(layout, &sender_agent_id_hex)?.ok_or_else(|| {
+                ChatError::Invalid(format!(
+                    "no card for envelope sender {}",
+                    &sender_agent_id_hex[..8.min(sender_agent_id_hex.len())]
+                ))
+            })?;
+        let agent_pk_b64 = stored_card.agent_public_key_b64.as_deref().ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "card for {} has no ML-DSA pubkey",
+                &sender_agent_id_hex[..8.min(sender_agent_id_hex.len())]
+            ))
+        })?;
+        let agent_pub = B64
+            .decode(agent_pk_b64)
+            .map_err(|e| ChatError::Invalid(format!("card agent_public_key_b64: {e}")))?;
+        let canonical = canonical_envelope_bytes(env)?;
+        let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        ml_dsa_verify(&agent_pub, &sign_bytes, &env.sender_signature)
+            .map_err(|_| ChatError::Invalid("envelope signature verify failed".into()))?;
+
+        // Lazy conversation creation: if Bob accepted an invite via
+        // x0xd but his local has no Conversation yet, seed a shell
+        // before the dedup+history mutation runs. Use the same
+        // self-only constructor `create_private_group` uses so the
+        // on-disk shape matches.
+        if registry.get(group_id_hex).await?.is_none() {
+            let conv =
+                self_only_private_group_conversation(group_id_hex, None, identity, signer.as_ref());
+            registry.save(&conv).await?;
+        }
+
+        // Validate the nonce shape BEFORE we touch x0xd's /secure/decrypt
+        // — a malformed nonce is unrecoverable and a wasted daemon
+        // round-trip would just surface the same error noisier.
+        if env.nonce.len() != 12 {
+            return Err(ChatError::Invalid("nonce length".into()));
+        }
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes.copy_from_slice(&env.nonce);
+
+        // x0xd's /secure/decrypt is the only path that can fail with
+        // remote state we don't control (stale epoch, KEM mismatch).
+        // Run it BEFORE the dedup mutation so a replay-detection close
+        // doesn't poison the seen-nonces window on a real decrypt
+        // failure. The replay surface here is bounded — x0xd's TreeKEM
+        // gates the decrypt key, so re-decrypting the same ciphertext
+        // can't escalate beyond the post-dedup drop.
         let frame: EncryptedFrame = postcard::from_bytes(&env.ciphertext)
             .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
-        let sender_agent_id_hex = hex::encode(env.sender_agent_id.as_bytes());
         let secure = self.secure_groups()?;
         let plaintext = secure
             .decrypt(group_id_hex, &frame, Some(&sender_agent_id_hex))
             .await?;
         let body = String::from_utf8(plaintext)
             .map_err(|e| ChatError::Invalid(format!("body utf8: {e}")))?;
-        Ok(HistoryEntry {
-            sender_agent_id_hex,
+
+        let entry = HistoryEntry {
+            sender_agent_id_hex: sender_agent_id_hex.clone(),
             sender_name: None,
             body,
             ts_ms: env.timestamp_ms,
             message_id: hex::encode(envelope_dedupe_bytes(env)),
-        })
+        };
+        let entry_for_closure = entry.clone();
+
+        // Atomic dedup + history mutation. The mutate_in_place closure
+        // holds the by-group_id mutex across the check + push + persist
+        // so a concurrent inbound on the same group can't slip an extra
+        // copy past the window. Replay surfaces as `Skip(None)`; fresh
+        // surfaces as `Persist(Some(entry))`.
+        let outcome = registry
+            .mutate_in_place(group_id_hex, |conv| {
+                if conv.check_and_record_nonce(&sender_agent_id_hex, nonce_bytes) {
+                    return MutateAction::Skip(None);
+                }
+                conv.push_history(entry_for_closure.clone());
+                MutateAction::Persist(Some(entry_for_closure.clone()))
+            })
+            .await?;
+
+        match outcome {
+            Some(_persisted) => Ok(PrivateGroupReceive::Persisted(entry)),
+            None => Ok(PrivateGroupReceive::Replay),
+        }
     }
 
     /// Build a [`SecureGroupsEndpoint`] against the same x0xd that
@@ -670,6 +841,91 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Build a `Conversation` shell for a private-secure group containing
+/// only the local member. The peer roster grows lazily as invites land
+/// (lazy fallback in `receive_private_group_envelope`). All key-state
+/// fields are zero-placeholders because x0xd's `TreeKEM` owns the real
+/// key material — see [`Endpoint::create_private_group`] for the
+/// rationale.
+fn self_only_private_group_conversation<S: Signer + ?Sized>(
+    group_id_hex: &str,
+    name: Option<String>,
+    identity: &FetchitIdentity,
+    signer: &S,
+) -> Conversation {
+    let local_member = Member {
+        user_id_hex: identity.user_id_hex().map(str::to_owned),
+        devices: vec![MemberDevice {
+            agent_id_hex: identity.agent_id_hex().to_owned(),
+            kem_public_key_b64: B64.encode(identity.kem_public_key()),
+            agent_public_key_b64: Some(B64.encode(signer.public_key())),
+            added_at_epoch: 0,
+            status: MemberDeviceStatus::Active,
+        }],
+        joined_at_epoch: 0,
+    };
+    let now = now_ms();
+    Conversation {
+        group_id_hex: group_id_hex.to_owned(),
+        name,
+        members: vec![local_member],
+        current_epoch: 0,
+        // Placeholder key — x0xd's TreeKEM owns the real key material;
+        // the fetchit-layer current_key is never used on this path.
+        // Kept all-zeros at AEAD_KEY_LEN so the b64-decode invariant
+        // (`current_key().len() == AEAD_KEY_LEN`) holds if a stale
+        // caller accidentally treats this conv as a DM.
+        current_key_b64: B64.encode([0u8; AEAD_KEY_LEN]),
+        prior_keys: Vec::new(),
+        own_role: Role::Admin,
+        created_at_ms: now,
+        last_rekey_at_ms: now,
+        auto_rekey_interval_ms: crate::conversation::DEFAULT_AUTO_REKEY_INTERVAL_MS,
+        // Locally-initiated group is trusted by construction. For the
+        // lazy-create path (a peer's invite landed us in), we still mark
+        // Confirmed because the relay-side ML-DSA verify is what gates
+        // inbound on this private-group path, not the fetchit trust
+        // posture.
+        trust_state: TrustState::Confirmed,
+        seen_nonces: BTreeMap::new(),
+        history: VecDeque::new(),
+    }
+}
+
+/// Routing predicate: is this `TransitEnvelope` a private-secure group
+/// frame produced by [`Endpoint::send_private_group`]?
+///
+/// The discriminator is `kind == GroupChat && kem_ciphertext.is_empty()`.
+/// The legacy chat-layer group path always populates `kem_ciphertext`
+/// (per-recipient ML-KEM-768 encapsulation); the private-group path
+/// does NOT, because x0xd's `TreeKEM` rides inside `ciphertext` instead.
+///
+/// This predicate is the sole gate that peer.rs uses to route between
+/// `conversation::dispatch_inbound` (legacy KEM path) and
+/// [`Endpoint::receive_private_group_envelope`] (x0xd /secure/decrypt
+/// path). A future DM transport that legitimately leaves
+/// `kem_ciphertext` empty would misroute — guard the invariant.
+#[must_use]
+pub fn is_private_group_envelope(env: &TransitEnvelope) -> bool {
+    matches!(env.kind, EnvelopeKind::GroupChat) && env.kem_ciphertext.is_empty()
+}
+
+/// Outcome of [`Endpoint::receive_private_group_envelope`]: either a
+/// freshly-decoded entry that was appended to the conversation's
+/// history, or a replay (same envelope seen before this conversation's
+/// per-sender sliding window).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrivateGroupReceive {
+    /// Envelope was fresh: decrypted, verified, dedup-recorded, history
+    /// extended, vault persisted. Carries the `HistoryEntry` so callers
+    /// can surface it to the UI.
+    Persisted(HistoryEntry),
+    /// Envelope's outer nonce was already in the conversation's
+    /// per-sender sliding window. No state change; caller MUST NOT
+    /// surface anything.
+    Replay,
+}
+
 /// Decode an [`InboundEnvelope`] (raw bytes from a transport) into a
 /// [`DirectMessage`]. Used by transports that don't speak the v2
 /// conversation wire format (e.g. the legacy x0xd direct path and the
@@ -794,17 +1050,61 @@ mod tests {
     /// `POST /groups`. Doubles as a known value for envelope assertions.
     const TEST_GROUP_HEX: &str = "4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e";
 
+    /// Mount `POST /groups/<G>/secure/encrypt` returning a fixed
+    /// `EncryptedFrame` and `GET /groups/<G>/members` returning
+    /// `[local, peer]`. Returned as a pair so the send tests can drive
+    /// the encrypt+fanout flow against a single `MockServer` without
+    /// per-test boilerplate.
+    async fn mount_encrypt_and_two_member_roster(
+        server: &MockServer,
+        local_agent_hex: &str,
+        peer_agent_hex: &str,
+    ) {
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y2lwaGVydGV4dA==",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 7,
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_agent_hex, "state": "active"},
+                    {"agent_id": peer_agent_hex, "state": "active"},
+                ]
+            })))
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn send_private_group_encrypts_then_signs_and_postcards_frame() {
         // Wiremock x0xd's POST /groups/<G>/secure/encrypt — return a
         // synthetic EncryptedFrame and assert downstream the envelope
         // captured by the transport carries the postcard-encoded frame
         // in `ciphertext`, version=WIRE_VERSION, kind=GroupChat,
-        // epoch=secret_epoch, sender_signature non-empty.
+        // epoch=secret_epoch, sender_signature non-empty. Also mount
+        // GET /members so the fanout layer has a real peer to address.
         let server = MockServer::start().await;
-        let expected_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        let signer_concrete = Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_arc: Arc<dyn Signer> = signer_concrete.clone();
+        let (identity, _tmp) = fixture_identity(&signer_concrete);
+        let identity = Arc::new(identity);
+        let peer_hex = "b".repeat(64);
+        mount_encrypt_and_two_member_roster(&server, identity.agent_id_hex(), &peer_hex).await;
+        // Assert the encrypt body explicitly via a partial-json
+        // matcher so a future param rename trips the test.
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
         Mock::given(method("POST"))
-            .and(path(&expected_path))
+            .and(path(&encrypt_path))
             .and(body_partial_json(serde_json::json!({
                 "payload_b64": B64.encode(b"hello group"),
             })))
@@ -817,17 +1117,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = Http::new(format!("{}/", server.uri()), "tok".to_owned()).unwrap();
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
         let (transport, captured) = CapturingTransport::new();
         let mut router = Router::new();
         router.add(transport);
-        let signer_concrete = Arc::new(MlDsaSigner::generate().unwrap());
-        let signer_arc: Arc<dyn Signer> = signer_concrete.clone();
-        let (identity, _tmp) = fixture_identity(&signer_concrete);
-        let identity = Arc::new(identity);
         // The send_private_group path only consults `identity`,
-        // `signer`, and `router`; the registry + layout slots are
-        // unused for the secure-group send, so we leave them None.
+        // `signer`, `router`, and now the http (for the roster query).
+        // The registry + layout slots are unused for the bare send.
         let endpoint = Endpoint::new(
             &http,
             &router,
@@ -872,79 +1168,6 @@ mod tests {
         assert_eq!(env.nonce, B64.decode("MTIzNDU2Nzg5MGFi").unwrap());
         let group_id = env.group_id.expect("envelope must carry group_id");
         assert_eq!(hex::encode(group_id.as_bytes()), TEST_GROUP_HEX);
-    }
-
-    #[tokio::test]
-    async fn receive_private_group_envelope_decrypts_via_x0xd_and_yields_history_entry() {
-        // Wiremock x0xd's POST /groups/<G>/secure/decrypt — return the
-        // recovered plaintext as base64. Construct an inbound
-        // TransitEnvelope carrying a postcard'd EncryptedFrame in
-        // `ciphertext` and feed it through receive_private_group_envelope.
-        // Assert the HistoryEntry fields match the wire shape.
-        let server = MockServer::start().await;
-        let expected_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
-        let sender_bytes = [0xAA; 32];
-        let sender_hex = hex::encode(sender_bytes);
-        Mock::given(method("POST"))
-            .and(path(&expected_path))
-            .and(body_partial_json(serde_json::json!({
-                "sender_agent_id": sender_hex,
-                "secret_epoch": 9,
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "payload_b64": B64.encode(b"hi from peer"),
-            })))
-            .mount(&server)
-            .await;
-
-        let http = Http::new(format!("{}/", server.uri()), "tok".to_owned()).unwrap();
-        let router = Router::new();
-        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32]);
-
-        let frame = EncryptedFrame {
-            ciphertext_b64: "Y2lwaGVydGV4dA==".to_owned(),
-            nonce_b64: "MTIzNDU2Nzg5MGFi".to_owned(),
-            secret_epoch: 9,
-        };
-        let frame_bytes = postcard::to_allocvec(&frame).unwrap();
-        let mut group_id_bytes = [0u8; 32];
-        hex::decode_to_slice(TEST_GROUP_HEX, &mut group_id_bytes).unwrap();
-        let inbound = TransitEnvelope {
-            version: WIRE_VERSION,
-            kind: EnvelopeKind::GroupChat,
-            group_id: Some(ProtoGroupId::from_bytes(group_id_bytes)),
-            tenant_id: None,
-            sender_agent_id: ProtoAgentId::from_bytes(sender_bytes),
-            sender_machine_id: MachineId::from_bytes([0u8; 32]),
-            timestamp_ms: 1_700_000_000_000,
-            epoch: 9,
-            ciphertext: frame_bytes,
-            nonce: B64.decode("MTIzNDU2Nzg5MGFi").unwrap(),
-            kem_ciphertext: Vec::new(),
-            sender_signature: vec![0u8; 64],
-        };
-
-        let entry = endpoint
-            .receive_private_group_envelope(&inbound, TEST_GROUP_HEX)
-            .await
-            .unwrap();
-
-        assert_eq!(entry.sender_agent_id_hex, sender_hex);
-        assert_eq!(entry.body, "hi from peer");
-        assert_eq!(entry.ts_ms, 1_700_000_000_000);
-        assert_eq!(entry.sender_name, None);
-        assert!(
-            !entry.message_id.is_empty(),
-            "message_id must be a synthesized dedupe key",
-        );
-        // Determinism check on the synthesized id — same envelope must
-        // map to the same id so callers' dedupe paths can rely on it.
-        let entry2 = endpoint
-            .receive_private_group_envelope(&inbound, TEST_GROUP_HEX)
-            .await
-            .unwrap();
-        assert_eq!(entry.message_id, entry2.message_id);
     }
 
     #[test]

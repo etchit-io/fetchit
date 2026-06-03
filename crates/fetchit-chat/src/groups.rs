@@ -546,8 +546,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let http =
-            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
         let endpoint = Endpoint::new(&http);
         let ids = endpoint
             .members(&GroupId::parse(gid).unwrap())
@@ -578,8 +577,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let http =
-            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
         let endpoint = Endpoint::new(&http);
         let ids = endpoint
             .members(&GroupId::parse(gid).unwrap())
@@ -606,8 +604,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let http =
-            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
         let endpoint = Endpoint::new(&http);
         let ids = endpoint
             .members(&GroupId::parse(gid).unwrap())
@@ -630,8 +627,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let http =
-            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
         let endpoint = Endpoint::new(&http);
         let ids = endpoint
             .members(&GroupId::parse(gid).unwrap())
@@ -651,8 +647,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(404).set_body_string("group not found"))
             .mount(&server)
             .await;
-        let http =
-            crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
         let endpoint = Endpoint::new(&http);
         let err = endpoint
             .members(&GroupId::parse(gid).unwrap())
