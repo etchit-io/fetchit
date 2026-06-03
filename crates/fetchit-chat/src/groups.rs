@@ -183,6 +183,13 @@ struct JoinRequest<'a> {
     display_name: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+struct AddMemberRequest<'a> {
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<&'a str>,
+}
+
 #[derive(Deserialize)]
 struct GroupsResponse {
     #[serde(default)]
@@ -300,6 +307,48 @@ impl<'a> Endpoint<'a> {
                 },
             )
             .await
+    }
+
+    /// Register an agent as a member of a group from the creator's
+    /// side. **The creator must call this for every invitee.**
+    ///
+    /// `/groups/join` on the invitee establishes their local group
+    /// state and subscribes them to the group's metadata gossip topic,
+    /// but does NOT add them to /members on either side. Per x0xd's
+    /// named-groups model (see `docs/primers/groups.md` upstream),
+    /// creator-authored membership changes are what propagate across
+    /// subscribed peers — the creator posts a member-add event on the
+    /// group's metadata topic and every already-subscribed daemon
+    /// (including the invitee's, after their /groups/join) picks up
+    /// the converged roster.
+    ///
+    /// Without this call, the creator's `groups::members()` returns
+    /// only the owner and `send_private_group`'s fanout has nothing
+    /// to address; symmetrically, the invitee's own /members never
+    /// shows them in their own roster.
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces. 4xx from x0xd
+    /// (unknown group, malformed `agent_id`, already-a-member) lands as
+    /// [`ChatError::Daemon`].
+    pub async fn add_member(
+        &self,
+        group: &GroupId,
+        agent_id: &AgentId,
+        display_name: Option<&str>,
+    ) -> Result<()> {
+        let path = format!("/groups/{}/members", group.as_str());
+        let _: serde_json::Value = self
+            .http
+            .post_json(
+                &path,
+                &AddMemberRequest {
+                    agent_id: &agent_id.0,
+                    display_name,
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// Send a message into a group.
@@ -524,6 +573,61 @@ mod tests {
         let m: GroupMemberEntry = serde_json::from_str(json).expect("decode");
         assert_eq!(m.state.as_deref(), Some("active"));
         assert!(m.agent_id.0.starts_with("a48e8af1"));
+    }
+
+    #[tokio::test]
+    async fn add_member_posts_agent_id_and_display_name() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        let bob = "b".repeat(64);
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{gid}/members")))
+            .and(body_json(serde_json::json!({
+                "agent_id": &bob,
+                "display_name": "Bob",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "group_id": gid,
+                "agent_id": &bob,
+            })))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        endpoint
+            .add_member(
+                &GroupId::parse(gid).unwrap(),
+                &AgentId(bob.clone()),
+                Some("Bob"),
+            )
+            .await
+            .expect("add_member");
+    }
+
+    #[tokio::test]
+    async fn add_member_omits_display_name_when_none() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        let bob = "b".repeat(64);
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{gid}/members")))
+            .and(body_json(serde_json::json!({ "agent_id": &bob })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        endpoint
+            .add_member(&GroupId::parse(gid).unwrap(), &AgentId(bob), None)
+            .await
+            .expect("add_member");
     }
 
     #[tokio::test]

@@ -64,6 +64,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fetchit_chat::groups::GroupId;
+use fetchit_chat::identity::AgentId;
 use fetchit_chat::Client;
 use std::time::Duration;
 use url::Url;
@@ -250,6 +251,23 @@ async fn m2_live_private_group_round_trip() {
     eprintln!("[m2-live] >>> INVITE <<<");
     eprintln!("[m2-live] {}", invite.0);
     eprintln!("[m2-live] >>> END INVITE <<<");
+
+    // Creator-authored membership add. Per x0xd's named-groups model
+    // (upstream `docs/primers/groups.md`), /groups/join on the peer's
+    // side sets up their local group state and subscribes them to the
+    // group's metadata gossip topic, but does NOT register them in
+    // /members on either side. The creator must POST
+    // /groups/<id>/members; that event propagates over the gossip
+    // topic to every subscribed daemon (including the peer's, after
+    // their /groups/join lands). Without this call, /members shows
+    // only the owner on both sides and send_private_group's fanout
+    // has no recipients.
+    client
+        .groups()
+        .add_member(&group_id, &AgentId(peer_agent_hex.clone()), Some("bob"))
+        .await
+        .expect("creator-authored add_member must succeed");
+    eprintln!("[m2-live] add_member published for peer agent");
 
     // Wait for Bob to join. We poll the live roster via x0xd until
     // member_count >= 2 (Alice + Bob).
