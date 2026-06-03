@@ -45,6 +45,20 @@ pub struct Metrics {
     throttles_per_sender_total: AtomicU64,
     /// Throttle for over-size envelope.
     throttles_envelope_too_large_total: AtomicU64,
+    /// Send-frame envelopes accepted at the wire-version gate with
+    /// `envelope.version == 2` (pre-M2 sealed shape). This is the
+    /// operator's burn-down signal for narrowing the gate to v3-only:
+    /// when it stays at zero for a stable window, the transition
+    /// window is safe to close. Per private/metrics-policy.md: no
+    /// per-agent label — only the aggregate count.
+    envelopes_accepted_legacy_v2_total: AtomicU64,
+    /// Send-frame envelopes dropped at the wire-version gate because
+    /// `envelope.version` was outside the accepted set (today: {2, 3}).
+    /// A rising counter is the operator-visible signal that an old
+    /// client (v1) or a future-version (v4+) is hitting the relay
+    /// before its widening cutover has shipped. Per
+    /// private/metrics-policy.md: aggregate count only.
+    envelopes_dropped_version_gate_total: AtomicU64,
     /// Process start instant.
     started_at: Instant,
     /// Region this instance serves.
@@ -70,6 +84,8 @@ impl Metrics {
             throttles_per_recipient_total: AtomicU64::new(0),
             throttles_per_sender_total: AtomicU64::new(0),
             throttles_envelope_too_large_total: AtomicU64::new(0),
+            envelopes_accepted_legacy_v2_total: AtomicU64::new(0),
+            envelopes_dropped_version_gate_total: AtomicU64::new(0),
             started_at: Instant::now(),
             region,
             version,
@@ -154,6 +170,26 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Bump the legacy-v2 acceptance counter — called from the wire-
+    /// version gate when an inbound send-frame envelope carries
+    /// `version == 2`. The aggregate is the burn-down signal for the
+    /// M2 transition: when it stays at zero across all live peers
+    /// for a stable window, the relay's accepted-version set can be
+    /// narrowed to v3-only.
+    pub fn envelope_accepted_legacy_v2(&self) {
+        self.envelopes_accepted_legacy_v2_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the version-gate drop counter — called when an inbound
+    /// send-frame envelope's `version` falls outside the accepted
+    /// set. A rising counter means either old clients have re-emerged
+    /// (v1) or a future-version cutover started shipping early (v4+).
+    pub fn envelope_dropped_version_gate(&self) {
+        self.envelopes_dropped_version_gate_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Render every counter in Prometheus text-exposition format.
     #[must_use]
     pub fn render_prometheus(&self) -> String {
@@ -194,7 +230,21 @@ impl Metrics {
             self.transit_buffer_envelopes.load(Ordering::Relaxed)
         );
 
-        let counters: [(&str, &str, u64); 10] = [
+        for (name, help, value) in self.counter_snapshot() {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} counter");
+            let _ = writeln!(out, "{name}{{{labels}}} {value}");
+        }
+
+        out
+    }
+
+    /// Snapshot every allow-listed counter into a name/help/value
+    /// table. Split out of [`Self::render_prometheus`] so adding a
+    /// counter doesn't push the render function over the workspace
+    /// clippy too-many-lines budget.
+    fn counter_snapshot(&self) -> [(&'static str, &'static str, u64); 12] {
+        [
             (
                 "fetchit_relay_envelopes_sent_total",
                 "Send frames accepted into routing",
@@ -247,15 +297,21 @@ impl Metrics {
                 self.throttles_envelope_too_large_total
                     .load(Ordering::Relaxed),
             ),
-        ];
-
-        for (name, help, value) in counters {
-            let _ = writeln!(out, "# HELP {name} {help}");
-            let _ = writeln!(out, "# TYPE {name} counter");
-            let _ = writeln!(out, "{name}{{{labels}}} {value}");
-        }
-
-        out
+            (
+                "fetchit_relay_envelopes_accepted_legacy_v2_total",
+                "Send-frame envelopes accepted at the wire-version gate \
+                 with version=2 — the M2 transition burn-down signal",
+                self.envelopes_accepted_legacy_v2_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "fetchit_relay_envelopes_dropped_version_gate_total",
+                "Send-frame envelopes dropped because envelope.version \
+                 fell outside the accepted set",
+                self.envelopes_dropped_version_gate_total
+                    .load(Ordering::Relaxed),
+            ),
+        ]
     }
 }
 
@@ -287,9 +343,48 @@ mod tests {
             "fetchit_relay_throttles_per_recipient_total",
             "fetchit_relay_throttles_per_sender_total",
             "fetchit_relay_throttles_envelope_too_large_total",
+            "fetchit_relay_envelopes_accepted_legacy_v2_total",
+            "fetchit_relay_envelopes_dropped_version_gate_total",
         ] {
             assert!(out.contains(series), "missing: {series}");
         }
+    }
+
+    #[test]
+    fn legacy_v2_acceptance_counter_increments_independently() {
+        // The burn-down counter must increment ONLY when called and
+        // must render at the exact bump count. Independent of v3
+        // routing (we don't track v3 explicitly — it's the dominant
+        // case covered by envelopes_sent_total).
+        let m = Metrics::new(Region::Nyc, "v2-test".to_owned());
+        for _ in 0..7 {
+            m.envelope_accepted_legacy_v2();
+        }
+        let out = m.render_prometheus();
+        assert!(out.contains(
+            "fetchit_relay_envelopes_accepted_legacy_v2_total{region=\"nyc\",version=\"v2-test\"} 7"
+        ));
+        // And the gate-drop counter must STAY at zero — these are
+        // distinct surfaces.
+        assert!(out.contains(
+            "fetchit_relay_envelopes_dropped_version_gate_total{region=\"nyc\",version=\"v2-test\"} 0"
+        ));
+    }
+
+    #[test]
+    fn version_gate_drop_counter_increments_independently() {
+        let m = Metrics::new(Region::Nyc, "gate-test".to_owned());
+        for _ in 0..3 {
+            m.envelope_dropped_version_gate();
+        }
+        let out = m.render_prometheus();
+        assert!(out.contains(
+            "fetchit_relay_envelopes_dropped_version_gate_total{region=\"nyc\",version=\"gate-test\"} 3"
+        ));
+        // Burn-down counter stays at zero — they're orthogonal.
+        assert!(out.contains(
+            "fetchit_relay_envelopes_accepted_legacy_v2_total{region=\"nyc\",version=\"gate-test\"} 0"
+        ));
     }
 
     #[test]

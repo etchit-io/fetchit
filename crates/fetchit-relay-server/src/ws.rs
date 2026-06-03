@@ -302,7 +302,15 @@ fn handle_client_frame(
             // all live peers upgrade. Anything else is silently dropped
             // — the relay never decrypts, but it gates schema drift.
             if !matches!(envelope.version, 2 | 3) {
+                state.metrics.envelope_dropped_version_gate();
                 return true;
+            }
+            // Burn-down counter for the v2-accept window: bumped on
+            // every accepted legacy envelope so operators can see when
+            // the active-peer set has fully migrated and the gate can
+            // be narrowed to v3-only.
+            if envelope.version == 2 {
+                state.metrics.envelope_accepted_legacy_v2();
             }
 
             let direct_pushed = state.sessions.send(
