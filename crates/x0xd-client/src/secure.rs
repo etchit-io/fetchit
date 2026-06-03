@@ -70,6 +70,44 @@ struct CreatePrivateSecureRequest<'a> {
     discoverability: &'static str,
 }
 
+#[derive(Serialize)]
+struct EncryptRequest<'a> {
+    payload_b64: &'a str,
+}
+
+#[derive(Deserialize)]
+struct EncryptResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    ciphertext_b64: Option<String>,
+    #[serde(default)]
+    nonce_b64: Option<String>,
+    #[serde(default)]
+    secret_epoch: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct DecryptRequest<'a> {
+    ciphertext_b64: &'a str,
+    nonce_b64: &'a str,
+    secret_epoch: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_agent_id: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct DecryptResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    payload_b64: Option<String>,
+}
+
 impl SecureGroupsEndpoint {
     /// Build a new endpoint against an x0xd daemon at `base_url`,
     /// authenticated with `api_token`.
@@ -138,6 +176,113 @@ impl SecureGroupsEndpoint {
             group_id,
             chat_topic,
         })
+    }
+
+    /// Encrypt one application frame under the group's current MLS
+    /// epoch. Returns ciphertext + nonce + epoch the recipient needs
+    /// to feed to [`Self::decrypt`].
+    ///
+    /// # Errors
+    /// Returns [`X0xdError::Http`] / [`X0xdError::Url`] on transport
+    /// failure or URL join failure, [`X0xdError::Rejected`] if x0xd
+    /// returns non-2xx, `ok=false`, or omits one of the response
+    /// fields needed to construct an [`EncryptedFrame`].
+    pub async fn encrypt(
+        &self,
+        group_id: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedFrame, X0xdError> {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        let payload_b64 = B64.encode(plaintext);
+        let path = format!("groups/{group_id}/secure/encrypt");
+        let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .post(url)
+            .bearer_auth(&self.api_token)
+            .json(&EncryptRequest {
+                payload_b64: &payload_b64,
+            })
+            .send()
+            .await?;
+        if !raw.status().is_success() {
+            let status = raw.status();
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd /secure/encrypt returned {status}: {body}"
+            )));
+        }
+        let resp: EncryptResponse = raw.json().await?;
+        if !resp.ok {
+            return Err(X0xdError::Rejected(resp.error.unwrap_or_else(|| {
+                "x0xd returned ok=false without error message".into()
+            })));
+        }
+        let ciphertext_b64 = resp
+            .ciphertext_b64
+            .ok_or_else(|| X0xdError::Rejected("encrypt response missing ciphertext_b64".into()))?;
+        let nonce_b64 = resp
+            .nonce_b64
+            .ok_or_else(|| X0xdError::Rejected("encrypt response missing nonce_b64".into()))?;
+        let secret_epoch = resp
+            .secret_epoch
+            .ok_or_else(|| X0xdError::Rejected("encrypt response missing secret_epoch".into()))?;
+        Ok(EncryptedFrame {
+            ciphertext_b64,
+            nonce_b64,
+            secret_epoch,
+        })
+    }
+
+    /// Decrypt one application frame. `sender_agent_id` is optional;
+    /// when supplied x0xd checks the membership / identity binding.
+    ///
+    /// # Errors
+    /// Returns [`X0xdError::Http`] / [`X0xdError::Url`] on transport
+    /// failure, [`X0xdError::Rejected`] if x0xd returns non-2xx,
+    /// `ok=false`, or omits `payload_b64`, or if the base64 payload
+    /// is malformed.
+    pub async fn decrypt(
+        &self,
+        group_id: &str,
+        frame: &EncryptedFrame,
+        sender_agent_id: Option<&str>,
+    ) -> Result<Vec<u8>, X0xdError> {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        let path = format!("groups/{group_id}/secure/decrypt");
+        let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .post(url)
+            .bearer_auth(&self.api_token)
+            .json(&DecryptRequest {
+                ciphertext_b64: &frame.ciphertext_b64,
+                nonce_b64: &frame.nonce_b64,
+                secret_epoch: frame.secret_epoch,
+                sender_agent_id,
+            })
+            .send()
+            .await?;
+        if !raw.status().is_success() {
+            let status = raw.status();
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd /secure/decrypt returned {status}: {body}"
+            )));
+        }
+        let resp: DecryptResponse = raw.json().await?;
+        if !resp.ok {
+            return Err(X0xdError::Rejected(resp.error.unwrap_or_else(|| {
+                "x0xd returned ok=false without error message".into()
+            })));
+        }
+        let payload_b64 = resp
+            .payload_b64
+            .ok_or_else(|| X0xdError::Rejected("decrypt response missing payload_b64".into()))?;
+        B64.decode(&payload_b64)
+            .map_err(|e| X0xdError::Rejected(format!("decrypt payload base64: {e}")))
     }
 }
 
@@ -245,5 +390,106 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn encrypt_posts_payload_b64_and_parses_frame() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/G/secure/encrypt"))
+            .and(body_partial_json(serde_json::json!({
+                "payload_b64": "aGk=",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "bm9uY2U=",
+                "secret_epoch": 3,
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let f = endpoint.encrypt("G", b"hi").await.unwrap();
+        assert_eq!(f.secret_epoch, 3);
+        assert_eq!(f.ciphertext_b64, "Y3Q=");
+        assert_eq!(f.nonce_b64, "bm9uY2U=");
+    }
+
+    #[tokio::test]
+    async fn encrypt_surfaces_4xx_body_in_rejected_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/G/secure/encrypt"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_string(r#"{"ok":false,"error":"not a member"}"#),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint.encrypt("G", b"hi").await.unwrap_err();
+        match err {
+            X0xdError::Rejected(msg) => {
+                assert!(msg.contains("403"));
+                assert!(msg.contains("not a member"));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decrypt_posts_full_frame_and_returns_plaintext_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/G/secure/decrypt"))
+            .and(body_partial_json(serde_json::json!({
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "bm9uY2U=",
+                "secret_epoch": 3,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": "aGk=",
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: "bm9uY2U=".into(),
+            secret_epoch: 3,
+        };
+        let plaintext = endpoint.decrypt("G", &frame, None).await.unwrap();
+        assert_eq!(plaintext, b"hi");
+    }
+
+    #[tokio::test]
+    async fn decrypt_passes_sender_agent_id_when_supplied() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/G/secure/decrypt"))
+            .and(body_partial_json(serde_json::json!({
+                "sender_agent_id": "abcd1234",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": "aGk=",
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: "bm9uY2U=".into(),
+            secret_epoch: 3,
+        };
+        endpoint
+            .decrypt("G", &frame, Some("abcd1234"))
+            .await
+            .unwrap();
     }
 }
