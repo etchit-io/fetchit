@@ -186,10 +186,10 @@ async fn ws_upgrade_authenticates_via_authorization_header() {
 
 #[tokio::test]
 async fn auth_verify_failure_returns_generic_body_without_leaking_variant_detail() {
-    // SEC-001: drive auth_verify into the AgentMismatch rejection
-    // path (agent_id does not derive from the supplied public key)
-    // and assert the response body is exactly "authentication
-    // failed" — not the variant-specific reason string.
+    // Drive auth_verify into the AgentMismatch rejection path
+    // (agent_id does not derive from the supplied public key) and
+    // assert the response body is exactly "authentication failed" —
+    // not the variant-specific reason string.
     let addr = start_test_server().await;
     let http = reqwest::Client::new();
     let challenge: AuthChallenge = http

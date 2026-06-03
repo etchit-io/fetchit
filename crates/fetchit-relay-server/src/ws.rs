@@ -886,7 +886,8 @@ mod tests {
     async fn bounded_channel_backpressure_slow_receiver() {
         // Slow receiver: never reads. Bounded channel must reject the
         // (WS_OUTBOUND_CAPACITY + 1)-th send instead of growing without
-        // bound. This is the load-bearing invariant for WS-001.
+        // bound. This is the load-bearing invariant the bounded
+        // outbound channel was added for.
         let (tx, _rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
         for i in 0..WS_OUTBOUND_CAPACITY {
             tx.try_send(ServerFrame::Pong(Pong { nonce: i as u64 }))
