@@ -246,11 +246,19 @@ async fn decode_private_group(
         .await
     {
         Ok(PrivateGroupReceive::Persisted(entry)) => {
+            // Logs metadata only — sender + group prefixes + payload
+            // size. Printing the plaintext body would land in stderr
+            // which the systemd unit pipes to journalctl AND the
+            // chat-peer-start wrapper appends to PEER_RX_LOG, both
+            // long-lived destinations that the relay-metadata-hiding
+            // claims in `crates/fetchit-chat/SECURITY.md` promise to
+            // keep plaintext out of. Body size is observable enough
+            // for live-test debugging without breaking the promise.
             eprintln!(
-                "[peer] private-group: from={} group={} body={:?}",
+                "[peer] private-group: from={} group={} body_len={}",
                 short(&entry.sender_agent_id_hex),
                 short(&group_id_hex),
-                entry.body
+                entry.body.len()
             );
             // M2 live-test echo handler. Bounces the body back into
             // the same group so the test asserter sees an inbound
