@@ -57,6 +57,13 @@ pub enum ChatError {
         /// Where the identity vault was looked up.
         path: String,
     },
+
+    /// Caller invoked `RelayTransport::send` without supplying a
+    /// prebuilt sealed envelope. After M2, the v1 fabricated path is
+    /// gone — every send must go through the conversation/group
+    /// layer that produces a sealed `TransitEnvelope`.
+    #[error("sealed envelope required: caller did not supply a prebuilt sealed envelope")]
+    SealedRequired,
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {
@@ -65,5 +72,18 @@ impl From<x0xd_client::DiscoveryError> for ChatError {
             x0xd_client::DiscoveryError::Io(io) => Self::Io(io),
             other => Self::NotDiscoverable(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sealed_required_displays_descriptive_message() {
+        let e: ChatError = ChatError::SealedRequired;
+        let msg = e.to_string();
+        assert!(msg.contains("sealed envelope required"));
     }
 }
