@@ -155,6 +155,19 @@ struct CreateRequest<'a> {
     preset: &'static str,
 }
 
+#[derive(Serialize)]
+struct CreatePrivateRequest<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<&'a str>,
+    /// Hard-coded `private_secure` — x0xd v0.20.1+ activates PQ
+    /// `TreeKEM` on `private_secure` + `discoverability=Hidden`.
+    preset: &'static str,
+    /// Hard-coded `Hidden` — required alongside `private_secure` for
+    /// `MlsEncrypted` activation per x0xd v0.20.1 release notes.
+    discoverability: &'static str,
+}
+
 #[derive(Deserialize)]
 struct InviteResponse {
     // x0xd 0.19+ calls the field `invite_link` (the full x0x:// URI),
@@ -223,6 +236,28 @@ impl<'a> Endpoint<'a> {
                     name,
                     display_name,
                     preset: "public_open",
+                },
+            )
+            .await
+    }
+
+    /// Create a private MLS group with PQ `TreeKEM` activation. Backed
+    /// by x0xd's `preset=private_secure` + `discoverability=Hidden`,
+    /// which the daemon backs with `saorsa-mls v0.3.x` (ML-KEM-768 +
+    /// ML-DSA-65). Distinct from [`Self::create`] which makes a
+    /// plaintext-on-gossip public room.
+    ///
+    /// # Errors
+    /// Returns whatever the underlying HTTP layer surfaces.
+    pub async fn create_private(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
+        self.http
+            .post_json(
+                "/groups",
+                &CreatePrivateRequest {
+                    name,
+                    display_name,
+                    preset: "private_secure",
+                    discoverability: "Hidden",
                 },
             )
             .await
@@ -389,5 +424,42 @@ mod tests {
         );
         assert!(json.contains("\"name\":\"demo\""));
         assert!(json.contains("\"display_name\":\"josh\""));
+    }
+
+    #[test]
+    fn create_private_request_includes_private_secure_and_hidden() {
+        let req = CreatePrivateRequest {
+            name: "alpha",
+            display_name: None,
+            preset: "private_secure",
+            discoverability: "Hidden",
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        assert!(
+            json.contains("\"preset\":\"private_secure\""),
+            "preset: {json}"
+        );
+        assert!(
+            json.contains("\"discoverability\":\"Hidden\""),
+            "discoverability: {json}"
+        );
+        assert!(json.contains("\"name\":\"alpha\""), "name: {json}");
+        // display_name omitted entirely when None (skip_serializing_if)
+        assert!(!json.contains("display_name"), "should be skipped: {json}");
+    }
+
+    #[test]
+    fn create_private_request_includes_display_name_when_supplied() {
+        let req = CreatePrivateRequest {
+            name: "alpha",
+            display_name: Some("Alice"),
+            preset: "private_secure",
+            discoverability: "Hidden",
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        assert!(
+            json.contains("\"display_name\":\"Alice\""),
+            "display_name: {json}"
+        );
     }
 }
