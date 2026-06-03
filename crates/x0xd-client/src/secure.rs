@@ -1,6 +1,6 @@
 //! Typed wrappers over x0xd's MLS HTTP+SSE surface (TreeKEM-backed since
-//! x0xd v0.20.1). Consumers are `fetchit-chat::groups` for the encrypted
-//! group send/receive path; the daemon owns the MLS ratchet.
+//! x0xd v0.20.1). Consumed by the fetchit-chat groups module for the
+//! encrypted group send/receive path; the daemon owns the MLS ratchet.
 
 use serde::{Deserialize, Serialize};
 
