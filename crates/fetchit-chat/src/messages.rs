@@ -733,6 +733,25 @@ impl<'a> Endpoint<'a> {
         };
         let entry_for_closure = entry.clone();
 
+        // Anti-DoS gate on the lazy-bootstrap path. The `mutate_in_place_or_init`
+        // closure below will spawn a fresh Conversation on disk if none exists
+        // for `group_id_hex` yet. Without an authorisation check on that
+        // bootstrap step, any sender we've already paired with (their ML-DSA
+        // verify passes upstream of this) could stream envelopes for an
+        // unbounded space of attacker-chosen `group_id_hex` values and force
+        // the receiver to write a new vault file per group_id — disk-fill DoS.
+        // x0xd is the source of truth for membership; we only bootstrap when
+        // it confirms we are actually in the group. After bootstrap, every
+        // subsequent receive uses the existing Conversation with no roster
+        // query, so this is amortised to one HTTP call per first-receive per
+        // group. Membership-revocation race (we got kicked between this check
+        // and the mutate) is benign: subsequent receives just hit the
+        // existing conv path; the disk-fill vector is closed regardless.
+        if registry.get(group_id_hex).await?.is_none() {
+            self.verify_group_membership(group_id_hex, identity.agent_id_hex())
+                .await?;
+        }
+
         // Atomic lazy-create + dedup + history mutation. The
         // `mutate_in_place_or_init` closure runs the bootstrap of a
         // fresh self-only conversation UNDER the per-group mutex iff
@@ -781,6 +800,41 @@ impl<'a> Endpoint<'a> {
         let base = url::Url::parse(self.http.base_url())
             .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
         SecureGroupsEndpoint::new(base, self.http.token().to_owned()).map_err(ChatError::from)
+    }
+
+    /// Confirm with `x0xd` that `self_agent_id_hex` is a member of
+    /// `group_id_hex`. Used as the anti-`DoS` gate before
+    /// `mutate_in_place_or_init` lazy-bootstraps a fresh on-disk
+    /// `Conversation`: an ML-DSA-paired contact could otherwise mint
+    /// envelopes against any string-shaped `group_id_hex` and force
+    /// the receiver to spawn an unbounded number of vault entries
+    /// (disk-fill `DoS`). `x0xd` is the source of truth for group
+    /// membership; envelopes whose `group_id` doesn't list us as a
+    /// member are rejected before any disk write.
+    ///
+    /// Comparison is case-insensitive to match
+    /// `send_private_group`'s self-exclusion: x0xd's roster shape
+    /// has historically returned mixed-case agent IDs and the wire
+    /// `AgentId` is `#[serde(transparent)]`.
+    async fn verify_group_membership(
+        &self,
+        group_id_hex: &str,
+        self_agent_id_hex: &str,
+    ) -> Result<()> {
+        let group_id = crate::groups::GroupId::parse(group_id_hex)?;
+        let groups = crate::groups::Endpoint::new(self.http);
+        let roster = groups.members(&group_id).await?;
+        if !roster
+            .iter()
+            .any(|m| m.0.eq_ignore_ascii_case(self_agent_id_hex))
+        {
+            let preview_len = 8.min(group_id_hex.len());
+            return Err(ChatError::Invalid(format!(
+                "not a member of group {}; refusing to bootstrap conversation",
+                &group_id_hex[..preview_len]
+            )));
+        }
+        Ok(())
     }
 
     async fn dispatch_outbox(&self, outbox: Vec<ChatOutbound>) -> Result<Option<String>> {
@@ -1175,6 +1229,43 @@ mod tests {
                 "members": [
                     {"agent_id": local_agent_hex, "state": "active"},
                     {"agent_id": peer_agent_hex, "state": "active"},
+                ]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Smaller helper for `receive_private_group_envelope` tests that
+    /// exercise lazy-bootstrap: mounts `GET /groups/<G>/members`
+    /// returning a 1-entry roster containing `local_agent_hex`. The
+    /// membership gate (anti-DoS) on the bootstrap path queries this
+    /// endpoint; without the mock, every bootstrap path 404s.
+    async fn mount_members_with_self_only(server: &MockServer, local_agent_hex: &str) {
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_agent_hex, "state": "active"},
+                ]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Helper for the receive-side not-a-member test: mounts a
+    /// `GET /groups/<G>/members` that returns OK but with a roster
+    /// that does NOT contain `local_agent_hex`. The anti-DoS gate
+    /// should reject the bootstrap.
+    async fn mount_members_without_self(server: &MockServer, other_agent_hex: &str) {
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": other_agent_hex, "state": "active"},
                 ]
             })))
             .mount(server)
@@ -2050,6 +2141,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_decrypt(&server, b"hi from peer").await;
         let rig = build_rig();
+        mount_members_with_self_only(&server, rig.identity.agent_id_hex()).await;
         let sender_signer = MlDsaSigner::generate().unwrap();
         let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
             &sender_signer.public_key(),
@@ -2219,6 +2311,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_decrypt(&server, b"hi from peer").await;
         let rig = build_rig();
+        mount_members_with_self_only(&server, rig.identity.agent_id_hex()).await;
         let sender_signer = MlDsaSigner::generate().unwrap();
         let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
             &sender_signer.public_key(),
@@ -2255,6 +2348,125 @@ mod tests {
         let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
         assert_eq!(conv.history.len(), 1);
         assert_eq!(conv.history.back().unwrap().body, "hi from peer");
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_rejects_when_not_in_x0xd_roster() {
+        // Anti-DoS gate on the lazy-bootstrap path. A paired contact
+        // (sender card cached, ML-DSA-65 verify passes upstream) could
+        // otherwise spam fake group_id_hex values and force the
+        // receiver to bootstrap an unbounded number of Conversation
+        // vault entries. x0xd is the source of truth for membership
+        // — when its /groups/<id>/members roster excludes our
+        // agent_id, we refuse to bootstrap and drop the envelope.
+        let server = MockServer::start().await;
+        mount_decrypt(&server, b"hi from peer").await;
+        let rig = build_rig();
+        // Mount a roster that does NOT contain the receiver.
+        let other_hex = "c".repeat(64);
+        mount_members_without_self(&server, &other_hex).await;
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 200).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+
+        // Pre-condition: registry has no conversation yet.
+        assert!(rig.registry.get(TEST_GROUP_HEX).await.unwrap().is_none());
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        match err {
+            ChatError::Invalid(ref m) if m.contains("not a member of group") => {}
+            other => panic!("expected Invalid(not a member of group...), got {other:?}"),
+        }
+        // Post-condition: NO Conversation was created — the gate
+        // closed the disk-fill path.
+        assert!(
+            rig.registry.get(TEST_GROUP_HEX).await.unwrap().is_none(),
+            "membership gate must NOT bootstrap a Conversation when rejected",
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_skips_roster_check_when_conversation_exists() {
+        // The membership gate is on the LAZY-BOOTSTRAP path only —
+        // once a Conversation exists in the registry, subsequent
+        // receives use it directly with no roster query. This pins
+        // the optimisation: we don't make x0xd round-trips on every
+        // group message after the first, and a membership-revocation
+        // race (we got kicked between bootstrap and a later receive)
+        // doesn't break delivery for already-known groups.
+        //
+        // Test shape: DELIBERATELY do NOT mount `/groups/<G>/members`.
+        // Then pre-seed the registry with a self-only Conversation
+        // for TEST_GROUP_HEX. If the receive code path queried
+        // members against the server, wiremock would 404 and the
+        // call would error out. The success of this test demonstrates
+        // the optimisation.
+        let server = MockServer::start().await;
+        mount_decrypt(&server, b"hi from peer").await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+
+        // Pre-seed the registry so the lazy-bootstrap path is NOT
+        // exercised. Build a self-only conv the same way the
+        // production lazy-bootstrap would and save it.
+        let signer_arc = rig.signer_arc();
+        let pre_seeded = self_only_private_group_conversation(
+            TEST_GROUP_HEX,
+            None,
+            &rig.identity,
+            signer_arc.as_ref(),
+        );
+        rig.registry.save(&pre_seeded).await.unwrap();
+
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 999).await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+
+        let out = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .expect("receive must succeed without a /members mock — gate is bootstrap-only");
+        assert!(
+            matches!(out, PrivateGroupReceive::Persisted(_)),
+            "existing-conv path: expected Persisted, got {out:?}",
+        );
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        assert_eq!(
+            conv.history.len(),
+            1,
+            "entry persisted into pre-seeded conv"
+        );
     }
 
     #[tokio::test]
@@ -2376,6 +2588,7 @@ mod tests {
             .mount(&server)
             .await;
         let rig = build_rig();
+        mount_members_with_self_only(&server, rig.identity.agent_id_hex()).await;
 
         // Build N independent senders, install N cards, craft N
         // envelopes with distinct nonces+timestamps so dedupe keys
