@@ -1,10 +1,10 @@
 //! Allow-listed Prometheus metric surface.
 //!
-//! The complete metric set is documented in `private/metrics-policy.md`.
-//! Every counter exposed here has a typed setter or incrementer — there
-//! is no generic "label-set increment" API on purpose, so a developer
-//! adding a forbidden dimension has to add a method and surface it in
-//! code review.
+//! The complete metric set is documented in `docs/metrics-policy.md`
+//! (workspace root). Every counter exposed here has a typed setter
+//! or incrementer — there is no generic "label-set increment" API
+//! on purpose, so a developer adding a forbidden dimension has to
+//! add a method and surface it in code review.
 //!
 //! No metric label or value here may carry an agent id, tenant id,
 //! group id, machine id, IP, country, ASN, or user agent.
@@ -34,7 +34,7 @@ pub struct Metrics {
     /// proxy for "recipient never came back to THIS relay". A rising
     /// counter is the operator-visible signal that peers are routing
     /// to relays where their recipients don't live (the cross-relay
-    /// federation gap). Per private/metrics-policy.md: no per-agent
+    /// federation gap). Per `docs/metrics-policy.md`: no per-agent
     /// label — only the aggregate count.
     envelopes_dropped_ttl_total: AtomicU64,
     /// `/v1/auth/challenge` calls.
@@ -53,7 +53,7 @@ pub struct Metrics {
     /// `envelope.version == 2` (pre-M2 sealed shape). This is the
     /// operator's burn-down signal for narrowing the gate to v3-only:
     /// when it stays at zero for a stable window, the transition
-    /// window is safe to close. Per private/metrics-policy.md: no
+    /// window is safe to close. Per docs/metrics-policy.md: no
     /// per-agent label — only the aggregate count.
     envelopes_accepted_legacy_v2_total: AtomicU64,
     /// Send-frame envelopes dropped at the wire-version gate because
@@ -61,7 +61,7 @@ pub struct Metrics {
     /// A rising counter is the operator-visible signal that an old
     /// client (v1) or a future-version (v4+) is hitting the relay
     /// before its widening cutover has shipped. Per
-    /// private/metrics-policy.md: aggregate count only.
+    /// docs/metrics-policy.md: aggregate count only.
     envelopes_dropped_version_gate_total: AtomicU64,
     /// Process start instant.
     started_at: Instant,

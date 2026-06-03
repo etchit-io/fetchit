@@ -387,9 +387,10 @@ fn spawn_sweeper(state: Arc<ServerState>) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         // Only warn when the eviction count STRICTLY EXCEEDS the
         // previous sweep — a persistently-offline recipient would
-        // otherwise flood logs at 2 warns/min indefinitely. Bob's
-        // dashboard scrapes the metric (`transit_buffer_envelopes`)
-        // for steady-state; the warn is for spike detection.
+        // otherwise flood logs at 2 warns/min indefinitely. The
+        // operator dashboard scrapes the metric
+        // (`transit_buffer_envelopes`) for steady-state; the warn
+        // is for spike detection.
         let mut last_evicted: usize = 0;
         loop {
             interval.tick().await;

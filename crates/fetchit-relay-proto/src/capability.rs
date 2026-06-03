@@ -104,8 +104,9 @@ impl From<FeatureFlag> for u32 {
 ///
 /// **Any new capability introduced after the initial six typed
 /// variants must be emitted as [`Capability::Unknown`]** carrying
-/// an opaque `tag` (the semantic capability id assigned in the
-/// M2+ catalogue) and `payload` (its postcard-encoded body).
+/// an opaque `tag` (the semantic capability id assigned in a
+/// future capability catalogue) and `payload` (its postcard-encoded
+/// body).
 /// Older binaries decode it as `Unknown`, round-trip its bytes
 /// intact so issuer signatures still verify after a forwarder
 /// that doesn't recognise the tag, and silently skip it during
@@ -134,7 +135,7 @@ pub enum Capability {
     /// yet recognise (see type docstring).
     Unknown {
         /// Semantic capability identifier assigned by the issuer
-        /// (M2+ catalogue).
+        /// (assigned via a future capability catalogue).
         tag: u8,
         /// Postcard-encoded payload for the unknown capability.
         payload: Vec<u8>,
@@ -334,7 +335,7 @@ mod tests {
 
     #[test]
     fn unknown_feature_flag_wire_discriminant_decodes_to_unknown() {
-        // A discriminant past the named variants — what M2.5 or later
+        // A discriminant past the named variants — what newer
         // issuers will emit — must decode to FeatureFlag::Unknown
         // rather than failing the whole token parse.
         let bytes = postcard::to_allocvec(&42u32).unwrap();
@@ -416,7 +417,7 @@ mod tests {
     #[test]
     fn known_feature_flag_wire_format_unchanged_by_unknown_variant() {
         // Wire-compat guard: adding Unknown(u32) must NOT change the
-        // bytes emitted for the named variants. M0 clients and M2.5
+        // bytes emitted for the named variants. Older and newer
         // clients must still interoperate.
         let bytes = postcard::to_allocvec(&FeatureFlag::EncryptedBackup).unwrap();
         assert_eq!(bytes, postcard::to_allocvec(&0u32).unwrap());

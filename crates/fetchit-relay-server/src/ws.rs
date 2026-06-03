@@ -155,12 +155,12 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
     )
     .await;
 
-    // Cleanup-trail tracing — operators (Bob's metrics dashboard)
-    // need to distinguish clean client closes from writer-task death
-    // so a flapping-relay outage is visible without grep'ing for
-    // session ids. Per private/metrics-policy.md: NO agent_id or
-    // peer-IP fields land in the log — only the session id (opaque
-    // monotonic) and the LoopExit reason.
+    // Cleanup-trail tracing — operators need to distinguish clean
+    // client closes from writer-task death so a flapping-relay
+    // outage is visible without grep'ing for session ids. Per
+    // `docs/metrics-policy.md`: NO agent_id or peer-IP fields land
+    // in the log — only the session id (opaque monotonic) and the
+    // LoopExit reason.
     match exit {
         LoopExit::ClientClosed => {
             debug!(

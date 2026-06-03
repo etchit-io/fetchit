@@ -279,7 +279,8 @@ returns the device list only when `rec.devices` contains `to`, else `[to]`;
   x0xd's ML-DSA-65 agent key, never an Autonomi key.
 - **No telemetry from the chat surface.** Prometheus metrics on the
   relay are aggregate counters (region + version labels only) with
-  no per-agent dimensions; see `private/metrics-policy.md`.
+  no per-agent dimensions; see `docs/metrics-policy.md` at the
+  workspace root.
 - **The relay is open source.** AGPL-3.0-only. You can read the code
   and run your own.
 

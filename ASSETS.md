@@ -34,7 +34,7 @@ hints) and M3 (the constellation operates on top of the graph).
 
 **Acquirer-legible signal:** add-contact funnel + paired-contacts
 count per agent (aggregate, no per-agent label per
-`private/metrics-policy.md`).
+`docs/metrics-policy.md`).
 
 ---
 
@@ -81,9 +81,9 @@ B2B revenue).
 - `crates/fetchit-relay-server/` -- the relay binary (AGPL-3.0-only;
   splits to its own repo in M1)
 - `crates/fetchit-relay-proto/` -- wire protocol (the M3 RFC target)
-- `private/metrics-policy.md` -- the allow-list that gates what the
+- `docs/metrics-policy.md` -- the allow-list that gates what the
   constellation will ever expose
-- Ops dashboard at `josh-clsn/fetchit-ops` -- Bob's track
+- Ops dashboard at `josh-clsn/fetchit-ops` -- relay-operator track
 
 **Acquirer-legible signal:** relay uptime SLA across N independently
 operated regions; ML-DSA-65-signed denylist feed subscriber count.
@@ -126,7 +126,7 @@ settled through etch>it; paying creator cohort count.
   is the storage-usage growth that fetch>it drives on Autonomi
   (storage GMV → ant-core ecosystem health), not the binary itself.
 - **User data.** Privacy-respecting framing requires this be NOT an
-  asset. Aggregate counts only (per `private/metrics-policy.md`); no
+  asset. Aggregate counts only (per `docs/metrics-policy.md`); no
   per-agent dimensions ever land in scrapeable metrics.
 
 ---
