@@ -184,6 +184,114 @@ pub enum BridgeDecision {
     PromptConsent,
 }
 
+/// Window after which a bridge-inbound shadow entry stops suppressing
+/// SSE-side reachability recording.
+///
+/// Bridge inbound flow: chat-peer receives a sealed
+/// `EnvelopeKind::X0xdGroupMetadataEvent` via relay, unseals, POSTs the
+/// inner JSON to local x0xd `/publish`. Saorsa pubsub's local-loopback
+/// then re-emits the same event on the local `/events` SSE stream.
+/// Without a shadow entry, the SSE consumer would interpret that
+/// loopback as evidence of direct-gossip reachability for the signer
+/// and falsely flip `(group, member)` to `Reachable` — exactly the
+/// case the bridge exists to solve. The shadow window must comfortably
+/// cover the round trip between `POST /publish` and SSE emission.
+pub const SHADOW_WINDOW_MS: u64 = 5_000;
+
+/// In-memory ring of recently-bridge-delivered payload hashes. Consumed
+/// by the SSE consumer to suppress false-positive reachability records
+/// on bridge-loopback events.
+///
+/// Keyed by the FNV-style hash of the inner JSON event payload bytes
+/// (i.e. the same bytes that arrive on the SSE consumer's
+/// `Event::GossipMessage { payload, .. }`). The hash is intentionally
+/// content-only so any path mutation in x0xd's publish/loopback layer
+/// — re-base64, key-order shuffle — would cause a benign cache miss
+/// (record runs, double-recording is harmless idempotent) rather than
+/// a silent false reachability record.
+///
+/// C4 scaffolding contract: callers `mark` before `POST /publish` and
+/// `is_recent_and_evict` from the SSE consumer hot path. Periodic
+/// `evict_older_than` is OK but optional — entries beyond
+/// `2 * SHADOW_WINDOW_MS` are dropped on lookup anyway.
+#[derive(Debug, Default)]
+pub struct BridgeInboundShadow {
+    inner: HashMap<u64, LastSeenMs>,
+}
+
+impl BridgeInboundShadow {
+    /// Empty shadow set. Equivalent to `Default`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark `payload_hash` as recently bridge-delivered at `now_ms`.
+    /// Called from the chat-peer's bridge dispatcher BEFORE
+    /// `POST /publish` so the upcoming SSE loopback finds the entry.
+    pub fn mark(&mut self, payload_hash: u64, now_ms: u64) {
+        self.inner.insert(payload_hash, LastSeenMs(now_ms));
+    }
+
+    /// Check whether `payload_hash` was bridge-delivered within
+    /// [`SHADOW_WINDOW_MS`] of `now_ms`. Side-effect-free; pair with
+    /// [`Self::evict_older_than`] to bound memory.
+    #[must_use]
+    pub fn is_recent(&self, payload_hash: u64, now_ms: u64) -> bool {
+        match self.inner.get(&payload_hash) {
+            Some(LastSeenMs(last)) => now_ms.saturating_sub(*last) < SHADOW_WINDOW_MS,
+            None => false,
+        }
+    }
+
+    /// Drop every entry whose age exceeds `cutoff_ms` relative to
+    /// `now_ms`. Call periodically from the chat-peer (or inline at
+    /// `mark` time on a counter) to keep the table bounded under
+    /// sustained bridge traffic.
+    pub fn evict_older_than(&mut self, now_ms: u64, cutoff_ms: u64) {
+        self.inner
+            .retain(|_, LastSeenMs(last)| now_ms.saturating_sub(*last) < cutoff_ms);
+    }
+
+    /// Number of shadow entries currently tracked.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// `true` when no shadow entries are tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+/// Compute a stable in-process hash of `payload` for use as a
+/// [`BridgeInboundShadow`] key. Not cryptographically strong — the
+/// adversary model is "x0xd's own loopback, not a relay attacker."
+#[must_use]
+pub fn hash_payload(payload: &[u8]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    payload.hash(&mut h);
+    h.finish()
+}
+
+/// Parse `x0x.named_group/<gid>/metadata` into the group id segment.
+///
+/// Returns `None` when the topic doesn't match the metadata-topic
+/// shape (e.g. presence topics, chat content topics) or when the
+/// embedded segment is not a valid [`GroupId`] (path traversal guard,
+/// see [`GroupId::parse`]). Used by the SSE consumer to extract the
+/// reachability key from `Event::GossipMessage { topic, .. }`.
+#[must_use]
+pub fn group_id_from_metadata_topic(topic: &str) -> Option<GroupId> {
+    let inside = topic.strip_prefix("x0x.named_group/")?;
+    let gid = inside.strip_suffix("/metadata")?;
+    GroupId::parse(gid).ok()
+}
+
 /// Routing rule per §5 of `private/m2.5-bridge-collapsed-spec.md`.
 ///
 /// Pure decision: no side effects, no I/O. Composable into both the
@@ -427,5 +535,134 @@ mod tests {
             ),
             BridgeDecision::PromptConsent,
         );
+    }
+
+    // ── BridgeInboundShadow ───────────────────────────────────────────
+
+    #[test]
+    fn shadow_default_is_empty_and_misses_lookup() {
+        let shadow = BridgeInboundShadow::new();
+        assert!(shadow.is_empty());
+        assert_eq!(shadow.len(), 0);
+        assert!(!shadow.is_recent(42, 1_000_000));
+    }
+
+    #[test]
+    fn shadow_mark_hits_within_window() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(42, 1_000_000);
+        assert!(shadow.is_recent(42, 1_000_500));
+        // Boundary: SHADOW_WINDOW_MS - 1 is still recent.
+        assert!(shadow.is_recent(42, 1_000_000 + SHADOW_WINDOW_MS - 1));
+    }
+
+    #[test]
+    fn shadow_mark_misses_at_window_boundary() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(42, 1_000_000);
+        // Boundary exclusive — at SHADOW_WINDOW_MS exactly, treated as expired.
+        assert!(!shadow.is_recent(42, 1_000_000 + SHADOW_WINDOW_MS));
+    }
+
+    #[test]
+    fn shadow_mark_misses_past_window() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(42, 1_000_000);
+        assert!(!shadow.is_recent(42, 1_000_000 + SHADOW_WINDOW_MS + 1));
+    }
+
+    #[test]
+    fn shadow_mark_only_matches_exact_hash() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(42, 1_000_000);
+        assert!(!shadow.is_recent(43, 1_000_500));
+    }
+
+    #[test]
+    fn shadow_clock_skew_backward_still_recent() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(42, 2_000_000);
+        // saturating_sub treats backward skew as 0 elapsed → recent.
+        assert!(shadow.is_recent(42, 1_000_000));
+    }
+
+    #[test]
+    fn shadow_evict_older_than_drops_expired() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(1, 1_000);
+        shadow.mark(2, 5_000);
+        shadow.mark(3, 9_000);
+        assert_eq!(shadow.len(), 3);
+        shadow.evict_older_than(10_000, 6_000);
+        // Keep only entries newer than 10_000 - 6_000 = 4_000
+        assert_eq!(shadow.len(), 2);
+        assert!(!shadow.is_recent(1, 10_000));
+        // hash=2 still inside SHADOW_WINDOW_MS window relative to its
+        // own mark time? mark=5000, now=10000, elapsed=5000 > 5000 = false
+        // so is_recent returns false even though evict kept the entry.
+        // (Eviction cutoff != lookup window; they bound different things.)
+        assert!(!shadow.is_recent(2, 10_000));
+    }
+
+    #[test]
+    fn shadow_re_mark_refreshes_timestamp() {
+        let mut shadow = BridgeInboundShadow::new();
+        shadow.mark(42, 1_000_000);
+        // Re-mark at a later timestamp; lookup at a moment past the
+        // original window should still resolve recent.
+        shadow.mark(42, 1_000_000 + SHADOW_WINDOW_MS + 10);
+        assert!(shadow.is_recent(42, 1_000_000 + SHADOW_WINDOW_MS + 100));
+        assert_eq!(shadow.len(), 1, "no duplicate row");
+    }
+
+    // ── hash_payload ──────────────────────────────────────────────────
+
+    #[test]
+    fn hash_payload_stable_for_same_input() {
+        let a = hash_payload(b"hello");
+        let b = hash_payload(b"hello");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_payload_differs_for_different_input() {
+        let a = hash_payload(b"hello");
+        let b = hash_payload(b"world");
+        assert_ne!(a, b);
+    }
+
+    // ── group_id_from_metadata_topic ──────────────────────────────────
+
+    #[test]
+    fn topic_parser_extracts_valid_group_id() {
+        let topic = "x0x.named_group/group-abc_123/metadata";
+        let gid = group_id_from_metadata_topic(topic).unwrap();
+        assert_eq!(gid.as_str(), "group-abc_123");
+    }
+
+    #[test]
+    fn topic_parser_rejects_non_metadata_suffix() {
+        assert!(group_id_from_metadata_topic("x0x.named_group/g/chat").is_none());
+        assert!(group_id_from_metadata_topic("x0x.named_group/g").is_none());
+    }
+
+    #[test]
+    fn topic_parser_rejects_wrong_prefix() {
+        assert!(group_id_from_metadata_topic("presence/g/metadata").is_none());
+        assert!(group_id_from_metadata_topic("named_group/g/metadata").is_none());
+    }
+
+    #[test]
+    fn topic_parser_rejects_path_traversal_in_segment() {
+        // `..` is rejected by GroupId::parse (only [a-zA-Z0-9_-] allowed),
+        // so even though the prefix/suffix shape matches, the inner
+        // segment fails validation.
+        assert!(group_id_from_metadata_topic("x0x.named_group/../metadata").is_none());
+        assert!(group_id_from_metadata_topic("x0x.named_group/a/b/metadata").is_none());
+    }
+
+    #[test]
+    fn topic_parser_rejects_empty_group_id() {
+        assert!(group_id_from_metadata_topic("x0x.named_group//metadata").is_none());
     }
 }

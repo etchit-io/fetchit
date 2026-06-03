@@ -499,6 +499,18 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         }
     });
 
+    // M2.5 — background task pumps x0xd's `/events` SSE into the
+    // reachability cache. Without this, every `(group, member)` stays
+    // `Unreachable` and every bridge-eligible send routes through the
+    // consent modal even after the user has opted in. Bridge-loopback
+    // events are filtered via the shadow set the dispatcher marks
+    // before `POST /publish`, and self-publish loopbacks are filtered
+    // by the `from == local_agent_id` guard inside the recorder.
+    match client.spawn_sse_reachability_recorder() {
+        Ok(_handle) => eprintln!("[peer] sse reachability recorder started"),
+        Err(e) => eprintln!("[peer] sse reachability recorder not started: {e}"),
+    }
+
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = stdin.next_line().await? {
         if line.is_empty() {

@@ -190,6 +190,12 @@ struct ChatState {
     /// [`BridgeConsentStore::set`]; sender routing reads via
     /// [`BridgeConsentStore::lookup`].
     bridge_consent: Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeConsentStore>>,
+    /// M2.5 bridge — recent bridge-inbound payload hashes. Marked by
+    /// [`Client::dispatch_inbound_bridge`] before `POST /publish` so
+    /// the SSE consumer can distinguish bridge-loopback from real
+    /// direct-gossip delivery and avoid the false-positive reachability
+    /// record that would silently break the symmetric-NAT case.
+    bridge_inbound_shadow: Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeInboundShadow>>,
 }
 
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
@@ -500,6 +506,20 @@ impl Client {
         self.chat.as_ref().map(|c| c.bridge_consent.clone())
     }
 
+    /// Cloneable handle to the M2.5 bridge-inbound shadow set. The SSE
+    /// reachability recorder consults this to avoid false-recording
+    /// `(group, member)` as `Reachable` when the inbound event came
+    /// via bridge-loopback (the case the bridge exists to solve).
+    /// External callers should typically prefer
+    /// [`Client::spawn_sse_reachability_recorder`] over driving the
+    /// shadow directly.
+    #[must_use]
+    pub fn bridge_inbound_shadow(
+        &self,
+    ) -> Option<Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeInboundShadow>>> {
+        self.chat.as_ref().map(|c| c.bridge_inbound_shadow.clone())
+    }
+
     /// Send an M2.5 bridge envelope — a signed x0xd
     /// `NamedGroupMetadataEvent` JSON body — to a single peer over the
     /// relay path, gated by the per-group consent + reachability rule
@@ -633,8 +653,122 @@ impl Client {
             .identity_arc()
             .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
         let secure = self.secure_groups()?;
-        crate::groups::bridge::handle_inbound_bridge_envelope(&secure, identity.as_ref(), transit)
+        if transit.kind != fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent {
+            return Err(ChatError::Invalid(format!(
+                "dispatch_inbound_bridge called on kind={:?}",
+                transit.kind
+            )));
+        }
+        let wrapper = crate::groups::bridge::unseal_bridge_wrapper(
+            identity.kem_secret_key(),
+            &transit.kem_ciphertext,
+            &transit.nonce,
+            &transit.ciphertext,
+        )?;
+        // Mark the bridge-inbound shadow BEFORE we publish so the SSE
+        // consumer (which races us via x0xd's local pubsub loopback)
+        // can recognise the about-to-arrive event as bridge-delivered
+        // and skip the false-positive reachability record. Hashing the
+        // decoded JSON bytes matches whatever the SSE consumer sees on
+        // `Event::GossipMessage { payload, .. }`. A best-effort
+        // decode-failure here just skips the shadow entry — the
+        // publish below still runs, so the worst case is a benign
+        // future false-positive Reachable record.
+        if let Some(shadow) = self.bridge_inbound_shadow() {
+            if let Ok(payload_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(wrapper.payload_b64.as_bytes())
+            {
+                let h = crate::groups_reachability::hash_payload(&payload_bytes);
+                shadow.lock().await.mark(
+                    h,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                );
+            }
+        }
+        secure
+            .publish(&wrapper.topic, &wrapper.payload_b64)
             .await
+            .map_err(ChatError::from)?;
+        Ok(())
+    }
+
+    /// Spawn the M2.5 SSE reachability recorder: a background task that
+    /// consumes `/events`, watches for `NamedGroupMetadataEvent` gossip
+    /// frames, and records direct-gossip reachability into
+    /// [`ReachabilityCache`] for `(group, sender)`. Events that match
+    /// a recent [`BridgeInboundShadow`] entry are skipped, and
+    /// self-published loopbacks (`from == local agent id`) are skipped
+    /// — together that keeps `Reachable` honest under the
+    /// symmetric-NAT bridge-loopback case the spec §5 routing rule
+    /// depends on.
+    ///
+    /// The returned handle owns the task; dropping it terminates the
+    /// recorder. Surface errors hitting the SSE endpoint are logged
+    /// once and the task exits — the chat-peer's outer reconnect loop
+    /// is expected to respawn it.
+    ///
+    /// # Errors
+    /// Returns `ChatError::Invalid` when the client was built without
+    /// chat state (the cache + shadow would have no host to write to).
+    pub fn spawn_sse_reachability_recorder(&self) -> Result<tokio::task::JoinHandle<()>> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let cache = chat.reachability.clone();
+        let shadow = chat.bridge_inbound_shadow.clone();
+        let local_agent_hex = chat.identity.agent_id_hex().to_owned();
+        let client = self.clone();
+        Ok(tokio::spawn(async move {
+            let mut stream = match client.events().await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("sse reachability recorder: open /events failed: {e}");
+                    return;
+                }
+            };
+            while let Some(event) = stream.next().await {
+                let event = match event {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log::warn!("sse reachability recorder: stream error: {e}");
+                        return;
+                    }
+                };
+                let Event::GossipMessage {
+                    topic,
+                    payload,
+                    from,
+                } = event
+                else {
+                    continue;
+                };
+                let Some(from_agent) = from else { continue };
+                // Self-publish loopback: x0xd surfaces our own
+                // POST /publish back to us with from=local. Skip.
+                if from_agent.0 == local_agent_hex {
+                    continue;
+                }
+                // Bridge-loopback: chat-peer dispatcher marked the
+                // shadow before POSTing. Same payload bytes hash to
+                // the same key; window-bounded so a re-mark from a
+                // *real* later gossip event would still record.
+                let h = crate::groups_reachability::hash_payload(&payload);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                if shadow.lock().await.is_recent(h, now) {
+                    continue;
+                }
+                let Some(group) = crate::groups_reachability::group_id_from_metadata_topic(&topic)
+                else {
+                    continue;
+                };
+                cache.lock().await.record(group, from_agent, now);
+            }
+        }))
     }
 
     /// Open the unified SSE event stream from x0xd — presence,
@@ -901,6 +1035,9 @@ async fn build_with_chat(
             )),
             bridge_consent: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeConsentStore::new(),
+            )),
+            bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::BridgeInboundShadow::new(),
             )),
         }),
         relay_handle,
