@@ -3,6 +3,8 @@
 //! encrypted group send/receive path; the daemon owns the MLS ratchet.
 
 use crate::error::X0xdError;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -192,8 +194,6 @@ impl SecureGroupsEndpoint {
         group_id: &str,
         plaintext: &[u8],
     ) -> Result<EncryptedFrame, X0xdError> {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
         let payload_b64 = B64.encode(plaintext);
         let path = format!("groups/{group_id}/secure/encrypt");
         let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
@@ -249,8 +249,6 @@ impl SecureGroupsEndpoint {
         frame: &EncryptedFrame,
         sender_agent_id: Option<&str>,
     ) -> Result<Vec<u8>, X0xdError> {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
         let path = format!("groups/{group_id}/secure/decrypt");
         let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
         let raw = self
@@ -491,5 +489,62 @@ mod tests {
             .decrypt("G", &frame, Some("abcd1234"))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn decrypt_surfaces_4xx_body_in_rejected_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/G/secure/decrypt"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string(r#"{"ok":false,"error":"stale epoch"}"#),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: "bm9uY2U=".into(),
+            secret_epoch: 3,
+        };
+        let err = endpoint.decrypt("G", &frame, None).await.unwrap_err();
+        match err {
+            X0xdError::Rejected(msg) => {
+                assert!(msg.contains("403"), "status code missing: {msg}");
+                assert!(msg.contains("stale epoch"), "body missing: {msg}");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decrypt_returns_rejected_when_response_payload_b64_is_malformed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/G/secure/decrypt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": "!!!not-valid-base64!!!",
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: "bm9uY2U=".into(),
+            secret_epoch: 3,
+        };
+        let err = endpoint.decrypt("G", &frame, None).await.unwrap_err();
+        match err {
+            X0xdError::Rejected(msg) => {
+                assert!(
+                    msg.contains("decrypt payload base64"),
+                    "expected base64 context in message: {msg}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
     }
 }
