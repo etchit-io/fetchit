@@ -514,7 +514,15 @@ impl<'a> Endpoint<'a> {
         let mut last_receipt_id: Option<String> = None;
         let mut delivered = false;
         for member in roster {
-            if member.0 == local_agent_hex {
+            // `identity.agent_id_hex()` is lowercase by construction
+            // but `AgentId` is `#[serde(transparent)]`, so roster
+            // entries deserialised from x0xd carry whatever case the
+            // daemon emits. A case-sensitive `==` would let
+            // mixed/uppercase agent_ids slip past self-exclusion and
+            // fan the envelope back to the local — double-history at
+            // best, redirect loops at worst. ASCII-hex case-fold is
+            // safe because every byte is `0-9a-fA-F`.
+            if member.0.eq_ignore_ascii_case(local_agent_hex) {
                 continue;
             }
             let transport_out = TransportOutbound {
@@ -1580,6 +1588,83 @@ mod tests {
         assert!(
             !recipients.contains(&local_hex),
             "self must be excluded from fanout",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_private_group_self_exclusion_is_case_insensitive() {
+        // P1 from Bob's review: roster fanout filtered self with a
+        // case-sensitive `==`. `identity.agent_id_hex()` is lowercase
+        // by construction, but `AgentId` is `#[serde(transparent)]` so
+        // roster entries carry whatever case x0xd emits. If the
+        // daemon ever returns mixed/uppercase ids the case-sensitive
+        // filter doesn't drop self, and the local fans the envelope
+        // back to itself. Targeted fix: `eq_ignore_ascii_case` at the
+        // filter site (ASCII-hex case-fold is safe — every byte is
+        // 0-9a-fA-F).
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let local_hex_upper = local_hex.to_ascii_uppercase();
+        let peer = "b".repeat(64);
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        // Roster has self in UPPERCASE. With the old `==` filter,
+        // self would NOT match and the envelope would fan out to
+        // self too — captured.len() would be 2.
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex_upper, "state": "active"},
+                    {"agent_id": peer, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+        );
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        let recipients: Vec<String> = captured.iter().map(|(a, _)| a.0.clone()).collect();
+        assert_eq!(
+            captured.len(),
+            1,
+            "case-insensitive self-exclusion must drop the mixed-case \
+             local; saw recipients {recipients:?}",
+        );
+        assert_eq!(
+            recipients[0], peer,
+            "only the peer must receive — self was uppercase but is still self",
         );
     }
 
