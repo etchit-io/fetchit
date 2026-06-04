@@ -59,13 +59,18 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use base64::Engine as _;
 use fetchit_chat::error::ChatError;
+use fetchit_chat::groups::bridge::{
+    self, build_member_joined_event, canonical_member_joined_bytes, BridgeRole, MemberJoinedInputs,
+};
 use fetchit_chat::groups::GroupId;
 use fetchit_chat::groups_reachability::{BridgeDecision, GroupBridgeConsent};
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::Client;
 use std::time::Duration;
 use url::Url;
+use x0xd_client::Signer as _;
 
 /// Production relay we point at for the live round-trip. Matches the NY
 /// droplet in `KNOWN_RELAYS` and the M2 live scaffold.
@@ -320,27 +325,99 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
         .await
         .set(group.clone(), GroupBridgeConsent::ConsentedOptIn);
 
-    // Construct a signed MemberJoined event using our local x0xd as the
-    // ML-DSA-65 signer. This mirrors what the chat-peer dispatch loop
-    // does in production when the bridge fires on a real invite.
-    //
-    // TODO(C5): wire up the actual canonical-bytes + sign + wrap call
-    // path. The helpers live at:
-    // - `fetchit_chat::groups::bridge::canonical_member_joined_bytes`
-    // - `fetchit_chat::groups::bridge::build_member_joined_event`
-    // The signer needs to come from `x0xd-client::X0xdSigner`; the
-    // m2_live.rs scaffold has a working pattern for instantiating one
-    // against the same `base_url + token`.
-    //
-    // Once wired, assert:
-    // 1. send_x0xd_metadata_event returns Ok(WrapAndSend)
-    // 2. Box B's diagnostic counter for member_joined_events_applied
-    //    increments within LIVE_APPLY_TIMEOUT
-    // 3. Box B's /groups/<gid>/members includes Box A's agent id
+    // Construct a separate `X0xdSigner` against the same daemon Box A's
+    // `Client` is bound to. We use this to (a) pull the local agent's
+    // ML-DSA-65 public key (needed inside the canonical-bytes formula
+    // and the JSON event body) and (b) ML-DSA-65 sign the canonical
+    // bytes — mirroring exactly what the chat-peer's bridge dispatcher
+    // does in production on a real symmetric-NAT join.
+    let home = std::env::var("HOME").expect("HOME must be set");
+    let port_file = env_or("X0XD_PORT_FILE", || {
+        format!("{home}/.local/share/x0x-claude-here/api.port")
+    });
+    let token_path = env_or("X0XD_TOKEN_PATH", || {
+        format!("{home}/.local/share/x0x-claude-here/api-token")
+    });
+    let base_url = read_x0xd_base_url(&port_file);
+    let token = std::fs::read_to_string(&token_path)
+        .unwrap_or_else(|e| panic!("read x0xd token at {token_path}: {e}"))
+        .trim()
+        .to_owned();
+    let signer = x0xd_client::X0xdSigner::connect(
+        Url::parse(&base_url).expect("x0xd base url parses"),
+        &token,
+    )
+    .await
+    .expect("X0xdSigner::connect against local x0xd");
+
+    let local_agent_id_hex = hex::encode(signer.agent_id());
+    let local_pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(signer.public_key());
+
+    // The MemberJoined event is invite-bound: x0xd's apply path runs
+    // `consume_issued_invite(secret, …)` (upstream `src/groups/mod.rs:642`,
+    // rev `6d96ca5`) and rejects when the secret isn't on the inviter's
+    // `issued_invites` map. For the live test the inviter (Box B) issues
+    // an invite on his side and ships the secret + group id via env;
+    // without it the inner apply fails and Box B's
+    // `member_joined_events_applied` counter never moves. The send-side
+    // contract (return of `WrapAndSend`) still holds either way — that's
+    // what this test asserts; the cross-box counter assertion is the
+    // residential-NAT close-gate.
+    let invite_secret = std::env::var("M2_5_BRIDGE_INVITE_SECRET").unwrap_or_default();
+    let stable_group_id = std::env::var("M2_5_BRIDGE_STABLE_GROUP_ID").ok();
+
+    let ts_ms = now_ms();
+    let inputs = MemberJoinedInputs {
+        group_id: &group_id_str,
+        stable_group_id: stable_group_id.as_deref(),
+        member_agent_id: &local_agent_id_hex,
+        member_public_key_b64: &local_pubkey_b64,
+        role: BridgeRole::Member,
+        display_name: None,
+        inviter_agent_id: &peer_agent_hex,
+        invite_secret: &invite_secret,
+        ts_ms,
+        treekem_key_package_b64: None,
+    };
+
+    let canonical = canonical_member_joined_bytes(&inputs);
+    let signature_bytes = signer
+        .sign(&canonical)
+        .await
+        .expect("local x0xd /agent/sign over canonical MemberJoined bytes");
+    let signature_b64 = base64::engine::general_purpose::STANDARD.encode(&signature_bytes);
+
+    let event_json = build_member_joined_event(&inputs, &signature_b64);
+    let signed_event_bytes = serde_json::to_vec(&event_json).expect("JSON event serialize");
 
     let topic = format!("x0x.named_group/{group_id_str}/metadata");
-    let _ = (topic, peer_agent_hex); // silence unused until wired
-    eprintln!("[m2.5-live] scaffold reached; canonical-event signing wiring TODO (see comment).");
+
+    let decision = client
+        .send_x0xd_metadata_event(&peer_agent_hex, &group, topic, &signed_event_bytes)
+        .await
+        .expect("send must succeed on the WrapAndSend path");
+    assert_eq!(
+        decision,
+        BridgeDecision::WrapAndSend,
+        "with ConsentedOptIn + Unreachable peer the bridge must engage",
+    );
+
+    eprintln!(
+        "[m2.5-live] bridge MemberJoined sent — group={group_id_str} member={local_agent_id_hex} \
+         inviter={peer_agent_hex} ts_ms={ts_ms} sig_b64_len={sig_len} event_bytes={event_len}",
+        sig_len = signature_b64.len(),
+        event_len = signed_event_bytes.len(),
+    );
+    eprintln!(
+        "[m2.5-live] Box B verification (not asserted here — that is the close-gate test): \
+         (1) chat-peer log on Box B shows bridge dispatch + `/publish` ok; \
+         (2) `member_joined_events_applied` diagnostic counter for group {group_id_str} \
+         incremented; \
+         (3) `GET /groups/{group_id_str}/members` on Box B includes {local_agent_id_hex}."
+    );
+    // Silence unused warnings from the bridge re-export when only the
+    // explicitly-imported items are referenced.
+    let _ = (bridge::MEMBER_JOINED_DOMAIN, &peer_share_uri);
 }
 
 /// After the bridge dispatcher unseals + POSTs an event to local
