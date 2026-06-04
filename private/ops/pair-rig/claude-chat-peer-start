@@ -1,0 +1,110 @@
+#!/bin/bash
+# claude-chat-peer-start — launch fetchit-chat-peer in persistent
+# outbox+cursor mode against the local x0xd, with port-file self-heal.
+#
+# Supersedes the FIFO-+-keepalive recipe documented through 2026-06-03
+# afternoon. The chat-peer binary at b552a65+ reads outbound lines from
+# `--outbox-file` resuming at `--cursor-file`, advances the cursor
+# atomically after each acked send, and exits 2 on permanent send
+# failure. `Restart=always` + `BindsTo=x0xd-claude-here.service` in the
+# systemd unit brings it back against a freshly resolved x0xd port.
+#
+# Env overrides:
+#   X0XD_NAME              default claude-here
+#   X0XD_BASE              default: read from ~/.local/share/x0x-${X0XD_NAME}/api.port
+#                          (the chat-peer ALSO self-heals on connect-refused
+#                          via --x0xd-port-file; this env is only used to seed
+#                          the initial URL before the first request).
+#   PEER_DATA_DIR          default ~/.local/share/fetchit-claude-peer
+#   PEER_DISPLAY           default claude-fetchit-B
+#   PEER_BIN               default ~/Desktop/etchit-fetchit/fetchit/target/debug/fetchit-chat-peer
+#   PEER_ADDR              Alice's 64-hex agent id; REQUIRED
+#   PEER_RELAY             default http://67.207.94.66:8088
+#   PEER_OUTBOX_FILE       default /tmp/claude-pair/to-alice.txt
+#   PEER_CURSOR_FILE       default /tmp/claude-pair/to-alice.cursor
+#   PEER_RX_LOG            default /tmp/claude-rx
+#
+# Usage:
+#   PEER_ADDR=a48e8af1...fcc947 claude-chat-peer-start
+
+set -euo pipefail
+
+X0XD_NAME="${X0XD_NAME:-claude-here}"
+X0XD_DATA_DIR="${HOME}/.local/share/x0x-${X0XD_NAME}"
+X0XD_API_PORT_FILE="$X0XD_DATA_DIR/api.port"
+X0XD_TOKEN_PATH="${X0XD_TOKEN_PATH:-$X0XD_DATA_DIR/api-token}"
+PEER_DATA_DIR="${PEER_DATA_DIR:-${HOME}/.local/share/fetchit-claude-peer}"
+PEER_DISPLAY="${PEER_DISPLAY:-claude-fetchit-B}"
+PEER_BIN="${PEER_BIN:-${HOME}/Desktop/etchit-fetchit/fetchit/target/debug/fetchit-chat-peer}"
+PEER_RELAY="${PEER_RELAY:-http://67.207.94.66:8088}"
+PEER_OUTBOX_FILE="${PEER_OUTBOX_FILE:-/tmp/claude-pair/to-alice.txt}"
+PEER_CURSOR_FILE="${PEER_CURSOR_FILE:-/tmp/claude-pair/to-alice.cursor}"
+PEER_RX_LOG="${PEER_RX_LOG:-/tmp/claude-rx}"
+
+# Seed X0XD_BASE from the daemon's own api.port file unless the caller
+# pinned it. The chat-peer's `--x0xd-port-file` flag is the durable
+# self-heal — this initial value only matters for the first request
+# before any drift is observed.
+if [[ -z "${X0XD_BASE:-}" ]]; then
+  if [[ ! -f "$X0XD_API_PORT_FILE" ]]; then
+    echo "x0xd api.port file missing at $X0XD_API_PORT_FILE — is x0xd running for instance '$X0XD_NAME'?" >&2
+    exit 2
+  fi
+  X0XD_API_ADDR="$(cat -- "$X0XD_API_PORT_FILE")"
+  if [[ -z "$X0XD_API_ADDR" ]]; then
+    echo "x0xd api.port empty at $X0XD_API_PORT_FILE — daemon may be mid-startup" >&2
+    exit 2
+  fi
+  X0XD_BASE="http://${X0XD_API_ADDR}"
+fi
+
+if [[ -z "${PEER_ADDR:-}" ]]; then
+  echo "PEER_ADDR (64-hex agent id) required" >&2
+  exit 2
+fi
+if [[ ! -x "$PEER_BIN" ]]; then
+  echo "PEER_BIN not executable: $PEER_BIN" >&2
+  exit 2
+fi
+if [[ ! -f "$X0XD_TOKEN_PATH" ]]; then
+  echo "x0xd token missing at $X0XD_TOKEN_PATH — is x0xd running for instance '$X0XD_NAME'?" >&2
+  exit 2
+fi
+
+PASSPHRASE_FILE="$PEER_DATA_DIR/passphrase"
+if [[ ! -f "$PASSPHRASE_FILE" ]]; then
+  echo "passphrase file missing at $PASSPHRASE_FILE" >&2
+  exit 2
+fi
+
+# Make sure the outbox + cursor parents exist and the outbox is a
+# regular file (the OLD design used a FIFO at /tmp/claude-tx; if that
+# inode is still around at the configured outbox path we need to clear
+# it so byte-offset reads work).
+mkdir -p -- "$(dirname -- "$PEER_OUTBOX_FILE")"
+mkdir -p -- "$(dirname -- "$PEER_CURSOR_FILE")"
+if [[ -p "$PEER_OUTBOX_FILE" ]]; then
+  echo "[start] outbox path $PEER_OUTBOX_FILE was a FIFO — removing" >&2
+  rm -f -- "$PEER_OUTBOX_FILE"
+fi
+[[ -f "$PEER_OUTBOX_FILE" ]] || : > "$PEER_OUTBOX_FILE"
+
+printf '[start] chat-peer up — pid=%s x0xd=%s name=%s peer=%s outbox=%s cursor=%s ts=%s\n' \
+  "$$" "$X0XD_BASE" "$X0XD_NAME" "${PEER_ADDR:0:8}" "$PEER_OUTBOX_FILE" "$PEER_CURSOR_FILE" "$(date -Is)" \
+  >> "$PEER_RX_LOG"
+
+# `exec` so PID 1 of the cgroup is chat-peer; systemd's TimeoutStopSec
+# applies to it directly and SIGTERM closes the WS gracefully.
+exec "$PEER_BIN" \
+  --x0xd-base "$X0XD_BASE" \
+  --x0xd-token-path "$X0XD_TOKEN_PATH" \
+  --x0xd-port-file "$X0XD_API_PORT_FILE" \
+  --relay "$PEER_RELAY" \
+  --data-dir "$PEER_DATA_DIR" \
+  --passphrase-file "$PASSPHRASE_FILE" \
+  --display-name "$PEER_DISPLAY" \
+  chat \
+    --peer "$PEER_ADDR" \
+    --outbox-file "$PEER_OUTBOX_FILE" \
+    --cursor-file "$PEER_CURSOR_FILE" \
+  >> "$PEER_RX_LOG" 2>&1
