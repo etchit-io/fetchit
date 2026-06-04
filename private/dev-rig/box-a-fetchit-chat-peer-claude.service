@@ -26,4 +26,11 @@ Restart=always
 RestartSec=3
 
 [Install]
+# Auto-resume when x0xd is started: WantedBy=x0xd-claude-here.service
+# installs a `x0xd-claude-here.service.wants/` symlink so a bare
+# `systemctl start x0xd-claude-here` brings chat-peer back too, closing
+# the BindsTo + PartOf gap where cascade STOP works but cascade START
+# does not. Verified by Bob on Box B (TEST 5b PASS, 2026-06-03).
+# Re-installation requires `systemctl --user reenable` (not enable).
 WantedBy=default.target
+WantedBy=x0xd-claude-here.service
