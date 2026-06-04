@@ -601,6 +601,205 @@ where
     }
 }
 
+/// **M2.5 Welcome reverse-flow** — drive the OWNER side of the bridge.
+///
+/// Counterpart to `m2_5_bridge_live_member_joined_applies_on_peer`.
+/// That test exercises the *joiner* side: capture our own
+/// `MemberJoined` off SSE, wrap, ship to peer. This test does the
+/// inverse: on the *owner* (already in the group's `TreeKEM` tree),
+/// subscribe to the metadata topic, capture any owner-authored event
+/// (welcomes, tree updates), and bridge each one to the named joiner.
+/// Wired together these two tests close the cross-residential-NAT
+/// `TreeKEM` welcome loop without needing a working gossip mesh.
+///
+/// # Required env
+/// - `M2_5_BRIDGE_VAULT_PASS`
+/// - `M2_5_BRIDGE_JOINER_AGENT` — 64-hex joiner agent id (recipient).
+/// - `M2_5_BRIDGE_JOINER_SHARE_URI` — `x0x://agent/<base64>` for the
+///   joiner; imported so `recipient_kem_key` resolves.
+/// - `M2_5_BRIDGE_GROUP_ID` — 64-hex group id. The local agent MUST
+///   already be a member (typically the owner / creator) — we bridge
+///   to the joiner; we don't join.
+/// - `M2_5_BRIDGE_OWNER_TIMEOUT` (optional, default 120) — seconds to
+///   wait for events. The test runs the full window or until 10 events
+///   have been bridged.
+/// - `X0XD_PORT_FILE` / `X0XD_TOKEN_PATH` — as elsewhere in this file.
+#[tokio::test]
+#[ignore = "M2.5 owner-side bridge — requires owner-rig x0xd + joiner share URI"]
+#[allow(clippy::too_many_lines)]
+async fn m2_5_bridge_live_owner_bridges_to_joiner() {
+    let vault_pass = env_required("M2_5_BRIDGE_VAULT_PASS");
+    let joiner_agent_hex = env_required("M2_5_BRIDGE_JOINER_AGENT");
+    let joiner_share_uri = env_required("M2_5_BRIDGE_JOINER_SHARE_URI");
+    let group_id_str = env_required("M2_5_BRIDGE_GROUP_ID");
+    let timeout_secs: u64 = env_or("M2_5_BRIDGE_OWNER_TIMEOUT", || "120".to_owned())
+        .parse()
+        .unwrap_or(120);
+
+    assert_eq!(
+        joiner_agent_hex.len(),
+        64,
+        "M2_5_BRIDGE_JOINER_AGENT must be 64-hex",
+    );
+    assert!(
+        joiner_share_uri.starts_with("x0x://agent/"),
+        "M2_5_BRIDGE_JOINER_SHARE_URI must be x0x://agent/",
+    );
+
+    let (client, _data_dir) = build_test_client(&vault_pass, true).await;
+
+    // Persist joiner's share card so recipient_kem_key resolves.
+    client
+        .identity()
+        .import_uri(&joiner_share_uri)
+        .await
+        .expect("import joiner share URI");
+    if let Some(layout) = client.layout() {
+        let stored = fetchit_chat::messages::StoredContactCard::from_share_uri(&joiner_share_uri)
+            .expect("StoredContactCard::from_share_uri");
+        stored.save(layout).expect("StoredContactCard.save");
+    }
+
+    let group = GroupId::parse(&group_id_str).expect("group id parses");
+
+    // ConsentedOptIn so the bridge actually sends. We are the owner;
+    // we ARE bridging on behalf of our group, by definition consenting.
+    client
+        .bridge_consent()
+        .expect("chat state present")
+        .lock()
+        .await
+        .set(group.clone(), GroupBridgeConsent::ConsentedOptIn);
+
+    let local_agent_id_hex = client
+        .identity_arc()
+        .expect("client built with chat state")
+        .agent_id_hex()
+        .to_owned();
+
+    // Raw HTTP for /subscribe + /groups/<gid>.
+    let home = std::env::var("HOME").expect("HOME must be set");
+    let port_file = env_or("X0XD_PORT_FILE", || {
+        format!("{home}/.local/share/x0x-claude-here/api.port")
+    });
+    let token_path = env_or("X0XD_TOKEN_PATH", || {
+        format!("{home}/.local/share/x0x-claude-here/api-token")
+    });
+    let base_url = read_x0xd_base_url(&port_file);
+    let token = std::fs::read_to_string(&token_path)
+        .unwrap_or_else(|e| panic!("read x0xd token: {e}"))
+        .trim()
+        .to_owned();
+    let http = reqwest::Client::builder()
+        .default_headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().expect("auth header"),
+            );
+            h
+        })
+        .build()
+        .expect("reqwest client");
+
+    let metadata_topic = get_group_metadata_topic(&http, &base_url, &group_id_str).await;
+    post_x0xd_subscribe(&http, &base_url, &metadata_topic).await;
+
+    let mut sse = client.events().await.expect("open /events SSE");
+
+    eprintln!(
+        "[m2.5-owner] watching {metadata_topic} for up to {timeout_secs}s — owner={} joiner={}",
+        &local_agent_id_hex[..16],
+        &joiner_agent_hex[..16],
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut bridged: u32 = 0;
+    let mut skipped_joiner_authored: u32 = 0;
+    let mut skipped_other_topic: u32 = 0;
+
+    while bridged < 10 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let next = match tokio::time::timeout(remaining, sse.next()).await {
+            Ok(Some(Ok(ev))) => ev,
+            Ok(Some(Err(_))) => continue,
+            Ok(None) | Err(_) => break,
+        };
+        let Event::GossipMessage {
+            topic,
+            payload,
+            from: _,
+        } = next
+        else {
+            continue;
+        };
+        if topic != metadata_topic {
+            skipped_other_topic += 1;
+            continue;
+        }
+        let parsed: serde_json::Value = match serde_json::from_slice(&payload) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[m2.5-owner] skip: payload not JSON ({e}); len={}",
+                    payload.len(),
+                );
+                continue;
+            }
+        };
+        let event_kind = parsed
+            .get("event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        // The joiner authors `member_joined`; the owner authors
+        // welcomes + tree updates. Skip member_joined regardless of
+        // who delivered it to us (us-as-bridge-receiver, gossip-direct,
+        // or pubsub-loopback after we POSTed /publish ourselves).
+        if event_kind == "member_joined" {
+            skipped_joiner_authored += 1;
+            eprintln!(
+                "[m2.5-owner] skip member_joined: member={}",
+                parsed
+                    .get("member_agent_id")
+                    .and_then(|v| v.as_str())
+                    .map_or("?", |s| &s[..16.min(s.len())]),
+            );
+            continue;
+        }
+        eprintln!(
+            "[m2.5-owner] bridging kind={} bytes={} target={}",
+            event_kind,
+            payload.len(),
+            &joiner_agent_hex[..16],
+        );
+        let decision = client
+            .send_x0xd_metadata_event(&joiner_agent_hex, &group, metadata_topic.clone(), &payload)
+            .await
+            .unwrap_or_else(|e| panic!("send_x0xd_metadata_event for kind={event_kind}: {e}"));
+        bridged += 1;
+        eprintln!("[m2.5-owner] bridged #{bridged} kind={event_kind} decision={decision:?}");
+        assert_eq!(
+            decision,
+            BridgeDecision::WrapAndSend,
+            "owner-side bridge should always WrapAndSend (Unreachable + ConsentedOptIn)",
+        );
+    }
+
+    eprintln!(
+        "[m2.5-owner] DONE — bridged={bridged} skipped_joiner_authored={skipped_joiner_authored} \
+         skipped_other_topic={skipped_other_topic}",
+    );
+    assert!(
+        bridged >= 1,
+        "no owner-authored events seen on {metadata_topic} in {timeout_secs}s — \
+         expected at least 1 (joiner must trigger a fresh join during this window \
+         so the owner's apply path publishes the Welcome). skipped_joiner_authored={skipped_joiner_authored}",
+    );
+}
+
 /// After the bridge dispatcher unseals + POSTs an event to local
 /// `/publish`, x0xd's pubsub loopback re-delivers the same payload back
 /// to the SSE consumer. The `BridgeInboundShadow` must suppress that
