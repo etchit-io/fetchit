@@ -1,0 +1,29 @@
+[Unit]
+Description=fetchit-chat-peer for Claude pair-rig (Alice/Box A)
+# PartOf cascades both stop AND restart of x0xd-claude-here.service to
+# this unit — exactly what we want for the rig: when x0xd restarts on
+# a new port, chat-peer must restart too so the wrapper re-reads
+# api.port. Requires keeps the hard start-time dependency. After
+# orders chat-peer behind x0xd.
+#
+# Why not BindsTo alone: BindsTo propagates STOP downward but not
+# restart-upward, so a deliberate `systemctl restart x0xd` would leave
+# chat-peer dead.
+Requires=x0xd-claude-here.service
+PartOf=x0xd-claude-here.service
+After=x0xd-claude-here.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/claude-chat-peer-start
+# Restart=always covers BOTH transient failures and the deliberate
+# exit-2 the binary emits on permanent send-failure (the new
+# --outbox-file mode uses this as a signal to systemd: "rebuild me
+# with a freshly-resolved x0xd port"). on-failure ignores certain
+# exit codes depending on SuccessExitStatus and would let the binary
+# die silently.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
