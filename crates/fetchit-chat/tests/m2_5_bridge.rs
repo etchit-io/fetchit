@@ -27,11 +27,19 @@
 //!   Box A systemd-rig paths.
 //!
 //! `m2_5_bridge_live_*` only:
-//! - `M2_5_BRIDGE_PEER_AGENT` — 64-hex agent id of the Box-B peer.
-//! - `M2_5_BRIDGE_PEER_SHARE_URI` — `x0x://agent/<base64>` for B; the
-//!   test imports this into the hermetic `TempDir` vault before send.
-//! - `M2_5_BRIDGE_GROUP_ID` — existing `private_secure` group on both
-//!   x0xds, with A and B as members (the bridge does not create groups).
+//! - `M2_5_BRIDGE_PEER_AGENT` — 64-hex agent id of the peer (owner of the
+//!   group, recipient of the bridge envelope).
+//! - `M2_5_BRIDGE_PEER_SHARE_URI` — `x0x://agent/<base64>` for the peer;
+//!   the test imports this into the hermetic `TempDir` vault before
+//!   send so `recipient_kem_key` (P1.A gate) resolves.
+//! - `M2_5_BRIDGE_INVITE_LINK` — the `invite_link` blob returned by
+//!   `POST /groups/<gid>/invite` on the peer. The local x0xd
+//!   constructs + signs + publishes the `MemberJoined` event itself
+//!   when we `POST /groups/join` with this link, matching the
+//!   production flow exactly; we capture the bytes off the pubsub
+//!   loopback and ship them, so the test never mirrors upstream's
+//!   canonical-bytes formula.
+//! - `M2_5_BRIDGE_DISPLAY_NAME` — optional, default `"wyse21-test"`.
 //!
 //! # How to run
 //!
@@ -43,9 +51,9 @@
 //!
 //! # Live cross-box round-trip:
 //! M2_5_BRIDGE_VAULT_PASS=<test-pass> \
-//! M2_5_BRIDGE_PEER_AGENT=<bob-hex> \
+//! M2_5_BRIDGE_PEER_AGENT=<peer-hex> \
 //! M2_5_BRIDGE_PEER_SHARE_URI='x0x://agent/<base64>' \
-//! M2_5_BRIDGE_GROUP_ID=<64-hex-group-id> \
+//! M2_5_BRIDGE_INVITE_LINK='<invite_link blob from POST /groups/<gid>/invite>' \
 //!     cargo test -p fetchit-chat --test m2_5_bridge \
 //!         -- --ignored --nocapture m2_5_bridge_live
 //! ```
@@ -59,18 +67,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use base64::Engine as _;
 use fetchit_chat::error::ChatError;
-use fetchit_chat::groups::bridge::{
-    self, build_member_joined_event, canonical_member_joined_bytes, BridgeRole, MemberJoinedInputs,
-};
+use fetchit_chat::events::Event;
 use fetchit_chat::groups::GroupId;
 use fetchit_chat::groups_reachability::{BridgeDecision, GroupBridgeConsent};
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::Client;
 use std::time::Duration;
 use url::Url;
-use x0xd_client::Signer as _;
 
 /// Production relay we point at for the live round-trip. Matches the NY
 /// droplet in `KNOWN_RELAYS` and the M2 live scaffold.
@@ -269,25 +273,36 @@ async fn m2_5_bridge_reachable_yields_let_gossip_carry() {
 
 // ── Live cross-internet: bidirectional round-trip ─────────────────────
 
-/// Send a signed `MemberJoined` event from Box A to Box B via relay,
-/// observe upstream `member_joined_events_applied` increment on B (or
-/// its functional analog: the local x0xd applied the event and B's
-/// roster reflects it).
+/// Drive the production join flow from the joiner side, capture the
+/// `MemberJoined` event that x0xd publishes locally, and ship it to the
+/// peer via the M2.5 bridge.
 ///
-/// **Box B prerequisite**: Box B's chat-peer is running with the M2.5
-/// bridge dispatcher enabled (74ea382+) and has the group in question
-/// in `named_groups` with the local agent listed in the issued-invite
-/// records (so `consume_issued_invite` succeeds). Box A's test
-/// constructs the canonical bytes + signs via local /agent/sign + wraps
-/// + relays. The receiver chat-peer unseals, POSTs to `/publish`,
-/// pubsub loopback hits the apply path.
+/// The local x0xd does all the cryptographic work:
+/// `POST /groups/join` triggers x0xd's internal
+/// `canonical_member_joined_bytes` + ML-DSA-65 sign + publish to the
+/// group's `metadata_topic` (see `x0xd.rs:9311` `join_group_via_invite`).
+/// The pubsub loopback delivers the same bytes back to our `/events`
+/// SSE subscriber within milliseconds; we capture the raw payload and
+/// hand it to [`Client::send_x0xd_metadata_event`] without re-mirroring
+/// upstream's formula.
+///
+/// **Peer prerequisite**: peer's chat-peer is running with the M2.5
+/// bridge dispatcher enabled (`74ea382`+), the peer has created a
+/// `private_secure` group and issued an invite for the local agent's
+/// hex id, and the resulting `invite_link` blob is supplied via
+/// `M2_5_BRIDGE_INVITE_LINK`. On receipt the peer's chat-peer unseals,
+/// POSTs to `/publish`, pubsub loopback hits `apply_named_group_metadata_event`,
+/// and `consume_issued_invite` succeeds — the peer's
+/// `member_joined_events_applied` counter increments and the local
+/// agent shows up on `GET /groups/<gid>/members`.
 #[tokio::test]
-#[ignore = "M2.5 bridge live round-trip — requires Box B rig + production relay"]
+#[ignore = "M2.5 bridge live round-trip — requires peer rig + production relay"]
 async fn m2_5_bridge_live_member_joined_applies_on_peer() {
     let vault_pass = env_required("M2_5_BRIDGE_VAULT_PASS");
     let peer_agent_hex = env_required("M2_5_BRIDGE_PEER_AGENT");
     let peer_share_uri = env_required("M2_5_BRIDGE_PEER_SHARE_URI");
-    let group_id_str = env_required("M2_5_BRIDGE_GROUP_ID");
+    let invite_link = env_required("M2_5_BRIDGE_INVITE_LINK");
+    let display_name = env_or("M2_5_BRIDGE_DISPLAY_NAME", || "wyse21-test".to_owned());
 
     assert_eq!(
         peer_agent_hex.len(),
@@ -299,10 +314,14 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
         peer_share_uri.starts_with("x0x://agent/"),
         "M2_5_BRIDGE_PEER_SHARE_URI must be an x0x://agent/ URI",
     );
+    assert!(
+        !invite_link.is_empty(),
+        "M2_5_BRIDGE_INVITE_LINK must be the invite_link blob from POST /groups/<gid>/invite on the peer",
+    );
 
     let (client, _data_dir) = build_test_client(&vault_pass, true).await;
 
-    // Persist Box B's v2 share-card so recipient_kem_key (P1.A gate) finds it.
+    // Persist peer's v2 share-card so recipient_kem_key (P1.A gate) finds it.
     client
         .identity()
         .import_uri(&peer_share_uri)
@@ -314,23 +333,16 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
         stored.save(layout).expect("StoredContactCard.save");
     }
 
-    let group = GroupId::parse(&group_id_str).expect("group id parses");
+    let local_agent_id_hex = client
+        .identity_arc()
+        .expect("client built with chat state")
+        .agent_id_hex()
+        .to_owned();
 
-    // Opt in to the bridge for this group; the consent gate would
-    // otherwise refuse the send with BridgeNeedsConsent.
-    client
-        .bridge_consent()
-        .expect("chat state present")
-        .lock()
-        .await
-        .set(group.clone(), GroupBridgeConsent::ConsentedOptIn);
-
-    // Construct a separate `X0xdSigner` against the same daemon Box A's
-    // `Client` is bound to. We use this to (a) pull the local agent's
-    // ML-DSA-65 public key (needed inside the canonical-bytes formula
-    // and the JSON event body) and (b) ML-DSA-65 sign the canonical
-    // bytes — mirroring exactly what the chat-peer's bridge dispatcher
-    // does in production on a real symmetric-NAT join.
+    // Build a raw reqwest client against the local x0xd. x0xd-client
+    // intentionally doesn't expose /groups/join or /groups/<gid> —
+    // those are test-driver / desktop-shell concerns, not part of the
+    // chat-stack's typed surface.
     let home = std::env::var("HOME").expect("HOME must be set");
     let port_file = env_or("X0XD_PORT_FILE", || {
         format!("{home}/.local/share/x0x-claude-here/api.port")
@@ -343,57 +355,64 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
         .unwrap_or_else(|e| panic!("read x0xd token at {token_path}: {e}"))
         .trim()
         .to_owned();
-    let signer = x0xd_client::X0xdSigner::connect(
-        Url::parse(&base_url).expect("x0xd base url parses"),
-        &token,
+    let http = build_x0xd_http_client(&token);
+
+    // Subscribe to /events FIRST so the MemberJoined publish that
+    // `/groups/join` kicks off doesn't race the capture. x0xd publishes
+    // to the local saorsa-gossip mesh, which loops back to subscribed
+    // SSE consumers within a few hundred ms.
+    let mut sse = client.events().await.expect("open /events SSE");
+
+    // POST /groups/join — x0xd constructs canonical bytes + ML-DSA-65
+    // signs with the local agent's key + publishes the resulting
+    // NamedGroupMetadataEvent::MemberJoined on the group's
+    // `metadata_topic`. We never touch the formula in this test.
+    let join_resp = post_groups_join(&http, &base_url, &invite_link, &display_name).await;
+    let group_id_str = join_resp
+        .get("group_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("POST /groups/join response missing group_id: {join_resp}"))
+        .to_owned();
+    let group = GroupId::parse(&group_id_str).expect("group_id parses");
+
+    // Opt in to bridge consent for this group; the consent gate would
+    // otherwise refuse the send with BridgeNeedsConsent.
+    client
+        .bridge_consent()
+        .expect("chat state present")
+        .lock()
+        .await
+        .set(group.clone(), GroupBridgeConsent::ConsentedOptIn);
+
+    // Read the real metadata_topic from x0xd's group details endpoint
+    // (#265): the bridge receiver re-publishes on the same topic via
+    // local /publish, so we MUST ship x0xd's chosen topic string rather
+    // than a hand-constructed template.
+    let metadata_topic = get_group_metadata_topic(&http, &base_url, &group_id_str).await;
+
+    // Capture the published event off the pubsub loopback.
+    let signed_event_bytes = await_member_joined_publish(
+        &mut sse,
+        &metadata_topic,
+        &local_agent_id_hex,
+        LIVE_APPLY_TIMEOUT,
     )
     .await
-    .expect("X0xdSigner::connect against local x0xd");
+    .expect("local x0xd did not publish MemberJoined within LIVE_APPLY_TIMEOUT");
 
-    let local_agent_id_hex = hex::encode(signer.agent_id());
-    let local_pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(signer.public_key());
-
-    // The MemberJoined event is invite-bound: x0xd's apply path runs
-    // `consume_issued_invite(secret, …)` (upstream `src/groups/mod.rs:642`,
-    // rev `6d96ca5`) and rejects when the secret isn't on the inviter's
-    // `issued_invites` map. For the live test the inviter (Box B) issues
-    // an invite on his side and ships the secret + group id via env;
-    // without it the inner apply fails and Box B's
-    // `member_joined_events_applied` counter never moves. The send-side
-    // contract (return of `WrapAndSend`) still holds either way — that's
-    // what this test asserts; the cross-box counter assertion is the
-    // residential-NAT close-gate.
-    let invite_secret = std::env::var("M2_5_BRIDGE_INVITE_SECRET").unwrap_or_default();
-    let stable_group_id = std::env::var("M2_5_BRIDGE_STABLE_GROUP_ID").ok();
-
-    let ts_ms = now_ms();
-    let inputs = MemberJoinedInputs {
-        group_id: &group_id_str,
-        stable_group_id: stable_group_id.as_deref(),
-        member_agent_id: &local_agent_id_hex,
-        member_public_key_b64: &local_pubkey_b64,
-        role: BridgeRole::Member,
-        display_name: None,
-        inviter_agent_id: &peer_agent_hex,
-        invite_secret: &invite_secret,
-        ts_ms,
-        treekem_key_package_b64: None,
-    };
-
-    let canonical = canonical_member_joined_bytes(&inputs);
-    let signature_bytes = signer
-        .sign(&canonical)
-        .await
-        .expect("local x0xd /agent/sign over canonical MemberJoined bytes");
-    let signature_b64 = base64::engine::general_purpose::STANDARD.encode(&signature_bytes);
-
-    let event_json = build_member_joined_event(&inputs, &signature_b64);
-    let signed_event_bytes = serde_json::to_vec(&event_json).expect("JSON event serialize");
-
-    let topic = format!("x0x.named_group/{group_id_str}/metadata");
+    eprintln!(
+        "[m2.5-live] captured x0xd MemberJoined — group={group_id_str} member={local_agent_id_hex} \
+         topic={metadata_topic} event_bytes={event_len}",
+        event_len = signed_event_bytes.len(),
+    );
 
     let decision = client
-        .send_x0xd_metadata_event(&peer_agent_hex, &group, topic, &signed_event_bytes)
+        .send_x0xd_metadata_event(
+            &peer_agent_hex,
+            &group,
+            metadata_topic.clone(),
+            &signed_event_bytes,
+        )
         .await
         .expect("send must succeed on the WrapAndSend path");
     assert_eq!(
@@ -403,21 +422,122 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
     );
 
     eprintln!(
-        "[m2.5-live] bridge MemberJoined sent — group={group_id_str} member={local_agent_id_hex} \
-         inviter={peer_agent_hex} ts_ms={ts_ms} sig_b64_len={sig_len} event_bytes={event_len}",
-        sig_len = signature_b64.len(),
-        event_len = signed_event_bytes.len(),
+        "[m2.5-live] bridge dispatch sent — peer={peer_agent_hex} topic={metadata_topic} \
+         decision={decision:?}",
     );
     eprintln!(
-        "[m2.5-live] Box B verification (not asserted here — that is the close-gate test): \
-         (1) chat-peer log on Box B shows bridge dispatch + `/publish` ok; \
-         (2) `member_joined_events_applied` diagnostic counter for group {group_id_str} \
-         incremented; \
-         (3) `GET /groups/{group_id_str}/members` on Box B includes {local_agent_id_hex}."
+        "[m2.5-live] peer-side verification (asserted out-of-band): \
+         peer chat-peer log shows kind=X0xdGroupMetadataEvent + dispatch_inbound_bridge ok; \
+         peer x0xd `member_joined_events_applied` counter increments for {group_id_str}; \
+         peer GET /groups/{group_id_str}/members includes {local_agent_id_hex}."
     );
-    // Silence unused warnings from the bridge re-export when only the
-    // explicitly-imported items are referenced.
-    let _ = (bridge::MEMBER_JOINED_DOMAIN, &peer_share_uri);
+}
+
+fn build_x0xd_http_client(token: &str) -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .expect("bearer header value"),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("build x0xd reqwest::Client")
+}
+
+async fn post_groups_join(
+    http: &reqwest::Client,
+    base_url: &str,
+    invite_link: &str,
+    display_name: &str,
+) -> serde_json::Value {
+    let url = format!("{base_url}/groups/join");
+    let body = serde_json::json!({
+        "invite": invite_link,
+        "display_name": display_name,
+    });
+    let resp = http
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST /groups/join: {e}"));
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .unwrap_or_else(|e| panic!("POST /groups/join json decode: {e}"));
+    assert!(
+        status.is_success() && json.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        "POST /groups/join failed: status={status} body={json}",
+    );
+    json
+}
+
+async fn get_group_metadata_topic(
+    http: &reqwest::Client,
+    base_url: &str,
+    group_id: &str,
+) -> String {
+    let url = format!("{base_url}/groups/{group_id}");
+    let resp = http
+        .get(&url)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("GET /groups/{group_id}: {e}"));
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .unwrap_or_else(|e| panic!("GET /groups/{group_id} json: {e}"));
+    json.get("metadata_topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("GET /groups/{group_id} response missing metadata_topic: {json}"))
+        .to_owned()
+}
+
+/// Pull the next `GossipMessage` on `metadata_topic` whose decoded JSON
+/// is a `MemberJoined` for our agent, returning the raw payload bytes
+/// x0xd published. Bounded by `timeout` so a missed event doesn't hang
+/// CI.
+async fn await_member_joined_publish<S>(
+    sse: &mut fetchit_chat::events::EventStream<S>,
+    metadata_topic: &str,
+    local_agent_id_hex: &str,
+    timeout: Duration,
+) -> Option<Vec<u8>>
+where
+    S: futures_util::Stream<Item = Result<Event, ChatError>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let next = match tokio::time::timeout(remaining, sse.next()).await {
+            Ok(Some(Ok(ev))) => ev,
+            Ok(Some(Err(_))) => continue,
+            Ok(None) | Err(_) => return None,
+        };
+        let Event::GossipMessage { topic, payload, .. } = next else {
+            continue;
+        };
+        if topic != metadata_topic {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let event_kind = parsed.get("event").and_then(|v| v.as_str());
+        let member_id = parsed.get("member_agent_id").and_then(|v| v.as_str());
+        if event_kind == Some("member_joined")
+            && member_id.is_some_and(|m| m.eq_ignore_ascii_case(local_agent_id_hex))
+        {
+            return Some(payload);
+        }
+    }
 }
 
 /// After the bridge dispatcher unseals + POSTs an event to local
