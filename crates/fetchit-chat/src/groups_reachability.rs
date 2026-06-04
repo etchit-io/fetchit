@@ -292,6 +292,49 @@ pub fn group_id_from_metadata_topic(topic: &str) -> Option<GroupId> {
     GroupId::parse(gid).ok()
 }
 
+/// Decide whether an inbound `Event::GossipMessage` deserves a
+/// reachability record. Pure function — no I/O, no awaits — so the SSE
+/// consumer can pass borrows of its locked
+/// [`BridgeInboundShadow`] and the test path can drive every branch
+/// hermetically without spinning up a real x0xd.
+///
+/// Returns `Some((group, sender))` when the event represents fresh
+/// evidence of direct-gossip reachability and the caller should
+/// [`ReachabilityCache::record`] the pair. Returns `None` when:
+///
+/// 1. The event has no `from` (anonymous gossip — nothing to record).
+/// 2. `from == local_agent_hex` — our own /publish loopback.
+/// 3. `shadow.is_recent(hash_payload(payload), now_ms)` — bridge
+///    loopback; recording would falsely promote
+///    `(group, signer) → Reachable` exactly when the bridge fired
+///    *because* direct gossip failed.
+/// 4. `topic` does not match the
+///    `x0x.named_group/<gid>/metadata` shape, or the embedded segment
+///    fails [`GroupId::parse`].
+///
+/// Used by [`crate::client::Client::spawn_sse_reachability_recorder`]
+/// to keep the §5 routing rule honest under the symmetric-NAT case
+/// the bridge exists to solve.
+#[must_use]
+pub fn classify_sse_event(
+    topic: &str,
+    payload: &[u8],
+    from: Option<&AgentId>,
+    local_agent_hex: &str,
+    shadow: &BridgeInboundShadow,
+    now_ms: u64,
+) -> Option<(GroupId, AgentId)> {
+    let from = from?;
+    if from.0 == local_agent_hex {
+        return None;
+    }
+    if shadow.is_recent(hash_payload(payload), now_ms) {
+        return None;
+    }
+    let group = group_id_from_metadata_topic(topic)?;
+    Some((group, from.clone()))
+}
+
 /// Routing rule per §5 of `private/m2.5-bridge-collapsed-spec.md`.
 ///
 /// Pure decision: no side effects, no I/O. Composable into both the
@@ -664,5 +707,208 @@ mod tests {
     #[test]
     fn topic_parser_rejects_empty_group_id() {
         assert!(group_id_from_metadata_topic("x0x.named_group//metadata").is_none());
+    }
+
+    // ── classify_sse_event ────────────────────────────────────────────
+
+    /// Helper: local agent's hex string used as the "self" identity in
+    /// the classify tests.
+    fn local_hex() -> String {
+        "0".repeat(64)
+    }
+
+    #[test]
+    fn classify_records_real_gossip_event() {
+        let shadow = BridgeInboundShadow::new();
+        let topic = "x0x.named_group/group1/metadata";
+        let payload = b"signed-event-bytes-from-remote-peer";
+        let from = AgentId("ff".repeat(32));
+        let result = classify_sse_event(
+            topic,
+            payload,
+            Some(&from),
+            &local_hex(),
+            &shadow,
+            1_000_000,
+        );
+        let (group, member) = result.expect("real gossip event must record");
+        assert_eq!(group.as_str(), "group1");
+        assert_eq!(member.0, from.0);
+    }
+
+    #[test]
+    fn classify_skips_self_publish_loopback() {
+        let shadow = BridgeInboundShadow::new();
+        let local = local_hex();
+        let from = AgentId(local.clone());
+        // Our own /publish loopback: from == local_agent_hex.
+        let result = classify_sse_event(
+            "x0x.named_group/group1/metadata",
+            b"any-payload",
+            Some(&from),
+            &local,
+            &shadow,
+            1_000_000,
+        );
+        assert!(
+            result.is_none(),
+            "self-publish loopback must not record reachability",
+        );
+    }
+
+    #[test]
+    fn classify_skips_bridge_loopback_within_window() {
+        let mut shadow = BridgeInboundShadow::new();
+        let payload = b"sealed-bridge-payload-bytes";
+        let h = hash_payload(payload);
+        shadow.mark(h, 1_000_000);
+
+        let from = AgentId("ff".repeat(32));
+        let result = classify_sse_event(
+            "x0x.named_group/group1/metadata",
+            payload,
+            Some(&from),
+            &local_hex(),
+            &shadow,
+            1_000_500,
+        );
+        assert!(
+            result.is_none(),
+            "bridge-loopback event within shadow window must not record",
+        );
+    }
+
+    #[test]
+    fn classify_records_after_shadow_window_elapses() {
+        let mut shadow = BridgeInboundShadow::new();
+        let payload = b"sealed-bridge-payload-bytes";
+        shadow.mark(hash_payload(payload), 1_000_000);
+        let from = AgentId("ff".repeat(32));
+        // A FOLLOW-UP event from the same peer past the shadow window
+        // is genuine gossip — record it.
+        let result = classify_sse_event(
+            "x0x.named_group/group1/metadata",
+            payload,
+            Some(&from),
+            &local_hex(),
+            &shadow,
+            1_000_000 + SHADOW_WINDOW_MS + 1,
+        );
+        assert!(
+            result.is_some(),
+            "post-window event must record once shadow expires",
+        );
+    }
+
+    #[test]
+    fn classify_skips_when_from_is_none() {
+        let shadow = BridgeInboundShadow::new();
+        // x0xd sometimes emits frames with `from = None` (anonymous /
+        // unauthenticated gossip). The reachability key needs a
+        // member, so skip cleanly.
+        let result = classify_sse_event(
+            "x0x.named_group/group1/metadata",
+            b"any-payload",
+            None,
+            &local_hex(),
+            &shadow,
+            1_000_000,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn classify_skips_wrong_topic_shape() {
+        let shadow = BridgeInboundShadow::new();
+        let from = AgentId("ff".repeat(32));
+        // Not a metadata topic (chat content, presence, etc.) — the
+        // reachability cache only tracks group-metadata flows.
+        let result = classify_sse_event(
+            "presence/group1/online",
+            b"any-payload",
+            Some(&from),
+            &local_hex(),
+            &shadow,
+            1_000_000,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn classify_skips_traversal_in_topic_segment() {
+        let shadow = BridgeInboundShadow::new();
+        let from = AgentId("ff".repeat(32));
+        // Path-traversal characters inside the group-id segment fail
+        // GroupId::parse and so cleanly skip — we do NOT want path
+        // poisoning to reach the reachability key.
+        let result = classify_sse_event(
+            "x0x.named_group/../metadata",
+            b"any-payload",
+            Some(&from),
+            &local_hex(),
+            &shadow,
+            1_000_000,
+        );
+        assert!(result.is_none());
+    }
+
+    /// End-to-end semantics check: simulate the symmetric-NAT bridge
+    /// loopback that the spec §5 design relies on suppressing. Without
+    /// the shadow filter the cache would falsely flip to `Reachable`
+    /// and the next send would silently fail by routing
+    /// `LetGossipCarry` into a dead gossip path.
+    #[test]
+    fn classify_under_symmetric_nat_bridge_loopback_does_not_promote_reachable() {
+        let mut shadow = BridgeInboundShadow::new();
+        let mut cache = ReachabilityCache::new();
+
+        let topic = "x0x.named_group/groupA/metadata";
+        let payload = b"sealed-signed-member-joined-event-bytes";
+        let alice = AgentId("aa".repeat(32));
+        let now = 1_000_000;
+
+        // Bridge dispatcher: mark shadow before POST /publish.
+        shadow.mark(hash_payload(payload), now);
+
+        // SSE consumer fires next, picks up the loopback frame.
+        let decision = classify_sse_event(
+            topic,
+            payload,
+            Some(&alice),
+            &local_hex(),
+            &shadow,
+            now + 50, // 50 ms after the mark, well within SHADOW_WINDOW_MS
+        );
+        assert!(decision.is_none(), "loopback must not record");
+
+        // Cache stays Unreachable for (groupA, alice). The next send
+        // path will hit BridgeConsentStore::lookup → WrapAndSend (after
+        // consent), which is the only delivery shape that actually
+        // works on a symmetric-NAT pair.
+        let group = GroupId::parse("groupA").unwrap();
+        assert_eq!(
+            cache.lookup(&group, &alice, now + 100),
+            Reachability::Unreachable,
+        );
+
+        // Belt-and-suspenders: if a *later* genuine direct-gossip frame
+        // arrives outside the window, it MUST be allowed to record.
+        let later_payload = b"a-different-signed-event-bytes";
+        let later = now + SHADOW_WINDOW_MS + 1_000;
+        let decision = classify_sse_event(
+            topic,
+            later_payload,
+            Some(&alice),
+            &local_hex(),
+            &shadow,
+            later,
+        );
+        let (group_back, member_back) = decision.expect("post-window must record");
+        cache.record(group_back, member_back, later);
+        assert_eq!(
+            cache.lookup(&group, &alice, later + 10),
+            Reachability::Reachable,
+            "post-window real gossip must promote to Reachable",
+        );
     }
 }

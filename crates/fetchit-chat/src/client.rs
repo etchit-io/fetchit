@@ -745,28 +745,27 @@ impl Client {
                 else {
                     continue;
                 };
-                let Some(from_agent) = from else { continue };
-                // Self-publish loopback: x0xd surfaces our own
-                // POST /publish back to us with from=local. Skip.
-                if from_agent.0 == local_agent_hex {
-                    continue;
-                }
-                // Bridge-loopback: chat-peer dispatcher marked the
-                // shadow before POSTing. Same payload bytes hash to
-                // the same key; window-bounded so a re-mark from a
-                // *real* later gossip event would still record.
-                let h = crate::groups_reachability::hash_payload(&payload);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                if shadow.lock().await.is_recent(h, now) {
-                    continue;
-                }
-                let Some(group) = crate::groups_reachability::group_id_from_metadata_topic(&topic)
-                else {
-                    continue;
+                // Snapshot the shadow under its lock, run the pure
+                // classify decision, then drop the shadow lock before
+                // touching the cache. Keeps the two mutexes from
+                // composing into a held-across-await chain.
+                let classified = {
+                    let shadow_guard = shadow.lock().await;
+                    crate::groups_reachability::classify_sse_event(
+                        &topic,
+                        &payload,
+                        from.as_ref(),
+                        &local_agent_hex,
+                        &shadow_guard,
+                        now,
+                    )
                 };
-                cache.lock().await.record(group, from_agent, now);
+                if let Some((group, member)) = classified {
+                    cache.lock().await.record(group, member, now);
+                }
             }
         }))
     }
