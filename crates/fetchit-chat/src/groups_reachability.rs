@@ -196,7 +196,14 @@ pub enum BridgeDecision {
 /// and falsely flip `(group, member)` to `Reachable` — exactly the
 /// case the bridge exists to solve. The shadow window must comfortably
 /// cover the round trip between `POST /publish` and SSE emission.
-pub const SHADOW_WINDOW_MS: u64 = 5_000;
+///
+/// 30 s is wide enough to absorb SSE consumer back-pressure under a
+/// bursty inbound flurry (paired with the chat-peer's
+/// `spawn_sse_reachability_recorder` respawn loop, which itself
+/// applies a backoff after stream errors), and narrow enough that a
+/// genuine later direct-gossip event from the same signer past 30 s
+/// promotes to `Reachable` on the very next tick.
+pub const SHADOW_WINDOW_MS: u64 = 30_000;
 
 /// In-memory ring of recently-bridge-delivered payload hashes. Consumed
 /// by the SSE consumer to suppress false-positive reachability records
@@ -631,20 +638,27 @@ mod tests {
 
     #[test]
     fn shadow_evict_older_than_drops_expired() {
+        // Timestamps expressed relative to a `t0` anchor so the test
+        // stays valid as `SHADOW_WINDOW_MS` evolves. `evict_older_than`
+        // bounds memory; it is independent of `is_recent`'s lookup
+        // window. Drop entries older than `2 * SHADOW_WINDOW_MS` to
+        // verify both: an entry inside the lookup window survives both
+        // checks, and an entry past the eviction cutoff is gone.
+        let t0 = 1_000_000_u64;
         let mut shadow = BridgeInboundShadow::new();
-        shadow.mark(1, 1_000);
-        shadow.mark(2, 5_000);
-        shadow.mark(3, 9_000);
+        shadow.mark(1, t0); // ancient — should be evicted
+        shadow.mark(2, t0 + 3 * SHADOW_WINDOW_MS); // recent — should survive both
+        shadow.mark(3, t0 + 3 * SHADOW_WINDOW_MS + 100);
         assert_eq!(shadow.len(), 3);
-        shadow.evict_older_than(10_000, 6_000);
-        // Keep only entries newer than 10_000 - 6_000 = 4_000
-        assert_eq!(shadow.len(), 2);
-        assert!(!shadow.is_recent(1, 10_000));
-        // hash=2 still inside SHADOW_WINDOW_MS window relative to its
-        // own mark time? mark=5000, now=10000, elapsed=5000 > 5000 = false
-        // so is_recent returns false even though evict kept the entry.
-        // (Eviction cutoff != lookup window; they bound different things.)
-        assert!(!shadow.is_recent(2, 10_000));
+        let now = t0 + 3 * SHADOW_WINDOW_MS + 200;
+        shadow.evict_older_than(now, 2 * SHADOW_WINDOW_MS);
+        assert_eq!(shadow.len(), 2, "ancient entry dropped");
+        assert!(!shadow.is_recent(1, now), "ancient entry not recent");
+        assert!(
+            shadow.is_recent(2, now),
+            "recent entry still inside lookup window"
+        );
+        assert!(shadow.is_recent(3, now));
     }
 
     #[test]

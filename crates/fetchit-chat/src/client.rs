@@ -705,9 +705,16 @@ impl Client {
     /// depends on.
     ///
     /// The returned handle owns the task; dropping it terminates the
-    /// recorder. Surface errors hitting the SSE endpoint are logged
-    /// once and the task exits — the chat-peer's outer reconnect loop
-    /// is expected to respawn it.
+    /// recorder.
+    ///
+    /// # Respawn contract
+    ///
+    /// The task wraps its `/events` subscription in an exponential
+    /// backoff loop (1 s → 2 s → 4 s → … capped at 60 s) so a
+    /// transient x0xd outage (service restart, port drift, network
+    /// flap) does not silently kill reachability tracking — the next
+    /// successful open resets the backoff. Errors are logged once per
+    /// retry. The task only exits when its `JoinHandle` is dropped.
     ///
     /// # Errors
     /// Returns `ChatError::Invalid` when the client was built without
@@ -722,49 +729,78 @@ impl Client {
         let local_agent_hex = chat.identity.agent_id_hex().to_owned();
         let client = self.clone();
         Ok(tokio::spawn(async move {
-            let mut stream = match client.events().await {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("sse reachability recorder: open /events failed: {e}");
-                    return;
-                }
-            };
-            while let Some(event) = stream.next().await {
-                let event = match event {
-                    Ok(e) => e,
+            const MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+            let mut backoff = MIN_BACKOFF;
+            loop {
+                let mut stream = match client.events().await {
+                    Ok(s) => {
+                        // Successful subscribe — reset backoff so a
+                        // long-running session that later fails comes
+                        // back at the floor.
+                        backoff = MIN_BACKOFF;
+                        s
+                    }
                     Err(e) => {
-                        log::warn!("sse reachability recorder: stream error: {e}");
-                        return;
+                        log::warn!(
+                            "sse reachability recorder: open /events failed: {e}; retrying in {backoff:?}",
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        continue;
                     }
                 };
-                let Event::GossipMessage {
-                    topic,
-                    payload,
-                    from,
-                } = event
-                else {
-                    continue;
-                };
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                // Snapshot the shadow under its lock, run the pure
-                // classify decision, then drop the shadow lock before
-                // touching the cache. Keeps the two mutexes from
-                // composing into a held-across-await chain.
-                let classified = {
-                    let shadow_guard = shadow.lock().await;
-                    crate::groups_reachability::classify_sse_event(
-                        &topic,
-                        &payload,
-                        from.as_ref(),
-                        &local_agent_hex,
-                        &shadow_guard,
-                        now,
-                    )
-                };
-                if let Some((group, member)) = classified {
-                    cache.lock().await.record(group, member, now);
+                let mut stream_ok = true;
+                while let Some(event) = stream.next().await {
+                    let event = match event {
+                        Ok(e) => e,
+                        Err(e) => {
+                            log::warn!("sse reachability recorder: stream error: {e}; reopening");
+                            stream_ok = false;
+                            break;
+                        }
+                    };
+                    let Event::GossipMessage {
+                        topic,
+                        payload,
+                        from,
+                    } = event
+                    else {
+                        continue;
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    // Snapshot the shadow under its lock, run the pure
+                    // classify decision, then drop the shadow lock
+                    // before touching the cache. Keeps the two
+                    // mutexes from composing into a held-across-await
+                    // chain.
+                    let classified = {
+                        let shadow_guard = shadow.lock().await;
+                        crate::groups_reachability::classify_sse_event(
+                            &topic,
+                            &payload,
+                            from.as_ref(),
+                            &local_agent_hex,
+                            &shadow_guard,
+                            now,
+                        )
+                    };
+                    if let Some((group, member)) = classified {
+                        cache.lock().await.record(group, member, now);
+                    }
+                }
+                // Stream ended (either clean EOF or an error broke us
+                // out above). Brief sleep + reopen — clean EOF likely
+                // means x0xd terminated the SSE; if we hammer reopen,
+                // x0xd treats us as a buggy client.
+                if stream_ok {
+                    log::info!("sse reachability recorder: stream ended cleanly; reopening");
+                    tokio::time::sleep(MIN_BACKOFF).await;
+                } else {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
         }))
