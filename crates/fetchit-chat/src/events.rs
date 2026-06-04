@@ -224,14 +224,26 @@ fn decode_frame(frame: &Frame) -> Result<Option<Event>> {
                 topic: String,
                 #[serde(default)]
                 payload: Option<String>,
-                #[serde(default)]
+                // x0xd emits `sender` (hex string); legacy / test
+                // callers use `from`.
+                #[serde(default, alias = "sender")]
                 from: Option<AgentId>,
             }
+            // x0xd's `/subscribe`-forwarder wraps gossip events in an
+            // outer `SseEvent { type: "message", data: { topic,
+            // payload, sender, … } }` (see `x0xd::SseEvent` +
+            // `subscribe` handler). Strip the wrapper if present; the
+            // bare shape `{ topic, payload, … }` from older callers
+            // and unit tests still parses on the same arm.
+            let inner = match (value.get("type"), value.get("data")) {
+                (Some(_), Some(data)) if data.is_object() => data.clone(),
+                _ => value,
+            };
             let R {
                 topic,
                 payload,
                 from,
-            } = serde_json::from_value(value)?;
+            } = serde_json::from_value(inner)?;
             let bytes = if let Some(b64) = payload {
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
                     .map_err(|e| ChatError::Invalid(format!("gossip payload b64: {e}")))?
@@ -421,5 +433,85 @@ mod tests {
             decode_frame(&f).unwrap().unwrap(),
             Event::GossipMessage { .. }
         ));
+    }
+
+    /// x0xd's `/subscribe`-forwarder serializes
+    /// `SseEvent { type: "message", data: { topic, payload, sender, … } }`
+    /// — the inner gossip fields live one level deeper than a bare
+    /// `{ topic, payload }` frame. Pin that the decoder unwraps the
+    /// envelope and surfaces the inner topic + base64 payload + sender.
+    #[test]
+    fn x0xd_wrapped_subscribe_frame_decodes_to_gossip() {
+        let wire = r#"{
+            "type": "message",
+            "data": {
+                "subscription_id": "abc",
+                "topic": "x0x.group.5ffbb3c93daea2e6.meta",
+                "payload": "aGVsbG8=",
+                "sender": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "verified": true,
+                "trust_level": null
+            }
+        }"#;
+        let f = frame("message", wire);
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::GossipMessage {
+                topic,
+                payload,
+                from,
+            } => {
+                assert_eq!(topic, "x0x.group.5ffbb3c93daea2e6.meta");
+                assert_eq!(payload, b"hello");
+                assert_eq!(
+                    from.expect("sender alias picked up").0,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                );
+            }
+            other => panic!("expected GossipMessage, got {other:?}"),
+        }
+    }
+
+    /// Defence-in-depth: a wrapped frame with no inner `sender`
+    /// (e.g. an unsigned admin event) still decodes; `from` is None.
+    #[test]
+    fn x0xd_wrapped_frame_without_sender_decodes() {
+        let wire = r#"{
+            "type": "message",
+            "data": {
+                "topic": "x0x.group.deadbeef00000000.meta",
+                "payload": "aGVsbG8="
+            }
+        }"#;
+        let f = frame("message", wire);
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::GossipMessage { topic, from, .. } => {
+                assert_eq!(topic, "x0x.group.deadbeef00000000.meta");
+                assert!(from.is_none());
+            }
+            other => panic!("expected GossipMessage, got {other:?}"),
+        }
+    }
+
+    /// The decoder must still accept the bare `{ topic, payload }` shape
+    /// older tests + direct callers produce. Regression guard so the
+    /// wrapper-unwrap doesn't break the existing contract.
+    #[test]
+    fn bare_gossip_frame_still_decodes_after_unwrap_logic() {
+        let f = frame(
+            "gossip",
+            r#"{"topic":"news","payload":"aGVsbG8=","from":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+        );
+        match decode_frame(&f).unwrap().unwrap() {
+            Event::GossipMessage {
+                topic,
+                payload,
+                from,
+            } => {
+                assert_eq!(topic, "news");
+                assert_eq!(payload, b"hello");
+                assert!(from.is_some());
+            }
+            other => panic!("expected GossipMessage, got {other:?}"),
+        }
     }
 }
