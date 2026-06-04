@@ -310,7 +310,12 @@ pub fn group_id_from_metadata_topic(topic: &str) -> Option<GroupId> {
 /// [`ReachabilityCache::record`] the pair. Returns `None` when:
 ///
 /// 1. The event has no `from` (anonymous gossip — nothing to record).
-/// 2. `from == local_agent_hex` — our own /publish loopback.
+/// 2. `from` matches `local_agent_hex` (case-insensitive ASCII) — our
+///    own /publish loopback. The case-insensitive compare mirrors the
+///    M2 send path's `eq_ignore_ascii_case` on agent-id hexes
+///    (`messages.rs`) so x0xd's `/agent` and `/events` SSE surfaces
+///    can disagree on hex casing without breaking the self-publish
+///    skip.
 /// 3. `shadow.is_recent(hash_payload(payload), now_ms)` — bridge
 ///    loopback; recording would falsely promote
 ///    `(group, signer) → Reachable` exactly when the bridge fired
@@ -332,7 +337,7 @@ pub fn classify_sse_event(
     now_ms: u64,
 ) -> Option<(GroupId, AgentId)> {
     let from = from?;
-    if from.0 == local_agent_hex {
+    if from.0.eq_ignore_ascii_case(local_agent_hex) {
         return None;
     }
     if shadow.is_recent(hash_payload(payload), now_ms) {
@@ -767,6 +772,48 @@ mod tests {
         assert!(
             result.is_none(),
             "self-publish loopback must not record reachability",
+        );
+    }
+
+    /// x0xd's `/agent` and `/events` surfaces can disagree on hex
+    /// casing for the same agent id (see M2 `messages.rs` which uses
+    /// `eq_ignore_ascii_case` against the same class of comparison).
+    /// A case-sensitive equality at the loopback skip would miss the
+    /// self-publish frame and falsely promote `(group, self)` to
+    /// `Reachable` — exactly the silent-fail the bridge exists to
+    /// avoid. Pin the case-insensitive contract here.
+    #[test]
+    fn classify_skips_self_publish_loopback_under_mixed_case() {
+        let shadow = BridgeInboundShadow::new();
+        let lower = "deadbeefcafe".to_string() + &"0".repeat(52);
+        let upper = lower.to_ascii_uppercase();
+        // Local stored as lowercase, SSE `from` arrives uppercase.
+        let from = AgentId(upper.clone());
+        let result = classify_sse_event(
+            "x0x.named_group/group1/metadata",
+            b"any-payload",
+            Some(&from),
+            &lower,
+            &shadow,
+            1_000_000,
+        );
+        assert!(
+            result.is_none(),
+            "mixed-case self-publish loopback must still skip",
+        );
+        // And vice versa (local stored uppercase, SSE from lowercase).
+        let from = AgentId(lower.clone());
+        let result = classify_sse_event(
+            "x0x.named_group/group1/metadata",
+            b"any-payload",
+            Some(&from),
+            &upper,
+            &shadow,
+            1_000_000,
+        );
+        assert!(
+            result.is_none(),
+            "mixed-case self-publish loopback must still skip (reverse direction)",
         );
     }
 
