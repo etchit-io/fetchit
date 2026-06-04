@@ -40,6 +40,13 @@
 //!   loopback and ship them, so the test never mirrors upstream's
 //!   canonical-bytes formula.
 //! - `M2_5_BRIDGE_DISPLAY_NAME` — optional, default `"wyse21-test"`.
+//! - `M2_5_BRIDGE_DUMP_BYTES` — optional. When set to a filesystem
+//!   path, the live test writes the captured `signed_event_bytes` to
+//!   that path before shipping the bridge envelope. Used once to
+//!   produce the hermetic shadow fixture in
+//!   `crates/fetchit-chat/tests/fixtures/m2_5_member_joined_wyse21.bin`;
+//!   the shadow test then drives the bridge against the recorded
+//!   bytes without needing a live rig.
 //!
 //! # How to run
 //!
@@ -425,6 +432,20 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
          topic={metadata_topic} event_bytes={event_len}",
         event_len = signed_event_bytes.len(),
     );
+
+    // Optional fixture-dump: write the captured signed event bytes to
+    // a file when `M2_5_BRIDGE_DUMP_BYTES=<path>` is set. The hermetic
+    // shadow test in this module reads the fixture instead of running
+    // /groups/join + SSE capture, so live regressions don't require a
+    // standing rig once we have one good capture.
+    if let Ok(dump_path) = std::env::var("M2_5_BRIDGE_DUMP_BYTES") {
+        std::fs::write(&dump_path, &signed_event_bytes)
+            .unwrap_or_else(|e| panic!("M2_5_BRIDGE_DUMP_BYTES write to {dump_path}: {e}"));
+        eprintln!(
+            "[m2.5-live] dumped {} captured bytes to {dump_path}",
+            signed_event_bytes.len(),
+        );
+    }
 
     let decision = client
         .send_x0xd_metadata_event(
