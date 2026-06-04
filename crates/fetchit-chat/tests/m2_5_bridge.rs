@@ -297,6 +297,7 @@ async fn m2_5_bridge_reachable_yields_let_gossip_carry() {
 /// agent shows up on `GET /groups/<gid>/members`.
 #[tokio::test]
 #[ignore = "M2.5 bridge live round-trip — requires peer rig + production relay"]
+#[allow(clippy::too_many_lines)]
 async fn m2_5_bridge_live_member_joined_applies_on_peer() {
     let vault_pass = env_required("M2_5_BRIDGE_VAULT_PASS");
     let peer_agent_hex = env_required("M2_5_BRIDGE_PEER_AGENT");
@@ -390,6 +391,25 @@ async fn m2_5_bridge_live_member_joined_applies_on_peer() {
     // than a hand-constructed template.
     let metadata_topic = get_group_metadata_topic(&http, &base_url, &group_id_str).await;
 
+    // Register an SSE-forwarding subscription. x0xd's /events stream
+    // only sees gossip payloads that were wired into the broadcast
+    // channel by an explicit `POST /subscribe` (see
+    // `x0xd.rs::subscribe` — every received message gets forwarded to
+    // `state.broadcast_tx`, which feeds `/events`). The internal
+    // metadata-applier subscription (`ensure_named_group_metadata_listener`)
+    // is a separate consumer and never broadcasts to SSE. Without this
+    // call our capture loop waits forever even though x0xd's loopback
+    // is firing.
+    //
+    // x0xd publishes the MemberJoined event twice:
+    //   1. Synchronously inside `/groups/join` — we miss this one
+    //      because /subscribe isn't installed yet (the topic isn't
+    //      known until /groups/join returns).
+    //   2. After `GROUP_BACKGROUND_PUBLISH_DELAY` (8s) via
+    //      `tokio::spawn` — we catch this one. The applier is
+    //      idempotent so the missed first publish is fine.
+    post_x0xd_subscribe(&http, &base_url, &metadata_topic).await;
+
     // Capture the published event off the pubsub loopback.
     let signed_event_bytes = await_member_joined_publish(
         &mut sse,
@@ -470,10 +490,30 @@ async fn post_groups_join(
         .await
         .unwrap_or_else(|e| panic!("POST /groups/join json decode: {e}"));
     assert!(
-        status.is_success() && json.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        status.is_success()
+            && json
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         "POST /groups/join failed: status={status} body={json}",
     );
     json
+}
+
+async fn post_x0xd_subscribe(http: &reqwest::Client, base_url: &str, topic: &str) {
+    let url = format!("{base_url}/subscribe");
+    let resp = http
+        .post(&url)
+        .json(&serde_json::json!({ "topic": topic }))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST /subscribe topic={topic}: {e}"));
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_else(|_| "<no body>".to_owned());
+    assert!(
+        status.is_success(),
+        "POST /subscribe topic={topic} failed: status={status} body={body}",
+    );
 }
 
 async fn get_group_metadata_topic(
