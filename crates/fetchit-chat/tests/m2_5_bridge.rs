@@ -775,12 +775,43 @@ async fn m2_5_bridge_live_owner_bridges_to_joiner() {
             payload.len(),
             &joiner_agent_hex[..16],
         );
-        let decision = client
-            .send_x0xd_metadata_event(&joiner_agent_hex, &group, metadata_topic.clone(), &payload)
-            .await
-            .unwrap_or_else(|e| panic!("send_x0xd_metadata_event for kind={event_kind}: {e}"));
+        // The relay client reconnects asynchronously when the server
+        // idles us out (~60s of pure-listen waiting for x0xd to publish
+        // MemberAdded). A fresh send during reconnect returns "client
+        // is reconnecting"; retry with a bounded sleep so the send
+        // completes once reconnect settles. Cap so a truly dead relay
+        // still surfaces.
+        let mut attempts: u32 = 0;
+        let decision = loop {
+            match client
+                .send_x0xd_metadata_event(
+                    &joiner_agent_hex,
+                    &group,
+                    metadata_topic.clone(),
+                    &payload,
+                )
+                .await
+            {
+                Ok(d) => break d,
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if attempts < 10
+                        && (msg.contains("reconnecting") || msg.contains("disconnected"))
+                    {
+                        attempts += 1;
+                        eprintln!("[m2.5-owner] retry {attempts}/10: relay {msg}; sleep 2s");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    panic!("send_x0xd_metadata_event for kind={event_kind}: {e}");
+                }
+            }
+        };
         bridged += 1;
-        eprintln!("[m2.5-owner] bridged #{bridged} kind={event_kind} decision={decision:?}");
+        eprintln!(
+            "[m2.5-owner] bridged #{bridged} kind={event_kind} attempts={} decision={decision:?}",
+            attempts + 1,
+        );
         assert_eq!(
             decision,
             BridgeDecision::WrapAndSend,
