@@ -60,6 +60,14 @@ struct Cli {
     #[arg(long, default_value = "/root/.local/share/x0x/api-token")]
     x0xd_token_path: String,
 
+    /// Path to x0xd's `api.port` discovery file. When set, the embedded
+    /// signer self-heals across daemon restarts (transparent retry on
+    /// connect-refused after re-reading the port file). Recommended for
+    /// the systemd-supervised rig so an x0xd port drift doesn't wedge
+    /// the binary against a stale URL for the rest of the session.
+    #[arg(long)]
+    x0xd_port_file: Option<PathBuf>,
+
     /// Relay base URL (e.g. `http://67.207.94.66:8088`).
     #[arg(
         long,
@@ -101,11 +109,35 @@ enum Mode {
     Echo,
     /// Print the local peer's share URI and exit.
     Card,
-    /// Interactive chat — stdin → send to `peer`; inbound → stdout.
+    /// Interactive chat — read outbound lines from stdin (or a file when
+    /// `--outbox-file` is set) and send them to `peer`. Inbound DMs print
+    /// to stdout.
+    ///
+    /// When `--outbox-file` + `--cursor-file` are supplied, the binary
+    /// runs in **persistent** mode: lines are read from the file
+    /// starting at the cursor offset and the cursor advances atomically
+    /// after each acked send. A permanent send failure aborts with exit
+    /// code 2 so systemd (`Restart=always`, `BindsTo=`) brings the
+    /// binary back up against a freshly-resolved x0xd port without
+    /// losing queued lines. This is the rig that powers the
+    /// `/tmp/claude-pair/to-bob.txt` pair-chat.
     Chat {
-        /// Hex agent id of the peer to send stdin lines to.
+        /// Hex agent id of the peer to send lines to.
         #[arg(long)]
         peer: String,
+
+        /// Path to a UTF-8 outbox file. When set, the binary reads
+        /// outbound lines from this file (resuming from `--cursor-file`)
+        /// instead of stdin. Pair with `--cursor-file`.
+        #[arg(long)]
+        outbox_file: Option<PathBuf>,
+
+        /// Persisted byte-offset cursor into `--outbox-file`. Atomically
+        /// rewritten after each successful send so a chat-peer restart
+        /// resumes without re-sending acked lines or dropping queued
+        /// ones. Required when `--outbox-file` is set.
+        #[arg(long)]
+        cursor_file: Option<PathBuf>,
     },
     /// Import a peer's share URI into the local contact store. Required
     /// before `chat` can build a Conversation against that peer (the
@@ -133,6 +165,13 @@ async fn main() -> Result<()> {
     if let Some(p) = passphrase {
         builder = builder.passphrase(p);
     }
+    if let Some(port_file) = cli.x0xd_port_file.clone() {
+        eprintln!(
+            "[peer] x0xd signer self-heal enabled via {}",
+            port_file.display()
+        );
+        builder = builder.x0xd_port_file(port_file);
+    }
     let client = builder.build().await.context("build Client")?;
 
     let me = client.identity().me().await.context("read /agent")?;
@@ -151,7 +190,17 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Mode::Echo => run_echo(&client, &cli.display_name).await,
-        Mode::Chat { peer } => run_chat(&client, &cli.display_name, &peer).await,
+        Mode::Chat {
+            peer,
+            outbox_file,
+            cursor_file,
+        } => match (outbox_file, cursor_file) {
+            (None, None) => run_chat(&client, &cli.display_name, &peer).await,
+            (Some(o), Some(c)) => run_chat_outbox(&client, &cli.display_name, &peer, &o, &c).await,
+            (None, Some(_)) | (Some(_), None) => {
+                anyhow::bail!("--outbox-file and --cursor-file must both be set or both omitted")
+            }
+        },
         Mode::Import { uri_file } => run_import(&client, &uri_file).await,
     }
 }
@@ -532,6 +581,136 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         futures_util::future::pending::<()>(),
     )
     .await;
+    Ok(())
+}
+
+/// Persistent `chat` mode: read outbound lines from `outbox_file` past
+/// the byte offset recorded in `cursor_file`, send each, advance the
+/// cursor atomically on ack. Exits with status 2 on permanent send
+/// failure so the systemd wrapper rebuilds the binary with a fresh
+/// `--x0xd-base` (resolved from `api.port` at unit-start time).
+///
+/// Cursor semantics:
+/// - Missing or empty cursor file → start at offset 0.
+/// - Cursor past EOF → wait for new bytes (legitimate after a sync).
+/// - Cursor advances by `line.len() + 1` (the trailing newline) once
+///   the line's send returns `Ok`. The write is `write(.tmp) + rename`
+///   so a crash mid-update leaves the previous cursor intact — never
+///   half-written, never lost.
+///
+/// Polling interval is intentionally a humble 250ms: this rig handles
+/// human keystrokes from one Claude session to another, not high-rate
+/// traffic. `inotify` would be tighter but introduces a platform
+/// dependency the dev rig has no need for.
+async fn run_chat_outbox(
+    client: &Client,
+    display_name: &str,
+    peer_hex: &str,
+    outbox_file: &std::path::Path,
+    cursor_file: &std::path::Path,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let peer = AgentId::parse(peer_hex.to_owned()).context("invalid peer agent id")?;
+    let mut inbound = client
+        .take_transport_inbound("relay")
+        .context("relay inbound already taken")?;
+
+    let client_clone = client.clone();
+    let reader_handle = tokio::spawn(async move {
+        while let Some(env) = inbound.recv().await {
+            if let Some(dm) = decode_inbound(&client_clone, env).await {
+                println!("[{}] {}", short(&dm.from.0), dm.body);
+            }
+        }
+    });
+
+    match client.spawn_sse_reachability_recorder() {
+        Ok(_handle) => eprintln!("[peer] sse reachability recorder started"),
+        Err(e) => eprintln!("[peer] sse reachability recorder not started: {e}"),
+    }
+
+    if let Some(parent) = cursor_file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create cursor parent {}", parent.display()))?;
+    }
+    if !outbox_file.exists() {
+        std::fs::write(outbox_file, b"")
+            .with_context(|| format!("create outbox {}", outbox_file.display()))?;
+    }
+
+    let mut pos: u64 = read_cursor(cursor_file).unwrap_or(0);
+    eprintln!(
+        "[peer] outbox={} cursor={}@{}",
+        outbox_file.display(),
+        cursor_file.display(),
+        pos,
+    );
+
+    loop {
+        let f = std::fs::File::open(outbox_file)
+            .with_context(|| format!("open outbox {}", outbox_file.display()))?;
+        let file_len = f.metadata()?.len();
+        if pos > file_len {
+            // Outbox was truncated/rotated under us. Reset to head so we
+            // don't silently skip newly-rewritten lines.
+            eprintln!("[peer] outbox truncated (cursor {pos} > size {file_len}); resetting cursor");
+            pos = 0;
+            write_cursor_atomic(cursor_file, pos)?;
+        }
+        let mut buf_reader = BufReader::new(f);
+        buf_reader.seek(SeekFrom::Start(pos))?;
+        let mut any_progress = false;
+        for line_result in buf_reader.lines() {
+            let line = line_result.context("read outbox line")?;
+            let line_bytes = line.len() as u64 + 1; // +1 for newline
+            if line.is_empty() {
+                pos = pos.saturating_add(line_bytes);
+                write_cursor_atomic(cursor_file, pos)?;
+                any_progress = true;
+                continue;
+            }
+            let messages = client.messages();
+            let send_result =
+                send_with_retry("chat send", || messages.send(&peer, &line, display_name)).await;
+            match send_result {
+                Ok(id) => {
+                    eprintln!("[peer] sent — id={id:?}");
+                    pos = pos.saturating_add(line_bytes);
+                    write_cursor_atomic(cursor_file, pos)?;
+                    any_progress = true;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[peer] chat-outbox send permanent fail: {e}; exiting 2 for systemd restart",
+                    );
+                    drop(reader_handle);
+                    std::process::exit(2);
+                }
+            }
+        }
+        if !any_progress {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+}
+
+/// Read a u64 byte-offset cursor from `path`. Missing or unparseable
+/// values fold to `Ok(0)` so a fresh rig starts at the head of the
+/// outbox without ceremony.
+fn read_cursor(path: &std::path::Path) -> std::io::Result<u64> {
+    let raw = std::fs::read_to_string(path)?;
+    let trimmed = raw.trim();
+    Ok(trimmed.parse().unwrap_or(0))
+}
+
+/// Atomically rewrite the cursor file via `write(.tmp) + rename`. A
+/// crash mid-update leaves the previous cursor visible to the next
+/// process — never a half-written value.
+fn write_cursor_atomic(path: &std::path::Path, pos: u64) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, pos.to_string())?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 

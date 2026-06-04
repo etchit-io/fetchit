@@ -54,6 +54,14 @@ pub struct ClientBuilder {
     /// is wired with a no-op lookup (always returns `None`), so
     /// reachability stays `No` and the Router falls through to relay.
     contact_pubkey_lookup: Option<ContactPubkeyLookup>,
+    /// Optional path to x0xd's `api.port` discovery file. When set, the
+    /// internal [`x0xd_client::X0xdSigner`] is constructed via
+    /// [`x0xd_client::X0xdSigner::connect_with_port_file`] and the
+    /// signer self-heals across x0xd restarts — a connect-refused
+    /// error re-reads the port file, swaps the cached URL, and retries
+    /// once. Long-running consumers (chat-peer, desktop app) survive
+    /// a daemon restart without going through their own restart cycle.
+    x0xd_port_file: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -72,6 +80,7 @@ impl std::fmt::Debug for ClientBuilder {
                 "contact_pubkey_lookup",
                 &self.contact_pubkey_lookup.as_ref().map(|_| "<closure>"),
             )
+            .field("x0xd_port_file", &self.x0xd_port_file)
             .finish()
     }
 }
@@ -142,6 +151,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Path to x0xd's `api.port` discovery file. Enables port self-
+    /// healing in the embedded [`x0xd_client::X0xdSigner`] so
+    /// long-running consumers survive a daemon restart without the
+    /// signer's cached base URL going stale. Recommended for any
+    /// process that outlives a single x0xd lifetime — desktop app,
+    /// chat-peer rig, etch>it agent bridges.
+    #[must_use]
+    pub fn x0xd_port_file(mut self, path: PathBuf) -> Self {
+        self.x0xd_port_file = Some(path);
+        self
+    }
+
     /// Build the client. Falls back to [`discover_local`] for any
     /// x0xd connection field not explicitly set.
     ///
@@ -163,6 +184,7 @@ impl ClientBuilder {
             self.passphrase,
             self.enable_lan_direct,
             self.contact_pubkey_lookup,
+            self.x0xd_port_file,
         )
         .await
     }
@@ -231,7 +253,7 @@ impl Client {
 
     /// Build from an already-resolved endpoint, no relay transport.
     pub async fn from_endpoint(ep: DaemonEndpoint) -> Result<Self> {
-        Self::from_parts(ep.base_url, ep.token, None, None, None, false, None).await
+        Self::from_parts(ep.base_url, ep.token, None, None, None, false, None, None).await
     }
 
     /// Start a builder for custom configuration.
@@ -249,6 +271,7 @@ impl Client {
         passphrase: Option<String>,
         enable_lan_direct: bool,
         contact_pubkey_lookup: Option<ContactPubkeyLookup>,
+        x0xd_port_file: Option<PathBuf>,
     ) -> Result<Self> {
         let http = Arc::new(Http::new(base_url.clone(), token.clone())?);
         let needs_chat =
@@ -264,6 +287,7 @@ impl Client {
                 passphrase,
                 enable_lan_direct,
                 contact_pubkey_lookup,
+                x0xd_port_file,
             )
             .await?
         } else {
@@ -941,7 +965,11 @@ async fn enforce_m2_treekem_minimum(base_url: &str, token: &str) -> Result<()> {
 /// wrapper is built, so transport errors stay as transport errors)
 /// but before `/agent` or any chat state, so an outdated daemon fails
 /// fast with a typed error that names the upgrade target.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
 async fn build_with_chat(
     http: &Http,
     base_url: &str,
@@ -951,6 +979,7 @@ async fn build_with_chat(
     passphrase: Option<String>,
     enable_lan_direct: bool,
     contact_pubkey_lookup: Option<ContactPubkeyLookup>,
+    x0xd_port_file: Option<PathBuf>,
 ) -> Result<(
     Router,
     Option<ChatState>,
@@ -1000,14 +1029,25 @@ async fn build_with_chat(
     // transport: each `X0xdSigner` opens its own warmup round-trip and
     // every `sign` call hits `/agent/sign`, so cloning the Arc keeps a
     // single WebSocket-paired x0xd identity instead of doubling sessions.
-    let x0xd_signer = Arc::new(
+    //
+    // When the caller supplied a `port_file` path
+    // ([`ClientBuilder::x0xd_port_file`]), the signer self-heals across
+    // x0xd restarts: a connect-refused error during signing triggers a
+    // re-read of `api.port` and a one-shot retry against the new URL,
+    // so long-running consumers (chat-peer, desktop app) survive a
+    // daemon restart without going through their own restart cycle.
+    let x0xd_signer = Arc::new(if let Some(path) = x0xd_port_file {
+        X0xdSigner::connect_with_port_file(path, token)
+            .await
+            .map_err(|e| ChatError::MessageTransport(format!("x0xd signer (port-file): {e}")))?
+    } else {
         X0xdSigner::connect(
             Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
             token,
         )
         .await
-        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?,
-    );
+        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?
+    });
     let signer: Arc<dyn Signer> = x0xd_signer.clone();
 
     let mut router = Router::new();
