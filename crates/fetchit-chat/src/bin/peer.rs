@@ -704,12 +704,22 @@ fn read_cursor(path: &std::path::Path) -> std::io::Result<u64> {
     Ok(trimmed.parse().unwrap_or(0))
 }
 
-/// Atomically rewrite the cursor file via `write(.tmp) + rename`. A
-/// crash mid-update leaves the previous cursor visible to the next
-/// process — never a half-written value.
+/// Atomically rewrite the cursor file. On `data=writeback` mounts the
+/// rename can land before the data is durable, leaving an empty `.tmp`
+/// visible after a crash — which would reset the cursor to 0 on the
+/// next read and replay the entire outbox (duplicate-send hazard).
+/// Defend by `sync_all()`-ing the file handle before close, then
+/// rename. The data-before-metadata order is now durable regardless of
+/// mount mode.
+///
+/// (Per Bob's cross-review of `b552a65` 2026-06-03 — P0-A finding.)
 fn write_cursor_atomic(path: &std::path::Path, pos: u64) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, pos.to_string())?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(pos.to_string().as_bytes())?;
+    f.sync_all()?;
+    drop(f);
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -769,5 +779,59 @@ mod tests {
             SEND_MAX_ATTEMPTS,
             "every attempt must have run before surfacing the error",
         );
+    }
+
+    // ── outbox-cursor file helpers ────────────────────────────────────
+
+    #[test]
+    fn write_cursor_atomic_persists_value_and_no_tmp_residue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor = tmp.path().join("chat-peer.cursor");
+        write_cursor_atomic(&cursor, 12_345).expect("write");
+        assert_eq!(read_cursor(&cursor).unwrap(), 12_345);
+        // The .tmp helper must be renamed away — leaving it around
+        // would confuse a future write that overwrites the .tmp.
+        assert!(!cursor.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn write_cursor_atomic_overwrite_replaces_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor = tmp.path().join("chat-peer.cursor");
+        write_cursor_atomic(&cursor, 100).unwrap();
+        write_cursor_atomic(&cursor, 9_001).unwrap();
+        assert_eq!(read_cursor(&cursor).unwrap(), 9_001);
+    }
+
+    #[test]
+    fn read_cursor_missing_file_yields_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor = tmp.path().join("never-written.cursor");
+        // The wrapper at the call site (`run_chat_outbox`) folds
+        // `Err` to `0` via `unwrap_or(0)`. The helper itself surfaces
+        // the IO error so callers can distinguish "no cursor yet"
+        // from "cursor file is unreadable for some other reason".
+        let err = read_cursor(&cursor).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn read_cursor_unparseable_value_yields_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor = tmp.path().join("chat-peer.cursor");
+        std::fs::write(&cursor, "not-a-number").unwrap();
+        // Defensive fold: an outbox should not be replayed from a
+        // garbage cursor value either. `0` is the safest restart
+        // point because the de-dup logic in the relay-side outbox
+        // catches the resends on the next layer.
+        assert_eq!(read_cursor(&cursor).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_cursor_with_trailing_whitespace_parses_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor = tmp.path().join("chat-peer.cursor");
+        std::fs::write(&cursor, "  17860 \n").unwrap();
+        assert_eq!(read_cursor(&cursor).unwrap(), 17_860);
     }
 }
