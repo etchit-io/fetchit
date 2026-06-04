@@ -6,7 +6,8 @@
 //! under ML-KEM-768 to the recipient.
 
 use crate::identity::{AgentId, GroupId, MachineId, TenantId};
-use serde::{Deserialize, Serialize};
+use serde::de::{EnumAccess, Error as _, VariantAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Wire-protocol version. Bumped to 3 at M2 (2026-06-02) when the
 /// v1 unsealed-fabricated escape hatch was removed and every send
@@ -29,7 +30,19 @@ pub const WIRE_VERSION: u16 = 3;
 pub const WIRE_VERSION_V2_SUNSET: &str = "2026-12-01";
 
 /// Discriminator for what the ciphertext payload represents.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Forward compatibility
+///
+/// `Serialize`/`Deserialize` are implemented by hand below so that
+/// unknown postcard discriminators round-trip through
+/// [`Self::Unknown`] instead of failing the whole `TransitEnvelope`
+/// decode. The relay only inspects sender/recipient/timestamp/sig
+/// for routing — payload kind is opaque — so a relay running an
+/// older proto can transparently pass through envelopes whose
+/// `kind` it doesn't recognise once this variant is deployed. The
+/// docstring on the C1 commit (`68f85e3`) referred to this shim;
+/// this commit makes the shim actually exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnvelopeKind {
     /// One-to-one direct message.
     Dm,
@@ -84,6 +97,98 @@ pub enum EnvelopeKind {
     /// See `private/m2.5-bridge-collapsed-spec.md` on the `m2.5-design`
     /// branch for the full spec.
     X0xdGroupMetadataEvent,
+    /// Forward-compat catch-all. Holds the raw postcard discriminator
+    /// of an envelope kind this version of the proto doesn't recognise.
+    /// `Serialize` emits the original discriminator verbatim so a
+    /// relay holding `Unknown(n)` re-emits a wire frame byte-identical
+    /// to whatever the newer sender produced. Recipients running the
+    /// newer proto then decode the inner variant as normal.
+    ///
+    /// **Not for application code.** Senders never construct
+    /// `Unknown(_)`; the relay never inspects the inner u8 for
+    /// routing; the receiver's auto-derived path never sees it
+    /// because by the time decoding reaches application code the
+    /// recipient is running the version that knows the new variant.
+    Unknown(u8),
+}
+
+// Wire discriminators — kept in lockstep with the variant order
+// above so the hand-rolled Serialize/Deserialize maps round-trip with
+// the byte representation that derived `Deserialize` would have
+// produced before this shim landed.
+const DISC_DM: u32 = 0;
+const DISC_GROUP_CHAT: u32 = 1;
+const DISC_ADMIN_EVENT: u32 = 2;
+const DISC_DELIVERY_RECEIPT: u32 = 3;
+const DISC_PRIVATE_GROUP_CHAT: u32 = 4;
+const DISC_X0XD_GROUP_METADATA_EVENT: u32 = 5;
+
+impl Serialize for EnvelopeKind {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        // serialize_unit_variant's `variant_index` is the value
+        // postcard writes as the varint discriminator on the wire,
+        // so `Unknown(n)` round-trips to exactly the same byte the
+        // newer sender emitted.
+        let disc = match self {
+            EnvelopeKind::Dm => DISC_DM,
+            EnvelopeKind::GroupChat => DISC_GROUP_CHAT,
+            EnvelopeKind::AdminEvent => DISC_ADMIN_EVENT,
+            EnvelopeKind::DeliveryReceipt => DISC_DELIVERY_RECEIPT,
+            EnvelopeKind::PrivateGroupChat => DISC_PRIVATE_GROUP_CHAT,
+            EnvelopeKind::X0xdGroupMetadataEvent => DISC_X0XD_GROUP_METADATA_EVENT,
+            EnvelopeKind::Unknown(n) => u32::from(*n),
+        };
+        ser.serialize_unit_variant("EnvelopeKind", disc, "Variant")
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvelopeKind {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct KindVisitor;
+        impl<'de> Visitor<'de> for KindVisitor {
+            type Value = EnvelopeKind;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("EnvelopeKind enum variant")
+            }
+            fn visit_enum<A: EnumAccess<'de>>(self, access: A) -> Result<EnvelopeKind, A::Error> {
+                let (disc, var) = access.variant::<u32>()?;
+                var.unit_variant()?;
+                Ok(match disc {
+                    DISC_DM => EnvelopeKind::Dm,
+                    DISC_GROUP_CHAT => EnvelopeKind::GroupChat,
+                    DISC_ADMIN_EVENT => EnvelopeKind::AdminEvent,
+                    DISC_DELIVERY_RECEIPT => EnvelopeKind::DeliveryReceipt,
+                    DISC_PRIVATE_GROUP_CHAT => EnvelopeKind::PrivateGroupChat,
+                    DISC_X0XD_GROUP_METADATA_EVENT => EnvelopeKind::X0xdGroupMetadataEvent,
+                    n => match u8::try_from(n) {
+                        Ok(byte) => EnvelopeKind::Unknown(byte),
+                        Err(_) => {
+                            return Err(A::Error::custom(format!(
+                                "EnvelopeKind discriminator {n} exceeds u8::MAX; \
+                                 forward-compat shim only tracks discriminators ≤ 255",
+                            )))
+                        }
+                    },
+                })
+            }
+        }
+        // Pass a small variant-name slice for completeness; postcard
+        // routes by index, not name, so the strings don't appear on
+        // the wire — they just keep the contract honest.
+        de.deserialize_enum(
+            "EnvelopeKind",
+            &[
+                "Dm",
+                "GroupChat",
+                "AdminEvent",
+                "DeliveryReceipt",
+                "PrivateGroupChat",
+                "X0xdGroupMetadataEvent",
+                "Unknown",
+            ],
+            KindVisitor,
+        )
+    }
 }
 
 /// One ciphertext-carrying message routed by the relay.
@@ -260,6 +365,86 @@ mod tests {
         let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.kind, EnvelopeKind::PrivateGroupChat);
         assert!(decoded.kem_ciphertext.is_empty());
+    }
+
+    /// Sanity: every known variant round-trips byte-for-byte under
+    /// the hand-rolled Serde impls. Pins the postcard discriminator
+    /// indices that other clients on the wire depend on.
+    #[test]
+    fn every_known_variant_roundtrips_with_stable_discriminator() {
+        for (variant, expected_disc_byte) in [
+            (EnvelopeKind::Dm, 0u8),
+            (EnvelopeKind::GroupChat, 1),
+            (EnvelopeKind::AdminEvent, 2),
+            (EnvelopeKind::DeliveryReceipt, 3),
+            (EnvelopeKind::PrivateGroupChat, 4),
+            (EnvelopeKind::X0xdGroupMetadataEvent, 5),
+        ] {
+            let bytes = postcard::to_allocvec(&variant).unwrap();
+            assert_eq!(
+                bytes,
+                vec![expected_disc_byte],
+                "variant {variant:?} must serialize to single varint byte {expected_disc_byte}",
+            );
+            let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    /// An envelope produced by a future client with a kind variant
+    /// this proto doesn't recognise (e.g. discriminator 6, 7, 42)
+    /// MUST decode to `EnvelopeKind::Unknown(n)` instead of failing
+    /// the whole envelope deserialization. Without this the relay
+    /// blackholes the `SendFrame`, the client times out at 10 s, and
+    /// the user sees a silent send failure — the exact failure mode
+    /// that motivated this commit.
+    #[test]
+    fn unknown_discriminator_decodes_as_unknown_variant() {
+        for disc in [6u8, 7, 42, 99, 200, 255] {
+            // Postcard's varint encoding for u32 < 128 is a single byte
+            // equal to the value, so we can craft the wire bytes by
+            // hand and verify the visitor handles them.
+            let bytes = if disc < 128 {
+                vec![disc]
+            } else {
+                // Two-byte varint: low 7 bits in first byte with high
+                // bit set, then upper 7 bits in second byte.
+                vec![disc | 0x80, 0x01]
+            };
+            let decoded: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(
+                decoded,
+                EnvelopeKind::Unknown(disc),
+                "wire disc {disc} must decode to Unknown({disc})",
+            );
+        }
+    }
+
+    /// `Unknown(n)` must round-trip back to the same byte pattern the
+    /// originating sender wrote, so the relay can hold an envelope of
+    /// kind it doesn't understand and forward it byte-identically to
+    /// the recipient — which DOES understand the kind.
+    #[test]
+    fn unknown_variant_reserializes_to_original_discriminator() {
+        for disc in [6u8, 42, 200] {
+            let envelope = EnvelopeKind::Unknown(disc);
+            let bytes = postcard::to_allocvec(&envelope).unwrap();
+            let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back, envelope, "Unknown({disc}) round-trip mismatch");
+        }
+    }
+
+    /// A full `TransitEnvelope` with kind=`Unknown(42)` must decode +
+    /// re-encode cleanly so the relay can pass it through transparently.
+    #[test]
+    fn transit_envelope_with_unknown_kind_roundtrips() {
+        let mut env = sample_envelope();
+        env.kind = EnvelopeKind::Unknown(42);
+        env.ciphertext = vec![0xab; 256];
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.kind, EnvelopeKind::Unknown(42));
+        assert_eq!(decoded.ciphertext, vec![0xab; 256]);
     }
 
     #[test]

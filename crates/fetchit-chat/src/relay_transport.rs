@@ -162,6 +162,15 @@ fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<Inboun
                     }
                 }
                 RelayKind::AdminEvent => continue,
+                // Forward-compat: a newer sender used a kind we don't
+                // recognise yet. The relay passed it through verbatim;
+                // we drop it here since the chat layer has no
+                // semantics to map it to. Logged so an unexpectedly-
+                // common Unknown stream surfaces in journals.
+                RelayKind::Unknown(disc) => {
+                    log::warn!("relay inbound: dropping envelope with unknown kind disc={disc}");
+                    continue;
+                }
             };
             let from = AgentId(hex::encode(env.sender_agent_id.as_bytes()));
             let inbound = InboundEnvelope {

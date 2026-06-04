@@ -328,14 +328,17 @@ async fn handle_inbound_conn(
                 verified_aid.0
             )));
         }
-        let inbound = inbound_envelope_from_transit(verified_aid.clone(), transit);
+        let Some(inbound) = inbound_envelope_from_transit(verified_aid.clone(), transit) else {
+            // Unknown forward-compat kind from a newer sender — drop here.
+            continue;
+        };
         if tx.send(inbound).is_err() {
             return Ok(());
         }
     }
 }
 
-fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> InboundEnvelope {
+fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<InboundEnvelope> {
     let kind = match env.kind {
         // X0xdGroupMetadataEvent: M2.5 bridge variant — wire-shape
         // carry only at C1; the dispatcher in peer.rs discriminates
@@ -355,15 +358,24 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Inbound
                     .unwrap_or_default(),
             }
         }
+        // Forward-compat: an envelope from a newer peer carrying a
+        // kind this proto doesn't recognise. We drop it at the
+        // transport layer — the chat layer has no semantics to map
+        // it to. Returning None lets the pump skip cleanly without
+        // breaking subsequent envelopes.
+        RelayKind::Unknown(disc) => {
+            log::warn!("lan-direct inbound: dropping envelope with unknown kind disc={disc}");
+            return None;
+        }
     };
-    InboundEnvelope {
+    Some(InboundEnvelope {
         kind,
         from,
         payload: env.ciphertext.clone(),
         timestamp_ms: env.timestamp_ms,
         transport_name: TRANSPORT_NAME,
         transit: Some(env),
-    }
+    })
 }
 
 fn materialise_transit(
