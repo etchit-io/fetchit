@@ -3,8 +3,10 @@
 //!
 //! M3 federation core
 //! (`docs/superpowers/plans/2026-06-06-m3-federation-core-plan.md`).
-//! Stage 1 Tasks 1.1-1.3 land here: `connect`, `connection_states`,
-//! `send` (fan-out), `next_delivery` (merged inbox), `shutdown`.
+//! Stage 1 Tasks 1.1-1.4 land here: `connect`, `connection_states`,
+//! `send` (fan-out), `next_delivery` (merged inbox), `watch_presence`
+//! / `unwatch_presence` / `next_presence` (presence multiplexing),
+//! `shutdown`.
 //!
 //! Design decisions resolved per Alice's #251 plan landing
 //! (62d7424/3e74a36): fan-out send to every healthy relay, lean on
@@ -17,7 +19,7 @@ use crate::client::{Client, ClientConfig, ConnState};
 use crate::error::ClientError;
 use crate::outbox::Receipt;
 use crate::signer::Signer;
-use fetchit_relay_proto::{AgentId, DedupeKey, Deliver, TransitEnvelope};
+use fetchit_relay_proto::{AgentId, DedupeKey, Deliver, PresenceUpdate, TransitEnvelope};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, Mutex};
 
@@ -39,6 +41,10 @@ pub struct RelaySet {
     /// chat layer keyed off the envelope's `message_id`; the recipient's
     /// x0xd is the source-of-truth dedupe via canonical event hash.
     inbox_rx: Mutex<mpsc::UnboundedReceiver<Deliver>>,
+    /// Merged presence: every relay's `Client::next_presence` stream
+    /// is forwarded into this single channel. Same per-relay forwarder
+    /// pattern as `inbox_rx`. Duplicates absorb at the chat layer.
+    presence_rx: Mutex<mpsc::UnboundedReceiver<PresenceUpdate>>,
 }
 
 impl RelaySet {
@@ -130,10 +136,28 @@ impl RelaySet {
         }
         drop(inbox_tx);
 
+        // Per-relay presence forwarder — same shape as the inbox
+        // forwarders, draining `Client::next_presence` into a single
+        // merged mpsc.
+        let (presence_tx, presence_rx) = mpsc::unbounded_channel();
+        for relay in &relays {
+            let r = Arc::clone(relay);
+            let tx = presence_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = r.next_presence().await {
+                    if tx.send(p).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(presence_tx);
+
         Ok(Self {
             relays,
             states_rx,
             inbox_rx: Mutex::new(inbox_rx),
+            presence_rx: Mutex::new(presence_rx),
         })
     }
 
@@ -174,6 +198,58 @@ impl RelaySet {
     pub async fn shutdown(&self) {
         let shutdowns = self.relays.iter().map(|r| r.shutdown());
         futures_util::future::join_all(shutdowns).await;
+    }
+
+    /// Subscribe every relay in the set to presence transitions for
+    /// `agents`. Each relay maintains its own watch set across
+    /// reconnects, so fan-out is durable past any single relay's
+    /// supervisor restart.
+    ///
+    /// # Errors
+    /// Returns the last underlying [`ClientError`] only when EVERY
+    /// relay's `watch_presence` errored. Any partial success keeps
+    /// the watch alive on the healthy relays and resolves `Ok`.
+    pub fn watch_presence(&self, agents: &[AgentId]) -> Result<(), ClientError> {
+        let mut any_ok = false;
+        let mut last_err: Option<ClientError> = None;
+        for relay in &self.relays {
+            match relay.watch_presence(agents) {
+                Ok(()) => any_ok = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if any_ok || last_err.is_none() {
+            Ok(())
+        } else {
+            Err(last_err.unwrap_or(ClientError::InboxClosed))
+        }
+    }
+
+    /// Drop every relay's interest in `agents`.
+    ///
+    /// # Errors
+    /// Same any-ok semantics as [`Self::watch_presence`].
+    pub fn unwatch_presence(&self, agents: &[AgentId]) -> Result<(), ClientError> {
+        let mut any_ok = false;
+        let mut last_err: Option<ClientError> = None;
+        for relay in &self.relays {
+            match relay.unwatch_presence(agents) {
+                Ok(()) => any_ok = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if any_ok || last_err.is_none() {
+            Ok(())
+        } else {
+            Err(last_err.unwrap_or(ClientError::InboxClosed))
+        }
+    }
+
+    /// Receive the next presence transition from the merged stream.
+    ///
+    /// Returns `None` once every relay has shut down.
+    pub async fn next_presence(&self) -> Option<PresenceUpdate> {
+        self.presence_rx.lock().await.recv().await
     }
 
     /// Receive the next delivered envelope from the merged inbox.
