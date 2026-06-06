@@ -964,4 +964,85 @@ mod tests {
         assert_eq!(envelopes[0].recipient_agent_id.as_bytes(), &aid_a);
         assert_eq!(envelopes[1].recipient_agent_id.as_bytes(), &aid_b);
     }
+
+    /// Regression: the inbound bridge path (`handle_inbound_bridge_envelope`)
+    /// must route all five owner-broadcast `NamedGroupMetadataEvent` variants
+    /// to local x0xd `/publish` without inspecting the inner event kind.
+    /// A discriminator check that hardcoded `"member_joined"` would silently
+    /// drop `member_removed`, `member_role_updated`, `policy_updated`,
+    /// `member_banned`, and `group_deleted` on the receiver side.
+    #[tokio::test]
+    async fn inbound_x0xd_metadata_event_routes_all_owner_broadcast_variants() {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zeroize::Zeroizing;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/publish"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .expect(5)
+            .mount(&server)
+            .await;
+
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let secure = x0xd_client::SecureGroupsEndpoint::new(base, "test-token").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = std::sync::Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".to_owned())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let identity = crate::chat_identity::FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &"a".repeat(64),
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+
+        let recipient_kem_pub = identity.kem_public_key().to_vec();
+        let recipient_aid = [0x01u8; 32];
+        let local_aid = [0x02u8; 32];
+        let local_machine = [0x03u8; 32];
+        let topic = "x0x.named_group/test/metadata".to_owned();
+
+        let event_kinds = [
+            "member_removed",
+            "member_role_updated",
+            "policy_updated",
+            "member_banned",
+            "group_deleted",
+        ];
+        for kind in event_kinds {
+            let event_json = serde_json::json!({ "event": kind, "ts_ms": 1_700_000_000_000u64 });
+            let payload_b64 = encode_payload_b64(&event_json).unwrap();
+            let outbound = build_bridge_outbox(
+                &recipient_aid,
+                &recipient_kem_pub,
+                topic.clone(),
+                payload_b64,
+                &local_aid,
+                &local_machine,
+                &StubSigner,
+            )
+            .await
+            .unwrap();
+            handle_inbound_bridge_envelope(&secure, &identity, &outbound.envelope)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("handle_inbound_bridge_envelope failed for {kind}: {e}")
+                });
+        }
+
+        server.verify().await;
+    }
 }
