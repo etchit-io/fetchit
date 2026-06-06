@@ -46,6 +46,7 @@ saorsa-pqc.workspace = true
 serde.workspace = true
 snow = "0.10"
 mdns-sd = { version = "0.20", default-features = false }
+semver = "1"
 serde_jcs = "0.2"
 serde_json.workspace = true
 sha2.workspace = true
