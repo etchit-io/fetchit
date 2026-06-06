@@ -1,21 +1,24 @@
 //! Multi-home wrapper that fans send across multiple relays and merges
 //! their inbound streams into a single Deliver stream.
 //!
-//! **Status: scaffold.** Stage 1 Task 1.1 of M3 federation core
+//! M3 federation core
 //! (`docs/superpowers/plans/2026-06-06-m3-federation-core-plan.md`).
-//! Only `connect`, `connection_states`, and `shutdown` are implemented
-//! here; `send` and `next_delivery` resolve through later tasks once
-//! the dedupe + fan-out strategy is cross-reviewed with Alice (Box A).
+//! Stage 1 Tasks 1.1-1.2 land here: `connect`, `connection_states`,
+//! `send` (fan-out), `shutdown`. Task 1.3 (`next_delivery` merged
+//! inbox) lands separately.
 //!
-//! Per the plan, the open design questions blocking the rest are:
-//! send-all vs send-one-with-failover, inbound dedupe scope, and
-//! per-relay reconnect bookkeeping.
-
-#![allow(dead_code)] // scaffolding — send/recv plumbing arrives in later tasks.
+//! Design decisions resolved per Alice's #251 plan landing
+//! (62d7424/3e74a36): fan-out send to every healthy relay, lean on
+//! x0xd's canonical-event-hash dedup at the recipient's chat layer
+//! rather than transport-layer dedupe at the sender. Each relay's
+//! own `Client` supervisor owns its reconnect bookkeeping; `RelaySet`
+//! only observes per-relay state via the merged watch.
 
 use crate::client::{Client, ClientConfig, ConnState};
 use crate::error::ClientError;
+use crate::outbox::Receipt;
 use crate::signer::Signer;
+use fetchit_relay_proto::{AgentId, DedupeKey, TransitEnvelope};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -139,6 +142,69 @@ impl RelaySet {
         let shutdowns = self.relays.iter().map(|r| r.shutdown());
         futures_util::future::join_all(shutdowns).await;
     }
+
+    /// Fan-out send to every relay in the set.
+    ///
+    /// Each relay's transit layer holds the envelope independently;
+    /// receivers see at most one copy because the recipient's x0xd
+    /// dedupes by canonical event hash (see Alice's #251 plan
+    /// Discovery section). The first successful per-relay `Receipt`
+    /// is reported as [`SendOutcome::primary`]; the rest sit in
+    /// [`SendOutcome::extras`] for ops introspection.
+    ///
+    /// # Errors
+    /// Returns the last per-relay [`ClientError`] only when EVERY
+    /// relay errors. Any partial success still resolves `Ok` so a
+    /// single healthy relay keeps the peer reachable.
+    pub async fn send(
+        &self,
+        to: AgentId,
+        envelope: TransitEnvelope,
+        dedupe_key: DedupeKey,
+    ) -> Result<SendOutcome, ClientError> {
+        let sends = self.relays.iter().map(|relay| {
+            let r = Arc::clone(relay);
+            let env = envelope.clone();
+            async move { r.send(to, env, dedupe_key).await }
+        });
+        let results = futures_util::future::join_all(sends).await;
+
+        let mut primary: Option<Receipt> = None;
+        let mut extras: Vec<Result<Receipt, ClientError>> = Vec::with_capacity(results.len());
+        for r in results {
+            match r {
+                Ok(receipt) if primary.is_none() => primary = Some(receipt),
+                other => extras.push(other),
+            }
+        }
+
+        if let Some(p) = primary {
+            Ok(SendOutcome { primary: p, extras })
+        } else {
+            Err(extras
+                .into_iter()
+                .filter_map(Result::err)
+                .last()
+                .unwrap_or(ClientError::InboxClosed))
+        }
+    }
+}
+
+/// Result of a fan-out [`RelaySet::send`].
+///
+/// `primary` is the first successful per-relay `Receipt` returned in
+/// fan-out order; `extras` carries every other per-relay result (both
+/// successes and errors) so ops surfaces can show "delivered on 2 of
+/// 3 relays" without re-issuing the send.
+#[derive(Debug)]
+pub struct SendOutcome {
+    /// First successful per-relay receipt in fan-out order.
+    pub primary: Receipt,
+    /// Per-relay results from every relay other than the one that
+    /// produced [`Self::primary`]. Order matches the relay order
+    /// passed to [`RelaySet::connect`], with the primary's slot
+    /// elided.
+    pub extras: Vec<Result<Receipt, ClientError>>,
 }
 
 #[cfg(test)]
