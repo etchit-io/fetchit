@@ -192,6 +192,20 @@ impl RelaySet {
         self.states_rx.clone()
     }
 
+    /// Borrow the first relay's `connection_state` receiver as a
+    /// single-relay convenience for callers that haven't yet adopted
+    /// multi-relay aggregation (e.g. the desktop's terminal-disconnect
+    /// toast still consumes one `ConnState` stream). The relay at
+    /// index 0 is the first config passed to [`Self::connect`].
+    ///
+    /// Always returns a live receiver because [`Self::connect`] rejects
+    /// empty input. Future Vec-aware UIs should consume
+    /// [`Self::states_receiver`] directly.
+    #[must_use]
+    pub fn primary_connection_state(&self) -> watch::Receiver<ConnState> {
+        self.relays[0].connection_state()
+    }
+
     /// Signal every relay's supervisor to close its session.
     ///
     /// Subsequent calls are no-ops.

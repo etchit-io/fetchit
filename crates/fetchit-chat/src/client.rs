@@ -929,7 +929,7 @@ impl Client {
             return Ok(());
         };
         relay
-            .relay_client()
+            .relay_set()
             .watch_presence(agents)
             .map_err(|e| ChatError::MessageTransport(format!("watch_presence: {e}")))
     }
@@ -944,7 +944,7 @@ impl Client {
             return Ok(());
         };
         relay
-            .relay_client()
+            .relay_set()
             .unwatch_presence(agents)
             .map_err(|e| ChatError::MessageTransport(format!("unwatch_presence: {e}")))
     }
@@ -953,7 +953,7 @@ impl Client {
     /// if no relay transport is wired or the supervisor has shut down.
     pub async fn next_relay_presence(&self) -> Option<fetchit_relay_proto::PresenceUpdate> {
         let relay = self.relay.as_ref()?;
-        relay.relay_client().next_presence().await
+        relay.relay_set().next_presence().await
     }
 
     /// Watch the relay connection state. Returns `None` when no relay
@@ -966,7 +966,7 @@ impl Client {
         &self,
     ) -> Option<tokio::sync::watch::Receiver<fetchit_relay_client::ConnState>> {
         let relay = self.relay.as_ref()?;
-        Some(relay.relay_client().connection_state())
+        Some(relay.relay_set().primary_connection_state())
     }
 }
 

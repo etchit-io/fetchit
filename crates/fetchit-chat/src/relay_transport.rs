@@ -21,7 +21,7 @@ use crate::transport::{
     InboundEnvelope, OutboundEnvelope, OutboundKind, Reachability, SendReceipt, Transport,
 };
 use async_trait::async_trait;
-use fetchit_relay_client::{Client as RelayClient, ClientConfig, Signer};
+use fetchit_relay_client::{ClientConfig, RelaySet, Signer};
 use fetchit_relay_proto::{AgentId as RelayAgentId, DedupeKey, EnvelopeKind as RelayKind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,10 +32,15 @@ use url::Url;
 
 const TRANSPORT_NAME: &str = "relay";
 
-/// Cross-internet chat transport routed through a `fetchit-relay-server`
-/// instance.
+/// Cross-internet chat transport routed through one or more
+/// `fetchit-relay-server` instances via [`RelaySet`].
+///
+/// M3 federation core: outbound sends fan out to every relay in the
+/// set; inbound deliveries arrive on a single merged stream. Receiver-
+/// side dedupe is handled at the chat layer via the envelope's
+/// `message_id` (canonical event hash at x0xd).
 pub struct RelayTransport {
-    client: Arc<RelayClient>,
+    relay_set: Arc<RelaySet>,
     counter: AtomicU64,
     inbound: StdMutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>,
     /// Local agent id captured from the signer at connect time. Used
@@ -46,28 +51,43 @@ pub struct RelayTransport {
 }
 
 impl RelayTransport {
-    /// Connect to a relay at `base_url`, using any [`Signer`]
-    /// implementation for ML-DSA-65 auth (production: `X0xdSigner`;
-    /// tests can use `StaticKeySigner`).
-    ///
-    /// Spawns a background task that pumps inbound deliveries from the
-    /// relay into the channel exposed via [`Transport::take_inbound`].
+    /// Connect to a single relay at `base_url`. Convenience wrapper
+    /// over [`Self::connect_multi`] that wraps the URL in a one-entry
+    /// vec — preserves the M2 single-relay call surface while letting
+    /// the internals run through [`RelaySet`].
     ///
     /// # Errors
     /// Returns [`ChatError::MessageTransport`] on any handshake or
     /// connection failure.
     pub async fn connect(base_url: Url, signer: Arc<dyn Signer>) -> Result<Arc<Self>> {
+        Self::connect_multi(vec![base_url], signer).await
+    }
+
+    /// Connect concurrently to every relay in `base_urls`, using any
+    /// [`Signer`] implementation for ML-DSA-65 auth (production:
+    /// `X0xdSigner`; tests can use `StaticKeySigner`).
+    ///
+    /// Spawns a background task that pumps merged inbound deliveries
+    /// from the [`RelaySet`] into the channel exposed via
+    /// [`Transport::take_inbound`].
+    ///
+    /// # Errors
+    /// Returns [`ChatError::MessageTransport`] when every relay fails
+    /// its initial handshake — any surviving subset keeps the peer
+    /// reachable. Also returns the same error when `base_urls` is
+    /// empty.
+    pub async fn connect_multi(base_urls: Vec<Url>, signer: Arc<dyn Signer>) -> Result<Arc<Self>> {
         let local_agent_id = RelayAgentId::from_bytes(signer.agent_id());
-        let config = ClientConfig::new(base_url);
-        let relay_client = RelayClient::connect(config, signer)
+        let configs: Vec<ClientConfig> = base_urls.into_iter().map(ClientConfig::new).collect();
+        let relay_set = RelaySet::connect(configs, signer)
             .await
             .map_err(|e| ChatError::MessageTransport(format!("relay connect: {e}")))?;
-        let client = Arc::new(relay_client);
+        let relay_set = Arc::new(relay_set);
         // TODO(perf): bound this channel once we measure realistic inbound rates.
         let (tx, rx) = mpsc::unbounded_channel();
-        spawn_inbound_pump(client.clone(), tx);
+        spawn_inbound_pump(relay_set.clone(), tx);
         Ok(Arc::new(Self {
-            client,
+            relay_set,
             counter: AtomicU64::new(0),
             inbound: StdMutex::new(Some(rx)),
             local_agent_id,
@@ -83,10 +103,13 @@ impl RelayTransport {
         &self.local_agent_id
     }
 
-    /// Borrow the underlying relay client (for telemetry / debugging only).
+    /// Borrow the underlying [`RelaySet`] for telemetry, presence
+    /// subscription, or connection-state observation. Multi-home
+    /// aware callers route through this instead of poking at any
+    /// single per-relay client.
     #[must_use]
-    pub fn relay_client(&self) -> &Arc<RelayClient> {
-        &self.client
+    pub fn relay_set(&self) -> &Arc<RelaySet> {
+        &self.relay_set
     }
 
     fn next_dedupe_key(&self) -> DedupeKey {
@@ -118,13 +141,17 @@ impl Transport for RelayTransport {
             caller: "RelayTransport::send",
         })?;
         let dedupe_key = self.next_dedupe_key();
-        let receipt = self
-            .client
+        // Fan-out send: RelaySet returns Ok with `.primary` = first
+        // successful per-relay receipt and `.extras` = the rest. We
+        // report `primary` upward — the chat layer doesn't surface
+        // per-relay distribution yet (future ops metrics task).
+        let outcome = self
+            .relay_set
             .send(to_relay, transit, dedupe_key)
             .await
             .map_err(|e| ChatError::MessageTransport(format!("relay send: {e}")))?;
         Ok(SendReceipt {
-            accepted_at_ms: receipt.accepted_at_ms,
+            accepted_at_ms: outcome.primary.accepted_at_ms,
             message_id: Some(hex::encode(dedupe_key.as_bytes())),
             transport_name: TRANSPORT_NAME,
         })
@@ -135,10 +162,10 @@ impl Transport for RelayTransport {
     }
 }
 
-fn spawn_inbound_pump(client: Arc<RelayClient>, tx: mpsc::UnboundedSender<InboundEnvelope>) {
+fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<InboundEnvelope>) {
     tokio::spawn(async move {
         loop {
-            let Some(delivery) = client.next_delivery().await else {
+            let Some(delivery) = relay_set.next_delivery().await else {
                 break;
             };
             let env = delivery.envelope;
