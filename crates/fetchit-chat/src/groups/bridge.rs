@@ -454,6 +454,7 @@ pub async fn handle_inbound_bridge_envelope(
             transit.kind
         )));
     }
+    check_bridge_event_freshness(transit.timestamp_ms, now_ms())?;
     let wrapper = unseal_bridge_wrapper(
         identity.kem_secret_key(),
         &transit.kem_ciphertext,
@@ -462,6 +463,39 @@ pub async fn handle_inbound_bridge_envelope(
     )?;
     secure.publish(&wrapper.topic, &wrapper.payload_b64).await?;
     Ok(())
+}
+
+/// Freshness window for inbound bridge envelopes. Defense in depth
+/// against replay of a legitimately-sealed envelope captured from a
+/// prior session: the AEAD AAD already binds `timestamp_ms` so
+/// tampering is detected at unseal, but a captured-and-replayed
+/// envelope unseals cleanly because it carries the original
+/// signature + AAD. A ±30min window accommodates the practical
+/// upper bound on the bridge path's queue latency (relay buffer +
+/// reconnect + offline catch-up) plus typical NTP clock drift on
+/// either endpoint.
+pub(crate) const BRIDGE_FRESHNESS_WINDOW_MS: u64 = 30 * 60 * 1000;
+
+/// Reject a bridge envelope whose wire-layer `timestamp_ms` drifts
+/// more than [`BRIDGE_FRESHNESS_WINDOW_MS`] from local wall-clock
+/// `now_ms`. Defense in depth on the bridge inbound path; the M2.5
+/// design already pins replay via invite single-use, `state_hash`
+/// chain, and epoch verification at the local x0xd apply path.
+fn check_bridge_event_freshness(transit_ts_ms: u64, now_ms: u64) -> Result<()> {
+    let drift = transit_ts_ms.abs_diff(now_ms);
+    if drift > BRIDGE_FRESHNESS_WINDOW_MS {
+        return Err(ChatError::Invalid(format!(
+            "bridge envelope ts_ms outside ±30min freshness window: \
+             ts_ms={transit_ts_ms} now_ms={now_ms} drift_ms={drift}"
+        )));
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -814,5 +848,37 @@ mod tests {
             matches!(err, ChatError::Invalid(ref s) if s.contains("b64 decode")),
             "expected b64-decode invalid, got {err:?}"
         );
+    }
+
+    #[test]
+    fn freshness_accepts_within_window() {
+        let now: u64 = 1_700_000_000_000;
+        assert!(check_bridge_event_freshness(now, now).is_ok());
+        assert!(check_bridge_event_freshness(now - 29 * 60 * 1000, now).is_ok());
+        assert!(check_bridge_event_freshness(now + 29 * 60 * 1000, now).is_ok());
+        assert!(check_bridge_event_freshness(now - BRIDGE_FRESHNESS_WINDOW_MS, now).is_ok());
+        assert!(check_bridge_event_freshness(now + BRIDGE_FRESHNESS_WINDOW_MS, now).is_ok());
+    }
+
+    #[test]
+    fn freshness_rejects_past_drift() {
+        let now: u64 = 1_700_000_000_000;
+        let too_old = now - BRIDGE_FRESHNESS_WINDOW_MS - 1;
+        let err = check_bridge_event_freshness(too_old, now).unwrap_err();
+        match err {
+            ChatError::Invalid(msg) => {
+                assert!(msg.contains("freshness window"), "msg: {msg}");
+                assert!(msg.contains("drift_ms"), "msg: {msg}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn freshness_rejects_future_drift() {
+        let now: u64 = 1_700_000_000_000;
+        let too_new = now + BRIDGE_FRESHNESS_WINDOW_MS + 1;
+        let err = check_bridge_event_freshness(too_new, now).unwrap_err();
+        assert!(matches!(err, ChatError::Invalid(_)), "got {err:?}");
     }
 }
