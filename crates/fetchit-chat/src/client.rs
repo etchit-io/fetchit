@@ -273,7 +273,10 @@ impl Client {
         contact_pubkey_lookup: Option<ContactPubkeyLookup>,
         x0xd_port_file: Option<PathBuf>,
     ) -> Result<Self> {
-        let http = Arc::new(Http::new(base_url.clone(), token.clone())?);
+        let http = Arc::new(match x0xd_port_file.as_ref() {
+            Some(path) => Http::new_with_port_file(path.clone(), token.clone())?,
+            None => Http::new(base_url.clone(), token.clone())?,
+        });
         let needs_chat =
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
 
@@ -504,7 +507,7 @@ impl Client {
     /// `POST /publish` the inner JSON event so pubsub-loopback advances
     /// local MLS state via the standard apply path.
     fn secure_groups(&self) -> Result<x0xd_client::SecureGroupsEndpoint> {
-        let base = url::Url::parse(self.http.base_url())
+        let base = url::Url::parse(&self.http.base_url())
             .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
         x0xd_client::SecureGroupsEndpoint::new(base, self.http.token().to_owned())
             .map_err(ChatError::from)

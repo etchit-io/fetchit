@@ -812,7 +812,7 @@ impl<'a> Endpoint<'a> {
     /// URL + token, and the endpoint is cheap (one `reqwest::Client`
     /// builder call).
     fn secure_groups(&self) -> Result<SecureGroupsEndpoint> {
-        let base = url::Url::parse(self.http.base_url())
+        let base = url::Url::parse(&self.http.base_url())
             .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
         SecureGroupsEndpoint::new(base, self.http.token().to_owned()).map_err(ChatError::from)
     }
