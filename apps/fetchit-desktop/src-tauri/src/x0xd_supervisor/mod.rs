@@ -4,3 +4,7 @@
 pub mod pick;
 #[allow(unused_imports)]
 pub use pick::{pick_binary, BinaryChoice};
+
+pub mod spawn;
+#[allow(unused_imports)]
+pub use spawn::{pick_free_port, spawn_bundled};
