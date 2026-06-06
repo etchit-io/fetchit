@@ -68,6 +68,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # string leaves that pass parse_bootstrap_peer, so a future minor
 # schema rotation at WithAutonomi doesn't blow up the refresh.
 toml = "0.8"
+# Portable OS config-dir lookup (XDG on Linux, APPDATA on Windows,
+# ~/Library/Application Support on macOS).
+dirs = "5"
 # Enumerate the host's non-loopback network interfaces so the LAN-direct
 # mDNS announcement can publish concrete reachable IPs. Pure-Rust,
 # no system deps.

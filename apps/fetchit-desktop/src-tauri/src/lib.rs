@@ -627,16 +627,59 @@ fn bundled_x0xd_binary_path() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Config-dir path for the x0xd TOML to pass when spawning the bundled binary.
+/// Config-dir path for the x0xd TOML used when spawning the bundled binary.
 ///
-/// E2 replaces this with a first-run copy that substitutes `PLACEHOLDER_*`
-/// relay agent IDs from the template at `resources/x0xd.toml.tpl` into
-/// the user's config dir.
+/// On first run, copies `resources/x0xd.toml.tpl` into the OS config dir
+/// (`$XDG_CONFIG_HOME/fetchit/x0xd.toml` on Linux,
+/// `%APPDATA%\fetchit\x0xd.toml` on Windows,
+/// `~/Library/Application Support/fetchit/x0xd.toml` on macOS),
+/// substituting any `FETCHIT_*_RELAY_AGENT_ID` env vars set at build/release
+/// time. Subsequent runs reuse the existing file so user edits persist.
 fn bundled_x0xd_toml_path() -> std::path::PathBuf {
-    // FIXME(E2): replace with first-run user-config-dir copy that
-    // substitutes PLACEHOLDER_* relay agent IDs into the bundled TOML
-    // template at resources/x0xd.toml.tpl.
-    std::path::PathBuf::from("/tmp/fetchit-x0xd.toml")
+    let cfg_base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
+    let app_cfg = cfg_base.join("fetchit");
+    let _ = std::fs::create_dir_all(&app_cfg);
+    let dst = app_cfg.join("x0xd.toml");
+    if !dst.exists() {
+        let tpl = include_str!("../resources/x0xd.toml.tpl");
+        let mut filled = tpl.to_owned();
+        if let Ok(ny) = std::env::var("FETCHIT_NY_RELAY_AGENT_ID") {
+            filled = filled.replace("PLACEHOLDER_NY_RELAY_AGENT_ID_HEX", &ny);
+        }
+        if let Ok(fra) = std::env::var("FETCHIT_FRA_RELAY_AGENT_ID") {
+            filled = filled.replace("PLACEHOLDER_FRA_RELAY_AGENT_ID_HEX", &fra);
+        }
+        let _ = std::fs::write(&dst, filled);
+    }
+    dst
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod e2_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::bundled_x0xd_toml_path;
+
+    #[test]
+    fn first_run_copies_tpl_and_substitutes_placeholders() {
+        let temp = tempfile::tempdir().unwrap();
+        // Point XDG_CONFIG_HOME at the temp dir so dirs::config_dir()
+        // returns a predictable, isolated path.
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+        let aid = "deadbeef".repeat(8); // 64-hex
+        std::env::set_var("FETCHIT_NY_RELAY_AGENT_ID", &aid);
+
+        let path = bundled_x0xd_toml_path();
+        let body = std::fs::read_to_string(&path).expect("template must be copied on first run");
+
+        assert!(body.contains(&aid), "NY placeholder must be substituted");
+        assert!(
+            !body.contains("PLACEHOLDER_NY_RELAY_AGENT_ID_HEX"),
+            "NY placeholder must be removed"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("FETCHIT_NY_RELAY_AGENT_ID");
+    }
 }
 
 /// Boot the x0xd supervisor synchronously before the Tauri runtime starts.
