@@ -270,7 +270,7 @@ mod tests {
         // Only store a card for aid_c; aid_b has none.
         store_card(&layout, aid_c, &pk_c);
 
-        // aid_a is actor, aid_b is removed — both filtered before lookup.
+        // aid_a is actor, aid_b is removed; both filtered before lookup.
         // aid_c has a card but there's nothing else in active_member_aids,
         // so aid_c should produce an envelope.
         // Introduce aid_d with no card to exercise the skip path.
