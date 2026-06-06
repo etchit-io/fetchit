@@ -19,6 +19,14 @@
 //!    The responder reads frames until the connection closes and pumps
 //!    each one onto the transport's inbound mpsc as an
 //!    [`InboundEnvelope`].
+//!
+//! Sealed-only send contract: every `send` MUST carry a prebuilt sealed
+//! `TransitEnvelope` on `OutboundEnvelope.transit`. The conversation /
+//! group layer is the only sanctioned producer. Callers that pass
+//! `transit: None` get [`ChatError::SealedRequired`] before the
+//! transport touches the network — the legacy v1 fabricated escape
+//! hatch has been removed for parity with
+//! [`crate::relay_transport::RelayTransport`].
 
 use crate::error::{ChatError, Result};
 use crate::identity::AgentId;
@@ -30,10 +38,7 @@ use crate::transport::{
 };
 use async_trait::async_trait;
 use fetchit_relay_client::Signer;
-use fetchit_relay_proto::{
-    AgentId as RelayAgentId, EnvelopeKind as RelayKind, GroupId as RelayGroupId, MachineId,
-    TransitEnvelope, WIRE_VERSION,
-};
+use fetchit_relay_proto::{EnvelopeKind as RelayKind, TransitEnvelope};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -163,6 +168,12 @@ impl Transport for LanDirectTransport {
     }
 
     async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
+        // Sealed-required guard ahead of any network I/O: a buggy
+        // caller must not be able to spend a TCP connect + Noise XX
+        // handshake on a wire-shape that would be refused at the last
+        // step anyway.
+        let transit = materialise_transit(&self.local_agent_id, &envelope)?;
+
         let rec = self
             .table
             .lookup(to)
@@ -209,7 +220,6 @@ impl Transport for LanDirectTransport {
         .await
         .map_err(|_| ChatError::MessageTransport("lan handshake timeout".into()))??;
 
-        let transit = materialise_transit(&self.local_agent_id, &envelope)?;
         let bytes = postcard::to_allocvec(&transit)
             .map_err(|e| ChatError::Invalid(format!("transit encode: {e}")))?;
         write_app_frame(&mut stream, &mut ts, &bytes).await?;
@@ -383,42 +393,23 @@ fn materialise_transit(
     envelope: &OutboundEnvelope,
 ) -> Result<TransitEnvelope> {
     let local_aid = agent_id_bytes(local_agent_id)?;
-    if let Some(prebuilt) = &envelope.transit {
-        // A buggy conversation layer could hand us a TransitEnvelope
-        // whose sender_agent_id doesn't match this device — refuse
-        // rather than impersonate.
-        if prebuilt.sender_agent_id.as_bytes() != &local_aid {
-            return Err(ChatError::Invalid(format!(
-                "prebuilt envelope sender_agent_id mismatch: claimed {}, local {}",
-                hex::encode(prebuilt.sender_agent_id.as_bytes()),
-                local_agent_id.0
-            )));
-        }
-        return Ok(prebuilt.clone());
+    // Sealed-only post-M2. The conversation/group layer is the only
+    // sanctioned producer of a `TransitEnvelope` for this transport;
+    // the v1 fabricated escape hatch has been removed for parity with
+    // `RelayTransport::send`. A buggy or wrong-version caller surfaces
+    // `SealedRequired` here instead of silently emitting an unsealed
+    // wire shape.
+    let prebuilt = envelope.transit.as_ref().ok_or(ChatError::SealedRequired {
+        caller: "LanDirectTransport::send",
+    })?;
+    if prebuilt.sender_agent_id.as_bytes() != &local_aid {
+        return Err(ChatError::Invalid(format!(
+            "prebuilt envelope sender_agent_id mismatch: claimed {}, local {}",
+            hex::encode(prebuilt.sender_agent_id.as_bytes()),
+            local_agent_id.0
+        )));
     }
-    let machine_id = MachineId::from_bytes(envelope.from_machine_id.unwrap_or([0u8; 32]));
-    let (kind, group_id) = match &envelope.kind {
-        OutboundKind::Dm => (RelayKind::Dm, None),
-        OutboundKind::Group { group_id } => {
-            let bytes =
-                parse_hex_32(group_id).map_err(|e| ChatError::Invalid(format!("group id: {e}")))?;
-            (RelayKind::GroupChat, Some(RelayGroupId::from_bytes(bytes)))
-        }
-    };
-    Ok(TransitEnvelope {
-        version: WIRE_VERSION,
-        kind,
-        group_id,
-        tenant_id: None,
-        sender_agent_id: RelayAgentId::from_bytes(local_aid),
-        sender_machine_id: machine_id,
-        timestamp_ms: envelope.timestamp_ms,
-        epoch: 0,
-        ciphertext: envelope.payload.clone(),
-        nonce: Vec::new(),
-        kem_ciphertext: Vec::new(),
-        sender_signature: Vec::new(),
-    })
+    Ok(prebuilt.clone())
 }
 
 fn make_prologue(init_aid: &[u8; 32], resp_aid: &[u8; 32]) -> Vec<u8> {
@@ -478,12 +469,42 @@ mod tests {
     use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
     use crate::lan_discovery::{LanPeerRecord, LanPeerTable};
     use fetchit_relay_client::MlDsaSigner;
+    use fetchit_relay_proto::{AgentId as RelayAgentId, MachineId, WIRE_VERSION};
     use std::time::Instant;
     use tempfile::tempdir;
     use zeroize::Zeroizing;
 
     fn aid(byte: u8) -> AgentId {
         AgentId::parse(hex::encode([byte; 32])).unwrap()
+    }
+
+    /// Build an `OutboundEnvelope` with a sealed-enough prebuilt
+    /// `TransitEnvelope`. The conversation/group layer is the real
+    /// producer in production; this stub is just enough to satisfy the
+    /// sealed-required guard and the sender-binding check.
+    fn sealed_outbound_dm(local_aid: &AgentId, payload: Vec<u8>, ts_ms: u64) -> OutboundEnvelope {
+        let local_bytes = agent_id_bytes(local_aid).unwrap();
+        let transit = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: RelayKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes(local_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: ts_ms,
+            epoch: 0,
+            ciphertext: payload.clone(),
+            nonce: Vec::new(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload,
+            timestamp_ms: ts_ms,
+            transit: Some(transit),
+        }
     }
 
     fn fresh_static(aid_hex: &str) -> Arc<LanStaticIdentity> {
@@ -651,13 +672,7 @@ mod tests {
 
         let mut rx_b = transport_b.take_inbound().expect("inbound rx");
 
-        let outbound = OutboundEnvelope {
-            kind: OutboundKind::Dm,
-            from_machine_id: None,
-            payload: b"hello via LAN".to_vec(),
-            timestamp_ms: 1_700_000_000_000,
-            transit: None,
-        };
+        let outbound = sealed_outbound_dm(&aid_a, b"hello via LAN".to_vec(), 1_700_000_000_000);
         let receipt = transport_a.send(&aid_b, outbound.clone()).await.unwrap();
         assert_eq!(receipt.transport_name, "lan-direct");
 
@@ -690,7 +705,7 @@ mod tests {
             Arc::new(|_q: &AgentId| -> Option<Vec<u8>> { Some(vec![0xaa; 64]) });
 
         let (transport_a, _) = LanDirectTransport::start(
-            aid_a,
+            aid_a.clone(),
             static_a,
             signer_a,
             table_a,
@@ -700,13 +715,7 @@ mod tests {
         .await
         .unwrap();
 
-        let outbound = OutboundEnvelope {
-            kind: OutboundKind::Dm,
-            from_machine_id: None,
-            payload: b"hi".to_vec(),
-            timestamp_ms: 0,
-            transit: None,
-        };
+        let outbound = sealed_outbound_dm(&aid_a, b"hi".to_vec(), 0);
         let err = transport_a.send(&aid_b, outbound).await.unwrap_err();
         assert!(matches!(err, ChatError::MessageTransport(_)), "got {err:?}");
     }
@@ -744,6 +753,31 @@ mod tests {
             ChatError::Invalid(msg) => assert!(msg.contains("mismatch"), "msg: {msg}"),
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    /// `materialise_transit` MUST reject any envelope that doesn't
+    /// carry a prebuilt sealed `TransitEnvelope`. The v1 fabricated
+    /// fallback was removed for parity with `RelayTransport::send` —
+    /// there is no LAN-direct escape hatch left, and this is the
+    /// contract callers of `LanDirectTransport::send` see.
+    #[test]
+    fn materialise_transit_without_prebuilt_returns_sealed_required() {
+        let local = aid(0xd4);
+        let envelope = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: b"unsealed".to_vec(),
+            timestamp_ms: 1_700_000_000_000,
+            transit: None,
+        };
+        let err = materialise_transit(&local, &envelope).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChatError::SealedRequired { caller } if caller == "LanDirectTransport::send",
+            ),
+            "expected SealedRequired{{caller=LanDirectTransport::send}}, got {err:?}",
+        );
     }
 
     #[test]
@@ -799,7 +833,7 @@ mod tests {
             Arc::new(|_q: &AgentId| -> Option<Vec<u8>> { Some(vec![0xaa; 64]) });
 
         let (transport_a, _) = LanDirectTransport::start(
-            aid_a,
+            aid_a.clone(),
             static_a,
             signer_a,
             table_a,
@@ -809,13 +843,7 @@ mod tests {
         .await
         .unwrap();
 
-        let outbound = OutboundEnvelope {
-            kind: OutboundKind::Dm,
-            from_machine_id: None,
-            payload: b"hi".to_vec(),
-            timestamp_ms: 0,
-            transit: None,
-        };
+        let outbound = sealed_outbound_dm(&aid_a, b"hi".to_vec(), 0);
         let started = tokio::time::Instant::now();
         let err = transport_a.send(&aid_b, outbound).await.unwrap_err();
         let elapsed = started.elapsed();

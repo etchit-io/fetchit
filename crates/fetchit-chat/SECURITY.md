@@ -103,17 +103,19 @@ from "M2 implementation shipped."
 
 ## Remaining caveats
 
-### 3. LAN-direct send path still has its own fabricate-when-None branch
+### 3. LAN-direct send path now matches the relay sealed-only contract
 
-`LanDirectTransport::materialise_transit` retains a fabricate path
-for callers that pass `transit: None` (epoch=0, empty signature,
-empty nonce, empty kem_ciphertext). The bytes are not exposed on the
-wire — the entire `TransitEnvelope` rides through the Noise XX
-encrypted channel, so confidentiality and authentication on the LAN
-path come from the channel-binding handshake described in caveat 5
-below, not from the envelope shape. The architectural symmetry with
-the relay path is still real technical debt; tracked as a follow-up
-to give LAN-direct the same `SealedRequired` discipline.
+Closed. `LanDirectTransport::send` and the `materialise_transit`
+helper now refuse `OutboundEnvelope { transit: None, .. }` with
+`ChatError::SealedRequired { caller: "LanDirectTransport::send" }`
+before any TCP connect or Noise XX handshake runs. The v1 fabricate
+branch (epoch=0, empty signature/nonce/kem_ciphertext) is gone, so
+both transports share one discipline: the conversation / group layer
+is the only sanctioned producer of a `TransitEnvelope`, and a buggy
+or wrong-version caller surfaces here rather than emitting an
+unsealed wire shape. The sender-binding check
+(`prebuilt.sender_agent_id == local_agent_id`) remains in place as
+defense-in-depth against a buggy local layer.
 
 ### 4. DirectMessage.verified is honest about per-message signatures
 
