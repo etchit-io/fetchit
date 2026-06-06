@@ -117,12 +117,37 @@ impl MembersSingleflight {
 }
 
 async fn wait_for_leader(existing: Inflight) -> Result<Vec<AgentId>> {
-    existing.completion.notified().await;
+    // `Notify::notify_waiters` does not stack permits: any waiter that
+    // registers AFTER the leader's `notify_waiters` call will never wake.
+    // The leader's `publish_result` -> `notify_waiters` -> entry-remove
+    // sequence can run entirely between this waiter's mutex-drop in
+    // `fetch_or_wait` and the moment it starts awaiting, so the naive
+    // `notified().await` form deadlocks the waiter task.
+    //
+    // Pin and `enable()` the `Notified` BEFORE re-reading the published
+    // slot. `Notified::enable()` (tokio 1.32+) registers the waiter on
+    // the `Notify` without consuming a permit, closing the race:
+    //   * leader published between mutex-release and enable: re-read sees
+    //     the result, we return without awaiting.
+    //   * leader publishes between enable and the re-read: re-read still
+    //     sees the result.
+    //   * leader publishes after both: our pinned `Notified` is already
+    //     subscribed and `notify_waiters` will wake us.
+    let mut notified = std::pin::pin!(existing.completion.notified());
+    notified.as_mut().enable();
+    if let Some(shared) = read_published(&existing) {
+        return shared_to_result(shared);
+    }
+    notified.await;
     let Some(shared) = read_published(&existing) else {
         return Err(ChatError::MessageTransport(
             "singleflight leader dropped without setting a result".into(),
         ));
     };
+    shared_to_result(shared)
+}
+
+fn shared_to_result(shared: SharedRoster) -> Result<Vec<AgentId>> {
     match shared {
         Ok(roster) => Ok((*roster).clone()),
         Err(msg) => Err(ChatError::MessageTransport(format!(
@@ -263,6 +288,43 @@ mod tests {
             .unwrap();
         }
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stress_concurrent_callers_no_waiter_hang() {
+        // Regression for the `Notify::notify_waiters` permit-stacking
+        // gotcha: any waiter that started `notified().await` AFTER the
+        // leader fired `notify_waiters` (e.g. because the leader's
+        // fetch resolved between the waiter's mutex-drop and its first
+        // poll of the notified future) hung forever, because the
+        // entry-remove in phase 3 dropped the `Notify`'s next chance
+        // to wake it. The fix is `Notified::enable()` in
+        // [`wait_for_leader`] before the published-state recheck.
+        //
+        // This stresses the race by spawning many same-key callers
+        // against an immediate-Ok leader fetch (no await inside the
+        // closure), on a multi-thread runtime so the leader and
+        // waiters can genuinely interleave. The whole join is time-
+        // bounded; the broken version times out, the fix passes.
+        let sf = Arc::new(MembersSingleflight::new());
+        let mut handles = Vec::new();
+        for _ in 0..200u32 {
+            let sf = sf.clone();
+            handles.push(tokio::spawn(async move {
+                sf.fetch_or_wait("gid-stress", || async { Ok(vec![aid(0xee)]) })
+                    .await
+            }));
+        }
+        let joined = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures_util::future::join_all(handles),
+        )
+        .await
+        .expect("singleflight stress test hung; waiter notify race regressed");
+        for result in joined {
+            let roster = result.unwrap().unwrap();
+            assert_eq!(roster, vec![aid(0xee)]);
+        }
     }
 
     #[tokio::test]
