@@ -29,7 +29,11 @@ fn stage_bundled_x0xd() {
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let target_dir = resources_dir.join(format!("{target_os}-{target_arch}"));
     fs::create_dir_all(&target_dir).expect("create per-target dir");
-    let binary_name = if target_os == "windows" { "x0xd.exe" } else { "x0xd" };
+    let binary_name = if target_os == "windows" {
+        "x0xd.exe"
+    } else {
+        "x0xd"
+    };
     let binary_path = target_dir.join(binary_name);
 
     let src = if let Ok(path) = std::env::var("FETCHIT_BUNDLED_X0XD_PATH") {
