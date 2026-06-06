@@ -56,6 +56,8 @@ fetchit-chat = { path = "../../../crates/fetchit-chat" }
 # Direct dep so the chat layer can name relay-proto types (e.g.
 # `AgentId`, `PresenceUpdate`) when wiring the new presence pump.
 fetchit-relay-proto = { path = "../../../crates/fetchit-relay-proto" }
+x0xd-client = { path = "../../../crates/x0xd-client" }
+semver = "1"
 hex = "0.4"
 url = "2.5"
 # Used only by refresh_peers_from_upstream to GET WithAutonomi's

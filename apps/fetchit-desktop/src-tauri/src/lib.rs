@@ -13,6 +13,7 @@ mod rendition;
 mod server;
 mod settings;
 mod state;
+mod x0xd_supervisor;
 
 use std::sync::{Arc, OnceLock};
 
