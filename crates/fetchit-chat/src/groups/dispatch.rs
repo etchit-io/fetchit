@@ -12,10 +12,13 @@
 use crate::conversation::OutboundEnvelope as ConvEnvelope;
 use crate::error::{ChatError, Result};
 use crate::groups::bridge::{dispatch_owner_broadcast, recipient_kem_key, OwnerBroadcastInputs};
+use crate::groups::bridge_group_deleted::{build_group_deleted_event, GroupDeletedInputs};
+use crate::groups::bridge_member_banned::{build_member_banned_event, MemberBannedInputs};
 use crate::groups::bridge_member_removed::{build_member_removed_event, MemberRemovedInputs};
 use crate::groups::bridge_member_role_updated::{
     build_member_role_updated_event, MemberRoleUpdatedInputs,
 };
+use crate::groups::bridge_policy_updated::{build_policy_updated_event, PolicyUpdatedInputs};
 use crate::identity::AgentId;
 use crate::local_store::StoreLayout;
 use crate::transport::{OutboundEnvelope, OutboundKind, Router};
@@ -284,6 +287,381 @@ where
     Ok(())
 }
 
+/// Build sealed [`ConvEnvelope`]s for a `PolicyUpdated` fan-out.
+///
+/// Filters only `actor_agent_id` from `active_member_aids`. Recipients
+/// missing a share-card are skipped (logged at `WARN`); any other error
+/// propagates.
+///
+/// This is the pure inner function; [`dispatch_policy_updated_bridge`]
+/// wraps it and routes via [`Router`].
+///
+/// # Errors
+/// - [`ChatError::Invalid`] on share-card b64 decode failure.
+/// - Any error surfaced by the KEM/AEAD/signing path in
+///   [`dispatch_owner_broadcast`].
+#[allow(clippy::too_many_arguments)]
+pub async fn build_policy_updated_envelopes<S>(
+    signer: &S,
+    layout: &StoreLayout,
+    group_id: &str,
+    metadata_topic: &str,
+    revision: u64,
+    actor_agent_id: [u8; 32],
+    policy_json: serde_json::Value,
+    commit_json: Option<serde_json::Value>,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<Vec<ConvEnvelope>>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let actor_hex = hex::encode(actor_agent_id);
+
+    let event = build_policy_updated_event(&PolicyUpdatedInputs {
+        group_id,
+        revision,
+        actor: &actor_hex,
+        policy_json,
+        commit_json,
+    });
+
+    let mut recipients: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(active_member_aids.len());
+    for aid in active_member_aids {
+        if aid == &actor_agent_id {
+            continue;
+        }
+        let aid_hex = hex::encode(aid);
+        match recipient_kem_key(layout, &aid_hex) {
+            Ok(kem) => recipients.push((*aid, kem)),
+            Err(ChatError::ShareCardMissing { .. }) => {
+                log::warn!("PolicyUpdated bridge: share-card missing for {aid_hex}; skipping");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    dispatch_owner_broadcast(
+        signer,
+        &OwnerBroadcastInputs {
+            topic: metadata_topic.to_owned(),
+            event_json: event,
+            recipients_kem: &recipients,
+            local_agent_id: actor_agent_id,
+            local_machine_id,
+        },
+    )
+    .await
+}
+
+/// Fan out a `PolicyUpdated` bridge envelope to every active member
+/// except the actor.
+///
+/// Recipients whose share-card has not been imported are skipped with a
+/// `WARN` log. Other errors (bad b64, KEM/AEAD failure, signer error)
+/// propagate as hard failures.
+///
+/// # Errors
+/// - [`ChatError::ShareCardMissing`] is swallowed (warn-logged); see
+///   [`build_policy_updated_envelopes`] for full error list.
+/// - [`ChatError::NoTransportAvailable`] / relay errors forwarded from
+///   [`Router::send`].
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_policy_updated_bridge<S>(
+    signer: &S,
+    router: &Router,
+    layout: &StoreLayout,
+    group_id: &str,
+    metadata_topic: &str,
+    revision: u64,
+    actor_agent_id: [u8; 32],
+    policy_json: serde_json::Value,
+    commit_json: Option<serde_json::Value>,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<()>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let envelopes = build_policy_updated_envelopes(
+        signer,
+        layout,
+        group_id,
+        metadata_topic,
+        revision,
+        actor_agent_id,
+        policy_json,
+        commit_json,
+        active_member_aids,
+        local_machine_id,
+    )
+    .await?;
+
+    for env in envelopes {
+        let recipient = AgentId(hex::encode(env.recipient_agent_id.as_bytes()));
+        let transport_out = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: Some(local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms: env.envelope.timestamp_ms,
+            transit: Some(env.envelope),
+        };
+        router.send(&recipient, transport_out).await?;
+    }
+    Ok(())
+}
+
+/// Build sealed [`ConvEnvelope`]s for a `MemberBanned` fan-out.
+///
+/// Filters `actor_agent_id` and `banned_agent_id` from
+/// `active_member_aids`. The banned peer does not receive the event.
+/// Recipients missing a share-card are skipped (logged at `WARN`); any
+/// other error propagates.
+///
+/// This is the pure inner function; [`dispatch_member_banned_bridge`]
+/// wraps it and routes via [`Router`].
+///
+/// # Errors
+/// - [`ChatError::Invalid`] on share-card b64 decode failure.
+/// - Any error surfaced by the KEM/AEAD/signing path in
+///   [`dispatch_owner_broadcast`].
+#[allow(clippy::too_many_arguments)]
+pub async fn build_member_banned_envelopes<S>(
+    signer: &S,
+    layout: &StoreLayout,
+    group_id: &str,
+    metadata_topic: &str,
+    revision: u64,
+    actor_agent_id: [u8; 32],
+    banned_agent_id: [u8; 32],
+    reason: Option<&str>,
+    commit_json: Option<serde_json::Value>,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<Vec<ConvEnvelope>>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let actor_hex = hex::encode(actor_agent_id);
+    let banned_hex = hex::encode(banned_agent_id);
+
+    let event = build_member_banned_event(&MemberBannedInputs {
+        group_id,
+        revision,
+        actor: &actor_hex,
+        agent_id: &banned_hex,
+        reason,
+        commit_json,
+    });
+
+    let mut recipients: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(active_member_aids.len());
+    for aid in active_member_aids {
+        if aid == &actor_agent_id || aid == &banned_agent_id {
+            continue;
+        }
+        let aid_hex = hex::encode(aid);
+        match recipient_kem_key(layout, &aid_hex) {
+            Ok(kem) => recipients.push((*aid, kem)),
+            Err(ChatError::ShareCardMissing { .. }) => {
+                log::warn!("MemberBanned bridge: share-card missing for {aid_hex}; skipping");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    dispatch_owner_broadcast(
+        signer,
+        &OwnerBroadcastInputs {
+            topic: metadata_topic.to_owned(),
+            event_json: event,
+            recipients_kem: &recipients,
+            local_agent_id: actor_agent_id,
+            local_machine_id,
+        },
+    )
+    .await
+}
+
+/// Fan out a `MemberBanned` bridge envelope to every active member
+/// except the actor and the banned peer.
+///
+/// Recipients whose share-card has not been imported are skipped with a
+/// `WARN` log. Other errors (bad b64, KEM/AEAD failure, signer error)
+/// propagate as hard failures.
+///
+/// # Errors
+/// - [`ChatError::ShareCardMissing`] is swallowed (warn-logged); see
+///   [`build_member_banned_envelopes`] for full error list.
+/// - [`ChatError::NoTransportAvailable`] / relay errors forwarded from
+///   [`Router::send`].
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_member_banned_bridge<S>(
+    signer: &S,
+    router: &Router,
+    layout: &StoreLayout,
+    group_id: &str,
+    metadata_topic: &str,
+    revision: u64,
+    actor_agent_id: [u8; 32],
+    banned_agent_id: [u8; 32],
+    reason: Option<&str>,
+    commit_json: Option<serde_json::Value>,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<()>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let envelopes = build_member_banned_envelopes(
+        signer,
+        layout,
+        group_id,
+        metadata_topic,
+        revision,
+        actor_agent_id,
+        banned_agent_id,
+        reason,
+        commit_json,
+        active_member_aids,
+        local_machine_id,
+    )
+    .await?;
+
+    for env in envelopes {
+        let recipient = AgentId(hex::encode(env.recipient_agent_id.as_bytes()));
+        let transport_out = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: Some(local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms: env.envelope.timestamp_ms,
+            transit: Some(env.envelope),
+        };
+        router.send(&recipient, transport_out).await?;
+    }
+    Ok(())
+}
+
+/// Build sealed [`ConvEnvelope`]s for a `GroupDeleted` fan-out.
+///
+/// Filters only `actor_agent_id` from `active_member_aids`. All other
+/// members are notified so they can tear down their local state.
+/// Recipients missing a share-card are skipped (logged at `WARN`); any
+/// other error propagates.
+///
+/// This is the pure inner function; [`dispatch_group_deleted_bridge`]
+/// wraps it and routes via [`Router`].
+///
+/// # Errors
+/// - [`ChatError::Invalid`] on share-card b64 decode failure.
+/// - Any error surfaced by the KEM/AEAD/signing path in
+///   [`dispatch_owner_broadcast`].
+#[allow(clippy::too_many_arguments)]
+pub async fn build_group_deleted_envelopes<S>(
+    signer: &S,
+    layout: &StoreLayout,
+    group_id: &str,
+    metadata_topic: &str,
+    revision: u64,
+    actor_agent_id: [u8; 32],
+    commit_json: Option<serde_json::Value>,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<Vec<ConvEnvelope>>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let actor_hex = hex::encode(actor_agent_id);
+
+    let event = build_group_deleted_event(&GroupDeletedInputs {
+        group_id,
+        revision,
+        actor: &actor_hex,
+        commit_json,
+    });
+
+    let mut recipients: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(active_member_aids.len());
+    for aid in active_member_aids {
+        if aid == &actor_agent_id {
+            continue;
+        }
+        let aid_hex = hex::encode(aid);
+        match recipient_kem_key(layout, &aid_hex) {
+            Ok(kem) => recipients.push((*aid, kem)),
+            Err(ChatError::ShareCardMissing { .. }) => {
+                log::warn!("GroupDeleted bridge: share-card missing for {aid_hex}; skipping");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    dispatch_owner_broadcast(
+        signer,
+        &OwnerBroadcastInputs {
+            topic: metadata_topic.to_owned(),
+            event_json: event,
+            recipients_kem: &recipients,
+            local_agent_id: actor_agent_id,
+            local_machine_id,
+        },
+    )
+    .await
+}
+
+/// Fan out a `GroupDeleted` bridge envelope to every active member
+/// except the actor.
+///
+/// Recipients whose share-card has not been imported are skipped with a
+/// `WARN` log. Other errors (bad b64, KEM/AEAD failure, signer error)
+/// propagate as hard failures.
+///
+/// # Errors
+/// - [`ChatError::ShareCardMissing`] is swallowed (warn-logged); see
+///   [`build_group_deleted_envelopes`] for full error list.
+/// - [`ChatError::NoTransportAvailable`] / relay errors forwarded from
+///   [`Router::send`].
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_group_deleted_bridge<S>(
+    signer: &S,
+    router: &Router,
+    layout: &StoreLayout,
+    group_id: &str,
+    metadata_topic: &str,
+    revision: u64,
+    actor_agent_id: [u8; 32],
+    commit_json: Option<serde_json::Value>,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<()>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let envelopes = build_group_deleted_envelopes(
+        signer,
+        layout,
+        group_id,
+        metadata_topic,
+        revision,
+        actor_agent_id,
+        commit_json,
+        active_member_aids,
+        local_machine_id,
+    )
+    .await?;
+
+    for env in envelopes {
+        let recipient = AgentId(hex::encode(env.recipient_agent_id.as_bytes()));
+        let transport_out = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: Some(local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms: env.envelope.timestamp_ms,
+            transit: Some(env.envelope),
+        };
+        router.send(&recipient, transport_out).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -515,6 +893,204 @@ mod tests {
             assert_eq!(inner["group_id"], "group-1");
             assert_eq!(inner["actor"], hex::encode(aid_a));
             assert_eq!(inner["agent_id"], hex::encode(aid_b));
+        }
+    }
+
+    /// Actor (aid-a) is filtered; aid-b and aid-c both receive the broadcast.
+    /// Inner JSON carries `"event":"policy_updated"` and the policy object.
+    #[tokio::test]
+    async fn dispatch_policy_updated_bridge_skips_actor() {
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let aid_a = [0xaau8; 32];
+        let aid_b = [0xbbu8; 32];
+        let aid_c = [0xccu8; 32];
+
+        let (pk_a, _) = kem_keygen().unwrap();
+        let (pk_b, sk_b) = kem_keygen().unwrap();
+        let (pk_c, sk_c) = kem_keygen().unwrap();
+
+        store_card(&layout, aid_a, &pk_a);
+        store_card(&layout, aid_b, &pk_b);
+        store_card(&layout, aid_c, &pk_c);
+
+        let policy = json!({"name": "strict", "max_members": 50});
+
+        let envelopes = build_policy_updated_envelopes(
+            &StubSigner,
+            &layout,
+            "group-1",
+            "x0x.named_group/group-1/metadata",
+            5,
+            aid_a,
+            policy.clone(),
+            None,
+            &[aid_a, aid_b, aid_c],
+            [0x01u8; 32],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(envelopes.len(), 2, "aid-b and aid-c receive the broadcast");
+
+        let recipient_ids: Vec<[u8; 32]> = envelopes
+            .iter()
+            .map(|e| {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(e.recipient_agent_id.as_bytes());
+                arr
+            })
+            .collect();
+        assert!(recipient_ids.contains(&aid_b));
+        assert!(recipient_ids.contains(&aid_c));
+
+        for env in &envelopes {
+            let aid_bytes: [u8; 32] = {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(env.recipient_agent_id.as_bytes());
+                arr
+            };
+            let sk = if aid_bytes == aid_b { &sk_b } else { &sk_c };
+            let wrapper = crate::groups::bridge::unseal_bridge_wrapper(
+                sk,
+                &env.envelope.kem_ciphertext,
+                &env.envelope.nonce,
+                &env.envelope.ciphertext,
+            )
+            .unwrap();
+            let payload_bytes = B64.decode(&wrapper.payload_b64).unwrap();
+            let inner: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+            assert_eq!(inner["event"], "policy_updated");
+            assert_eq!(inner["policy"]["name"], "strict");
+            assert_eq!(inner["policy"]["max_members"], 50);
+        }
+    }
+
+    /// Actor (aid-a) and banned peer (aid-b) are filtered; only aid-c receives
+    /// the broadcast. Inner JSON carries `"event":"member_banned"`,
+    /// `"reason":"spam"`, and `"agent_id"` matching hex(aid-b).
+    #[tokio::test]
+    async fn dispatch_member_banned_bridge_skips_actor_and_banned() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let aid_a = [0xaau8; 32];
+        let aid_b = [0xbbu8; 32];
+        let aid_c = [0xccu8; 32];
+
+        let (pk_a, _) = kem_keygen().unwrap();
+        let (pk_b, _) = kem_keygen().unwrap();
+        let (pk_c, sk_c) = kem_keygen().unwrap();
+
+        store_card(&layout, aid_a, &pk_a);
+        store_card(&layout, aid_b, &pk_b);
+        store_card(&layout, aid_c, &pk_c);
+
+        let envelopes = build_member_banned_envelopes(
+            &StubSigner,
+            &layout,
+            "group-1",
+            "x0x.named_group/group-1/metadata",
+            8,
+            aid_a,
+            aid_b,
+            Some("spam"),
+            None,
+            &[aid_a, aid_b, aid_c],
+            [0x01u8; 32],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(envelopes.len(), 1, "only aid-c receives the broadcast");
+        assert_eq!(
+            envelopes[0].recipient_agent_id.as_bytes(),
+            &aid_c,
+            "sole recipient is aid-c"
+        );
+
+        let wrapper = crate::groups::bridge::unseal_bridge_wrapper(
+            &sk_c,
+            &envelopes[0].envelope.kem_ciphertext,
+            &envelopes[0].envelope.nonce,
+            &envelopes[0].envelope.ciphertext,
+        )
+        .unwrap();
+        let payload_bytes = B64.decode(&wrapper.payload_b64).unwrap();
+        let inner: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(inner["event"], "member_banned");
+        assert_eq!(inner["reason"], "spam");
+        assert_eq!(inner["agent_id"], hex::encode(aid_b));
+    }
+
+    /// Actor (aid-a) is filtered; aid-b and aid-c both receive the
+    /// group-deleted broadcast. Inner JSON carries `"event":"group_deleted"`
+    /// and `"revision":99`.
+    #[tokio::test]
+    async fn dispatch_group_deleted_bridge_skips_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let aid_a = [0xaau8; 32];
+        let aid_b = [0xbbu8; 32];
+        let aid_c = [0xccu8; 32];
+
+        let (pk_a, _) = kem_keygen().unwrap();
+        let (pk_b, sk_b) = kem_keygen().unwrap();
+        let (pk_c, sk_c) = kem_keygen().unwrap();
+
+        store_card(&layout, aid_a, &pk_a);
+        store_card(&layout, aid_b, &pk_b);
+        store_card(&layout, aid_c, &pk_c);
+
+        let envelopes = build_group_deleted_envelopes(
+            &StubSigner,
+            &layout,
+            "group-1",
+            "x0x.named_group/group-1/metadata",
+            99,
+            aid_a,
+            None,
+            &[aid_a, aid_b, aid_c],
+            [0x01u8; 32],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(envelopes.len(), 2, "aid-b and aid-c receive the broadcast");
+
+        let recipient_ids: Vec<[u8; 32]> = envelopes
+            .iter()
+            .map(|e| {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(e.recipient_agent_id.as_bytes());
+                arr
+            })
+            .collect();
+        assert!(recipient_ids.contains(&aid_b));
+        assert!(recipient_ids.contains(&aid_c));
+
+        for env in &envelopes {
+            let aid_bytes: [u8; 32] = {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(env.recipient_agent_id.as_bytes());
+                arr
+            };
+            let sk = if aid_bytes == aid_b { &sk_b } else { &sk_c };
+            let wrapper = crate::groups::bridge::unseal_bridge_wrapper(
+                sk,
+                &env.envelope.kem_ciphertext,
+                &env.envelope.nonce,
+                &env.envelope.ciphertext,
+            )
+            .unwrap();
+            let payload_bytes = B64.decode(&wrapper.payload_b64).unwrap();
+            let inner: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+            assert_eq!(inner["event"], "group_deleted");
+            assert_eq!(inner["revision"], 99u64);
         }
     }
 }
