@@ -202,9 +202,11 @@ pub struct Endpoint<'a> {
     signer: Option<&'a Arc<dyn Signer>>,
     layout: Option<&'a StoreLayout>,
     local_machine_id: [u8; 32],
+    members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
 }
 
 impl<'a> Endpoint<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         http: &'a Http,
         router: &'a Router,
@@ -213,6 +215,7 @@ impl<'a> Endpoint<'a> {
         signer: Option<&'a Arc<dyn Signer>>,
         layout: Option<&'a StoreLayout>,
         local_machine_id: [u8; 32],
+        members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
     ) -> Self {
         Self {
             http,
@@ -222,6 +225,7 @@ impl<'a> Endpoint<'a> {
             signer,
             layout,
             local_machine_id,
+            members_singleflight,
         }
     }
 
@@ -847,8 +851,21 @@ impl<'a> Endpoint<'a> {
         self_agent_id_hex: &str,
     ) -> Result<()> {
         let group_id = crate::groups::GroupId::parse(group_id_hex)?;
-        let groups = crate::groups::Endpoint::new(self.http);
-        let roster = groups.members(&group_id).await?;
+        let roster = match self.members_singleflight {
+            Some(sf) => {
+                sf.fetch_or_wait(group_id_hex, || async {
+                    crate::groups::Endpoint::new(self.http)
+                        .members(&group_id)
+                        .await
+                })
+                .await?
+            }
+            None => {
+                crate::groups::Endpoint::new(self.http)
+                    .members(&group_id)
+                    .await?
+            }
+        };
         if !roster
             .iter()
             .any(|m| m.0.eq_ignore_ascii_case(self_agent_id_hex))
@@ -1356,6 +1373,7 @@ mod tests {
             Some(&signer_arc),
             None,
             [0u8; 32],
+            None,
         );
 
         let msg_id = endpoint
@@ -1550,6 +1568,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -1565,7 +1584,7 @@ mod tests {
         let (transport, _captured) = CapturingTransport::new();
         let mut router = Router::new();
         router.add(transport);
-        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32]);
+        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32], None);
         let err = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
             .await
@@ -1601,6 +1620,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -1653,6 +1673,7 @@ mod tests {
             Some(&failing),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -1755,6 +1776,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -1884,6 +1906,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let msg_id = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -1957,6 +1980,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -2028,6 +2052,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -2106,6 +2131,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -2158,6 +2184,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let msg_id = endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -2203,6 +2230,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
@@ -2235,6 +2263,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
@@ -2270,6 +2299,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
 
         let first = endpoint
@@ -2321,6 +2351,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
@@ -2362,6 +2393,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
@@ -2405,6 +2437,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
@@ -2440,6 +2473,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
 
         // Pre-condition: registry has no conversation yet (lazy create).
@@ -2492,6 +2526,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
 
         // Pre-condition: registry has no conversation yet.
@@ -2560,6 +2595,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
 
         let out = endpoint
@@ -2637,6 +2673,7 @@ mod tests {
             Some(&signer_arc),
             Some(&rig.layout),
             [0u8; 32],
+            None,
         );
         let err = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
@@ -2778,6 +2815,7 @@ mod tests {
                     Some(&signer_arc),
                     Some(&layout),
                     [0u8; 32],
+                    None,
                 );
                 barrier.wait().await;
                 endpoint
@@ -2898,6 +2936,7 @@ mod tests {
             Some(&alice_signer_arc),
             Some(&alice_rig.layout),
             [0u8; 32],
+            None,
         );
         alice_endpoint
             .send_private_group(TEST_GROUP_HEX, "hello bob", "Alice")
@@ -2929,6 +2968,7 @@ mod tests {
             Some(&bob_signer_arc),
             Some(&bob_rig.layout),
             [0u8; 32],
+            None,
         );
         let out = bob_endpoint
             .receive_private_group_envelope(&envelope, TEST_GROUP_HEX)

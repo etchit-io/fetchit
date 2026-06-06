@@ -218,6 +218,11 @@ struct ChatState {
     /// direct-gossip delivery and avoid the false-positive reachability
     /// record that would silently break the symmetric-NAT case.
     bridge_inbound_shadow: Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeInboundShadow>>,
+    /// Per-`group_id` in-flight deduplicator for the x0xd `/members`
+    /// fetch on the inbound bootstrap path. Concurrent envelopes for
+    /// the same brand-new group collapse to one upstream call instead
+    /// of N. See [`crate::members_singleflight`].
+    members_singleflight: Arc<crate::members_singleflight::MembersSingleflight>,
 }
 
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
@@ -358,6 +363,7 @@ impl Client {
             self.chat.as_ref().map(|c| &c.signer),
             self.chat.as_ref().map(|c| &c.layout),
             self.chat.as_ref().map_or([0u8; 32], |c| c.local_machine_id),
+            self.chat.as_ref().map(|c| &c.members_singleflight),
         )
     }
 
@@ -1147,6 +1153,7 @@ async fn build_with_chat(
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
+            members_singleflight: Arc::new(crate::members_singleflight::MembersSingleflight::new()),
         }),
         relay_handle,
         lan_handle,

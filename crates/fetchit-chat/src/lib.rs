@@ -39,6 +39,7 @@ pub mod transport;
 
 mod client;
 mod http;
+mod members_singleflight;
 
 pub use chat_identity::FetchitIdentity;
 pub use client::{Client, ClientBuilder};
