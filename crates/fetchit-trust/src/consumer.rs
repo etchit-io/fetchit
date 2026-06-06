@@ -13,9 +13,7 @@
 //! consumes the published denylist.
 
 use crate::error::TrustError;
-use crate::types::{
-    DenylistEntry, DenylistResponse, DenylistToSign, EntryKind, TargetIdentity,
-};
+use crate::types::{DenylistEntry, DenylistResponse, DenylistToSign, EntryKind, TargetIdentity};
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
 use std::collections::HashSet;
 
