@@ -12,3 +12,7 @@ pub use spawn::{pick_free_port, spawn_bundled};
 pub mod supervise;
 #[allow(unused_imports)]
 pub use supervise::CrashLoopDetector;
+
+pub mod run;
+#[allow(unused_imports)]
+pub use run::{boot_supervisor, SupervisorConfig, SupervisorHandle};
