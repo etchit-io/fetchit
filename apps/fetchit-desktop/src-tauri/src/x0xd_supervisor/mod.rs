@@ -15,4 +15,6 @@ pub use supervise::CrashLoopDetector;
 
 pub mod run;
 #[allow(unused_imports)]
-pub use run::{boot_supervisor, SupervisorConfig, SupervisorHandle};
+pub use run::{
+    boot_supervisor, spawn_supervisor_task, SupervisorConfig, SupervisorHandle, SupervisorTask,
+};
