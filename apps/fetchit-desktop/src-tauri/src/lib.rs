@@ -645,7 +645,7 @@ fn bundled_x0xd_toml_path() -> std::path::PathBuf {
 /// [`x0xd_supervisor::boot_supervisor`] using a fresh Tokio runtime, and
 /// returns the x0xd base URL to thread into the chat client:
 /// - Bundled binary chosen: `Some("http://127.0.0.1:<managed-port>")`.
-/// - Installed binary chosen (or no binary available): `None` — the chat
+/// - Installed binary chosen (or no binary available): `None`; the chat
 ///   client falls back to `discover_local()` on first use.
 fn boot_x0xd_supervisor_blocking() -> Option<String> {
     use std::time::Duration;
