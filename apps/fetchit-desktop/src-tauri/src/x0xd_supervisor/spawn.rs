@@ -32,8 +32,8 @@ pub fn spawn_bundled(
     let child = Command::new(binary)
         .arg("--config")
         .arg(toml_path)
-        .arg("--http-bind")
-        .arg(format!("127.0.0.1:{port}"))
+        .arg("--api-port")
+        .arg(port.to_string())
         .spawn()
         .map_err(|e| format!("spawn bundled x0xd: {e}"))?;
     Ok((child, port))

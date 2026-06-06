@@ -835,6 +835,12 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
 ///   ~/.local/bin), the supervisor logs once and continues polling
 ///   silently — no point spamming the log every 5 s.
 fn spawn_x0xd_supervisor(state: ChatState) {
+    // When the bundled supervisor is managing a private x0xd instance, skip
+    // the legacy path-based poller. Running both would race over `x0x start`
+    // against a process the new supervisor already owns on a managed port.
+    if crate::BUNDLED_SUPERVISOR_ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         // Brief initial delay so the very first probe doesn't race the
         // app's own initialisation (build_chat_state may itself trigger

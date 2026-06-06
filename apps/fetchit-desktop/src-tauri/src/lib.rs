@@ -15,7 +15,8 @@ mod settings;
 mod state;
 mod x0xd_supervisor;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use fetchit_core::handlers::default_registry;
@@ -43,6 +44,16 @@ fn now_secs() -> u64 {
 /// Filled in by `run`'s setup callback once the local media server is bound.
 /// JS reads it via [`media_url_base`].
 static MEDIA_URL_BASE: OnceLock<String> = OnceLock::new();
+
+/// Set to `true` when `boot_x0xd_supervisor_blocking` picks the bundled
+/// binary and starts the respawn task. `spawn_x0xd_supervisor` in chat.rs
+/// checks this to avoid racing over the same x0xd process.
+static BUNDLED_SUPERVISOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Holds the bundled-x0xd [`SupervisorTask`] for the lifetime of the app.
+/// Populated once by `boot_x0xd_supervisor_blocking`; dropped when the
+/// process exits.
+static SUPERVISOR_TASK: OnceLock<Mutex<Option<x0xd_supervisor::SupervisorTask>>> = OnceLock::new();
 
 /// The bundled default peer list (production network). The frontend
 /// pre-fills the editor with this when the user hasn't saved an override.
@@ -619,12 +630,23 @@ fn chat_feature_enabled(state: tauri::State<'_, AppState>) -> bool {
 
 /// Resource path for the bundled x0xd binary shipped inside the app bundle.
 ///
-/// Returns `None` in E1 so the supervisor falls through to
-/// `discover_installed_x0xd()` for the user's system-wide install.
-/// F1+F2 replace this with real resource-dir resolution once the
-/// binary is staged under `resources/x0xd/<target_os>-<target_arch>/x0xd`.
+/// Reads the `FETCHIT_BUNDLED_X0XD_PATH_REL` env var stamped by `build.rs`
+/// when the binary is staged under `resources/`. At runtime, tries two
+/// resolution bases in order: CWD (for `cargo run` from `src-tauri/`) then
+/// next to the executable (for installed bundles). Returns `None` when the
+/// env var is unset (default dev build) or neither candidate exists, so the
+/// supervisor falls through to `discover_installed_x0xd()`.
 fn bundled_x0xd_binary_path() -> Option<std::path::PathBuf> {
-    None
+    use std::path::PathBuf;
+    let rel = option_env!("FETCHIT_BUNDLED_X0XD_PATH_REL")?;
+    let rel_path = PathBuf::from(rel);
+    let candidates = [
+        std::env::current_dir().ok().map(|c| c.join(&rel_path)),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join(&rel_path))),
+    ];
+    candidates.into_iter().flatten().find(|p| p.exists())
 }
 
 /// Config-dir path for the x0xd TOML used when spawning the bundled binary.
@@ -658,9 +680,16 @@ fn bundled_x0xd_toml_path() -> std::path::PathBuf {
 mod e2_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::bundled_x0xd_toml_path;
+    use std::sync::Mutex;
+
+    // Serialises all tests that mutate env vars in this module so that
+    // concurrent test threads do not observe each other's env mutations.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn first_run_copies_tpl_and_substitutes_placeholders() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let temp = tempfile::tempdir().unwrap();
         // Point XDG_CONFIG_HOME at the temp dir so dirs::config_dir()
         // returns a predictable, isolated path.
@@ -716,10 +745,26 @@ fn boot_x0xd_supervisor_blocking() -> Option<String> {
         return None;
     };
 
-    match rt.block_on(x0xd_supervisor::boot_supervisor(cfg)) {
+    let boot_result = rt.block_on(x0xd_supervisor::boot_supervisor(cfg.clone()));
+    match boot_result {
         Ok(handle) => match handle.choice {
-            BinaryChoice::Bundled { .. } if handle.port != 0 => {
-                Some(format!("http://127.0.0.1:{}", handle.port))
+            BinaryChoice::Bundled { ref binary, .. } if handle.port != 0 => {
+                let binary = binary.clone();
+                let disabled = handle.disabled.clone();
+                let port = handle.port;
+                // Spawn the respawn loop on the Tauri async runtime, which
+                // outlives this boot helper. The local `rt` is dropped after
+                // this function returns; tasks spawned on it would be aborted.
+                // `spawn_supervisor_task` calls `tokio::spawn` internally, so
+                // we enter the Tauri runtime's context before calling it.
+                let _enter = tauri::async_runtime::handle().inner().enter();
+                let task = x0xd_supervisor::spawn_supervisor_task(cfg, binary, disabled);
+                let cell = SUPERVISOR_TASK.get_or_init(|| Mutex::new(None));
+                if let Ok(mut g) = cell.lock() {
+                    *g = Some(task);
+                }
+                BUNDLED_SUPERVISOR_ACTIVE.store(true, Ordering::Release);
+                Some(format!("http://127.0.0.1:{port}"))
             }
             _ => None,
         },
