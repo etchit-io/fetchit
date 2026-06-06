@@ -75,12 +75,19 @@ pub struct ChatState {
     /// chat-client lock; the flag is read on next `get()` after an
     /// `invalidate()`.
     lan_direct_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Base URL for the locally-managed x0xd instance, set when the
+    /// supervisor picks the bundled binary and binds it to a known port.
+    /// `None` when using an installed x0xd (discovery falls through to
+    /// `discover_local()` in `fetchit_chat::Client::builder().build()`).
+    x0xd_base_url: Option<String>,
 }
 
 impl ChatState {
     /// Build a fresh `ChatState` bound to the supplied relay URL +
     /// chat data dir. `passphrase` is an optional Argon2id passphrase
-    /// for headless installs without a working keystore.
+    /// for headless installs without a working keystore. `x0xd_base_url`
+    /// pins the daemon URL when the supervisor manages the bundled x0xd;
+    /// `None` falls through to `discover_local()` on the first `get()`.
     ///
     /// # Errors
     /// Returns the parse error if `relay_url` is not a valid URL.
@@ -89,6 +96,7 @@ impl ChatState {
         data_dir: PathBuf,
         passphrase: Option<String>,
         lan_direct_enabled: bool,
+        x0xd_base_url: Option<String>,
     ) -> Result<Self, String> {
         // Go through the same validation path as `set_relay_url` so a
         // hand-edited `settings.json` with a loopback or reserved
@@ -102,6 +110,7 @@ impl ChatState {
             data_dir,
             passphrase: Arc::new(Mutex::new(passphrase)),
             lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(lan_direct_enabled)),
+            x0xd_base_url,
         })
     }
 
@@ -125,6 +134,9 @@ impl ChatState {
             .enable_lan_direct(lan);
         if let Some(p) = passphrase {
             builder = builder.passphrase(p);
+        }
+        if let Some(ref base) = self.x0xd_base_url {
+            builder = builder.base_url(base.clone());
         }
         let c = builder.build().await.map_err(|e| e.to_string())?;
         *guard = Some(c.clone());

@@ -617,8 +617,80 @@ fn chat_feature_enabled(state: tauri::State<'_, AppState>) -> bool {
     )
 }
 
+/// Resource path for the bundled x0xd binary shipped inside the app bundle.
+///
+/// Returns `None` in E1 so the supervisor falls through to
+/// `discover_installed_x0xd()` for the user's system-wide install.
+/// F1+F2 replace this with real resource-dir resolution once the
+/// binary is staged under `resources/x0xd/<target_os>-<target_arch>/x0xd`.
+fn bundled_x0xd_binary_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Config-dir path for the x0xd TOML to pass when spawning the bundled binary.
+///
+/// E2 replaces this with a first-run copy that substitutes `PLACEHOLDER_*`
+/// relay agent IDs from the template at `resources/x0xd.toml.tpl` into
+/// the user's config dir.
+fn bundled_x0xd_toml_path() -> std::path::PathBuf {
+    // FIXME(E2): replace with first-run user-config-dir copy that
+    // substitutes PLACEHOLDER_* relay agent IDs into the bundled TOML
+    // template at resources/x0xd.toml.tpl.
+    std::path::PathBuf::from("/tmp/fetchit-x0xd.toml")
+}
+
+/// Boot the x0xd supervisor synchronously before the Tauri runtime starts.
+///
+/// Builds a [`x0xd_supervisor::SupervisorConfig`], blocks on
+/// [`x0xd_supervisor::boot_supervisor`] using a fresh Tokio runtime, and
+/// returns the x0xd base URL to thread into the chat client:
+/// - Bundled binary chosen: `Some("http://127.0.0.1:<managed-port>")`.
+/// - Installed binary chosen (or no binary available): `None` — the chat
+///   client falls back to `discover_local()` on first use.
+fn boot_x0xd_supervisor_blocking() -> Option<String> {
+    use std::time::Duration;
+    use x0xd_supervisor::{BinaryChoice, SupervisorConfig};
+
+    let bundled_version = option_env!("FETCHIT_BUNDLED_X0XD_VERSION")
+        .unwrap_or("0.21.3")
+        .parse::<semver::Version>()
+        .ok();
+
+    let cfg = SupervisorConfig {
+        bundled_binary: bundled_x0xd_binary_path(),
+        bundled_version,
+        bundled_toml: bundled_x0xd_toml_path(),
+        port_range: (45_000, 45_100),
+        crash_window: Duration::from_secs(30),
+        crash_threshold: 3,
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    let Ok(rt) = rt else {
+        eprintln!("[fetchit][supervisor] failed to build runtime for boot; chat uses discovery");
+        return None;
+    };
+
+    match rt.block_on(x0xd_supervisor::boot_supervisor(cfg)) {
+        Ok(handle) => match handle.choice {
+            BinaryChoice::Bundled { .. } if handle.port != 0 => {
+                Some(format!("http://127.0.0.1:{}", handle.port))
+            }
+            _ => None,
+        },
+        Err(e) => {
+            eprintln!("[fetchit][supervisor] boot_supervisor: {e}; chat uses discovery");
+            None
+        }
+    }
+}
+
 /// Build the chat state from a relay URL, falling back to the default
-/// URL when the user-supplied one is malformed.
+/// URL when the user-supplied one is malformed. `x0xd_base_url` pins
+/// the daemon URL when the supervisor manages a bundled x0xd; `None`
+/// lets the chat client fall through to `discover_local()`.
 ///
 /// # Panics
 /// Cannot panic in practice — `settings::DEFAULT_RELAY_URL` is a
@@ -629,8 +701,15 @@ fn build_chat_state(
     relay_url: &str,
     data_dir: std::path::PathBuf,
     lan_direct_enabled: bool,
+    x0xd_base_url: Option<String>,
 ) -> chat::ChatState {
-    match chat::ChatState::new(relay_url, data_dir.clone(), None, lan_direct_enabled) {
+    match chat::ChatState::new(
+        relay_url,
+        data_dir.clone(),
+        None,
+        lan_direct_enabled,
+        x0xd_base_url.clone(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -641,6 +720,7 @@ fn build_chat_state(
                 data_dir,
                 None,
                 lan_direct_enabled,
+                x0xd_base_url,
             )
             .expect("default relay url is always valid")
         }
@@ -659,6 +739,12 @@ fn build_chat_state(
 #[allow(clippy::too_many_lines)] // dominated by the invoke-handler list
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Boot the x0xd supervisor before the Tauri runtime starts.
+    // In E1, bundled_x0xd_binary_path() returns None so this always
+    // falls back to the installed binary (or no-op if absent).
+    // F1+F2 wire the real bundled binary; E2 wires the real TOML path.
+    let x0xd_base_url = boot_x0xd_supervisor_blocking();
+
     // Two scheme aliases for the same protocol handler. The localhost HTTP
     // server is the third path WebKit's `<video>` will accept (it ignores
     // custom URI schemes for media), spawned in `setup` below.
@@ -730,8 +816,12 @@ pub fn run() {
             // spawn_event_pump — is gated: it pulls x0xd, opens a WS
             // to the relay, and starts background tasks. Skip when
             // chat is off so the v1 release ships cold.
-            let chat_state =
-                build_chat_state(&relay_url, app_data.join("chat"), lan_direct_enabled);
+            let chat_state = build_chat_state(
+                &relay_url,
+                app_data.join("chat"),
+                lan_direct_enabled,
+                x0xd_base_url.clone(),
+            );
             app.manage(chat_state.clone());
             if chat_enabled_at_boot {
                 chat::spawn_event_pump(app.handle().clone(), chat_state);
