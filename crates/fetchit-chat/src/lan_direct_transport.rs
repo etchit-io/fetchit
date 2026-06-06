@@ -355,9 +355,11 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
         // on `transit.kind` and routes to the local /publish path in
         // C3. Rides the Dm shape because the chat-layer routing
         // predicate doesn't yet model bridge events.
-        RelayKind::Dm | RelayKind::AdminEvent | RelayKind::X0xdGroupMetadataEvent => {
-            OutboundKind::Dm
-        }
+        RelayKind::Dm
+        | RelayKind::AdminEvent
+        | RelayKind::X0xdGroupMetadataEvent
+        | RelayKind::WelcomeBlobRequest
+        | RelayKind::WelcomeBlobResponse => OutboundKind::Dm,
         // PrivateGroupChat rides the same inbound shape as GroupChat —
         // downstream `is_private_group_envelope` discriminates the two.
         RelayKind::GroupChat | RelayKind::PrivateGroupChat | RelayKind::DeliveryReceipt => {

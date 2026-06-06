@@ -97,6 +97,21 @@ pub enum EnvelopeKind {
     /// See `private/m2.5-bridge-collapsed-spec.md` on the `m2.5-design`
     /// branch for the full spec.
     X0xdGroupMetadataEvent,
+    /// #251 Layer 2 Welcome contingency: joiner -> owner request for
+    /// the MLS Welcome blob bytes via fetchit-relay. Fires when the
+    /// joiner's bundled x0xd is below v0.21.3 (the David 63b5c63b
+    /// Welcome-retry fix lands) and the native peer-relay Welcome
+    /// fetch failed with `ReaderExit`. The owner's chat-peer fetches
+    /// the pending Welcome from local x0xd and replies with a
+    /// `WelcomeBlobResponse`. Once the bundled binary pins a release
+    /// containing 63b5c63b, the dispatch path returns `NotNeeded`
+    /// and the caller short-circuits to x0xd's native flow.
+    WelcomeBlobRequest,
+    /// #251 Layer 2 Welcome contingency: owner -> joiner response
+    /// carrying the MLS Welcome blob bytes the joiner's x0xd will
+    /// import via `POST /groups/join-from-bridged-blob`. Same gate
+    /// as `WelcomeBlobRequest`.
+    WelcomeBlobResponse,
     /// Forward-compat catch-all. Holds the raw postcard discriminator
     /// of an envelope kind this version of the proto doesn't recognise.
     /// `Serialize` emits the original discriminator verbatim so a
@@ -122,6 +137,8 @@ const DISC_ADMIN_EVENT: u32 = 2;
 const DISC_DELIVERY_RECEIPT: u32 = 3;
 const DISC_PRIVATE_GROUP_CHAT: u32 = 4;
 const DISC_X0XD_GROUP_METADATA_EVENT: u32 = 5;
+const DISC_WELCOME_BLOB_REQUEST: u32 = 6;
+const DISC_WELCOME_BLOB_RESPONSE: u32 = 7;
 
 impl Serialize for EnvelopeKind {
     fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
@@ -136,6 +153,8 @@ impl Serialize for EnvelopeKind {
             EnvelopeKind::DeliveryReceipt => DISC_DELIVERY_RECEIPT,
             EnvelopeKind::PrivateGroupChat => DISC_PRIVATE_GROUP_CHAT,
             EnvelopeKind::X0xdGroupMetadataEvent => DISC_X0XD_GROUP_METADATA_EVENT,
+            EnvelopeKind::WelcomeBlobRequest => DISC_WELCOME_BLOB_REQUEST,
+            EnvelopeKind::WelcomeBlobResponse => DISC_WELCOME_BLOB_RESPONSE,
             EnvelopeKind::Unknown(n) => u32::from(*n),
         };
         ser.serialize_unit_variant("EnvelopeKind", disc, "Variant")
@@ -160,6 +179,8 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                     DISC_DELIVERY_RECEIPT => EnvelopeKind::DeliveryReceipt,
                     DISC_PRIVATE_GROUP_CHAT => EnvelopeKind::PrivateGroupChat,
                     DISC_X0XD_GROUP_METADATA_EVENT => EnvelopeKind::X0xdGroupMetadataEvent,
+                    DISC_WELCOME_BLOB_REQUEST => EnvelopeKind::WelcomeBlobRequest,
+                    DISC_WELCOME_BLOB_RESPONSE => EnvelopeKind::WelcomeBlobResponse,
                     n => match u8::try_from(n) {
                         Ok(byte) => EnvelopeKind::Unknown(byte),
                         Err(_) => {
@@ -184,6 +205,8 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                 "DeliveryReceipt",
                 "PrivateGroupChat",
                 "X0xdGroupMetadataEvent",
+                "WelcomeBlobRequest",
+                "WelcomeBlobResponse",
                 "Unknown",
             ],
             KindVisitor,
@@ -379,6 +402,8 @@ mod tests {
             (EnvelopeKind::DeliveryReceipt, 3),
             (EnvelopeKind::PrivateGroupChat, 4),
             (EnvelopeKind::X0xdGroupMetadataEvent, 5),
+            (EnvelopeKind::WelcomeBlobRequest, 6),
+            (EnvelopeKind::WelcomeBlobResponse, 7),
         ] {
             let bytes = postcard::to_allocvec(&variant).unwrap();
             assert_eq!(
@@ -392,15 +417,15 @@ mod tests {
     }
 
     /// An envelope produced by a future client with a kind variant
-    /// this proto doesn't recognise (e.g. discriminator 6, 7, 42)
+    /// this proto doesn't recognise (e.g. discriminator 42, 99)
     /// MUST decode to `EnvelopeKind::Unknown(n)` instead of failing
     /// the whole envelope deserialization. Without this the relay
     /// blackholes the `SendFrame`, the client times out at 10 s, and
-    /// the user sees a silent send failure — the exact failure mode
-    /// that motivated this commit.
+    /// the user sees a silent send failure, which is the exact failure
+    /// mode that motivated this shim.
     #[test]
     fn unknown_discriminator_decodes_as_unknown_variant() {
-        for disc in [6u8, 7, 42, 99, 200, 255] {
+        for disc in [8u8, 42, 99, 200, 255] {
             // Postcard's varint encoding for u32 < 128 is a single byte
             // equal to the value, so we can craft the wire bytes by
             // hand and verify the visitor handles them.
@@ -426,7 +451,7 @@ mod tests {
     /// the recipient — which DOES understand the kind.
     #[test]
     fn unknown_variant_reserializes_to_original_discriminator() {
-        for disc in [6u8, 42, 200] {
+        for disc in [8u8, 42, 200] {
             let envelope = EnvelopeKind::Unknown(disc);
             let bytes = postcard::to_allocvec(&envelope).unwrap();
             let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
@@ -467,5 +492,21 @@ mod tests {
         let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.kind, EnvelopeKind::X0xdGroupMetadataEvent);
         assert_eq!(decoded.ciphertext, vec![0xee; 1024]);
+    }
+
+    #[test]
+    fn envelope_kind_welcome_blob_request_round_trips() {
+        let env = EnvelopeKind::WelcomeBlobRequest;
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, EnvelopeKind::WelcomeBlobRequest);
+    }
+
+    #[test]
+    fn envelope_kind_welcome_blob_response_round_trips() {
+        let env = EnvelopeKind::WelcomeBlobResponse;
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, EnvelopeKind::WelcomeBlobResponse);
     }
 }
