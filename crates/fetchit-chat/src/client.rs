@@ -281,6 +281,7 @@ impl Client {
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
 
         let (router, chat, relay, lan, lan_bound_addr) = if needs_chat {
+            announce_identity_best_effort(&http).await;
             build_with_chat(
                 &http,
                 &base_url,
@@ -937,6 +938,35 @@ impl std::fmt::Debug for Client {
 /// [`ChatError::MessageTransport`]; an outdated daemon surfaces as
 /// [`ChatError::Invalid`] with a message that names both the live
 /// version and the upgrade target.
+/// Best-effort announce of this agent's `agent_id -> public_key`
+/// binding to x0xd's gossip identity store via `POST /announce`.
+/// Runs once at chat-flow startup so any subsequent
+/// `groups::create_private` user-flow can pass the MLS
+/// `MemberJoined` signature-verify path. A failure here is logged
+/// and swallowed: DM and inbound group-receive surfaces stay
+/// functional, and the next process startup gets another chance.
+async fn announce_identity_best_effort(http: &Http) {
+    let base = match url::Url::parse(&http.base_url()) {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("identity/announce: invalid x0xd base url: {e}");
+            return;
+        }
+    };
+    let endpoint = match x0xd_client::IdentityEndpoint::new(base, http.token().to_owned()) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("identity/announce: endpoint setup failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = endpoint.announce(false, false).await {
+        log::warn!(
+            "identity/announce: failed (private-group MemberJoined verifies may fail until next chat startup): {e}"
+        );
+    }
+}
+
 async fn enforce_m2_treekem_minimum(base_url: &str, token: &str) -> Result<()> {
     let parsed_base =
         Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;

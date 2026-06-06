@@ -18,12 +18,14 @@
 
 pub mod discovery;
 pub mod error;
+pub mod identity;
 pub mod secure;
 pub mod signer;
 pub mod version;
 
 pub use discovery::{base_url_from_api_port_line, discover_in, discover_local, DaemonEndpoint};
 pub use error::{DiscoveryError, X0xdError};
+pub use identity::IdentityEndpoint;
 pub use secure::{CreatedGroup, EncryptedFrame, SecureGroupsEndpoint};
 pub use signer::{Signer, X0xdSigner};
 pub use version::X0xdVersion;
