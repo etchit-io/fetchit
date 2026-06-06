@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod discover;
 pub mod discovery;
 pub mod error;
 pub mod identity;
@@ -23,6 +24,7 @@ pub mod secure;
 pub mod signer;
 pub mod version;
 
+pub use discover::{discover_installed_x0xd, InstalledX0xd};
 pub use discovery::{base_url_from_api_port_line, discover_in, discover_local, DaemonEndpoint};
 pub use error::{DiscoveryError, X0xdError};
 pub use identity::IdentityEndpoint;
