@@ -26,9 +26,12 @@
 //!   Saorsa pubsub's loopback semantics.
 //! - [`bridge_member_removed`]: JSON event builders for member removal
 //!   and other owner-side group-metadata mutations.
+//! - [`bridge_member_role_updated`]: JSON event builder for member role
+//!   changes when gossip can't deliver.
 
 pub mod bridge;
 pub mod bridge_member_removed;
+pub mod bridge_member_role_updated;
 
 use crate::error::{ChatError, Result};
 use crate::http::Http;
