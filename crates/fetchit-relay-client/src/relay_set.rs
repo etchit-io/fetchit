@@ -342,7 +342,10 @@ mod tests {
         // Calling connect with no configs is a logic bug: a RelaySet
         // with zero relays has nothing to do. Surface that fast.
         // Empty-configs path doesn't touch the signer — any dummy is fine.
-        let signer = Arc::new(crate::signer::StaticKeySigner::from_public_key(vec![0u8; 32]));
+        let signer = Arc::new(crate::signer::StaticKeySigner::from_public_key(vec![
+            0u8;
+            32
+        ]));
         let res = RelaySet::connect(Vec::new(), signer).await;
         assert!(res.is_err(), "empty configs must surface an error");
     }
