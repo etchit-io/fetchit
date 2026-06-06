@@ -3,9 +3,8 @@
 //!
 //! M3 federation core
 //! (`docs/superpowers/plans/2026-06-06-m3-federation-core-plan.md`).
-//! Stage 1 Tasks 1.1-1.2 land here: `connect`, `connection_states`,
-//! `send` (fan-out), `shutdown`. Task 1.3 (`next_delivery` merged
-//! inbox) lands separately.
+//! Stage 1 Tasks 1.1-1.3 land here: `connect`, `connection_states`,
+//! `send` (fan-out), `next_delivery` (merged inbox), `shutdown`.
 //!
 //! Design decisions resolved per Alice's #251 plan landing
 //! (62d7424/3e74a36): fan-out send to every healthy relay, lean on
@@ -18,9 +17,9 @@ use crate::client::{Client, ClientConfig, ConnState};
 use crate::error::ClientError;
 use crate::outbox::Receipt;
 use crate::signer::Signer;
-use fetchit_relay_proto::{AgentId, DedupeKey, TransitEnvelope};
+use fetchit_relay_proto::{AgentId, DedupeKey, Deliver, TransitEnvelope};
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch, Mutex};
 
 /// One per-relay session a peer maintains concurrently with N-1 others.
 ///
@@ -34,6 +33,12 @@ pub struct RelaySet {
     /// Updated by a small forwarder task per relay that watches the
     /// underlying `connection_state` and republishes the snapshot.
     states_rx: watch::Receiver<Vec<ConnState>>,
+    /// Merged inbox: every relay's `Client::next_delivery` stream is
+    /// forwarded into this single channel by a per-relay task spawned
+    /// in `connect`. Caller-side dedupe (when needed) lives at the
+    /// chat layer keyed off the envelope's `message_id`; the recipient's
+    /// x0xd is the source-of-truth dedupe via canonical event hash.
+    inbox_rx: Mutex<mpsc::UnboundedReceiver<Deliver>>,
 }
 
 impl RelaySet {
@@ -101,7 +106,35 @@ impl RelaySet {
             });
         }
 
-        Ok(Self { relays, states_rx })
+        // One inbox forwarder task per relay drains the per-relay
+        // `Client::next_delivery` stream into a single merged mpsc
+        // channel. `RelaySet::next_delivery` reads from that channel.
+        // The merged channel does not dedupe — receiver-side caller
+        // (the chat layer) handles dedupe via `message_id`; x0xd at the
+        // recipient is the canonical-event-hash source of truth.
+        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        for relay in &relays {
+            let r = Arc::clone(relay);
+            let tx = inbox_tx.clone();
+            tokio::spawn(async move {
+                while let Some(d) = r.next_delivery().await {
+                    if tx.send(d).is_err() {
+                        // Receiver was dropped — RelaySet is being torn
+                        // down. Exit cleanly so the per-relay task
+                        // doesn't leak across the rest of the process
+                        // lifetime.
+                        break;
+                    }
+                }
+            });
+        }
+        drop(inbox_tx);
+
+        Ok(Self {
+            relays,
+            states_rx,
+            inbox_rx: Mutex::new(inbox_rx),
+        })
     }
 
     /// One [`ConnState`] per relay in the same order as `configs`.
@@ -141,6 +174,22 @@ impl RelaySet {
     pub async fn shutdown(&self) {
         let shutdowns = self.relays.iter().map(|r| r.shutdown());
         futures_util::future::join_all(shutdowns).await;
+    }
+
+    /// Receive the next delivered envelope from the merged inbox.
+    ///
+    /// Drains the union of every relay's per-relay `next_delivery`
+    /// stream. The same logical envelope MAY surface more than once
+    /// when the sender fanned out to multiple relays and the receiver
+    /// is connected to multiple of those same relays; caller-side
+    /// dedupe at the chat layer (keyed off the envelope's `message_id`)
+    /// absorbs the duplication. The recipient's x0xd is the
+    /// canonical-event-hash dedupe source-of-truth past that.
+    ///
+    /// Returns `None` once every relay has shut down — useful for the
+    /// orderly-drain shutdown path.
+    pub async fn next_delivery(&self) -> Option<Deliver> {
+        self.inbox_rx.lock().await.recv().await
     }
 
     /// Fan-out send to every relay in the set.
