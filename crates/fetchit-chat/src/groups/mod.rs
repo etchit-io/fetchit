@@ -24,8 +24,11 @@
 //!   `EnvelopeKind::X0xdGroupMetadataEvent` payload so the receiving
 //!   daemon can `POST /publish` it locally and advance MLS state via
 //!   Saorsa pubsub's loopback semantics.
+//! - [`bridge_member_removed`]: JSON event builders for member removal
+//!   and other owner-side group-metadata mutations.
 
 pub mod bridge;
+pub mod bridge_member_removed;
 
 use crate::error::{ChatError, Result};
 use crate::http::Http;
