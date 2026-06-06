@@ -1,0 +1,66 @@
+name: bundled-x0xd
+
+# Manual trigger + PRs. Not every push -- cloning + building x0x is expensive.
+on:
+  workflow_dispatch:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  X0XD_PIN_SHA: "91951a503c7c763aca54de4de1df128cbab82383"
+
+jobs:
+  build-bundled-x0xd:
+    name: Build bundled x0xd + fetchit-desktop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fetchit
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux webkit deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
+
+      - name: Cache x0x build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ~/x0x
+          cache-on-failure: true
+
+      - name: Cache fetchit-desktop build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+          cache-on-failure: true
+
+      - name: Clone pinned saorsa-labs/x0x
+        run: |
+          git clone https://github.com/saorsa-labs/x0x "$HOME/x0x"
+          cd "$HOME/x0x"
+          git checkout "$X0XD_PIN_SHA"
+
+      - name: Build x0xd
+        run: |
+          cd "$HOME/x0x"
+          cargo build --release --bin x0xd
+
+      - name: Build fetchit-desktop with bundled binary
+        env:
+          FETCHIT_BUNDLED_X0XD_PATH: /home/runner/x0x/target/release/x0xd
+          FETCHIT_BUNDLED_X0XD_VERSION: "0.21.3-pre.fetchit"
+        run: |
+          cargo build --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
+
+      - name: Confirm x0xd staged into resources
+        run: |
+          ls -lh apps/fetchit-desktop/src-tauri/resources/x0xd/
