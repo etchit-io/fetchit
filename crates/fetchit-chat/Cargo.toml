@@ -61,4 +61,5 @@ axum.workspace = true
 fetchit-relay-server = { path = "../fetchit-relay-server" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3.13"
+tracing.workspace = true
 wiremock = "0.6"

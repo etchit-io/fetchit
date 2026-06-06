@@ -134,6 +134,8 @@ fn read_x0xd_base_url(port_file: &str) -> String {
 async fn m2_live_private_group_round_trip() {
     let home = std::env::var("HOME").expect("HOME must be set");
 
+    let topology = std::env::var("FETCHIT_TEST_TOPOLOGY").unwrap_or_else(|_| "wyse".to_owned());
+
     let port_file = env_or("X0XD_PORT_FILE", || {
         format!("{home}/.local/share/x0x-claude-here/api.port")
     });
@@ -144,6 +146,8 @@ async fn m2_live_private_group_round_trip() {
     let peer_share_uri = env_required("M2_LIVE_PEER_SHARE_URI");
     let vault_pass = env_required("M2_LIVE_VAULT_PASS");
     let group_name = env_or("M2_LIVE_GROUP_NAME", || format!("m2-live-{}", now_ms()));
+
+    tracing::info!(target: "m2_live", %topology, "soak round starting");
 
     assert_eq!(
         peer_agent_hex.len(),
@@ -373,4 +377,11 @@ fn group_id_round_trips_for_documentation() {
     let hex = "a".repeat(64);
     let id = GroupId::parse(&hex).expect("64-hex parses");
     assert_eq!(id.as_str(), hex);
+}
+
+#[test]
+fn topology_defaults_to_wyse_when_env_unset() {
+    std::env::remove_var("FETCHIT_TEST_TOPOLOGY");
+    let topology = std::env::var("FETCHIT_TEST_TOPOLOGY").unwrap_or_else(|_| "wyse".to_owned());
+    assert_eq!(topology, "wyse");
 }
