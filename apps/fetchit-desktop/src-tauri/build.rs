@@ -10,6 +10,13 @@ use std::process::Command;
 /// Bump to "0.21.3" once David tags v0.21.3 upstream.
 const X0XD_PIN_VERSION: &str = "0.21.3-pre.fetchit";
 
+/// Pinned upstream commit in saorsa-labs/x0x that this fetch>it release
+/// bundles. Resolved at brainstorm + plan time (2026-06-06).
+/// When David tags v0.21.3, bump this to the tag commit sha and update
+/// `X0XD_PIN_VERSION` to "0.21.3" in the same commit (see private/251-decisions.md D3).
+#[allow(dead_code)]
+const X0XD_PIN_SHA: &str = "91951a503c7c763aca54de4de1df128cbab82383";
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=FETCHIT_BUNDLED_X0XD_PATH");
