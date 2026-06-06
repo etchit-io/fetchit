@@ -778,9 +778,11 @@ async fn m2_5_bridge_live_owner_bridges_to_joiner() {
         // The relay client reconnects asynchronously when the server
         // idles us out (~60s of pure-listen waiting for x0xd to publish
         // MemberAdded). A fresh send during reconnect returns "client
-        // is reconnecting"; retry with a bounded sleep so the send
-        // completes once reconnect settles. Cap so a truly dead relay
-        // still surfaces.
+        // is reconnecting"; under back-to-back large bridge sends a
+        // second send may also surface as "relay send: send timed out
+        // after 10s" while the relay is still ACKing the first. Retry
+        // with a bounded sleep so either case completes once the
+        // connection settles. Cap so a truly dead relay still surfaces.
         let mut attempts: u32 = 0;
         let decision = loop {
             match client
@@ -796,7 +798,9 @@ async fn m2_5_bridge_live_owner_bridges_to_joiner() {
                 Err(e) => {
                     let msg = format!("{e}");
                     if attempts < 10
-                        && (msg.contains("reconnecting") || msg.contains("disconnected"))
+                        && (msg.contains("reconnecting")
+                            || msg.contains("disconnected")
+                            || msg.contains("timed out"))
                     {
                         attempts += 1;
                         eprintln!("[m2.5-owner] retry {attempts}/10: relay {msg}; sleep 2s");
