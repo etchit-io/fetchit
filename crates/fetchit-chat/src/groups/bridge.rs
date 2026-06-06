@@ -498,6 +498,57 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Common inputs for owner-emitted `NamedGroupMetadataEvent` variants
+/// that need to be ferried over the bridge. The caller picks the right
+/// `build_*_event` helper before invoking [`dispatch_owner_broadcast`].
+#[derive(Debug)]
+pub struct OwnerBroadcastInputs<'a> {
+    /// x0xd metadata topic for the target group.
+    pub topic: String,
+    /// JSON event body (already signed by the owner's ML-DSA-65 key).
+    pub event_json: serde_json::Value,
+    /// One `(agent_id_bytes, kem_public_key_bytes)` entry per
+    /// recipient. `agent_id_bytes` is the raw 32-byte agent id;
+    /// `kem_pub` must be `KEM_PUBLIC_KEY_LEN` bytes.
+    pub recipients_kem: &'a [([u8; 32], Vec<u8>)],
+    /// Caller's raw 32-byte agent id (stamped as `sender_agent_id`).
+    pub local_agent_id: [u8; 32],
+    /// Caller's raw 32-byte machine id (stamped as `sender_machine_id`).
+    pub local_machine_id: [u8; 32],
+}
+
+/// Build one outbound bridge envelope per recipient. Returns the
+/// outbox-ready [`OutboundEnvelope`]s; the caller pushes them through
+/// the existing relay-client send path.
+///
+/// # Errors
+/// Surfaces any AEAD / KEM / signing error from [`seal_bridge_wrapper`]
+/// or [`build_bridge_outbox`].
+pub async fn dispatch_owner_broadcast<S>(
+    signer: &S,
+    inputs: &OwnerBroadcastInputs<'_>,
+) -> Result<Vec<OutboundEnvelope>>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let payload_b64 = encode_payload_b64(&inputs.event_json)?;
+    let mut out = Vec::with_capacity(inputs.recipients_kem.len());
+    for (aid, kem_pub) in inputs.recipients_kem {
+        let env = build_bridge_outbox(
+            aid,
+            kem_pub,
+            inputs.topic.clone(),
+            payload_b64.clone(),
+            &inputs.local_agent_id,
+            &inputs.local_machine_id,
+            signer,
+        )
+        .await?;
+        out.push(env);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -880,5 +931,37 @@ mod tests {
         let too_new = now + BRIDGE_FRESHNESS_WINDOW_MS + 1;
         let err = check_bridge_event_freshness(too_new, now).unwrap_err();
         assert!(matches!(err, ChatError::Invalid(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_owner_broadcast_fans_out_one_envelope_per_recipient() {
+        let (kem_pub_a, _) = kem_keygen().unwrap();
+        let (kem_pub_b, _) = kem_keygen().unwrap();
+        let aid_a = [0xaau8; 32];
+        let aid_b = [0xbbu8; 32];
+        let local_aid = [0x01u8; 32];
+        let local_machine = [0x02u8; 32];
+        let inputs = OwnerBroadcastInputs {
+            topic: "x0x.named_group.metadata.gid".to_owned(),
+            event_json: serde_json::json!({ "event": "member_removed", "agent_id": "x" }),
+            recipients_kem: &[(aid_a, kem_pub_a), (aid_b, kem_pub_b)],
+            local_agent_id: local_aid,
+            local_machine_id: local_machine,
+        };
+        let envelopes = dispatch_owner_broadcast(&StubSigner, &inputs)
+            .await
+            .unwrap();
+        assert_eq!(envelopes.len(), 2);
+        for env in &envelopes {
+            assert_eq!(
+                env.envelope.kind,
+                EnvelopeKind::X0xdGroupMetadataEvent,
+                "kind must be X0xdGroupMetadataEvent"
+            );
+            assert!(!env.envelope.ciphertext.is_empty());
+            assert_eq!(env.envelope.sender_agent_id.as_bytes(), &local_aid);
+        }
+        assert_eq!(envelopes[0].recipient_agent_id.as_bytes(), &aid_a);
+        assert_eq!(envelopes[1].recipient_agent_id.as_bytes(), &aid_b);
     }
 }
