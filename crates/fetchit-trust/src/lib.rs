@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod consumer;
 pub mod error;
 pub mod server;
 pub mod signer;
@@ -17,8 +18,11 @@ pub mod storage;
 pub mod types;
 
 pub use config::ServerConfig;
+pub use consumer::{signing_bytes, verify_signature, VerifiedDenylist};
 pub use error::TrustError;
 pub use server::Server;
 pub use signer::IssuerSigner;
 pub use storage::Storage;
-pub use types::{DenylistEntry, DenylistResponse, EntryKind, Report, ReportKind, TargetIdentity};
+pub use types::{
+    DenylistEntry, DenylistResponse, DenylistToSign, EntryKind, Report, ReportKind, TargetIdentity,
+};

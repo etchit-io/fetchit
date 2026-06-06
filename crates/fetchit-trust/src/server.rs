@@ -99,13 +99,7 @@ struct ReportSubmit {
     reporter_agent_id_hex: Option<String>,
 }
 
-#[derive(Serialize)]
-struct DenylistToSign<'a> {
-    etag: &'a str,
-    generated_at_ms: u64,
-    kind: EntryKind,
-    entries: &'a [DenylistEntry],
-}
+use crate::types::DenylistToSign;
 
 async fn health(State(state): State<Arc<ServerState>>) -> Json<Health> {
     Json(Health {

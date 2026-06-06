@@ -99,6 +99,24 @@ pub struct DenylistResponse {
     pub issuer_key_id: String,
 }
 
+/// Canonical signing payload for [`DenylistResponse`].
+///
+/// Both the server-side signer and the consumer-side verifier
+/// construct this from the same field set + postcard-encode it.
+/// Borrowing keeps the server's hot path zero-copy; consumers
+/// reconstruct it from a deserialized [`DenylistResponse`].
+#[derive(Serialize)]
+pub struct DenylistToSign<'a> {
+    /// Mirrors [`DenylistResponse::etag`].
+    pub etag: &'a str,
+    /// Mirrors [`DenylistResponse::generated_at_ms`].
+    pub generated_at_ms: u64,
+    /// Mirrors [`DenylistResponse::kind`].
+    pub kind: EntryKind,
+    /// Mirrors [`DenylistResponse::entries`].
+    pub entries: &'a [DenylistEntry],
+}
+
 /// Health endpoint payload.
 #[derive(Debug, Serialize)]
 pub struct Health {
