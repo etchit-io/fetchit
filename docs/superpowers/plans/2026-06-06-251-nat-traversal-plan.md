@@ -44,8 +44,8 @@ Additionally upstream emits `PolicyUpdated`, `MemberBanned`,
 the existing `EnvelopeKind::X0xdGroupMetadataEvent` wire (the M2.5
 bridge already accepts arbitrary JSON via `X0xdGroupMetadataEventWrapper`).
 
-Source: `/home/josh/Desktop/x0x/src/bin/x0xd.rs:5768-5830` for the
-enum definition, `/home/josh/Desktop/x0x/src/groups/state_commit.rs:269`
+Source: `saorsa-labs/x0x:src/bin/x0xd.rs:5768-5830 @ 91951a5` for the
+enum definition, `saorsa-labs/x0x:src/groups/state_commit.rs:269 @ 91951a5`
 for `GroupStateCommit`, `crates/fetchit-relay-proto/src/envelope.rs:77-99`
 for the existing bridge wire.
 
@@ -993,7 +993,7 @@ it.
 
 Run: `cargo test -p fetchit-chat dispatch::tests::inbound_x0xd_metadata_event_routes_all_owner_broadcast_variants`
 
-If the dispatch path hardcodes the `"member_joined"` discriminator, the test will fail until you loosen the discriminator check to allow any of the five new variants (route opaquely if upstream accepts opaque events; verify against `/home/josh/Desktop/x0x/src/bin/x0xd.rs` `apply_named_group_metadata_event` to confirm it routes by `event` field).
+If the dispatch path hardcodes the `"member_joined"` discriminator, the test will fail until you loosen the discriminator check to allow any of the five new variants (route opaquely if upstream accepts opaque events; verify against `<local-clone-of-saorsa-labs/x0x>/src/bin/x0xd.rs` `apply_named_group_metadata_event` to confirm it routes by `event` field).
 
 - [ ] **Step 4: Workspace gate**.
 
@@ -1512,6 +1512,14 @@ git -c user.email='59794857+josh-clsn@users.noreply.github.com' \
 //! that carries David's 63b5c63b Welcome-retry fix). Once the local
 //! binary catches up, callers short-circuit to x0xd's native Welcome
 //! flow.
+//!
+//! Asymmetric by design: only the JOINER side gates against this
+//! version threshold. The OWNER side responds unconditionally to a
+//! `WelcomeBlobRequest` envelope it receives, because the owner has
+//! no way to know which version the joiner is running and a stray
+//! response is harmless (the joiner just ignores it if its x0xd
+//! already accepted the native Welcome). Do not add owner-side
+//! gating here.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -1663,14 +1671,14 @@ as a sibling step (`Task B5a`) and stub them with `unimplemented!()`
 until the upstream endpoints are confirmed via:
 
 ```bash
-grep -nE "pending-welcome|join-from|/groups/join" /home/josh/Desktop/x0x/src/bin/x0xd.rs
+grep -nE "pending-welcome|join-from|/groups/join" <local-clone-of-saorsa-labs/x0x>/src/bin/x0xd.rs
 ```
 
 For v1.0, if `join-from-bridged-blob` does not exist upstream, route
 via the existing `/groups/join` endpoint and pass the `treekem_welcome_b64`
 as the legacy inline-Welcome field (the upstream `MemberAdded`
 fallback path already accepts inline Welcomes; see
-`/home/josh/Desktop/x0x/src/bin/x0xd.rs:7960-7990` for the
+`saorsa-labs/x0x:src/bin/x0xd.rs:7960-7990 @ 91951a5` for the
 `treekem_welcome_b64` field on `MemberAdded`).
 
 - [ ] **Step 2: Add an integration test that round-trips through
