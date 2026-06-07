@@ -20,6 +20,10 @@ use fetchit_relay_proto::TransitEnvelope;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+mod nonce_dedup;
+
+pub use nonce_dedup::NonceDedup;
+
 /// Out-of-band hint to the router about whether a given transport
 /// should be attempted for a recipient right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -40,6 +40,7 @@ hex.workspace = true
 hkdf.workspace = true
 keyring.workspace = true
 log.workspace = true
+lru.workspace = true
 postcard.workspace = true
 rand.workspace = true
 reqwest.workspace = true

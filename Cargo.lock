@@ -2940,6 +2940,7 @@ dependencies = [
  "hkdf",
  "keyring",
  "log",
+ "lru",
  "mdns-sd",
  "postcard",
  "rand 0.8.6",

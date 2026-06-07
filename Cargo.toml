@@ -78,6 +78,7 @@ argon2 = "0.5"
 directories = "5"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tempfile = "3.13"
+lru = "0.16"
 
 [profile.release]
 lto = "thin"
