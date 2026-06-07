@@ -38,6 +38,12 @@ pub struct StoreLayout {
     /// `<data_dir>/user_manifests/` — populated by the multi-device
     /// build; created here for forward compatibility.
     pub user_manifests_dir: PathBuf,
+    /// `<data_dir>/fedi/` — actor identities for the M4 fediverse
+    /// bridge. Lives as a sibling of the chat dirs (not nested inside
+    /// `conversations/`) so the "compromise scope = bridge posting
+    /// only, chat unaffected" boundary is visibly enforced on disk
+    /// too. See M4 plan decision 1.1.
+    pub fedi_dir: PathBuf,
 }
 
 impl StoreLayout {
@@ -50,11 +56,13 @@ impl StoreLayout {
         let contacts_dir = root.join("contacts");
         let conversations_dir = root.join("conversations");
         let user_manifests_dir = root.join("user_manifests");
+        let fedi_dir = root.join("fedi");
         for dir in [
             &root,
             &contacts_dir,
             &conversations_dir,
             &user_manifests_dir,
+            &fedi_dir,
         ] {
             fs::create_dir_all(dir)?;
             #[cfg(unix)]
@@ -70,6 +78,7 @@ impl StoreLayout {
             contacts_dir,
             conversations_dir,
             user_manifests_dir,
+            fedi_dir,
         })
     }
 
@@ -84,6 +93,17 @@ impl StoreLayout {
     pub fn conversation_path(&self, group_id_hex: &str) -> PathBuf {
         self.conversations_dir
             .join(format!("{group_id_hex}.json.enc"))
+    }
+
+    /// File path for a persisted fediverse actor identity, keyed by
+    /// handle local-part (e.g. `"josh"` for `@josh@etchit.io`).
+    ///
+    /// Encrypted on disk via the same chat-identity-derived vault key
+    /// as conversation vaults; the `.json.enc` suffix marks it
+    /// distinct from plaintext card files.
+    #[must_use]
+    pub fn actor_identity_path(&self, handle: &str) -> PathBuf {
+        self.fedi_dir.join(format!("{handle}.json.enc"))
     }
 }
 
@@ -144,6 +164,7 @@ mod tests {
         assert!(layout.contacts_dir.exists());
         assert!(layout.conversations_dir.exists());
         assert!(layout.user_manifests_dir.exists());
+        assert!(layout.fedi_dir.exists());
     }
 
     #[test]
@@ -152,6 +173,34 @@ mod tests {
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
         let p = layout.contact_path("abc123");
         assert!(p.to_string_lossy().ends_with("abc123.json"));
+    }
+
+    #[test]
+    fn actor_identity_path_uses_handle_under_fedi_dir() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let p = layout.actor_identity_path("josh");
+        assert!(p.starts_with(&layout.fedi_dir));
+        assert!(p.to_string_lossy().ends_with("josh.json.enc"));
+    }
+
+    #[test]
+    fn fedi_dir_is_sibling_of_chat_dirs() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        assert_eq!(layout.fedi_dir.parent(), Some(layout.root.as_path()));
+        assert_eq!(layout.contacts_dir.parent(), Some(layout.root.as_path()));
+        assert_ne!(layout.fedi_dir, layout.conversations_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fedi_dir_is_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let mode = fs::metadata(&layout.fedi_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
