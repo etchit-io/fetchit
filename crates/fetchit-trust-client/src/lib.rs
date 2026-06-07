@@ -17,3 +17,5 @@ mod index;
 
 pub use consumer::{BlockEvent, DenylistConsumer, TrustError};
 pub use http::HttpClient;
+#[cfg(feature = "reqwest")]
+pub use http::ReqwestClient;
