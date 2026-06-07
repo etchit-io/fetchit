@@ -39,12 +39,6 @@ jobs:
             patchelf \
             libsoup-3.0-dev
 
-      - name: Cache x0x build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ~/x0x
-          cache-on-failure: true
-
       - name: Cache fetchit-desktop build
         uses: Swatinem/rust-cache@v2
         with:
@@ -56,6 +50,17 @@ jobs:
           git clone https://github.com/saorsa-labs/x0x "$HOME/x0x"
           cd "$HOME/x0x"
           git checkout "$X0XD_PIN_SHA"
+
+      # Cache after clone so Swatinem can hash the freshly-checked-out
+      # Cargo.lock when it computes the cache key. With the opposite
+      # order the restore-time key uses a fallback (no lock on disk)
+      # but the save-time key uses the lock, the two diverge, and the
+      # cache never hits across runs.
+      - name: Cache x0x build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ~/x0x
+          cache-on-failure: true
 
       - name: Build x0xd
         run: |

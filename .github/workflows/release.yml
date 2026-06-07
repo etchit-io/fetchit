@@ -277,8 +277,7 @@ jobs:
       # Clone before Swatinem so Cargo.lock is on disk when the cache
       # restore step computes its key; otherwise the restore key is
       # empty/fallback and never matches the save key (cache miss every
-      # run). This is the one place where bundled-x0xd.yml has the
-      # opposite order; left as a follow-up cleanup over there.
+      # run).
       - name: Clone pinned saorsa-labs/x0x
         shell: bash
         run: |
