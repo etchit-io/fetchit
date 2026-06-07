@@ -7,6 +7,7 @@
 //! that both the chat-side signer and any verifier (fetch>it node or
 //! third-party PQ-aware bridge) must agree on, byte-for-byte.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Domain separator for the attestation signing input. Prefixed to the
@@ -23,13 +24,45 @@ pub const DOMAIN_SEPARATOR: &[u8] = b"fetchit-fedi-actor-attestation-v1";
 /// The signed bytes are produced by [`signing_input`] from the same
 /// `(handle, actor_url, agent_id_hex, rsa_pubkey_der)` tuple that the
 /// chat-side `mint_actor_identity` builds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// # Wire representation
+///
+/// In-memory the byte fields are raw `Vec<u8>`. When serialised (to
+/// the on-disk fedi vault or to the Actor JSON-LD `publicKey`
+/// extension), both fields are emitted as base64 strings via the
+/// [`b64`] serde-with helper — one canonical encoding everywhere the
+/// attestation crosses a wire or a disk boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MlDsaAttestation {
     /// ML-DSA-65 public key bytes (raw, not encoded). The chat-identity
     /// pubkey under which the signature verifies.
+    #[serde(with = "b64")]
     pub ml_dsa_pubkey: Vec<u8>,
     /// ML-DSA-65 signature over [`signing_input`] of the actor fields.
+    #[serde(with = "b64")]
     pub signature: Vec<u8>,
+}
+
+/// Serde-with helper that encodes `Vec<u8>` as base64 strings on the
+/// wire (and at rest) while keeping the in-memory type as raw bytes.
+///
+/// Uses the URL-safe-padded `base64::engine::general_purpose::STANDARD`
+/// alphabet — the standard `ActivityPub` HTTP-Signatures + Mastodon
+/// `publicKeyPem` convention.
+mod b64 {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        STANDARD.encode(bytes).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl MlDsaAttestation {
@@ -304,5 +337,31 @@ mod tests {
         let att = MlDsaAttestation::new(pk.clone(), sig.clone());
         assert_eq!(att.ml_dsa_pubkey, pk);
         assert_eq!(att.signature, sig);
+    }
+
+    #[test]
+    fn attestation_serializes_byte_fields_as_base64_strings() {
+        // FROZEN wire shape. Vault files + JSON-LD `publicKey`
+        // extensions both rely on this exact encoding.
+        let att = MlDsaAttestation::new(vec![0xDE, 0xAD, 0xBE, 0xEF], vec![0x01, 0x02, 0x03]);
+        let json = serde_json::to_string(&att).unwrap();
+        assert_eq!(json, r#"{"ml_dsa_pubkey":"3q2+7w==","signature":"AQID"}"#);
+    }
+
+    #[test]
+    fn attestation_round_trips_through_json() {
+        let att = MlDsaAttestation::new(vec![0x11; 32], vec![0x22; 64]);
+        let json = serde_json::to_string(&att).unwrap();
+        let recovered: MlDsaAttestation = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered, att);
+    }
+
+    #[test]
+    fn attestation_rejects_invalid_base64_on_deserialize() {
+        // Garbage in the byte fields should produce a parser error,
+        // not a corrupt attestation.
+        let bad = r#"{"ml_dsa_pubkey":"!!!not-valid-b64!!!","signature":"AQID"}"#;
+        let result: Result<MlDsaAttestation, _> = serde_json::from_str(bad);
+        assert!(result.is_err());
     }
 }
