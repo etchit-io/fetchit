@@ -35,6 +35,7 @@ fetchit-relay-client = { path = "../fetchit-relay-client" }
 flate2 = "1.0"
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust = { path = "../fetchit-trust" }
+fetchit-trust-client = { path = "../fetchit-trust-client" }
 x0xd-client = { path = "../x0xd-client" }
 futures-util.workspace = true
 hex.workspace = true

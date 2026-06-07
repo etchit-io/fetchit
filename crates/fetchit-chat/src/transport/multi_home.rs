@@ -26,6 +26,14 @@
 //! D5 hard-blocks outbound sends to a denylisted `AgentId`: the
 //! symmetric half of D3's `RelayUrl` check. The inbound `AgentId`
 //! block lives in `dispatch.rs` (D7).
+//!
+//! D6 closes the mid-session reactivity loop: when a `BlockEvent`
+//! arrives on the optional [`fetchit_trust_client::BlockEvent`]
+//! subscriber with `kind = RelayUrl`, any active slot 1/2 whose
+//! `relay_url` is in `added` gets dropped. Slot 0 is immune — the
+//! user's chosen primary is a Settings surface concern (G1 banner),
+//! not a transport drop. Subsequent sends naturally re-allocate via
+//! the LRU path.
 
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -201,6 +209,12 @@ impl MultiHomeTransport {
     /// immediately to `primary_url`; slots 1 and 2 stay empty until
     /// D3's outbound path opens them.
     ///
+    /// Equivalent to
+    /// [`Self::new_with_subscriber`]`(primary_url, denylist, on_inbound, builder, None)`:
+    /// no mid-session denylist reactivity. Production callers use
+    /// `new_with_subscriber` to wire the
+    /// [`fetchit_trust_client::DenylistConsumer`] broadcast.
+    ///
     /// # Errors
     /// Returns [`TransportError::BuildFailed`] when the `builder`
     /// cannot open slot 0 against `primary_url`.
@@ -209,6 +223,25 @@ impl MultiHomeTransport {
         denylist: Arc<dyn fetchit_trust::DenylistQuery>,
         on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
         builder: Arc<dyn RelayBuilder>,
+    ) -> Result<Self, TransportError> {
+        Self::new_with_subscriber(primary_url, denylist, on_inbound, builder, None).await
+    }
+
+    /// Construct a multi-home transport with an optional
+    /// [`fetchit_trust_client::BlockEvent`] subscriber. When `Some`,
+    /// a background task drains the channel and drops any active slot
+    /// 1/2 whose `relay_url` appears in a `RelayUrl` block's `added`
+    /// list. Slot 0 is immune — see module docs.
+    ///
+    /// # Errors
+    /// Returns [`TransportError::BuildFailed`] when the `builder`
+    /// cannot open slot 0 against `primary_url`.
+    pub async fn new_with_subscriber(
+        primary_url: String,
+        denylist: Arc<dyn fetchit_trust::DenylistQuery>,
+        on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
+        builder: Arc<dyn RelayBuilder>,
+        block_events: Option<tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>>,
     ) -> Result<Self, TransportError> {
         let handle = builder.build(&primary_url).await?;
         let primary_slot = Slot {
@@ -220,14 +253,74 @@ impl MultiHomeTransport {
         let dedup = NonceDedup::new(10_000, std::time::Duration::from_secs(300));
         let inbox_dedup = Arc::new(std::sync::Mutex::new(dedup));
         Self::spawn_fan_in_for_slot(handle, Arc::clone(&inbox_dedup), Arc::clone(&on_inbound));
-        Ok(Self {
+        let mh = Self {
             primary_url,
             builder,
             slots: Arc::new(RwLock::new(initial_slots)),
             inbox_dedup,
             denylist,
             on_inbound,
-        })
+        };
+        if let Some(rx) = block_events {
+            mh.spawn_denylist_subscriber(rx);
+        }
+        Ok(mh)
+    }
+
+    /// Drain a [`fetchit_trust_client::BlockEvent`] broadcast and drop
+    /// any active slot 1/2 whose `relay_url` matches a `RelayUrl`
+    /// kind's `added` list. Slot 0 stays — see module docs.
+    fn spawn_denylist_subscriber(
+        &self,
+        mut rx: tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>,
+    ) {
+        let slots = Arc::clone(&self.slots);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if !matches!(event.kind, fetchit_trust::EntryKind::RelayUrl)
+                            || event.added.is_empty()
+                        {
+                            continue;
+                        }
+                        let mut guard = match slots.write() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                log::warn!(
+                                    "multi_home slots lock poisoned during denylist drop: {e}",
+                                );
+                                continue;
+                            }
+                        };
+                        // Slots 1 + 2 only: slot 0 is the user's chosen
+                        // primary and a denylist hit there is a Settings
+                        // concern (G1 banner), not a transport drop.
+                        for slot in guard.iter_mut().skip(1) {
+                            let drop_it = slot
+                                .as_ref()
+                                .is_some_and(|s| event.added.iter().any(|u| u == &s.relay_url));
+                            if drop_it {
+                                if let Some(s) = slot.as_ref() {
+                                    log::info!(
+                                        "multi_home dropping slot: relay denylisted mid-session: url={}",
+                                        s.relay_url,
+                                    );
+                                }
+                                *slot = None;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Slow consumer; missed events. At worst we'll
+                        // miss a single denylist transition for the
+                        // active slot; the next outbound send re-checks
+                        // `is_blocked` against the cached snapshot.
+                    }
+                }
+            }
+        });
     }
 
     /// Send `envelope` to recipient `to` via the first relay in
@@ -863,6 +956,156 @@ mod tests {
             count.load(Ordering::SeqCst),
             1,
             "duplicate (sender, nonce) across slots dedups to one",
+        );
+    }
+
+    /// D6: a mid-session `RelayUrl` block event drops the matching
+    /// slot 1/2 (slot 0 is immune). Subsequent sends would naturally
+    /// re-allocate via the LRU path; the assertion here is only that
+    /// the active slot got cleared.
+    #[tokio::test]
+    async fn mid_session_relay_block_drops_active_slot() {
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+            Some(rx),
+        )
+        .await
+        .unwrap();
+
+        // Open slot 1 via outbound send so there's something to drop.
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://later-blocked.test/v1/ws"),
+        )
+        .await
+        .unwrap();
+        assert!(mh.slots_for_test()[1].is_some());
+
+        // Emit a block event for the slot 1 URL.
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://later-blocked.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+
+        // Let the subscriber task process.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let slots = mh.slots_for_test();
+        let urls: Vec<&str> = slots
+            .iter()
+            .filter_map(|s| s.as_ref().map(|x| x.relay_url.as_str()))
+            .collect();
+        assert!(
+            !urls.contains(&"wss://later-blocked.test/v1/ws"),
+            "slot to denylisted relay should have been dropped, got {urls:?}",
+        );
+        assert!(
+            urls.contains(&"wss://primary.test/v1/ws"),
+            "slot 0 stays — it's the primary",
+        );
+    }
+
+    /// D6: slot 0 (primary) is immune from the mid-session drop even
+    /// when its URL appears in the block event. Surfacing a denylisted
+    /// primary is a Settings concern (G1 banner), not a transport drop.
+    #[tokio::test]
+    async fn mid_session_relay_block_does_not_drop_slot_zero() {
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+            Some(rx),
+        )
+        .await
+        .unwrap();
+
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://primary.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            mh.slots_for_test()[0]
+                .as_ref()
+                .map(|s| s.relay_url.as_str()),
+            Some("wss://primary.test/v1/ws"),
+            "slot 0 must survive a denylist of its own URL",
+        );
+    }
+
+    /// D6: a non-`RelayUrl` block event (`AgentId`, `XorName`, `ActorUrl`)
+    /// does NOT touch any slot. Slot drops are scoped to
+    /// `EntryKind::RelayUrl` only — the `AgentId` block path is the
+    /// outbound `send` guard (D5).
+    #[tokio::test]
+    async fn mid_session_non_relay_block_does_not_touch_slots() {
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+            Some(rx),
+        )
+        .await
+        .unwrap();
+
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://secondary.test/v1/ws"),
+        )
+        .await
+        .unwrap();
+        let before: Vec<String> = mh
+            .slots_for_test()
+            .iter()
+            .filter_map(|s| s.as_ref().map(|x| x.relay_url.clone()))
+            .collect();
+
+        // Same URL value, but kind=AgentId — must not match the slot
+        // drop. (The hex shape is wrong for an AgentId, but the
+        // subscriber filters on kind, not on value validity.)
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::AgentId,
+            added: vec!["wss://secondary.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let after: Vec<String> = mh
+            .slots_for_test()
+            .iter()
+            .filter_map(|s| s.as_ref().map(|x| x.relay_url.clone()))
+            .collect();
+        assert_eq!(
+            before, after,
+            "non-RelayUrl block kinds must not drop any slot",
         );
     }
 
