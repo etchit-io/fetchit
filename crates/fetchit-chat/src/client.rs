@@ -595,21 +595,23 @@ impl Client {
             }
             return;
         }
-        // M3 federation core: drop inbound user-content from denylisted
-        // senders BEFORE the decrypt path runs. Gate sits AFTER the
-        // bridge / Welcome dispatchers so group-state propagation and
-        // invite mechanics keep working even when the sender is on
-        // the list (those flows would otherwise leave the group
-        // membership state divergent across the federation). Sender
-        // identity comes from the signed `sender_agent_id`, so the
-        // relay can't help an attacker bypass this by spoofing.
-        if let Some(denylist) = self.denylist.as_ref() {
-            let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
-            if denylist.is_blocked(&sender_hex).await {
-                self.denylist_dropped_inbound
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return;
-            }
+        // M3 D7: drop inbound user-content from denylisted senders
+        // BEFORE the decrypt path runs. Gate sits AFTER the bridge /
+        // Welcome dispatchers so group-state propagation and invite
+        // mechanics keep working even when the sender is on the list
+        // (those flows would otherwise leave the group membership
+        // state divergent across the federation). Sender identity
+        // comes from the signed `sender_agent_id`, so the relay can't
+        // help an attacker bypass this by spoofing.
+        //
+        // Silent drop (no error surfaced) is deliberate — mirrors the
+        // `ChatError::Denied` doc contract, and avoids leaking a
+        // "you're blocked" signal that an attacker could correlate
+        // against a candidate sender set.
+        if should_drop_inbound_from_denylisted(self.denylist.as_ref(), &transit).await {
+            self.denylist_dropped_inbound
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
         }
         if messages::is_private_group_envelope(&transit) {
             let group_id_hex = transit
@@ -1070,6 +1072,27 @@ impl std::fmt::Debug for Client {
 /// [`ChatError::MessageTransport`]; an outdated daemon surfaces as
 /// [`ChatError::Invalid`] with a message that names both the live
 /// version and the upgrade target.
+/// M3 D7 inbound denylist gate. Lifted out of
+/// [`Client::default_dispatch_one`] so it can be unit-tested without
+/// standing up a full [`Client`] (which would require an x0xd
+/// version probe, a relay handshake, and a populated chat vault).
+///
+/// Returns `true` when the consumer is wired AND the envelope's
+/// signed `sender_agent_id` hashes to a 64-hex value currently on
+/// the denylist. `false` when the consumer is absent (ungated), the
+/// sender is allowed, or the consumer hasn't refreshed yet (the
+/// snapshot fails open — see [`crate::denylist::DenylistCheck`]).
+async fn should_drop_inbound_from_denylisted(
+    denylist: Option<&Arc<dyn crate::denylist::DenylistCheck>>,
+    transit: &fetchit_relay_proto::TransitEnvelope,
+) -> bool {
+    let Some(denylist) = denylist else {
+        return false;
+    };
+    let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+    denylist.is_blocked(&sender_hex).await
+}
+
 /// Best-effort announce of this agent's `agent_id -> public_key`
 /// binding to x0xd's gossip identity store via `POST /announce`.
 /// Runs once at chat-flow startup so any subsequent
@@ -2125,5 +2148,83 @@ mod tests {
         // A literal space breaks URL parsing.
         let err = build_actor_url("not a domain", "josh").unwrap_err();
         assert!(format!("{err}").contains("actor url"));
+    }
+
+    // ── M3 D7 inbound denylist gate ───────────────────────────────
+
+    /// Build a minimal transit envelope whose `sender_agent_id` is
+    /// the given 32-byte fingerprint. Every other field carries a
+    /// stable default — the D7 gate only consults `sender_agent_id`,
+    /// so the surrounding shape is fixture-only.
+    fn d7_envelope(sender: [u8; 32]) -> fetchit_relay_proto::TransitEnvelope {
+        use fetchit_relay_proto::{
+            AgentId as RelayAgentId, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION,
+        };
+        TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes(sender),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 1_700_000_000_000,
+            epoch: 0,
+            ciphertext: vec![0u8; 16],
+            nonce: vec![0u8; 12],
+            kem_ciphertext: vec![0u8; 32],
+            sender_signature: vec![0u8; 64],
+        }
+    }
+
+    /// D7: with no denylist wired, every inbound is accepted — the
+    /// gate is ungated by design (LAN-only deployments, M0 startup
+    /// before the consumer's first refresh).
+    #[tokio::test]
+    async fn d7_should_drop_inbound_returns_false_when_denylist_absent() {
+        let env = d7_envelope([0xaa; 32]);
+        assert!(!super::should_drop_inbound_from_denylisted(None, &env).await);
+    }
+
+    /// D7 happy path: a denylisted sender's envelope returns `true`
+    /// so the caller can silently drop + bump the counter.
+    #[tokio::test]
+    async fn d7_should_drop_inbound_returns_true_for_denylisted_sender() {
+        let sender_bytes = [0xbb; 32];
+        let blocked_hex = hex::encode(sender_bytes);
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> =
+            Arc::new(crate::denylist::tests::StaticDenylist::new([blocked_hex]));
+        let env = d7_envelope(sender_bytes);
+        assert!(super::should_drop_inbound_from_denylisted(Some(&denylist), &env).await);
+    }
+
+    /// D7: an envelope from a non-blocked sender flows through even
+    /// when the denylist is non-empty — the check is value-scoped,
+    /// not kind-scoped (mirrors the D5 outbound symmetry test).
+    #[tokio::test]
+    async fn d7_should_drop_inbound_returns_false_for_allowed_sender() {
+        let blocked_bytes = [0xcc; 32];
+        let allowed_bytes = [0xdd; 32];
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> = Arc::new(
+            crate::denylist::tests::StaticDenylist::new([hex::encode(blocked_bytes)]),
+        );
+        let env = d7_envelope(allowed_bytes);
+        assert!(!super::should_drop_inbound_from_denylisted(Some(&denylist), &env).await);
+    }
+
+    /// D7: the gate keys on the lowercase 64-hex of the 32-byte
+    /// fingerprint — exactly the format the published denylist
+    /// emits. A consumer seeded with the canonical hex MUST match.
+    #[tokio::test]
+    async fn d7_should_drop_inbound_uses_lowercase_64_hex_key() {
+        let sender_bytes = [0x10; 32];
+        let canonical_hex = hex::encode(sender_bytes);
+        assert_eq!(canonical_hex.len(), 64);
+        assert!(canonical_hex
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> =
+            Arc::new(crate::denylist::tests::StaticDenylist::new([canonical_hex]));
+        let env = d7_envelope(sender_bytes);
+        assert!(super::should_drop_inbound_from_denylisted(Some(&denylist), &env).await);
     }
 }

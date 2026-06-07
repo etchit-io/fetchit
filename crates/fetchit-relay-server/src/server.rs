@@ -367,10 +367,7 @@ mod fediverse_inbox_metrics_tests {
         let state = test_server_state(Some(im));
         let body = render_metrics_body(&state);
         // Existing relay-server counter family still present.
-        assert!(
-            body.contains("# HELP"),
-            "expected relay counter HELP lines"
-        );
+        assert!(body.contains("# HELP"), "expected relay counter HELP lines");
         // Inbox family spliced in.
         assert!(
             body.contains("fedi_inbox_accepted_total 1"),
