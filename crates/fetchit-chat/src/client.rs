@@ -1579,6 +1579,10 @@ impl Client {
 }
 
 fn build_actor_url(domain: &str, handle: &str) -> Result<url::Url> {
+    // TODO(M5): domain becomes user-configurable. Add a domain-shape
+    // validator (similar to validate_actor_handle) before
+    // multi-tenant launch. M4 only ships with `etchit.io`, so
+    // url::Url::parse failure is sufficient.
     let raw = format!("https://{domain}/actors/{handle}");
     raw.parse()
         .map_err(|e| ChatError::Invalid(format!("actor url {raw:?}: {e}")))
