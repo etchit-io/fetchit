@@ -3,6 +3,8 @@
 use crate::auth::AuthService;
 use crate::capability::CapabilityResolver;
 use crate::config::ServerConfig;
+#[cfg(feature = "fediverse-inbox")]
+use crate::inbox::InboxMetrics;
 use crate::metrics::Metrics;
 use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
@@ -42,12 +44,22 @@ pub struct ServerState {
     /// In-RAM profile-index map (`agent_id` → latest record). See
     /// `docs/profile-manifest-v1.md` § 4 + `docs/qr-pairing-v1.md`.
     pub profiles: Arc<ProfileIndex>,
+    /// Optional shared [`InboxMetrics`] when the relay-server is
+    /// built with `--features fediverse-inbox`. When `Some`, the
+    /// `/v1/metrics` endpoint splices the inbox counter family into
+    /// its output. Callers attach the same `Arc<InboxMetrics>` to
+    /// the inbox handler's `InboxState` so handler increments and
+    /// scrape reads observe the same atomic counters.
+    #[cfg(feature = "fediverse-inbox")]
+    pub inbox_metrics: Option<Arc<InboxMetrics>>,
 }
 
 /// Builder + runner for one relay node.
 pub struct Server {
     config: ServerConfig,
     verifier: Arc<dyn SignatureVerifier>,
+    #[cfg(feature = "fediverse-inbox")]
+    inbox_metrics: Option<Arc<InboxMetrics>>,
 }
 
 impl Server {
@@ -57,6 +69,8 @@ impl Server {
         Self {
             config,
             verifier: Arc::new(MlDsa65Verifier::new()),
+            #[cfg(feature = "fediverse-inbox")]
+            inbox_metrics: None,
         }
     }
 
@@ -64,6 +78,20 @@ impl Server {
     #[must_use]
     pub fn with_verifier(mut self, verifier: Arc<dyn SignatureVerifier>) -> Self {
         self.verifier = verifier;
+        self
+    }
+
+    /// Attach a shared [`InboxMetrics`] so `/v1/metrics` also renders
+    /// the `fedi_inbox_*_total` counter family. The same `Arc` should
+    /// be threaded into the inbox handler's
+    /// `crate::inbox::InboxState::metrics` so handler increments and
+    /// scrape reads observe the same atomics.
+    ///
+    /// Only available when the `fediverse-inbox` feature is enabled.
+    #[cfg(feature = "fediverse-inbox")]
+    #[must_use]
+    pub fn with_inbox_metrics(mut self, metrics: Arc<InboxMetrics>) -> Self {
+        self.inbox_metrics = Some(metrics);
         self
     }
 
@@ -90,6 +118,8 @@ impl Server {
             metrics,
             profiles: ProfileIndex::new(),
             config: self.config,
+            #[cfg(feature = "fediverse-inbox")]
+            inbox_metrics: self.inbox_metrics,
         });
         let router = Router::new()
             .route("/v1/health", get(health))
@@ -236,7 +266,7 @@ async fn metrics_handler(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4",
         )],
-        state.metrics.render_prometheus(),
+        render_metrics_body(&state),
     )
 }
 
@@ -252,8 +282,26 @@ async fn metrics_internal_handler(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4",
         )],
-        state.metrics.render_prometheus(),
+        render_metrics_body(&state),
     )
+}
+
+/// Render the full `/v1/metrics` body. Concatenates the existing
+/// relay-server counter family with the inbox counter family when
+/// the `fediverse-inbox` feature is enabled AND a shared
+/// `InboxMetrics` was attached via [`Server::with_inbox_metrics`].
+///
+/// Stage 3.3a (M4) — keeps the metrics-source composition local to
+/// `server.rs` so the inbox module stays a pure observability
+/// producer.
+fn render_metrics_body(state: &ServerState) -> String {
+    #[allow(unused_mut)]
+    let mut body = state.metrics.render_prometheus();
+    #[cfg(feature = "fediverse-inbox")]
+    if let Some(m) = &state.inbox_metrics {
+        body.push_str(&m.render_prometheus());
+    }
+    body
 }
 
 async fn auth_challenge(State(state): State<Arc<ServerState>>) -> Json<AuthChallenge> {
@@ -278,5 +326,91 @@ async fn auth_verify(
                 "authentication failed".to_owned(),
             ))
         }
+    }
+}
+
+#[cfg(all(test, feature = "fediverse-inbox"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod fediverse_inbox_metrics_tests {
+    use super::*;
+    use crate::inbox::{DropReason, InboxMetrics};
+
+    fn test_server_state(inbox_metrics: Option<Arc<InboxMetrics>>) -> Arc<ServerState> {
+        // Build a Server with a minimal config and surface the
+        // ServerState via router().1 — the router itself is dropped.
+        let bind = "127.0.0.1:0".parse().unwrap();
+        let server = Server::new(ServerConfig::defaults(bind, Region::Other("test".into())))
+            .with_verifier(Arc::new(crate::signature::AcceptAllVerifier));
+        let server = match inbox_metrics {
+            Some(m) => server.with_inbox_metrics(m),
+            None => server,
+        };
+        let (_router, state) = server.router();
+        state
+    }
+
+    #[test]
+    fn metrics_body_omits_inbox_section_when_no_metrics_attached() {
+        let state = test_server_state(None);
+        let body = render_metrics_body(&state);
+        assert!(
+            !body.contains("fedi_inbox_"),
+            "inbox section must NOT appear when no InboxMetrics attached:\n{body}"
+        );
+    }
+
+    #[test]
+    fn metrics_body_includes_inbox_section_when_attached() {
+        let im = Arc::new(InboxMetrics::new());
+        im.record_accept();
+        im.record_drop(&DropReason::BodyTooLarge);
+        let state = test_server_state(Some(im));
+        let body = render_metrics_body(&state);
+        // Existing relay-server counter family still present.
+        assert!(
+            body.contains("# HELP"),
+            "expected relay counter HELP lines"
+        );
+        // Inbox family spliced in.
+        assert!(
+            body.contains("fedi_inbox_accepted_total 1"),
+            "expected spliced inbox accepted counter:\n{body}"
+        );
+        assert!(
+            body.contains("fedi_inbox_dropped_body_too_large_total 1"),
+            "expected spliced inbox drop counter:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_metrics_endpoint_serves_spliced_body() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let im = Arc::new(InboxMetrics::new());
+        im.record_accept();
+        let bind = "127.0.0.1:0".parse().unwrap();
+        let server = Server::new(ServerConfig::defaults(bind, Region::Other("test".into())))
+            .with_verifier(Arc::new(crate::signature::AcceptAllVerifier))
+            .with_inbox_metrics(im);
+        let (router, _state) = server.router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(status.is_success(), "status was {status}");
+        assert!(body.contains("fedi_inbox_accepted_total 1"));
     }
 }
