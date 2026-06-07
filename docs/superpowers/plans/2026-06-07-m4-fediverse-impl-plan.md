@@ -6,6 +6,15 @@
 - Brainstorm at `docs/superpowers/plans/2026-06-07-m4-fediverse-brainstorm.md` (cross-reviewed by Alice, c581f9e).
 - Q1 ActivityPub HTTPS POSTs ✅, Q2 per-user WebFinger handle + ML-DSA/RSA cosign ✅, Q3 relay-as-inbox with etchit.io fallback ✅. C=Public confirmed by Josh 2026-06-07.
 
+**Decisions locked 2026-06-07 (Alice impl-plan cross-review):**
+- **Q1.1 StoreLayout::fedi_dir** — sibling of `chat_dir`. Visible on-disk compromise-scope boundary.
+- **Q2.1 HTTP Signatures** — RFC 9421 primary; draft-cavage fallback on `400 Bad Request` with cavage shape; 24h per-instance signing-scheme cache. Splits build-sequence into 2.1a + 2.1b.
+- **Q3.1 inbound wire** — `EnvelopeKind::PublicPost` on existing relay-WS (next-free DISC on wire-v3); `dispatch.rs` routes to chat-layer public-feed handler. No new transport surface.
+- **Q4.1 blocked-instance response** — silent `202 Accepted` + counter. Matches Mastodon suspend pattern (no retry, no block-signal). Ops-visible via counter.
+- **[III] per-POST ML-DSA cosig — DROPPED for M4 launch.** The Actor JSON-LD ML-DSA attestation over the RSA pubkey is the authoritative PQ binding. Per-POST ML-DSA header only defends against post-attestation RSA-key compromise, which is documented as a per-actor blast-radius event in `SECURITY.md`. Revisit if a real compromise-scope analysis says otherwise.
+- **[I] Stage 6 split** — 6.1 WebFinger read-path Worker + 6.2 handle-registration write-path API. Claim shape: user signs `{handle, agent_id_hex, actor_url, registered_at_ms}` with their ML-DSA chat-identity key; registry verifies against published identity card.
+- **[V] Stage 5.3 expand** — `subscribe_actor` explicitly does WebFinger-resolve → outbox GET → outbound Follow POST → persist subscription → drain inbound. Not a read-only fetch+cache.
+
 **Architecture:** New `fetchit-fedi` crate (workspace member, NOT a chat-`Transport` impl). Holds the WebFinger client, ActivityPub Actor builder, outbound HTTPS POST delivery with HTTP Signatures (RFC 9421), and the inbound inbox handler. `fetchit-chat` grows ONE additional envelope kind (`PublicPost`) and ONE chat-layer surface that routes `PublicPost`s through the new fedi transport without sharing the existing `Router`/`Transport` plumbing. `fetchit-trust` denylist manifest grows an `EntryKind::ActorUrl` arm — one-line additive change per Alice [A].
 
 **Tech stack:** Existing workspace pins. Rust 2021, MSRV 1.85, `tokio`, `reqwest` (already a dep via `x0xd-client`). New crates: `webfinger` (or hand-roll — confirm pre-spec), `http-signature-normalization`, `rsa` (for cosign-only RSA-2048 keypairs). PQ stays on ML-DSA-65. No `axum` pulled into `fetchit-chat` — the inbox HTTP server lives inside `fetchit-relay-server` (which already runs `axum`) as a new endpoint module.
@@ -100,11 +109,11 @@ pub struct Actor {
 - ML-DSA attestation verifies against the chat-identity ML-DSA pubkey.
 - 100% unit-test coverage on `mint` + `load` + `Actor::to_json_ld`.
 
-**Open question 1.1:** Where does the `StoreLayout` for fedi keys live? Recommendation: a new `StoreLayout::fedi_dir()` sibling of `chat_dir()`, isolated namespace.
+**Decided 1.1 (Alice cross-review):** `StoreLayout::fedi_dir()` is a sibling of `chat_dir()`, isolated namespace. Keeps the "compromise scope = bridge posting only, chat unaffected" risk boundary visibly enforced on disk too — RSA-2048 keys never share a directory with chat-identity ML-DSA material.
 
 ---
 
-## Stage 2 — Outbound HTTPS POST + HTTP Signature cosign
+## Stage 2 — Outbound HTTPS POST + RSA HTTP Signature
 
 Deliver an `Activity` (initially just `Create` of a `Note` representing a `PublicPost`) to a remote actor's inbox.
 
@@ -165,11 +174,12 @@ impl HttpSignatureKey {
 ```
 
 **Acceptance criteria for Stage 2:**
-- Wiremock-based test: POST a sample `Create(Note)` to a mock inbox, assert request shape (`Signature` header structure, `Digest: SHA-256=...`, body verbatim).
+- Wiremock-based test: POST a sample `Create(Note)` to a mock inbox, assert request shape (RFC 9421 `Signature` header structure, `Digest: SHA-256=...`, body verbatim).
 - Round-trip: signature verifies against the published RSA pubkey.
-- ML-DSA cosignature is independently emitted as a header extension (`X-Fetchit-MLDSA-Signature: base64(...)`) — Mastodon ignores, fetch>it verifies.
+- Cavage fallback: on `400 Bad Request` with a cavage-shape error body, retry with draft-cavage normalisation; per-instance signing-scheme preference cached for 24h (eviction TTL, not LRU).
+- The Actor JSON-LD's ML-DSA attestation over the RSA pubkey is the authoritative PQ binding (verified on Actor fetch, not on per-POST receipt). Per-POST `X-Fetchit-MLDSA-Signature` is **NOT** emitted (see Decisions [III]).
 
-**Open question 2.1:** RFC 9421 vs draft-cavage HTTP Signatures. Mastodon ships 2026-vintage builds that speak RFC 9421; older instances still expect draft-cavage. Recommendation: speak both, prefer RFC 9421, fall back if remote signals it. Worth confirming current state via WebFetch on Mastodon's HTTP-Sig docs before coding.
+**Decided 2.1 (Alice [Q2.1] + [IV]):** Speak both RFC 9421 and draft-cavage. RFC 9421 primary; on `400 Bad Request` matching the cavage shape, retry with draft-cavage. Cache the per-instance signing-scheme preference for ~24h to avoid re-probing on every delivery. Two different normalisation rules + header sets = two implementations, ~50/50 effort split. Build sequence breaks 2.1 into 2.1a (RFC 9421 primary) + 2.1b (draft-cavage fallback + capability cache).
 
 ---
 
@@ -218,7 +228,7 @@ Each is its own metric counter:
 - Happy-path test: well-formed POST → 202 Accepted, activity is enqueued for chat-layer delivery.
 - Denylist gate (per Alice [A], extends `EntryKind::ActorUrl`) drops inbound from blocked source actors.
 
-**Open question 3.1:** Where does the inbox enqueue inbound activities? Recommendation: a new `pending_deliveries` mpsc, drained by the chat-layer subscriber surface. The relay-server holds the queue; chat-clients pull via existing relay-WS or a new sibling endpoint. Defer the wire format to Stage 5.
+**Decided 3.1 (Alice [Q3.1] + [II]):** Inbound activities ride the existing relay-WS as a new `EnvelopeKind::PublicPost` (next-free DISC on wire-v3). The relay-server transforms inbox POST → `EnvelopeKind::PublicPost` envelope and adds it to the same out-stream the chat-client already drains. `dispatch.rs` routes the new kind to the chat-layer public-feed handler in Stage 5.3. No new transport surface, no second WS pump in the chat-client, same auth-bound session, same delivery semantics. The relay-server already routes authenticated envelopes to the right session; `PublicPost` is just another EnvelopeKind on that pipe.
 
 ---
 
@@ -289,7 +299,7 @@ Inbox + outbound delivery AND fetchit denylist (`is_blocked_actor`) AND mastodon
 - Mastodon-blocklist consumer test against a fixture from Oliphant's list.
 - Inbox integration test: blocked instance → 403 (or silent 202 + counter, per privacy preference).
 
-**Open question 4.1:** Silent-drop vs `403` for blocked instances? Silent matches the [[two-privacy-contracts]] B-side ethos (no signal to the blocker). `403` is the ActivityPub-conventional response. Recommendation: silent 202 (Mastodon retries on non-2xx; silent acknowledgement makes the block invisible to the source). Counter still fires for ops.
+**Decided 4.1 (Alice [Q4.1]):** Silent `202 Accepted` + counter. Matches Mastodon's suspend pattern — source instance sees delivery succeed, no retry, no block-signal. Per-event reasoning ([[two-privacy-contracts]] B-side ethos of no-signal-to-blocker) plus mechanical reasoning (non-2xx triggers Mastodon's exponential backoff; silent 202 makes the block invisible AND quiet). Counter still fires for ops visibility.
 
 ---
 
@@ -325,8 +335,17 @@ impl Client {
         post: PublicPost,
     ) -> Result<PublishReceipt, ChatError>;
 
-    /// Subscribe to a remote actor's outbox. Inbound posts arrive on
-    /// the same event stream as chat events but tagged as PublicPost.
+    /// Subscribe to a remote actor's outbox. NOT read-only fetch+cache —
+    /// per Alice [V], the ActivityPub Follow flow runs end-to-end:
+    ///
+    ///   1. WebFinger-resolve `handle` → actor URL
+    ///   2. GET actor's outbox URL to confirm subscribability
+    ///   3. POST `Follow` activity to actor's inbox (uses Stage 2 transport)
+    ///   4. Persist subscription state locally (StoreLayout::fedi_dir)
+    ///   5. Drain inbound from PendingDeliveryQueue → public feed
+    ///
+    /// Inbound posts arrive on the same event stream as chat events
+    /// but tagged as `EnvelopeKind::PublicPost` per Decided 3.1.
     pub async fn subscribe_actor(&self, handle: &str) -> Result<(), ChatError>;
 }
 ```
@@ -351,18 +370,58 @@ This is a UI requirement, not a chat-API one. The chat surface returns `Ok` rega
 
 ---
 
-## Stage 6 — WebFinger endpoint on `etchit.io`
+## Stage 6 — WebFinger endpoint + handle-registration on `etchit.io`
 
-The `etchit.io` static-pages site grows a `/.well-known/webfinger` endpoint. Cloudflare Worker (or a Functions endpoint) reads a static `webfinger.json` map keyed by `acct:<handle>@etchit.io`.
+Per Alice [I], Stage 6 has two distinct sub-tasks — a **read path** (Worker returns JRD for known handles) and a **write path** (registration API verifies ML-DSA-signed claims and updates the map). Doing only the read path would force every handle through manual Josh-edits-the-file deploys, which doesn't scale past ~50 users.
+
+### Stage 6.1 — WebFinger read-path Worker
+
+The `etchit.io` static-pages site grows a `/.well-known/webfinger` endpoint. Cloudflare Worker reads a stored `webfinger.json` map keyed by `acct:<handle>@etchit.io`.
 
 **Deliverables:**
-- `etchit-website/.well-known/webfinger.json` — base map for known handles.
-- A Cloudflare Worker (`etchit-website/functions/[[...].js]`) that returns the right JSON for `?resource=acct:<handle>@etchit.io`.
-- Documentation at `docs/FEDIVERSE.md` describing the handle-registration flow.
+- `etchit-website/.well-known/webfinger.json` — base map; initially seeded with maintainer handles.
+- A Cloudflare Worker (`etchit-website/functions/.well-known/webfinger.js`) that returns the right JSON for `?resource=acct:<handle>@etchit.io`.
+- Documentation at `docs/FEDIVERSE.md` describing the handle-registration flow (covers 6.1 + 6.2).
 
-**Acceptance criteria for Stage 6:**
+**Acceptance criteria for Stage 6.1:**
 - `curl https://etchit.io/.well-known/webfinger?resource=acct:josh@etchit.io` returns a valid WebFinger JRD.
 - Cross-check: a vanilla Mastodon instance can resolve `@josh@etchit.io` to the actor URL.
+
+### Stage 6.2 — handle-registration API (write path)
+
+A server-side function (Cloudflare Worker with KV-backed state, or a small Workers/D1 backend) that accepts ML-DSA-signed handle claims and updates the webfinger map.
+
+**Claim shape:**
+
+```jsonc
+// POST https://etchit.io/api/register-handle
+// Content-Type: application/json
+{
+  "handle": "josh",
+  "agent_id_hex": "64-hex-bound-to-chat-identity",
+  "actor_url": "https://etchit.io/actors/josh",
+  "registered_at_ms": 1717740000000,
+  "ml_dsa_pubkey_hex": "...",
+  "ml_dsa_signature_hex": "..."          // signs the above 4 fields canonicalised
+}
+```
+
+**Verification flow (server side):**
+1. Look up the chat-layer's published identity card for `agent_id_hex`.
+2. Confirm `ml_dsa_pubkey_hex` matches the identity card's pubkey.
+3. Verify `ml_dsa_signature_hex` over `{handle, agent_id_hex, actor_url, registered_at_ms}` (canonical encoding).
+4. Reject if `handle` already maps to a different `agent_id_hex` (conflict).
+5. Reject if `registered_at_ms` is outside `±5 min` of server clock (freshness).
+6. On success: append to the webfinger map (KV write), return `201 Created` with the resulting JRD.
+
+**Acceptance criteria for Stage 6.2:**
+- POST with a valid ML-DSA claim → `201 Created`, follow-up `GET /.well-known/webfinger?resource=acct:<handle>@etchit.io` resolves.
+- POST with a tampered claim → `400 Bad Request`, no map change.
+- POST with a conflicting handle → `409 Conflict`, no map change.
+- POST with a stale `registered_at_ms` → `400 Bad Request`.
+- Cloudflare KV (or chosen backing store) is provisioned + read by the 6.1 Worker.
+
+**Open question 6.2.1 — backing store:** Cloudflare KV is the lightest option; D1 if a SQL surface is preferred for conflict-lookup speed. Recommendation: KV for v1, revisit if registration rate exceeds ~10/s sustained.
 
 ---
 
@@ -386,17 +445,20 @@ Sequential to M3 closing — Stage 7 cannot ship until the M3 community-relay on
 | 1.1 | `fetchit-fedi` crate scaffold | Bob | none |
 | 1.2 | `ActorIdentity` mint + load | Bob | 1.1 |
 | 1.3 | `Actor` JSON-LD round-trip | Bob | 1.2 |
-| 2.1 | `HttpSignatureKey` + RFC 9421 + draft-cavage | Bob | 1.3 |
-| 2.2 | `FediverseTransport::deliver` outbound | Bob | 2.1 |
-| 3.1 | `inbox` module scaffold + 5 pre-flight gates | Bob | 2.1 (shares signature code) |
+| 2.1a | `HttpSignatureKey` + RFC 9421 primary | Bob | 1.3 |
+| 2.1b | draft-cavage fallback + 24h per-instance capability cache | Bob | 2.1a |
+| 2.2 | `FediverseTransport::deliver` outbound | Bob | 2.1b |
+| 3.1 | `inbox` module scaffold + 5 pre-flight gates | Bob | 2.1a (shares signature code) |
 | 3.2 | Inbox metrics + ops surface | Bob | 3.1 |
+| 3.3 | Relay-server inbox → `EnvelopeKind::PublicPost` on out-stream | Bob | 3.1, 5.1 |
 | 4.1 | `EntryKind::ActorUrl` + manifest test | Bob | none (parallel with Stage 1-3) |
 | 4.2 | `DenylistCheck::is_blocked_actor` trait extension | Bob | 4.1 |
 | 4.3 | `MastodonBlocklistConsumer` + Oliphant fixture | Bob | 4.2 |
-| 5.1 | `PublicPost` envelope + `ChatError::Denied { actor_url }` | Bob | 1.3, 4.2 |
+| 5.1 | `PublicPost` envelope + `ChatError::Denied { actor_url }` + `EnvelopeKind::PublicPost` wire DISC | Bob | 1.3, 4.2 |
 | 5.2 | `Client::publish_public_post` + wire test | Bob | 5.1, 2.2 |
-| 5.3 | `Client::subscribe_actor` + inbound surface | Bob | 5.2, 3.1 |
-| 6.1 | `etchit.io/.well-known/webfinger` Worker | Joint | 1.3 (for actor URL shape) |
+| 5.3 | `Client::subscribe_actor` (Follow flow per [V]) + inbound `PublicPost` dispatch | Bob | 5.2, 3.3 |
+| 6.1 | `etchit.io/.well-known/webfinger` Worker (read path) | Joint | 1.3 (for actor URL shape) |
+| 6.2 | `/api/register-handle` (write path with ML-DSA claim verification) | Joint | 6.1 |
 | 7.1 | `COMMUNITY-RELAY.md` fediverse-inbox section | Joint | M3 #162 closes, Stage 3 ships |
 | 7.2 | First operator opts in | Joint (Josh's pick) | 7.1 |
 
@@ -418,7 +480,7 @@ Stages 1-4 can land in parallel where independent; Stage 5 is the chat-layer joi
 
 Per Alice [B], the bridge has asymmetric PQ properties. The eventual `docs/SECURITY.md` update needs to surface:
 
-> **Fediverse bridge (M4).** Outbound deliveries from a fetch>it actor carry both an RSA HTTP Signature (Mastodon-compatible) and an ML-DSA-65 signature over the same canonical bytes, published in the Actor `publicKey` extension. fetch>it nodes verify both layers; Mastodon-class nodes ignore the ML-DSA layer. Inbound deliveries from non-fetchit peers carry RSA HTTP Signatures only — there is no PQ verification on that side. This is unavoidable until the fediverse adopts PQ HTTP Signatures and must NOT be misrepresented as symmetric PQ behaviour. Content-E2EE remains true where applicable (none, for the public bridge surface); metadata privacy remains false; bridge inbound verification is non-PQ.
+> **Fediverse bridge (M4).** Outbound deliveries from a fetch>it actor carry an RSA-2048 HTTP Signature (RFC 9421, draft-cavage fallback) for Mastodon-class interop. The RSA pubkey is attested by an ML-DSA-65 signature in the Actor JSON-LD `publicKey` extension; fetch>it nodes verify both layers (RSA-sig over the POST body, ML-DSA over the RSA pubkey via the Actor), Mastodon-class nodes verify the RSA sig only. The per-POST ML-DSA cosig header was **not** shipped — the Actor-level attestation is the authoritative PQ binding, and the only attack the per-POST header defended against is post-attestation RSA-key compromise, which is a per-actor blast-radius event documented under "RSA key compromise scope" above. Inbound deliveries from non-fetchit peers carry RSA HTTP Signatures only — there is no PQ verification on that side. This is unavoidable until the fediverse adopts PQ HTTP Signatures and must NOT be misrepresented as symmetric PQ behaviour. Content-E2EE remains true where applicable (none, for the public bridge surface); metadata privacy remains false; bridge inbound verification is non-PQ.
 
 Defer landing this amendment until Stage 5 ships and the bridge is actually carrying traffic.
 
