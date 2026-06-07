@@ -112,6 +112,28 @@ pub enum EnvelopeKind {
     /// import via `POST /groups/join-from-bridged-blob`. Same gate
     /// as `WelcomeBlobRequest`.
     WelcomeBlobResponse,
+    /// M4 fediverse bridge — outbound public `ActivityPub` post
+    /// (`Create { Note }`) leaving the chat-layer toward
+    /// `fetchit-fedi`'s `FediverseTransport::deliver`, or an inbound
+    /// activity that passed every pre-flight gate on a
+    /// `fediverse-inbox`-enabled relay and is being delivered to the
+    /// chat-layer's public-feed handler.
+    ///
+    /// Distinct from every other envelope kind because the body is
+    /// NOT chat-layer ciphertext — it carries an
+    /// `application/activity+json` byte payload that downstream
+    /// hands off verbatim. The relay does not decrypt these (parity
+    /// with every other kind); the receiver's content handler is the
+    /// one that parses the JSON-LD.
+    ///
+    /// Reserved at Stage 5.1 of the M4 plan
+    /// (`docs/superpowers/plans/2026-06-07-m4-fediverse-impl-plan.md`);
+    /// chat-layer wire-up lands at Stage 5.2 / 5.3, inbox-side
+    /// out-stream wire-up at Stage 3.3b.
+    ///
+    /// Appended at the end of the enum to keep existing variant
+    /// indices stable for postcard wire-compat.
+    PublicPost,
     /// Forward-compat catch-all. Holds the raw postcard discriminator
     /// of an envelope kind this version of the proto doesn't recognise.
     /// `Serialize` emits the original discriminator verbatim so a
@@ -139,6 +161,7 @@ const DISC_PRIVATE_GROUP_CHAT: u32 = 4;
 const DISC_X0XD_GROUP_METADATA_EVENT: u32 = 5;
 const DISC_WELCOME_BLOB_REQUEST: u32 = 6;
 const DISC_WELCOME_BLOB_RESPONSE: u32 = 7;
+const DISC_PUBLIC_POST: u32 = 8;
 
 impl Serialize for EnvelopeKind {
     fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
@@ -155,6 +178,7 @@ impl Serialize for EnvelopeKind {
             EnvelopeKind::X0xdGroupMetadataEvent => DISC_X0XD_GROUP_METADATA_EVENT,
             EnvelopeKind::WelcomeBlobRequest => DISC_WELCOME_BLOB_REQUEST,
             EnvelopeKind::WelcomeBlobResponse => DISC_WELCOME_BLOB_RESPONSE,
+            EnvelopeKind::PublicPost => DISC_PUBLIC_POST,
             EnvelopeKind::Unknown(n) => u32::from(*n),
         };
         ser.serialize_unit_variant("EnvelopeKind", disc, "Variant")
@@ -181,6 +205,7 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                     DISC_X0XD_GROUP_METADATA_EVENT => EnvelopeKind::X0xdGroupMetadataEvent,
                     DISC_WELCOME_BLOB_REQUEST => EnvelopeKind::WelcomeBlobRequest,
                     DISC_WELCOME_BLOB_RESPONSE => EnvelopeKind::WelcomeBlobResponse,
+                    DISC_PUBLIC_POST => EnvelopeKind::PublicPost,
                     n => match u8::try_from(n) {
                         Ok(byte) => EnvelopeKind::Unknown(byte),
                         Err(_) => {
@@ -207,6 +232,7 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                 "X0xdGroupMetadataEvent",
                 "WelcomeBlobRequest",
                 "WelcomeBlobResponse",
+                "PublicPost",
                 "Unknown",
             ],
             KindVisitor,
@@ -404,6 +430,7 @@ mod tests {
             (EnvelopeKind::X0xdGroupMetadataEvent, 5),
             (EnvelopeKind::WelcomeBlobRequest, 6),
             (EnvelopeKind::WelcomeBlobResponse, 7),
+            (EnvelopeKind::PublicPost, 8),
         ] {
             let bytes = postcard::to_allocvec(&variant).unwrap();
             assert_eq!(
@@ -425,7 +452,7 @@ mod tests {
     /// mode that motivated this shim.
     #[test]
     fn unknown_discriminator_decodes_as_unknown_variant() {
-        for disc in [8u8, 42, 99, 200, 255] {
+        for disc in [9u8, 42, 99, 200, 255] {
             // Postcard's varint encoding for u32 < 128 is a single byte
             // equal to the value, so we can craft the wire bytes by
             // hand and verify the visitor handles them.
@@ -451,7 +478,7 @@ mod tests {
     /// the recipient — which DOES understand the kind.
     #[test]
     fn unknown_variant_reserializes_to_original_discriminator() {
-        for disc in [8u8, 42, 200] {
+        for disc in [9u8, 42, 200] {
             let envelope = EnvelopeKind::Unknown(disc);
             let bytes = postcard::to_allocvec(&envelope).unwrap();
             let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
@@ -508,5 +535,41 @@ mod tests {
         let bytes = postcard::to_allocvec(&env).unwrap();
         let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back, EnvelopeKind::WelcomeBlobResponse);
+    }
+
+    /// M4 fediverse-bridge wire DISC reservation (Stage 5.1-proto).
+    /// Pins `PublicPost` at discriminator 8 so Stage 3.3b (inbox →
+    /// out-stream) + Stage 5.2 (`Client::publish_public_post`) can
+    /// rely on the byte representation when the chat-layer surface
+    /// lands.
+    #[test]
+    fn envelope_kind_public_post_round_trips() {
+        let env = EnvelopeKind::PublicPost;
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        assert_eq!(
+            bytes,
+            vec![8u8],
+            "PublicPost must serialize to single varint byte 8"
+        );
+        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, EnvelopeKind::PublicPost);
+    }
+
+    /// Full `TransitEnvelope` carrying an ActivityPub-shaped body
+    /// under `kind = PublicPost` must round-trip. Bodies on this
+    /// kind are NOT chat ciphertext — `kem_ciphertext` is empty and
+    /// the `ciphertext` field carries the raw
+    /// `application/activity+json` bytes (relay does not decrypt).
+    #[test]
+    fn transit_envelope_with_public_post_kind_roundtrips() {
+        let mut env = sample_envelope();
+        env.kind = EnvelopeKind::PublicPost;
+        env.kem_ciphertext = Vec::new();
+        env.ciphertext = br#"{"type":"Create","object":{"type":"Note"}}"#.to_vec();
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let decoded: TransitEnvelope = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.kind, EnvelopeKind::PublicPost);
+        assert!(decoded.kem_ciphertext.is_empty());
+        assert_eq!(decoded.ciphertext, env.ciphertext);
     }
 }

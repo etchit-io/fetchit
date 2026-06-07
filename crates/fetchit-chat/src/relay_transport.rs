@@ -201,6 +201,19 @@ fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<Inboun
                     log::warn!("relay inbound: dropping envelope with unknown kind disc={disc}");
                     continue;
                 }
+                // M4 Stage 5.1-proto wire DISC reservation. PublicPost
+                // (fediverse-bridge inbound activity) routes to the
+                // chat-layer public-feed handler in Stage 5.3; until
+                // then we drop here with a log warn. Until 3.3b wires
+                // the relay-server inbox to push PublicPost on the
+                // out-stream, none of these will ever appear in
+                // production.
+                RelayKind::PublicPost => {
+                    log::warn!(
+                        "relay inbound: dropping PublicPost — no chat-layer route until Stage 5.3"
+                    );
+                    continue;
+                }
             };
             let from = AgentId(hex::encode(env.sender_agent_id.as_bytes()));
             let inbound = InboundEnvelope {

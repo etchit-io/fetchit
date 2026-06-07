@@ -379,6 +379,19 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
             log::warn!("lan-direct inbound: dropping envelope with unknown kind disc={disc}");
             return None;
         }
+        // M4 Stage 5.1-proto wire DISC reservation. PublicPost
+        // (fediverse-bridge inbound activity) has no chat-layer
+        // semantics on the LAN-direct path — drop with a log warn
+        // until Stage 5.3 wires the public-feed handler dispatch.
+        // LAN-direct never carries a PublicPost in production today
+        // (the inbox endpoint is the only producer); the arm exists
+        // to keep the match exhaustive.
+        RelayKind::PublicPost => {
+            log::warn!(
+                "lan-direct inbound: dropping PublicPost — no chat-layer route until Stage 5.3"
+            );
+            return None;
+        }
     };
     Some(InboundEnvelope {
         kind,
