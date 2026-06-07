@@ -174,6 +174,12 @@ impl DenylistConsumer {
     }
 }
 
+impl fetchit_trust::DenylistQuery for DenylistConsumer {
+    fn is_blocked(&self, kind: EntryKind, value: &str) -> bool {
+        DenylistConsumer::is_blocked(self, kind, value)
+    }
+}
+
 fn kind_query_str(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::XorName => "xor_name",
@@ -302,6 +308,28 @@ mod tests {
         let _ = consumer.refresh(&stub2).await; // Per-kind failure swallowed; refresh may still report Ok if others fail soft.
         assert!(consumer.is_blocked(EntryKind::RelayUrl, "wss://a"));
         assert!(!consumer.is_blocked(EntryKind::RelayUrl, "wss://b"));
+    }
+
+    #[tokio::test]
+    async fn is_blocked_works_through_dyn_trait() {
+        use fetchit_trust::DenylistQuery;
+        use std::sync::Arc;
+
+        let signer = IssuerSigner::generate("test").unwrap();
+        let stub = StubHttp::new();
+        let resp = signed_response(&signer, EntryKind::AgentId, &["a".repeat(64).as_str()]);
+        stub.pre_bake("agent_id", json_bytes(&resp));
+
+        let consumer = Arc::new(DenylistConsumer::new(
+            signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        ));
+        consumer.refresh(&stub).await.unwrap();
+
+        let dyn_q: Arc<dyn DenylistQuery> = consumer.clone() as Arc<dyn DenylistQuery>;
+        assert!(dyn_q.is_blocked(EntryKind::AgentId, &"a".repeat(64)));
+        assert!(!dyn_q.is_blocked(EntryKind::AgentId, &"b".repeat(64)));
     }
 
     #[tokio::test]
