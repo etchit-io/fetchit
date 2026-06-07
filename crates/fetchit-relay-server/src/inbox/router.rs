@@ -19,8 +19,8 @@ use super::sig_verify::{
     check_date_skew, extract_inbox_signature_context, verify_inbox_request, SignatureScheme,
 };
 use super::{
-    DropReason, InboxDenylistCheck, InboxError, InboxRateLimit, ReplayWindow, WebFingerError,
-    WebFingerLookup,
+    DropReason, InboxDenylistCheck, InboxError, InboxMetrics, InboxRateLimit, ReplayWindow,
+    WebFingerError, WebFingerLookup,
 };
 
 /// Default `Content-Length` ceiling for inbound activities — 1 MB.
@@ -53,6 +53,11 @@ pub struct InboxState {
     /// Sink for activities that pass every gate (Stage 3.3 wires the
     /// `EnvelopeKind::PublicPost` out-stream here).
     pub sink: Arc<dyn PendingDeliverySink>,
+    /// Per-gate Prometheus counter family (Stage 3.2). Default is
+    /// a fresh zero-valued [`InboxMetrics`]; production callers
+    /// share an `Arc<InboxMetrics>` so the ops surface can scrape
+    /// the same counter set the handler increments.
+    pub metrics: Arc<InboxMetrics>,
     /// Hard ceiling on inbound body size (gate 4).
     pub max_body_bytes: usize,
     /// Maximum ±skew for `Date` + `Signature-Input;created`.
@@ -76,6 +81,7 @@ impl InboxState {
             denylist,
             webfinger,
             sink,
+            metrics: Arc::new(InboxMetrics::new()),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             max_date_skew: DEFAULT_MAX_DATE_SKEW,
         }
@@ -89,6 +95,7 @@ pub struct InboxStateBuilder {
     denylist: Arc<dyn InboxDenylistCheck>,
     webfinger: Arc<dyn WebFingerLookup>,
     sink: Arc<dyn PendingDeliverySink>,
+    metrics: Arc<InboxMetrics>,
     max_body_bytes: usize,
     max_date_skew: Duration,
 }
@@ -124,6 +131,15 @@ impl InboxStateBuilder {
         self
     }
 
+    /// Swap in a shared [`InboxMetrics`] so the ops surface scrapes
+    /// the same counter set the handler increments. Default builds
+    /// get a fresh zero-valued instance.
+    #[must_use]
+    pub fn with_metrics(mut self, m: Arc<InboxMetrics>) -> Self {
+        self.metrics = m;
+        self
+    }
+
     /// Finalize the [`InboxState`].
     #[must_use]
     pub fn build(self) -> InboxState {
@@ -133,6 +149,7 @@ impl InboxStateBuilder {
             denylist: self.denylist,
             webfinger: self.webfinger,
             sink: self.sink,
+            metrics: self.metrics,
             max_body_bytes: self.max_body_bytes,
             max_date_skew: self.max_date_skew,
         }
@@ -172,7 +189,9 @@ pub fn inbox_router(state: InboxState) -> Router {
 }
 
 /// Axum handler — runs every gate in order, returns the status code
-/// each gate's `InboxError` carries.
+/// each gate's `InboxError` carries. Metric increments happen inside
+/// [`handle_inbox_inner`] so tests that drive the inner function
+/// directly observe counter activity too.
 async fn handle_inbox(
     State(state): State<InboxState>,
     headers: HeaderMap,
@@ -188,7 +207,9 @@ async fn handle_inbox(
     }
 }
 
-/// Inner handler logic — runs the 5 pre-flight gates in order.
+/// Inner handler logic — runs the 5 pre-flight gates in order +
+/// records the appropriate counter on accept/drop.
+///
 /// Separated from [`handle_inbox`] so the orchestration is
 /// `?`-ergonomic and the unit tests can drive it without the
 /// axum layer.
@@ -197,6 +218,19 @@ async fn handle_inbox_inner(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(), InboxError> {
+    let metrics = state.metrics.clone();
+    let outcome = run_gates(state, headers, body).await;
+    match &outcome {
+        Ok(()) => metrics.record_accept(),
+        Err(err) => metrics.record_drop(&err.reason),
+    }
+    outcome
+}
+
+/// Core gate orchestration — no metric recording. Used by
+/// [`handle_inbox_inner`] which wraps it with `record_accept` /
+/// `record_drop` so the metrics integration stays in one place.
+async fn run_gates(state: InboxState, headers: HeaderMap, body: Bytes) -> Result<(), InboxError> {
     // Gate 4: body size.
     if body.len() > state.max_body_bytes {
         return Err(InboxError::payload_too_large());
@@ -314,7 +348,10 @@ fn date_to_unix(date: &str) -> i64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::inbox::{InboxDenylistCheck, PendingDeliverySink, WebFingerError, WebFingerLookup};
+    use crate::inbox::{
+        InboxDenylistCheck, InboxMetrics, PendingDeliverySink, ScalarDropSnapshot, WebFingerError,
+        WebFingerLookup,
+    };
     use async_trait::async_trait;
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
     use rsa::rand_core::OsRng;
@@ -717,5 +754,198 @@ mod tests {
         assert_eq!(err.status, 401);
         // Only the first delivery should have made it to the sink.
         assert_eq!(sink.deliveries.lock().unwrap().len(), 1);
+    }
+
+    // ---- Stage 3.2: gate-to-counter wiring ----
+
+    fn make_state_with_metrics(
+        pub_pem: String,
+        sink: Arc<RecordingSink>,
+        metrics: Arc<InboxMetrics>,
+    ) -> InboxState {
+        InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink,
+        )
+        .with_metrics(metrics)
+        .build()
+    }
+
+    #[tokio::test]
+    async fn metrics_happy_path_increments_accepted() {
+        let (priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = make_state_with_metrics(pub_pem, sink, metrics.clone());
+        let body = b"{}";
+        let date = now_imf_fixdate();
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let headers = signed_headers_for(
+            &priv_pem,
+            body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+            &date,
+        );
+
+        handle_inbox_inner(state, headers, Bytes::from_static(body))
+            .await
+            .unwrap();
+        assert_eq!(metrics.accepted_total(), 1);
+        assert_eq!(metrics.scalar_drops(), ScalarDropSnapshot::default());
+    }
+
+    #[tokio::test]
+    async fn metrics_body_too_large_increments_counter() {
+        let (_priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink,
+        )
+        .with_max_body_bytes(8)
+        .with_metrics(metrics.clone())
+        .build();
+        let body = vec![0u8; 64];
+        let _ = handle_inbox_inner(state, HeaderMap::new(), Bytes::from(body)).await;
+        assert_eq!(metrics.scalar_drops().body_too_large, 1);
+        assert_eq!(metrics.accepted_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_rate_limited_increments_per_instance() {
+        let (priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink,
+        )
+        .with_rate_limit(Arc::new(InboxRateLimit::new(1)))
+        .with_metrics(metrics.clone())
+        .build();
+        let body = b"{}";
+        let date = now_imf_fixdate();
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let headers = signed_headers_for(
+            &priv_pem,
+            body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+            &date,
+        );
+
+        // First request: success.
+        handle_inbox_inner(state.clone(), headers.clone(), Bytes::from_static(body))
+            .await
+            .unwrap();
+        // Second request: rate-limited (different body so replay
+        // doesn't preempt).
+        let body2 = b"{\"x\":1}";
+        let headers2 = signed_headers_for(
+            &priv_pem,
+            body2,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+            &date,
+        );
+        let _ = handle_inbox_inner(state, headers2, Bytes::from_static(body2)).await;
+        assert_eq!(metrics.rate_limited_count("etchit.io"), 1);
+        assert_eq!(metrics.accepted_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_denylist_increments_counter() {
+        let (priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = InboxState::builder(
+            Arc::new(AlwaysDenyDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink,
+        )
+        .with_metrics(metrics.clone())
+        .build();
+        let body = b"{}";
+        let date = now_imf_fixdate();
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let headers = signed_headers_for(
+            &priv_pem,
+            body,
+            "https://attacker.example/actors/eve#main-key",
+            &url,
+            &date,
+        );
+        let _ = handle_inbox_inner(state, headers, Bytes::from_static(body)).await;
+        assert_eq!(metrics.scalar_drops().denylisted, 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_tampered_body_increments_sig_fail_digest_mismatch() {
+        let (priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = make_state_with_metrics(pub_pem, sink, metrics.clone());
+        let signed_body = b"{}";
+        let date = now_imf_fixdate();
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let headers = signed_headers_for(
+            &priv_pem,
+            signed_body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+            &date,
+        );
+        let tampered = b"hostile";
+        let _ = handle_inbox_inner(state, headers, Bytes::from_static(tampered)).await;
+        assert_eq!(metrics.sig_fail_count("digest_mismatch"), 1);
+        assert_eq!(metrics.accepted_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_replay_increments_counter() {
+        let (priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink,
+        )
+        .with_rate_limit(Arc::new(InboxRateLimit::new(10)))
+        .with_metrics(metrics.clone())
+        .build();
+        let body = b"{}";
+        let date = now_imf_fixdate();
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let headers = signed_headers_for(
+            &priv_pem,
+            body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+            &date,
+        );
+        handle_inbox_inner(state.clone(), headers.clone(), Bytes::from_static(body))
+            .await
+            .unwrap();
+        let _ = handle_inbox_inner(state, headers, Bytes::from_static(body)).await;
+        assert_eq!(metrics.scalar_drops().replay, 1);
+        assert_eq!(metrics.accepted_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_missing_header_increments_per_name() {
+        let (_priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = Arc::new(InboxMetrics::new());
+        let state = make_state_with_metrics(pub_pem, sink, metrics.clone());
+        // No headers at all — first required header (`signature`)
+        // fires the missing-header counter.
+        let _ = handle_inbox_inner(state, HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        assert_eq!(metrics.missing_header_count("signature"), 1);
     }
 }

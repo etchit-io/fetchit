@@ -37,11 +37,13 @@
 //! before metric increments so the wire shape stays reviewable on
 //! its own.
 
+pub mod metrics;
 pub mod rate_limit;
 pub mod replay;
 pub mod router;
 pub mod sig_verify;
 
+pub use metrics::{InboxMetrics, ScalarDropSnapshot};
 pub use rate_limit::InboxRateLimit;
 pub use replay::ReplayWindow;
 pub use router::{inbox_router, InboxState, PendingDelivery};
