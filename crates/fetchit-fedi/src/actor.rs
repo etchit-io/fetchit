@@ -165,7 +165,10 @@ impl Actor {
         let actor_url_str = self.id.as_str();
         let key_id = format!("{actor_url_str}#main-key");
         json!({
-            "@context": ["https://www.w3.org/ns/activitystreams"],
+            "@context": [
+                "https://www.w3.org/ns/activitystreams",
+                "https://w3id.org/security/v1",
+            ],
             "id": actor_url_str,
             "type": "Person",
             "preferredUsername": self.preferred_username,
@@ -352,12 +355,32 @@ mod tests {
             .unwrap()
             .starts_with("-----BEGIN PUBLIC KEY-----"));
 
-        // @context is an array with the activitystreams vocab first.
+        // @context is an array with the activitystreams + security/v1
+        // vocabularies. security/v1 is required for strict JSON-LD
+        // processors to understand the publicKey/publicKeyPem/owner
+        // terms (Alice F1).
         assert_eq!(v["@context"][0], "https://www.w3.org/ns/activitystreams");
+        assert_eq!(v["@context"][1], "https://w3id.org/security/v1");
 
         // PQ attestation under the FROZEN property URI.
         let pq = &v[PQ_ATTESTATION_PROPERTY_URI];
         assert!(pq["ml_dsa_pubkey"].is_string());
         assert!(pq["signature"].is_string());
+    }
+
+    #[test]
+    fn to_json_ld_includes_security_v1_context() {
+        // Mastodon's own Actor JSON-LD emits security/v1 alongside
+        // activitystreams because publicKey + publicKeyPem + owner
+        // are defined in that vocabulary. Without it a strict
+        // JSON-LD processor cannot resolve those terms.
+        let actor = Actor::from_identity(&sample_identity()).unwrap();
+        let v = actor.to_json_ld();
+        let ctx = v["@context"].as_array().expect("@context is array");
+        let urls: Vec<&str> = ctx.iter().filter_map(|c| c.as_str()).collect();
+        assert!(
+            urls.contains(&"https://w3id.org/security/v1"),
+            "@context must include w3id security vocabulary; got {urls:?}"
+        );
     }
 }
