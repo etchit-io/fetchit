@@ -110,44 +110,74 @@ impl HttpSignatureKey {
         let priv_key = RsaPrivateKey::from_pkcs8_pem(&self.rsa_private_pem)
             .map_err(|e| HttpSignatureError::InvalidPrivateKey(format!("{e}")))?;
         let signing_key = SigningKey::<Sha256>::new(priv_key);
-
-        let content_digest = compute_content_digest(body);
-        // Mastodon's `host_from_url` includes the port when non-default
-        // (anything that isn't `443` over https or `80` over http).
-        // `url::Url::port()` already normalizes default ports to `None`,
-        // so we just append whatever `port()` returns. Without this, a
-        // signer hitting `https://inbox.example:8443/inbox` would put
-        // `host: inbox.example` in the canonical base while the Mastodon
-        // verifier reconstructs `host: inbox.example:8443`, and every
-        // POST to that server would silently fail verification.
-        let host_str = url
-            .host_str()
-            .ok_or_else(|| HttpSignatureError::MissingHost(url.to_string()))?;
-        let host = match url.port() {
-            Some(port) => format!("{host_str}:{port}"),
-            None => host_str.to_string(),
-        };
-        let sig_params = build_signature_input_params(created_unix, &self.key_id);
-        let signing_base = build_signature_base(
-            url.as_str(),
-            &host,
+        sign_post_rfc9421_with_key(
+            &signing_key,
+            &self.key_id,
+            url,
+            body,
             date_header,
-            &content_digest,
-            &sig_params,
-        );
-
-        let signature = signing_key
-            .try_sign(signing_base.as_bytes())
-            .map_err(|e| HttpSignatureError::SigningFailed(format!("{e}")))?;
-        let sig_b64 = B64.encode(signature.to_bytes());
-
-        Ok(SignedHeaders {
-            date: date_header.to_string(),
-            content_digest,
-            signature_input: format!("sig1={sig_params}"),
-            signature: format!("sig1=:{sig_b64}:"),
-        })
+            created_unix,
+        )
     }
+}
+
+/// Build the RFC 9421 [`SignedHeaders`] for a POST to `url`, using a
+/// pre-decoded [`SigningKey<Sha256>`] so the PKCS#8 parse only runs
+/// once per actor (rather than once per delivery). Used by
+/// [`crate::transport::FediverseTransport`] which caches one
+/// signing-key Arc per actor `key_id`.
+///
+/// Otherwise byte-identical to [`HttpSignatureKey::sign_post_rfc9421`].
+///
+/// # Errors
+/// - [`HttpSignatureError::MissingHost`] when `url` has no host
+///   component.
+/// - [`HttpSignatureError::SigningFailed`] when the underlying
+///   RSA-SHA256 operation fails.
+pub fn sign_post_rfc9421_with_key(
+    signing_key: &SigningKey<Sha256>,
+    key_id: &str,
+    url: &url::Url,
+    body: &[u8],
+    date_header: &str,
+    created_unix: i64,
+) -> Result<SignedHeaders, HttpSignatureError> {
+    let content_digest = compute_content_digest(body);
+    // Mastodon's `host_from_url` includes the port when non-default
+    // (anything that isn't `443` over https or `80` over http).
+    // `url::Url::port()` already normalizes default ports to `None`,
+    // so we just append whatever `port()` returns. Without this, a
+    // signer hitting `https://inbox.example:8443/inbox` would put
+    // `host: inbox.example` in the canonical base while the Mastodon
+    // verifier reconstructs `host: inbox.example:8443`, and every
+    // POST to that server would silently fail verification.
+    let host_str = url
+        .host_str()
+        .ok_or_else(|| HttpSignatureError::MissingHost(url.to_string()))?;
+    let host = match url.port() {
+        Some(port) => format!("{host_str}:{port}"),
+        None => host_str.to_string(),
+    };
+    let sig_params = build_signature_input_params(created_unix, key_id);
+    let signing_base = build_signature_base(
+        url.as_str(),
+        &host,
+        date_header,
+        &content_digest,
+        &sig_params,
+    );
+
+    let signature = signing_key
+        .try_sign(signing_base.as_bytes())
+        .map_err(|e| HttpSignatureError::SigningFailed(format!("{e}")))?;
+    let sig_b64 = B64.encode(signature.to_bytes());
+
+    Ok(SignedHeaders {
+        date: date_header.to_string(),
+        content_digest,
+        signature_input: format!("sig1={sig_params}"),
+        signature: format!("sig1=:{sig_b64}:"),
+    })
 }
 
 /// SHA-256 of `body` as a `Content-Digest` header value

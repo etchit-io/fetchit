@@ -3000,12 +3000,15 @@ name = "fetchit-fedi"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "reqwest 0.12.28",
  "rsa",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "tokio",
  "url",
+ "wiremock",
 ]
 
 [[package]]

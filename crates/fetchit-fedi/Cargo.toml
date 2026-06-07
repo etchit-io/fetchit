@@ -14,11 +14,15 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
+reqwest.workspace = true
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["oid"] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
 url.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

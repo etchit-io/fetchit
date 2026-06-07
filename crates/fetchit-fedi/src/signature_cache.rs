@@ -27,8 +27,13 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use crate::signature::{HttpSignatureError, HttpSignatureKey, SignedHeaders};
-use crate::signature_cavage::CavageSignedHeaders;
+use rsa::pkcs1v15::SigningKey;
+use sha2::Sha256;
+
+use crate::signature::{
+    sign_post_rfc9421_with_key, HttpSignatureError, HttpSignatureKey, SignedHeaders,
+};
+use crate::signature_cavage::{sign_post_cavage_with_key, CavageSignedHeaders};
 
 /// 24h cache TTL for an observed preference. After this window the
 /// peer might have changed its negotiation behaviour; force a fresh
@@ -237,11 +242,7 @@ pub fn sign_post_with_preference(
 
     match format {
         SignatureFormat::Rfc9421 => {
-            let created = i64::try_from(
-                now.duration_since(SystemTime::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            )
-            .unwrap_or(i64::MAX);
+            let created = created_unix(now);
             let signed = key.sign_post_rfc9421(url, body, date_header, created)?;
             Ok(OutboundSignedHeaders::Rfc9421(signed))
         }
@@ -250,6 +251,95 @@ pub fn sign_post_with_preference(
             Ok(OutboundSignedHeaders::Cavage(signed))
         }
     }
+}
+
+/// Pre-decoded-key sibling of [`sign_post_with_preference`].
+///
+/// Skips the per-call PKCS#8 decode that
+/// [`HttpSignatureKey::sign_post_rfc9421`] /
+/// [`HttpSignatureKey::sign_post_cavage`] otherwise pay; used by
+/// [`crate::transport::FediverseTransport`] which caches one
+/// [`SigningKey<Sha256>`] per actor `key_id` so the PKCS#8 parse
+/// only runs the first time an actor is delivered with.
+///
+/// Format-resolution semantics are otherwise identical to
+/// [`sign_post_with_preference`] — cache lookup first, then caller-
+/// supplied default for unknown / stale origins.
+///
+/// # Errors
+/// Propagates any [`HttpSignatureError`] from the chosen signer.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_post_with_preference_keyed(
+    signing_key: &SigningKey<Sha256>,
+    key_id: &str,
+    url: &url::Url,
+    body: &[u8],
+    date_header: &str,
+    now: SystemTime,
+    cache: &SignatureCapabilityCache,
+    default: SignatureFormat,
+) -> Result<OutboundSignedHeaders, HttpSignatureError> {
+    let format = inbox_origin(url)
+        .and_then(|origin| cache.preference(&origin, now))
+        .unwrap_or(default);
+
+    match format {
+        SignatureFormat::Rfc9421 => {
+            let created = created_unix(now);
+            let signed =
+                sign_post_rfc9421_with_key(signing_key, key_id, url, body, date_header, created)?;
+            Ok(OutboundSignedHeaders::Rfc9421(signed))
+        }
+        SignatureFormat::Cavage => {
+            let signed = sign_post_cavage_with_key(signing_key, key_id, url, body, date_header)?;
+            Ok(OutboundSignedHeaders::Cavage(signed))
+        }
+    }
+}
+
+/// Sign-with-explicit-format sibling of [`sign_post_with_preference_keyed`].
+///
+/// Bypasses the capability cache to sign with `format` directly.
+/// Used by [`crate::transport::FediverseTransport`] on the 401-driven
+/// flip-and-retry path: the cache says one thing, the receiver
+/// rejected, so the transport explicitly signs with the opposite
+/// format on the second attempt without going back through the cache.
+///
+/// # Errors
+/// Propagates any [`HttpSignatureError`] from the chosen signer.
+pub fn sign_post_with_format_keyed(
+    signing_key: &SigningKey<Sha256>,
+    key_id: &str,
+    url: &url::Url,
+    body: &[u8],
+    date_header: &str,
+    now: SystemTime,
+    format: SignatureFormat,
+) -> Result<OutboundSignedHeaders, HttpSignatureError> {
+    match format {
+        SignatureFormat::Rfc9421 => {
+            let created = created_unix(now);
+            let signed =
+                sign_post_rfc9421_with_key(signing_key, key_id, url, body, date_header, created)?;
+            Ok(OutboundSignedHeaders::Rfc9421(signed))
+        }
+        SignatureFormat::Cavage => {
+            let signed = sign_post_cavage_with_key(signing_key, key_id, url, body, date_header)?;
+            Ok(OutboundSignedHeaders::Cavage(signed))
+        }
+    }
+}
+
+/// Unix-seconds-since-epoch for the RFC 9421 `created` parameter.
+/// Saturates at 0 if `now` is before the epoch and at `i64::MAX` for
+/// implausibly-far-future times — both are impossible to hit in
+/// production but preserve total deterministic behaviour for tests.
+fn created_unix(now: SystemTime) -> i64 {
+    i64::try_from(
+        now.duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

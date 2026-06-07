@@ -92,41 +92,59 @@ impl HttpSignatureKey {
         let priv_key = RsaPrivateKey::from_pkcs8_pem(&self.rsa_private_pem)
             .map_err(|e| HttpSignatureError::InvalidPrivateKey(format!("{e}")))?;
         let signing_key = SigningKey::<Sha256>::new(priv_key);
-
-        let digest = compute_digest_cavage(body);
-        // Mirror RFC 9421 path host:port rule (`url::Url::port()`
-        // normalises 443/80 to None) so a Mastodon receiver
-        // reconstructs the same `host:` line via its
-        // `host_from_url` helper.
-        let host_str = url
-            .host_str()
-            .ok_or_else(|| HttpSignatureError::MissingHost(url.to_string()))?;
-        let host = match url.port() {
-            Some(port) => format!("{host_str}:{port}"),
-            None => host_str.to_string(),
-        };
-        let request_target = build_request_target(url);
-        let signing_base = build_cavage_base(&request_target, &host, date_header, &digest);
-
-        let signature = signing_key
-            .try_sign(signing_base.as_bytes())
-            .map_err(|e| HttpSignatureError::SigningFailed(format!("{e}")))?;
-        let sig_b64 = B64.encode(signature.to_bytes());
-
-        let signature_header = format!(
-            "keyId=\"{key_id}\",\
-             algorithm=\"rsa-sha256\",\
-             headers=\"(request-target) host date digest\",\
-             signature=\"{sig_b64}\"",
-            key_id = self.key_id,
-        );
-
-        Ok(CavageSignedHeaders {
-            date: date_header.to_string(),
-            digest,
-            signature: signature_header,
-        })
+        sign_post_cavage_with_key(&signing_key, &self.key_id, url, body, date_header)
     }
+}
+
+/// Build the draft-cavage [`CavageSignedHeaders`] for a POST to `url`,
+/// using a pre-decoded [`SigningKey<Sha256>`] so the PKCS#8 parse
+/// runs once per actor (rather than once per delivery). Mirrors
+/// [`crate::signature::sign_post_rfc9421_with_key`].
+///
+/// # Errors
+/// - [`HttpSignatureError::MissingHost`] when `url` has no host
+///   component.
+/// - [`HttpSignatureError::SigningFailed`] when the underlying
+///   RSA-SHA256 operation fails.
+pub fn sign_post_cavage_with_key(
+    signing_key: &SigningKey<Sha256>,
+    key_id: &str,
+    url: &url::Url,
+    body: &[u8],
+    date_header: &str,
+) -> Result<CavageSignedHeaders, HttpSignatureError> {
+    let digest = compute_digest_cavage(body);
+    // Mirror RFC 9421 path host:port rule (`url::Url::port()`
+    // normalises 443/80 to None) so a Mastodon receiver
+    // reconstructs the same `host:` line via its
+    // `host_from_url` helper.
+    let host_str = url
+        .host_str()
+        .ok_or_else(|| HttpSignatureError::MissingHost(url.to_string()))?;
+    let host = match url.port() {
+        Some(port) => format!("{host_str}:{port}"),
+        None => host_str.to_string(),
+    };
+    let request_target = build_request_target(url);
+    let signing_base = build_cavage_base(&request_target, &host, date_header, &digest);
+
+    let signature = signing_key
+        .try_sign(signing_base.as_bytes())
+        .map_err(|e| HttpSignatureError::SigningFailed(format!("{e}")))?;
+    let sig_b64 = B64.encode(signature.to_bytes());
+
+    let signature_header = format!(
+        "keyId=\"{key_id}\",\
+         algorithm=\"rsa-sha256\",\
+         headers=\"(request-target) host date digest\",\
+         signature=\"{sig_b64}\""
+    );
+
+    Ok(CavageSignedHeaders {
+        date: date_header.to_string(),
+        digest,
+        signature: signature_header,
+    })
 }
 
 /// SHA-256 of `body` as a draft-cavage `Digest` header value —
