@@ -158,18 +158,18 @@ This sub-deliverable is documentation + a single config change. No new code beyo
 
 ## Build sequence
 
-1. **Stage 1 Task 1.1** — `RelaySet::connect` + `connection_states` + tests
-2. **Stage 1 Task 1.2** — `RelaySet::send` (fan-out, SendOutcome) + tests
-3. **Stage 1 Task 1.3** — `RelaySet::next_delivery` (merged inbox + dedupe) + tests
-4. **Stage 1 Task 1.4** — `RelaySet::watch_presence` + `next_presence` + tests
-5. **Stage 1 Task 1.5** — `RelaySet::shutdown` + tests
-6. **Stage 1 Task 1.6** — Swap `fetchit-chat::relay_transport` from `Client` to `RelaySet`, gate behind feature flag `multi-home` for the chat-peer
-7. **Stage 2 Task 2.1** — Denylist manifest type + chainmark verify + parser + tests
-8. **Stage 2 Task 2.2** — `DenylistConsumer::refresh` (HTTPS pull, hourly cadence) + tests
-9. **Stage 2 Task 2.3** — Outbound + inbound gate in chat layer + tests
-10. **Stage 3 Task 3.1** — `docs/COMMUNITY-RELAY.md` draft
-11. **Stage 3 Task 3.2** — `DEFAULT_RELAYS` table refactor for community entries
-12. **Stage 3 Task 3.3** — Actual operator onboarded (Josh)
+1. **Stage 1 Task 1.1** ✅ — `RelaySet::connect` + `connection_states` (relay_set.rs:61 + states_receiver/primary_connection_state)
+2. **Stage 1 Task 1.2** ✅ — `RelaySet::send` (fan-out + `SendOutcome { primary, extras }`) — relay_set.rs:284
+3. **Stage 1 Task 1.3** ✅ — `RelaySet::next_delivery` (merged inbox; chat-layer dedupes via `message_id` / x0xd canonical hash)
+4. **Stage 1 Task 1.4** ✅ — `RelaySet::watch_presence` / `unwatch_presence` / `next_presence` (per-relay forwarder tasks + any-ok semantics)
+5. **Stage 1 Task 1.5** ✅ — `RelaySet::shutdown` (join_all per-relay shutdowns)
+6. **Stage 1 Task 1.6** ✅ — `fetchit-chat::relay_transport` wraps `Arc<RelaySet>`; `connect(Url)` preserved as `connect_multi(vec![url])` convenience. Four chat-layer call sites migrated from `relay_client()` to `relay_set()`. Shipped 9618b41. End-to-end fan-out + partial-fail + merged-inbox coverage shipped 8395625 (3 in-process relay-server integration tests).
+7. **Stage 2 Task 2.1** ✅ — `VerifiedDenylist` + `signing_bytes` + `verify_signature` (ML-DSA-65 chainmark)
+8. **Stage 2 Task 2.2** ✅ — `DenylistConsumer::refresh` (HTTPS pull + `with_refresh_interval` + `spawn_refresh_loop`) — shipped 90d57e4
+9. **Stage 2 Task 2.3** — Outbound + inbound gate in chat layer + tests — *pending Alice's chokepoint placement weigh-in (Client vs Router/Transport, drop-vs-error semantics)*
+10. **Stage 3 Task 3.1** ✅ — `docs/COMMUNITY-RELAY.md` draft
+11. **Stage 3 Task 3.2** — `DEFAULT_RELAYS` table refactor for community entries — *needs operator pick from Josh + design alignment with Alice on the descriptor shape (URL-only vs Region/operator/is_official metadata)*
+12. **Stage 3 Task 3.3** — Actual operator onboarded — *Josh's pick*
 
 Sequential Stage 1 → Stage 2 → Stage 3 keeps each commit small and reviewable. Stage 1 lands first because Stage 2 and Stage 3 don't change without it.
 
