@@ -50,6 +50,15 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 # window is unfocused; the chat panel falls back gracefully if the
 # user hasn't granted permission.
 tauri-plugin-notification = "2"
+# Structured logging for the supervisor + boot path. The `log` feature
+# makes `tracing::warn!` etc. also emit as `log` events so they flow
+# through `tauri-plugin-log`'s `log`-crate facade without a custom
+# subscriber. Matches fetchit-chat which depends on `tracing` directly.
+tracing = { version = "0.1", features = ["log"] }
+# Wires the `log` crate facade to per-target writers (stdout in dev,
+# rotated files in prod). Picks up every `tracing::*` event because of
+# the `tracing/log` feature above.
+tauri-plugin-log = "2"
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
 fetchit-chat = { path = "../../../crates/fetchit-chat" }

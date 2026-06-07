@@ -688,7 +688,9 @@ mod e2_tests {
 
     #[test]
     fn first_run_copies_tpl_and_substitutes_placeholders() {
-        let _guard = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let temp = tempfile::tempdir().unwrap();
         // Point XDG_CONFIG_HOME at the temp dir so dirs::config_dir()
@@ -741,6 +743,9 @@ fn boot_x0xd_supervisor_blocking() -> Option<String> {
         .enable_all()
         .build();
     let Ok(rt) = rt else {
+        // Fires before `run()` wires `tauri-plugin-log`, so no tracing
+        // subscriber would catch a `tracing::warn!` here. Stay on stderr
+        // so dev terminals still see the failure.
         eprintln!("[fetchit][supervisor] failed to build runtime for boot; chat uses discovery");
         return None;
     };
@@ -769,6 +774,7 @@ fn boot_x0xd_supervisor_blocking() -> Option<String> {
             _ => None,
         },
         Err(e) => {
+            // Same pre-init lifetime as the runtime-build branch above.
             eprintln!("[fetchit][supervisor] boot_supervisor: {e}; chat uses discovery");
             None
         }
@@ -854,6 +860,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_log::Builder::default().build())
         .register_asynchronous_uri_scheme_protocol("fetchit", protocol::handle)
         .register_asynchronous_uri_scheme_protocol("autonomi", protocol::handle)
         .setup(move |app| {

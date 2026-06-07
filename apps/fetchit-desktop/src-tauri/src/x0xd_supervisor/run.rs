@@ -128,16 +128,18 @@ pub fn spawn_supervisor_task(
                                 || matches!(exit, Ok(Err(_)) | Err(_));
                             if crashed && detector.record(std::time::Instant::now()) {
                                 *disabled.lock().await = true;
-                                eprintln!(
-                                    "[fetchit][supervisor] x0xd crash-loop tripped; \
-                                     disabling bundled binary for this session"
+                                tracing::warn!(
+                                    target: "fetchit::supervisor",
+                                    "x0xd crash-loop tripped; disabling bundled binary for this session",
                                 );
                                 return;
                             }
                         }
                         Ok(Err(e)) => {
-                            eprintln!(
-                                "[fetchit][supervisor] x0xd spawn failed: {e}"
+                            tracing::warn!(
+                                target: "fetchit::supervisor",
+                                error = %e,
+                                "x0xd spawn failed",
                             );
                             if detector.record(std::time::Instant::now()) {
                                 *disabled.lock().await = true;
@@ -145,8 +147,10 @@ pub fn spawn_supervisor_task(
                             }
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[fetchit][supervisor] supervisor task panic: {e}"
+                            tracing::warn!(
+                                target: "fetchit::supervisor",
+                                error = %e,
+                                "supervisor task panic",
                             );
                             return;
                         }
