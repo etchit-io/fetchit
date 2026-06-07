@@ -1,9 +1,28 @@
-//! Stage 2.1: `DenylistConsumer` — coordinates HTTP fetch, signature
-//! verification, in-memory index, and disk cache. Stub for C1.
-//! Real implementation lands in C4-C9.
+//! Stage 2.1: multi-kind [`DenylistConsumer`] — coordinates HTTP
+//! fetch, ML-DSA-65 signature verification, and the in-memory hot
+//! lookup index across all four [`EntryKind`] variants.
+//!
+//! Reuses [`fetchit_trust::consumer::verify_signature`] for the
+//! signature verify (no fresh ML-DSA code lives here) and the
+//! crate-local [`DenylistIndexes`] for atomic per-kind index swaps.
 
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
+use fetchit_trust::consumer::verify_signature;
+use fetchit_trust::types::DenylistResponse;
 use fetchit_trust::EntryKind;
 use thiserror::Error;
+
+use crate::http::HttpClient;
+use crate::index::DenylistIndexes;
+
+const ALL_KINDS: [EntryKind; 4] = [
+    EntryKind::XorName,
+    EntryKind::AgentId,
+    EntryKind::RelayUrl,
+    EntryKind::ActorUrl,
+];
 
 /// Errors produced by the trust-client crate.
 #[derive(Debug, Error)]
@@ -22,22 +41,302 @@ pub enum TrustError {
     Io(String),
 }
 
-/// Periodic-refresh denylist consumer. Stub; real impl in C4-C9.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct DenylistConsumer {
-    kind_supported: [EntryKind; 4],
-}
-
 /// Emitted on the broadcast channel whenever a refresh produces a
-/// delta against the previous in-memory index. Stub shape; real
-/// fields land in C6.
+/// delta against the previous in-memory index. Stub shape; the
+/// broadcast emit lands in C6.
 #[derive(Clone, Debug)]
 pub struct BlockEvent {
-    /// Which `EntryKind` changed.
+    /// Which [`EntryKind`] changed.
     pub kind: EntryKind,
     /// Values added in this refresh.
     pub added: Vec<String>,
     /// Values removed in this refresh.
     pub removed: Vec<String>,
+}
+
+/// Multi-kind denylist consumer.
+///
+/// Subscribes to ALL four [`EntryKind`] feeds from a single
+/// `fetch_url_base` (e.g. `https://etchit.io/v1`) and exposes a
+/// unified [`Self::is_blocked`] lookup. Implements
+/// [`fetchit_trust::DenylistQuery`] (in C7) for injection into the
+/// chat and reader code paths.
+///
+/// The in-memory index is protected by a `std::sync::RwLock`: reads
+/// are the hot path (every inbound chat envelope, every reader
+/// `XorName` fetch) and are uncontended except during the rare
+/// refresh swap, so a synchronous lock keeps the lookup side from
+/// having to be async.
+pub struct DenylistConsumer {
+    issuer_public_key_bytes: Vec<u8>,
+    fetch_url_base: String,
+    indexes: Arc<RwLock<DenylistIndexes>>,
+    #[allow(dead_code)] // Wired in C8 (disk cache).
+    cache_path: Option<PathBuf>,
+}
+
+impl DenylistConsumer {
+    /// Construct a consumer that polls `fetch_url_base` against
+    /// `issuer_public_key_bytes`. `fetch_url_base` is the v1 root,
+    /// e.g. `https://etchit.io/v1`; the per-kind endpoints are
+    /// derived by appending `/denylist?kind=<kind>`.
+    #[must_use]
+    pub fn new(
+        issuer_public_key_bytes: Vec<u8>,
+        fetch_url_base: String,
+        cache_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            issuer_public_key_bytes,
+            fetch_url_base,
+            indexes: Arc::new(RwLock::new(DenylistIndexes::default())),
+            cache_path,
+        }
+    }
+
+    /// Refresh all four kinds from `client`. Per-kind errors are
+    /// logged via `tracing::warn!` and SWALLOWED — the previous good
+    /// index for that kind is preserved. Returns `Ok(())` when at
+    /// least one kind refreshed successfully, or the last per-kind
+    /// error when every kind failed.
+    ///
+    /// # Errors
+    /// Returns the last per-kind error when none of the four
+    /// refreshes succeeded.
+    pub async fn refresh<C: HttpClient + ?Sized>(&self, client: &C) -> Result<(), TrustError> {
+        let mut last_err: Option<TrustError> = None;
+        let mut any_ok = false;
+        for kind in ALL_KINDS {
+            match self.refresh_one(client, kind).await {
+                Ok(()) => any_ok = true,
+                Err(e) => {
+                    tracing::warn!(
+                        ?kind,
+                        error = %e,
+                        "denylist refresh failed; preserving prior index for kind"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        if any_ok {
+            Ok(())
+        } else {
+            Err(last_err.unwrap_or_else(|| TrustError::Http("no kinds refreshed".into())))
+        }
+    }
+
+    async fn refresh_one<C: HttpClient + ?Sized>(
+        &self,
+        client: &C,
+        kind: EntryKind,
+    ) -> Result<(), TrustError> {
+        let url = format!(
+            "{}/denylist?kind={}",
+            self.fetch_url_base,
+            kind_query_str(kind)
+        );
+        let bytes = client.get(&url).await?;
+        let resp: DenylistResponse =
+            serde_json::from_slice(&bytes).map_err(|e| TrustError::Decode(e.to_string()))?;
+        if resp.kind != kind {
+            return Err(TrustError::Decode(format!(
+                "response kind {:?} does not match requested {:?}",
+                resp.kind, kind
+            )));
+        }
+        verify_signature(&resp, &self.issuer_public_key_bytes)
+            .map_err(|e| TrustError::BadSignature(e.to_string()))?;
+        let values: Vec<String> = resp
+            .entries
+            .iter()
+            .map(|e| e.target.value.clone())
+            .collect();
+        let _delta = self
+            .indexes
+            .write()
+            .map_err(|e| TrustError::Io(format!("index lock poisoned: {e}")))?
+            .replace(resp.kind, values);
+        // C6 wires _delta into a broadcast channel emit; for C4 we just swap.
+        Ok(())
+    }
+
+    /// `true` when `(kind, value)` is on the current snapshot.
+    ///
+    /// Synchronous: the index lock is held only for the duration of
+    /// the lookup. Safe to call from sync or async contexts.
+    #[must_use]
+    pub fn is_blocked(&self, kind: EntryKind, value: &str) -> bool {
+        match self.indexes.read() {
+            Ok(idx) => idx.is_blocked(kind, value),
+            Err(poisoned) => poisoned.into_inner().is_blocked(kind, value),
+        }
+    }
+}
+
+fn kind_query_str(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::XorName => "xor_name",
+        EntryKind::AgentId => "agent_id",
+        EntryKind::RelayUrl => "relay_url",
+        EntryKind::ActorUrl => "actor_url",
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::http::HttpClient;
+    use async_trait::async_trait;
+    use fetchit_trust::signer::IssuerSigner;
+    use fetchit_trust::types::{
+        DenylistEntry, DenylistResponse, DenylistToSign, ReportKind, TargetIdentity,
+    };
+    use fetchit_trust::EntryKind;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    fn signed_response(
+        signer: &IssuerSigner,
+        kind: EntryKind,
+        values: &[&str],
+    ) -> DenylistResponse {
+        let entries: Vec<DenylistEntry> = values
+            .iter()
+            .map(|v| DenylistEntry {
+                target: TargetIdentity::new(kind, *v),
+                added_at_ms: 1_700_000_000_000,
+                reason: ReportKind::Spam,
+            })
+            .collect();
+        let to_sign = DenylistToSign {
+            etag: "etag-1",
+            generated_at_ms: 1_700_000_000_001,
+            kind,
+            entries: &entries,
+        };
+        let sign_bytes = postcard::to_allocvec(&to_sign).unwrap();
+        let sig = signer.sign(&sign_bytes).unwrap();
+        DenylistResponse {
+            etag: "etag-1".into(),
+            generated_at_ms: 1_700_000_000_001,
+            kind,
+            entries,
+            issuer_signature_hex: hex::encode(sig),
+            issuer_key_id: signer.key_id.clone(),
+        }
+    }
+
+    /// Test HTTP stub. Pre-bake responses by URL substring; return
+    /// 404-equivalent (Err) for unmatched URLs.
+    struct StubHttp {
+        by_kind: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl StubHttp {
+        fn new() -> Self {
+            Self {
+                by_kind: Mutex::new(HashMap::new()),
+            }
+        }
+        fn pre_bake(&self, kind_query: &str, body: Vec<u8>) {
+            self.by_kind.lock().unwrap().insert(kind_query.into(), body);
+        }
+    }
+
+    #[async_trait]
+    impl HttpClient for StubHttp {
+        async fn get(&self, url: &str) -> Result<Vec<u8>, TrustError> {
+            let map = self.by_kind.lock().unwrap();
+            for (kind_query, body) in map.iter() {
+                if url.contains(kind_query) {
+                    return Ok(body.clone());
+                }
+            }
+            Err(TrustError::Http(format!("stub: no body for {url}")))
+        }
+    }
+
+    fn json_bytes(resp: &DenylistResponse) -> Vec<u8> {
+        serde_json::to_vec(resp).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refresh_indexes_signed_relay_url_entries() {
+        let signer = IssuerSigner::generate("test").unwrap();
+        let stub = StubHttp::new();
+        let resp = signed_response(&signer, EntryKind::RelayUrl, &["wss://bad.example/v1/ws"]);
+        stub.pre_bake("relay_url", json_bytes(&resp));
+
+        let consumer = DenylistConsumer::new(
+            signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        );
+        consumer.refresh(&stub).await.unwrap();
+        assert!(consumer.is_blocked(EntryKind::RelayUrl, "wss://bad.example/v1/ws"));
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_bad_signature_keeps_old_index() {
+        let good_signer = IssuerSigner::generate("good").unwrap();
+        let bad_signer = IssuerSigner::generate("bad").unwrap();
+        let consumer = DenylistConsumer::new(
+            good_signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        );
+
+        // First refresh: good signer, succeeds.
+        let stub1 = StubHttp::new();
+        let resp1 = signed_response(&good_signer, EntryKind::RelayUrl, &["wss://a"]);
+        stub1.pre_bake("relay_url", json_bytes(&resp1));
+        consumer.refresh(&stub1).await.ok(); // Some other kinds may 404 in stub, that's OK.
+        assert!(consumer.is_blocked(EntryKind::RelayUrl, "wss://a"));
+
+        // Second refresh: bad signer for the same kind.
+        let stub2 = StubHttp::new();
+        let resp2 = signed_response(&bad_signer, EntryKind::RelayUrl, &["wss://b"]);
+        stub2.pre_bake("relay_url", json_bytes(&resp2));
+        let _ = consumer.refresh(&stub2).await; // Per-kind failure swallowed; refresh may still report Ok if others fail soft.
+        assert!(consumer.is_blocked(EntryKind::RelayUrl, "wss://a"));
+        assert!(!consumer.is_blocked(EntryKind::RelayUrl, "wss://b"));
+    }
+
+    #[tokio::test]
+    async fn refresh_iterates_all_four_kinds() {
+        let signer = IssuerSigner::generate("test").unwrap();
+        let stub = StubHttp::new();
+        for kind in [
+            EntryKind::XorName,
+            EntryKind::AgentId,
+            EntryKind::RelayUrl,
+            EntryKind::ActorUrl,
+        ] {
+            let val = match kind {
+                EntryKind::XorName | EntryKind::AgentId => "a".repeat(64),
+                EntryKind::RelayUrl => "wss://r.example/v1/ws".to_string(),
+                EntryKind::ActorUrl => "https://m.example/users/a".to_string(),
+            };
+            let resp = signed_response(&signer, kind, &[&val]);
+            let url_segment = match kind {
+                EntryKind::XorName => "xor_name",
+                EntryKind::AgentId => "agent_id",
+                EntryKind::RelayUrl => "relay_url",
+                EntryKind::ActorUrl => "actor_url",
+            };
+            stub.pre_bake(url_segment, json_bytes(&resp));
+        }
+        let consumer = DenylistConsumer::new(
+            signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        );
+        consumer.refresh(&stub).await.unwrap();
+        assert!(consumer.is_blocked(EntryKind::XorName, &"a".repeat(64)));
+        assert!(consumer.is_blocked(EntryKind::AgentId, &"a".repeat(64)));
+        assert!(consumer.is_blocked(EntryKind::RelayUrl, "wss://r.example/v1/ws"));
+        assert!(consumer.is_blocked(EntryKind::ActorUrl, "https://m.example/users/a"));
+    }
 }
