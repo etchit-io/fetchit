@@ -13,6 +13,7 @@ use fetchit_trust::consumer::verify_signature;
 use fetchit_trust::types::DenylistResponse;
 use fetchit_trust::EntryKind;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 use crate::http::HttpClient;
 use crate::index::DenylistIndexes;
@@ -42,8 +43,7 @@ pub enum TrustError {
 }
 
 /// Emitted on the broadcast channel whenever a refresh produces a
-/// delta against the previous in-memory index. Stub shape; the
-/// broadcast emit lands in C6.
+/// delta against the previous in-memory index.
 #[derive(Clone, Debug)]
 pub struct BlockEvent {
     /// Which [`EntryKind`] changed.
@@ -73,6 +73,7 @@ pub struct DenylistConsumer {
     indexes: Arc<RwLock<DenylistIndexes>>,
     #[allow(dead_code)] // Wired in C8 (disk cache).
     cache_path: Option<PathBuf>,
+    tx: broadcast::Sender<BlockEvent>,
 }
 
 impl DenylistConsumer {
@@ -86,12 +87,24 @@ impl DenylistConsumer {
         fetch_url_base: String,
         cache_path: Option<PathBuf>,
     ) -> Self {
+        let (tx, _) = broadcast::channel(256);
         Self {
             issuer_public_key_bytes,
             fetch_url_base,
             indexes: Arc::new(RwLock::new(DenylistIndexes::default())),
             cache_path,
+            tx,
         }
+    }
+
+    /// Subscribe to [`BlockEvent`]s emitted on every refresh that
+    /// produces a non-empty delta. Capacity is bounded (256); slow
+    /// consumers may lag and observe `RecvError::Lagged` on the next
+    /// recv, in which case they should resync from the current index
+    /// snapshot.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<BlockEvent> {
+        self.tx.subscribe()
     }
 
     /// Refresh all four kinds from `client`. Per-kind errors are
@@ -152,12 +165,25 @@ impl DenylistConsumer {
             .iter()
             .map(|e| e.target.value.clone())
             .collect();
-        let _delta = self
-            .indexes
-            .write()
-            .map_err(|e| TrustError::Io(format!("index lock poisoned: {e}")))?
-            .replace(resp.kind, values);
-        // C6 wires _delta into a broadcast channel emit; for C4 we just swap.
+        let delta = {
+            let mut idx = self
+                .indexes
+                .write()
+                .map_err(|e| TrustError::Io(format!("index lock poisoned: {e}")))?;
+            idx.replace(resp.kind, values)
+        };
+        if !delta.added.is_empty() || !delta.removed.is_empty() {
+            let event = BlockEvent {
+                kind: delta.kind,
+                added: delta.added,
+                removed: delta.removed,
+            };
+            // Best-effort: drops silently when there are no
+            // subscribers. The index swap already happened; push
+            // notification is a courtesy, not a correctness
+            // requirement.
+            let _ = self.tx.send(event);
+        }
         Ok(())
     }
 
@@ -330,6 +356,65 @@ mod tests {
         let dyn_q: Arc<dyn DenylistQuery> = consumer.clone() as Arc<dyn DenylistQuery>;
         assert!(dyn_q.is_blocked(EntryKind::AgentId, &"a".repeat(64)));
         assert!(!dyn_q.is_blocked(EntryKind::AgentId, &"b".repeat(64)));
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_block_events_on_refresh() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let signer = IssuerSigner::generate("test").unwrap();
+        let stub = StubHttp::new();
+        let resp = signed_response(&signer, EntryKind::RelayUrl, &["wss://bad.example/v1/ws"]);
+        stub.pre_bake("relay_url", json_bytes(&resp));
+
+        let consumer = DenylistConsumer::new(
+            signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        );
+        let mut rx = consumer.subscribe();
+        consumer.refresh(&stub).await.unwrap();
+
+        let evt = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("event arrives within 200ms")
+            .expect("channel not closed");
+        assert_eq!(evt.kind, EntryKind::RelayUrl);
+        assert_eq!(evt.added, vec!["wss://bad.example/v1/ws".to_string()]);
+        assert!(evt.removed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscribe_no_event_on_idempotent_refresh() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let signer = IssuerSigner::generate("test").unwrap();
+        let stub = StubHttp::new();
+        let resp = signed_response(&signer, EntryKind::AgentId, &["a".repeat(64).as_str()]);
+        stub.pre_bake("agent_id", json_bytes(&resp));
+
+        let consumer = DenylistConsumer::new(
+            signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        );
+        consumer.refresh(&stub).await.unwrap();
+        let mut rx = consumer.subscribe();
+        consumer.refresh(&stub).await.unwrap(); // identical snapshot
+
+        // No delta -> no BlockEvent for AgentId. (Other kinds may emit because
+        // their first refresh transitions empty -> empty too, which also no-ops.
+        // The assertion is that we don't see an AgentId event referencing
+        // the "a"*64 value as added a second time.)
+        let result = timeout(Duration::from_millis(100), rx.recv()).await;
+        if let Ok(Ok(evt)) = result {
+            assert!(
+                !(evt.kind == EntryKind::AgentId && evt.added.contains(&"a".repeat(64))),
+                "should not re-emit added for an idempotent refresh"
+            );
+        }
     }
 
     #[tokio::test]
