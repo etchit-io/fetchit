@@ -2934,6 +2934,7 @@ dependencies = [
  "fetchit-relay-client",
  "fetchit-relay-proto",
  "fetchit-relay-server",
+ "fetchit-trust",
  "flate2",
  "futures-util",
  "hex",
