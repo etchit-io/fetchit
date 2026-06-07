@@ -102,6 +102,18 @@ pub enum ChatError {
         /// Group id whose consent is `DeclinedOptOut`.
         group_id: String,
     },
+
+    /// M3 federation core: the addressed recipient is on the
+    /// community-maintained denylist. The chat layer refuses outbound
+    /// DM sends to blocked peers — UI surfaces "this contact is on
+    /// the community denylist" so the user understands why the send
+    /// was rejected. Inbound from blocked peers is silently dropped
+    /// at the dispatcher, not surfaced as this error.
+    #[error("recipient {agent_id_hex} is on the community denylist — send refused")]
+    Denied {
+        /// 64-hex agent id of the blocked recipient.
+        agent_id_hex: String,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {

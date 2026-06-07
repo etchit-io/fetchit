@@ -203,9 +203,18 @@ pub struct Endpoint<'a> {
     layout: Option<&'a StoreLayout>,
     local_machine_id: [u8; 32],
     members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
+    /// M3 federation core: when wired, [`Self::send`] returns
+    /// [`ChatError::Denied`] for blocked recipients before sealing.
+    /// `None` = ungated.
+    denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
 }
 
 impl<'a> Endpoint<'a> {
+    /// Pre-M3 8-arg constructor, retained for the existing test suite
+    /// (which builds endpoints without a denylist consumer).
+    /// Production code uses [`Self::new_with_denylist`] via
+    /// [`crate::Client::messages`].
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         http: &'a Http,
@@ -217,6 +226,36 @@ impl<'a> Endpoint<'a> {
         local_machine_id: [u8; 32],
         members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
     ) -> Self {
+        Self::new_with_denylist(
+            http,
+            router,
+            identity,
+            registry,
+            signer,
+            layout,
+            local_machine_id,
+            members_singleflight,
+            None,
+        )
+    }
+
+    /// Same as [`Self::new`] but with an explicit denylist consumer
+    /// slot. Used by [`crate::Client::messages`] in production; the
+    /// 8-arg [`Self::new`] is the test-facing path that leaves the
+    /// gate disabled (all existing tests built against it predate
+    /// M3 and ungated semantics preserve their expectations).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_denylist(
+        http: &'a Http,
+        router: &'a Router,
+        identity: Option<&'a Arc<FetchitIdentity>>,
+        registry: Option<&'a Arc<ConversationRegistry>>,
+        signer: Option<&'a Arc<dyn Signer>>,
+        layout: Option<&'a StoreLayout>,
+        local_machine_id: [u8; 32],
+        members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
+        denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
+    ) -> Self {
         Self {
             http,
             router,
@@ -226,6 +265,7 @@ impl<'a> Endpoint<'a> {
             layout,
             local_machine_id,
             members_singleflight,
+            denylist,
         }
     }
 
@@ -242,13 +282,27 @@ impl<'a> Endpoint<'a> {
     /// `ChatError::NoTransportAvailable` when the router has no
     /// reachable transport; `ChatError::Invalid` when no stored card
     /// is available for the recipient or the client was built in
-    /// REST-only mode without chat-encryption state.
+    /// REST-only mode without chat-encryption state;
+    /// [`ChatError::Denied`] when the recipient is on the wired
+    /// denylist (M3 federation core).
     pub async fn send(
         &self,
         to: &AgentId,
         body: &str,
         sender_name: &str,
     ) -> Result<Option<String>> {
+        // M3 federation core: refuse outbound DMs to denylisted
+        // peers BEFORE sealing or bootstrapping a conversation. Caller
+        // sees the typed Denied variant and can surface a "this
+        // contact is on the community denylist" UI without leaking
+        // any details about why.
+        if let Some(denylist) = self.denylist {
+            if denylist.is_blocked(&to.0).await {
+                return Err(ChatError::Denied {
+                    agent_id_hex: to.0.clone(),
+                });
+            }
+        }
         // Surface a "no transport" error before the chat-state check
         // so callers that build a Client without a relay still see the
         // historical error variant.

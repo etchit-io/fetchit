@@ -62,6 +62,14 @@ pub struct ClientBuilder {
     /// once. Long-running consumers (chat-peer, desktop app) survive
     /// a daemon restart without going through their own restart cycle.
     x0xd_port_file: Option<PathBuf>,
+    /// M3 federation core: optional community denylist consumer.
+    /// When set, outbound DM sends to blocked recipients return
+    /// [`ChatError::Denied`] and inbound envelopes from blocked
+    /// senders are silently dropped at the dispatcher. When `None`,
+    /// the chat layer is ungated (LAN-only / offline deployments,
+    /// integration tests, and the M0 boot path where the consumer
+    /// hasn't completed its first refresh yet).
+    denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -81,6 +89,7 @@ impl std::fmt::Debug for ClientBuilder {
                 &self.contact_pubkey_lookup.as_ref().map(|_| "<closure>"),
             )
             .field("x0xd_port_file", &self.x0xd_port_file)
+            .field("denylist", &self.denylist.as_ref().map(|_| "<consumer>"))
             .finish()
     }
 }
@@ -163,6 +172,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Plug in a community denylist consumer. With this set:
+    ///
+    /// - DM outbound to a blocked recipient returns
+    ///   [`ChatError::Denied`] before the envelope is sealed or sent.
+    /// - Inbound deliveries from blocked senders are silently
+    ///   dropped at the dispatcher, before any decrypt path runs —
+    ///   the conversation layer never sees them.
+    ///
+    /// Without this, the chat layer is ungated (LAN-only / offline
+    /// builds, tests, M0 startup before the consumer's first
+    /// refresh). The consumer is whatever the host wires up — the
+    /// canonical implementation is `fetchit_trust::DenylistConsumer`,
+    /// bridged via a thin adapter to [`crate::DenylistCheck`].
+    #[must_use]
+    pub fn denylist(mut self, denylist: Arc<dyn crate::denylist::DenylistCheck>) -> Self {
+        self.denylist = Some(denylist);
+        self
+    }
+
     /// Build the client. Falls back to [`discover_local`] for any
     /// x0xd connection field not explicitly set.
     ///
@@ -185,6 +213,7 @@ impl ClientBuilder {
             self.enable_lan_direct,
             self.contact_pubkey_lookup,
             self.x0xd_port_file,
+            self.denylist,
         )
         .await
     }
@@ -246,6 +275,12 @@ pub struct Client {
     /// The TCP `SocketAddr` the LAN-direct listener bound when wired.
     /// Desktop publishes this port via mDNS so peers can dial back.
     lan_bound_addr: Option<std::net::SocketAddr>,
+    /// M3 federation core: community denylist consumer. When wired,
+    /// the dispatcher drops inbound from blocked senders and
+    /// `messages::Endpoint::send` returns [`ChatError::Denied`] for
+    /// blocked recipients. Cloneable across `Client` clones; the
+    /// underlying refresh loop runs on the host's runtime.
+    denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
 }
 
 impl Client {
@@ -258,7 +293,18 @@ impl Client {
 
     /// Build from an already-resolved endpoint, no relay transport.
     pub async fn from_endpoint(ep: DaemonEndpoint) -> Result<Self> {
-        Self::from_parts(ep.base_url, ep.token, None, None, None, false, None, None).await
+        Self::from_parts(
+            ep.base_url,
+            ep.token,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Start a builder for custom configuration.
@@ -277,6 +323,7 @@ impl Client {
         enable_lan_direct: bool,
         contact_pubkey_lookup: Option<ContactPubkeyLookup>,
         x0xd_port_file: Option<PathBuf>,
+        denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
     ) -> Result<Self> {
         let http = Arc::new(match x0xd_port_file.as_ref() {
             Some(path) => Http::new_with_port_file(path.clone(), token.clone())?,
@@ -315,6 +362,7 @@ impl Client {
             relay,
             lan,
             lan_bound_addr,
+            denylist,
         })
     }
 
@@ -355,7 +403,7 @@ impl Client {
     /// Direct messaging endpoint — sends route through the Router.
     #[must_use]
     pub fn messages(&self) -> messages::Endpoint<'_> {
-        messages::Endpoint::new(
+        messages::Endpoint::new_with_denylist(
             &self.http,
             &self.router,
             self.chat.as_ref().map(|c| &c.identity),
@@ -364,6 +412,7 @@ impl Client {
             self.chat.as_ref().map(|c| &c.layout),
             self.chat.as_ref().map_or([0u8; 32], |c| c.local_machine_id),
             self.chat.as_ref().map(|c| &c.members_singleflight),
+            self.denylist.as_ref(),
         )
     }
 
@@ -473,6 +522,20 @@ impl Client {
         };
         if let Some(identity) = self.identity_arc() {
             if hex::encode(transit.sender_agent_id.as_bytes()) == identity.agent_id_hex() {
+                return;
+            }
+        }
+        // M3 federation core: drop inbound from denylisted senders
+        // BEFORE any decrypt path runs. Preserves "no plaintext leak"
+        // semantics — a blocked sender's envelope never reaches the
+        // conversation layer, bridge dispatcher, welcome handlers, or
+        // private-group decrypt. Sender is identified by the transit
+        // envelope's signed `sender_agent_id`, so the relay can't
+        // help an attacker bypass this by spoofing.
+        if let Some(denylist) = self.denylist.as_ref() {
+            let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+            if denylist.is_blocked(&sender_hex).await {
+                log::debug!("denylist: drop inbound from blocked sender {sender_hex}");
                 return;
             }
         }
