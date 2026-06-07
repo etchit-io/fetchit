@@ -33,6 +33,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned upstream saorsa-labs/x0x sha for the bundled x0xd. Mirrors
+  # bundled-x0xd.yml and apps/fetchit-desktop/src-tauri/build.rs.
+  # Bump in lockstep with build.rs::X0XD_PIN_SHA and X0XD_PIN_VERSION.
+  X0XD_PIN_SHA: "91951a503c7c763aca54de4de1df128cbab82383"
+  X0XD_PIN_VERSION: "0.21.3-pre.fetchit"
 
 jobs:
   release-apk:
@@ -260,6 +265,93 @@ jobs:
             "WINDOWS_CERTIFICATE_FILE=$pfx",
             "WINDOWS_CERTIFICATE_PASSWORD=$env:WIN_CERT_PWD"
           ) | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      # ── Bundled x0xd: clone, build per-platform, codesign on macOS ───
+      # Layers the pinned saorsa-labs/x0x x0xd binary into the Tauri
+      # bundle so installs work without requiring users to side-load a
+      # daemon. The src-tauri build.rs reads FETCHIT_BUNDLED_X0XD_PATH
+      # and copies the binary into resources/x0xd/{os}-{arch}/, which
+      # tauri.conf.json globs into the final bundle. macOS lipo'ing
+      # produces one universal binary covering both arch slices of the
+      # final .app (see docs/superpowers/specs notes for option D).
+      # Clone before Swatinem so Cargo.lock is on disk when the cache
+      # restore step computes its key; otherwise the restore key is
+      # empty/fallback and never matches the save key (cache miss every
+      # run). This is the one place where bundled-x0xd.yml has the
+      # opposite order; left as a follow-up cleanup over there.
+      - name: Clone pinned saorsa-labs/x0x
+        shell: bash
+        run: |
+          git clone https://github.com/saorsa-labs/x0x "${{ runner.temp }}/x0x"
+          cd "${{ runner.temp }}/x0x"
+          git checkout "$X0XD_PIN_SHA"
+
+      - name: Cache x0x build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/x0x
+          shared-key: x0x-${{ matrix.label }}
+          cache-on-failure: true
+
+      - name: Build x0xd (Linux + Windows native)
+        if: matrix.platform != 'macos-latest'
+        shell: bash
+        run: |
+          cd "${{ runner.temp }}/x0x"
+          cargo build --release --bin x0xd
+
+      - name: Build x0xd (macOS universal via lipo)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          cd "${{ runner.temp }}/x0x"
+          cargo build --release --bin x0xd --target aarch64-apple-darwin
+          cargo build --release --bin x0xd --target x86_64-apple-darwin
+          lipo -create -output "${{ runner.temp }}/x0x/target/release/x0xd-universal" \
+            "${{ runner.temp }}/x0x/target/aarch64-apple-darwin/release/x0xd" \
+            "${{ runner.temp }}/x0x/target/x86_64-apple-darwin/release/x0xd"
+
+      # Hardened-runtime sign so the .app can notarize. Must happen
+      # before tauri-action stages the binary; build.rs's fs::copy
+      # preserves the signature across the resources/x0xd/ relocation.
+      # APPLE_SIGNING_IDENTITY is exported by the earlier Stage Apple
+      # step only when the cert secret is set; if unset, the .app
+      # itself is unsigned too and an unsigned bundled binary matches.
+      - name: Codesign bundled x0xd (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "APPLE_SIGNING_IDENTITY not set, skipping bundled x0xd codesign (matches unsigned .app)"
+            exit 0
+          fi
+          codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" \
+            "${{ runner.temp }}/x0x/target/release/x0xd-universal"
+          codesign --verify --verbose=2 \
+            "${{ runner.temp }}/x0x/target/release/x0xd-universal"
+
+      - name: Export bundled x0xd env for tauri-action
+        shell: bash
+        run: |
+          case "${{ matrix.platform }}" in
+            macos-latest)
+              path="${{ runner.temp }}/x0x/target/release/x0xd-universal"
+              ;;
+            windows-latest)
+              path="${{ runner.temp }}/x0x/target/release/x0xd.exe"
+              ;;
+            *)
+              path="${{ runner.temp }}/x0x/target/release/x0xd"
+              ;;
+          esac
+          if [ ! -f "$path" ]; then
+            echo "::error::bundled x0xd missing at $path"
+            exit 1
+          fi
+          {
+            echo "FETCHIT_BUNDLED_X0XD_PATH=$path"
+            echo "FETCHIT_BUNDLED_X0XD_VERSION=$X0XD_PIN_VERSION"
+          } >> "$GITHUB_ENV"
 
       # ── Build + publish (tauri-action handles bundle discovery) ───
       # No signing env vars on this step — the Stage Apple / Stage
