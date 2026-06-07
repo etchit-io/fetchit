@@ -1012,7 +1012,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn record_nonce_serialises_concurrent_calls_on_same_group() {
         // Two concurrent record_nonce calls on the same (group, sender,
         // nonce) — the OLD code, where dispatch_message did its own
@@ -1020,6 +1020,12 @@ mod tests {
         // could let both observe an empty window and both surface the
         // message. The atomic record_nonce closes that race: exactly
         // one survives as Recorded, the other sees Replay.
+        //
+        // multi_thread runtime so the two spawn'd tasks can actually
+        // race on separate worker threads; on the default single-thread
+        // tokio runtime they would be cooperatively scheduled and the
+        // 32-round retry loop below would never exercise the contended
+        // path it claims to defend.
         let (_d, reg) = fresh_registry();
         let conv = dm("aa", LOCAL, PEER, 0, 0, 0);
         reg.save(&conv).await.unwrap();
