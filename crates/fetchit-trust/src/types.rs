@@ -42,6 +42,43 @@ impl TargetIdentity {
             value: value.into().to_ascii_lowercase(),
         }
     }
+
+    /// Construct + validate. Per-kind rules:
+    /// - [`EntryKind::XorName`] / [`EntryKind::AgentId`]: 64-char
+    ///   lowercase hex (input is lowercased first, then validated).
+    /// - [`EntryKind::RelayUrl`]: lowercased; must start with
+    ///   `wss://`.
+    /// - [`EntryKind::ActorUrl`]: lowercased; must start with
+    ///   `https://`.
+    ///
+    /// Use `try_new` in new code where invalid input is a real bug.
+    /// The infallible [`Self::new`] is kept for callers that need
+    /// permissive back-compat behaviour.
+    ///
+    /// # Errors
+    /// Returns a static `&str` describing the kind-specific rule that
+    /// failed.
+    pub fn try_new(kind: EntryKind, value: impl Into<String>) -> Result<Self, &'static str> {
+        let v = value.into().to_ascii_lowercase();
+        match kind {
+            EntryKind::XorName | EntryKind::AgentId => {
+                if v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("XorName/AgentId require 64-char lowercase hex");
+                }
+            }
+            EntryKind::RelayUrl => {
+                if !v.starts_with("wss://") {
+                    return Err("RelayUrl must be wss://");
+                }
+            }
+            EntryKind::ActorUrl => {
+                if !v.starts_with("https://") {
+                    return Err("ActorUrl must be https://");
+                }
+            }
+        }
+        Ok(Self { kind, value: v })
+    }
 }
 
 /// Classification chosen by the reporter.
@@ -160,5 +197,50 @@ mod tests {
     fn actor_url_entry_kind_lowercases_value() {
         let t = TargetIdentity::new(EntryKind::ActorUrl, "HTTPS://Mastodon.example/Users/Eve");
         assert_eq!(t.value, "https://mastodon.example/users/eve");
+    }
+
+    #[test]
+    fn xorname_value_must_be_64_hex() {
+        let t = TargetIdentity::try_new(EntryKind::XorName, "deadbeef");
+        assert!(t.is_err());
+    }
+
+    #[test]
+    fn agentid_value_must_be_64_hex() {
+        let t = TargetIdentity::try_new(EntryKind::AgentId, "abc");
+        assert!(t.is_err());
+    }
+
+    #[test]
+    fn xorname_accepts_64_hex_lowercase() {
+        let v = "0".repeat(64);
+        let t = TargetIdentity::try_new(EntryKind::XorName, &v).unwrap();
+        assert_eq!(t.value, v);
+    }
+
+    #[test]
+    fn xorname_accepts_64_hex_uppercase_normalises_lowercase() {
+        let v = "A".repeat(64);
+        let t = TargetIdentity::try_new(EntryKind::XorName, &v).unwrap();
+        assert_eq!(t.value, "a".repeat(64));
+    }
+
+    #[test]
+    fn relay_url_must_be_wss() {
+        assert!(TargetIdentity::try_new(EntryKind::RelayUrl, "wss://a.example/v1/ws").is_ok());
+        assert!(TargetIdentity::try_new(EntryKind::RelayUrl, "ws://a.example/v1/ws").is_err());
+        assert!(TargetIdentity::try_new(EntryKind::RelayUrl, "file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn actor_url_must_be_https() {
+        assert!(TargetIdentity::try_new(EntryKind::ActorUrl, "https://m.example/u/a").is_ok());
+        assert!(TargetIdentity::try_new(EntryKind::ActorUrl, "http://m.example/u/a").is_err());
+    }
+
+    #[test]
+    fn relay_url_normalises_to_lowercase() {
+        let t = TargetIdentity::try_new(EntryKind::RelayUrl, "WSS://Relay.Example/V1/WS").unwrap();
+        assert_eq!(t.value, "wss://relay.example/v1/ws");
     }
 }
