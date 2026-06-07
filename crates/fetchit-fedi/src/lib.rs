@@ -24,6 +24,7 @@
 
 pub mod activity;
 pub mod actor;
+pub mod attestation;
 pub mod signature;
 pub mod transport;
 pub mod webfinger;

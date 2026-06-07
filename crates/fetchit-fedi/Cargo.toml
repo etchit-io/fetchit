@@ -13,5 +13,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]

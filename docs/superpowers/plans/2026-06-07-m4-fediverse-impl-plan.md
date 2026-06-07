@@ -75,20 +75,28 @@ pub struct ActorIdentity {
 }
 
 impl ActorIdentity {
-    /// Mint a fresh ActorIdentity. Stores the RSA key + binding
-    /// signature in the StoreLayout for re-load on restart.
-    pub fn mint(
-        handle: &str,
-        domain: &str,
-        chat_identity: &fetchit_chat::FetchitIdentity,
-        layout: &fetchit_chat::local_store::StoreLayout,
-    ) -> Result<Self, ActorError>;
+    /// Pure-data constructor. The factory (RSA gen + ML-DSA attestation
+    /// signing + StoreLayout I/O) lives in `fetchit-chat` to keep the
+    /// dep direction unidirectional (chat → fedi). See
+    /// **Cross-crate cut** below.
+    pub fn new(
+        handle: String,
+        actor_url: url::Url,
+        agent_id_hex: String,
+        rsa_priv_pem: String,
+        ml_dsa_attestation: MlDsaAttestation,
+    ) -> Self;
 
-    /// Load a previously-minted ActorIdentity by handle.
-    pub fn load(
-        handle: &str,
-        layout: &fetchit_chat::local_store::StoreLayout,
-    ) -> Result<Option<Self>, ActorError>;
+    /// Symmetric reload from persisted bytes. Same data shape as `new`;
+    /// chat-side `load_actor_identity` calls this after reading the
+    /// on-disk material.
+    pub fn from_persisted(
+        handle: String,
+        rsa_priv_pem: String,
+        ml_dsa_attestation: MlDsaAttestation,
+        actor_url: url::Url,
+        agent_id_hex: String,
+    ) -> Self;
 }
 
 /// Serialised `Actor` JSON-LD as Mastodon expects, plus our PQ
@@ -102,6 +110,35 @@ pub struct Actor {
     pub ml_dsa_attestation: MlDsaAttestation, // (pubkey + signature over RSA pubkey)
 }
 ```
+
+**Cross-crate cut (Alice 2026-06-07 follow-up to 8263c1c):** The mint/load factory lives in `fetchit-chat`, not `fetchit-fedi`, because mint needs a chat-identity ML-DSA signer + a `StoreLayout`. Keeping it on the chat side preserves unidirectional `chat → fedi` deps:
+
+```rust
+// crates/fetchit-chat/src/public.rs (new)
+impl Client {
+    /// Mint an actor identity bound to this client's chat identity.
+    /// 1. gens RSA-2048
+    /// 2. canonical-byte-signs (RSA pubkey, handle, actor_url, agent_id_hex)
+    ///    with the chat-identity ML-DSA key (canonical input format defined
+    ///    in `fetchit_fedi::attestation::signing_input`)
+    /// 3. persists priv key + attestation to `layout.fedi_dir()`
+    /// 4. returns `fetchit_fedi::ActorIdentity::new(...)`
+    pub async fn mint_actor_identity(
+        &self,
+        handle: &str,
+        domain: &str,
+    ) -> Result<fetchit_fedi::ActorIdentity, ChatError>;
+
+    /// Load a previously-minted identity by handle from
+    /// `layout.fedi_dir()`. Returns `None` if not persisted.
+    pub async fn load_actor_identity(
+        &self,
+        handle: &str,
+    ) -> Result<Option<fetchit_fedi::ActorIdentity>, ChatError>;
+}
+```
+
+`MlDsaAttestation` lives in `fetchit-fedi` and exposes a canonical `signing_input(handle, actor_url, agent_id_hex, rsa_pubkey_der) -> Vec<u8>` so bridge-side verifiers depend on a locked byte format. Domain-separated; format frozen at Stage 1.2a (8263c1c follow-up).
 
 **Acceptance criteria for Stage 1:**
 - `ActorBuilder` mints + persists an Actor with both keys.
