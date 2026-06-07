@@ -1457,6 +1457,163 @@ async fn sweep_auto_rekey(
     Ok(rekeyed)
 }
 
+impl Client {
+    /// Mint a fresh fediverse-bridge actor identity for this user's
+    /// chat identity. Generates an RSA-2048 keypair, signs the
+    /// ML-DSA-65 attestation over the canonical
+    /// [`fetchit_fedi::attestation::signing_input`] bytes, and
+    /// persists everything to the encrypted fedi vault at
+    /// `<layout.root>/fedi/<handle>.json.enc`.
+    ///
+    /// `domain` is the fediverse host that will publish the actor's
+    /// `WebFinger` record (currently fetchit-operated: `etchit.io`).
+    /// `actor_url` is constructed as `https://<domain>/actors/<handle>`.
+    ///
+    /// `passphrase` mirrors the rest of the chat surface — `None` uses
+    /// the OS keychain entry, `Some` derives via Argon2id with the
+    /// existing identity vault's salt.
+    ///
+    /// # Errors
+    ///
+    /// - [`ChatError::Invalid`] when chat state has not been initialised.
+    /// - [`ChatError::Invalid`] when `handle` fails validation (empty,
+    ///   more than 64 chars, or chars outside `[A-Za-z0-9_-]`). This
+    ///   also gates path-traversal: handles are formatted into a file
+    ///   path under `fedi_dir`, and the validator forbids `.` and `/`.
+    /// - Propagates RSA keygen, attestation signing, master-key
+    ///   resolution, and vault-write failures verbatim.
+    pub async fn mint_actor_identity(
+        &self,
+        handle: &str,
+        domain: &str,
+        passphrase: Option<&str>,
+    ) -> Result<fetchit_fedi::actor::ActorIdentity> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+
+        validate_actor_handle(handle)?;
+        let actor_url = build_actor_url(domain, handle)?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+
+        if chat.layout.actor_identity_path(handle).exists() {
+            log::warn!(
+                "[chat] mint_actor_identity called on handle {handle:?} which already has a \
+                 persisted vault; the prior vault will be overwritten. Consider \
+                 load_actor_identity instead."
+            );
+        }
+
+        let material = crate::fedi_identity::generate_rsa_2048().await?;
+        let attestation = crate::fedi_identity::sign_actor_attestation(
+            handle,
+            &actor_url,
+            &agent_id_hex,
+            &material.spki_der,
+            chat.signer.as_ref(),
+        )
+        .await?;
+
+        let vault = crate::fedi_vault::ActorIdentityVault {
+            handle: handle.to_string(),
+            actor_url: actor_url.clone(),
+            agent_id_hex: agent_id_hex.clone(),
+            rsa_priv_pem: material.priv_pem.clone(),
+            ml_dsa_attestation: attestation.clone(),
+        };
+        crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
+
+        Ok(fetchit_fedi::actor::ActorIdentity::new(
+            handle.to_string(),
+            actor_url,
+            agent_id_hex,
+            material.priv_pem,
+            attestation,
+        ))
+    }
+
+    /// Load a previously-minted [`fetchit_fedi::actor::ActorIdentity`]
+    /// from the fedi vault. Returns `Ok(None)` when no vault file
+    /// exists for the handle (the caller's "first run / not yet
+    /// minted" path).
+    ///
+    /// `passphrase` semantics mirror [`Self::mint_actor_identity`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ChatError::Invalid`] when chat state has not been initialised.
+    /// - [`ChatError::Invalid`] when `handle` fails validation.
+    /// - Propagates master-key resolution and vault-decrypt failures
+    ///   (tampered ciphertext, wrong master, parse).
+    #[allow(clippy::unused_async)]
+    pub async fn load_actor_identity(
+        &self,
+        handle: &str,
+        passphrase: Option<&str>,
+    ) -> Result<Option<fetchit_fedi::actor::ActorIdentity>> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        validate_actor_handle(handle)?;
+
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+
+        let Some(vault) = crate::fedi_vault::load_actor_identity(handle, &master, &chat.layout)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(fetchit_fedi::actor::ActorIdentity::from_persisted(
+            vault.handle,
+            vault.rsa_priv_pem,
+            vault.ml_dsa_attestation,
+            vault.actor_url,
+            vault.agent_id_hex,
+        )))
+    }
+}
+
+fn build_actor_url(domain: &str, handle: &str) -> Result<url::Url> {
+    let raw = format!("https://{domain}/actors/{handle}");
+    raw.parse()
+        .map_err(|e| ChatError::Invalid(format!("actor url {raw:?}: {e}")))
+}
+
+/// Sanity-check an actor handle before it is used as a path component
+/// or sent to the registry. Real ownership verification happens at
+/// Stage 6.2 (the `WebFinger` registration API); this is a local
+/// pre-claim guard.
+///
+/// Rejects empty handles, handles longer than 64 chars, or any
+/// character outside `[A-Za-z0-9_-]`. The character allowlist forbids
+/// `.` and `/` so a malicious handle cannot traverse out of `fedi_dir`
+/// via [`crate::local_store::StoreLayout::actor_identity_path`].
+fn validate_actor_handle(handle: &str) -> Result<()> {
+    if handle.is_empty() {
+        return Err(ChatError::Invalid("actor handle must be non-empty".into()));
+    }
+    if handle.len() > 64 {
+        return Err(ChatError::Invalid(format!(
+            "actor handle exceeds 64 chars (got {})",
+            handle.len()
+        )));
+    }
+    for b in handle.bytes() {
+        if !matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-') {
+            return Err(ChatError::Invalid(format!(
+                "actor handle contains invalid char {:?}; allowed: [A-Za-z0-9_-]",
+                b as char
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn resolve_master_key(
     identity_vault_path: &std::path::Path,
     passphrase: Option<&str>,
@@ -1902,5 +2059,64 @@ mod tests {
             }
             other => panic!("expected ChatError::Invalid, got {other:?}"),
         }
+    }
+
+    // ── M4 actor identity helpers ─────────────────────────────────
+
+    #[test]
+    fn validate_actor_handle_accepts_valid_handles() {
+        assert!(validate_actor_handle("josh").is_ok());
+        assert!(validate_actor_handle("Alice_42").is_ok());
+        assert!(validate_actor_handle("ab-c-d").is_ok());
+        assert!(validate_actor_handle("x").is_ok());
+        // Right at the 64-char cap.
+        let max = "a".repeat(64);
+        assert!(validate_actor_handle(&max).is_ok());
+    }
+
+    #[test]
+    fn validate_actor_handle_rejects_empty() {
+        let err = validate_actor_handle("").unwrap_err();
+        assert!(format!("{err}").contains("non-empty"));
+    }
+
+    #[test]
+    fn validate_actor_handle_rejects_too_long() {
+        let too_long = "a".repeat(65);
+        let err = validate_actor_handle(&too_long).unwrap_err();
+        assert!(format!("{err}").contains("64"));
+    }
+
+    #[test]
+    fn validate_actor_handle_rejects_path_separator() {
+        // Both `.` and `/` are forbidden — path-traversal defense
+        // when actor_identity_path joins the handle into fedi_dir.
+        assert!(validate_actor_handle("../etc/passwd").is_err());
+        assert!(validate_actor_handle("foo/bar").is_err());
+        assert!(validate_actor_handle("foo.bar").is_err());
+    }
+
+    #[test]
+    fn validate_actor_handle_rejects_whitespace_and_punctuation() {
+        assert!(validate_actor_handle("hello world").is_err());
+        assert!(validate_actor_handle("foo!").is_err());
+        assert!(validate_actor_handle("a@b").is_err());
+        assert!(validate_actor_handle("a$b").is_err());
+    }
+
+    #[test]
+    fn build_actor_url_constructs_https_path() {
+        let url = build_actor_url("etchit.io", "josh").unwrap();
+        assert_eq!(url.as_str(), "https://etchit.io/actors/josh");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("etchit.io"));
+        assert_eq!(url.path(), "/actors/josh");
+    }
+
+    #[test]
+    fn build_actor_url_rejects_malformed_domain() {
+        // A literal space breaks URL parsing.
+        let err = build_actor_url("not a domain", "josh").unwrap_err();
+        assert!(format!("{err}").contains("actor url"));
     }
 }
