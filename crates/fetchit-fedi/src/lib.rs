@@ -26,5 +26,7 @@ pub mod activity;
 pub mod actor;
 pub mod attestation;
 pub mod signature;
+pub mod signature_cache;
+pub mod signature_cavage;
 pub mod transport;
 pub mod webfinger;
