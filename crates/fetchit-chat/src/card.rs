@@ -169,6 +169,14 @@ struct SignedCardBody<'a> {
 /// The card JSON is taken in its post-x0xd-generation shape (i.e. the
 /// `card` field of `GET /agent/card`'s response).
 ///
+/// `hints` is the optional [`RendezvousHintsV1`] payload to populate
+/// the forward-compat [`CardExtension::v2_rendezvous_hints`] slot.
+/// `Some(_)` writes `{"v": 1, "data": <hints>}` under
+/// `fetchit_rendezvous_hints`; `None` omits the field entirely so the
+/// wire shape matches a v1 card byte-for-byte. Hints are NOT covered
+/// by the card signature — they are additive runtime metadata, not a
+/// signed identity claim.
+///
 /// Returns the augmented JSON value (caller serializes + b64-encodes
 /// to produce the final `x0x://agent/<…>` URI).
 ///
@@ -178,6 +186,7 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
     x0x_card: &serde_json::Value,
     kem_public_key: &[u8],
     signer: &S,
+    hints: Option<RendezvousHintsV1>,
 ) -> Result<serde_json::Value, ChatError> {
     let x0x_obj = x0x_card
         .as_object()
@@ -203,7 +212,7 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
         .await
         .map_err(|e| ChatError::Invalid(format!("card sign: {e}")))?;
 
-    let mut out = serde_json::Map::with_capacity(x0x_obj.len() + 4);
+    let mut out = serde_json::Map::with_capacity(x0x_obj.len() + 5);
     for (k, v) in x0x_obj {
         out.insert(k.clone(), v.clone());
     }
@@ -223,6 +232,17 @@ pub async fn extend_with_fetchit_fields<S: Signer + ?Sized>(
         "fetchit_card_signature_b64".into(),
         serde_json::Value::String(B64.encode(sig)),
     );
+    if let Some(h) = hints {
+        let wrapped = RendezvousHints {
+            v: 1,
+            data: h.to_value(),
+        };
+        out.insert(
+            "fetchit_rendezvous_hints".into(),
+            serde_json::to_value(&wrapped)
+                .map_err(|e| ChatError::Invalid(format!("hints to_value: {e}")))?,
+        );
+    }
     Ok(serde_json::Value::Object(out))
 }
 
@@ -483,7 +503,7 @@ mod tests {
     async fn extend_then_verify_round_trip() {
         let signer = MlDsaSigner::generate().unwrap();
         let kem_pub = vec![0xaa; 1184];
-        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, None)
             .await
             .unwrap();
         let pk = signer.public_key();
@@ -497,7 +517,7 @@ mod tests {
     async fn tampered_kem_field_fails_verify() {
         let signer = MlDsaSigner::generate().unwrap();
         let kem_pub = vec![0xaa; 1184];
-        let mut extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+        let mut extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, None)
             .await
             .unwrap();
         extended["fetchit_kem_public_key_b64"] =
@@ -510,7 +530,7 @@ mod tests {
     async fn tampered_x0x_field_fails_verify() {
         let signer = MlDsaSigner::generate().unwrap();
         let kem_pub = vec![0xaa; 1184];
-        let mut extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+        let mut extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, None)
             .await
             .unwrap();
         extended["display_name"] = serde_json::Value::String("Mallory".into());
@@ -522,7 +542,7 @@ mod tests {
     async fn uri_round_trip() {
         let signer = MlDsaSigner::generate().unwrap();
         let kem_pub = vec![0xaa; 1184];
-        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, None)
             .await
             .unwrap();
         let uri = extended_card_to_uri(&extended).unwrap();
@@ -542,7 +562,7 @@ mod tests {
             "kem_public_key": (0..1184_u32).map(|i| u8::try_from(i % 256).expect("modulo 256")).collect::<Vec<u8>>(),
         });
         let kem_pub = vec![0xaa; 1184];
-        let extended = extend_with_fetchit_fields(&card, &kem_pub, &signer)
+        let extended = extend_with_fetchit_fields(&card, &kem_pub, &signer, None)
             .await
             .unwrap();
         let compressed_uri = extended_card_to_uri(&extended).unwrap();
@@ -594,7 +614,7 @@ mod tests {
         // JSON, URL-safe base64, no leading format tag.
         let signer = MlDsaSigner::generate().unwrap();
         let kem_pub = vec![0xaa; 1184];
-        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, None)
             .await
             .unwrap();
         let raw = serde_json::to_vec(&extended).unwrap();
@@ -611,7 +631,7 @@ mod tests {
     async fn schema_freeze_v1_card_omits_hints_field_on_wire() {
         let signer = MlDsaSigner::generate().unwrap();
         let kem_pub = vec![0xaa; 1184];
-        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer)
+        let extended = extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, None)
             .await
             .unwrap();
         let json = serde_json::to_string(&extended).unwrap();
@@ -701,6 +721,30 @@ mod tests {
         let json = serde_json::json!({ "relays": ["wss://nyc.etchit.io/v1/ws"] });
         let parsed = RendezvousHintsV1::from_value(&json).unwrap();
         assert_eq!(parsed.relays, vec!["wss://nyc.etchit.io/v1/ws".to_string()]);
+    }
+
+    /// Task A3: `extend_with_fetchit_fields` accepts `Some(hints)` and
+    /// threads them into the emitted card under the
+    /// `fetchit_rendezvous_hints` key, wrapped as
+    /// `RendezvousHints { v: 1, data: hints.to_value() }`. Round-trip
+    /// the resulting JSON through the strict parser, then through
+    /// `RendezvousHintsV1::from_value`, and recover the same list.
+    #[tokio::test]
+    async fn card_with_hints_round_trips() {
+        let signer = MlDsaSigner::generate().unwrap();
+        let kem_pub = vec![0xaa; 1184];
+        let hints = RendezvousHintsV1 {
+            relays: vec!["wss://nyc.etchit.io/v1/ws".into()],
+        };
+        let card =
+            extend_with_fetchit_fields(&fake_x0x_card(), &kem_pub, &signer, Some(hints.clone()))
+                .await
+                .unwrap();
+        let parsed: CardExtension = serde_json::from_value(card).unwrap();
+        let wrapped = parsed.v2_rendezvous_hints.expect("hints present");
+        assert_eq!(wrapped.v, 1);
+        let decoded = RendezvousHintsV1::from_value(&wrapped.data).unwrap();
+        assert_eq!(decoded.relays, hints.relays);
     }
 
     #[test]

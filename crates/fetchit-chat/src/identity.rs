@@ -172,6 +172,7 @@ impl<'a> Endpoint<'a> {
             &card_value,
             identity.kem_public_key(),
             signer.as_ref(),
+            None,
         )
         .await?;
         crate::card::extended_card_to_uri(&extended)
