@@ -112,13 +112,25 @@ impl HttpSignatureKey {
         let signing_key = SigningKey::<Sha256>::new(priv_key);
 
         let content_digest = compute_content_digest(body);
-        let host = url
+        // Mastodon's `host_from_url` includes the port when non-default
+        // (anything that isn't `443` over https or `80` over http).
+        // `url::Url::port()` already normalizes default ports to `None`,
+        // so we just append whatever `port()` returns. Without this, a
+        // signer hitting `https://inbox.example:8443/inbox` would put
+        // `host: inbox.example` in the canonical base while the Mastodon
+        // verifier reconstructs `host: inbox.example:8443`, and every
+        // POST to that server would silently fail verification.
+        let host_str = url
             .host_str()
             .ok_or_else(|| HttpSignatureError::MissingHost(url.to_string()))?;
+        let host = match url.port() {
+            Some(port) => format!("{host_str}:{port}"),
+            None => host_str.to_string(),
+        };
         let sig_params = build_signature_input_params(created_unix, &self.key_id);
         let signing_base = build_signature_base(
             url.as_str(),
-            host,
+            &host,
             date_header,
             &content_digest,
             &sig_params,
@@ -149,6 +161,12 @@ pub fn compute_content_digest(body: &[u8]) -> String {
 /// Build the RFC 9421 `Signature-Input` parameter portion (the part
 /// after `sig1=`). The same string is appended to the canonical
 /// signing base on the `@signature-params` line.
+///
+/// Note: RFC 9421 §2.3 SHOULD-NOT emit `alg`, but Mastodon emits and
+/// accepts it (it's carried over from their cavage signatures and is
+/// tolerated in 9421). We deliberately exceed the SHOULD-NOT for
+/// Mastodon interop; dropping it would hurt verifier compatibility on
+/// the install base.
 fn build_signature_input_params(created_unix: i64, key_id: &str) -> String {
     format!(
         "(\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\");\
@@ -399,6 +417,94 @@ mod tests {
         assert!(verifying_key
             .verify(signing_base.as_bytes(), &signature)
             .is_err());
+    }
+
+    #[test]
+    fn host_includes_non_default_port_for_mastodon_compat() {
+        // Per Alice F-host-port: a signer hitting an inbox on a non-
+        // default port MUST put `<host>:<port>` in the canonical base,
+        // because Mastodon's `host_from_url` reconstructs the same.
+        // Without this, `https://example.com:8443/inbox` deliveries
+        // would silently fail verification — a nightmare to debug on a
+        // remote receiver.
+        let (key, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com:8443/inbox".parse().unwrap();
+        let body = b"body";
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let created = 783_000_000;
+
+        let signed = key.sign_post_rfc9421(&url, body, date, created).unwrap();
+
+        let sig_params = signed.signature_input.strip_prefix("sig1=").unwrap();
+        let signing_base = build_signature_base(
+            url.as_str(),
+            "example.com:8443",
+            date,
+            &signed.content_digest,
+            sig_params,
+        );
+        assert!(
+            signing_base.contains("\"host\": example.com:8443\n"),
+            "expected 'host: example.com:8443' in signing base; got:\n{signing_base}"
+        );
+
+        let sig_b64 = signed
+            .signature
+            .strip_prefix("sig1=:")
+            .unwrap()
+            .strip_suffix(':')
+            .unwrap();
+        let sig_bytes = B64.decode(sig_b64).unwrap();
+        let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+        let verifying_key = VerifyingKey::<Sha256>::new(pub_key.clone());
+        verifying_key
+            .verify(signing_base.as_bytes(), &signature)
+            .expect("self-verify with non-default port host");
+    }
+
+    #[test]
+    fn host_omits_default_https_port() {
+        // `url::Url::port()` returns `None` for default-scheme ports
+        // (443 over https, 80 over http). The canonical base must NOT
+        // carry `:443`, since that's also what Mastodon's verifier
+        // reconstructs.
+        let (key, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/inbox".parse().unwrap();
+        let body = b"body";
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let created = 783_000_000;
+
+        let signed = key.sign_post_rfc9421(&url, body, date, created).unwrap();
+
+        let sig_params = signed.signature_input.strip_prefix("sig1=").unwrap();
+        let signing_base = build_signature_base(
+            url.as_str(),
+            "example.com",
+            date,
+            &signed.content_digest,
+            sig_params,
+        );
+        assert!(
+            signing_base.contains("\"host\": example.com\n"),
+            "expected bare host in signing base; got:\n{signing_base}"
+        );
+        assert!(
+            !signing_base.contains(":443"),
+            "default https port must not appear in canonical base"
+        );
+
+        let sig_b64 = signed
+            .signature
+            .strip_prefix("sig1=:")
+            .unwrap()
+            .strip_suffix(':')
+            .unwrap();
+        let sig_bytes = B64.decode(sig_b64).unwrap();
+        let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+        let verifying_key = VerifyingKey::<Sha256>::new(pub_key.clone());
+        verifying_key
+            .verify(signing_base.as_bytes(), &signature)
+            .expect("self-verify with default-port URL");
     }
 
     #[test]
