@@ -133,7 +133,7 @@ Per Alice's flag (`[a48e8af1] Worth confirming during brainstorm that M3's Relay
 
 2. **Inbox hosting.** Q3 above. Recommendation: relay-as-inbox (option C) with etchit.io as launch-day fallback (option A).
 
-3. **Third privacy contract (Public).** Visibility model section. Does adding C = Public muddy the [[two-privacy-contracts]] strategic framing, or does it cleanly extend it? My read: cleanly extends — the three contracts are the THREE ways a fetchit user might want a message handled. Three checkboxes per send affordance might be too much; recommendation: UI defaults to A (Relay) for chat, C (Public) for posts, B (Direct) is opt-in on either. **This is the only spec choice that touches strategic posture rather than just engineering — Josh's weigh-in is the blocker for graduating this brainstorm to a writing-plans handoff.**
+3. **Third privacy contract (Public).** Visibility model section. Adding C = Public extends [[two-privacy-contracts]] cleanly — the three contracts are the THREE ways a fetchit user might want a message handled, each with a visibly distinct privacy floor. UI defaults to A (Relay) for chat, C (Public) for posts, B (Direct) is opt-in on either. **Decided 2026-06-07 by Josh: C=Public confirmed as a sibling contract. Brainstorm graduates to writing-plans handoff.**
 
 4. **Native fediverse blocklist consumption.** Denylist section. Recommendation: consume Oliphant/Garden Fence as a secondary filter; fetchit-curated list is canonical for fetchit-internal moderation. Both AND'd at the bridge boundary.
 
