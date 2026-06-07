@@ -67,6 +67,10 @@ Recommendation: per-user handle, registry lives on a fetchit-operated etchit.io 
 
 Recommendation: (a) for M4 launch. (b) is the long-game once the fediverse adopts PQ HTTP Signatures (early proposals exist; nothing implemented yet at 2026-06-07). Document this as a known interop seam.
 
+**ML-DSA signature asymmetry across the bridge.** Outbound deliveries from a fetchit actor carry BOTH the RSA HTTP Signature (Mastodon-compatible) AND an ML-DSA-65 signature over the same canonical bytes, published in the Actor `publicKey` extension. fetch>it nodes verify both layers; Mastodon nodes ignore the ML-DSA layer.
+
+Inbound deliveries from a Mastodon-class instance carry ONLY an RSA HTTP Signature — there is no ML-DSA layer on traffic that didn't originate from a fetchit actor. We verify with the source actor's published RSA pubkey resolved via WebFinger. **This asymmetry is unavoidable and the bridge surface must NOT claim symmetric PQ behaviour.** The eventual SECURITY.md amendment needs to surface the line: "outbound PQ-protected and Mastodon-compatible; inbound RSA-only-verifiable from non-PQ peers." Until the fediverse adopts PQ HTTP Signatures, this is the floor — content-E2EE remains true where applicable (none, for the public bridge surface), metadata privacy remains false, and bridge inbound verification is non-PQ. Per [[feedback-pq-claims]].
+
 ### Q3 — Hosting model: who runs the inbox?
 
 ActivityPub deliveries are PUSH — the remote server POSTs to OUR inbox. Someone has to host that inbox at a stable HTTPS URL. Three patterns:
@@ -127,17 +131,15 @@ Per Alice's flag (`[a48e8af1] Worth confirming during brainstorm that M3's Relay
 
 1. **ActivityPub crate choice.** `apub` vs `fediverse-features` vs hand-rolled minimal client. Need fresh upstream check per [[check-upstream-always-first]] — what shipped in last 6 months? Recommendation: defer until we actually start coding M4; brainstorm doesn't need to pick.
 
-2. **Per-user vs per-relay actor identity.** Q2 above. Recommendation: per-user handle on a fetchit-operated registry, ML-DSA + RSA co-signing for HTTP Signature interop.
+2. **Inbox hosting.** Q3 above. Recommendation: relay-as-inbox (option C) with etchit.io as launch-day fallback (option A).
 
-3. **Inbox hosting.** Q3 above. Recommendation: relay-as-inbox (option C) with etchit.io as launch-day fallback (option A).
+3. **Third privacy contract (Public).** Visibility model section. Does adding C = Public muddy the [[two-privacy-contracts]] strategic framing, or does it cleanly extend it? My read: cleanly extends — the three contracts are the THREE ways a fetchit user might want a message handled. Three checkboxes per send affordance might be too much; recommendation: UI defaults to A (Relay) for chat, C (Public) for posts, B (Direct) is opt-in on either. **This is the only spec choice that touches strategic posture rather than just engineering — Josh's weigh-in is the blocker for graduating this brainstorm to a writing-plans handoff.**
 
-4. **Third privacy contract (Public).** Visibility model section. Does adding C = Public muddy the [[two-privacy-contracts]] strategic framing, or does it cleanly extend it? My read: cleanly extends — the three contracts are the THREE ways a fetchit user might want a message handled. Three checkboxes per send affordance might be too much; recommendation: UI defaults to A (Relay) for chat, C (Public) for posts, B (Direct) is opt-in on either. Worth Josh weighing in.
+4. **Native fediverse blocklist consumption.** Denylist section. Recommendation: consume Oliphant/Garden Fence as a secondary filter; fetchit-curated list is canonical for fetchit-internal moderation. Both AND'd at the bridge boundary.
 
-5. **Native fediverse blocklist consumption.** Denylist section. Recommendation: consume Oliphant/Garden Fence as a secondary filter; fetchit-curated list is canonical for fetchit-internal moderation. Both AND'd at the bridge boundary.
+5. **No-publishing constraint.** Does M4 cross the [[read-only-means-no-wallet]] line? My read: NO. The "read-only" phrase scopes specifically to Autonomi wallet/publishing. ActivityPub posts are NOT wallet-signed and NOT Autonomi-published — they're a transport sibling. But this is exactly the kind of phrase that needs guarding per [[read-only-means-no-wallet]] memo, so worth surfacing.
 
-6. **No-publishing constraint.** Does M4 cross the [[read-only-means-no-wallet]] line? My read: NO. The "read-only" phrase scopes specifically to Autonomi wallet/publishing. ActivityPub posts are NOT wallet-signed and NOT Autonomi-published — they're a transport sibling. But this is exactly the kind of phrase that needs guarding per [[read-only-means-no-wallet]] memo, so worth surfacing.
-
-7. **M5 / instance-mode hand-off.** This brainstorm scopes M4 as bridge-only. At what point do we want fetchit to ACT as an instance (admin'd by an operator, hosting many users, presenting as a Mastodon-class object)? Recommendation: not until M5 at earliest; M4 should explicitly avoid baking instance assumptions into the bridge code.
+6. **M5 / instance-mode hand-off.** This brainstorm scopes M4 as bridge-only. At what point do we want fetchit to ACT as an instance (admin'd by an operator, hosting many users, presenting as a Mastodon-class object)? Recommendation: not until M5 at earliest; M4 should explicitly avoid baking instance assumptions into the bridge code.
 
 ---
 
