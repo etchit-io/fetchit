@@ -23,7 +23,9 @@
 //! [`NonceDedup`] gate and dispatch first-seen envelopes via
 //! `on_inbound`. Duplicates arriving on a sibling slot are dropped.
 //!
-//! Denylist enforcement on `AgentId` (D5+) lands in a subsequent task.
+//! D5 hard-blocks outbound sends to a denylisted `AgentId`: the
+//! symmetric half of D3's `RelayUrl` check. The inbound `AgentId`
+//! block lives in `dispatch.rs` (D7).
 
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -228,11 +230,13 @@ impl MultiHomeTransport {
         })
     }
 
-    /// Send `envelope` to the recipient identified by `hints`.
+    /// Send `envelope` to recipient `to` via the first relay in
+    /// `hints`.
     ///
     /// Slot policy (module doc):
     /// - Picks `hints.relays[0]` as the destination.
     /// - Rejects on relay-URL denylist hit.
+    /// - Rejects on recipient-`AgentId` denylist hit (D5).
     /// - Reuses slot 0 if the destination matches the local primary.
     /// - Reuses slots 1/2 if either matches, refreshing
     ///   `last_traffic_at`.
@@ -240,13 +244,14 @@ impl MultiHomeTransport {
     ///   evicts the LRU of 1/2 (slot 0 is never evicted).
     ///
     /// # Errors
-    /// - [`TransportError::Blocked`] when the destination relay URL is
-    ///   on the active denylist.
+    /// - [`TransportError::Blocked`] when the destination relay URL or
+    ///   recipient agent is on the active denylist.
     /// - [`TransportError::BuildFailed`] when `hints.relays` is empty,
     ///   when the underlying [`RelayBuilder`] fails to open a new
     ///   slot, or when the per-slot send fails.
     pub async fn send(
         &self,
+        to: &crate::identity::AgentId,
         envelope: TransitEnvelope,
         hints: &crate::card::RendezvousHintsV1,
     ) -> Result<(), TransportError> {
@@ -264,8 +269,17 @@ impl MultiHomeTransport {
                 "relay denylisted: {target_url}"
             )));
         }
-        // AgentId denylist check lands in D5; this slot picks only on
-        // the relay URL.
+
+        // D5: hard-block outbound to a denylisted recipient agent.
+        if self
+            .denylist
+            .is_blocked(fetchit_trust::EntryKind::AgentId, &to.0)
+        {
+            return Err(TransportError::Blocked(format!(
+                "agent denylisted: {}",
+                to.0
+            )));
+        }
 
         let handle = self.acquire_slot(&target_url).await?;
         handle.send(envelope).await
@@ -437,6 +451,24 @@ mod tests {
         }
     }
 
+    /// Denylist stub that blocks specific `AgentId` hex strings.
+    struct AgentBlockingDenylist {
+        blocked_agents: Vec<String>,
+    }
+    impl AgentBlockingDenylist {
+        fn new(blocked: &[&str]) -> Self {
+            Self {
+                blocked_agents: blocked.iter().map(|s| (*s).to_string()).collect(),
+            }
+        }
+    }
+    impl fetchit_trust::DenylistQuery for AgentBlockingDenylist {
+        fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
+            matches!(kind, fetchit_trust::EntryKind::AgentId)
+                && self.blocked_agents.iter().any(|v| v == value)
+        }
+    }
+
     fn sample_envelope() -> TransitEnvelope {
         TransitEnvelope {
             version: WIRE_VERSION,
@@ -458,6 +490,12 @@ mod tests {
         crate::card::RendezvousHintsV1 {
             relays: vec![url.to_string()],
         }
+    }
+
+    /// Default test recipient: a stable 64-hex agent id distinct
+    /// from the D5 denylist tests' `blocked_hex` / `allowed_hex`.
+    fn sample_recipient() -> crate::identity::AgentId {
+        crate::identity::AgentId("1".repeat(64))
     }
 
     /// Build an inbound envelope keyed on `(sender, nonce)` for the
@@ -541,9 +579,13 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(sample_envelope(), &hints("wss://primary.test/v1/ws"))
-            .await
-            .unwrap();
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://primary.test/v1/ws"),
+        )
+        .await
+        .unwrap();
 
         let slots = mh.slots_for_test();
         assert!(slots[0].is_some());
@@ -571,9 +613,13 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(sample_envelope(), &hints("wss://secondary.test/v1/ws"))
-            .await
-            .unwrap();
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://secondary.test/v1/ws"),
+        )
+        .await
+        .unwrap();
 
         let slots = mh.slots_for_test();
         assert_eq!(
@@ -607,17 +653,29 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(sample_envelope(), &hints("wss://r1.test/v1/ws"))
-            .await
-            .unwrap();
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://r1.test/v1/ws"),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        mh.send(sample_envelope(), &hints("wss://r2.test/v1/ws"))
-            .await
-            .unwrap();
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://r2.test/v1/ws"),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        mh.send(sample_envelope(), &hints("wss://r3.test/v1/ws"))
-            .await
-            .unwrap();
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://r3.test/v1/ws"),
+        )
+        .await
+        .unwrap();
 
         let slots = mh.slots_for_test();
         let urls: Vec<String> = slots
@@ -649,7 +707,11 @@ mod tests {
         .unwrap();
 
         let err = mh
-            .send(sample_envelope(), &hints("wss://evil.test/v1/ws"))
+            .send(
+                &sample_recipient(),
+                sample_envelope(),
+                &hints("wss://evil.test/v1/ws"),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -661,6 +723,71 @@ mod tests {
         let slots = mh.slots_for_test();
         assert!(slots[1].is_none());
         assert!(slots[2].is_none());
+    }
+
+    /// D5: an outbound send to a denylisted recipient short-circuits
+    /// with `TransportError::Blocked` even when the destination relay
+    /// is allowed. No slot 1/2 allocation occurs and the relay handle
+    /// records nothing.
+    #[tokio::test]
+    async fn send_to_denylisted_agent_returns_blocked_error() {
+        let builder = Arc::new(StubRelayBuilder::default());
+        let blocked_hex = "d".repeat(64);
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> =
+            Arc::new(AgentBlockingDenylist::new(&[blocked_hex.as_str()]));
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let result = mh
+            .send(
+                &crate::identity::AgentId(blocked_hex.clone()),
+                sample_envelope(),
+                &hints("wss://primary.test/v1/ws"),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(TransportError::Blocked(_))),
+            "expected Blocked, got {result:?}",
+        );
+        // Only the slot-0 build at init: the block fires before
+        // acquire_slot would dial.
+        assert_eq!(builder.built.lock().unwrap().len(), 1);
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        assert_eq!(slot0_handle.traffic_count_for_test(), 0);
+    }
+
+    /// D5: a send to a non-denylisted agent still succeeds even when
+    /// other agents are on the denylist; the check is value-scoped,
+    /// not kind-scoped.
+    #[tokio::test]
+    async fn send_to_non_blocked_agent_succeeds_even_when_others_blocked() {
+        let builder = Arc::new(StubRelayBuilder::default());
+        let blocked_hex = "d".repeat(64);
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> =
+            Arc::new(AgentBlockingDenylist::new(&[blocked_hex.as_str()]));
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let allowed_hex = "a".repeat(64);
+        mh.send(
+            &crate::identity::AgentId(allowed_hex),
+            sample_envelope(),
+            &hints("wss://primary.test/v1/ws"),
+        )
+        .await
+        .unwrap();
     }
 
     /// A first-seen inbound envelope on slot 0 fans through the dedup
@@ -717,9 +844,13 @@ mod tests {
         .unwrap();
 
         // Open slot 1 via an outbound send to a second URL.
-        mh.send(sample_envelope(), &hints("wss://secondary.test/v1/ws"))
-            .await
-            .unwrap();
+        mh.send(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://secondary.test/v1/ws"),
+        )
+        .await
+        .unwrap();
 
         let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
         let slot1_handle = Arc::clone(&mh.slots_for_test()[1].as_ref().unwrap().handle);
