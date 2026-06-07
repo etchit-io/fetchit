@@ -12,6 +12,15 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Stage 7 of the M4 fediverse plan gates the inbox endpoint behind
+# this feature so the default relay-server build (the LIT Chat
+# pass-through) ships without any fediverse code or its dep tree.
+# Community-relay operators opting into the fediverse-inbox role
+# build with `--features fediverse-inbox`.
+default = []
+fediverse-inbox = ["dep:fetchit-fedi", "dep:rsa"]
+
 [[bin]]
 name = "fetchit-relay-server"
 path = "src/main.rs"
@@ -24,7 +33,9 @@ base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 dashmap.workspace = true
+fetchit-fedi = { path = "../fetchit-fedi", optional = true }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+rsa = { workspace = true, optional = true }
 futures-util.workspace = true
 hex.workspace = true
 postcard.workspace = true
@@ -38,9 +49,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util", "signal", "net", "io-util"] }
 tokio-tungstenite = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

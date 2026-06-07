@@ -3080,12 +3080,14 @@ dependencies = [
  "bytes",
  "clap",
  "dashmap",
+ "fetchit-fedi",
  "fetchit-relay-proto",
  "futures-util",
  "hex",
  "postcard",
  "rand 0.8.6",
  "reqwest 0.12.28",
+ "rsa",
  "saorsa-pqc 0.5.1",
  "serde",
  "serde_jcs",
@@ -3093,9 +3095,11 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
+ "tower",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
