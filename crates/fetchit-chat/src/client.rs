@@ -383,6 +383,80 @@ impl Client {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Construct an M3 denylist consumer rooted at `denylist_url_base`
+    /// (e.g. `https://etchit.io/v1`), spawn its background poll loop
+    /// against `http`, and install it into this client's denylist gate.
+    ///
+    /// `cache_path` is the on-disk directory `DenylistConsumer` writes
+    /// the per-kind signed manifests under for offline-boot hydration;
+    /// `None` skips disk persistence. Cache hydration runs synchronously
+    /// before this method returns, so a cold offline boot still picks
+    /// up the prior good snapshot.
+    ///
+    /// `http` is the [`fetchit_trust_client::HttpClient`] the poll loop
+    /// drives the refresh through. Production callers pass a
+    /// [`fetchit_trust_client::ReqwestClient`] (constructed with
+    /// `ReqwestClient::new()`); tests inject a stub so the boot path is
+    /// exercisable without network access.
+    ///
+    /// On return:
+    /// - The client's [`crate::DenylistCheck`] field is set to a
+    ///   [`crate::denylist::DenylistQueryAdapter`] wrapping the new
+    ///   consumer; outbound DM sends and inbound dispatch begin gating
+    ///   immediately (against the cache snapshot until the first online
+    ///   refresh completes).
+    /// - A background tokio task polls `denylist_url_base` on the
+    ///   consumer's default cadence; the [`tokio::task::JoinHandle`] is
+    ///   currently dropped (M3 D8.2 will stash it for graceful
+    ///   shutdown).
+    /// - The consumer's [`fetchit_trust_client::BlockEvent`] subscriber
+    ///   is created and dropped; D9+ will route it into
+    ///   [`crate::transport::MultiHomeTransport::new_with_subscriber`]
+    ///   so mid-session `RelayUrl` blocks drop active slots.
+    ///
+    /// The hardcoded issuer pubkey is
+    /// [`fetchit_trust_client::etchitio_pubkey`]; pre-launch this is a
+    /// placeholder fixture, swapped for the real etchit-io key before
+    /// any production deploy.
+    ///
+    /// # Errors
+    /// Returns no errors today: the consumer constructor is infallible
+    /// and the cache load is best-effort. The signature is `Result` so
+    /// future versions (e.g. surfacing first-refresh failures or
+    /// rejecting a malformed URL) can fail loudly.
+    pub fn install_m3_denylist(
+        &mut self,
+        denylist_url_base: String,
+        cache_path: Option<PathBuf>,
+        http: Arc<dyn fetchit_trust_client::HttpClient + Send + Sync + 'static>,
+    ) -> Result<()> {
+        let consumer = Arc::new(fetchit_trust_client::DenylistConsumer::new(
+            fetchit_trust_client::etchitio_pubkey(),
+            denylist_url_base,
+            cache_path,
+        ));
+        consumer.load_cache_blocking();
+
+        // Subscribe before spawning the poll loop so the very first
+        // refresh's BlockEvent isn't lost. D9+ hands this receiver to
+        // MultiHomeTransport::new_with_subscriber; today it's discarded
+        // (drop closes the receiver but the consumer keeps the
+        // broadcast Sender alive, so future subscribers still work).
+        let _subscriber = consumer.subscribe();
+
+        // TODO(M3 D8.2): stash the JoinHandle on Client so shutdown can
+        // abort the loop deterministically. Today the task lives until
+        // the consumer Arc drops (every subscriber + the adapter + this
+        // spawned closure each hold one).
+        let _handle = Arc::clone(&consumer).spawn_poll_loop(http);
+
+        let query: Arc<dyn fetchit_trust::DenylistQuery> = consumer;
+        let adapter: Arc<dyn crate::denylist::DenylistCheck> =
+            Arc::new(crate::denylist::DenylistQueryAdapter::new(query));
+        self.denylist = Some(adapter);
+        Ok(())
+    }
+
     /// Borrow the LAN-direct transport handle when one is wired.
     /// Returns `None` for clients built without
     /// [`ClientBuilder::enable_lan_direct`]. Desktop callers use this
@@ -2226,5 +2300,68 @@ mod tests {
             Arc::new(crate::denylist::tests::StaticDenylist::new([canonical_hex]));
         let env = d7_envelope(sender_bytes);
         assert!(super::should_drop_inbound_from_denylisted(Some(&denylist), &env).await);
+    }
+
+    // ── M3 D8 install boot wiring ────────────────────────────────
+
+    /// Stub HTTP client whose `get` never returns: the install path
+    /// constructs the consumer + spawns the poll loop but should NOT
+    /// actually fire a refresh during the call itself (the poll
+    /// loop's first tick fires the configured interval after spawn,
+    /// not synchronously).
+    ///
+    /// Using a never-returning stub catches any future refactor that
+    /// accidentally turns `install_m3_denylist` into a synchronous
+    /// refresher — the test would hang instead of passing.
+    struct PendingHttp;
+
+    #[async_trait]
+    impl fetchit_trust_client::HttpClient for PendingHttp {
+        async fn get(
+            &self,
+            _url: &str,
+        ) -> std::result::Result<Vec<u8>, fetchit_trust_client::TrustError> {
+            std::future::pending().await
+        }
+    }
+
+    /// D8 happy path: a REST-only client begins with no denylist
+    /// wired, `install_m3_denylist` populates the field with the
+    /// adapter, and inbound-drop counter starts at zero. Uses a
+    /// pending HTTP stub so no real network call fires.
+    #[tokio::test]
+    async fn install_m3_denylist_sets_denylist_field() {
+        // REST-only client (no relay_url / data_dir / passphrase /
+        // lan-direct) — `from_parts` skips build_with_chat entirely
+        // and never touches the network or x0xd.
+        let mut client = Client::from_parts(
+            "http://127.0.0.1:1".into(),
+            "test-token".into(),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("REST-only client construction");
+        assert!(
+            client.denylist.is_none(),
+            "fresh REST-only client has no denylist wired"
+        );
+
+        let http: Arc<dyn fetchit_trust_client::HttpClient + Send + Sync + 'static> =
+            Arc::new(PendingHttp);
+        client
+            .install_m3_denylist("https://etchit.io/v1".into(), None, http)
+            .expect("install succeeds");
+        assert!(client.denylist.is_some(), "denylist installed");
+        assert_eq!(
+            client.denylist_dropped_inbound_count(),
+            0,
+            "counter starts at zero"
+        );
     }
 }

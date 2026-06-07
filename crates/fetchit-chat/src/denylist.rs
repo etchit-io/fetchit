@@ -15,16 +15,17 @@
 //!   [`crate::ChatError::Denied`] when the recipient is blocked.
 //! - Inbound dispatcher: [`crate::Client::default_dispatch_one`]
 //!   silently drops envelopes whose sender is blocked, BEFORE any
-//!   decrypt path runs — preserves "no plaintext leak" semantics.
+//!   decrypt path runs (preserves "no plaintext leak" semantics).
 //!
 //! Group sends are not gated at the sender side; the receiver-side
 //! inbound gate is what makes blocking effective for group traffic.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Decide whether a given peer is on the community denylist.
 ///
-/// `is_blocked` MUST be cheap (read-lock or in-memory map) — it runs
+/// `is_blocked` MUST be cheap (read-lock or in-memory map): it runs
 /// on every outbound DM send and every inbound delivery.
 ///
 /// Convention: `agent_id_hex` is the lowercase 64-character hex of
@@ -37,6 +38,41 @@ pub trait DenylistCheck: Send + Sync {
     /// (the published manifest is the source of truth; an empty
     /// cache returns `false`).
     async fn is_blocked(&self, agent_id_hex: &str) -> bool;
+}
+
+/// Bridges any [`fetchit_trust::DenylistQuery`] impl into the
+/// [`DenylistCheck`] async trait the chat client expects.
+///
+/// The chat surface only ever asks about agent identifiers, so the
+/// adapter pins the underlying query to
+/// [`fetchit_trust::EntryKind::AgentId`]. Hits against other kinds
+/// (`RelayUrl`, `XorName`, `ActorUrl`) are NOT surfaced as agent
+/// blocks: that's a security property of the adapter, not an
+/// accident, and is covered by a dedicated test below.
+///
+/// `DenylistQuery::is_blocked` is synchronous (in-memory snapshot);
+/// the async on [`DenylistCheck::is_blocked`] satisfies the trait
+/// signature but never actually awaits.
+pub struct DenylistQueryAdapter {
+    inner: Arc<dyn fetchit_trust::DenylistQuery>,
+}
+
+impl DenylistQueryAdapter {
+    /// Wrap an `Arc<dyn DenylistQuery>` for use as a [`DenylistCheck`].
+    /// The canonical inner is
+    /// [`fetchit_trust_client::DenylistConsumer`].
+    #[must_use]
+    pub fn new(inner: Arc<dyn fetchit_trust::DenylistQuery>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl DenylistCheck for DenylistQueryAdapter {
+    async fn is_blocked(&self, agent_id_hex: &str) -> bool {
+        self.inner
+            .is_blocked(fetchit_trust::EntryKind::AgentId, agent_id_hex)
+    }
 }
 
 #[cfg(test)]
@@ -77,5 +113,47 @@ pub(crate) mod tests {
         assert!(d.is_blocked(&"a".repeat(64)).await);
         assert!(d.is_blocked(&"b".repeat(64)).await);
         assert!(!d.is_blocked(&"c".repeat(64)).await);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod adapter_tests {
+    use super::*;
+    use fetchit_trust::{DenylistQuery, EntryKind};
+    use std::sync::Arc;
+
+    struct BlocksAgent(&'static str);
+    impl DenylistQuery for BlocksAgent {
+        fn is_blocked(&self, kind: EntryKind, value: &str) -> bool {
+            matches!(kind, EntryKind::AgentId) && value == self.0
+        }
+    }
+
+    /// `AgentId` hits in the underlying `DenylistQuery` surface as
+    /// chat-layer agent blocks.
+    #[tokio::test]
+    async fn adapter_delegates_agent_id_block_through() {
+        let inner: Arc<dyn DenylistQuery> = Arc::new(BlocksAgent("evil"));
+        let adapter = DenylistQueryAdapter::new(inner);
+        assert!(adapter.is_blocked("evil").await);
+        assert!(!adapter.is_blocked("good").await);
+    }
+
+    /// Security property: the adapter pins the kind to
+    /// `EntryKind::AgentId`. A `DenylistQuery` that only returns true
+    /// for some OTHER kind (here, `XorName`) MUST NOT bleed through
+    /// as an agent block: otherwise a reader-side `XorName` block
+    /// would silently propagate to chat agent gating.
+    #[tokio::test]
+    async fn adapter_only_checks_agent_id_kind() {
+        struct BlocksXorName;
+        impl DenylistQuery for BlocksXorName {
+            fn is_blocked(&self, kind: EntryKind, _value: &str) -> bool {
+                matches!(kind, EntryKind::XorName)
+            }
+        }
+        let adapter: DenylistQueryAdapter = DenylistQueryAdapter::new(Arc::new(BlocksXorName));
+        assert!(!adapter.is_blocked("anything").await);
     }
 }

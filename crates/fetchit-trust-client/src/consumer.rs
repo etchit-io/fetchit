@@ -143,7 +143,7 @@ impl DenylistConsumer {
     ///
     /// The returned [`tokio::task::JoinHandle`] lets the caller
     /// `abort()` the loop on shutdown.
-    pub fn spawn_poll_loop<C: HttpClient + Send + Sync + 'static>(
+    pub fn spawn_poll_loop<C: HttpClient + ?Sized + Send + Sync + 'static>(
         self: Arc<Self>,
         client: Arc<C>,
     ) -> tokio::task::JoinHandle<()> {
