@@ -57,7 +57,7 @@ self_encryption = "=0.36.0"
 xor_name = "=5.0.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
-url = "2.5"
+url = { version = "2.5", features = ["serde"] }
 base64 = "0.22"
 futures-util = "0.3"
 postcard = { version = "1.0", default-features = false, features = ["use-std"] }

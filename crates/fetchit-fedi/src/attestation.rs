@@ -46,9 +46,11 @@ pub struct MlDsaAttestation {
 /// Serde-with helper that encodes `Vec<u8>` as base64 strings on the
 /// wire (and at rest) while keeping the in-memory type as raw bytes.
 ///
-/// Uses the URL-safe-padded `base64::engine::general_purpose::STANDARD`
-/// alphabet — the standard `ActivityPub` HTTP-Signatures + Mastodon
-/// `publicKeyPem` convention.
+/// Uses the standard alphabet padded
+/// `base64::engine::general_purpose::STANDARD` so the JSON shape stays
+/// portable across any base64 consumer (including future JSON-LD
+/// verifiers). The `+/` alphabet matches `ActivityPub` HTTP-Signatures
+/// + Mastodon `publicKeyPem` conventions.
 mod b64 {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
