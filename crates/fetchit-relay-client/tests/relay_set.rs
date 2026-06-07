@@ -57,9 +57,9 @@ async fn send_fans_out_to_every_relay_in_set() {
     let base_a = Url::parse(&format!("http://{addr_a}/")).unwrap();
     let base_b = Url::parse(&format!("http://{addr_b}/")).unwrap();
 
-    let alice_signer: Arc<dyn Signer + Send + Sync> = Arc::new(
-        StaticKeySigner::from_public_key(b"alice-public-key".to_vec()),
-    );
+    let alice_signer: Arc<dyn Signer + Send + Sync> = Arc::new(StaticKeySigner::from_public_key(
+        b"alice-public-key".to_vec(),
+    ));
     let bob_signer: Arc<dyn Signer + Send + Sync> =
         Arc::new(StaticKeySigner::from_public_key(b"bob-public-key".to_vec()));
     let alice_id = AgentId::from_bytes(alice_signer.agent_id());
@@ -120,9 +120,9 @@ async fn connect_partial_success_keeps_healthy_relay_alive() {
     };
     let base_dead = Url::parse(&format!("http://{dead_addr}/")).unwrap();
 
-    let alice_signer: Arc<dyn Signer + Send + Sync> = Arc::new(
-        StaticKeySigner::from_public_key(b"alice-public-key".to_vec()),
-    );
+    let alice_signer: Arc<dyn Signer + Send + Sync> = Arc::new(StaticKeySigner::from_public_key(
+        b"alice-public-key".to_vec(),
+    ));
     let bob_signer: Arc<dyn Signer + Send + Sync> =
         Arc::new(StaticKeySigner::from_public_key(b"bob-public-key".to_vec()));
     let alice_id = AgentId::from_bytes(alice_signer.agent_id());
@@ -177,11 +177,12 @@ async fn next_delivery_merges_inboxes_across_relays() {
     let base_a = Url::parse(&format!("http://{addr_a}/")).unwrap();
     let base_b = Url::parse(&format!("http://{addr_b}/")).unwrap();
 
-    let alice_signer: Arc<dyn Signer + Send + Sync> = Arc::new(
-        StaticKeySigner::from_public_key(b"alice-public-key".to_vec()),
-    );
-    let carol_signer: Arc<dyn Signer + Send + Sync> =
-        Arc::new(StaticKeySigner::from_public_key(b"carol-public-key".to_vec()));
+    let alice_signer: Arc<dyn Signer + Send + Sync> = Arc::new(StaticKeySigner::from_public_key(
+        b"alice-public-key".to_vec(),
+    ));
+    let carol_signer: Arc<dyn Signer + Send + Sync> = Arc::new(StaticKeySigner::from_public_key(
+        b"carol-public-key".to_vec(),
+    ));
     let bob_signer: Arc<dyn Signer + Send + Sync> =
         Arc::new(StaticKeySigner::from_public_key(b"bob-public-key".to_vec()));
     let alice_id = AgentId::from_bytes(alice_signer.agent_id());
