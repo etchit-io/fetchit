@@ -1,9 +1,17 @@
 name: bundled-x0xd
 
-# Manual trigger + PRs. Not every push -- cloning + building x0x is expensive.
+# Manual trigger + PRs that touch the bundled-binary surface. Cloning
+# x0x and building a release binary is ~15min on ubuntu-latest, so PRs
+# that only touch unrelated crates (chat, relay-client, core, web)
+# skip this lane via the `paths` filter. workflow_dispatch always
+# triggers regardless of path scope.
 on:
   workflow_dispatch:
   pull_request:
+    paths:
+      - 'apps/fetchit-desktop/src-tauri/**'
+      - 'crates/x0xd-client/**'
+      - '.github/workflows/bundled-x0xd.yml'
 
 env:
   CARGO_TERM_COLOR: always
