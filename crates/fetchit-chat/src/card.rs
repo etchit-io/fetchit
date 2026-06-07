@@ -85,6 +85,65 @@ pub struct RendezvousHints {
     pub data: serde_json::Value,
 }
 
+const MAX_HINT_RELAYS: usize = 8;
+const MAX_HINT_URL_LEN: usize = 256;
+
+/// V1 payload for the [`RendezvousHints::data`] slot.
+///
+/// Ordered list of `wss://` relay URLs the card issuer can be reached
+/// on. First entry is the issuer's primary; subsequent entries are
+/// fallbacks the issuer advertises in advanced mode.
+///
+/// Decoder validation:
+/// - `relays` non-empty.
+/// - Each entry parses as a `wss://` URL.
+/// - Each entry <= 256 chars (`DoS` guard).
+/// - `relays.len()` <= 8 (`DoS` guard).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RendezvousHintsV1 {
+    /// Ordered list of `wss://` URLs.
+    pub relays: Vec<String>,
+}
+
+impl RendezvousHintsV1 {
+    /// Parse a [`RendezvousHints::data`] JSON value into
+    /// `RendezvousHintsV1`, applying all decoder validations.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] on decode failure or validator rejection.
+    pub fn from_value(v: &serde_json::Value) -> Result<Self, ChatError> {
+        let parsed: Self = serde_json::from_value(v.clone())
+            .map_err(|e| ChatError::Invalid(format!("hints decode: {e}")))?;
+        if parsed.relays.is_empty() {
+            return Err(ChatError::Invalid("hints.relays empty".into()));
+        }
+        if parsed.relays.len() > MAX_HINT_RELAYS {
+            return Err(ChatError::Invalid(format!(
+                "hints.relays >{MAX_HINT_RELAYS}"
+            )));
+        }
+        for url in &parsed.relays {
+            if url.len() > MAX_HINT_URL_LEN {
+                return Err(ChatError::Invalid("hints url too long".into()));
+            }
+            if !url.starts_with("wss://") {
+                return Err(ChatError::Invalid(format!(
+                    "hints url scheme not wss: {url}"
+                )));
+            }
+        }
+        Ok(parsed)
+    }
+
+    /// Re-encode `RendezvousHintsV1` as a `serde_json::Value` suitable
+    /// for the outer [`RendezvousHints::data`] slot.
+    #[must_use]
+    #[allow(clippy::expect_used)] // RendezvousHintsV1 has no non-string-keyed map; serde_json::to_value is provably infallible
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("RendezvousHintsV1 serializes")
+    }
+}
+
 /// Bytes signed for `CardExtension.signature_b64`:
 /// `concat(SIGN_DOMAIN_CARD, postcard({ x0x_card_json, fetchit_card_version,
 /// kem_public_key_b64, agent_public_key_b64 }))`. We use postcard on a tuple
@@ -613,6 +672,42 @@ mod tests {
         });
         let parsed: CardExtension = serde_json::from_value(v1_wire).unwrap();
         assert_eq!(parsed.v2_rendezvous_hints, None);
+    }
+
+    #[test]
+    fn rendezvous_hints_v1_rejects_non_wss_scheme() {
+        let json = serde_json::json!({ "relays": ["ws://example.com/v1/ws"] });
+        let err = RendezvousHintsV1::from_value(&json).unwrap_err();
+        assert!(format!("{err}").contains("wss"));
+    }
+
+    #[test]
+    fn rendezvous_hints_v1_rejects_empty_list() {
+        let json = serde_json::json!({ "relays": [] });
+        assert!(RendezvousHintsV1::from_value(&json).is_err());
+    }
+
+    #[test]
+    fn rendezvous_hints_v1_rejects_too_many() {
+        let urls: Vec<_> = (0..9)
+            .map(|i| format!("wss://r{i}.example/v1/ws"))
+            .collect();
+        let json = serde_json::json!({ "relays": urls });
+        assert!(RendezvousHintsV1::from_value(&json).is_err());
+    }
+
+    #[test]
+    fn rendezvous_hints_v1_accepts_simple_list() {
+        let json = serde_json::json!({ "relays": ["wss://nyc.etchit.io/v1/ws"] });
+        let parsed = RendezvousHintsV1::from_value(&json).unwrap();
+        assert_eq!(parsed.relays, vec!["wss://nyc.etchit.io/v1/ws".to_string()]);
+    }
+
+    #[test]
+    fn rendezvous_hints_v1_rejects_oversized_url() {
+        let long = "wss://".to_string() + &"a".repeat(300) + "/ws";
+        let json = serde_json::json!({ "relays": [long] });
+        assert!(RendezvousHintsV1::from_value(&json).is_err());
     }
 
     /// M0 schema-freeze contract: a v2-shape wire JSON with hints
