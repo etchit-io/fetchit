@@ -287,6 +287,13 @@ pub struct Client {
     /// whether the consumer is actually catching anything. Shared
     /// across `Client` clones via `Arc<AtomicU64>`.
     denylist_dropped_inbound: Arc<std::sync::atomic::AtomicU64>,
+    /// M3 federation core: the list of `wss://` relay URLs this client
+    /// currently advertises in the v2 share card's reserved
+    /// `fetchit_rendezvous_hints` slot. Empty means the card is minted
+    /// without the hints field (forward-compat with v1 readers).
+    /// Mutated by [`Self::regenerate_card_with_relays`]; consumed by
+    /// [`Self::current_card_value`] when minting a fresh card.
+    advertised_relays: Arc<tokio::sync::RwLock<Vec<String>>>,
 }
 
 impl Client {
@@ -370,6 +377,7 @@ impl Client {
             lan_bound_addr,
             denylist,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         })
     }
 
@@ -455,6 +463,95 @@ impl Client {
             Arc::new(crate::denylist::DenylistQueryAdapter::new(query));
         self.denylist = Some(adapter);
         Ok(())
+    }
+
+    /// Replace the relay list advertised in this client's v2 share card
+    /// with `relays`, after validating them through
+    /// [`crate::card::RendezvousHintsV1::from_value`]. Subsequent calls
+    /// to [`Self::current_card_value`] (and any future
+    /// `extended_share_uri` mint) embed the new list in the card's
+    /// reserved `fetchit_rendezvous_hints` slot.
+    ///
+    /// Validation (delegated to `RendezvousHintsV1::from_value`):
+    /// `relays` is non-empty, has at most 8 entries, and every entry
+    /// is at most 256 chars and prefixed with `wss://`.
+    ///
+    /// The v3 profile manifest republish that propagates the new
+    /// relay set across the federation is **deferred to Phase E**
+    /// (`apps/fetchit-desktop/src-tauri` will drive the publish from
+    /// the Tauri command); this method only mutates in-memory state
+    /// and logs an info line so operators see when a regenerate
+    /// happens.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] when the relay list fails validation.
+    pub async fn regenerate_card_with_relays(&self, relays: Vec<String>) -> Result<()> {
+        let hints_value = serde_json::json!({ "relays": relays });
+        // Validate via the v1 decoder so the same shape that ships in
+        // a card is rejected here too — non-empty, <= 8 entries,
+        // <= 256 chars, wss:// scheme.
+        let _validated = crate::card::RendezvousHintsV1::from_value(&hints_value)?;
+
+        {
+            let mut slot = self.advertised_relays.write().await;
+            slot.clone_from(&relays);
+        }
+
+        log::info!(
+            "[chat] card regenerated with {} advertised relays",
+            relays.len()
+        );
+        // TODO(M3 Phase E): republish the v3 profile manifest so the
+        // new hints propagate to the federation. Tauri command in
+        // apps/fetchit-desktop/src-tauri (Phase E2) will drive that
+        // network call once this in-memory swap returns.
+        Ok(())
+    }
+
+    /// Mint the v2 extended share card from in-memory chat state +
+    /// the currently advertised relays. Used today by D9 tests and by
+    /// Phase E callers that want the card without the HTTP round-trip
+    /// to `GET /agent/card` (which a unit test cannot stand up).
+    ///
+    /// Returns the card JSON value with the `fetchit_*` fields baked
+    /// in (and `fetchit_rendezvous_hints` populated when
+    /// [`Self::regenerate_card_with_relays`] has been called with a
+    /// non-empty list). The contained x0x card body is a minimal
+    /// fixture-shaped object derived from the chat identity's
+    /// `agent_id_hex`; the production code path
+    /// ([`identity::Endpoint::extended_share_uri`]) replaces that with
+    /// the live `GET /agent/card` body before signing.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] when the client was built without chat
+    /// state (REST-only mode has no KEM key or signer to attach), or
+    /// when the card-signing path fails.
+    pub async fn current_card_value(&self) -> Result<serde_json::Value> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not built; no card to mint".into()))?;
+        let relays = self.advertised_relays.read().await.clone();
+        let hints = if relays.is_empty() {
+            None
+        } else {
+            Some(crate::card::RendezvousHintsV1 { relays })
+        };
+        // Minimal x0x card body — only the agent_id is load-bearing
+        // for the card-signature path. Production callers replace this
+        // with the daemon's `GET /agent/card` body before signing.
+        let x0x_card = serde_json::json!({
+            "agent_id": chat.identity.agent_id_hex(),
+            "display_name": "",
+            "addresses": [],
+        });
+        crate::card::extend_with_fetchit_fields(
+            &x0x_card,
+            chat.identity.kem_public_key(),
+            chat.signer.as_ref(),
+            hints,
+        )
+        .await
     }
 
     /// Borrow the LAN-direct transport handle when one is wired.
@@ -2323,6 +2420,132 @@ mod tests {
         ) -> std::result::Result<Vec<u8>, fetchit_trust_client::TrustError> {
             std::future::pending().await
         }
+    }
+
+    // ── M3 D9 regenerate_card_with_relays ────────────────────────
+
+    /// Build a chat-state-enabled `Client` without going through
+    /// `from_parts` (which probes `/version` and refuses without a
+    /// reachable x0xd). The HTTP, router, and transports are stubbed
+    /// to whatever a hermetic test needs.
+    fn test_client_no_denylist() -> (Client, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("d9-test".to_owned())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let dsa_signer = MlDsaSigner::generate().unwrap();
+        let agent_id_hex = hex::encode(dsa_signer.agent_id());
+        let identity = Arc::new(
+            FetchitIdentity::load_or_create(
+                dir.path(),
+                &master,
+                &agent_id_hex,
+                kdf_id_argon2(),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let registry = Arc::new(ConversationRegistry::new(
+            layout.clone(),
+            master,
+            kdf_id_argon2(),
+            Some(salt),
+        ));
+        let signer: Arc<dyn Signer> = Arc::new(dsa_signer);
+        let chat = ChatState {
+            identity,
+            registry,
+            signer,
+            layout,
+            local_machine_id: [0u8; 32],
+            reachability: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::ReachabilityCache::new(),
+            )),
+            bridge_consent: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::BridgeConsentStore::new(),
+            )),
+            bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::BridgeInboundShadow::new(),
+            )),
+            members_singleflight: Arc::new(crate::members_singleflight::MembersSingleflight::new()),
+        };
+        let http = Arc::new(Http::new("http://127.0.0.1:1".into(), "tok".into()).unwrap());
+        let client = Client {
+            http,
+            router: Arc::new(Router::new()),
+            chat: Some(chat),
+            relay: None,
+            lan: None,
+            lan_bound_addr: None,
+            denylist: None,
+            denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        };
+        (client, dir)
+    }
+
+    /// D9 happy path: validation accepts a real-world relay list and
+    /// the next `current_card_value()` call carries those URLs in
+    /// the v2 hints slot under `{v: 1, data: {relays: [...]}}`.
+    #[tokio::test]
+    async fn regenerate_card_with_relays_validates_and_updates_hints() {
+        let (client, _dir) = test_client_no_denylist();
+        let relays = vec![
+            "wss://nyc.etchit.io/v1/ws".to_string(),
+            "wss://community.example/v1/ws".to_string(),
+        ];
+        client
+            .regenerate_card_with_relays(relays.clone())
+            .await
+            .expect("validated relay list must succeed");
+        let card_value = client.current_card_value().await.expect("card mint");
+        let parsed: crate::card::CardExtension =
+            serde_json::from_value(card_value).expect("v2 extension parses");
+        let hints = parsed.v2_rendezvous_hints.expect("hints present in card");
+        assert_eq!(hints.v, 1);
+        let v1 = crate::card::RendezvousHintsV1::from_value(&hints.data).unwrap();
+        assert_eq!(v1.relays, relays);
+    }
+
+    /// D9 negative: non-`wss://` schemes are rejected at validation
+    /// before any in-memory state is mutated. We confirm the rejection
+    /// AND that the advertised-relays slot is untouched on error.
+    #[tokio::test]
+    async fn regenerate_card_with_relays_rejects_non_wss() {
+        let (client, _dir) = test_client_no_denylist();
+        let result = client
+            .regenerate_card_with_relays(vec!["http://not-wss.example/v1/ws".into()])
+            .await;
+        assert!(matches!(result, Err(ChatError::Invalid(_))));
+        assert!(
+            client.advertised_relays.read().await.is_empty(),
+            "validation failure must leave the relay slot empty",
+        );
+    }
+
+    /// D9 negative: empty list is rejected by `RendezvousHintsV1::from_value`.
+    #[tokio::test]
+    async fn regenerate_card_with_relays_rejects_empty() {
+        let (client, _dir) = test_client_no_denylist();
+        let result = client.regenerate_card_with_relays(vec![]).await;
+        assert!(matches!(result, Err(ChatError::Invalid(_))));
+    }
+
+    /// D9 follow-up: when no relays have been registered the card
+    /// mint omits the `fetchit_rendezvous_hints` field entirely
+    /// (matches the M0 schema-freeze v1-wire contract).
+    #[tokio::test]
+    async fn current_card_value_without_regenerate_omits_hints() {
+        let (client, _dir) = test_client_no_denylist();
+        let card_value = client.current_card_value().await.expect("card mint");
+        let parsed: crate::card::CardExtension = serde_json::from_value(card_value).unwrap();
+        assert!(parsed.v2_rendezvous_hints.is_none());
     }
 
     /// D8 happy path: a REST-only client begins with no denylist
