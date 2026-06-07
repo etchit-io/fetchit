@@ -726,6 +726,7 @@ mod tests {
             display_name: "Bob".into(),
             kem_public_key_b64: B64.encode(&raw),
             agent_public_key_b64: None,
+            rendezvous_hints: None,
         };
         card.save(&layout).unwrap();
         let got = recipient_kem_key(&layout, &aid_hex).unwrap();
@@ -892,6 +893,7 @@ mod tests {
             display_name: "Mallory".into(),
             kem_public_key_b64: "not-valid-base64!!!!".into(),
             agent_public_key_b64: None,
+            rendezvous_hints: None,
         };
         card.save(&layout).unwrap();
         let err = recipient_kem_key(&layout, &aid_hex).unwrap_err();

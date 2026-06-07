@@ -110,6 +110,16 @@ pub struct StoredContactCard {
     /// `public_key_b64`, or `agent_public_key_b64`.
     #[serde(default)]
     pub agent_public_key_b64: Option<String>,
+    /// M3 R-tail-5: relay hints the peer advertised in the
+    /// `fetchit_rendezvous_hints` v1 slot of their share card.
+    /// `None` for legacy v1 cards (no hints field) AND for v3
+    /// profile-paired contacts (their hints live in the
+    /// `ProfileManifest`, not parsed here yet). Send-path callers
+    /// fall back to the local primary URL when this is `None` so
+    /// [`crate::transport::MultiHomeTransport`] keeps routing via
+    /// slot 0 for legacy contacts.
+    #[serde(default)]
+    pub rendezvous_hints: Option<crate::card::RendezvousHintsV1>,
 }
 
 impl StoredContactCard {
@@ -158,12 +168,74 @@ impl StoredContactCard {
                 })?
                 .to_owned()
         };
+        // M3 R-tail-5: lift the `fetchit_rendezvous_hints` slot off
+        // the URI so [`crate::transport::MultiHomeTransport`] can
+        // route outbound DMs / fanout envelopes to slots 1/2 when the
+        // peer's advertised primary differs from ours. Missing slot
+        // (legacy v1 card) and decoder-rejected payload both surface
+        // as `None`; send-path callers synthesize a primary-URL
+        // fallback so the slot-0 default keeps working.
+        let rendezvous_hints = obj
+            .get("fetchit_rendezvous_hints")
+            .and_then(|v| serde_json::from_value::<crate::card::RendezvousHints>(v.clone()).ok())
+            .filter(|h| h.v == 1)
+            .and_then(|h| crate::card::RendezvousHintsV1::from_value(&h.data).ok());
         Ok(Self {
             agent_id_hex,
             display_name,
             kem_public_key_b64,
             agent_public_key_b64: agent_pk_b64_opt,
+            rendezvous_hints,
         })
+    }
+
+    /// Resolve `recipient`'s advertised relay hints from their stored
+    /// contact card on disk. Returns `None` when the contact is not
+    /// imported, when the on-disk card is a legacy v1 card without
+    /// the `v2_rendezvous_hints` slot, or when the slot's payload
+    /// fails decoder validation.
+    ///
+    /// Cheap: one filesystem stat + (when present) a single JSON
+    /// deserialize, no network calls. Fanout paths can call this
+    /// N times per group send without measurable cost.
+    ///
+    /// `None` here is semantically distinct from `Some(empty)` — the
+    /// recipient hasn't advertised a specific relay set, so the
+    /// sender should fall back to its own primary URL. See
+    /// [`Self::resolve_recipient_hints_or_fallback`] for the
+    /// caller-side synthesis helper.
+    ///
+    /// # Errors
+    /// Forwards IO and JSON-parse failures from [`Self::load`].
+    pub fn resolve_recipient_hints(
+        layout: &StoreLayout,
+        agent_id_hex: &str,
+    ) -> Result<Option<crate::card::RendezvousHintsV1>> {
+        Ok(Self::load(layout, agent_id_hex)?.and_then(|c| c.rendezvous_hints))
+    }
+
+    /// Resolve `recipient`'s hints with a fallback to a synthetic
+    /// `RendezvousHintsV1 { relays: [primary_fallback_url] }` when
+    /// the on-disk card has no `fetchit_rendezvous_hints` slot.
+    ///
+    /// The fallback keeps existing v1-card contacts routable through
+    /// [`crate::transport::MultiHomeTransport`]'s slot 0 (the local
+    /// primary) so the legitimate `None` from a legacy card never
+    /// reaches the strict-on-`None` transport layer.
+    ///
+    /// # Errors
+    /// Forwards [`Self::load`] IO and JSON-parse failures.
+    pub fn resolve_recipient_hints_or_fallback(
+        layout: &StoreLayout,
+        agent_id_hex: &str,
+        primary_fallback_url: &str,
+    ) -> Result<crate::card::RendezvousHintsV1> {
+        let hints = Self::resolve_recipient_hints(layout, agent_id_hex)?.unwrap_or_else(|| {
+            crate::card::RendezvousHintsV1 {
+                relays: vec![primary_fallback_url.to_owned()],
+            }
+        });
+        Ok(hints)
     }
 
     /// Persist this card to `layout.contact_path(self.agent_id_hex)`.
@@ -207,6 +279,13 @@ pub struct Endpoint<'a> {
     /// [`ChatError::Denied`] for blocked recipients before sealing.
     /// `None` = ungated.
     denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
+    /// M3 R-tail-5: the local primary relay URL the send path uses
+    /// to synthesize a fallback `RendezvousHintsV1` when the
+    /// recipient's stored card has no `v2_rendezvous_hints` slot.
+    /// `None` when the client was built without a relay URL
+    /// (REST-only / unit-test mode); send paths then pass through
+    /// `None` and the no-transport gate trips first anyway.
+    primary_relay_url: Option<&'a str>,
 }
 
 impl<'a> Endpoint<'a> {
@@ -236,14 +315,15 @@ impl<'a> Endpoint<'a> {
             local_machine_id,
             members_singleflight,
             None,
+            None,
         )
     }
 
     /// Same as [`Self::new`] but with an explicit denylist consumer
-    /// slot. Used by [`crate::Client::messages`] in production; the
-    /// 8-arg [`Self::new`] is the test-facing path that leaves the
-    /// gate disabled (all existing tests built against it predate
-    /// M3 and ungated semantics preserve their expectations).
+    /// slot and the local primary relay URL. Used by
+    /// [`crate::Client::messages`] in production; the 8-arg
+    /// [`Self::new`] is the test-facing path that leaves the gate
+    /// disabled and the primary URL unset.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_denylist(
         http: &'a Http,
@@ -255,6 +335,7 @@ impl<'a> Endpoint<'a> {
         local_machine_id: [u8; 32],
         members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
         denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
+        primary_relay_url: Option<&'a str>,
     ) -> Self {
         Self {
             http,
@@ -266,7 +347,45 @@ impl<'a> Endpoint<'a> {
             local_machine_id,
             members_singleflight,
             denylist,
+            primary_relay_url,
         }
+    }
+
+    /// M3 R-tail-5 helper: resolve `recipient_agent_id_hex`'s
+    /// advertised relay hints from their stored contact card, falling
+    /// back to a synthesized `RendezvousHintsV1 { relays: [primary] }`
+    /// against the local primary URL so
+    /// [`crate::transport::MultiHomeTransport`] always receives
+    /// `Some(hints)` and can be strict-on-`None`.
+    ///
+    /// Returns `None` only when neither a card is on disk (or it
+    /// carries no hints) NOR a primary URL is wired (REST-only mode).
+    /// In that case the Router caller passes `None` through and the
+    /// no-transport gate trips first anyway.
+    ///
+    /// Owned return (not `&RendezvousHintsV1`) so the synthesized
+    /// fallback's lifetime survives the `.await` point on the
+    /// subsequent `Router::send` call.
+    fn resolve_hints_for(
+        &self,
+        recipient_agent_id_hex: &str,
+    ) -> Option<crate::card::RendezvousHintsV1> {
+        let layout = self.layout?;
+        let card_hints = StoredContactCard::resolve_recipient_hints(layout, recipient_agent_id_hex)
+            .ok()
+            .flatten();
+        if card_hints.is_some() {
+            return card_hints;
+        }
+        // Legacy v1 card OR no card at all: synthesize a hint
+        // pointing at the local primary so MultiHomeTransport routes
+        // through slot 0 — that's the same wire behavior as the
+        // pre-R-tail-5 None path, just expressed as Some(hints) so
+        // the transport surface can be strict.
+        self.primary_relay_url
+            .map(|url| crate::card::RendezvousHintsV1 {
+                relays: vec![url.to_owned()],
+            })
     }
 
     /// Send a direct message. On first contact, bootstraps a fresh
@@ -655,7 +774,20 @@ impl<'a> Endpoint<'a> {
                 timestamp_ms,
                 transit: Some(envelope.clone()),
             };
-            match self.router.send(&member, transport_out, None).await {
+            // M3 R-tail-5: thread per-recipient relay hints into the
+            // Router. Legacy v1 contacts (no hints slot on their card)
+            // get a synthesized fallback to our own primary URL so
+            // MultiHomeTransport's slot 0 still serves them; v2-card
+            // contacts with a different primary route to slot 1/2.
+            // The lookup is a single file stat + (when present) a
+            // small JSON decode against `layout`, cheap enough to do
+            // per-member in a fanout loop.
+            let hints = self.resolve_hints_for(&member.0);
+            match self
+                .router
+                .send(&member, transport_out, hints.as_ref())
+                .await
+            {
                 Ok(receipt) => {
                     last_receipt_id = receipt.message_id.or(last_receipt_id);
                     delivered += 1;
@@ -968,7 +1100,16 @@ impl<'a> Endpoint<'a> {
                 timestamp_ms,
                 transit: Some(ob.envelope),
             };
-            let receipt = self.router.send(&recipient, transport_out, None).await?;
+            // M3 R-tail-5: look up the recipient's advertised relay
+            // hints so MultiHomeTransport can route via slot 1/2 when
+            // their primary differs from ours. Legacy v1 contacts
+            // fall back to our own primary URL synthesized in
+            // `resolve_hints_for`.
+            let hints = self.resolve_hints_for(&recipient.0);
+            let receipt = self
+                .router
+                .send(&recipient, transport_out, hints.as_ref())
+                .await?;
             last_id = receipt.message_id;
         }
         Ok(last_id)
@@ -1572,6 +1713,7 @@ mod tests {
             display_name: "Peer".to_owned(),
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: Some(B64.encode(sender_signer.public_key())),
+            rendezvous_hints: None,
         };
         card.save(&rig.layout).unwrap();
     }
@@ -1937,6 +2079,7 @@ mod tests {
             [0u8; 32],
             None,
             Some(&denylist),
+            None,
         );
 
         let err = endpoint
@@ -3276,5 +3419,252 @@ mod tests {
             transit: None,
         };
         assert!(decode_direct_message(inbound).is_err());
+    }
+
+    // ---- R-tail-5 ------------------------------------------------------
+
+    /// M3 R-tail-5: [`StoredContactCard::from_share_uri`] lifts the
+    /// `fetchit_rendezvous_hints` slot off a v2 share URI into the
+    /// in-memory [`StoredContactCard::rendezvous_hints`] field, and
+    /// [`StoredContactCard::resolve_recipient_hints`] surfaces it
+    /// back through the layout/disk lookup. The fanout sites consume
+    /// this exact path on every `Router::send` to pick a slot.
+    #[tokio::test]
+    async fn resolve_recipient_hints_round_trips_v2_card() {
+        use crate::card::RendezvousHintsV1;
+        use crate::local_store::StoreLayout;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let hints = RendezvousHintsV1 {
+            relays: vec!["wss://nyc.test/v1/ws".to_owned()],
+        };
+        let aid_hex = "0".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: aid_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(hints.clone()),
+        };
+        card.save(&layout).unwrap();
+
+        let got = StoredContactCard::resolve_recipient_hints(&layout, &aid_hex)
+            .unwrap()
+            .expect("hints round-trip via disk");
+        assert_eq!(got.relays, hints.relays);
+    }
+
+    /// Legacy v1 card has no hints slot — resolver returns None.
+    /// The send-path fallback then synthesizes the local primary URL
+    /// before calling `MultiHomeTransport`.
+    #[tokio::test]
+    async fn resolve_recipient_hints_legacy_v1_card_returns_none() {
+        use crate::local_store::StoreLayout;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid_hex = "1".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: aid_hex.clone(),
+            display_name: "LegacyPeer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+        };
+        card.save(&layout).unwrap();
+
+        let got = StoredContactCard::resolve_recipient_hints(&layout, &aid_hex).unwrap();
+        assert!(
+            got.is_none(),
+            "legacy v1 card resolves to None so caller can synthesize primary fallback",
+        );
+    }
+
+    /// R-tail-5 fallback wrapper: legacy v1 card synthesises a
+    /// `RendezvousHintsV1 { relays: [primary] }` so
+    /// [`crate::transport::MultiHomeTransport`] always sees
+    /// `Some(hints)` and can be strict-on-None at the wire boundary.
+    #[tokio::test]
+    async fn resolve_recipient_hints_or_fallback_synthesizes_primary_for_v1_card() {
+        use crate::local_store::StoreLayout;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid_hex = "2".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: aid_hex.clone(),
+            display_name: "LegacyPeer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+        };
+        card.save(&layout).unwrap();
+
+        let primary = "wss://primary.test/v1/ws";
+        let got =
+            StoredContactCard::resolve_recipient_hints_or_fallback(&layout, &aid_hex, primary)
+                .unwrap();
+        assert_eq!(got.relays, vec![primary.to_owned()]);
+    }
+
+    /// `HintCapturingTransport`: records the hints handed to its
+    /// `send` so the send-path tests can assert what the fanout
+    /// loop computed per recipient.
+    struct HintCapturingTransport {
+        last_hints: Arc<StdMutex<Option<crate::card::RendezvousHintsV1>>>,
+    }
+
+    impl HintCapturingTransport {
+        fn new() -> (
+            Arc<Self>,
+            Arc<StdMutex<Option<crate::card::RendezvousHintsV1>>>,
+        ) {
+            let captured = Arc::new(StdMutex::new(None));
+            (
+                Arc::new(Self {
+                    last_hints: captured.clone(),
+                }),
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Transport for HintCapturingTransport {
+        fn name(&self) -> &'static str {
+            "hint-capture"
+        }
+        fn reachability(&self, _: &AgentId) -> Reachability {
+            Reachability::Always
+        }
+        async fn send(
+            &self,
+            _: &AgentId,
+            _: TransportOutbound,
+            hints: Option<&crate::card::RendezvousHintsV1>,
+        ) -> Result<SendReceipt> {
+            *self.last_hints.lock().unwrap() = hints.cloned();
+            Ok(SendReceipt {
+                accepted_at_ms: 1,
+                message_id: Some("captured".into()),
+                transport_name: "hint-capture",
+            })
+        }
+        fn take_inbound(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>> {
+            None
+        }
+    }
+
+    /// R-tail-5: a private-group fanout to a peer whose stored card
+    /// carries v2 hints forwards those hints verbatim to the Router.
+    /// This is the load-bearing assertion that proves the multi-home
+    /// routing reach is live: a contact card with v2 hints to
+    /// `wss://A` causes the transport surface to see
+    /// `Some(relays=[wss://A])` on send.
+    #[tokio::test]
+    async fn send_private_group_threads_v2_hints_to_router() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer_hex = "b".repeat(64);
+        mount_encrypt_and_two_member_roster(&server, &local_hex, &peer_hex).await;
+
+        // Peer's card advertises a v2 hint to wss://nyc.test/v1/ws —
+        // this is what MultiHomeTransport will route by.
+        let advertised = "wss://nyc.test/v1/ws";
+        let peer_card = StoredContactCard {
+            agent_id_hex: peer_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec![advertised.to_owned()],
+            }),
+        };
+        peer_card.save(&rig.layout).unwrap();
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = HintCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let primary = "wss://primary.test/v1/ws";
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            None,
+            Some(primary),
+        );
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .expect("fanout succeeds");
+
+        let got = captured.lock().unwrap().clone().expect("hints captured");
+        assert_eq!(
+            got.relays,
+            vec![advertised.to_owned()],
+            "v2 hints from peer's card must reach Router::send verbatim",
+        );
+    }
+
+    /// R-tail-5 fallback: legacy v1 contact (no hints on card) →
+    /// fanout synthesizes the local primary URL and passes that
+    /// through as `Some(hints)`. Keeps the strict-on-None contract at
+    /// the transport surface honest while preserving the legacy wire
+    /// path.
+    #[tokio::test]
+    async fn send_private_group_falls_back_to_primary_when_recipient_card_lacks_v2_hints() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer_hex = "c".repeat(64);
+        mount_encrypt_and_two_member_roster(&server, &local_hex, &peer_hex).await;
+
+        // Peer's card is legacy v1: no `rendezvous_hints`. The
+        // send-path's fallback synthesis must kick in.
+        let peer_card = StoredContactCard {
+            agent_id_hex: peer_hex.clone(),
+            display_name: "LegacyPeer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+        };
+        peer_card.save(&rig.layout).unwrap();
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = HintCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let primary = "wss://primary.test/v1/ws";
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            None,
+            Some(primary),
+        );
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .expect("fanout succeeds");
+
+        let got = captured.lock().unwrap().clone().expect("hints captured");
+        assert_eq!(
+            got.relays,
+            vec![primary.to_owned()],
+            "v1 card + primary URL must synthesize fallback hints",
+        );
     }
 }

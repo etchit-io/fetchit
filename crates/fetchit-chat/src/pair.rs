@@ -235,6 +235,12 @@ pub fn record_into_stored_contact(record: &ProfileIndexRecord) -> StoredContactC
         display_name: String::new(),
         kem_public_key_b64: record.kem_pubkey.clone(),
         agent_public_key_b64: Some(record.ml_dsa_pubkey.clone()),
+        // M3 R-tail-5: v3 profile pairing doesn't yet thread relay
+        // hints from `ProfileManifest.relays` into `StoredContactCard`;
+        // legacy v1 fallback applies (send path synthesizes the local
+        // primary URL). Wire-up tracked alongside the M3 profile
+        // republish work in apps/fetchit-desktop/src-tauri.
+        rendezvous_hints: None,
     }
 }
 

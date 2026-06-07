@@ -360,6 +360,13 @@ async fn dispatch_welcome(
         display_name: String::new(),
         kem_public_key_b64: verified.sender_kem_pub_b64,
         agent_public_key_b64: Some(verified.sender_pk_b64),
+        // TOFU welcomes don't carry the sender's advertised
+        // rendezvous hints — that metadata lives on their share card,
+        // which they paste-imported earlier. Pending-cards installed
+        // via welcome stay v1-shaped here; the send path's primary
+        // fallback keeps replies routable until the peer re-pastes
+        // an updated card.
+        rendezvous_hints: None,
     });
 
     let result = install_or_rekey_conversation(
@@ -622,6 +629,7 @@ mod tests {
             display_name: "Peer".to_owned(),
             kem_public_key_b64: B64.encode(kem_pub),
             agent_public_key_b64: Some(B64.encode(signer.public_key())),
+            rendezvous_hints: None,
         };
         card.save(layout).unwrap();
     }
@@ -852,6 +860,7 @@ mod tests {
             display_name: "Synthetic".to_owned(),
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: Some(B64.encode(synthetic_signer.public_key())),
+            rendezvous_hints: None,
         };
         synthetic_card.save(&layout_b).unwrap();
         let registry_b =
@@ -1060,6 +1069,7 @@ mod tests {
             display_name: "Sender".to_owned(),
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
+            rendezvous_hints: None,
         };
         no_pk_card.save(&layout_b).unwrap();
         let registry_b =

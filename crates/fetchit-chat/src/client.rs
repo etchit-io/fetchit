@@ -306,6 +306,15 @@ pub struct Client {
     /// was supplied at boot.
     multi_home_inbound:
         Option<Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>>,
+    /// M3 R-tail-5: the local primary relay URL pinned to
+    /// [`crate::transport::MultiHomeTransport`]'s slot 0. Send-path
+    /// helpers synthesize this into a fallback
+    /// `RendezvousHintsV1 { relays: [primary_url] }` when the
+    /// recipient's stored card has no `v2_rendezvous_hints` slot —
+    /// keeps legacy v1 contacts routable through slot 0 while letting
+    /// the transport layer be strict-on-`None`. `None` when the
+    /// client was built without a relay URL (REST-only mode).
+    primary_relay_url: Option<String>,
 }
 
 impl Client {
@@ -357,27 +366,28 @@ impl Client {
         let needs_chat =
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
 
-        let (router, chat, relay, lan, lan_bound_addr, multi_home_inbound) = if needs_chat {
-            announce_identity_best_effort(&http).await;
-            build_with_chat(
-                &http,
-                &base_url,
-                token,
-                relay_url,
-                data_dir,
-                passphrase,
-                enable_lan_direct,
-                contact_pubkey_lookup,
-                x0xd_port_file,
-            )
-            .await?
-        } else {
-            (Router::new(), None, None, None, None, None)
-        };
+        let (router, chat, relay, lan, lan_bound_addr, multi_home_inbound, primary_relay_url) =
+            if needs_chat {
+                announce_identity_best_effort(&http).await;
+                build_with_chat(
+                    &http,
+                    &base_url,
+                    token,
+                    relay_url,
+                    data_dir,
+                    passphrase,
+                    enable_lan_direct,
+                    contact_pubkey_lookup,
+                    x0xd_port_file,
+                )
+                .await?
+            } else {
+                (Router::new(), None, None, None, None, None, None)
+            };
 
         let router = Arc::new(router);
         if let Some(chat) = chat.as_ref() {
-            spawn_auto_rekey_sweeper(&router, chat);
+            spawn_auto_rekey_sweeper(&router, chat, primary_relay_url.clone());
         }
 
         Ok(Self {
@@ -391,6 +401,7 @@ impl Client {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound,
+            primary_relay_url,
         })
     }
 
@@ -614,6 +625,7 @@ impl Client {
             self.chat.as_ref().map_or([0u8; 32], |c| c.local_machine_id),
             self.chat.as_ref().map(|c| &c.members_singleflight),
             self.denylist.as_ref(),
+            self.primary_relay_url.as_deref(),
         )
     }
 
@@ -988,7 +1000,27 @@ impl Client {
             timestamp_ms: outbound.envelope.timestamp_ms,
             transit: Some(outbound.envelope),
         };
-        self.router.send(&recipient, transport_out, None).await?;
+        // M3 R-tail-5: resolve the recipient's advertised relay hints
+        // from their stored card so MultiHomeTransport can route this
+        // sealed bridge envelope to slot 1/2 when their primary
+        // differs from ours. Legacy v1 contacts fall back to the
+        // local primary URL (slot 0).
+        let hints = crate::messages::StoredContactCard::resolve_recipient_hints(
+            &chat.layout,
+            recipient_agent_id_hex,
+        )
+        .ok()
+        .flatten()
+        .or_else(|| {
+            self.primary_relay_url
+                .as_deref()
+                .map(|url| crate::card::RendezvousHintsV1 {
+                    relays: vec![url.to_owned()],
+                })
+        });
+        self.router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
         Ok(decision)
     }
 
@@ -1375,6 +1407,11 @@ async fn build_with_chat(
     Option<Arc<LanDirectTransport>>,
     Option<std::net::SocketAddr>,
     Option<Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>>,
+    // M3 R-tail-5: slot-0 primary URL string the caller passed (already
+    // pinned inside `MultiHomeTransport`). Send-path fallback synthesizes
+    // this into a `RendezvousHintsV1` when the recipient's stored card
+    // has no v2 hints slot.
+    Option<String>,
 )> {
     // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
     // chat-side work so an outdated daemon never gets a chance to
@@ -1488,6 +1525,7 @@ async fn build_with_chat(
     let mut mh_inbound_slot: Option<
         Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>,
     > = None;
+    let mut primary_relay_url_str: Option<String> = None;
     if let Some(url) = relay_url {
         // The denylist gate inside `MultiHomeTransport` is `DenylistQuery`
         // (read-side trait). Until R-tail-4.x splits `DenylistCheck`'s
@@ -1522,8 +1560,10 @@ async fn build_with_chat(
         let builder: Arc<dyn crate::transport::RelayBuilder> =
             Arc::new(crate::transport::RealRelayBuilder::new(x0xd_signer.clone()));
 
+        let url_str = url.to_string();
+        primary_relay_url_str = Some(url_str.clone());
         let mh = crate::transport::MultiHomeTransport::new_with_subscriber(
-            url.to_string(),
+            url_str,
             mh_denylist,
             on_inbound,
             builder,
@@ -1566,6 +1606,7 @@ async fn build_with_chat(
         lan_handle,
         lan_bound_addr,
         mh_inbound_slot,
+        primary_relay_url_str,
     ))
 }
 
@@ -1592,12 +1633,17 @@ fn derive_machine_id(machine_id: &str) -> [u8; 32] {
 ///
 /// The first tick is consumed immediately so the sweep does not run
 /// the instant the client starts.
-fn spawn_auto_rekey_sweeper(router: &Arc<Router>, chat: &ChatState) {
+fn spawn_auto_rekey_sweeper(
+    router: &Arc<Router>,
+    chat: &ChatState,
+    primary_relay_url: Option<String>,
+) {
     let registry = chat.registry.clone();
     let identity = chat.identity.clone();
     let signer = chat.signer.clone();
     let router = router.clone();
     let machine_id = chat.local_machine_id;
+    let layout = chat.layout.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(AUTO_REKEY_SWEEP_INTERVAL);
         // First tick fires immediately; skip so we don't rotate on
@@ -1605,7 +1651,17 @@ fn spawn_auto_rekey_sweeper(router: &Arc<Router>, chat: &ChatState) {
         tick.tick().await;
         loop {
             tick.tick().await;
-            match sweep_auto_rekey(&registry, &identity, &router, machine_id, &signer).await {
+            match sweep_auto_rekey(
+                &registry,
+                &identity,
+                &router,
+                machine_id,
+                &signer,
+                &layout,
+                primary_relay_url.as_deref(),
+            )
+            .await
+            {
                 Ok(n) if n > 0 => log::info!("[chat] auto-rekey: rotated {n} conversations"),
                 Ok(_) => {}
                 Err(e) => log::warn!("[chat] auto-rekey sweep error: {e}"),
@@ -1699,6 +1755,8 @@ async fn sweep_auto_rekey(
     router: &Arc<Router>,
     machine_id: [u8; 32],
     signer: &Arc<dyn Signer>,
+    layout: &StoreLayout,
+    primary_relay_url: Option<&str>,
 ) -> Result<usize> {
     let cached = registry.snapshot_cached().await;
     let mut rekeyed = 0usize;
@@ -1727,7 +1785,20 @@ async fn sweep_auto_rekey(
                 timestamp_ms,
                 transit: Some(ob.envelope),
             };
-            if let Err(e) = router.send(&recipient, transport_out, None).await {
+            // M3 R-tail-5: thread per-recipient hints — auto-rekey
+            // welcomes are exactly the kind of relay traffic
+            // multi-home wants to route via the contact's primary
+            // slot. Legacy v1 contacts fall back to our own primary.
+            let hints =
+                crate::messages::StoredContactCard::resolve_recipient_hints(layout, &recipient.0)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        primary_relay_url.map(|url| crate::card::RendezvousHintsV1 {
+                            relays: vec![url.to_owned()],
+                        })
+                    });
+            if let Err(e) = router.send(&recipient, transport_out, hints.as_ref()).await {
                 log::warn!(
                     "[chat] auto-rekey: send to {} failed: {e}",
                     recipient.short()
@@ -2575,6 +2646,7 @@ mod tests {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: None,
+            primary_relay_url: None,
         };
         (client, dir)
     }
@@ -2765,6 +2837,7 @@ mod tests {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
+            primary_relay_url: None,
         };
 
         // Router carries exactly one transport — MultiHomeTransport —

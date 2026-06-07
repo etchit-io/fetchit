@@ -298,6 +298,12 @@ pub struct Slot {
 /// occupied. Inbound deliveries fan into a single dispatch stream
 /// gated by [`NonceDedup`] (D4).
 pub struct MultiHomeTransport {
+    /// Slot-0 URL the transport was constructed with. Retained for
+    /// diagnostics and future fallback policy work; the live slot 0
+    /// is owned by [`Self::slots`] and reachable via
+    /// [`Self::slot_zero_handle`].
+    #[allow(dead_code)]
+    // R-tail-5 retired the local-fallback read site; field kept for diagnostics + future use
     primary_url: String,
     builder: Arc<dyn RelayBuilder>,
     slots: Arc<RwLock<[Option<Slot>; 3]>>,
@@ -670,22 +676,25 @@ impl crate::transport::Transport for MultiHomeTransport {
         envelope: OutboundEnvelope,
         hints: Option<&crate::card::RendezvousHintsV1>,
     ) -> crate::error::Result<SendReceipt> {
-        // TODO R-tail-5: tighten None to error once Endpoint::send
-        // threads hints from the recipient's contact card. Today,
-        // existing callers still pass None; fall back to slot 0 (the
-        // pinned primary) so production chat keeps working during the
-        // trait-extension migration.
-        let fallback_hints = crate::card::RendezvousHintsV1 {
-            relays: vec![self.primary_url.clone()],
-        };
-        let effective_hints = hints.unwrap_or(&fallback_hints);
+        // R-tail-5: every send-site (DM, group fanout, bridge,
+        // auto-rekey) now resolves the recipient's hints (or
+        // synthesizes a fallback to the local primary) before calling
+        // through the Router. `None` is a real bug at this layer —
+        // someone added a new call site and forgot to resolve hints.
+        // Surfacing the typed `Invalid` lets the bug fail loudly at
+        // the wire boundary instead of silently dropping the send.
+        let hints = hints.ok_or_else(|| {
+            crate::error::ChatError::Invalid(
+                "MultiHomeTransport::send requires RendezvousHints".into(),
+            )
+        })?;
         let transit = envelope
             .transit
             .ok_or(crate::error::ChatError::SealedRequired {
                 caller: "MultiHomeTransport::send",
             })?;
         let receipt = self
-            .send_inner(to, transit, effective_hints)
+            .send_inner(to, transit, hints)
             .await
             .map_err(|e| match e {
                 TransportError::Blocked(msg) => {
@@ -1393,13 +1402,14 @@ mod tests {
         assert_eq!(slot0_handle.traffic_count_for_test(), 1);
     }
 
-    /// R-tail-4: until `Endpoint::send` threads hints from the
-    /// recipient's contact card, the `Transport` impl falls back to
-    /// slot 0 (the pinned primary) when called with `None` hints so
-    /// existing callers stay on the wire during the migration. R-tail-5
-    /// tightens this back to a typed error.
+    /// R-tail-5: every send-site now resolves hints (with fallback to
+    /// the local primary) before calling the Router, so `None` at
+    /// this layer is a real bug. The `Transport` impl returns a typed
+    /// `Invalid` error rather than silently routing to slot 0 — that
+    /// loud failure is what catches the next contributor who adds a
+    /// new send path and forgets to resolve hints.
     #[tokio::test]
-    async fn transport_impl_falls_back_to_slot_zero_when_hints_none() {
+    async fn transport_impl_errors_on_none_hints() {
         use crate::transport::Transport;
         let builder = Arc::new(StubRelayBuilder::default());
         let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
@@ -1414,16 +1424,17 @@ mod tests {
 
         let to = sample_recipient();
         let envelope = sample_outbound_envelope();
-        let receipt = <MultiHomeTransport as Transport>::send(&mh, &to, envelope, None)
+        let err = <MultiHomeTransport as Transport>::send(&mh, &to, envelope, None)
             .await
-            .expect("None-hints fallback succeeds");
-        assert_eq!(receipt.transport_name, "multi-home");
+            .expect_err("None-hints must error post-R-tail-5");
+        assert!(
+            matches!(err, crate::error::ChatError::Invalid(ref s) if s.contains("RendezvousHints")),
+            "expected Invalid(\"...RendezvousHints...\"), got {err:?}",
+        );
 
-        // The slot-0 (primary) handle should have recorded the send —
-        // the None-hints path resolves to the pinned primary URL.
+        // No send recorded on slot 0; no slot 1/2 allocations either.
         let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
-        assert_eq!(slot0_handle.traffic_count_for_test(), 1);
-        // And no allocation in slots 1 or 2.
+        assert_eq!(slot0_handle.traffic_count_for_test(), 0);
         assert!(mh.slots_for_test()[1].is_none());
         assert!(mh.slots_for_test()[2].is_none());
     }

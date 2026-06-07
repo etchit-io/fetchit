@@ -21,7 +21,32 @@ use crate::groups::bridge_member_role_updated::{
 use crate::groups::bridge_policy_updated::{build_policy_updated_event, PolicyUpdatedInputs};
 use crate::identity::AgentId;
 use crate::local_store::StoreLayout;
+use crate::messages::StoredContactCard;
 use crate::transport::{OutboundEnvelope, OutboundKind, Router};
+
+/// M3 R-tail-5: resolve `recipient_agent_id_hex`'s advertised relay
+/// hints from their stored card, falling back to a synthesized
+/// `RendezvousHintsV1 { relays: [primary] }` when the card has no
+/// `v2_rendezvous_hints` slot (or is missing entirely). Returns
+/// `None` only when the local has no primary URL wired (REST-only
+/// mode) AND the recipient's card has no hints; in that case the
+/// Router caller passes `None` through and the no-transport gate
+/// trips first.
+fn resolve_hints_for_recipient(
+    layout: &StoreLayout,
+    recipient_agent_id_hex: &str,
+    primary_relay_url: Option<&str>,
+) -> Option<crate::card::RendezvousHintsV1> {
+    let card_hints = StoredContactCard::resolve_recipient_hints(layout, recipient_agent_id_hex)
+        .ok()
+        .flatten();
+    if card_hints.is_some() {
+        return card_hints;
+    }
+    primary_relay_url.map(|url| crate::card::RendezvousHintsV1 {
+        relays: vec![url.to_owned()],
+    })
+}
 
 /// Build sealed [`ConvEnvelope`]s for a `MemberRemoved` fan-out.
 ///
@@ -122,6 +147,7 @@ pub async fn dispatch_member_removed_bridge<S>(
     commit_json: Option<serde_json::Value>,
     active_member_aids: &[[u8; 32]],
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -151,7 +177,10 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out, None).await?;
+        let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+        router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
     }
     Ok(())
 }
@@ -254,6 +283,7 @@ pub async fn dispatch_member_role_updated_bridge<S>(
     commit_json: Option<serde_json::Value>,
     active_member_aids: &[[u8; 32]],
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -282,7 +312,10 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out, None).await?;
+        let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+        router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
     }
     Ok(())
 }
@@ -379,6 +412,7 @@ pub async fn dispatch_policy_updated_bridge<S>(
     commit_json: Option<serde_json::Value>,
     active_member_aids: &[[u8; 32]],
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -406,7 +440,10 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out, None).await?;
+        let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+        router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
     }
     Ok(())
 }
@@ -508,6 +545,7 @@ pub async fn dispatch_member_banned_bridge<S>(
     commit_json: Option<serde_json::Value>,
     active_member_aids: &[[u8; 32]],
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -536,7 +574,10 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out, None).await?;
+        let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+        router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
     }
     Ok(())
 }
@@ -631,6 +672,7 @@ pub async fn dispatch_group_deleted_bridge<S>(
     commit_json: Option<serde_json::Value>,
     active_member_aids: &[[u8; 32]],
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -657,7 +699,10 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out, None).await?;
+        let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+        router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
     }
     Ok(())
 }
@@ -683,6 +728,7 @@ pub async fn dispatch_welcome_request_to_owner<S>(
     joiner_agent_id: [u8; 32],
     ts_ms: u64,
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -736,7 +782,10 @@ where
         timestamp_ms: env.timestamp_ms,
         transit: Some(env),
     };
-    router.send(&recipient, transport_out, None).await?;
+    let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+    router
+        .send(&recipient, transport_out, hints.as_ref())
+        .await?;
     Ok(())
 }
 
@@ -761,6 +810,7 @@ pub async fn dispatch_welcome_blob_to_joiner<S>(
     blob_bytes: &[u8],
     ts_ms: u64,
     local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
 ) -> Result<()>
 where
     S: fetchit_relay_client::Signer + ?Sized,
@@ -816,7 +866,10 @@ where
         timestamp_ms: env.timestamp_ms,
         transit: Some(env),
     };
-    router.send(&recipient, transport_out, None).await?;
+    let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+    router
+        .send(&recipient, transport_out, hints.as_ref())
+        .await?;
     Ok(())
 }
 
@@ -851,6 +904,7 @@ mod tests {
             display_name: "peer".into(),
             kem_public_key_b64: B64.encode(kem_pub),
             agent_public_key_b64: None,
+            rendezvous_hints: None,
         };
         card.save(layout).unwrap();
     }
@@ -1264,6 +1318,7 @@ mod tests {
             joiner_aid,
             42_000_u64,
             machine_id,
+            None,
         )
         .await
         .unwrap();
@@ -1325,6 +1380,7 @@ mod tests {
             &blob_bytes,
             99_000_u64,
             machine_id,
+            None,
         )
         .await
         .unwrap();
@@ -1417,5 +1473,149 @@ mod tests {
             assert_eq!(inner["event"], "group_deleted");
             assert_eq!(inner["revision"], 99u64);
         }
+    }
+
+    /// M3 R-tail-5: a `dispatch_*_bridge` fanout that hits a recipient
+    /// whose stored card carries v2 hints forwards those hints
+    /// verbatim into `Router::send`. Exercises the
+    /// `resolve_hints_for_recipient` seam end-to-end through one of
+    /// the seven owner-broadcast call sites.
+    #[allow(clippy::too_many_lines)] // multi-recipient setup + capture mock + assertions
+    #[tokio::test]
+    async fn dispatch_member_removed_bridge_threads_v2_hints_to_router() {
+        use std::sync::{Arc, Mutex};
+
+        /// Capturing transport that records hints per call so the
+        /// test can assert which slot URL the Router would pick.
+        struct HintCapturingTransport {
+            hints: Mutex<Vec<Option<crate::card::RendezvousHintsV1>>>,
+            recipients: Mutex<Vec<AgentId>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::transport::Transport for HintCapturingTransport {
+            fn name(&self) -> &'static str {
+                "hint-capture"
+            }
+            fn reachability(&self, _: &AgentId) -> crate::transport::Reachability {
+                crate::transport::Reachability::Always
+            }
+            async fn send(
+                &self,
+                to: &AgentId,
+                _: crate::transport::OutboundEnvelope,
+                hints: Option<&crate::card::RendezvousHintsV1>,
+            ) -> crate::error::Result<crate::transport::SendReceipt> {
+                self.hints.lock().unwrap().push(hints.cloned());
+                self.recipients.lock().unwrap().push(to.clone());
+                Ok(crate::transport::SendReceipt {
+                    accepted_at_ms: 1,
+                    message_id: None,
+                    transport_name: "hint-capture",
+                })
+            }
+            fn take_inbound(
+                &self,
+            ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::transport::InboundEnvelope>>
+            {
+                None
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let aid_a = [0xaau8; 32]; // actor (filtered)
+        let aid_b = [0xbbu8; 32]; // removed (filtered)
+        let aid_v2 = [0xccu8; 32]; // v2-card peer
+        let aid_v1 = [0xddu8; 32]; // v1-card peer (fallback)
+
+        let (pk_a, _) = kem_keygen().unwrap();
+        let (pk_b, _) = kem_keygen().unwrap();
+        let (pk_v2, _) = kem_keygen().unwrap();
+        let (pk_v1, _) = kem_keygen().unwrap();
+        store_card(&layout, aid_a, &pk_a);
+        store_card(&layout, aid_b, &pk_b);
+
+        // v2 peer's card carries advertised hints to wss://advertised.test/v1/ws.
+        let advertised = "wss://advertised.test/v1/ws";
+        let v2_card = StoredContactCard {
+            agent_id_hex: hex::encode(aid_v2),
+            display_name: "V2Peer".into(),
+            kem_public_key_b64: B64.encode(&pk_v2),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec![advertised.to_owned()],
+            }),
+        };
+        v2_card.save(&layout).unwrap();
+
+        // v1 peer's card has no hints — the fanout should synthesize
+        // the local primary URL.
+        let v1_card = StoredContactCard {
+            agent_id_hex: hex::encode(aid_v1),
+            display_name: "V1Peer".into(),
+            kem_public_key_b64: B64.encode(&pk_v1),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+        };
+        v1_card.save(&layout).unwrap();
+
+        let primary = "wss://primary.test/v1/ws";
+        let capture = Arc::new(HintCapturingTransport {
+            hints: Mutex::new(Vec::new()),
+            recipients: Mutex::new(Vec::new()),
+        });
+        let mut router = crate::transport::Router::new();
+        router.add(capture.clone());
+
+        dispatch_member_removed_bridge(
+            &StubSigner,
+            &router,
+            &layout,
+            "group-1",
+            "x0x.named_group/group-1/metadata",
+            7,
+            aid_a,
+            aid_b,
+            None,
+            None,
+            None,
+            &[aid_a, aid_b, aid_v2, aid_v1],
+            [0x01u8; 32],
+            Some(primary),
+        )
+        .await
+        .unwrap();
+
+        let recipients = capture.recipients.lock().unwrap().clone();
+        let hints = capture.hints.lock().unwrap().clone();
+        assert_eq!(recipients.len(), 2);
+        // Recipient order matches active_member_aids order, modulo the
+        // actor/removed filter — v2 first, then v1.
+        let v2_idx = recipients
+            .iter()
+            .position(|r| r.0 == hex::encode(aid_v2))
+            .unwrap();
+        let v1_idx = recipients
+            .iter()
+            .position(|r| r.0 == hex::encode(aid_v1))
+            .unwrap();
+        assert_eq!(
+            hints[v2_idx]
+                .as_ref()
+                .expect("v2 recipient must get Some(hints)")
+                .relays,
+            vec![advertised.to_owned()],
+            "v2 card hints forwarded verbatim",
+        );
+        assert_eq!(
+            hints[v1_idx]
+                .as_ref()
+                .expect("v1 recipient must get Some(hints) via primary fallback")
+                .relays,
+            vec![primary.to_owned()],
+            "v1 card synthesises primary fallback",
+        );
     }
 }
