@@ -10,24 +10,36 @@ pub enum EntryKind {
     XorName,
     /// 64-hex agent id (chat identity).
     AgentId,
+    /// Relay endpoint URL (e.g. `wss://relay.example.com/v1/ws`),
+    /// consumed by federated relays via the M3 denylist surface.
+    RelayUrl,
+    /// Fediverse actor URL (e.g. `https://mastodon.example/users/eve`),
+    /// consumed by the M4 Stage 4 `MastodonBlocklistConsumer`.
+    ActorUrl,
 }
 
 /// Identifies the thing being reported or denylisted.
+///
+/// `value` carries a 64-character lowercase hex string for
+/// [`EntryKind::XorName`] / [`EntryKind::AgentId`], and a normalised
+/// lowercase URL for [`EntryKind::RelayUrl`] / [`EntryKind::ActorUrl`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TargetIdentity {
     /// What family of identifier this is.
     pub kind: EntryKind,
-    /// 64-character lowercase hex.
-    pub value_hex: String,
+    /// Identifier value, normalised to lowercase ASCII at construction.
+    pub value: String,
 }
 
 impl TargetIdentity {
-    /// Build a new `TargetIdentity`, lowercasing the hex.
+    /// Build a new `TargetIdentity`, lowercasing the value at the
+    /// ASCII boundary. Hex values become lowercase hex; URL values
+    /// become lowercase URLs (scheme, host, path, etc.).
     #[must_use]
-    pub fn new(kind: EntryKind, value_hex: impl Into<String>) -> Self {
+    pub fn new(kind: EntryKind, value: impl Into<String>) -> Self {
         Self {
             kind,
-            value_hex: value_hex.into().to_ascii_lowercase(),
+            value: value.into().to_ascii_lowercase(),
         }
     }
 }
@@ -130,4 +142,23 @@ pub struct Health {
     pub denylisted_xornames: usize,
     /// Number of denylisted agent ids.
     pub denylisted_agents: usize,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_url_entry_kind_lowercases_value() {
+        let t = TargetIdentity::new(EntryKind::RelayUrl, "WSS://Relay.Example.com/V1/WS");
+        assert_eq!(t.kind, EntryKind::RelayUrl);
+        assert_eq!(t.value, "wss://relay.example.com/v1/ws");
+    }
+
+    #[test]
+    fn actor_url_entry_kind_lowercases_value() {
+        let t = TargetIdentity::new(EntryKind::ActorUrl, "HTTPS://Mastodon.example/Users/Eve");
+        assert_eq!(t.value, "https://mastodon.example/users/eve");
+    }
 }

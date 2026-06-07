@@ -12,6 +12,10 @@ struct Snapshot {
     reports: Vec<Report>,
     denylist_xornames: BTreeMap<String, DenylistEntry>,
     denylist_agents: BTreeMap<String, DenylistEntry>,
+    #[serde(default)]
+    denylist_relay_urls: BTreeMap<String, DenylistEntry>,
+    #[serde(default)]
+    denylist_actor_urls: BTreeMap<String, DenylistEntry>,
     etag_seq: u64,
 }
 
@@ -83,7 +87,7 @@ impl Storage {
     /// # Errors
     /// Returns persistence errors.
     pub fn deny(&self, entry: DenylistEntry) -> Result<(), TrustError> {
-        let key = entry.target.value_hex.clone();
+        let key = entry.target.value.clone();
         {
             let mut g = self.inner.write().map_err(|_| poisoned())?;
             match entry.target.kind {
@@ -92,6 +96,12 @@ impl Storage {
                 }
                 EntryKind::AgentId => {
                     g.denylist_agents.insert(key, entry);
+                }
+                EntryKind::RelayUrl => {
+                    g.denylist_relay_urls.insert(key, entry);
+                }
+                EntryKind::ActorUrl => {
+                    g.denylist_actor_urls.insert(key, entry);
                 }
             }
             g.etag_seq = g.etag_seq.saturating_add(1);
@@ -108,10 +118,16 @@ impl Storage {
             let mut g = self.inner.write().map_err(|_| poisoned())?;
             match target.kind {
                 EntryKind::XorName => {
-                    g.denylist_xornames.remove(&target.value_hex);
+                    g.denylist_xornames.remove(&target.value);
                 }
                 EntryKind::AgentId => {
-                    g.denylist_agents.remove(&target.value_hex);
+                    g.denylist_agents.remove(&target.value);
+                }
+                EntryKind::RelayUrl => {
+                    g.denylist_relay_urls.remove(&target.value);
+                }
+                EntryKind::ActorUrl => {
+                    g.denylist_actor_urls.remove(&target.value);
                 }
             }
             g.etag_seq = g.etag_seq.saturating_add(1);
@@ -119,7 +135,7 @@ impl Storage {
         self.persist()
     }
 
-    /// Current denylist for `kind`, sorted by hex value.
+    /// Current denylist for `kind`, sorted by value.
     ///
     /// # Errors
     /// Returns when the lock is poisoned.
@@ -128,6 +144,8 @@ impl Storage {
         let entries = match kind {
             EntryKind::XorName => g.denylist_xornames.values().cloned().collect(),
             EntryKind::AgentId => g.denylist_agents.values().cloned().collect(),
+            EntryKind::RelayUrl => g.denylist_relay_urls.values().cloned().collect(),
+            EntryKind::ActorUrl => g.denylist_actor_urls.values().cloned().collect(),
         };
         Ok(entries)
     }
