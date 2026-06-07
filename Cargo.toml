@@ -9,6 +9,7 @@ members = [
     "crates/fetchit-relay-server",
     "crates/fetchit-relay-client",
     "crates/fetchit-trust",
+    "crates/fetchit-trust-client",
     "crates/x0xd-client",
 ]
 exclude = ["crates/fetchit-ffi", "apps/fetchit-desktop/src-tauri"]
@@ -76,6 +77,7 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 argon2 = "0.5"
 directories = "5"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+tempfile = "3.13"
 
 [profile.release]
 lto = "thin"
