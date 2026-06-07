@@ -59,15 +59,47 @@ impl MlDsaAttestation {
 /// `actor_url` is rendered via [`url::Url::as_str`] so its serialisation
 /// is fixed by the `url` crate's normalisation, not by the caller.
 ///
-/// Returns an error only when a length exceeds `u32::MAX`, which would
-/// require a multi-gigabyte input — practically unreachable but explicit
-/// for forward-compatibility audits.
+/// # Field constraints (locked wire format)
+///
+/// These are part of the wire format, not implementation details. A
+/// verifier reconstructing the signing input from an `Actor` JSON-LD
+/// document MUST receive the same bytes; otherwise signatures look
+/// invalid for entirely benign-looking encoding differences.
+///
+/// - **`handle`** — non-empty UTF-8. Returns
+///   [`SigningInputError::EmptyHandle`] otherwise.
+/// - **`actor_url`** — its `Url::as_str()` rendering. The pinned `url`
+///   crate version is therefore part of the wire format; bumping `url`
+///   is a v2 migration.
+/// - **`agent_id_hex`** — lowercase 64-hex (chars `0..=9` and `a..=f`,
+///   exactly 64 bytes). Returns
+///   [`SigningInputError::InvalidAgentIdHex`] otherwise. The chat-side
+///   `mint_actor_identity` derives this from
+///   `FetchitIdentity::agent_id_hex()`, which already returns the
+///   canonical form.
+/// - **`rsa_pubkey_der`** — `SubjectPublicKeyInfo` DER (NOT PKCS#1
+///   `RSAPublicKey`). A verifier reconstructing the signing input from
+///   the `Actor`'s `publicKey.publicKeyPem` PEM-decodes that field to
+///   SPKI DER and feeds it here; signing over PKCS#1 instead would
+///   produce different bytes and break verification.
+/// - **Field length** — each field's byte length must fit in `u32`.
+///   Returns [`SigningInputError::FieldTooLong`] otherwise (practically
+///   unreachable; multi-gigabyte input).
 pub fn signing_input(
     handle: &str,
     actor_url: &url::Url,
     agent_id_hex: &str,
     rsa_pubkey_der: &[u8],
 ) -> Result<Vec<u8>, SigningInputError> {
+    if handle.is_empty() {
+        return Err(SigningInputError::EmptyHandle);
+    }
+    if !is_lowercase_64_hex(agent_id_hex) {
+        return Err(SigningInputError::InvalidAgentIdHex {
+            len: agent_id_hex.len(),
+        });
+    }
+
     let actor_url_str = actor_url.as_str();
     let total = DOMAIN_SEPARATOR
         .len()
@@ -82,6 +114,10 @@ pub fn signing_input(
     push_lp(&mut out, agent_id_hex.as_bytes())?;
     push_lp(&mut out, rsa_pubkey_der)?;
     Ok(out)
+}
+
+fn is_lowercase_64_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SigningInputError> {
@@ -102,6 +138,19 @@ pub enum SigningInputError {
         /// Offending field length in bytes.
         len: usize,
     },
+    /// `handle` was empty. Empty handles silently produce a structurally
+    /// valid attestation that no real actor can match — almost always a
+    /// caller bug.
+    #[error("attestation handle must be non-empty")]
+    EmptyHandle,
+    /// `agent_id_hex` was not lowercase 64-hex. Verifiers reconstruct
+    /// this field exactly; passing uppercase, mixed-case, `0x`-prefixed,
+    /// or wrong-length input silently breaks signature verification.
+    #[error("attestation agent_id_hex must be lowercase 64-hex (got len {len})")]
+    InvalidAgentIdHex {
+        /// Length of the offending input in bytes.
+        len: usize,
+    },
 }
 
 #[cfg(test)]
@@ -113,6 +162,11 @@ mod tests {
         s.parse().unwrap()
     }
 
+    const VALID_AGENT_HEX: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER_AGENT_HEX: &str =
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
     #[test]
     fn domain_separator_is_frozen() {
         assert_eq!(DOMAIN_SEPARATOR, b"fetchit-fedi-actor-attestation-v1");
@@ -123,7 +177,7 @@ mod tests {
         let bytes = signing_input(
             "josh",
             &url("https://etchit.io/actors/josh"),
-            "0123456789abcdef",
+            VALID_AGENT_HEX,
             &[0xDE, 0xAD, 0xBE, 0xEF],
         )
         .unwrap();
@@ -134,8 +188,8 @@ mod tests {
         expected.extend_from_slice(b"josh");
         expected.extend_from_slice(&29u32.to_be_bytes());
         expected.extend_from_slice(b"https://etchit.io/actors/josh");
-        expected.extend_from_slice(&16u32.to_be_bytes());
-        expected.extend_from_slice(b"0123456789abcdef");
+        expected.extend_from_slice(&64u32.to_be_bytes());
+        expected.extend_from_slice(VALID_AGENT_HEX.as_bytes());
         expected.extend_from_slice(&4u32.to_be_bytes());
         expected.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
@@ -147,7 +201,7 @@ mod tests {
         let base = signing_input(
             "josh",
             &url("https://etchit.io/actors/josh"),
-            "abcd",
+            VALID_AGENT_HEX,
             &[0x01],
         )
         .unwrap();
@@ -155,28 +209,28 @@ mod tests {
         let other_handle = signing_input(
             "alice",
             &url("https://etchit.io/actors/josh"),
-            "abcd",
+            VALID_AGENT_HEX,
             &[0x01],
         )
         .unwrap();
         let other_url = signing_input(
             "josh",
             &url("https://etchit.io/actors/alice"),
-            "abcd",
+            VALID_AGENT_HEX,
             &[0x01],
         )
         .unwrap();
         let other_agent = signing_input(
             "josh",
             &url("https://etchit.io/actors/josh"),
-            "ffff",
+            OTHER_AGENT_HEX,
             &[0x01],
         )
         .unwrap();
         let other_key = signing_input(
             "josh",
             &url("https://etchit.io/actors/josh"),
-            "abcd",
+            VALID_AGENT_HEX,
             &[0x02],
         )
         .unwrap();
@@ -185,6 +239,62 @@ mod tests {
         assert_ne!(base, other_url);
         assert_ne!(base, other_agent);
         assert_ne!(base, other_key);
+    }
+
+    #[test]
+    fn signing_input_rejects_empty_handle() {
+        let err = signing_input(
+            "",
+            &url("https://etchit.io/actors/josh"),
+            VALID_AGENT_HEX,
+            &[0x01],
+        )
+        .unwrap_err();
+        assert!(matches!(err, SigningInputError::EmptyHandle));
+    }
+
+    #[test]
+    fn signing_input_rejects_short_agent_id_hex() {
+        let err = signing_input(
+            "josh",
+            &url("https://etchit.io/actors/josh"),
+            "deadbeef",
+            &[0x01],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SigningInputError::InvalidAgentIdHex { len: 8 }
+        ));
+    }
+
+    #[test]
+    fn signing_input_rejects_uppercase_agent_id_hex() {
+        let upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        assert_eq!(upper.len(), 64);
+        let err = signing_input(
+            "josh",
+            &url("https://etchit.io/actors/josh"),
+            upper,
+            &[0x01],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SigningInputError::InvalidAgentIdHex { len: 64 }
+        ));
+    }
+
+    #[test]
+    fn signing_input_rejects_non_hex_agent_id() {
+        let bad = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeG";
+        assert_eq!(bad.len(), 64);
+        let err =
+            signing_input("josh", &url("https://etchit.io/actors/josh"), bad, &[0x01]).unwrap_err();
+        assert!(matches!(
+            err,
+            SigningInputError::InvalidAgentIdHex { len: 64 }
+        ));
     }
 
     #[test]
