@@ -27,10 +27,10 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
 use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer};
-use rsa::RsaPrivateKey;
+use rsa::signature::{SignatureEncoding, Signer, Verifier};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -237,15 +237,126 @@ fn build_signature_base(
     )
 }
 
+/// Errors from inbound HTTP Signature verification.
+///
+/// Stage 3.1a — the receiver side of the wire-format symmetry. Every
+/// variant is structured to map cleanly onto the relay-server inbox
+/// gate's drop-reason label (so Prometheus
+/// `fedi_inbox_dropped_sig_fail_total{reason}` stays a small finite
+/// label set).
+#[derive(Debug, Error)]
+pub enum SignatureVerifyError {
+    /// A required HTTP header was missing or could not be parsed.
+    #[error("malformed signature header: {0}")]
+    HeaderMalformed(String),
+    /// `Content-Digest` did not match the SHA-256 of the body.
+    #[error("Content-Digest header does not match body SHA-256")]
+    DigestMismatch,
+    /// The base64-encoded signature in the `Signature` header could
+    /// not be decoded.
+    #[error("signature payload base64 decode failed: {0}")]
+    SignatureDecodeFailed(String),
+    /// The RSA-SHA256 signature did not verify against the
+    /// canonical signing base reconstructed from the request.
+    #[error("RSA signature verification failed")]
+    VerifyFailed,
+}
+
+impl SignatureVerifyError {
+    /// Short label for Prometheus drop-reason counters. Keep the
+    /// set small — every new variant is a new high-cardinality
+    /// label slot.
+    #[must_use]
+    pub fn reason_label(&self) -> &'static str {
+        match self {
+            Self::HeaderMalformed(_) => "header_malformed",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::SignatureDecodeFailed(_) => "signature_decode",
+            Self::VerifyFailed => "verify_failed",
+        }
+    }
+}
+
+/// Verify the RFC 9421 HTTP Signature attached to an inbound
+/// `application/activity+json` POST against `public_key`.
+///
+/// Reconstructs the canonical signing base byte-for-byte from the
+/// caller-supplied request components ([`build_signature_base`])
+/// and verifies the base64-decoded signature with
+/// `VerifyingKey<Sha256>`. Caller must derive `target_uri`/`host`
+/// the same way the signer did — see Mastodon's `host_from_url`
+/// rule preserved by [`HttpSignatureKey::sign_post_rfc9421`].
+///
+/// The covered-component list embedded in `signature_input` MUST
+/// include `("@method" "@target-uri" "host" "date" "content-digest")`;
+/// the receiver does not currently allow leaner subsets. Stricter
+/// (more components) is fine — extras don't break verification
+/// because the signing base is reconstructed verbatim from the
+/// parameter portion.
+///
+/// `Content-Digest` is checked against `body`'s SHA-256 before the
+/// RSA verify so a missing/incorrect digest fails fast with a
+/// dedicated error variant for counter slicing.
+///
+/// # Errors
+/// - [`SignatureVerifyError::HeaderMalformed`] for any structurally
+///   invalid header value (missing `sig1=`, missing `signature`
+///   parameter, etc.).
+/// - [`SignatureVerifyError::DigestMismatch`] when `content_digest`
+///   does not match SHA-256(body).
+/// - [`SignatureVerifyError::SignatureDecodeFailed`] when the
+///   `sig1=:<b64>:` payload is not valid base64.
+/// - [`SignatureVerifyError::VerifyFailed`] on RSA verification
+///   failure.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_signature_rfc9421(
+    public_key: &RsaPublicKey,
+    target_uri: &str,
+    host: &str,
+    date: &str,
+    content_digest: &str,
+    signature_input: &str,
+    signature: &str,
+    body: &[u8],
+) -> Result<(), SignatureVerifyError> {
+    let expected_digest = compute_content_digest(body);
+    if expected_digest != content_digest {
+        return Err(SignatureVerifyError::DigestMismatch);
+    }
+
+    let sig_params = signature_input.strip_prefix("sig1=").ok_or_else(|| {
+        SignatureVerifyError::HeaderMalformed("Signature-Input must start with 'sig1='".into())
+    })?;
+
+    let signing_base = build_signature_base(target_uri, host, date, content_digest, sig_params);
+
+    let sig_b64 = signature
+        .strip_prefix("sig1=:")
+        .and_then(|s| s.strip_suffix(':'))
+        .ok_or_else(|| {
+            SignatureVerifyError::HeaderMalformed(
+                "Signature must be of the form 'sig1=:<base64>:'".into(),
+            )
+        })?;
+
+    let sig_bytes = B64
+        .decode(sig_b64)
+        .map_err(|e| SignatureVerifyError::SignatureDecodeFailed(format!("{e}")))?;
+    let parsed_sig = Signature::try_from(sig_bytes.as_slice())
+        .map_err(|e| SignatureVerifyError::SignatureDecodeFailed(format!("{e}")))?;
+
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key.clone());
+    verifying_key
+        .verify(signing_base.as_bytes(), &parsed_sig)
+        .map_err(|_| SignatureVerifyError::VerifyFailed)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use rsa::pkcs1v15::{Signature, VerifyingKey};
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
     use rsa::rand_core::OsRng;
-    use rsa::signature::Verifier;
-    use rsa::RsaPublicKey;
     use std::sync::OnceLock;
 
     /// Generate one RSA-2048 keypair per process and cache it. ~200ms
@@ -559,5 +670,206 @@ mod tests {
             .sign_post_rfc9421(&url, b"body", "Sun, 06 Nov 1994 08:49:37 GMT", 0)
             .unwrap_err();
         assert!(matches!(err, HttpSignatureError::InvalidPrivateKey(_)));
+    }
+
+    // -------- Stage 3.1a verifier --------
+
+    #[test]
+    fn verify_signature_rfc9421_round_trip() {
+        // Sign and verify with the same keypair — happy path.
+        let (key, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/users/alice/inbox".parse().unwrap();
+        let body = br#"{"type":"Create","actor":"https://etchit.io/actors/josh"}"#;
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let created = 783_000_000;
+
+        let signed = key.sign_post_rfc9421(&url, body, date, created).unwrap();
+
+        verify_signature_rfc9421(
+            pub_key,
+            url.as_str(),
+            "example.com",
+            date,
+            &signed.content_digest,
+            &signed.signature_input,
+            &signed.signature,
+            body,
+        )
+        .expect("round-trip verify");
+    }
+
+    #[test]
+    fn verify_signature_rfc9421_tampered_body_fails_with_digest_mismatch() {
+        let (key, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/users/alice/inbox".parse().unwrap();
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let created = 783_000_000;
+
+        let signed = key
+            .sign_post_rfc9421(&url, b"original", date, created)
+            .unwrap();
+
+        // Receiver gets a TAMPERED body but the same Content-Digest
+        // header — caught by the digest-mismatch gate before RSA verify.
+        let err = verify_signature_rfc9421(
+            pub_key,
+            url.as_str(),
+            "example.com",
+            date,
+            &signed.content_digest,
+            &signed.signature_input,
+            &signed.signature,
+            b"tampered",
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::DigestMismatch));
+        assert_eq!(err.reason_label(), "digest_mismatch");
+    }
+
+    #[test]
+    fn verify_signature_rfc9421_tampered_signature_fails() {
+        let (key, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/users/alice/inbox".parse().unwrap();
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let created = 783_000_000;
+        let body = b"identical body";
+
+        let signed = key.sign_post_rfc9421(&url, body, date, created).unwrap();
+
+        // Flip a middle character of the base64 payload — avoid the
+        // trailing `==` padding so the decode still yields the same
+        // 256-byte length, just different bytes. Result: well-formed
+        // signature payload, but bytes don't verify against the body.
+        let payload = signed
+            .signature
+            .strip_prefix("sig1=:")
+            .unwrap()
+            .strip_suffix(':')
+            .unwrap();
+        let mid = payload.len() / 2;
+        let mid_char = payload.as_bytes()[mid];
+        let replacement = if mid_char == b'A' { 'B' } else { 'A' };
+        let mut tampered_payload = payload.to_string();
+        tampered_payload.replace_range(mid..=mid, &replacement.to_string());
+        let tampered_sig = format!("sig1=:{tampered_payload}:");
+
+        let err = verify_signature_rfc9421(
+            pub_key,
+            url.as_str(),
+            "example.com",
+            date,
+            &signed.content_digest,
+            &signed.signature_input,
+            &tampered_sig,
+            body,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SignatureVerifyError::VerifyFailed),
+            "expected VerifyFailed, got: {err:?}"
+        );
+        assert_eq!(err.reason_label(), "verify_failed");
+    }
+
+    #[test]
+    fn verify_signature_rfc9421_malformed_signature_input_fails() {
+        let (_, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/inbox".parse().unwrap();
+        let body = b"body";
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+
+        let err = verify_signature_rfc9421(
+            pub_key,
+            url.as_str(),
+            "example.com",
+            date,
+            &compute_content_digest(body),
+            // No 'sig1=' prefix.
+            "(\"@method\")",
+            "sig1=:abcd:",
+            body,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::HeaderMalformed(_)));
+        assert_eq!(err.reason_label(), "header_malformed");
+    }
+
+    #[test]
+    fn verify_signature_rfc9421_malformed_signature_payload_fails() {
+        let (_, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/inbox".parse().unwrap();
+        let body = b"body";
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+
+        let err = verify_signature_rfc9421(
+            pub_key,
+            url.as_str(),
+            "example.com",
+            date,
+            &compute_content_digest(body),
+            "sig1=(\"@method\");created=0;keyid=\"x\";alg=\"rsa-v1_5-sha256\"",
+            // Missing the 'sig1=:<b64>:' wrapper.
+            "abcd",
+            body,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::HeaderMalformed(_)));
+    }
+
+    #[test]
+    fn verify_signature_rfc9421_invalid_base64_fails() {
+        let (_, pub_key) = test_key_material();
+        let url: url::Url = "https://example.com/inbox".parse().unwrap();
+        let body = b"body";
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+
+        let err = verify_signature_rfc9421(
+            pub_key,
+            url.as_str(),
+            "example.com",
+            date,
+            &compute_content_digest(body),
+            "sig1=(\"@method\");created=0;keyid=\"x\";alg=\"rsa-v1_5-sha256\"",
+            // Well-formed wrapper but the payload is not valid base64.
+            "sig1=:!!!not-base64!!!:",
+            body,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SignatureVerifyError::SignatureDecodeFailed(_)
+        ));
+        assert_eq!(err.reason_label(), "signature_decode");
+    }
+
+    #[test]
+    fn verify_signature_rfc9421_wrong_pubkey_fails() {
+        // Sign with one keypair, verify with a different pubkey ->
+        // VerifyFailed.
+        let (key, _) = test_key_material();
+        let url: url::Url = "https://example.com/users/alice/inbox".parse().unwrap();
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let created = 783_000_000;
+        let body = b"body";
+
+        let signed = key.sign_post_rfc9421(&url, body, date, created).unwrap();
+
+        // Fresh second keypair just for this test — independent OnceLock
+        // would be overkill.
+        let other_priv = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let other_pub = other_priv.to_public_key();
+
+        let err = verify_signature_rfc9421(
+            &other_pub,
+            url.as_str(),
+            "example.com",
+            date,
+            &signed.content_digest,
+            &signed.signature_input,
+            &signed.signature,
+            body,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::VerifyFailed));
     }
 }
