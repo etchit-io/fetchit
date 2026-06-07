@@ -132,7 +132,16 @@ impl Transport for RelayTransport {
         Reachability::Always
     }
 
-    async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
+    async fn send(
+        &self,
+        to: &AgentId,
+        envelope: OutboundEnvelope,
+        hints: Option<&crate::card::RendezvousHintsV1>,
+    ) -> Result<SendReceipt> {
+        // Single-relay transport: the relay URL is fixed at
+        // construction time, so advertised hints don't change routing.
+        // R-tail-3's MultiHomeTransport will slot-route by them.
+        let _ = hints;
         let to_relay = agent_id_to_relay(to)?;
         // Sealed-only post-M2 — every caller must hand us a fully
         // sealed envelope produced by the conversation/group layer.
@@ -307,7 +316,7 @@ mod tests {
             transit: None,
         };
 
-        let err = transport.send(&to, outbound).await.unwrap_err();
+        let err = transport.send(&to, outbound, None).await.unwrap_err();
         assert!(
             matches!(
                 err,

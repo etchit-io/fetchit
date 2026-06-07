@@ -151,7 +151,7 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out).await?;
+        router.send(&recipient, transport_out, None).await?;
     }
     Ok(())
 }
@@ -282,7 +282,7 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out).await?;
+        router.send(&recipient, transport_out, None).await?;
     }
     Ok(())
 }
@@ -406,7 +406,7 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out).await?;
+        router.send(&recipient, transport_out, None).await?;
     }
     Ok(())
 }
@@ -536,7 +536,7 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out).await?;
+        router.send(&recipient, transport_out, None).await?;
     }
     Ok(())
 }
@@ -657,7 +657,7 @@ where
             timestamp_ms: env.envelope.timestamp_ms,
             transit: Some(env.envelope),
         };
-        router.send(&recipient, transport_out).await?;
+        router.send(&recipient, transport_out, None).await?;
     }
     Ok(())
 }
@@ -736,7 +736,7 @@ where
         timestamp_ms: env.timestamp_ms,
         transit: Some(env),
     };
-    router.send(&recipient, transport_out).await?;
+    router.send(&recipient, transport_out, None).await?;
     Ok(())
 }
 
@@ -816,7 +816,7 @@ where
         timestamp_ms: env.timestamp_ms,
         transit: Some(env),
     };
-    router.send(&recipient, transport_out).await?;
+    router.send(&recipient, transport_out, None).await?;
     Ok(())
 }
 
@@ -1215,6 +1215,7 @@ mod tests {
             &self,
             _: &AgentId,
             env: crate::transport::OutboundEnvelope,
+            _: Option<&crate::card::RendezvousHintsV1>,
         ) -> crate::error::Result<crate::transport::SendReceipt> {
             self.sent.lock().unwrap().push(env);
             Ok(crate::transport::SendReceipt {

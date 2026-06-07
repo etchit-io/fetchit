@@ -167,7 +167,15 @@ impl Transport for LanDirectTransport {
         Reachability::IfReachable
     }
 
-    async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
+    async fn send(
+        &self,
+        to: &AgentId,
+        envelope: OutboundEnvelope,
+        hints: Option<&crate::card::RendezvousHintsV1>,
+    ) -> Result<SendReceipt> {
+        // LAN-direct routes via mDNS-discovered IP:port, not WS relays;
+        // advertised relay hints are irrelevant here.
+        let _ = hints;
         // Sealed-required guard ahead of any network I/O: a buggy
         // caller must not be able to spend a TCP connect + Noise XX
         // handshake on a wire-shape that would be refused at the last
@@ -688,7 +696,10 @@ mod tests {
         let mut rx_b = transport_b.take_inbound().expect("inbound rx");
 
         let outbound = sealed_outbound_dm(&aid_a, b"hello via LAN".to_vec(), 1_700_000_000_000);
-        let receipt = transport_a.send(&aid_b, outbound.clone()).await.unwrap();
+        let receipt = transport_a
+            .send(&aid_b, outbound.clone(), None)
+            .await
+            .unwrap();
         assert_eq!(receipt.transport_name, "lan-direct");
 
         let inbound = tokio::time::timeout(std::time::Duration::from_secs(5), rx_b.recv())
@@ -731,7 +742,7 @@ mod tests {
         .unwrap();
 
         let outbound = sealed_outbound_dm(&aid_a, b"hi".to_vec(), 0);
-        let err = transport_a.send(&aid_b, outbound).await.unwrap_err();
+        let err = transport_a.send(&aid_b, outbound, None).await.unwrap_err();
         assert!(matches!(err, ChatError::MessageTransport(_)), "got {err:?}");
     }
 
@@ -860,7 +871,7 @@ mod tests {
 
         let outbound = sealed_outbound_dm(&aid_a, b"hi".to_vec(), 0);
         let started = tokio::time::Instant::now();
-        let err = transport_a.send(&aid_b, outbound).await.unwrap_err();
+        let err = transport_a.send(&aid_b, outbound, None).await.unwrap_err();
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(12),

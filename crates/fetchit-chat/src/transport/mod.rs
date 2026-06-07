@@ -13,6 +13,7 @@
 //! holds ciphertext but is actually plaintext; ML-KEM-768 sealing
 //! lands in the next milestone.)
 
+use crate::card::RendezvousHintsV1;
 use crate::error::{ChatError, Result};
 use crate::identity::AgentId;
 use async_trait::async_trait;
@@ -120,10 +121,24 @@ pub trait Transport: Send + Sync {
 
     /// Try to deliver `envelope` to `to`.
     ///
+    /// `hints` carries the recipient's advertised
+    /// [`RendezvousHintsV1`] when the caller has resolved it from the
+    /// contact card. Slot-routing transports
+    /// (e.g. `MultiHomeTransport`) use it to pick the destination
+    /// relay; single-WS and LAN-direct transports ignore it. `None`
+    /// means the caller did not look hints up (legacy path) and is
+    /// distinct from `Some(empty)` which means the card explicitly
+    /// advertises no hints.
+    ///
     /// # Errors
     /// Returns `ChatError::Transport*` for wire failures; the router
     /// may try another transport in response.
-    async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt>;
+    async fn send(
+        &self,
+        to: &AgentId,
+        envelope: OutboundEnvelope,
+        hints: Option<&RendezvousHintsV1>,
+    ) -> Result<SendReceipt>;
 
     /// Take the inbound stream once. Subsequent calls return `None`.
     /// The chat layer pumps this into the unified event stream.
@@ -174,11 +189,20 @@ impl Router {
     /// Pick the highest-priority transport that can reach `to`,
     /// attempt the send, fall through to the next on error.
     ///
+    /// `hints` is forwarded verbatim to each transport's
+    /// [`Transport::send`]; pass `None` when the caller has not
+    /// resolved the recipient's [`RendezvousHintsV1`].
+    ///
     /// # Errors
     /// Returns [`ChatError::NoTransportAvailable`] if no transport
     /// reports a non-`No` reachability for `to`. Returns the last
     /// transport's error if every reachable transport failed.
-    pub async fn send(&self, to: &AgentId, envelope: OutboundEnvelope) -> Result<SendReceipt> {
+    pub async fn send(
+        &self,
+        to: &AgentId,
+        envelope: OutboundEnvelope,
+        hints: Option<&RendezvousHintsV1>,
+    ) -> Result<SendReceipt> {
         if self.transports.is_empty() {
             return Err(ChatError::NoTransportAvailable);
         }
@@ -189,7 +213,7 @@ impl Router {
                 continue;
             }
             any_reachable = true;
-            match transport.send(to, envelope.clone()).await {
+            match transport.send(to, envelope.clone(), hints).await {
                 Ok(receipt) => return Ok(receipt),
                 Err(e) => last_err = Some(e),
             }
@@ -234,7 +258,12 @@ mod tests {
         fn reachability(&self, _: &AgentId) -> Reachability {
             self.reach
         }
-        async fn send(&self, _: &AgentId, _: OutboundEnvelope) -> Result<SendReceipt> {
+        async fn send(
+            &self,
+            _: &AgentId,
+            _: OutboundEnvelope,
+            _: Option<&RendezvousHintsV1>,
+        ) -> Result<SendReceipt> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             let mut g = self.send_results.lock().unwrap();
             if g.is_empty() {
@@ -268,7 +297,10 @@ mod tests {
     #[tokio::test]
     async fn empty_router_returns_no_transport() {
         let r = Router::new();
-        let err = r.send(&AgentId("b".repeat(64)), env()).await.unwrap_err();
+        let err = r
+            .send(&AgentId("b".repeat(64)), env(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ChatError::NoTransportAvailable));
     }
 
@@ -287,7 +319,7 @@ mod tests {
         let mut r = Router::new();
         r.add(t1.clone());
         r.add(t2.clone());
-        let receipt = r.send(&AgentId("b".repeat(64)), env()).await.unwrap();
+        let receipt = r.send(&AgentId("b".repeat(64)), env(), None).await.unwrap();
         assert_eq!(receipt.transport_name, "a");
         assert_eq!(t1.attempts.load(Ordering::SeqCst), 1);
         assert_eq!(t2.attempts.load(Ordering::SeqCst), 0);
@@ -308,7 +340,7 @@ mod tests {
         let mut r = Router::new();
         r.add(t1.clone());
         r.add(t2.clone());
-        let receipt = r.send(&AgentId("b".repeat(64)), env()).await.unwrap();
+        let receipt = r.send(&AgentId("b".repeat(64)), env(), None).await.unwrap();
         assert_eq!(receipt.transport_name, "b");
         assert_eq!(t1.attempts.load(Ordering::SeqCst), 1);
         assert_eq!(t2.attempts.load(Ordering::SeqCst), 1);
@@ -325,7 +357,7 @@ mod tests {
         let mut r = Router::new();
         r.add(t1.clone());
         r.add(t2.clone());
-        let receipt = r.send(&AgentId("b".repeat(64)), env()).await.unwrap();
+        let receipt = r.send(&AgentId("b".repeat(64)), env(), None).await.unwrap();
         assert_eq!(receipt.transport_name, "b");
         assert_eq!(t1.attempts.load(Ordering::SeqCst), 0);
     }
@@ -335,7 +367,10 @@ mod tests {
         let t = Arc::new(ScriptedTransport::new("a", Reachability::No, vec![]));
         let mut r = Router::new();
         r.add(t);
-        let err = r.send(&AgentId("b".repeat(64)), env()).await.unwrap_err();
+        let err = r
+            .send(&AgentId("b".repeat(64)), env(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ChatError::NoTransportAvailable));
     }
 
@@ -348,7 +383,62 @@ mod tests {
         ));
         let mut r = Router::new();
         r.add(t);
-        let err = r.send(&AgentId("b".repeat(64)), env()).await.unwrap_err();
+        let err = r
+            .send(&AgentId("b".repeat(64)), env(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ChatError::Invalid(_)));
+    }
+
+    /// R-tail-1: hints supplied to `Router::send` reach the picked
+    /// transport's `send` verbatim, so a future `MultiHomeTransport`
+    /// can slot-route by them.
+    #[tokio::test]
+    async fn router_passes_hints_to_transport() {
+        struct HintCapturingTransport {
+            last_hints: Mutex<Option<RendezvousHintsV1>>,
+        }
+
+        #[async_trait]
+        impl Transport for HintCapturingTransport {
+            fn name(&self) -> &'static str {
+                "hint-capture"
+            }
+            fn reachability(&self, _: &AgentId) -> Reachability {
+                Reachability::Always
+            }
+            async fn send(
+                &self,
+                _: &AgentId,
+                _: OutboundEnvelope,
+                hints: Option<&RendezvousHintsV1>,
+            ) -> Result<SendReceipt> {
+                *self.last_hints.lock().unwrap() = hints.cloned();
+                Ok(SendReceipt {
+                    accepted_at_ms: 1,
+                    message_id: None,
+                    transport_name: "hint-capture",
+                })
+            }
+            fn take_inbound(&self) -> Option<mpsc::UnboundedReceiver<InboundEnvelope>> {
+                None
+            }
+        }
+
+        let captor = Arc::new(HintCapturingTransport {
+            last_hints: Mutex::new(None),
+        });
+        let mut r = Router::new();
+        r.add(captor.clone());
+
+        let hints = RendezvousHintsV1 {
+            relays: vec!["wss://primary.test/v1/ws".to_owned()],
+        };
+        r.send(&AgentId("b".repeat(64)), env(), Some(&hints))
+            .await
+            .unwrap();
+
+        let captured = captor.last_hints.lock().unwrap().clone();
+        assert_eq!(captured.unwrap().relays, hints.relays);
     }
 }

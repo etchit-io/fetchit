@@ -959,7 +959,7 @@ impl Client {
             timestamp_ms: outbound.envelope.timestamp_ms,
             transit: Some(outbound.envelope),
         };
-        self.router.send(&recipient, transport_out).await?;
+        self.router.send(&recipient, transport_out, None).await?;
         Ok(decision)
     }
 
@@ -1639,7 +1639,7 @@ async fn sweep_auto_rekey(
                 timestamp_ms,
                 transit: Some(ob.envelope),
             };
-            if let Err(e) = router.send(&recipient, transport_out).await {
+            if let Err(e) = router.send(&recipient, transport_out, None).await {
                 log::warn!(
                     "[chat] auto-rekey: send to {} failed: {e}",
                     recipient.short()

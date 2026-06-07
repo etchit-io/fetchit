@@ -655,7 +655,7 @@ impl<'a> Endpoint<'a> {
                 timestamp_ms,
                 transit: Some(envelope.clone()),
             };
-            match self.router.send(&member, transport_out).await {
+            match self.router.send(&member, transport_out, None).await {
                 Ok(receipt) => {
                     last_receipt_id = receipt.message_id.or(last_receipt_id);
                     delivered += 1;
@@ -968,7 +968,7 @@ impl<'a> Endpoint<'a> {
                 timestamp_ms,
                 transit: Some(ob.envelope),
             };
-            let receipt = self.router.send(&recipient, transport_out).await?;
+            let receipt = self.router.send(&recipient, transport_out, None).await?;
             last_id = receipt.message_id;
         }
         Ok(last_id)
@@ -1277,7 +1277,12 @@ mod tests {
         fn reachability(&self, _: &AgentId) -> Reachability {
             Reachability::Always
         }
-        async fn send(&self, _: &AgentId, envelope: TransportOutbound) -> Result<SendReceipt> {
+        async fn send(
+            &self,
+            _: &AgentId,
+            envelope: TransportOutbound,
+            _: Option<&crate::card::RendezvousHintsV1>,
+        ) -> Result<SendReceipt> {
             *self.captured.lock().unwrap() = envelope.transit.clone();
             Ok(SendReceipt {
                 accepted_at_ms: 1,
@@ -1789,7 +1794,12 @@ mod tests {
         fn reachability(&self, _: &AgentId) -> Reachability {
             Reachability::Always
         }
-        async fn send(&self, to: &AgentId, envelope: TransportOutbound) -> Result<SendReceipt> {
+        async fn send(
+            &self,
+            to: &AgentId,
+            envelope: TransportOutbound,
+            _: Option<&crate::card::RendezvousHintsV1>,
+        ) -> Result<SendReceipt> {
             if let Some(t) = envelope.transit {
                 self.captured.lock().unwrap().push((to.clone(), t));
             }
@@ -1974,7 +1984,12 @@ mod tests {
         fn reachability(&self, _: &AgentId) -> Reachability {
             Reachability::Always
         }
-        async fn send(&self, to: &AgentId, envelope: TransportOutbound) -> Result<SendReceipt> {
+        async fn send(
+            &self,
+            to: &AgentId,
+            envelope: TransportOutbound,
+            _: Option<&crate::card::RendezvousHintsV1>,
+        ) -> Result<SendReceipt> {
             if let Some(t) = envelope.transit {
                 self.captured.lock().unwrap().push((to.clone(), t));
             }
