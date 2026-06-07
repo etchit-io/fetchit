@@ -185,6 +185,23 @@ impl Actor {
                 name: "id".into(),
                 reason: format!("{e}"),
             })?;
+
+        // Reject documents whose `type` is outside the ActivityPub
+        // Actor-class allowlist. A malicious server could otherwise
+        // return a Note or Activity object styled as an Actor;
+        // downstream HTTP-Sig verifiers would then trust an unrelated
+        // pubkey. Per Alice F2.
+        if let Some(type_str) = value.get("type").and_then(Value::as_str) {
+            if !is_actor_class_type(type_str) {
+                return Err(ActorError::InvalidField {
+                    name: "type".into(),
+                    reason: format!(
+                        "expected one of {{Person, Service, Application, Organization, Group}}; got {type_str:?}"
+                    ),
+                });
+            }
+        }
+
         let preferred_username = required_str(value, "preferredUsername")?.to_string();
         let inbox_str = required_str(value, "inbox")?;
         let inbox = inbox_str
@@ -206,6 +223,21 @@ impl Actor {
             .ok_or_else(|| ActorError::MissingField {
                 name: "publicKey".into(),
             })?;
+
+        // Bind `publicKey.owner` to the Actor `id`. Tolerant on
+        // missing (some implementations elide it), strict on
+        // present-but-wrong: a forged Actor that points at someone
+        // else's pubkey is rejected at decode time so Stage 2
+        // HTTP-Sig verifiers don't have to re-check. Per Alice F1.
+        if let Some(owner) = pub_key_obj.get("owner").and_then(Value::as_str) {
+            if owner != id_str {
+                return Err(ActorError::InvalidField {
+                    name: "publicKey.owner".into(),
+                    reason: format!("owner {owner:?} does not match Actor id {id_str:?}"),
+                });
+            }
+        }
+
         let rsa_public_key_pem = pub_key_obj
             .get("publicKeyPem")
             .and_then(|v| v.as_str())
@@ -294,6 +326,16 @@ fn required_str<'a>(value: &'a Value, name: &str) -> Result<&'a str, ActorError>
         .get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| ActorError::MissingField { name: name.into() })
+}
+
+/// Allowlist of `type` values acceptable for an `ActivityPub` Actor
+/// document. A malicious server returning a `Note` or `Activity`
+/// object styled as an Actor is rejected at decode time.
+fn is_actor_class_type(type_str: &str) -> bool {
+    matches!(
+        type_str,
+        "Person" | "Service" | "Application" | "Organization" | "Group"
+    )
 }
 
 /// Encode SPKI DER bytes as a SPKI PEM string with the standard

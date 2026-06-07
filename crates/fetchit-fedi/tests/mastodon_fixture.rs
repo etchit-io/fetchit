@@ -122,3 +122,49 @@ fn malformed_attestation_value_surfaces_error() {
         "expected PQ attestation context in error; got: {msg}"
     );
 }
+
+#[test]
+fn forged_public_key_owner_is_rejected() {
+    // Per Alice F1: a malicious Actor that publishes someone else's
+    // pubkey via mismatched `publicKey.owner` must fail decode so
+    // Stage 2 HTTP-Sig verifiers don't trust the unrelated key.
+    let mut raw: Value = serde_json::from_str(FIXTURE).unwrap();
+    raw["publicKey"]["owner"] = serde_json::json!("https://attacker.example/users/eve");
+    let err = Actor::from_json_ld(&raw).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("publicKey.owner"),
+        "expected publicKey.owner in error; got: {msg}"
+    );
+}
+
+#[test]
+fn missing_public_key_owner_is_tolerated() {
+    // Per Alice F1: some implementations elide owner. Tolerant on
+    // missing, strict on present-but-wrong.
+    let mut raw: Value = serde_json::from_str(FIXTURE).unwrap();
+    raw["publicKey"].as_object_mut().unwrap().remove("owner");
+    Actor::from_json_ld(&raw).expect("decode tolerates a publicKey with no owner field");
+}
+
+#[test]
+fn non_actor_class_type_is_rejected() {
+    // Per Alice F2: a Note/Activity styled as an Actor must be
+    // rejected. Defense against confused-deputy bugs where Stage 2
+    // would fetch the actor URL and treat the response as an Actor.
+    let mut raw: Value = serde_json::from_str(FIXTURE).unwrap();
+    raw["type"] = serde_json::json!("Note");
+    let err = Actor::from_json_ld(&raw).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("type"), "expected type in error; got: {msg}");
+}
+
+#[test]
+fn service_type_is_accepted_as_actor_class() {
+    // Per Alice F2 allowlist: Service is a valid ActivityPub Actor
+    // type (commonly used for automated relays). Decode should
+    // succeed.
+    let mut raw: Value = serde_json::from_str(FIXTURE).unwrap();
+    raw["type"] = serde_json::json!("Service");
+    Actor::from_json_ld(&raw).expect("Service is a valid Actor-class type");
+}
