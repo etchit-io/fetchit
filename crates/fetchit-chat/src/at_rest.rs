@@ -64,6 +64,15 @@ impl MasterKey {
         &self.0
     }
 
+    /// Test-only constructor that wraps raw bytes. Production code must
+    /// go through [`Self::resolve`] so the key never originates outside
+    /// the keychain or the Argon2id KDF.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_bytes_for_test(bytes: [u8; AEAD_KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+
     /// Resolve a master key from the requested source.
     ///
     /// For `Keychain`: returns the existing key, or generates a fresh

@@ -18,10 +18,21 @@
 //! `SECURITY.md` amendment will note this explicitly so a future audit
 //! reader doesn't chase a non-issue.
 
+use crate::at_rest::MasterKey;
+use crate::chat_crypto::{derive_aead_key, AEAD_KEY_LEN};
 use crate::error::ChatError;
 use fetchit_fedi::attestation::{signing_input, MlDsaAttestation};
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::RsaPrivateKey;
+
+/// HKDF `info` string used to derive the fediverse-bridge vault key
+/// from the chat-identity master key.
+///
+/// **Frozen.** Bumping this is a v2 migration: every previously
+/// persisted `<handle>.json.enc` would fail to decrypt under the new
+/// info string. The `-v1` suffix matches the
+/// [`fetchit_fedi::attestation::DOMAIN_SEPARATOR`] versioning style.
+pub const FEDI_VAULT_INFO: &[u8] = b"fetchit-fedi-vault-v1";
 
 /// Generated RSA-2048 keypair material in the encodings the chat-side
 /// mint factory needs to feed both the on-disk vault and
@@ -86,6 +97,21 @@ pub async fn generate_rsa_2048() -> Result<RsaPrivateKeyMaterial, ChatError> {
     }
 }
 
+/// Derive the fediverse vault key from the chat-identity master key.
+///
+/// Uses HKDF-SHA-256 (the same primitive `chat_crypto` already uses
+/// for KEM derivation) with the FROZEN [`FEDI_VAULT_INFO`] string. The
+/// chat conversation vault uses a different info string, so a compromise
+/// of the fedi vault key cannot decrypt conversation vaults and vice
+/// versa, even though both keys live under one unlock surface (the
+/// user's single passphrase or one OS-keychain entry).
+///
+/// Returns a 32-byte AEAD key suitable for ChaCha20-Poly1305 seal/open.
+#[must_use]
+pub fn derive_fedi_vault_key(master_key: &MasterKey) -> [u8; AEAD_KEY_LEN] {
+    derive_aead_key(master_key.as_bytes(), FEDI_VAULT_INFO)
+}
+
 /// Sign the M4 actor attestation under `signer`'s ML-DSA-65 chat key.
 ///
 /// Hands the locked-format `signing_input` bytes to the signer, then
@@ -95,9 +121,11 @@ pub async fn generate_rsa_2048() -> Result<RsaPrivateKeyMaterial, ChatError> {
 /// freshly-generated RSA pubkey.
 ///
 /// # Errors
-/// - [`ChatError::Invalid`] wrapping a [`fetchit_fedi::attestation::SigningInputError`]
-///   if any field fails the canonical-format validation (lowercase
-///   64-hex `agent_id_hex`, non-empty `handle`, etc.).
+///
+/// - [`ChatError::Invalid`] wrapping a
+///   [`fetchit_fedi::attestation::SigningInputError`] if any field
+///   fails the canonical-format validation (lowercase 64-hex
+///   `agent_id_hex`, non-empty `handle`, etc.).
 /// - [`ChatError::Invalid`] wrapping the signer error string when the
 ///   ML-DSA sign call fails.
 pub async fn sign_actor_attestation(
@@ -157,6 +185,48 @@ mod tests {
 
     const VALID_AGENT_HEX: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn fedi_vault_info_is_frozen() {
+        assert_eq!(FEDI_VAULT_INFO, b"fetchit-fedi-vault-v1");
+    }
+
+    #[test]
+    fn fedi_vault_key_pins_to_known_ikm_golden_vector() {
+        // FROZEN golden vector. If this test fails, you have either
+        // bumped FEDI_VAULT_INFO, switched HKDF primitives, or both —
+        // any of which is a v2 wire migration. Do not "fix" the test
+        // by updating the expected bytes without versioning the info
+        // string.
+        let known_master = MasterKey::from_bytes_for_test([0x42u8; AEAD_KEY_LEN]);
+        let derived = derive_fedi_vault_key(&known_master);
+
+        // Computed once via HKDF-SHA-256(salt=None, ikm=[0x42;32],
+        // info=b"fetchit-fedi-vault-v1", L=32).
+        let expected = [
+            0x3e, 0x02, 0x1b, 0x0f, 0xb5, 0x30, 0x65, 0xb3, 0x6e, 0xb6, 0x2e, 0xaa, 0xab, 0xf3,
+            0x27, 0x23, 0xe4, 0xe7, 0x25, 0x67, 0xe2, 0xc3, 0xbf, 0x7f, 0xdb, 0xe8, 0x9a, 0xca,
+            0xf0, 0x9f, 0x5e, 0xd5,
+        ];
+        assert_eq!(derived, expected);
+    }
+
+    #[test]
+    fn fedi_vault_key_differs_from_other_info_strings() {
+        // A bug that accidentally lifted the wrong info string would
+        // produce a non-distinct key. Confirm domain separation works.
+        let known_master = MasterKey::from_bytes_for_test([0x42u8; AEAD_KEY_LEN]);
+        let fedi = derive_fedi_vault_key(&known_master);
+        let other = derive_aead_key(known_master.as_bytes(), b"some-other-info-v1");
+        assert_ne!(fedi, other);
+    }
+
+    #[test]
+    fn fedi_vault_key_differs_when_ikm_changes() {
+        let m1 = MasterKey::from_bytes_for_test([0x11u8; AEAD_KEY_LEN]);
+        let m2 = MasterKey::from_bytes_for_test([0x22u8; AEAD_KEY_LEN]);
+        assert_ne!(derive_fedi_vault_key(&m1), derive_fedi_vault_key(&m2));
+    }
 
     /// Mock `Signer` that returns deterministic pubkey + signature
     /// bytes for assertion. Mirrors the pattern in
