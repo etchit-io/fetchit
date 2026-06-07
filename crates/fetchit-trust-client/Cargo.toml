@@ -36,3 +36,4 @@ optional = true
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 hex = { workspace = true }
+postcard = { workspace = true }

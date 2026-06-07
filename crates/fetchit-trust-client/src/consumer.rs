@@ -79,7 +79,6 @@ pub struct DenylistConsumer {
     issuer_public_key_bytes: Vec<u8>,
     fetch_url_base: String,
     indexes: Arc<RwLock<DenylistIndexes>>,
-    #[allow(dead_code)] // Wired in C8 (disk cache).
     cache_path: Option<PathBuf>,
     tx: broadcast::Sender<BlockEvent>,
     poll_interval: std::time::Duration,
@@ -225,6 +224,21 @@ impl DenylistConsumer {
                 .map_err(|e| TrustError::Io(format!("index lock poisoned: {e}")))?;
             idx.replace(resp.kind, values)
         };
+
+        // Persist to disk before emitting the event so on-crash
+        // recovery sees the new state too. Best-effort: a write
+        // failure does not roll back the in-memory index; the next
+        // refresh will retry the write.
+        if let Some(dir) = &self.cache_path {
+            if let Err(e) = crate::cache::write_kind(dir, kind, &bytes) {
+                tracing::warn!(
+                    ?kind,
+                    error = %e,
+                    "denylist cache write failed; in-memory index still updated"
+                );
+            }
+        }
+
         if !delta.added.is_empty() || !delta.removed.is_empty() {
             let event = BlockEvent {
                 kind: delta.kind,
@@ -238,6 +252,77 @@ impl DenylistConsumer {
             let _ = self.tx.send(event);
         }
         Ok(())
+    }
+
+    /// Synchronously load any cached `DenylistResponse` files from
+    /// `cache_path` and hydrate the in-memory index. Each kind is
+    /// re-verified against the issuer pubkey; corrupt or
+    /// mismatched-signature files are logged and skipped (the next
+    /// online refresh will overwrite them).
+    ///
+    /// Call once at boot, BEFORE the first lookup, when offline
+    /// availability matters. No-op when `cache_path` is `None`.
+    ///
+    /// Per-kind failure isolation: a poisoned `relay_url.json` does
+    /// not prevent a valid `agent_id.json` from hydrating.
+    pub fn load_cache_blocking(&self) {
+        let Some(dir) = &self.cache_path else {
+            return;
+        };
+        for kind in ALL_KINDS {
+            let bytes = match crate::cache::read_kind(dir, kind) {
+                Ok(Some(b)) => b,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(?kind, error = %e, "denylist cache read failed");
+                    continue;
+                }
+            };
+            let resp: DenylistResponse = match serde_json::from_slice(&bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        ?kind,
+                        error = %e,
+                        "denylist cache decode failed; ignoring file"
+                    );
+                    continue;
+                }
+            };
+            if resp.kind != kind {
+                tracing::warn!(
+                    ?kind,
+                    found = ?resp.kind,
+                    "denylist cache kind mismatch; ignoring"
+                );
+                continue;
+            }
+            if let Err(e) = verify_signature(&resp, &self.issuer_public_key_bytes) {
+                tracing::warn!(
+                    ?kind,
+                    error = %e,
+                    "denylist cache signature mismatch; ignoring"
+                );
+                continue;
+            }
+            let values: Vec<String> = resp
+                .entries
+                .iter()
+                .map(|e| e.target.value.clone())
+                .collect();
+            let mut idx = match self.indexes.write() {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(
+                        ?kind,
+                        error = %e,
+                        "index lock poisoned during cache load"
+                    );
+                    continue;
+                }
+            };
+            idx.replace(kind, values);
+        }
     }
 
     /// `true` when `(kind, value)` is on the current snapshot.
