@@ -69,8 +69,9 @@ default.
 
 1. **Read the [`fetchit-relay`](https://github.com/etchit-io/fetchit-relay)
    repository.** README + systemd unit + `env.example` cover build,
-   deploy, ops, and monitoring. The binary is a single statically-linked
-   ~15 MB Linux binary built with `cargo build --release`.
+   deploy, ops, and monitoring. The `fetchit-relay-server` binary is
+   a single statically-linked ~15 MB Linux binary built with
+   `cargo build --release`.
 2. **Pick a region tag.** Common tags: `nyc`, `fra`, `sgp`, `syd`,
    `sfo`. New tags are fine — chat clients bucket unknown tags as
    `other` until the next default bump.
