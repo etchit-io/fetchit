@@ -58,6 +58,11 @@ pub struct ActorIdentityVault {
     pub agent_id_hex: String,
     /// RSA-2048 private key in PEM PKCS#8 form.
     pub rsa_priv_pem: String,
+    /// `SubjectPublicKeyInfo` DER bytes of the RSA-2048 public key.
+    /// Persisted alongside the private PEM so JSON-LD rendering (via
+    /// [`fetchit_fedi::actor::Actor::from_identity`]) can emit
+    /// `publicKeyPem` without a fedi-side RSA parser dep.
+    pub spki_der: Vec<u8>,
     /// ML-DSA-65 attestation binding the RSA pubkey to the
     /// chat-identity key.
     pub ml_dsa_attestation: MlDsaAttestation,
@@ -205,6 +210,7 @@ mod tests {
             rsa_priv_pem:
                 "-----BEGIN PRIVATE KEY-----\nsynthetic-test-key\n-----END PRIVATE KEY-----\n"
                     .into(),
+            spki_der: vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE],
             ml_dsa_attestation: MlDsaAttestation::new(vec![0xAA; 32], vec![0xBB; 64]),
         }
     }

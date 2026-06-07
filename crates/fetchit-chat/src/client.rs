@@ -1523,6 +1523,7 @@ impl Client {
             actor_url: actor_url.clone(),
             agent_id_hex: agent_id_hex.clone(),
             rsa_priv_pem: material.priv_pem.clone(),
+            spki_der: material.spki_der.clone(),
             ml_dsa_attestation: attestation.clone(),
         };
         crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
@@ -1532,6 +1533,7 @@ impl Client {
             actor_url,
             agent_id_hex,
             material.priv_pem,
+            material.spki_der,
             attestation,
         ))
     }
@@ -1571,6 +1573,7 @@ impl Client {
         Ok(Some(fetchit_fedi::actor::ActorIdentity::from_persisted(
             vault.handle,
             vault.rsa_priv_pem,
+            vault.spki_der,
             vault.ml_dsa_attestation,
             vault.actor_url,
             vault.agent_id_hex,
