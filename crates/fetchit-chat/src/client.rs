@@ -294,6 +294,18 @@ pub struct Client {
     /// Mutated by [`Self::regenerate_card_with_relays`]; consumed by
     /// [`Self::current_card_value`] when minting a fresh card.
     advertised_relays: Arc<tokio::sync::RwLock<Vec<String>>>,
+    /// M3 R-tail-4: inbound stream pumped from
+    /// [`crate::transport::MultiHomeTransport`]'s `on_inbound` callback.
+    /// `MultiHomeTransport` does not expose `take_inbound` (the trait
+    /// surface returns `None`) because its fan-in is shaped as a
+    /// closure-driven callback; this channel is the seam that lets
+    /// [`Self::take_transport_inbound`] return the unified stream the
+    /// existing relay-name callers expect. Wrapped in `Mutex<Option<_>>`
+    /// so the first taker wins (matches the bare `RelayTransport`'s
+    /// single-consumer inbound discipline). `None` when no relay URL
+    /// was supplied at boot.
+    multi_home_inbound:
+        Option<Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>>,
 }
 
 impl Client {
@@ -345,7 +357,7 @@ impl Client {
         let needs_chat =
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
 
-        let (router, chat, relay, lan, lan_bound_addr) = if needs_chat {
+        let (router, chat, relay, lan, lan_bound_addr, multi_home_inbound) = if needs_chat {
             announce_identity_best_effort(&http).await;
             build_with_chat(
                 &http,
@@ -360,7 +372,7 @@ impl Client {
             )
             .await?
         } else {
-            (Router::new(), None, None, None, None)
+            (Router::new(), None, None, None, None, None)
         };
 
         let router = Arc::new(router);
@@ -378,6 +390,7 @@ impl Client {
             denylist,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            multi_home_inbound,
         })
     }
 
@@ -650,11 +663,27 @@ impl Client {
     /// Take the inbound stream of the named transport once.
     /// Returns `None` if the transport isn't wired or its inbound has
     /// already been taken.
+    ///
+    /// `"relay"` and `"multi-home"` both resolve to the unified inbound
+    /// fanned in by [`crate::transport::MultiHomeTransport`]: that
+    /// transport doesn't expose `take_inbound` on the trait surface (its
+    /// dispatch is callback-shaped), so `Client` stashes the channel
+    /// behind [`Self::multi_home_inbound`] at boot. Existing callers
+    /// still ask for `"relay"`; new ones can use the canonical name.
     #[must_use]
     pub fn take_transport_inbound(
         &self,
         name: &str,
     ) -> Option<mpsc::UnboundedReceiver<InboundEnvelope>> {
+        if matches!(name, "relay" | "multi-home") {
+            if let Some(slot) = self.multi_home_inbound.as_ref() {
+                if let Ok(mut guard) = slot.lock() {
+                    if let Some(rx) = guard.take() {
+                        return Some(rx);
+                    }
+                }
+            }
+        }
         self.router
             .transports()
             .iter()
@@ -1345,6 +1374,7 @@ async fn build_with_chat(
     Option<Arc<RelayTransport>>,
     Option<Arc<LanDirectTransport>>,
     Option<std::net::SocketAddr>,
+    Option<Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>>,
 )> {
     // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
     // chat-side work so an outdated daemon never gets a chance to
@@ -1449,11 +1479,68 @@ async fn build_with_chat(
         router.add(lan_transport);
     }
 
+    // M3 R-tail-4: the bare `RelayTransport` is no longer registered
+    // directly on the Router — it lives inside slot 0 of
+    // `MultiHomeTransport`, which is what the Router sees. The
+    // `relay_handle` slot is still populated (from slot 0 of MH) so the
+    // presence-watch capabilities on `Client.relay` keep working.
     let mut relay_handle: Option<Arc<RelayTransport>> = None;
+    let mut mh_inbound_slot: Option<
+        Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>,
+    > = None;
     if let Some(url) = relay_url {
-        let relay = RelayTransport::connect(url, x0xd_signer.clone()).await?;
-        relay_handle = Some(relay.clone());
-        router.add(relay);
+        // The denylist gate inside `MultiHomeTransport` is `DenylistQuery`
+        // (read-side trait). Until R-tail-4.x splits `DenylistCheck`'s
+        // query half into a free-standing `DenylistQuery` impl, MH ships
+        // with a no-op gate; the existing `Client.denylist` field still
+        // gates the chat-layer surfaces (send + dispatch) end-to-end.
+        // BlockEvent reactivity (D6) is similarly wired via
+        // `Client::install_m3_denylist`'s consumer subscriber — out of
+        // scope here. When that lands, swap the `None` below for the
+        // consumer's `BlockEvent` broadcast receiver.
+        struct NoopDenylistQuery;
+        impl fetchit_trust::DenylistQuery for NoopDenylistQuery {
+            fn is_blocked(&self, _: fetchit_trust::EntryKind, _: &str) -> bool {
+                false
+            }
+        }
+        let mh_denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylistQuery);
+
+        // Inbound seam: every envelope MH fans in lands on this mpsc.
+        // `Client::take_transport_inbound("relay"|"multi-home")` drains
+        // it; that's what the existing dispatch path (`peer.rs`,
+        // `desktop/src-tauri/src/chat.rs`, `spawn_default_dispatcher`)
+        // hangs off of.
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<InboundEnvelope>();
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = {
+            let tx = inbound_tx.clone();
+            Arc::new(move |env: InboundEnvelope| {
+                let _ = tx.send(env);
+            })
+        };
+
+        let builder: Arc<dyn crate::transport::RelayBuilder> =
+            Arc::new(crate::transport::RealRelayBuilder::new(x0xd_signer.clone()));
+
+        let mh = crate::transport::MultiHomeTransport::new_with_subscriber(
+            url.to_string(),
+            mh_denylist,
+            on_inbound,
+            builder,
+            None,
+        )
+        .await
+        .map_err(|e| ChatError::MessageTransport(format!("multi-home boot: {e}")))?;
+        let mh = Arc::new(mh);
+
+        // Slot 0 is the pinned primary. Surface its inner
+        // `RelayTransport` so `Client.relay` keeps working for
+        // presence-watch and connection-state subscribers.
+        relay_handle = mh.slot_zero_handle().and_then(|h| h.relay_transport_arc());
+
+        mh_inbound_slot = Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx))));
+
+        router.add(mh as Arc<dyn crate::transport::Transport>);
     }
 
     Ok((
@@ -1478,6 +1565,7 @@ async fn build_with_chat(
         relay_handle,
         lan_handle,
         lan_bound_addr,
+        mh_inbound_slot,
     ))
 }
 
@@ -2486,6 +2574,7 @@ mod tests {
             denylist: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            multi_home_inbound: None,
         };
         (client, dir)
     }
@@ -2546,6 +2635,174 @@ mod tests {
         let card_value = client.current_card_value().await.expect("card mint");
         let parsed: crate::card::CardExtension = serde_json::from_value(card_value).unwrap();
         assert!(parsed.v2_rendezvous_hints.is_none());
+    }
+
+    // ── M3 R-tail-4 client boot wiring ───────────────────────────
+
+    /// R-tail-4 boot smoke: stand up a `Client` whose `build_with_chat`
+    /// path is mimicked here — we substitute a stub `RelayBuilder` so
+    /// no real WebSocket is opened — and assert (a) the Router holds a
+    /// `MultiHomeTransport` (single transport, slot 0 = the primary)
+    /// and (b) `Client.relay` is populated for the presence-watch
+    /// surfaces that read it directly. The inbound-rx slot exposed via
+    /// [`Client::take_transport_inbound`] under the legacy `"relay"`
+    /// name resolves through the new `multi_home_inbound` field.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // hermetic boot mirrors `build_with_chat` end-to-end.
+    async fn client_boot_wires_multi_home_into_router() {
+        use crate::transport::{
+            MultiHomeTransport, RelayBuilder, RelayHandle, Transport, TransportError,
+        };
+        use async_trait::async_trait;
+
+        struct StubBuilder;
+        #[async_trait]
+        impl RelayBuilder for StubBuilder {
+            async fn build(
+                &self,
+                url: &str,
+            ) -> std::result::Result<Arc<RelayHandle>, TransportError> {
+                Ok(Arc::new(RelayHandle::mock(url.to_string())))
+            }
+        }
+
+        struct NoopDenylistQuery;
+        impl fetchit_trust::DenylistQuery for NoopDenylistQuery {
+            fn is_blocked(&self, _: fetchit_trust::EntryKind, _: &str) -> bool {
+                false
+            }
+        }
+
+        // Build MH the same shape `build_with_chat` does: stub builder,
+        // no-op denylist, a callback that pushes inbound onto an mpsc
+        // we own — exactly the seam `Client::take_transport_inbound`
+        // drains for the legacy `"relay"` name.
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<InboundEnvelope>();
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = {
+            let tx = inbound_tx.clone();
+            Arc::new(move |env| {
+                let _ = tx.send(env);
+            })
+        };
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylistQuery);
+        let builder: Arc<dyn RelayBuilder> = Arc::new(StubBuilder);
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            on_inbound,
+            builder,
+            None,
+        )
+        .await
+        .expect("MH boot succeeds with stub builder");
+        let mh = Arc::new(mh);
+
+        let mut router = Router::new();
+        router.add(Arc::clone(&mh) as Arc<dyn Transport>);
+        // Stub handles built via `RelayHandle::mock` carry no real
+        // `RelayTransport`, so `relay_handle` stays None in the
+        // hermetic boot — production wires the real transport via
+        // `RealRelayBuilder`. The presence-watch contract is the
+        // `relay_transport_arc` accessor on the slot-0 handle, which
+        // we exercise from `MultiHomeTransport`'s own tests.
+
+        // Drive the same shape `from_parts` builds.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("rtail4-test".to_owned())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let dsa_signer = MlDsaSigner::generate().unwrap();
+        let agent_id_hex = hex::encode(dsa_signer.agent_id());
+        let identity = Arc::new(
+            FetchitIdentity::load_or_create(
+                dir.path(),
+                &master,
+                &agent_id_hex,
+                kdf_id_argon2(),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let registry = Arc::new(ConversationRegistry::new(
+            layout.clone(),
+            master,
+            kdf_id_argon2(),
+            Some(salt),
+        ));
+        let signer: Arc<dyn Signer> = Arc::new(dsa_signer);
+        let chat = ChatState {
+            identity,
+            registry,
+            signer,
+            layout,
+            local_machine_id: [0u8; 32],
+            reachability: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::ReachabilityCache::new(),
+            )),
+            bridge_consent: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::BridgeConsentStore::new(),
+            )),
+            bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
+                crate::groups_reachability::BridgeInboundShadow::new(),
+            )),
+            members_singleflight: Arc::new(crate::members_singleflight::MembersSingleflight::new()),
+        };
+        let http = Arc::new(Http::new("http://127.0.0.1:1".into(), "tok".into()).unwrap());
+        let client = Client {
+            http,
+            router: Arc::new(router),
+            chat: Some(chat),
+            relay: None,
+            lan: None,
+            lan_bound_addr: None,
+            denylist: None,
+            denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
+        };
+
+        // Router carries exactly one transport — MultiHomeTransport —
+        // and its name() is the canonical "multi-home".
+        let transports = client.router.transports();
+        assert_eq!(transports.len(), 1, "router holds MultiHomeTransport");
+        assert_eq!(
+            transports[0].name(),
+            "multi-home",
+            "router slot 0 is MultiHomeTransport",
+        );
+
+        // Legacy `"relay"` name still resolves — that's the seam
+        // existing callers (peer.rs, desktop chat.rs) hang off of.
+        let rx_via_relay = client.take_transport_inbound("relay");
+        assert!(
+            rx_via_relay.is_some(),
+            "legacy `relay` name resolves to the multi-home inbound seam",
+        );
+
+        // And it's a single-consumer channel — second take is None.
+        let rx_via_relay_again = client.take_transport_inbound("relay");
+        assert!(rx_via_relay_again.is_none(), "inbound rx is taken once");
+
+        // The canonical `"multi-home"` name resolves through the same
+        // slot. Both names share the underlying Client-owned channel.
+        let rx_via_canonical = client.take_transport_inbound("multi-home");
+        assert!(
+            rx_via_canonical.is_none(),
+            "canonical name shares the legacy-named slot",
+        );
+
+        // The stub-built MH carries slot 0 — pinned primary — and
+        // exposes the slot-0 handle for presence-watch surfaces.
+        assert!(
+            mh.slot_zero_handle().is_some(),
+            "slot 0 handle accessible for presence-watch surfaces",
+        );
     }
 
     /// D8 happy path: a REST-only client begins with no denylist

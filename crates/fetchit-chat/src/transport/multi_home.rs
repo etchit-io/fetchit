@@ -120,6 +120,15 @@ impl RelayHandle {
         &self.url
     }
 
+    /// Borrow the wrapped [`crate::relay_transport::RelayTransport`] for
+    /// callers that need direct access to its presence-watch surface
+    /// (e.g. `Client::watch_relay_presence`). Returns `None` for mock
+    /// handles built via [`Self::mock`].
+    #[must_use]
+    pub fn relay_transport_arc(&self) -> Option<Arc<crate::relay_transport::RelayTransport>> {
+        self.transport.clone()
+    }
+
     /// Send `envelope` to `to` through this relay session.
     ///
     /// Production handles ([`Self::from_transport`]) delegate to the
@@ -289,7 +298,6 @@ pub struct Slot {
 /// occupied. Inbound deliveries fan into a single dispatch stream
 /// gated by [`NonceDedup`] (D4).
 pub struct MultiHomeTransport {
-    #[allow(dead_code)] // Used by D7 (rebuild on net flap).
     primary_url: String,
     builder: Arc<dyn RelayBuilder>,
     slots: Arc<RwLock<[Option<Slot>; 3]>>,
@@ -623,6 +631,22 @@ impl MultiHomeTransport {
     pub(crate) fn slots_for_test(&self) -> [Option<Slot>; 3] {
         self.slots.read().expect("slots lock").clone()
     }
+
+    /// Borrow the slot-0 handle (the pinned primary). Callers that need
+    /// the inner [`crate::relay_transport::RelayTransport`] for
+    /// presence-watch or other single-WS APIs go through this to grab
+    /// the bare transport via [`RelayHandle::relay_transport_arc`].
+    /// Returns `None` only if slot 0 has been cleared (unreachable in
+    /// production — slot 0 is pinned at boot and never evicted).
+    #[must_use]
+    #[allow(clippy::expect_used)] // RwLock poison is unrecoverable; panic matches `slots_for_test`.
+    pub fn slot_zero_handle(&self) -> Option<Arc<RelayHandle>> {
+        self.slots
+            .read()
+            .expect("slots lock")
+            .first()
+            .and_then(|s| s.as_ref().map(|s| Arc::clone(&s.handle)))
+    }
 }
 
 #[async_trait]
@@ -646,18 +670,22 @@ impl crate::transport::Transport for MultiHomeTransport {
         envelope: OutboundEnvelope,
         hints: Option<&crate::card::RendezvousHintsV1>,
     ) -> crate::error::Result<SendReceipt> {
-        let hints = hints.ok_or_else(|| {
-            crate::error::ChatError::Invalid(
-                "MultiHomeTransport::send requires RendezvousHints — caller must resolve the recipient card's hints".into(),
-            )
-        })?;
+        // TODO R-tail-5: tighten None to error once Endpoint::send
+        // threads hints from the recipient's contact card. Today,
+        // existing callers still pass None; fall back to slot 0 (the
+        // pinned primary) so production chat keeps working during the
+        // trait-extension migration.
+        let fallback_hints = crate::card::RendezvousHintsV1 {
+            relays: vec![self.primary_url.clone()],
+        };
+        let effective_hints = hints.unwrap_or(&fallback_hints);
         let transit = envelope
             .transit
             .ok_or(crate::error::ChatError::SealedRequired {
                 caller: "MultiHomeTransport::send",
             })?;
         let receipt = self
-            .send_inner(to, transit, hints)
+            .send_inner(to, transit, effective_hints)
             .await
             .map_err(|e| match e {
                 TransportError::Blocked(msg) => {
@@ -1365,11 +1393,13 @@ mod tests {
         assert_eq!(slot0_handle.traffic_count_for_test(), 1);
     }
 
-    /// R-tail-3: the `Transport` impl requires `Some(hints)` — a
-    /// `None` from the Router (e.g. a card with no advertised relays)
-    /// must surface a typed error rather than silently fall through.
+    /// R-tail-4: until `Endpoint::send` threads hints from the
+    /// recipient's contact card, the `Transport` impl falls back to
+    /// slot 0 (the pinned primary) when called with `None` hints so
+    /// existing callers stay on the wire during the migration. R-tail-5
+    /// tightens this back to a typed error.
     #[tokio::test]
-    async fn transport_impl_rejects_none_hints() {
+    async fn transport_impl_falls_back_to_slot_zero_when_hints_none() {
         use crate::transport::Transport;
         let builder = Arc::new(StubRelayBuilder::default());
         let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
@@ -1384,12 +1414,17 @@ mod tests {
 
         let to = sample_recipient();
         let envelope = sample_outbound_envelope();
-        let err = <MultiHomeTransport as Transport>::send(&mh, &to, envelope, None)
+        let receipt = <MultiHomeTransport as Transport>::send(&mh, &to, envelope, None)
             .await
-            .unwrap_err();
-        assert!(
-            matches!(err, crate::error::ChatError::Invalid(_)),
-            "expected Invalid, got {err:?}",
-        );
+            .expect("None-hints fallback succeeds");
+        assert_eq!(receipt.transport_name, "multi-home");
+
+        // The slot-0 (primary) handle should have recorded the send —
+        // the None-hints path resolves to the pinned primary URL.
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        assert_eq!(slot0_handle.traffic_count_for_test(), 1);
+        // And no allocation in slots 1 or 2.
+        assert!(mh.slots_for_test()[1].is_none());
+        assert!(mh.slots_for_test()[2].is_none());
     }
 }
