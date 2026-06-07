@@ -4,6 +4,7 @@ members = [
     "crates/fetchit-net",
     "crates/fetchit-cli",
     "crates/fetchit-chat",
+    "crates/fetchit-fedi",
     "crates/fetchit-relay-proto",
     "crates/fetchit-relay-server",
     "crates/fetchit-relay-client",

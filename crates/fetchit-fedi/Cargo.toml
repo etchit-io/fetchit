@@ -1,0 +1,17 @@
+[package]
+name = "fetchit-fedi"
+description = "Fediverse bridge for fetch>it — ActivityPub Actor + outbound HTTPS POST + WebFinger + inbox-side primitives. NOT a fetchit_chat::Transport; PublicPost is its own envelope kind."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
