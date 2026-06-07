@@ -281,6 +281,12 @@ pub struct Client {
     /// blocked recipients. Cloneable across `Client` clones; the
     /// underlying refresh loop runs on the host's runtime.
     denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
+    /// M3 federation core: monotonic counter of inbound envelopes
+    /// silently dropped by the denylist gate. Surfaced to ops via
+    /// [`Self::denylist_dropped_inbound_count`] so operators can see
+    /// whether the consumer is actually catching anything. Shared
+    /// across `Client` clones via `Arc<AtomicU64>`.
+    denylist_dropped_inbound: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Client {
@@ -363,7 +369,18 @@ impl Client {
             lan,
             lan_bound_addr,
             denylist,
+            denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
+    }
+
+    /// Snapshot of the cumulative inbound-drop counter — number of
+    /// envelopes the denylist gate has silently rejected since this
+    /// `Client` was constructed. Ops surfaces poll this to confirm
+    /// the consumer is actually catching anything.
+    #[must_use]
+    pub fn denylist_dropped_inbound_count(&self) -> u64 {
+        self.denylist_dropped_inbound
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Borrow the LAN-direct transport handle when one is wired.
@@ -525,20 +542,6 @@ impl Client {
                 return;
             }
         }
-        // M3 federation core: drop inbound from denylisted senders
-        // BEFORE any decrypt path runs. Preserves "no plaintext leak"
-        // semantics — a blocked sender's envelope never reaches the
-        // conversation layer, bridge dispatcher, welcome handlers, or
-        // private-group decrypt. Sender is identified by the transit
-        // envelope's signed `sender_agent_id`, so the relay can't
-        // help an attacker bypass this by spoofing.
-        if let Some(denylist) = self.denylist.as_ref() {
-            let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
-            if denylist.is_blocked(&sender_hex).await {
-                log::debug!("denylist: drop inbound from blocked sender {sender_hex}");
-                return;
-            }
-        }
         if matches!(
             transit.kind,
             fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent
@@ -591,6 +594,22 @@ impl Client {
                 }
             }
             return;
+        }
+        // M3 federation core: drop inbound user-content from denylisted
+        // senders BEFORE the decrypt path runs. Gate sits AFTER the
+        // bridge / Welcome dispatchers so group-state propagation and
+        // invite mechanics keep working even when the sender is on
+        // the list (those flows would otherwise leave the group
+        // membership state divergent across the federation). Sender
+        // identity comes from the signed `sender_agent_id`, so the
+        // relay can't help an attacker bypass this by spoofing.
+        if let Some(denylist) = self.denylist.as_ref() {
+            let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+            if denylist.is_blocked(&sender_hex).await {
+                self.denylist_dropped_inbound
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
         if messages::is_private_group_envelope(&transit) {
             let group_id_hex = transit
