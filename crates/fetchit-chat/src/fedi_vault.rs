@@ -29,7 +29,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// File magic identifying a Fetchit Fedi Vault v1 file.
 pub const FEDI_VAULT_MAGIC: &[u8; 4] = b"FFV1";
@@ -119,11 +119,30 @@ pub fn save_actor_identity(
         opts.mode(0o600);
     }
     let mut f = opts.open(&tmp)?;
+    // Activate cleanup AFTER successful open — the guard removes `tmp`
+    // on any panic or `?` early-return until the final rename succeeds.
+    // Prevents `.tmp.<hex>` debris in `fedi_dir` from transient IO
+    // errors (per Alice [F1]).
+    let guard = TmpGuard(tmp.clone());
     f.write_all(&out)?;
     drop(f);
 
     fs::rename(&tmp, &path)?;
+    // Rename succeeded — the tmp path now refers to `path`. Disarm
+    // the guard so the destination isn't deleted.
+    std::mem::forget(guard);
     Ok(())
+}
+
+/// Removes its inner path on drop. Disarmed via `mem::forget` once the
+/// final rename succeeds; until then any panic or `?` early-return
+/// cleans the tmp file.
+struct TmpGuard(PathBuf);
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 /// Read and decrypt the [`ActorIdentityVault`] for `handle` from
@@ -269,5 +288,42 @@ mod tests {
         bad.extend_from_slice(&[0u8; AEAD_NONCE_LEN + 32]);
         let err = open_sealed(&key, &bad).unwrap_err();
         assert!(format!("{err}").contains("magic"));
+    }
+
+    #[test]
+    fn tmp_guard_removes_file_on_drop() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("scratch.bin");
+        fs::write(&target, b"hello").unwrap();
+        assert!(target.exists());
+
+        {
+            let _guard = TmpGuard(target.clone());
+        }
+        assert!(
+            !target.exists(),
+            "TmpGuard::drop should have removed the tmp file"
+        );
+    }
+
+    #[test]
+    fn save_leaves_no_tmp_siblings_on_success() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = fixture_master(0x42);
+        let v = sample_vault();
+        save_actor_identity(&v, &master, &layout).unwrap();
+
+        let entries: Vec<_> = fs::read_dir(&layout.fedi_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        for name in &entries {
+            let s = name.to_string_lossy();
+            assert!(
+                !s.contains(".tmp."),
+                "no .tmp.<hex> sibling should remain after success: {s}"
+            );
+        }
     }
 }
