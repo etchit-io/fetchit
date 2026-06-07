@@ -15,7 +15,7 @@ mod consumer;
 mod http;
 mod index;
 
-pub use consumer::{BlockEvent, DenylistConsumer, TrustError};
+pub use consumer::{BlockEvent, DenylistConsumer, TrustError, DEFAULT_POLL_INTERVAL};
 pub use http::HttpClient;
 #[cfg(feature = "reqwest")]
 pub use http::ReqwestClient;

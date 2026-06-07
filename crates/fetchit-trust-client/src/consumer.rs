@@ -25,6 +25,14 @@ const ALL_KINDS: [EntryKind; 4] = [
     EntryKind::ActorUrl,
 ];
 
+/// Default cadence for [`DenylistConsumer::spawn_poll_loop`]: 6 hours.
+///
+/// Production deployments may override via
+/// [`DenylistConsumer::with_poll_interval`] for ops-tuning. Exposed
+/// publicly so callers can construct a [`std::time::Duration`]
+/// relative to it (e.g. `DEFAULT_POLL_INTERVAL / 3` for tests).
+pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
 /// Errors produced by the trust-client crate.
 #[derive(Debug, Error)]
 pub enum TrustError {
@@ -74,6 +82,7 @@ pub struct DenylistConsumer {
     #[allow(dead_code)] // Wired in C8 (disk cache).
     cache_path: Option<PathBuf>,
     tx: broadcast::Sender<BlockEvent>,
+    poll_interval: std::time::Duration,
 }
 
 impl DenylistConsumer {
@@ -94,7 +103,24 @@ impl DenylistConsumer {
             indexes: Arc::new(RwLock::new(DenylistIndexes::default())),
             cache_path,
             tx,
+            poll_interval: DEFAULT_POLL_INTERVAL,
         }
+    }
+
+    /// Override the background poll cadence used by
+    /// [`Self::spawn_poll_loop`]. Defaults to [`DEFAULT_POLL_INTERVAL`]
+    /// (6 hours).
+    #[must_use]
+    pub fn with_poll_interval(mut self, interval: std::time::Duration) -> Self {
+        self.poll_interval = interval;
+        self
+    }
+
+    /// Current poll-loop cadence. Exposed for ops/diagnostic
+    /// surfaces that want to display the effective refresh interval.
+    #[must_use]
+    pub fn poll_interval(&self) -> std::time::Duration {
+        self.poll_interval
     }
 
     /// Subscribe to [`BlockEvent`]s emitted on every refresh that
@@ -105,6 +131,33 @@ impl DenylistConsumer {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<BlockEvent> {
         self.tx.subscribe()
+    }
+
+    /// Spawn a tokio task that periodically refreshes the consumer
+    /// against `client`. The first refresh fires on the first
+    /// interval tick (`tokio::time::interval` default behaviour) and
+    /// subsequent refreshes fire on the configured interval.
+    ///
+    /// Refresh errors are logged via `tracing::warn!` and do NOT
+    /// stop the loop, so the prior good index for each kind stays
+    /// valid past a transient fetch failure.
+    ///
+    /// The returned [`tokio::task::JoinHandle`] lets the caller
+    /// `abort()` the loop on shutdown.
+    pub fn spawn_poll_loop<C: HttpClient + Send + Sync + 'static>(
+        self: Arc<Self>,
+        client: Arc<C>,
+    ) -> tokio::task::JoinHandle<()> {
+        let interval_dur = self.poll_interval;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval_dur);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = self.refresh(client.as_ref()).await {
+                    tracing::warn!(error = %e, "denylist refresh");
+                }
+            }
+        })
     }
 
     /// Refresh all four kinds from `client`. Per-kind errors are
@@ -415,6 +468,88 @@ mod tests {
                 "should not re-emit added for an idempotent refresh"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_loop_refreshes_on_interval() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct CountingStub {
+            inner: StubHttp,
+            count: AtomicUsize,
+        }
+
+        impl CountingStub {
+            fn new() -> Self {
+                Self {
+                    inner: StubHttp::new(),
+                    count: AtomicUsize::new(0),
+                }
+            }
+            fn count(&self) -> usize {
+                self.count.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl HttpClient for CountingStub {
+            async fn get(&self, url: &str) -> Result<Vec<u8>, TrustError> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                self.inner.get(url).await
+            }
+        }
+
+        let signer = IssuerSigner::generate("test").unwrap();
+        let stub = Arc::new(CountingStub::new());
+        let resp = signed_response(&signer, EntryKind::RelayUrl, &["wss://r.example/v1/ws"]);
+        stub.inner.pre_bake("relay_url", json_bytes(&resp));
+
+        let consumer = Arc::new(
+            DenylistConsumer::new(
+                signer.public_key_bytes(),
+                "https://etchit.io/v1".into(),
+                None,
+            )
+            .with_poll_interval(Duration::from_secs(60)),
+        );
+        let _handle = Arc::clone(&consumer).spawn_poll_loop(Arc::clone(&stub));
+
+        // First tick: 60s. tokio::time::interval fires immediately on the
+        // first .tick().await — that's why the initial-tick semantics are
+        // tested separately. Sleep 1ms to let the first refresh fire.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let after_first = stub.count();
+        assert!(
+            after_first >= 4,
+            "initial tick should refresh all 4 kinds (got {after_first})"
+        );
+
+        // Advance virtual time past one full interval. Refresh fires again.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let after_second = stub.count();
+        assert!(
+            after_second >= 8,
+            "second tick should add 4 more refreshes (got {after_second})"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_poll_interval_overrides_default() {
+        // Just a unit-test of the builder, no real loop spawn.
+        let signer = IssuerSigner::generate("test").unwrap();
+        let consumer = DenylistConsumer::new(
+            signer.public_key_bytes(),
+            "https://etchit.io/v1".into(),
+            None,
+        )
+        .with_poll_interval(std::time::Duration::from_secs(120));
+        assert_eq!(
+            consumer.poll_interval(),
+            std::time::Duration::from_secs(120)
+        );
     }
 
     #[tokio::test]
