@@ -606,6 +606,28 @@ impl<'a> Endpoint<'a> {
                 .collect::<Vec<_>>()
         };
         let local_agent_hex = identity.agent_id_hex();
+        // M3 federation core: refuse outbound group sends if ANY
+        // roster member is on the community denylist. Same contract as
+        // the DM gate in [`Self::send`] — the UI surfaces
+        // [`ChatError::Denied`] so the user can remove the blocked
+        // member before retrying. Self is excluded from the check
+        // (the local can't denylist itself meaningfully) so a
+        // self-only group still sends. The Denied error names the
+        // first blocked member found so the UI can identify which
+        // contact to surface in the toast.
+        if let Some(denylist) = self.denylist {
+            for member in &roster {
+                if member.0.eq_ignore_ascii_case(local_agent_hex) {
+                    continue;
+                }
+                let member_lower = member.0.to_ascii_lowercase();
+                if denylist.is_blocked(&member_lower).await {
+                    return Err(ChatError::Denied {
+                        agent_id_hex: member.0.clone(),
+                    });
+                }
+            }
+        }
         let timestamp_ms = envelope.timestamp_ms;
         let mut last_receipt_id: Option<String> = None;
         let mut first_err: Option<ChatError> = None;
@@ -1850,6 +1872,74 @@ mod tests {
         assert!(
             !recipients.contains(&local_hex),
             "self must be excluded from fanout",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_private_group_refuses_when_roster_contains_denylisted_member() {
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let peer_clean = "b".repeat(64);
+        let peer_blocked = "c".repeat(64);
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex, "state": "active"},
+                    {"agent_id": peer_clean, "state": "active"},
+                    {"agent_id": peer_blocked, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let signer_arc = rig.signer_arc();
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> =
+            Arc::new(crate::denylist::tests::StaticDenylist::new([
+                peer_blocked.clone()
+            ]));
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            Some(&denylist),
+        );
+
+        let err = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hi", "A")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Denied { ref agent_id_hex } if agent_id_hex == &peer_blocked),
+            "expected Denied(peer_blocked), got {err:?}",
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "refused send must not fan out ANY envelopes — even to non-blocked members",
         );
     }
 
