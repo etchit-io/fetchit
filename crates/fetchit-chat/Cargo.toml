@@ -42,6 +42,7 @@ log.workspace = true
 postcard.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+rsa.workspace = true
 saorsa-pqc.workspace = true
 serde.workspace = true
 snow = "0.10"

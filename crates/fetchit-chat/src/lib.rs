@@ -23,6 +23,7 @@ pub mod denylist;
 pub mod discovery;
 pub mod error;
 pub mod events;
+pub mod fedi_identity;
 pub mod groups;
 pub mod groups_reachability;
 pub mod identity;
