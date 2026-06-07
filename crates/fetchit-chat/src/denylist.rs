@@ -38,6 +38,27 @@ pub trait DenylistCheck: Send + Sync {
     /// (the published manifest is the source of truth; an empty
     /// cache returns `false`).
     async fn is_blocked(&self, agent_id_hex: &str) -> bool;
+
+    /// M4 Stage 4.2 extension: true when the fediverse actor URL
+    /// is currently blocked. The fediverse-inbox path
+    /// ([`crate::denylist::DenylistQueryAdapter`] + the M4 Stage 3
+    /// inbox gate) calls this for every inbound activity's signing
+    /// actor URL; chat-only consumers ignore.
+    ///
+    /// `actor_url` is the **canonical-form** URL produced by
+    /// `fetchit_trust::TargetIdentity::try_new(EntryKind::ActorUrl, ...)`
+    /// — lowercased, no fragment, no query string, no userinfo, no
+    /// trailing slash on non-root paths. Callers that have not
+    /// already canonicalized MUST do so before calling, otherwise
+    /// the match against the canonical denylist entry will silently
+    /// miss.
+    ///
+    /// Default impl returns `false` so existing agent-only
+    /// consumers (test stubs, future single-purpose implementations)
+    /// keep working unchanged.
+    async fn is_blocked_actor(&self, _actor_url: &str) -> bool {
+        false
+    }
 }
 
 /// Bridges any [`fetchit_trust::DenylistQuery`] impl into the
@@ -72,6 +93,11 @@ impl DenylistCheck for DenylistQueryAdapter {
     async fn is_blocked(&self, agent_id_hex: &str) -> bool {
         self.inner
             .is_blocked(fetchit_trust::EntryKind::AgentId, agent_id_hex)
+    }
+
+    async fn is_blocked_actor(&self, actor_url: &str) -> bool {
+        self.inner
+            .is_blocked(fetchit_trust::EntryKind::ActorUrl, actor_url)
     }
 }
 
@@ -155,5 +181,77 @@ mod adapter_tests {
         }
         let adapter: DenylistQueryAdapter = DenylistQueryAdapter::new(Arc::new(BlocksXorName));
         assert!(!adapter.is_blocked("anything").await);
+    }
+
+    // ---- M4 Stage 4.2: is_blocked_actor extension ----
+
+    /// `ActorUrl` hits in the underlying `DenylistQuery` surface as
+    /// chat-layer actor blocks.
+    #[tokio::test]
+    async fn adapter_delegates_actor_url_block_through() {
+        struct BlocksActor(&'static str);
+        impl DenylistQuery for BlocksActor {
+            fn is_blocked(&self, kind: EntryKind, value: &str) -> bool {
+                matches!(kind, EntryKind::ActorUrl) && value == self.0
+            }
+        }
+        let inner: Arc<dyn DenylistQuery> =
+            Arc::new(BlocksActor("https://attacker.example/users/eve"));
+        let adapter = DenylistQueryAdapter::new(inner);
+        assert!(
+            adapter
+                .is_blocked_actor("https://attacker.example/users/eve")
+                .await
+        );
+        assert!(
+            !adapter
+                .is_blocked_actor("https://mastodon.example/users/alice")
+                .await
+        );
+    }
+
+    /// Security mirror of `adapter_only_checks_agent_id_kind`: the
+    /// `is_blocked_actor` arm pins to `EntryKind::ActorUrl`. A
+    /// `DenylistQuery` that blocks `RelayUrl` / `XorName` / `AgentId`
+    /// MUST NOT bleed through as an actor-URL block — otherwise an
+    /// unrelated denylist entry of another kind would silently gate
+    /// the fediverse-inbox path.
+    #[tokio::test]
+    async fn adapter_only_checks_actor_url_kind() {
+        struct BlocksRelayAndAgent;
+        impl DenylistQuery for BlocksRelayAndAgent {
+            fn is_blocked(&self, kind: EntryKind, _value: &str) -> bool {
+                matches!(kind, EntryKind::RelayUrl | EntryKind::AgentId)
+            }
+        }
+        let adapter: DenylistQueryAdapter =
+            DenylistQueryAdapter::new(Arc::new(BlocksRelayAndAgent));
+        assert!(
+            !adapter
+                .is_blocked_actor("https://mastodon.example/users/eve")
+                .await
+        );
+        // The cross-arm: same inner blocks AgentId so the
+        // `is_blocked` path WOULD return true, but
+        // `is_blocked_actor` MUST not.
+        assert!(adapter.is_blocked("anything").await);
+    }
+
+    /// The default trait impl returns `false`. Chat-only
+    /// implementations (`StaticDenylist` in tests, future
+    /// purpose-built consumers) don't need to override unless they
+    /// actually carry actor data — confirms the back-compat
+    /// guarantee.
+    #[tokio::test]
+    async fn default_is_blocked_actor_impl_returns_false() {
+        let d = super::tests::StaticDenylist::new(["a".repeat(64)]);
+        assert!(d.is_blocked(&"a".repeat(64)).await);
+        // No override → default → false even for the agent hex
+        // string passed as an actor URL.
+        assert!(!d.is_blocked_actor(&"a".repeat(64)).await);
+        assert!(
+            !d.is_blocked_actor("https://anywhere.example/users/anyone")
+                .await
+        );
     }
 }
