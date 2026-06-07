@@ -157,6 +157,82 @@ impl Actor {
         })
     }
 
+    /// Decode a Mastodon-compatible `application/activity+json`
+    /// document into an [`Actor`].
+    ///
+    /// Keys on the property names defined by the activitystreams +
+    /// security/v1 vocabularies (plus our own [`PQ_ATTESTATION_PROPERTY_URI`])
+    /// rather than running a strict JSON-LD context expansion. That
+    /// makes the decoder **forward-compat with Mastodon evolution** —
+    /// every extra Mastodon-specific key (`manuallyApprovesFollowers`,
+    /// `summary`, `attachment`, etc.) is silently ignored.
+    ///
+    /// # Errors
+    ///
+    /// - [`ActorError::MissingField`] when one of the required fields
+    ///   is absent: `id`, `preferredUsername`, `inbox`, `outbox`,
+    ///   `publicKey.publicKeyPem`, or the FROZEN PQ attestation key.
+    /// - [`ActorError::InvalidField`] when a URL field fails to parse.
+    /// - [`ActorError::Attestation`] when the PQ attestation value is
+    ///   structurally present but does not deserialize into
+    ///   [`MlDsaAttestation`] (e.g. invalid base64 in `ml_dsa_pubkey`
+    ///   or `signature`).
+    pub fn from_json_ld(value: &Value) -> Result<Self, ActorError> {
+        let id_str = required_str(value, "id")?;
+        let id = id_str
+            .parse::<url::Url>()
+            .map_err(|e| ActorError::InvalidField {
+                name: "id".into(),
+                reason: format!("{e}"),
+            })?;
+        let preferred_username = required_str(value, "preferredUsername")?.to_string();
+        let inbox_str = required_str(value, "inbox")?;
+        let inbox = inbox_str
+            .parse::<url::Url>()
+            .map_err(|e| ActorError::InvalidField {
+                name: "inbox".into(),
+                reason: format!("{e}"),
+            })?;
+        let outbox_str = required_str(value, "outbox")?;
+        let outbox = outbox_str
+            .parse::<url::Url>()
+            .map_err(|e| ActorError::InvalidField {
+                name: "outbox".into(),
+                reason: format!("{e}"),
+            })?;
+
+        let pub_key_obj = value
+            .get("publicKey")
+            .ok_or_else(|| ActorError::MissingField {
+                name: "publicKey".into(),
+            })?;
+        let rsa_public_key_pem = pub_key_obj
+            .get("publicKeyPem")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ActorError::MissingField {
+                name: "publicKey.publicKeyPem".into(),
+            })?
+            .to_string();
+
+        let attestation_raw =
+            value
+                .get(PQ_ATTESTATION_PROPERTY_URI)
+                .ok_or_else(|| ActorError::MissingField {
+                    name: PQ_ATTESTATION_PROPERTY_URI.into(),
+                })?;
+        let ml_dsa_attestation: MlDsaAttestation = serde_json::from_value(attestation_raw.clone())
+            .map_err(|e| ActorError::Attestation(format!("{e}")))?;
+
+        Ok(Self {
+            id,
+            preferred_username,
+            inbox,
+            outbox,
+            rsa_public_key_pem,
+            ml_dsa_attestation,
+        })
+    }
+
     /// Render the Mastodon-compatible JSON-LD document. The result is
     /// what `application/activity+json` consumers expect on GET against
     /// the actor URL.
@@ -185,7 +261,7 @@ impl Actor {
     }
 }
 
-/// Errors from `Actor` construction or rendering.
+/// Errors from `Actor` construction, rendering, or decoding.
 #[derive(Debug, thiserror::Error)]
 pub enum ActorError {
     /// Building the inbox URL failed.
@@ -194,6 +270,30 @@ pub enum ActorError {
     /// Building the outbox URL failed.
     #[error("outbox url construction failed: {0}")]
     OutboxUrl(String),
+    /// A required field is missing from the JSON-LD document.
+    #[error("required Actor field missing: {name}")]
+    MissingField {
+        /// Name of the missing field.
+        name: String,
+    },
+    /// A field was present but failed to parse.
+    #[error("Actor field {name} invalid: {reason}")]
+    InvalidField {
+        /// Field name.
+        name: String,
+        /// Reason for the parse failure.
+        reason: String,
+    },
+    /// The PQ attestation value failed structural deserialization.
+    #[error("Actor PQ attestation decode failed: {0}")]
+    Attestation(String),
+}
+
+fn required_str<'a>(value: &'a Value, name: &str) -> Result<&'a str, ActorError> {
+    value
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ActorError::MissingField { name: name.into() })
 }
 
 /// Encode SPKI DER bytes as a SPKI PEM string with the standard

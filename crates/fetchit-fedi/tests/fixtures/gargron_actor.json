@@ -1,0 +1,64 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/activitystreams",
+    "https://w3id.org/security/v1",
+    {
+      "manuallyApprovesFollowers": "as:manuallyApprovesFollowers",
+      "toot": "http://joinmastodon.org/ns#",
+      "featured": {
+        "@id": "toot:featured",
+        "@type": "@id"
+      },
+      "discoverable": "toot:discoverable"
+    }
+  ],
+  "id": "https://mastodon.example/users/gargron",
+  "type": "Person",
+  "preferredUsername": "gargron",
+  "name": "Eugen",
+  "summary": "<p>Developer of Mastodon, syndicated synthetic copy for fetch>it test fixtures.</p>",
+  "url": "https://mastodon.example/@gargron",
+  "manuallyApprovesFollowers": false,
+  "discoverable": true,
+  "published": "2016-03-16T14:34:26Z",
+  "inbox": "https://mastodon.example/users/gargron/inbox",
+  "outbox": "https://mastodon.example/users/gargron/outbox",
+  "followers": "https://mastodon.example/users/gargron/followers",
+  "following": "https://mastodon.example/users/gargron/following",
+  "featured": "https://mastodon.example/users/gargron/collections/featured",
+  "endpoints": {
+    "sharedInbox": "https://mastodon.example/inbox"
+  },
+  "icon": {
+    "type": "Image",
+    "mediaType": "image/png",
+    "url": "https://mastodon.example/system/accounts/avatars/000/000/001/original/synthetic.png"
+  },
+  "image": {
+    "type": "Image",
+    "mediaType": "image/png",
+    "url": "https://mastodon.example/system/accounts/headers/000/000/001/original/synthetic.png"
+  },
+  "publicKey": {
+    "id": "https://mastodon.example/users/gargron#main-key",
+    "owner": "https://mastodon.example/users/gargron",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nU3ludGhldGljLU5vdC1BLVJlYWwtUlNBLUtleS0tU1BLSS1ERVItYmFzZTY0LXBs\nYWNlaG9sZGVyLXVzZWQtZm9yLW91ci1jcm9zcy1jcmF0ZS1yb3VuZHRyaXAtdGVz\ndC1maXh0dXJlLW9ubHkuTWFzdG9kb24tcGFyc2VycyB3aWxsIGJ1dCB3ZSBkbyBu\nb3QgZGVjb2RlIHRoaXMgaW4gZmV0Y2hpdC1mZWRpJ3MgZnJvbV9qc29uX2xkLg==\n-----END PUBLIC KEY-----\n"
+  },
+  "attachment": [
+    {
+      "type": "PropertyValue",
+      "name": "Pronouns",
+      "value": "he/him"
+    },
+    {
+      "type": "PropertyValue",
+      "name": "Website",
+      "value": "<a href=\"https://example.invalid\">example.invalid</a>"
+    }
+  ],
+  "tag": [],
+  "https://etchit.io/ns#mlDsaAttestation-v1": {
+    "ml_dsa_pubkey": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQg==",
+    "signature": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=="
+  }
+}
