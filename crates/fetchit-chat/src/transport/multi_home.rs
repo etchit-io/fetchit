@@ -15,11 +15,15 @@
 //! 3. Match against slot 0; if equal, send there.
 //! 4. Match against slots 1 + 2; if equal, send there and refresh
 //!    `last_traffic_at`.
-//! 5. Otherwise allocate a new slot — fill an empty slot 1/2, or
+//! 5. Otherwise allocate a new slot, fill an empty slot 1/2, or
 //!    evict the LRU of 1/2 (slot 0 is immune).
 //!
-//! Inbound fan-in (D4) and denylist enforcement on `AgentId` (D5+) land
-//! in subsequent tasks.
+//! D4 wires the inbound fan-in: each slot owns an inbound mpsc
+//! receiver; per-slot fan-in tasks drain those into a shared
+//! [`NonceDedup`] gate and dispatch first-seen envelopes via
+//! `on_inbound`. Duplicates arriving on a sibling slot are dropped.
+//!
+//! Denylist enforcement on `AgentId` (D5+) lands in a subsequent task.
 
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -31,27 +35,37 @@ use crate::transport::nonce_dedup::NonceDedup;
 use crate::transport::InboundEnvelope;
 
 /// Concrete handle returned by [`RelayBuilder::build`]. Production
-/// wraps an `Arc<RelayTransport>` (plumbed in D4); tests use
-/// [`RelayHandle::mock`] which records sends in an internal buffer for
-/// assertion without standing up a real WebSocket.
+/// wraps an `Arc<RelayTransport>` (plumbed in D5+); tests use
+/// [`RelayHandle::mock`] which records sends in an internal buffer
+/// and exposes an `inbound_tx` channel for assertion-driven inbound
+/// delivery without standing up a real WebSocket.
 #[derive(Debug)]
 pub struct RelayHandle {
     url: String,
     #[cfg(test)]
     sends: std::sync::Mutex<Vec<TransitEnvelope>>,
-    // D4+ will add: transport: Arc<RelayTransport>,
+    #[cfg(test)]
+    inbound_tx: tokio::sync::mpsc::UnboundedSender<InboundEnvelope>,
+    #[cfg(test)]
+    inbound_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>>>,
+    // D5+ will add: transport: Arc<RelayTransport>,
 }
 
 impl RelayHandle {
     /// Mock handle used by tests that just need a URL-bearing slot
     /// filler without standing up a live WebSocket. Records every
-    /// envelope passed to [`Self::send`] so tests can assert routing.
+    /// envelope passed to [`Self::send`] so tests can assert routing,
+    /// and exposes [`Self::deliver_inbound`] to push test envelopes
+    /// into the per-slot inbound channel the multi-home fan-in drains.
     /// Not exposed in production builds.
     #[cfg(test)]
     pub(crate) fn mock(url: String) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             url,
             sends: std::sync::Mutex::new(Vec::new()),
+            inbound_tx: tx,
+            inbound_rx: std::sync::Mutex::new(Some(rx)),
         }
     }
 
@@ -96,6 +110,26 @@ impl RelayHandle {
     #[allow(clippy::expect_used)] // poisoned lock is a test bug; panic is fine.
     pub(crate) fn traffic_count_for_test(&self) -> usize {
         self.sends.lock().expect("sends lock").len()
+    }
+
+    /// Push a test envelope into this mock handle's inbound channel.
+    /// The per-slot fan-in task picks it up and feeds it through the
+    /// shared dedup gate.
+    #[cfg(test)]
+    pub(crate) fn deliver_inbound(&self, env: InboundEnvelope) {
+        let _ = self.inbound_tx.send(env);
+    }
+
+    /// Take the inbound receiver. Test-only; D5+ replaces this with
+    /// a real path via `RelayTransport::take_inbound`. Returns `None`
+    /// if the receiver has already been taken (per-slot one-shot
+    /// ownership).
+    #[cfg(test)]
+    #[allow(clippy::expect_used)] // poisoned lock is a test bug; panic is fine.
+    pub(crate) fn take_inbound_for_test(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>> {
+        self.inbound_rx.lock().expect("inbound_rx lock").take()
     }
 }
 
@@ -155,10 +189,8 @@ pub struct MultiHomeTransport {
     primary_url: String,
     builder: Arc<dyn RelayBuilder>,
     slots: Arc<RwLock<[Option<Slot>; 3]>>,
-    #[allow(dead_code)] // Used by D4 (inbound fan-in).
     inbox_dedup: Arc<std::sync::Mutex<NonceDedup>>,
     denylist: Arc<dyn fetchit_trust::DenylistQuery>,
-    #[allow(dead_code)] // Used by D4 (inbound fan-in).
     on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
 }
 
@@ -179,16 +211,18 @@ impl MultiHomeTransport {
         let handle = builder.build(&primary_url).await?;
         let primary_slot = Slot {
             relay_url: primary_url.clone(),
-            handle,
+            handle: Arc::clone(&handle),
             last_traffic_at: SystemTime::now(),
         };
         let initial_slots: [Option<Slot>; 3] = [Some(primary_slot), None, None];
         let dedup = NonceDedup::new(10_000, std::time::Duration::from_secs(300));
+        let inbox_dedup = Arc::new(std::sync::Mutex::new(dedup));
+        Self::spawn_fan_in_for_slot(handle, Arc::clone(&inbox_dedup), Arc::clone(&on_inbound));
         Ok(Self {
             primary_url,
             builder,
             slots: Arc::new(RwLock::new(initial_slots)),
-            inbox_dedup: Arc::new(std::sync::Mutex::new(dedup)),
+            inbox_dedup,
             denylist,
             on_inbound,
         })
@@ -282,6 +316,11 @@ impl MultiHomeTransport {
         };
 
         let handle = self.builder.build(target_url).await?;
+        Self::spawn_fan_in_for_slot(
+            Arc::clone(&handle),
+            Arc::clone(&self.inbox_dedup),
+            Arc::clone(&self.on_inbound),
+        );
 
         let mut slots = self.slots.write().expect("slots lock");
         slots[victim_idx] = Some(Slot {
@@ -290,6 +329,66 @@ impl MultiHomeTransport {
             last_traffic_at: SystemTime::now(),
         });
         Ok(handle)
+    }
+
+    /// Wire a slot's inbound stream into the dedup + dispatch path.
+    /// Spawned per slot at slot-construction time (during init for
+    /// slot 0; during [`Self::acquire_slot`] for slots 1 + 2).
+    ///
+    /// The spawned task does NOT keep an [`Arc<RelayHandle>`] alive;
+    /// it consumes only the `UnboundedReceiver` taken out of the
+    /// handle so that when the slot is evicted the
+    /// [`Arc<RelayHandle>`] drops, its `inbound_tx` field drops, the
+    /// channel closes, and the task exits naturally on the next
+    /// `recv()`.
+    #[allow(clippy::expect_used)] // dedup mutex poison is unrecoverable; panic is fine in the fan-in task.
+    fn spawn_fan_in_for_slot(
+        slot_handle: Arc<RelayHandle>,
+        dedup: Arc<std::sync::Mutex<NonceDedup>>,
+        on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
+    ) {
+        #[cfg(test)]
+        {
+            let Some(mut rx) = slot_handle.take_inbound_for_test() else {
+                return;
+            };
+            let url = slot_handle.url().to_string();
+            drop(slot_handle);
+            tokio::spawn(async move {
+                while let Some(env) = rx.recv().await {
+                    let Some(transit) = env.transit.as_ref() else {
+                        // No transit envelope means no canonical
+                        // nonce to dedup on. Pass through so the
+                        // dispatch layer can decide what to do.
+                        on_inbound(env);
+                        continue;
+                    };
+                    let Ok(nonce) = <[u8; 12]>::try_from(transit.nonce.as_slice()) else {
+                        tracing::debug!(
+                            url = %url,
+                            "multi-home fan-in: skipping envelope with non-12-byte nonce",
+                        );
+                        continue;
+                    };
+                    let key = (env.from.0.clone(), nonce);
+                    let pass = {
+                        let mut d = dedup.lock().expect("dedup lock");
+                        d.observe(key, std::time::Instant::now())
+                    };
+                    if pass {
+                        on_inbound(env);
+                    } else {
+                        tracing::debug!(url = %url, "multi-home dedup dropped duplicate");
+                    }
+                }
+            });
+        }
+        #[cfg(not(test))]
+        {
+            // Production fan-in plumbed in D5+ when RelayHandle wraps
+            // Arc<RelayTransport> and exposes a real take_inbound().
+            let _ = (slot_handle, dedup, on_inbound);
+        }
     }
 
     /// Snapshot the current slot array for test inspection. Not
@@ -358,6 +457,46 @@ mod tests {
     fn hints(url: &str) -> crate::card::RendezvousHintsV1 {
         crate::card::RendezvousHintsV1 {
             relays: vec![url.to_string()],
+        }
+    }
+
+    /// Build an inbound envelope keyed on `(sender, nonce)` for the
+    /// dedup gate. The dedup key components are
+    /// `(InboundEnvelope.from.0, transit.nonce[..12])` — every other
+    /// field is set to a stable default so equality-by-key is the
+    /// only thing distinguishing two test envelopes.
+    fn sample_inbound_envelope(sender: &str, nonce: [u8; 12]) -> InboundEnvelope {
+        // The sender_agent_id field carried in the transit envelope
+        // is a 32-byte fingerprint; the dedup key uses only the outer
+        // `from.0` String, so the byte form here is arbitrary.
+        let sender_bytes = {
+            let mut b = [0u8; 32];
+            for (i, ch) in sender.as_bytes().iter().take(32).enumerate() {
+                b[i] = *ch;
+            }
+            b
+        };
+        let transit = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes(sender_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 1_700_000_000_000,
+            epoch: 0,
+            ciphertext: vec![0xaa; 16],
+            nonce: nonce.to_vec(),
+            kem_ciphertext: vec![0xcc; 32],
+            sender_signature: vec![0xdd; 64],
+        };
+        InboundEnvelope {
+            kind: crate::transport::OutboundKind::Dm,
+            from: crate::identity::AgentId(sender.to_string()),
+            payload: vec![0xee; 16],
+            timestamp_ms: 1_700_000_000_000,
+            transport_name: "multi-home-test",
+            transit: Some(transit),
         }
     }
 
@@ -522,5 +661,108 @@ mod tests {
         let slots = mh.slots_for_test();
         assert!(slots[1].is_none());
         assert!(slots[2].is_none());
+    }
+
+    /// A first-seen inbound envelope on slot 0 fans through the dedup
+    /// gate and reaches `on_inbound` exactly once.
+    #[tokio::test]
+    async fn inbound_passes_through_on_first_seen() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = Arc::clone(&count);
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = Arc::new(move |_| {
+            count_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            on_inbound,
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        slot0_handle.deliver_inbound(sample_inbound_envelope("alice", [1u8; 12]));
+
+        // Give the spawned task time to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    /// The same envelope arriving over two slots (same `(sender,
+    /// nonce)` key) reaches `on_inbound` exactly once. The dedup gate
+    /// drops the sibling delivery.
+    #[tokio::test]
+    async fn duplicate_inbound_across_slots_dedup_to_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = Arc::clone(&count);
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = Arc::new(move |_| {
+            count_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            on_inbound,
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        // Open slot 1 via an outbound send to a second URL.
+        mh.send(sample_envelope(), &hints("wss://secondary.test/v1/ws"))
+            .await
+            .unwrap();
+
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        let slot1_handle = Arc::clone(&mh.slots_for_test()[1].as_ref().unwrap().handle);
+
+        slot0_handle.deliver_inbound(sample_inbound_envelope("alice", [9u8; 12]));
+        slot1_handle.deliver_inbound(sample_inbound_envelope("alice", [9u8; 12]));
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "duplicate (sender, nonce) across slots dedups to one",
+        );
+    }
+
+    /// Distinct dedup keys (different nonces, different senders) each
+    /// pass through independently.
+    #[tokio::test]
+    async fn distinct_nonces_each_pass_through() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = Arc::clone(&count);
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = Arc::new(move |_| {
+            count_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            on_inbound,
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        slot0_handle.deliver_inbound(sample_inbound_envelope("alice", [1u8; 12]));
+        slot0_handle.deliver_inbound(sample_inbound_envelope("alice", [2u8; 12]));
+        slot0_handle.deliver_inbound(sample_inbound_envelope("bob", [1u8; 12]));
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 3);
     }
 }
