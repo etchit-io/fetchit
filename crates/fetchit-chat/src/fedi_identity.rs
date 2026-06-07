@@ -19,6 +19,7 @@
 //! reader doesn't chase a non-issue.
 
 use crate::error::ChatError;
+use fetchit_fedi::attestation::{signing_input, MlDsaAttestation};
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::RsaPrivateKey;
 
@@ -85,6 +86,36 @@ pub async fn generate_rsa_2048() -> Result<RsaPrivateKeyMaterial, ChatError> {
     }
 }
 
+/// Sign the M4 actor attestation under `signer`'s ML-DSA-65 chat key.
+///
+/// Hands the locked-format `signing_input` bytes to the signer, then
+/// packages the signature + signer pubkey into the `MlDsaAttestation`
+/// the bridge-side verifier expects. The chat-side mint factory
+/// (lands 1.2b-iv) calls this with the chat-identity signer and the
+/// freshly-generated RSA pubkey.
+///
+/// # Errors
+/// - [`ChatError::Invalid`] wrapping a [`fetchit_fedi::attestation::SigningInputError`]
+///   if any field fails the canonical-format validation (lowercase
+///   64-hex `agent_id_hex`, non-empty `handle`, etc.).
+/// - [`ChatError::Invalid`] wrapping the signer error string when the
+///   ML-DSA sign call fails.
+pub async fn sign_actor_attestation(
+    handle: &str,
+    actor_url: &url::Url,
+    agent_id_hex: &str,
+    spki_der: &[u8],
+    signer: &dyn x0xd_client::Signer,
+) -> Result<MlDsaAttestation, ChatError> {
+    let input = signing_input(handle, actor_url, agent_id_hex, spki_der)
+        .map_err(|e| ChatError::Invalid(format!("signing_input: {e}")))?;
+    let signature = signer
+        .sign(&input)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("ml-dsa sign: {e}")))?;
+    Ok(MlDsaAttestation::new(signer.public_key(), signature))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -122,5 +153,100 @@ mod tests {
             "two keygen calls must produce different keys"
         );
         assert_ne!(a.priv_pem, b.priv_pem);
+    }
+
+    const VALID_AGENT_HEX: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Mock `Signer` that returns deterministic pubkey + signature
+    /// bytes for assertion. Mirrors the pattern in
+    /// `groups/welcome_inbound.rs::tests::StubSigner`.
+    struct StubSigner {
+        pub_key: Vec<u8>,
+        sig: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl x0xd_client::Signer for StubSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            [0u8; 32]
+        }
+        fn public_key(&self) -> Vec<u8> {
+            self.pub_key.clone()
+        }
+        async fn sign(&self, _message: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Ok(self.sig.clone())
+        }
+    }
+
+    struct FailingSigner;
+
+    #[async_trait::async_trait]
+    impl x0xd_client::Signer for FailingSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            [0u8; 32]
+        }
+        fn public_key(&self) -> Vec<u8> {
+            vec![0u8; 32]
+        }
+        async fn sign(&self, _message: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Err("simulated signing failure".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn sign_actor_attestation_returns_pubkey_and_signature_from_signer() {
+        let signer = StubSigner {
+            pub_key: vec![0xAA; 32],
+            sig: vec![0xBB; 64],
+        };
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+
+        let att = sign_actor_attestation(
+            "josh",
+            &actor_url,
+            VALID_AGENT_HEX,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            &signer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(att.ml_dsa_pubkey, vec![0xAA; 32]);
+        assert_eq!(att.signature, vec![0xBB; 64]);
+    }
+
+    #[tokio::test]
+    async fn sign_actor_attestation_propagates_signing_input_validation() {
+        let signer = StubSigner {
+            pub_key: vec![0xAA; 32],
+            sig: vec![0xBB; 64],
+        };
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+
+        let err = sign_actor_attestation("josh", &actor_url, "not-64-hex", &[0x01], &signer)
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("signing_input") && msg.contains("agent_id_hex"),
+            "expected signing_input + agent_id_hex in error; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_actor_attestation_propagates_signer_failure() {
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let err =
+            sign_actor_attestation("josh", &actor_url, VALID_AGENT_HEX, &[0x01], &FailingSigner)
+                .await
+                .unwrap_err();
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ml-dsa sign") && msg.contains("simulated"),
+            "expected ml-dsa sign + simulated in error; got: {msg}"
+        );
     }
 }

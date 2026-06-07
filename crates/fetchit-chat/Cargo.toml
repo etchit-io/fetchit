@@ -30,6 +30,7 @@ bytes.workspace = true
 chacha20poly1305.workspace = true
 clap.workspace = true
 directories.workspace = true
+fetchit-fedi = { path = "../fetchit-fedi" }
 fetchit-relay-client = { path = "../fetchit-relay-client" }
 flate2 = "1.0"
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
