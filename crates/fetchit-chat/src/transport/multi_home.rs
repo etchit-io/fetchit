@@ -42,23 +42,36 @@ use async_trait::async_trait;
 use fetchit_relay_proto::TransitEnvelope;
 
 use crate::transport::nonce_dedup::NonceDedup;
-use crate::transport::InboundEnvelope;
+use crate::transport::{InboundEnvelope, OutboundEnvelope, OutboundKind, SendReceipt};
+
+const TRANSPORT_NAME: &str = "multi-home";
 
 /// Concrete handle returned by [`RelayBuilder::build`]. Production
-/// wraps an `Arc<RelayTransport>` (plumbed in D5+); tests use
-/// [`RelayHandle::mock`] which records sends in an internal buffer
-/// and exposes an `inbound_tx` channel for assertion-driven inbound
-/// delivery without standing up a real WebSocket.
-#[derive(Debug)]
+/// wraps an `Arc<RelayTransport>` ([`RelayHandle::from_transport`]);
+/// tests use [`RelayHandle::mock`] which records sends in an internal
+/// buffer and exposes an `inbound_tx` channel for assertion-driven
+/// inbound delivery without standing up a real WebSocket.
 pub struct RelayHandle {
     url: String,
+    /// Production: real transport. `None` for mock handles built via
+    /// [`RelayHandle::mock`] — those route through the test recording
+    /// fields below.
+    transport: Option<Arc<crate::relay_transport::RelayTransport>>,
     #[cfg(test)]
     sends: std::sync::Mutex<Vec<TransitEnvelope>>,
     #[cfg(test)]
     inbound_tx: tokio::sync::mpsc::UnboundedSender<InboundEnvelope>,
     #[cfg(test)]
     inbound_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>>>,
-    // D5+ will add: transport: Arc<RelayTransport>,
+}
+
+impl std::fmt::Debug for RelayHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayHandle")
+            .field("url", &self.url)
+            .field("transport", &self.transport.as_ref().map(|_| "<connected>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl RelayHandle {
@@ -73,9 +86,31 @@ impl RelayHandle {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             url,
+            transport: None,
             sends: std::sync::Mutex::new(Vec::new()),
             inbound_tx: tx,
             inbound_rx: std::sync::Mutex::new(Some(rx)),
+        }
+    }
+
+    /// Production constructor: wrap an already-connected
+    /// [`crate::relay_transport::RelayTransport`] together with the URL
+    /// it was opened against. [`RealRelayBuilder::build`] is the only
+    /// production caller.
+    #[must_use]
+    pub fn from_transport(
+        url: String,
+        transport: Arc<crate::relay_transport::RelayTransport>,
+    ) -> Self {
+        Self {
+            url,
+            transport: Some(transport),
+            #[cfg(test)]
+            sends: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            inbound_tx: tokio::sync::mpsc::unbounded_channel().0,
+            #[cfg(test)]
+            inbound_rx: std::sync::Mutex::new(None),
         }
     }
 
@@ -85,32 +120,56 @@ impl RelayHandle {
         &self.url
     }
 
-    /// Send an envelope through this relay session.
+    /// Send `envelope` to `to` through this relay session.
     ///
-    /// In tests, this records the envelope in the mock's internal
-    /// buffer and returns `Ok(())`. In production builds (D3 floor),
-    /// the underlying [`crate::relay_transport::RelayTransport`] has
-    /// not yet been plumbed through — every call returns
-    /// [`TransportError::BuildFailed`]. D4 wires the real transport,
-    /// at which point this body becomes a genuine await.
+    /// Production handles ([`Self::from_transport`]) delegate to the
+    /// wrapped [`crate::relay_transport::RelayTransport`]; test mocks
+    /// ([`Self::mock`]) record the transit envelope in an internal
+    /// buffer and synthesize a placeholder [`SendReceipt`] so tests
+    /// can assert routing without standing up a real WebSocket.
+    ///
+    /// Mid-tier `RelayHandle`s built without a transport in non-test
+    /// builds (a misuse) return [`TransportError::BuildFailed`].
     ///
     /// # Errors
-    /// Returns [`TransportError::BuildFailed`] in non-test builds
-    /// until D4 wires the real transport.
-    // `async` is intentional even though D3's body never awaits — D4
-    // will plumb `RelayTransport::send` here and needs the future.
-    #[allow(clippy::unused_async, clippy::expect_used)]
-    pub async fn send(&self, envelope: TransitEnvelope) -> Result<(), TransportError> {
+    /// - [`TransportError::BuildFailed`] wrapping any underlying
+    ///   [`crate::error::ChatError`] from the real transport, including
+    ///   [`crate::error::ChatError::SealedRequired`] when `envelope.transit`
+    ///   is `None`.
+    #[allow(clippy::expect_used)]
+    pub async fn send(
+        &self,
+        to: &crate::identity::AgentId,
+        envelope: OutboundEnvelope,
+    ) -> Result<SendReceipt, TransportError> {
+        if let Some(transport) = &self.transport {
+            // The underlying RelayTransport binds to a single relay URL
+            // and ignores hints (R-tail-1); MultiHomeTransport's slot
+            // policy is what selected this handle, so hints have already
+            // done their work.
+            return <crate::relay_transport::RelayTransport as crate::transport::Transport>::send(
+                transport, to, envelope, None,
+            )
+            .await
+            .map_err(|e| TransportError::BuildFailed(format!("relay send: {e}")));
+        }
         #[cfg(test)]
         {
-            self.sends.lock().expect("sends lock").push(envelope);
-            Ok(())
+            let transit = envelope.transit.ok_or_else(|| {
+                TransportError::BuildFailed("RelayHandle::send mock: missing transit".into())
+            })?;
+            self.sends.lock().expect("sends lock").push(transit);
+            Ok(SendReceipt {
+                accepted_at_ms: 0,
+                message_id: None,
+                transport_name: "multi-home-mock",
+            })
         }
         #[cfg(not(test))]
         {
-            let _ = envelope;
+            let _ = (to, envelope);
             Err(TransportError::BuildFailed(
-                "D3 placeholder; D4 plumbs real transport".into(),
+                "RelayHandle::send called without a transport".into(),
             ))
         }
     }
@@ -144,9 +203,9 @@ impl RelayHandle {
 }
 
 /// Builds a [`RelayHandle`] for a given URL. Tests inject a stub
-/// builder that returns canned mocks; production will wire a real
-/// implementation in D3 that lifts `RelayTransport::connect` behind
-/// this trait.
+/// builder that returns canned mocks; production uses
+/// [`RealRelayBuilder`] which opens a live WebSocket via
+/// [`crate::relay_transport::RelayTransport::connect`].
 #[async_trait]
 pub trait RelayBuilder: Send + Sync {
     /// Open a fresh relay session to `url` and return the handle the
@@ -156,6 +215,41 @@ pub trait RelayBuilder: Send + Sync {
     /// Returns [`TransportError::BuildFailed`] on any underlying
     /// handshake or connection failure.
     async fn build(&self, url: &str) -> Result<Arc<RelayHandle>, TransportError>;
+}
+
+/// Production [`RelayBuilder`]: each [`Self::build`] call opens a real
+/// WebSocket via [`crate::relay_transport::RelayTransport::connect`]
+/// using the supplied [`fetchit_relay_client::Signer`] for the
+/// bearer-token handshake, then wraps the connected transport in a
+/// [`RelayHandle`] for [`MultiHomeTransport`] slot ownership.
+pub struct RealRelayBuilder {
+    signer: Arc<dyn fetchit_relay_client::Signer>,
+}
+
+impl RealRelayBuilder {
+    /// Construct a builder that authenticates every relay handshake
+    /// with `signer`. In production this is an
+    /// `X0xdSigner`; tests use `StaticKeySigner`.
+    #[must_use]
+    pub fn new(signer: Arc<dyn fetchit_relay_client::Signer>) -> Self {
+        Self { signer }
+    }
+}
+
+#[async_trait]
+impl RelayBuilder for RealRelayBuilder {
+    async fn build(&self, url: &str) -> Result<Arc<RelayHandle>, TransportError> {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| TransportError::BuildFailed(format!("invalid relay url {url}: {e}")))?;
+        let transport =
+            crate::relay_transport::RelayTransport::connect(parsed, Arc::clone(&self.signer))
+                .await
+                .map_err(|e| TransportError::BuildFailed(format!("relay connect: {e}")))?;
+        Ok(Arc::new(RelayHandle::from_transport(
+            url.to_string(),
+            transport,
+        )))
+    }
 }
 
 /// Failure modes specific to [`MultiHomeTransport`] construction and
@@ -336,18 +430,27 @@ impl MultiHomeTransport {
     /// - Otherwise allocates a new slot — fills an empty slot 1/2 or
     ///   evicts the LRU of 1/2 (slot 0 is never evicted).
     ///
+    /// `envelope` is the sealed [`TransitEnvelope`] from the
+    /// conversation/group layer; this method wraps it in an
+    /// [`OutboundEnvelope`] for the underlying handle.
+    ///
+    /// The [`crate::transport::Transport`] impl on this type wraps this
+    /// inherent method, adapting the [`OutboundEnvelope`] +
+    /// `Option<&RendezvousHintsV1>` signature and mapping
+    /// [`TransportError`] into [`crate::error::ChatError`].
+    ///
     /// # Errors
     /// - [`TransportError::Blocked`] when the destination relay URL or
     ///   recipient agent is on the active denylist.
     /// - [`TransportError::BuildFailed`] when `hints.relays` is empty,
     ///   when the underlying [`RelayBuilder`] fails to open a new
     ///   slot, or when the per-slot send fails.
-    pub async fn send(
+    pub async fn send_inner(
         &self,
         to: &crate::identity::AgentId,
         envelope: TransitEnvelope,
         hints: &crate::card::RendezvousHintsV1,
-    ) -> Result<(), TransportError> {
+    ) -> Result<SendReceipt, TransportError> {
         let target_url = hints
             .relays
             .first()
@@ -375,7 +478,14 @@ impl MultiHomeTransport {
         }
 
         let handle = self.acquire_slot(&target_url).await?;
-        handle.send(envelope).await
+        let outbound = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: envelope.ciphertext.clone(),
+            timestamp_ms: envelope.timestamp_ms,
+            transit: Some(envelope),
+        };
+        handle.send(to, outbound).await
     }
 
     /// Acquire a relay handle for `target_url`, opening a new slot if
@@ -448,54 +558,62 @@ impl MultiHomeTransport {
     /// [`Arc<RelayHandle>`] drops, its `inbound_tx` field drops, the
     /// channel closes, and the task exits naturally on the next
     /// `recv()`.
+    ///
+    /// Production handles drain
+    /// [`crate::relay_transport::RelayTransport::take_inbound`]; test
+    /// mocks drain the local mpsc fed by [`RelayHandle::deliver_inbound`].
     #[allow(clippy::expect_used)] // dedup mutex poison is unrecoverable; panic is fine in the fan-in task.
     fn spawn_fan_in_for_slot(
         slot_handle: Arc<RelayHandle>,
         dedup: Arc<std::sync::Mutex<NonceDedup>>,
         on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
     ) {
-        #[cfg(test)]
-        {
-            let Some(mut rx) = slot_handle.take_inbound_for_test() else {
-                return;
-            };
-            let url = slot_handle.url().to_string();
-            drop(slot_handle);
-            tokio::spawn(async move {
-                while let Some(env) = rx.recv().await {
-                    let Some(transit) = env.transit.as_ref() else {
-                        // No transit envelope means no canonical
-                        // nonce to dedup on. Pass through so the
-                        // dispatch layer can decide what to do.
-                        on_inbound(env);
-                        continue;
-                    };
-                    let Ok(nonce) = <[u8; 12]>::try_from(transit.nonce.as_slice()) else {
-                        tracing::debug!(
-                            url = %url,
-                            "multi-home fan-in: skipping envelope with non-12-byte nonce",
-                        );
-                        continue;
-                    };
-                    let key = (env.from.0.clone(), nonce);
-                    let pass = {
-                        let mut d = dedup.lock().expect("dedup lock");
-                        d.observe(key, std::time::Instant::now())
-                    };
-                    if pass {
-                        on_inbound(env);
-                    } else {
-                        tracing::debug!(url = %url, "multi-home dedup dropped duplicate");
-                    }
+        let url = slot_handle.url().to_string();
+        let rx = if let Some(transport) = &slot_handle.transport {
+            <crate::relay_transport::RelayTransport as crate::transport::Transport>::take_inbound(
+                transport.as_ref(),
+            )
+        } else {
+            #[cfg(test)]
+            {
+                slot_handle.take_inbound_for_test()
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
+        let Some(mut rx) = rx else {
+            return;
+        };
+        drop(slot_handle);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                let Some(transit) = env.transit.as_ref() else {
+                    // No transit envelope means no canonical nonce to
+                    // dedup on. Pass through so the dispatch layer can
+                    // decide what to do.
+                    on_inbound(env);
+                    continue;
+                };
+                let Ok(nonce) = <[u8; 12]>::try_from(transit.nonce.as_slice()) else {
+                    log::debug!(
+                        "multi-home fan-in: skipping envelope with non-12-byte nonce: url={url}"
+                    );
+                    continue;
+                };
+                let key = (env.from.0.clone(), nonce);
+                let pass = {
+                    let mut d = dedup.lock().expect("dedup lock");
+                    d.observe(key, std::time::Instant::now())
+                };
+                if pass {
+                    on_inbound(env);
+                } else {
+                    log::debug!("multi-home dedup dropped duplicate: url={url}");
                 }
-            });
-        }
-        #[cfg(not(test))]
-        {
-            // Production fan-in plumbed in D5+ when RelayHandle wraps
-            // Arc<RelayTransport> and exposes a real take_inbound().
-            let _ = (slot_handle, dedup, on_inbound);
-        }
+            }
+        });
     }
 
     /// Snapshot the current slot array for test inspection. Not
@@ -504,6 +622,67 @@ impl MultiHomeTransport {
     #[allow(clippy::expect_used)] // poisoned lock is a test bug; panic is fine.
     pub(crate) fn slots_for_test(&self) -> [Option<Slot>; 3] {
         self.slots.read().expect("slots lock").clone()
+    }
+}
+
+#[async_trait]
+impl crate::transport::Transport for MultiHomeTransport {
+    fn name(&self) -> &'static str {
+        TRANSPORT_NAME
+    }
+
+    fn reachability(&self, _: &crate::identity::AgentId) -> crate::transport::Reachability {
+        // MultiHomeTransport always has slot 0 pinned to the local
+        // primary, so it can always attempt a send. The Router gates
+        // *which* transport to try via `Reachability::No`; here we
+        // signal "always attempt" and let `send` reject (with
+        // `Invalid("hints required")`) when called without hints.
+        crate::transport::Reachability::Always
+    }
+
+    async fn send(
+        &self,
+        to: &crate::identity::AgentId,
+        envelope: OutboundEnvelope,
+        hints: Option<&crate::card::RendezvousHintsV1>,
+    ) -> crate::error::Result<SendReceipt> {
+        let hints = hints.ok_or_else(|| {
+            crate::error::ChatError::Invalid(
+                "MultiHomeTransport::send requires RendezvousHints — caller must resolve the recipient card's hints".into(),
+            )
+        })?;
+        let transit = envelope
+            .transit
+            .ok_or(crate::error::ChatError::SealedRequired {
+                caller: "MultiHomeTransport::send",
+            })?;
+        let receipt = self
+            .send_inner(to, transit, hints)
+            .await
+            .map_err(|e| match e {
+                TransportError::Blocked(msg) => {
+                    crate::error::ChatError::Denied { agent_id_hex: msg }
+                }
+                TransportError::BuildFailed(msg) => crate::error::ChatError::MessageTransport(msg),
+            })?;
+        // Re-stamp transport_name so receipts attribute to multi-home
+        // rather than the underlying single-relay transport that
+        // actually handled the wire send.
+        Ok(SendReceipt {
+            transport_name: TRANSPORT_NAME,
+            ..receipt
+        })
+    }
+
+    fn take_inbound(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::transport::InboundEnvelope>> {
+        // MultiHomeTransport's inbound is fanned in via the
+        // `on_inbound` callback supplied at construction time, not via
+        // the trait's `take_inbound`. Returning `None` tells the
+        // Router not to pump inbound from us — Client wires the
+        // callback at boot (R-tail-4).
+        None
     }
 }
 
@@ -672,7 +851,7 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://primary.test/v1/ws"),
@@ -706,7 +885,7 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://secondary.test/v1/ws"),
@@ -746,7 +925,7 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://r1.test/v1/ws"),
@@ -754,7 +933,7 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://r2.test/v1/ws"),
@@ -762,7 +941,7 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://r3.test/v1/ws"),
@@ -800,7 +979,7 @@ mod tests {
         .unwrap();
 
         let err = mh
-            .send(
+            .send_inner(
                 &sample_recipient(),
                 sample_envelope(),
                 &hints("wss://evil.test/v1/ws"),
@@ -838,7 +1017,7 @@ mod tests {
         .unwrap();
 
         let result = mh
-            .send(
+            .send_inner(
                 &crate::identity::AgentId(blocked_hex.clone()),
                 sample_envelope(),
                 &hints("wss://primary.test/v1/ws"),
@@ -874,7 +1053,7 @@ mod tests {
         .unwrap();
 
         let allowed_hex = "a".repeat(64);
-        mh.send(
+        mh.send_inner(
             &crate::identity::AgentId(allowed_hex),
             sample_envelope(),
             &hints("wss://primary.test/v1/ws"),
@@ -937,7 +1116,7 @@ mod tests {
         .unwrap();
 
         // Open slot 1 via an outbound send to a second URL.
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://secondary.test/v1/ws"),
@@ -982,7 +1161,7 @@ mod tests {
         .unwrap();
 
         // Open slot 1 via outbound send so there's something to drop.
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://later-blocked.test/v1/ws"),
@@ -1075,7 +1254,7 @@ mod tests {
         .await
         .unwrap();
 
-        mh.send(
+        mh.send_inner(
             &sample_recipient(),
             sample_envelope(),
             &hints("wss://secondary.test/v1/ws"),
@@ -1138,5 +1317,79 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    fn sample_outbound_envelope() -> OutboundEnvelope {
+        OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: vec![0xaa; 16],
+            timestamp_ms: 1_700_000_000_000,
+            transit: Some(sample_envelope()),
+        }
+    }
+
+    /// R-tail-3: calling `MultiHomeTransport` through the `Transport`
+    /// trait routes via the inherent slot allocator and yields a
+    /// `SendReceipt` stamped with our transport name. The mock
+    /// `RelayHandle` records the transit envelope so we can assert
+    /// the slot-0 handoff happened.
+    #[tokio::test]
+    async fn transport_impl_routes_via_inherent_send() {
+        use crate::transport::Transport;
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let to = sample_recipient();
+        let envelope = sample_outbound_envelope();
+        let hints = crate::card::RendezvousHintsV1 {
+            relays: vec!["wss://primary.test/v1/ws".to_string()],
+        };
+
+        let receipt = <MultiHomeTransport as Transport>::send(&mh, &to, envelope, Some(&hints))
+            .await
+            .expect("trait send succeeds");
+        assert_eq!(receipt.transport_name, "multi-home");
+
+        // The slot-0 mock handle should have recorded the transit
+        // envelope handed off through the trait surface.
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        assert_eq!(slot0_handle.traffic_count_for_test(), 1);
+    }
+
+    /// R-tail-3: the `Transport` impl requires `Some(hints)` — a
+    /// `None` from the Router (e.g. a card with no advertised relays)
+    /// must surface a typed error rather than silently fall through.
+    #[tokio::test]
+    async fn transport_impl_rejects_none_hints() {
+        use crate::transport::Transport;
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let to = sample_recipient();
+        let envelope = sample_outbound_envelope();
+        let err = <MultiHomeTransport as Transport>::send(&mh, &to, envelope, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::ChatError::Invalid(_)),
+            "expected Invalid, got {err:?}",
+        );
     }
 }

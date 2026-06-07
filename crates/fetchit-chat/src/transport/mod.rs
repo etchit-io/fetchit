@@ -24,7 +24,9 @@ use tokio::sync::mpsc;
 mod multi_home;
 mod nonce_dedup;
 
-pub use multi_home::{MultiHomeTransport, RelayBuilder, RelayHandle, Slot, TransportError};
+pub use multi_home::{
+    MultiHomeTransport, RealRelayBuilder, RelayBuilder, RelayHandle, Slot, TransportError,
+};
 pub use nonce_dedup::NonceDedup;
 
 /// Out-of-band hint to the router about whether a given transport
