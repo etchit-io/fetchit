@@ -70,6 +70,15 @@ pub struct ClientBuilder {
     /// integration tests, and the M0 boot path where the consumer
     /// hasn't completed its first refresh yet).
     denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
+    /// M3 Phase E1: initial advertised-relays list seeded into the
+    /// card's `fetchit_rendezvous_hints` slot at construction time.
+    /// When `Some`, the list is validated by
+    /// [`crate::card::RendezvousHintsV1::from_value`] and used
+    /// verbatim. When `None`, [`seed_initial_advertised_relays`]
+    /// falls back to `[primary_relay_url]` if (and only if) the
+    /// relay URL parses as `wss://`; otherwise leaves the slot
+    /// empty and the v2 hints field is omitted from the card.
+    advertised_relays: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -90,6 +99,7 @@ impl std::fmt::Debug for ClientBuilder {
             )
             .field("x0xd_port_file", &self.x0xd_port_file)
             .field("denylist", &self.denylist.as_ref().map(|_| "<consumer>"))
+            .field("advertised_relays", &self.advertised_relays)
             .finish()
     }
 }
@@ -191,6 +201,27 @@ impl ClientBuilder {
         self
     }
 
+    /// M3 Phase E1: seed the initial advertised-relays list that gets
+    /// minted into the card's `fetchit_rendezvous_hints` slot. The
+    /// list is validated by
+    /// [`crate::card::RendezvousHintsV1::from_value`] at build time —
+    /// non-`wss://` schemes, oversize entries (>256 chars), excess
+    /// entries (>8), and empty lists all surface as
+    /// [`ChatError::Invalid`].
+    ///
+    /// When this is not set, the constructor falls back to
+    /// `[primary_relay_url]` if (and only if) the relay URL parses
+    /// as `wss://`; otherwise the v2 hints field is omitted from
+    /// the card until [`Client::regenerate_card_with_relays`] is
+    /// called explicitly. Desktop callers usually populate this
+    /// from the Settings → Network → Advanced panel (E3); CLI /
+    /// chat-peer callers read it from their TOML config.
+    #[must_use]
+    pub fn advertised_relays(mut self, relays: Vec<String>) -> Self {
+        self.advertised_relays = Some(relays);
+        self
+    }
+
     /// Build the client. Falls back to [`discover_local`] for any
     /// x0xd connection field not explicitly set.
     ///
@@ -214,6 +245,7 @@ impl ClientBuilder {
             self.contact_pubkey_lookup,
             self.x0xd_port_file,
             self.denylist,
+            self.advertised_relays,
         )
         .await
     }
@@ -337,6 +369,7 @@ impl Client {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -358,6 +391,7 @@ impl Client {
         contact_pubkey_lookup: Option<ContactPubkeyLookup>,
         x0xd_port_file: Option<PathBuf>,
         denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
+        advertised_relays: Option<Vec<String>>,
     ) -> Result<Self> {
         let http = Arc::new(match x0xd_port_file.as_ref() {
             Some(path) => Http::new_with_port_file(path.clone(), token.clone())?,
@@ -390,6 +424,9 @@ impl Client {
             spawn_auto_rekey_sweeper(&router, chat, primary_relay_url.clone());
         }
 
+        let initial_relays =
+            seed_initial_advertised_relays(advertised_relays, primary_relay_url.as_deref())?;
+
         Ok(Self {
             http,
             router,
@@ -399,7 +436,7 @@ impl Client {
             lan_bound_addr,
             denylist,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            advertised_relays: Arc::new(tokio::sync::RwLock::new(initial_relays)),
             multi_home_inbound,
             primary_relay_url,
         })
@@ -1279,6 +1316,36 @@ async fn should_drop_inbound_from_denylisted(
     };
     let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
     denylist.is_blocked(&sender_hex).await
+}
+
+/// Seed the initial `advertised_relays` slot for a freshly-built
+/// [`Client`].
+///
+/// M3 Phase E1 contract:
+/// - `explicit = Some(list)` is validated by
+///   [`crate::card::RendezvousHintsV1::from_value`] and used as-is.
+///   Empty / non-`wss://` / oversize lists surface as
+///   [`ChatError::Invalid`].
+/// - `explicit = None` falls back to `[primary_relay_url]` when
+///   `primary_relay_url` is `Some(s)` and `s` starts with `wss://`.
+/// - All other cases return an empty `Vec` and the v2 hints field
+///   is omitted from the card until
+///   [`Client::regenerate_card_with_relays`] populates the slot.
+fn seed_initial_advertised_relays(
+    explicit: Option<Vec<String>>,
+    primary_relay_url: Option<&str>,
+) -> Result<Vec<String>> {
+    if let Some(list) = explicit {
+        let hints_value = serde_json::json!({ "relays": list });
+        let _validated = crate::card::RendezvousHintsV1::from_value(&hints_value)?;
+        return Ok(list);
+    }
+    if let Some(url) = primary_relay_url {
+        if url.starts_with("wss://") && url.len() <= 256 {
+            return Ok(vec![url.to_owned()]);
+        }
+    }
+    Ok(Vec::new())
 }
 
 /// Best-effort announce of this agent's `agent_id -> public_key`
@@ -2665,6 +2732,83 @@ mod tests {
         assert!(parsed.v2_rendezvous_hints.is_none());
     }
 
+    // ── M3 E1 seed_initial_advertised_relays ──────────────────────
+
+    /// E1: an explicit list of wss:// URLs is returned verbatim after
+    /// validation. The seed function is the single chokepoint that
+    /// runs the wire-format validator at boot, matching the post-boot
+    /// `regenerate_card_with_relays` contract.
+    #[test]
+    fn seed_initial_relays_uses_explicit_when_provided() {
+        let relays = vec![
+            "wss://nyc.etchit.io/v1/ws".to_owned(),
+            "wss://community.example/v1/ws".to_owned(),
+        ];
+        let seeded = super::seed_initial_advertised_relays(
+            Some(relays.clone()),
+            Some("wss://fallback.example/v1/ws"),
+        )
+        .expect("valid wss list must pass");
+        assert_eq!(seeded, relays);
+    }
+
+    /// E1: a non-wss scheme in the explicit list fails validation
+    /// before the slot is seeded. The same `RendezvousHintsV1`
+    /// validator rejects http://, ws://, file:// — anything but wss://.
+    #[test]
+    fn seed_initial_relays_rejects_non_wss_explicit() {
+        let result = super::seed_initial_advertised_relays(
+            Some(vec!["http://not-wss.example/v1/ws".to_owned()]),
+            Some("wss://fallback.example/v1/ws"),
+        );
+        assert!(matches!(result, Err(ChatError::Invalid(_))));
+    }
+
+    /// E1: an empty explicit list is rejected. The wire-format
+    /// contract requires at least one entry; callers that want
+    /// the no-hints behaviour should pass `None` (not `Some(vec![])`).
+    #[test]
+    fn seed_initial_relays_rejects_empty_explicit() {
+        let result = super::seed_initial_advertised_relays(Some(vec![]), None);
+        assert!(matches!(result, Err(ChatError::Invalid(_))));
+    }
+
+    /// E1: when no explicit list is provided and the primary relay
+    /// URL parses as wss://, the slot defaults to `[primary_url]`.
+    /// Gives a fresh boot a sensible single-relay hint without
+    /// requiring the operator to populate Settings → Network.
+    #[test]
+    fn seed_initial_relays_defaults_to_primary_when_wss() {
+        let primary = "wss://nyc.etchit.io/v1/ws";
+        let seeded = super::seed_initial_advertised_relays(None, Some(primary))
+            .expect("wss primary must default to [primary]");
+        assert_eq!(seeded, vec![primary.to_owned()]);
+    }
+
+    /// E1: when no explicit list is provided and the primary URL is
+    /// http://, the slot stays empty. Defaulting would surface as a
+    /// validation error at the next card mint because the wire-format
+    /// requires wss://; staying empty matches the M0 schema-freeze
+    /// contract of "no hints field" instead.
+    #[test]
+    fn seed_initial_relays_empty_when_primary_is_http() {
+        let seeded =
+            super::seed_initial_advertised_relays(None, Some("http://dev-relay.local:8088/"))
+                .expect("http primary must seed empty, not error");
+        assert!(seeded.is_empty());
+    }
+
+    /// E1: REST-only test mode (no relay configured at all). The
+    /// slot stays empty; the v2 hints field is simply omitted from
+    /// the card. This is the bare wiremock-backed Client shape used
+    /// by `tests/integration.rs::client_against`.
+    #[test]
+    fn seed_initial_relays_empty_when_no_primary() {
+        let seeded = super::seed_initial_advertised_relays(None, None)
+            .expect("REST-only build must seed empty without error");
+        assert!(seeded.is_empty());
+    }
+
     // ── M3 R-tail-4 client boot wiring ───────────────────────────
 
     /// R-tail-4 boot smoke: stand up a `Client` whose `build_with_chat`
@@ -2850,6 +2994,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
             None,
             None,
