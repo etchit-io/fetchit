@@ -209,6 +209,10 @@ fn private_ip_reason(host: &url::Host<&str>) -> Option<String> {
             if (ip.segments()[0] & 0xfe00) == 0xfc00 {
                 return Some(format!("unique-local IPv6 {ip}"));
             }
+            // Link-local fe80::/10
+            if (ip.segments()[0] & 0xffc0) == 0xfe80 {
+                return Some(format!("link-local IPv6 {ip}"));
+            }
             None
         }
         url::Host::Domain(_) => None,
@@ -321,9 +325,25 @@ async fn resolve_handle_at_endpoint(
         });
     }
 
+    // SEC-1 pre-check: if the response declares Content-Length > 64KB,
+    // reject before any body bytes land. Reqwest would otherwise
+    // pre-allocate against the declared length and consume that memory
+    // before the per-chunk cap fires. Hostile instance with a truthful
+    // (but oversized) header hits this branch; the streaming check
+    // still catches chunked/zero-length-declared bodies that exceed.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_JRD_BODY_BYTES as u64 {
+            return Err(WebFingerError::BodyTooLarge {
+                max_bytes: MAX_JRD_BODY_BYTES,
+            });
+        }
+    }
+
     // SEC-1: stream body chunks with a running size cap. Fails fast on
     // the first chunk that crosses 64KB rather than waiting for the
-    // full body to land.
+    // full body to land. Backstop for responses without Content-Length
+    // (chunked transfer-encoding) or with a truthful small length but
+    // an overrunning body.
     let mut body: Vec<u8> = Vec::with_capacity(1024);
     while let Some(chunk) = resp
         .chunk()
@@ -625,5 +645,87 @@ mod tests {
         let url = Url::parse("https://mastodon.example/").unwrap();
         let host = url.host().unwrap();
         assert!(private_ip_reason(&host).is_none());
+    }
+
+    // ----- V-1: IPv6 link-local fe80::/10 -----
+
+    #[test]
+    fn private_ip_reason_flags_ipv6_link_local() {
+        // fe80::/10 — IPv6 link-local. Reachable on the local segment
+        // without routing; SSRF target equivalent to IPv4 169.254/16.
+        let url = Url::parse("https://[fe80::1]/").unwrap();
+        let host = url.host().unwrap();
+        let reason = private_ip_reason(&host).expect("fe80::/10 must flag");
+        assert!(reason.contains("link-local"), "reason = {reason}");
+    }
+
+    #[test]
+    fn private_ip_reason_flags_ipv6_link_local_high_in_range() {
+        // febf:: is the top of the fe80::/10 prefix (segments[0] = 0xfebf
+        // still passes the 0xffc0 mask comparison). Pins the mask, not
+        // just the canonical fe80:: prefix.
+        let url = Url::parse("https://[febf::1]/").unwrap();
+        let host = url.host().unwrap();
+        assert!(private_ip_reason(&host).is_some());
+    }
+
+    // ----- V-3: post-flight IP filter catches redirect target -----
+
+    #[tokio::test]
+    async fn resolve_handle_at_endpoint_post_flight_catches_redirect_to_private_ip() {
+        let server = MockServer::start().await;
+        // Configure a 302 redirecting to the AWS / GCP / Azure metadata
+        // service. Reqwest's default redirect policy follows up to 10
+        // redirects — V-3's reason-for-being. The post-flight IP filter
+        // (resolve_handle_at_endpoint, after the redirect lands) MUST
+        // fail closed.
+        Mock::given(method("GET"))
+            .and(path("/.well-known/webfinger"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&server)
+            .await;
+
+        let endpoint = format!(
+            "{}/.well-known/webfinger?resource=acct:alice@x",
+            server.uri()
+        );
+        let client = reqwest::Client::new();
+        let err = resolve_handle_at_endpoint(&client, &endpoint, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        // Either PrivateInstance (post-flight fires because 169.254
+        // actually responded) OR Transport (169.254 unreachable in the
+        // test env — typical for CI / local). The failure mode this test
+        // refuses to accept is `Ok(Url)` containing a parsed actor URL
+        // from the metadata service, which would prove the post-flight
+        // gate is open.
+        match err {
+            WebFingerError::PrivateInstance { host } => {
+                assert!(host.contains("169.254"), "host = {host}");
+            }
+            WebFingerError::Transport(_) => {
+                // 169.254 unreachable — SSRF surface still closed: no
+                // JRD was parsed, no actor URL surfaced.
+            }
+            other => panic!("expected PrivateInstance or Transport, got {other:?}"),
+        }
+    }
+
+    // ----- V-6: parse_mention rejects bracketed IPv6 instance -----
+
+    #[test]
+    fn parse_mention_rejects_bracketed_ipv6_instance() {
+        // `[fe80::1]` has no `.` so it fails the structural instance gate
+        // before resolve_handle's SSRF pre-flight ever runs. Pinning the
+        // current behavior so a future relaxation of parse_mention's
+        // "has a dot" check (e.g. for sub-domain handling) doesn't open
+        // an IPv6-literal bypass.
+        assert!(matches!(
+            parse_mention("@alice@[fe80::1]"),
+            Err(WebFingerError::InvalidInstance(_))
+        ));
     }
 }
