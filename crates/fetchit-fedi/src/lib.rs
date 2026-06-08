@@ -32,3 +32,4 @@ pub mod transport;
 pub mod webfinger;
 
 pub use activity::PublicPost;
+pub use webfinger::{parse_mention, resolve_handle, ParsedHandle, WebFingerError};
