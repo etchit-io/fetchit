@@ -26,6 +26,11 @@ regex = "1.11"
 # decompression algorithm we enable — covers ~all real archives without
 # pulling in bzip2 / lzma / zstd binary bloat.
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+# M3 Phase F2 — DenylistQuery trait + EntryKind discriminant for the
+# render-time short-circuit (`HandlerRegistry::render_with_context`).
+# fetchit-trust is a leaf crate with no fetchit-* deps so this stays a
+# straight-line DAG.
+fetchit-trust = { path = "../fetchit-trust" }
 
 [dev-dependencies]
 tokio = { workspace = true }

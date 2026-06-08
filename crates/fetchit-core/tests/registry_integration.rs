@@ -4,9 +4,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use fetchit_core::handlers::default_registry;
-use fetchit_core::{Hint, RenderContext, Rendition};
+use fetchit_core::{Hint, RenderContext, RenderingContext, Rendition};
 
 fn render(bytes: &[u8]) -> Rendition {
     default_registry()
@@ -156,5 +158,66 @@ fn zip_renders_as_archive() {
     match render(&empty_zip) {
         Rendition::Archive { entries } => assert!(entries.is_empty()),
         other => panic!("a ZIP should be Rendition::Archive, got {other:?}"),
+    }
+}
+
+/// M3 F3 — `render_with_context` short-circuits to `Rendition::Blocked`
+/// when the denylist matches the address, otherwise passes through to
+/// the existing renderer set.
+#[test]
+fn render_with_context_blocked_xorname_short_circuits_default_registry() {
+    struct Block(&'static str);
+    impl fetchit_trust::DenylistQuery for Block {
+        fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
+            kind == fetchit_trust::EntryKind::XorName && value == self.0
+        }
+    }
+    let reg = default_registry();
+    let blocked_hex = "abcd".repeat(16);
+    let rctx = RenderingContext {
+        denylist: Some(Arc::new(Block(Box::leak(
+            blocked_hex.clone().into_boxed_str(),
+        )))),
+        addr_hex: Some(blocked_hex.clone()),
+    };
+    // A payload that WOULD render as text/json/etc. on the bare render
+    // path. The blocked short-circuit must beat the handler dispatch.
+    let payload = br#"{"foo":"bar"}"#;
+    let r = reg
+        .render_with_context(
+            Bytes::copy_from_slice(payload),
+            &Hint::default(),
+            &RenderContext::default(),
+            &rctx,
+        )
+        .expect("blocked short-circuit returns Ok(Blocked)");
+    match r {
+        Rendition::Blocked { reason } => {
+            assert!(reason.starts_with("xor_name:"), "reason = {reason}");
+            assert!(reason.contains(&blocked_hex), "reason = {reason}");
+        }
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}
+
+/// M3 F3 — when no denylist is supplied, the default registry behaves
+/// exactly as `render` did before M3. This pins the back-compat
+/// contract for offline / test callers that never wire a consumer.
+#[test]
+fn render_with_context_without_denylist_renders_as_before() {
+    let reg = default_registry();
+    let payload = br#"{"foo":"bar"}"#;
+    let rctx = RenderingContext::default();
+    let r = reg
+        .render_with_context(
+            Bytes::copy_from_slice(payload),
+            &Hint::default(),
+            &RenderContext::default(),
+            &rctx,
+        )
+        .expect("no-denylist path must match render() behaviour");
+    match r {
+        Rendition::Json { value } => assert_eq!(value["foo"], "bar"),
+        other => panic!("default-context JSON should be Rendition::Json, got {other:?}"),
     }
 }

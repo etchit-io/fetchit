@@ -186,6 +186,42 @@ pub enum Rendition {
     },
 }
 
+/// M3 Phase F2 — runtime context the renderer consults before
+/// dispatching a payload through the handler set.
+///
+/// When `denylist` is `Some(_)` and `addr_hex` is `Some(_)`,
+/// [`crate::registry::HandlerRegistry::render_with_context`] checks
+/// `is_blocked(EntryKind::XorName, addr_hex)` before any handler is
+/// chosen. A hit short-circuits to [`Rendition::Blocked`]; a miss
+/// falls through to the normal render path. The UI shell wires up
+/// the consumer (typically the chat / trust-client's
+/// `DenylistConsumer`) and threads the user-pasted Autonomi address
+/// through `addr_hex` on every fetch.
+///
+/// Either field being `None` disables the gate. Both fields are
+/// `None` by default so REST-only / offline / test callers keep the
+/// pre-M3 behaviour without a consumer wired up.
+#[derive(Default, Clone)]
+pub struct RenderingContext {
+    /// Optional community denylist consumer. The chat / trust-client
+    /// `DenylistConsumer` is the canonical implementation; tests
+    /// inject stubs.
+    pub denylist: Option<std::sync::Arc<dyn fetchit_trust::DenylistQuery>>,
+    /// The 64-char lowercase hex `XorName` the caller is about to
+    /// render. Required for the short-circuit; without it, the gate
+    /// silently passes through.
+    pub addr_hex: Option<String>,
+}
+
+impl std::fmt::Debug for RenderingContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderingContext")
+            .field("denylist", &self.denylist.as_ref().map(|_| "<consumer>"))
+            .field("addr_hex", &self.addr_hex)
+            .finish()
+    }
+}
+
 /// A single member of an archive [`Rendition::Archive`].
 #[derive(Debug, Clone)]
 pub struct ArchiveEntry {

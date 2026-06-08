@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::handler::{Confidence, ContentHandler, Hint, RenderContext, Rendition};
+use crate::handler::{
+    Confidence, ContentHandler, Hint, RenderContext, RenderingContext, Rendition,
+};
 use crate::{Error, Result};
 
 /// Number of leading bytes passed to [`ContentHandler::can_handle`].
@@ -73,6 +75,39 @@ impl HandlerRegistry {
         let head = &bytes[..head_len];
         let chosen = self.choose(head, hint).ok_or(Error::NoHandlerMatched)?;
         chosen.render(bytes, ctx)
+    }
+
+    /// M3 Phase F2 — denylist-gated render entry point.
+    ///
+    /// When `rendering_ctx` carries both a `denylist` and an
+    /// `addr_hex`, the gate runs `is_blocked(EntryKind::XorName,
+    /// addr_hex)` BEFORE any handler is chosen. A hit short-circuits
+    /// to [`Rendition::Blocked`] with a UI-renderable `reason`
+    /// string; a miss delegates to [`Self::render`] unchanged.
+    ///
+    /// Either gate field being `None` (or both) makes this method
+    /// behaviour-identical to `render` — that's the test/offline
+    /// path. The UI shell wires the consumer once at boot and threads
+    /// the user-pasted address through `addr_hex` per fetch.
+    ///
+    /// # Errors
+    /// Same as [`Self::render`]. The denylist short-circuit returns
+    /// `Ok(Rendition::Blocked)`, never an error.
+    pub fn render_with_context(
+        &self,
+        bytes: Bytes,
+        hint: &Hint,
+        ctx: &RenderContext,
+        rendering_ctx: &RenderingContext,
+    ) -> Result<Rendition> {
+        if let (Some(denylist), Some(addr)) = (&rendering_ctx.denylist, &rendering_ctx.addr_hex) {
+            if denylist.is_blocked(fetchit_trust::EntryKind::XorName, addr) {
+                return Ok(Rendition::Blocked {
+                    reason: format!("xor_name: {addr}"),
+                });
+            }
+        }
+        self.render(bytes, hint, ctx)
     }
 
     /// Visible for tests: just the detection step.
@@ -210,6 +245,125 @@ mod tests {
             )
             .expect("should render");
         assert_eq!(rendition_kind(&r), "first");
+    }
+
+    /// M3 F2: when the denylist matches the addr, the renderer short-
+    /// circuits before any handler is chosen. The `reason` string
+    /// carries the `EntryKind` discriminant + the canonical value.
+    #[test]
+    fn render_with_context_short_circuits_blocked_xorname() {
+        struct Block(&'static str);
+        impl fetchit_trust::DenylistQuery for Block {
+            fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
+                kind == fetchit_trust::EntryKind::XorName && value == self.0
+            }
+        }
+        let mut reg = HandlerRegistry::new();
+        reg.register(FakeHandler {
+            kind: "alpha",
+            confidence: Confidence::High,
+        });
+        let blocked_hex = "abcd".repeat(16);
+        let rctx = RenderingContext {
+            denylist: Some(Arc::new(Block(Box::leak(
+                blocked_hex.clone().into_boxed_str(),
+            )))),
+            addr_hex: Some(blocked_hex.clone()),
+        };
+        let r = reg
+            .render_with_context(
+                Bytes::from_static(b"any bytes"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx,
+            )
+            .expect("blocked short-circuit returns Ok(Blocked)");
+        match r {
+            Rendition::Blocked { reason } => {
+                assert!(reason.starts_with("xor_name:"), "reason = {reason}");
+                assert!(reason.contains(&blocked_hex), "reason = {reason}");
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    /// M3 F2: when the `denylist` is set but `addr_hex` is missing,
+    /// the gate silently passes through to the existing render path.
+    /// Same for the reverse case (`addr_hex` set but no `denylist`)
+    /// — neither is a misconfiguration the renderer should escalate.
+    #[test]
+    fn render_with_context_passes_through_when_gate_incomplete() {
+        struct AlwaysBlock;
+        impl fetchit_trust::DenylistQuery for AlwaysBlock {
+            fn is_blocked(&self, _: fetchit_trust::EntryKind, _: &str) -> bool {
+                true
+            }
+        }
+        let mut reg = HandlerRegistry::new();
+        reg.register(FakeHandler {
+            kind: "alpha",
+            confidence: Confidence::High,
+        });
+        // denylist Some, addr_hex None
+        let rctx_no_addr = RenderingContext {
+            denylist: Some(Arc::new(AlwaysBlock)),
+            addr_hex: None,
+        };
+        let r1 = reg
+            .render_with_context(
+                Bytes::from_static(b"x"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx_no_addr,
+            )
+            .expect("incomplete gate must not error");
+        assert_eq!(rendition_kind(&r1), "alpha");
+        // denylist None, addr_hex Some
+        let rctx_no_dl = RenderingContext {
+            denylist: None,
+            addr_hex: Some("abcd".repeat(16)),
+        };
+        let r2 = reg
+            .render_with_context(
+                Bytes::from_static(b"x"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx_no_dl,
+            )
+            .expect("incomplete gate must not error");
+        assert_eq!(rendition_kind(&r2), "alpha");
+    }
+
+    /// M3 F2: when the `denylist` + `addr_hex` are both set but the
+    /// addr doesn't match, the gate falls through to the existing
+    /// render path. This is the common happy-path case (most
+    /// addresses aren't blocked).
+    #[test]
+    fn render_with_context_passes_through_when_addr_not_blocked() {
+        struct BlockOnly(&'static str);
+        impl fetchit_trust::DenylistQuery for BlockOnly {
+            fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
+                kind == fetchit_trust::EntryKind::XorName && value == self.0
+            }
+        }
+        let mut reg = HandlerRegistry::new();
+        reg.register(FakeHandler {
+            kind: "alpha",
+            confidence: Confidence::High,
+        });
+        let rctx = RenderingContext {
+            denylist: Some(Arc::new(BlockOnly("ffff".repeat(16).leak()))),
+            addr_hex: Some("abcd".repeat(16)),
+        };
+        let r = reg
+            .render_with_context(
+                Bytes::from_static(b"x"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx,
+            )
+            .expect("unblocked addr renders normally");
+        assert_eq!(rendition_kind(&r), "alpha");
     }
 
     #[test]
