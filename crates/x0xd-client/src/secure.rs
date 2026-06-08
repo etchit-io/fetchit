@@ -35,14 +35,74 @@ fn validate_group_id_hex(s: &str) -> Result<&str, X0xdError> {
 
 /// One encrypted application-data frame returned by `/secure/encrypt`
 /// and accepted by `/secure/decrypt`.
+///
+/// The wire shape changed in x0xd v0.21.3 (ADR-0012): the real-`TreeKEM`
+/// `treekem_group_encrypt` path emits a self-describing
+/// `ApplicationCiphertext` that bakes the per-message nonce INTO the
+/// `ciphertext_b64` bytes and tags the response with
+/// `secure_plane = "treekem"`. The legacy `SignedPublic` AEAD path still
+/// returns the 3-field shape (ciphertext + separate `nonce_b64`) with no
+/// `secure_plane` tag.
+///
+/// The struct therefore carries:
+/// - `nonce_b64`: `Some(_)` for the legacy AEAD path, `None` when the
+///   nonce is embedded in the ciphertext (`TreeKEM`).
+/// - `plane`: `Some("treekem")` for the v0.21.3 `TreeKEM` path,
+///   `Some("signed_public")` for an explicit legacy tag, `None` when
+///   the daemon omits the field (older nodes — treated as legacy).
+///
+/// Both fields are additive and serialize with `#[serde(default)]` so
+/// older snapshots / wire-encoded frames continue to decode without the
+/// new fields present.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedFrame {
-    /// Base64 `ChaCha20-Poly1305` ciphertext.
+    /// Base64-encoded ciphertext. For `TreeKEM` this is a self-describing
+    /// `ApplicationCiphertext` (nonce embedded); for the legacy path this
+    /// is the raw `ChaCha20-Poly1305` output with `nonce_b64` supplying
+    /// the separate per-message nonce.
     pub ciphertext_b64: String,
-    /// Base64 12-byte nonce.
-    pub nonce_b64: String,
+    /// Base64 12-byte nonce. `None` for the `TreeKEM` path where the
+    /// nonce is baked into `ciphertext_b64`; `Some` for the legacy AEAD
+    /// path.
+    ///
+    /// `#[serde(default)]` keeps legacy snapshots that pre-date this
+    /// field decoding cleanly. The field is intentionally NOT
+    /// `skip_serializing_if = Option::is_none` — fetchit-chat
+    /// postcard-encodes the frame into the wire `TransitEnvelope`
+    /// ciphertext, and postcard (a positional binary format) requires
+    /// the `Option` discriminator byte even when the value is `None`.
+    #[serde(default)]
+    pub nonce_b64: Option<String>,
     /// MLS epoch (`secret_epoch` on the wire).
     pub secret_epoch: u32,
+    /// Secure-group plane: `"treekem"` (v0.21.3 ADR-0012) or
+    /// `"signed_public"` (legacy). `None` when the daemon omits the
+    /// tag — treated as legacy by the decrypt dispatcher to preserve
+    /// the pre-v0.21.3 contract.
+    ///
+    /// `#[serde(default)]` keeps legacy snapshots decoding cleanly;
+    /// `skip_serializing_if` is omitted for the same postcard-positional
+    /// reason as `nonce_b64`.
+    #[serde(default)]
+    pub plane: Option<String>,
+}
+
+/// Plane tag emitted by x0xd v0.21.3+ on real-`TreeKEM` groups (ADR-0012).
+pub const PLANE_TREEKEM: &str = "treekem";
+
+/// Plane tag for the legacy AEAD path. Older daemons omit the field;
+/// the decrypt dispatcher treats `None` and this value identically.
+pub const PLANE_SIGNED_PUBLIC: &str = "signed_public";
+
+impl EncryptedFrame {
+    /// True when the frame's plane is the v0.21.3 `TreeKEM`
+    /// `ApplicationCiphertext` shape (nonce embedded in ciphertext).
+    /// `None` and `"signed_public"` both return `false` so the decrypt
+    /// path keeps requiring `nonce_b64` for the legacy contract.
+    #[must_use]
+    pub fn is_treekem(&self) -> bool {
+        matches!(self.plane.as_deref(), Some(PLANE_TREEKEM))
+    }
 }
 
 /// Response shape from `POST /groups` for a private-secure group.
@@ -112,12 +172,15 @@ struct EncryptResponse {
     nonce_b64: Option<String>,
     #[serde(default)]
     secret_epoch: Option<u32>,
+    #[serde(default)]
+    secure_plane: Option<String>,
 }
 
 #[derive(Serialize)]
 struct DecryptRequest<'a> {
     ciphertext_b64: &'a str,
-    nonce_b64: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce_b64: Option<&'a str>,
     secret_epoch: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     sender_agent_id: Option<&'a str>,
@@ -260,16 +323,30 @@ impl SecureGroupsEndpoint {
         let ciphertext_b64 = resp
             .ciphertext_b64
             .ok_or_else(|| X0xdError::Rejected("encrypt response missing ciphertext_b64".into()))?;
-        let nonce_b64 = resp
-            .nonce_b64
-            .ok_or_else(|| X0xdError::Rejected("encrypt response missing nonce_b64".into()))?;
         let secret_epoch = resp
             .secret_epoch
             .ok_or_else(|| X0xdError::Rejected("encrypt response missing secret_epoch".into()))?;
+        // v0.21.3 dispatch: real-TreeKEM (ADR-0012) responses tag
+        // `secure_plane: "treekem"` and bake the nonce INTO the
+        // self-describing `ApplicationCiphertext` carried in
+        // `ciphertext_b64` — no separate `nonce_b64` on the wire. Legacy
+        // SignedPublic responses (and pre-v0.21.3 daemons) keep the
+        // 3-field shape: require `nonce_b64` there to preserve the AEAD
+        // contract.
+        let plane = resp.secure_plane;
+        let nonce_b64 =
+            if matches!(plane.as_deref(), Some(PLANE_TREEKEM)) {
+                None
+            } else {
+                Some(resp.nonce_b64.ok_or_else(|| {
+                    X0xdError::Rejected("encrypt response missing nonce_b64".into())
+                })?)
+            };
         Ok(EncryptedFrame {
             ciphertext_b64,
             nonce_b64,
             secret_epoch,
+            plane,
         })
     }
 
@@ -290,13 +367,27 @@ impl SecureGroupsEndpoint {
         let group_id = validate_group_id_hex(group_id)?;
         let path = format!("groups/{group_id}/secure/decrypt");
         let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        // v0.21.3 dispatch: TreeKEM `treekem_group_decrypt` reads only
+        // `ciphertext_b64` (the nonce travels inside the
+        // `ApplicationCiphertext`). Legacy SignedPublic still needs
+        // `nonce_b64` alongside. Omit the field entirely on the TreeKEM
+        // path so the daemon's serde parse does not see a spurious
+        // legacy-shape key.
+        let nonce_b64 =
+            if frame.is_treekem() {
+                None
+            } else {
+                Some(frame.nonce_b64.as_deref().ok_or_else(|| {
+                    X0xdError::Invalid("legacy decrypt requires nonce_b64".into())
+                })?)
+            };
         let raw = self
             .http
             .post(url)
             .bearer_auth(&self.api_token)
             .json(&DecryptRequest {
                 ciphertext_b64: &frame.ciphertext_b64,
-                nonce_b64: &frame.nonce_b64,
+                nonce_b64,
                 secret_epoch: frame.secret_epoch,
                 sender_agent_id,
             })
@@ -439,8 +530,9 @@ mod tests {
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         let frame = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 3,
+            plane: None,
         };
         let err = endpoint.decrypt("short", &frame, None).await.unwrap_err();
         match err {
@@ -458,8 +550,9 @@ mod tests {
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         let frame = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 3,
+            plane: None,
         };
         // 64 chars but contains a Z (non-hex).
         let mut bad = "a".repeat(63);
@@ -477,8 +570,9 @@ mod tests {
     fn encrypted_frame_round_trips_via_serde_json() {
         let f = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 7,
+            plane: None,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: EncryptedFrame = serde_json::from_str(&json).unwrap();
@@ -486,9 +580,39 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_frame_round_trips_treekem_shape() {
+        // TreeKEM (v0.21.3) — nonce baked into ciphertext, no separate
+        // `nonce_b64`. Plane tag distinguishes the dispatch path on
+        // decrypt.
+        let f = EncryptedFrame {
+            ciphertext_b64: "QXBwbGljYXRpb25DaXBoZXJ0ZXh0".into(),
+            nonce_b64: None,
+            secret_epoch: 11,
+            plane: Some(PLANE_TREEKEM.into()),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: EncryptedFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+        assert!(back.is_treekem());
+        assert!(back.nonce_b64.is_none());
+    }
+
+    #[test]
     fn encrypted_frame_rejects_missing_epoch() {
         let bad = r#"{"ciphertext_b64":"Y3Q=","nonce_b64":"bm9uY2U="}"#;
         assert!(serde_json::from_str::<EncryptedFrame>(bad).is_err());
+    }
+
+    #[test]
+    fn encrypted_frame_legacy_shape_decodes_without_plane() {
+        // Pre-v0.21.3 daemons / persisted snapshots omit `plane`; the
+        // additive `#[serde(default)]` keeps them decoding cleanly as
+        // `plane: None` which `is_treekem()` reports as legacy.
+        let legacy = r#"{"ciphertext_b64":"Y3Q=","nonce_b64":"bm9uY2U=","secret_epoch":3}"#;
+        let f: EncryptedFrame = serde_json::from_str(legacy).unwrap();
+        assert!(!f.is_treekem());
+        assert_eq!(f.nonce_b64.as_deref(), Some("bm9uY2U="));
+        assert!(f.plane.is_none());
     }
 
     #[tokio::test]
@@ -593,7 +717,42 @@ mod tests {
         let f = endpoint.encrypt(TEST_GROUP_HEX, b"hi").await.unwrap();
         assert_eq!(f.secret_epoch, 3);
         assert_eq!(f.ciphertext_b64, "Y3Q=");
-        assert_eq!(f.nonce_b64, "bm9uY2U=");
+        assert_eq!(f.nonce_b64.as_deref(), Some("bm9uY2U="));
+        // Legacy daemon — no `secure_plane` tag on the wire.
+        assert!(f.plane.is_none());
+        assert!(!f.is_treekem());
+    }
+
+    #[tokio::test]
+    async fn encrypt_returns_treekem_frame_without_nonce() {
+        // v0.21.3 ADR-0012: `treekem_group_encrypt` emits a
+        // self-describing `ApplicationCiphertext` and tags the response
+        // `secure_plane: "treekem"` — no separate `nonce_b64`. The
+        // pre-fix client errored with "encrypt response missing
+        // nonce_b64"; this test pins the new contract so a regression
+        // shows up immediately.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/encrypt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "QXBwQ2lwaGVyVGV4dEJsb2I=",
+                "secret_epoch": 7,
+                "secure_plane": "treekem",
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let f = endpoint.encrypt(TEST_GROUP_HEX, b"hi").await.unwrap();
+        assert_eq!(f.ciphertext_b64, "QXBwQ2lwaGVyVGV4dEJsb2I=");
+        assert!(
+            f.nonce_b64.is_none(),
+            "treekem frame must not carry a separate nonce_b64"
+        );
+        assert_eq!(f.secret_epoch, 7);
+        assert_eq!(f.plane.as_deref(), Some("treekem"));
+        assert!(f.is_treekem());
     }
 
     #[tokio::test]
@@ -639,14 +798,66 @@ mod tests {
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         let frame = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 3,
+            plane: None,
         };
         let plaintext = endpoint
             .decrypt(TEST_GROUP_HEX, &frame, None)
             .await
             .unwrap();
         assert_eq!(plaintext, b"hi");
+    }
+
+    #[tokio::test]
+    async fn decrypt_treekem_frame_omits_nonce_in_request() {
+        // v0.21.3: TreeKEM `treekem_group_decrypt` reads only
+        // `ciphertext_b64`. Sending `nonce_b64` alongside is harmless
+        // today but inconsistent with the new contract — and a future
+        // strict-mode daemon could 4xx on it. The mock therefore matches
+        // a body that lacks `nonce_b64` while carrying the ciphertext.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/decrypt"))
+            .and(body_partial_json(serde_json::json!({
+                "ciphertext_b64": "QXBwQ2lwaGVyVGV4dEJsb2I=",
+                "secret_epoch": 7,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": "aGk=",
+                "secret_epoch": 7,
+                "secure_plane": "treekem",
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "QXBwQ2lwaGVyVGV4dEJsb2I=".into(),
+            nonce_b64: None,
+            secret_epoch: 7,
+            plane: Some(PLANE_TREEKEM.into()),
+        };
+        let plaintext = endpoint
+            .decrypt(TEST_GROUP_HEX, &frame, None)
+            .await
+            .unwrap();
+        assert_eq!(plaintext, b"hi");
+
+        // Exact-body assertion: the captured POST must not carry
+        // `nonce_b64` — `body_partial_json` is presence-only, so we
+        // re-inspect the wiremock-captured request bytes to lock it in.
+        let received = server.received_requests().await.unwrap();
+        let decrypt = received
+            .iter()
+            .find(|r| r.url.path().ends_with("/secure/decrypt"))
+            .expect("decrypt request was captured");
+        let body: serde_json::Value = serde_json::from_slice(&decrypt.body).unwrap();
+        assert!(
+            body.get("nonce_b64").is_none(),
+            "treekem decrypt request must omit nonce_b64: {body}"
+        );
     }
 
     #[tokio::test]
@@ -667,8 +878,9 @@ mod tests {
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         let frame = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 3,
+            plane: None,
         };
         endpoint
             .decrypt(TEST_GROUP_HEX, &frame, Some("abcd1234"))
@@ -690,8 +902,9 @@ mod tests {
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         let frame = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 3,
+            plane: None,
         };
         let err = endpoint
             .decrypt(TEST_GROUP_HEX, &frame, None)
@@ -721,8 +934,9 @@ mod tests {
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         let frame = EncryptedFrame {
             ciphertext_b64: "Y3Q=".into(),
-            nonce_b64: "bm9uY2U=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
             secret_epoch: 3,
+            plane: None,
         };
         let err = endpoint
             .decrypt(TEST_GROUP_HEX, &frame, None)
@@ -737,6 +951,54 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn decrypt_legacy_frame_includes_nonce_in_request() {
+        // Conservative-semantic check: when the frame was produced by a
+        // legacy (non-TreeKEM) encrypt — `plane == None` — the decrypt
+        // request MUST still include `nonce_b64`. The mock matches the
+        // legacy body shape and the test verifies the request body
+        // afterwards so a future "drop nonce on all paths" regression
+        // would not just silently slide past wiremock's partial-match
+        // semantics.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups/4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e/secure/decrypt"))
+            .and(body_partial_json(serde_json::json!({
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "bm9uY2U=",
+                "secret_epoch": 3,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": "aGk=",
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let frame = EncryptedFrame {
+            ciphertext_b64: "Y3Q=".into(),
+            nonce_b64: Some("bm9uY2U=".into()),
+            secret_epoch: 3,
+            plane: None,
+        };
+        endpoint
+            .decrypt(TEST_GROUP_HEX, &frame, None)
+            .await
+            .unwrap();
+        let received = server.received_requests().await.unwrap();
+        let decrypt = received
+            .iter()
+            .find(|r| r.url.path().ends_with("/secure/decrypt"))
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&decrypt.body).unwrap();
+        assert_eq!(
+            body.get("nonce_b64").and_then(|v| v.as_str()),
+            Some("bm9uY2U="),
+            "legacy decrypt request must carry nonce_b64: {body}",
+        );
     }
 
     #[tokio::test]

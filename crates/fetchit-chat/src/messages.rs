@@ -858,6 +858,12 @@ impl<'a> Endpoint<'a> {
     ///   ML-DSA pubkey, or the envelope signature fails verification.
     /// * [`ChatError::MessageTransport`] — x0xd refused
     ///   `/secure/decrypt` (stale epoch, wrong group, sender mismatch).
+    // The body chains the per-step prelude — verify, nonce check, decrypt,
+    // dedupe, history mutation — and each step pulls a paragraph of inline
+    // commentary keyed to the security argument. Splitting into helpers
+    // would burn the through-line that makes the cross-checks legible. The
+    // 104/100 line budget breach is deliberate.
+    #[allow(clippy::too_many_lines)]
     pub async fn receive_private_group_envelope(
         &self,
         env: &TransitEnvelope,
@@ -914,24 +920,38 @@ impl<'a> Endpoint<'a> {
         nonce_bytes.copy_from_slice(&env.nonce);
 
         // Defence-in-depth: the AEAD-bound nonce lives INSIDE the
-        // postcard'd `EncryptedFrame.nonce_b64`. The outer envelope's
-        // `env.nonce` MUST match the inner one byte-for-byte. An
-        // attacker who has a captured envelope could otherwise mint a
-        // new envelope with a fresh `env.nonce` while leaving
-        // `frame.nonce_b64` unchanged — the per-sender replay window
-        // tracks `env.nonce`, so the fresh outer nonce sails past
-        // dedup; x0xd's `/secure/decrypt` is stateless within an
-        // epoch (`TreeKEM` epoch key + frame.nonce_b64 fully
-        // determine the AEAD key/nonce) so it accepts the same frame
-        // and the plaintext re-appears in history. Rejecting the
-        // mismatch BEFORE the replay check + the daemon round-trip
+        // frame the daemon decrypts. The outer envelope's `env.nonce`
+        // must be authentically derivable from the inner ciphertext so
+        // an attacker who captured a delivered envelope cannot mint a
+        // new envelope with a fresh `env.nonce` while leaving the
+        // ciphertext bytes unchanged — the per-sender replay window
+        // tracks `env.nonce`, so a fresh outer nonce would otherwise
+        // sail past dedup and the daemon would happily re-decrypt the
+        // same frame (TreeKEM is stateless within an epoch). Rejecting
+        // a mismatch BEFORE the replay check + the daemon round-trip
         // closes the entire outer-vs-inner-nonce-mismatch class.
+        //
+        // Plane dispatch (v0.21.3 ADR-0012):
+        // - Legacy `SignedPublic`: `frame.nonce_b64` IS the AEAD nonce.
+        //   `env.nonce` must equal the decoded value byte-for-byte.
+        // - `TreeKEM`: the AEAD nonce is embedded in
+        //   `frame.ciphertext_b64`; the daemon does not expose it. The
+        //   sender carries `env.nonce =
+        //   derive_treekem_outer_nonce(ciphertext_b64)`, so the receiver
+        //   recomputes the same derivation and checks for equality.
         let frame: EncryptedFrame = postcard::from_bytes(&env.ciphertext)
             .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
-        let frame_nonce = B64
-            .decode(&frame.nonce_b64)
-            .map_err(|e| ChatError::Invalid(format!("frame nonce b64: {e}")))?;
-        if frame_nonce != env.nonce {
+        let expected_outer_nonce: Vec<u8> = if frame.is_treekem() {
+            derive_treekem_outer_nonce(&frame.ciphertext_b64)
+        } else {
+            let nonce_b64 = frame
+                .nonce_b64
+                .as_deref()
+                .ok_or_else(|| ChatError::Invalid("legacy frame missing nonce_b64".into()))?;
+            B64.decode(nonce_b64)
+                .map_err(|e| ChatError::Invalid(format!("frame nonce b64: {e}")))?
+        };
+        if expected_outer_nonce != env.nonce {
             return Err(ChatError::Invalid(
                 "envelope nonce vs frame nonce mismatch".into(),
             ));
@@ -1192,14 +1212,33 @@ async fn build_private_group_envelope<S: Signer + ?Sized>(
 ) -> Result<TransitEnvelope> {
     let ciphertext = postcard::to_allocvec(frame)
         .map_err(|e| ChatError::Invalid(format!("postcard frame: {e}")))?;
-    // x0xd's nonce travels INSIDE the EncryptedFrame (and thus inside
-    // `ciphertext`); the wire-level `nonce` is informational only here
-    // — relays do not look at it for the private-group path. We carry
-    // the same bytes so wire observers see a consistent shape and a
-    // future cross-check can fail closed if they ever disagree.
-    let nonce_bytes = B64
-        .decode(&frame.nonce_b64)
-        .map_err(|e| ChatError::Invalid(format!("frame nonce b64: {e}")))?;
+    // Wire-level `env.nonce` is 12 bytes — the per-sender replay window
+    // and (for the legacy path) a defence-in-depth cross-check against
+    // the AEAD-bound nonce key off it.
+    //
+    // Legacy SignedPublic: `frame.nonce_b64` is the AEAD nonce. We carry
+    // it as `env.nonce` so the receive-side inner/outer cross-check
+    // closes the captured-envelope-replay vector (see
+    // `receive_private_group_envelope`).
+    //
+    // TreeKEM (v0.21.3 ADR-0012): the AEAD nonce is BAKED INTO the
+    // `ApplicationCiphertext` carried in `frame.ciphertext_b64`. The
+    // daemon does not expose it. We DERIVE `env.nonce` as the first 12
+    // bytes of `SHA256(domain || ciphertext_b64-bytes)` — a
+    // deterministic-per-ciphertext value the receiver can recompute
+    // and check, preserving the inner/outer integrity property: an
+    // attacker minting a fresh `env.nonce` against an unchanged inner
+    // ciphertext will fail the derivation check on the receive side.
+    let nonce_bytes = if frame.is_treekem() {
+        derive_treekem_outer_nonce(&frame.ciphertext_b64)
+    } else {
+        let nonce_b64 = frame
+            .nonce_b64
+            .as_deref()
+            .ok_or_else(|| ChatError::Invalid("legacy encrypt frame missing nonce_b64".into()))?;
+        B64.decode(nonce_b64)
+            .map_err(|e| ChatError::Invalid(format!("frame nonce b64: {e}")))?
+    };
     let mut local_agent_bytes = [0u8; 32];
     hex::decode_to_slice(local_agent_hex, &mut local_agent_bytes)
         .map_err(|e| ChatError::Invalid(format!("local agent_id hex: {e}")))?;
@@ -1233,6 +1272,28 @@ async fn build_private_group_envelope<S: Signer + ?Sized>(
         .map_err(|e| ChatError::Invalid(format!("envelope sign: {e}")))?;
     env.sender_signature = sig;
     Ok(env)
+}
+
+/// Derive the 12-byte wire-level `env.nonce` for a `TreeKEM` frame.
+///
+/// `frame.nonce_b64` is `None` on the `TreeKEM` path (v0.21.3 ADR-0012: the
+/// AEAD nonce is embedded in the `ApplicationCiphertext`). We still need a
+/// deterministic 12-byte value to populate `TransitEnvelope::nonce` so the
+/// per-sender replay window keeps working AND the receiver can re-derive
+/// the same value as an inner/outer integrity check.
+///
+/// The derivation is `SHA256(domain || ciphertext_b64_bytes)` truncated to
+/// 12 bytes. The domain string keeps this value distinct from any other
+/// per-message hash we might compute over the ciphertext (e.g.
+/// `envelope_dedupe_bytes`) so the two cannot collide and confuse a
+/// future cross-check.
+fn derive_treekem_outer_nonce(ciphertext_b64: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"lit/group/treekem/outer-nonce/v1\0");
+    h.update(ciphertext_b64.as_bytes());
+    let digest = h.finalize();
+    digest[..12].to_vec()
 }
 
 /// Wall-clock millis since the Unix epoch. On a broken clock
@@ -1625,10 +1686,11 @@ mod tests {
             .expect("envelope ciphertext must postcard-decode as EncryptedFrame");
         assert_eq!(frame.secret_epoch, 7);
         assert_eq!(frame.ciphertext_b64, "Y2lwaGVydGV4dA==");
-        assert_eq!(frame.nonce_b64, "MTIzNDU2Nzg5MGFi");
-        // Wire-level nonce mirrors the frame's nonce per the build
-        // helper's contract; a future cross-check would otherwise have
-        // no shape to assert against.
+        // Legacy mock encrypt — daemon returned `nonce_b64`, no
+        // `secure_plane` tag, so the frame's plane stays `None` and the
+        // build helper used `frame.nonce_b64` verbatim for `env.nonce`.
+        assert_eq!(frame.nonce_b64.as_deref(), Some("MTIzNDU2Nzg5MGFi"));
+        assert!(frame.plane.is_none());
         assert_eq!(env.nonce, B64.decode("MTIzNDU2Nzg5MGFi").unwrap());
         let group_id = env.group_id.expect("envelope must carry group_id");
         assert_eq!(hex::encode(group_id.as_bytes()), TEST_GROUP_HEX);
@@ -1730,8 +1792,9 @@ mod tests {
     ) -> TransitEnvelope {
         let frame = EncryptedFrame {
             ciphertext_b64: B64.encode(body),
-            nonce_b64: "MTIzNDU2Nzg5MGFi".to_owned(),
+            nonce_b64: Some("MTIzNDU2Nzg5MGFi".to_owned()),
             secret_epoch: 9,
+            plane: None,
         };
         let frame_bytes = postcard::to_allocvec(&frame).unwrap();
         let mut group_id_bytes = [0u8; 32];
@@ -3055,8 +3118,9 @@ mod tests {
             raw_nonce[0] = u8::try_from(i + 1).unwrap();
             let frame = EncryptedFrame {
                 ciphertext_b64: B64.encode([u8::try_from(i + 1).unwrap()]),
-                nonce_b64: B64.encode(raw_nonce),
+                nonce_b64: Some(B64.encode(raw_nonce)),
                 secret_epoch: 9,
+                plane: None,
             };
             let frame_bytes = postcard::to_allocvec(&frame).unwrap();
             let mut group_id_bytes = [0u8; 32];
@@ -3281,6 +3345,148 @@ mod tests {
         };
         assert_eq!(entry.body, "hello bob");
         assert_eq!(entry.sender_agent_id_hex, alice_hex);
+    }
+
+    /// Mount the v0.21.3 `TreeKEM` shape on `/secure/encrypt` +
+    /// `/secure/decrypt`: response carries `secure_plane: "treekem"` and
+    /// (encrypt) NO `nonce_b64` field, since the nonce is baked into
+    /// the `ApplicationCiphertext` returned in `ciphertext_b64`.
+    async fn mount_echo_treekem_encrypt_decrypt(server: &MockServer, plaintext_b64: &str) {
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "QXBwbGljYXRpb25DaXBoZXJ0ZXh0Qmxvbg==",
+                "secret_epoch": 7,
+                "secure_plane": "treekem",
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": plaintext_b64,
+                "secret_epoch": 7,
+                "secure_plane": "treekem",
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn send_then_receive_private_group_roundtrip_treekem() {
+        // v0.21.3 wire shape: the daemon's TreeKEM encrypt response
+        // omits `nonce_b64` and tags `secure_plane: "treekem"`. The
+        // wire-level `env.nonce` is therefore derived from the
+        // ciphertext bytes (see `derive_treekem_outer_nonce`). End-to-end
+        // round-trip locks in: encrypt parses cleanly, build_envelope
+        // populates `env.nonce` from the derivation, the receiver
+        // re-derives the same value, the inner/outer cross-check passes,
+        // and the decrypt POST omits `nonce_b64`.
+        let server = MockServer::start().await;
+        let alice_rig = build_rig();
+        let bob_rig = build_rig();
+        let alice_hex = alice_rig.agent_hex().to_owned();
+        let bob_hex = bob_rig.agent_hex().to_owned();
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": alice_hex, "state": "active"},
+                    {"agent_id": bob_hex, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        mount_echo_treekem_encrypt_decrypt(&server, &B64.encode(b"pq hello")).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, captured) = ManyCapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let alice_signer_arc = alice_rig.signer_arc();
+        let alice_endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&alice_rig.identity),
+            Some(&alice_rig.registry),
+            Some(&alice_signer_arc),
+            Some(&alice_rig.layout),
+            [0u8; 32],
+            None,
+        );
+        alice_endpoint
+            .send_private_group(TEST_GROUP_HEX, "pq hello", "Alice")
+            .await
+            .unwrap();
+
+        let (recipient, envelope) = {
+            let guard = captured.lock().unwrap();
+            assert_eq!(guard.len(), 1);
+            guard[0].clone()
+        };
+        assert_eq!(recipient.0, bob_hex);
+        assert!(is_private_group_envelope(&envelope));
+
+        // Wire-format invariants for the TreeKEM path: the postcard'd
+        // frame inside the envelope carries `plane: Some("treekem")` and
+        // `nonce_b64: None`; `env.nonce` is the deterministic 12-byte
+        // derivation of `frame.ciphertext_b64` so the receiver can
+        // verify the inner/outer binding without a separate nonce.
+        let frame: EncryptedFrame = postcard::from_bytes(&envelope.ciphertext).unwrap();
+        assert!(frame.is_treekem(), "frame must tag plane=treekem");
+        assert!(
+            frame.nonce_b64.is_none(),
+            "treekem frame must omit nonce_b64"
+        );
+        assert_eq!(
+            envelope.nonce,
+            derive_treekem_outer_nonce(&frame.ciphertext_b64),
+            "env.nonce must equal derived value for inner/outer cross-check",
+        );
+
+        install_card_for(&bob_rig, &alice_rig.signer, &alice_hex);
+        let bob_router = Router::new();
+        let bob_signer_arc = bob_rig.signer_arc();
+        let bob_endpoint = Endpoint::new(
+            &http,
+            &bob_router,
+            Some(&bob_rig.identity),
+            Some(&bob_rig.registry),
+            Some(&bob_signer_arc),
+            Some(&bob_rig.layout),
+            [0u8; 32],
+            None,
+        );
+        let out = bob_endpoint
+            .receive_private_group_envelope(&envelope, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        let PrivateGroupReceive::Persisted(entry) = out else {
+            panic!("expected Persisted, got {out:?}");
+        };
+        assert_eq!(entry.body, "pq hello");
+        assert_eq!(entry.sender_agent_id_hex, alice_hex);
+
+        // Lock in the decrypt-request shape: TreeKEM decrypt POST must
+        // omit `nonce_b64`. A future regression that reintroduces the
+        // legacy field would still pass wiremock's partial-match, so
+        // re-inspect the captured request body explicitly.
+        let received = server.received_requests().await.unwrap();
+        let decrypt = received
+            .iter()
+            .find(|r| r.url.path().ends_with("/secure/decrypt"))
+            .expect("decrypt request captured");
+        let body: serde_json::Value = serde_json::from_slice(&decrypt.body).unwrap();
+        assert!(
+            body.get("nonce_b64").is_none(),
+            "treekem decrypt request must not carry nonce_b64: {body}",
+        );
     }
 
     // ---- Routing predicate (table-driven) ------------------------------
