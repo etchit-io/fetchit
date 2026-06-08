@@ -64,7 +64,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fetchit_chat::groups::GroupId;
-use fetchit_chat::identity::AgentId;
 use fetchit_chat::Client;
 use std::time::Duration;
 use url::Url;
@@ -81,7 +80,13 @@ const MIN_HISTORY_FROM_BOB: usize = 5;
 const RELAY_URL: &str = "http://67.207.94.66:8088";
 
 /// How long we wait for Bob to join after we mint the invite.
-const JOIN_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// Bumped past the original 60s so David's v0.21.3 `63b5c63` joiner-
+/// side Welcome-fetch retry has headroom to ride out a transient gossip
+/// drop. The retry budget on the daemon side is a handful of attempts
+/// at exponential backoff; 120s comfortably covers a worst-case run
+/// without masking a genuine wedge.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Poll interval while waiting for Bob's join.
 const JOIN_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -245,8 +250,13 @@ async fn m2_live_private_group_round_trip() {
     let group_id_hex = group_id.as_str().to_owned();
     eprintln!("[m2-live] group_id = {group_id_hex}");
 
-    // Mint the invite. Bob pastes this manually in Task 15; Task 16
-    // automates the handshake via the chat-pipe.
+    // Mint the invite. The joiner's chat-peer (running
+    // `Mode::Join --invite-file <path>`) reads this and calls
+    // `Client::groups().join(invite)` on the other box, which drives
+    // the daemon's `/groups/join` -> Welcome-fetch path. That is the
+    // surface David's v0.21.3 `63b5c63` retry-fix patches; the earlier
+    // `add_member`-driven flow we replaced here bypassed it entirely
+    // and so never actually exercised the fix.
     let invite = client
         .groups()
         .invite(&group_id)
@@ -256,25 +266,28 @@ async fn m2_live_private_group_round_trip() {
     eprintln!("[m2-live] {}", invite.0);
     eprintln!("[m2-live] >>> END INVITE <<<");
 
-    // Creator-authored membership add. Per x0xd's named-groups model
-    // (upstream `docs/primers/groups.md`), /groups/join on the peer's
-    // side sets up their local group state and subscribes them to the
-    // group's metadata gossip topic, but does NOT register them in
-    // /members on either side. The creator must POST
-    // /groups/<id>/members; that event propagates over the gossip
-    // topic to every subscribed daemon (including the peer's, after
-    // their /groups/join lands). Without this call, /members shows
-    // only the owner on both sides and send_private_group's fanout
-    // has no recipients.
-    client
-        .groups()
-        .add_member(&group_id, &AgentId(peer_agent_hex.clone()), Some("bob"))
-        .await
-        .expect("creator-authored add_member must succeed");
-    eprintln!("[m2-live] add_member published for peer agent");
+    // Write the invite to a file that the joiner's chat-peer (running
+    // `Mode::Join --invite-file <path>` on the other box) reads to
+    // drive `/groups/join`. The default `/tmp/m2-live-invite.json`
+    // path matches the wyse21<->wyse37 empirical's scp pipeline; the
+    // env-var override exists for ad-hoc reruns on a different rig.
+    let invite_path = std::env::var("M2_LIVE_INVITE_FILE")
+        .unwrap_or_else(|_| "/tmp/m2-live-invite.json".to_string());
+    std::fs::write(&invite_path, &invite.0)
+        .unwrap_or_else(|e| panic!("write invite to {invite_path}: {e}"));
+    eprintln!("[m2-live] invite written to {invite_path}");
+    eprintln!("[m2-live] WAITING_FOR_JOINER_JOIN <<<");
+    eprintln!(
+        "[m2-live] Joiner-side action required: run `chat-peer ... join --invite-file {invite_path}`"
+    );
 
-    // Wait for Bob to join. We poll the live roster via x0xd until
-    // member_count >= 2 (Alice + Bob).
+    // Poll the live roster via x0xd until member_count >= 2. The
+    // joiner's `/groups/join` + David's Welcome-fetch retry land them
+    // via gossip catch-up, which the owner observes through /members.
+    // If David's `63b5c63` fix is NOT active on the joiner box, the
+    // Welcome-fetch fails closed on the first transient drop and the
+    // joiner never reaches /members; this loop will time out with a
+    // diagnostic naming the fix explicitly.
     let join_deadline = tokio::time::Instant::now() + JOIN_TIMEOUT;
     loop {
         let members = client
@@ -288,7 +301,6 @@ async fn m2_live_private_group_round_trip() {
             members.iter().map(|m| &m.0).collect::<Vec<_>>()
         );
         if members.len() >= 2 {
-            // Sanity-check Bob actually showed up under the expected id.
             assert!(
                 members.iter().any(|m| m.0 == peer_agent_hex),
                 "expected peer {peer_agent_hex} in roster but got {members:?}"
@@ -297,11 +309,11 @@ async fn m2_live_private_group_round_trip() {
         }
         assert!(
             tokio::time::Instant::now() < join_deadline,
-            "Bob ({peer_agent_hex}) did not join group {group_id_hex} within {JOIN_TIMEOUT:?}",
+            "joiner ({peer_agent_hex}) did not appear in /members for group {group_id_hex} within {JOIN_TIMEOUT:?}; David's 63b5c63 Welcome-retry fix may not be active on the joiner box",
         );
         tokio::time::sleep(JOIN_POLL_INTERVAL).await;
     }
-    eprintln!("[m2-live] roster has Bob; sending payload");
+    eprintln!("[m2-live] joiner converged; proceeding to message round-trip");
 
     // Send 5 messages, spaced so Bob's echo handler isn't slammed.
     let send_started_at = now_ms();

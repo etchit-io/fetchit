@@ -1,7 +1,7 @@
 //! `fetchit-chat-peer` — headless chat peer for testing.
 //!
 //! Drives `fetchit_chat::Client` against a local x0xd + a relay, with
-//! no GUI. Four modes:
+//! no GUI. Five modes:
 //!
 //! - `echo` — auto-echo every inbound DM back to its sender. Useful
 //!   for confirming relay round-trips from a different machine without
@@ -13,6 +13,11 @@
 //! - `import` — read a peer's share URI from a file (the v2 form is
 //!   ~12 KB, too large for a CLI arg) and add it to the local contact
 //!   store. Required before `chat` can encrypt to that peer.
+//! - `join`: read an invite payload from a file and call
+//!   `Client::groups().join(...)`, then enter echo mode for the
+//!   just-joined group. Used by the `m2_live` cross-NAT empirical to
+//!   drive the joiner-side `/groups/join` -> Welcome-fetch path that
+//!   David's v0.21.3 `63b5c63` retry-fix targets.
 
 #![allow(
     clippy::unwrap_used,
@@ -24,6 +29,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
+use fetchit_chat::groups::GroupInvite;
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::{
     decode_direct_message, is_private_group_envelope, PrivateGroupReceive,
@@ -149,6 +155,23 @@ enum Mode {
         #[arg(long)]
         uri_file: PathBuf,
     },
+    /// Read an invite payload from `invite_file` and call
+    /// `Client::groups().join(invite)`. Used by the `m2_live` cross-NAT
+    /// empirical to drive the joiner-side `/groups/join` -> Welcome-fetch
+    /// path (the surface David's v0.21.3 `63b5c63` retry-fix targets).
+    ///
+    /// After `/groups/join` succeeds, this subcommand enters echo mode
+    /// for the just-joined group: any private-group message received
+    /// from a group peer is echoed back via `send_private_group`. Exits
+    /// when the caller sends SIGTERM (or the binary's persistent-mode
+    /// signal pipeline catches it).
+    Join {
+        /// Path to a UTF-8 file containing the invite payload (the full
+        /// `x0x://invite/<base64>` URI as produced by
+        /// `Client::groups().invite(...)`).
+        #[arg(long)]
+        invite_file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -202,6 +225,7 @@ async fn main() -> Result<()> {
             }
         },
         Mode::Import { uri_file } => run_import(&client, &uri_file).await,
+        Mode::Join { invite_file } => run_join(&client, &cli.display_name, &invite_file).await,
     }
 }
 
@@ -239,6 +263,48 @@ async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
         eprintln!("[peer] no local layout (REST-only client); v2 fields not persisted");
     }
     Ok(())
+}
+
+async fn run_join(
+    client: &Client,
+    display_name: &str,
+    invite_file: &std::path::Path,
+) -> Result<()> {
+    // Read the invite payload as written by the m2_live owner-side
+    // driver: a single x0x://invite/<base64> URI on disk (trimmed of
+    // surrounding whitespace so a trailing newline from `echo` doesn't
+    // break the daemon's parser).
+    let raw = std::fs::read_to_string(invite_file)
+        .with_context(|| format!("read invite file at {}", invite_file.display()))?;
+    let invite = GroupInvite(raw.trim().to_owned());
+    if !invite.0.starts_with("x0x://invite/") {
+        anyhow::bail!(
+            "invite file does not start with x0x://invite/ (got {} bytes)",
+            invite.0.len()
+        );
+    }
+    eprintln!(
+        "[peer] joining group via invite ({} bytes from {})",
+        invite.0.len(),
+        invite_file.display(),
+    );
+    // The /groups/join call is what David's v0.21.3 63b5c63 retry-fix
+    // patches on the daemon side: if the Welcome-blob fetch from the
+    // inviter's daemon flakes (transient relay/gossip drop), x0xd now
+    // retries with backoff before failing closed.
+    let group = client
+        .groups()
+        .join(&invite, Some(display_name))
+        .await
+        .context("Client::groups().join(invite)")?;
+    eprintln!("[peer] joined group {}", group.group_id.as_str());
+    // The Mode::Echo loop already routes private-group envelopes
+    // through `decode_private_group`, which echoes the body back into
+    // the same group via `send_private_group`. Once /groups/join lands
+    // us in /members, the owner's `send_private_group` fanout will
+    // address an envelope to this peer; the echo fires as a side
+    // effect inside `decode_private_group`.
+    run_echo(client, display_name).await
 }
 
 fn resolve_token(cli: &Cli) -> Result<String> {
