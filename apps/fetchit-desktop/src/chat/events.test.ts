@@ -5,7 +5,12 @@ vi.mock("./notify", () => ({
   maybeNotifyInboundDm: (...args: unknown[]) => maybeNotifyMock(...args),
 }));
 
-import { applyChatEvent, projectPendingContact, warnEventToCopy } from "./events";
+import {
+  applyChatEvent,
+  makeRelayDenylistedHandler,
+  projectPendingContact,
+  warnEventToCopy,
+} from "./events";
 import { ChatStore, TRANSIENT_NOTICE_MS } from "./state";
 
 const ME = "a".repeat(64);
@@ -213,6 +218,37 @@ describe("warnEventToCopy", () => {
 
   it("falls back to a generic 'something went wrong' for unknown kinds", () => {
     expect(warnEventToCopy({ kind: "novel_failure_mode" })).toContain("novel_failure_mode");
+  });
+});
+
+describe("makeRelayDenylistedHandler (M3 G1)", () => {
+  const RELAY = "wss://nyc.etchit.io/v1/ws";
+
+  it("pushes a warn notice naming the relay URL on first fire", () => {
+    const handler = makeRelayDenylistedHandler(store);
+    handler(RELAY);
+    const notices = store.allNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0].severity).toBe("warn");
+    expect(notices[0].body).toContain(RELAY);
+    expect(notices[0].body).toContain("Settings → Network");
+  });
+
+  it("dedupes by URL — a repeated fire for the same relay is a no-op", () => {
+    const handler = makeRelayDenylistedHandler(store);
+    handler(RELAY);
+    handler(RELAY);
+    handler(RELAY);
+    // Idempotency note from G1 review: a Lagged-recovery or duplicate
+    // `added` re-fires the callback; the banner must not stack.
+    expect(store.allNotices()).toHaveLength(1);
+  });
+
+  it("surfaces distinct relays independently", () => {
+    const handler = makeRelayDenylistedHandler(store);
+    handler(RELAY);
+    handler("wss://fra.etchit.io/v1/ws");
+    expect(store.allNotices()).toHaveLength(2);
   });
 });
 

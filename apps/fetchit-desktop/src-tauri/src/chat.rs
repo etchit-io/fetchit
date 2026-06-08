@@ -826,6 +826,7 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_lan_mdns(app.clone(), state.clone());
     spawn_relay_presence(app.clone(), state.clone());
     spawn_relay_conn_state(app.clone(), state.clone());
+    spawn_relay_denylist(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
 }
@@ -1306,6 +1307,47 @@ fn spawn_relay_conn_state(app: AppHandle, state: ChatState) {
             }
             state.invalidate().await;
             tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
+/// M3 G1: register the primary-relay-denylisted callback on each freshly
+/// built chat client and emit `chat:relay-denylisted` to the frontend
+/// when it fires.
+///
+/// The callback lives on the client's `MultiHomeTransport` (slot 0's
+/// primary URL match); a fresh transport is built on every client
+/// rebuild, so the callback must be re-registered each cycle. We use the
+/// relay connection-state watch as the rebuild signal: it closes when the
+/// client is invalidated, at which point the outer loop re-`get()`s the
+/// new client and re-registers. REST-only clients (no relay) have no
+/// watch and nothing to register — sleep + retry.
+///
+/// Banner idempotency (Bob's G1 review note) is the frontend's job: each
+/// `BlockEvent` carrying the primary URL re-fires the callback, and a
+/// broadcast `Lagged`-gap recovery could double-emit, so the TS listener
+/// dedupes by URL before rendering.
+fn spawn_relay_denylist(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            // Register on this client's MultiHomeTransport. No-op when the
+            // client is REST-only (no relay URL -> no multi-home).
+            let app_for_cb = app.clone();
+            client.set_relay_denylisted_callback(std::sync::Arc::new(move |url: String| {
+                let _ = app_for_cb.emit("chat:relay-denylisted", url);
+            }));
+            // Park on the connection-state watch as the rebuild signal.
+            // `changed()` resolves on every transition and errors when the
+            // sender drops (client invalidated) — fall through to re-register.
+            if let Some(mut rx) = client.relay_connection_state() {
+                while rx.changed().await.is_ok() {}
+            } else {
+                tokio::time::sleep(RECONNECT_BACKOFF * 6).await;
+            }
         }
     });
 }

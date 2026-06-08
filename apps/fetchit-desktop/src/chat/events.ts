@@ -109,6 +109,33 @@ export function projectPendingContact(
   };
 }
 
+/// M3 G1: build a stateful handler for the `chat:relay-denylisted`
+/// event (payload = the user's primary relay URL that just landed on
+/// the community denylist). Dedupes by URL for the session so a
+/// broadcast `Lagged`-gap recovery or a duplicate `added` entry can't
+/// stack identical banners (Bob's G1 idempotency note). Exported so the
+/// dedup contract is unit-testable without a Tauri `listen` mock.
+///
+/// The user is NOT disconnected — slot 0 (the primary) is deliberately
+/// kept by `MultiHomeTransport` on a denylist hit (the D6 "Settings
+/// concern" contract), so the copy informs + suggests a switch rather
+/// than implying the link is dead.
+export function makeRelayDenylistedHandler(
+  store: ChatStore,
+): (url: string) => void {
+  const surfaced = new Set<string>();
+  return (url: string) => {
+    if (surfaced.has(url)) return;
+    surfaced.add(url);
+    store.pushNotice(
+      "warn",
+      `The relay you connect through (${url}) was added to the community `
+        + "safety denylist. You're still connected, but consider switching "
+        + "relays in Settings → Network.",
+    );
+  };
+}
+
 export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
   const unsubEvent = await listen<ChatEvent>("chat:event", (ev) => {
     applyChatEvent(store, ev.payload);
@@ -153,6 +180,14 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       }
     },
   );
+  const onRelayDenylisted = makeRelayDenylistedHandler(store);
+  const unsubRelayDenylisted = await listen<string>(
+    "chat:relay-denylisted",
+    (ev) => {
+      console.warn("[chat:relay-denylisted]", ev.payload);
+      onRelayDenylisted(ev.payload);
+    },
+  );
   const unsubContactReq = await listen<ContactRequestEvent>(
     "chat:contact-request",
     (ev) => {
@@ -175,6 +210,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubDaemon();
     unsubWarn();
     unsubRelayStatus();
+    unsubRelayDenylisted();
     unsubContactReq();
   };
 }
