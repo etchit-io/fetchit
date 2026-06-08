@@ -290,6 +290,11 @@ pub struct Slot {
     pub last_traffic_at: SystemTime,
 }
 
+/// M3 G1 — closure shape the primary-denylisted callback registers.
+/// Type-aliased so the struct field + the `set_*_callback` setter
+/// share one canonical name (`clippy::type_complexity` gate).
+pub type PrimaryDenylistedCallback = Arc<dyn Fn(String) + Send + Sync>;
+
 /// Multi-home transport owning up to 3 active relay sessions.
 ///
 /// Slot 0 is pinned at boot to the local primary URL and is immune
@@ -299,17 +304,24 @@ pub struct Slot {
 /// gated by [`NonceDedup`] (D4).
 pub struct MultiHomeTransport {
     /// Slot-0 URL the transport was constructed with. Retained for
-    /// diagnostics and future fallback policy work; the live slot 0
-    /// is owned by [`Self::slots`] and reachable via
-    /// [`Self::slot_zero_handle`].
-    #[allow(dead_code)]
-    // R-tail-5 retired the local-fallback read site; field kept for diagnostics + future use
+    /// diagnostics, the G1 primary-denylisted match, and future
+    /// fallback-policy work; the live slot 0 is owned by
+    /// [`Self::slots`] and reachable via [`Self::slot_zero_handle`].
     primary_url: String,
     builder: Arc<dyn RelayBuilder>,
     slots: Arc<RwLock<[Option<Slot>; 3]>>,
     inbox_dedup: Arc<std::sync::Mutex<NonceDedup>>,
     denylist: Arc<dyn fetchit_trust::DenylistQuery>,
     on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
+    /// M3 G1: optional callback the denylist subscriber invokes when
+    /// the user's primary relay (slot 0) is added to the community
+    /// denylist mid-session. Slot 0 is NOT dropped (per the D6
+    /// "Settings concern" contract); the callback surfaces the URL
+    /// so the desktop shell can emit a Tauri event + render the
+    /// conversation banner. Production callers register the closure
+    /// at boot; tests record into a shared `Mutex<Vec<String>>` to
+    /// assert the dispatch path.
+    primary_denylisted_cb: Arc<RwLock<Option<PrimaryDenylistedCallback>>>,
 }
 
 impl MultiHomeTransport {
@@ -368,6 +380,7 @@ impl MultiHomeTransport {
             inbox_dedup,
             denylist,
             on_inbound,
+            primary_denylisted_cb: Arc::new(RwLock::new(None)),
         };
         if let Some(rx) = block_events {
             mh.spawn_denylist_subscriber(rx);
@@ -375,14 +388,36 @@ impl MultiHomeTransport {
         Ok(mh)
     }
 
-    /// Drain a [`fetchit_trust_client::BlockEvent`] broadcast and drop
-    /// any active slot 1/2 whose `relay_url` matches a `RelayUrl`
-    /// kind's `added` list. Slot 0 stays — see module docs.
+    /// M3 G1: register a callback the denylist subscriber invokes
+    /// when slot 0's primary relay URL appears in a fresh
+    /// `BlockEvent::added` list. Replaces any prior callback. The
+    /// closure is dispatched from the subscriber task, so it MUST be
+    /// `Send + Sync`. Production callers register an emitter for the
+    /// `chat:relay-denylisted` Tauri event; tests record into a shared
+    /// `Mutex<Vec<String>>`.
+    pub fn set_primary_denylisted_callback(&self, cb: PrimaryDenylistedCallback) {
+        if let Ok(mut guard) = self.primary_denylisted_cb.write() {
+            *guard = Some(cb);
+        }
+    }
+
+    /// Drain a [`fetchit_trust_client::BlockEvent`] broadcast and:
+    ///
+    /// 1. Drop any active slot 1/2 whose `relay_url` matches a
+    ///    `RelayUrl` kind's `added` list. Slot 0 stays — a denylist
+    ///    hit there is a Settings concern (G1 banner), not a
+    ///    transport drop.
+    /// 2. Fire the registered [`Self::set_primary_denylisted_callback`]
+    ///    callback (if any) when slot 0's URL appears in the same
+    ///    `added` list. The callback emits the Tauri event that
+    ///    drives the conversation banner.
     fn spawn_denylist_subscriber(
         &self,
         mut rx: tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>,
     ) {
         let slots = Arc::clone(&self.slots);
+        let primary_url = self.primary_url.clone();
+        let cb_slot = Arc::clone(&self.primary_denylisted_cb);
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -391,6 +426,19 @@ impl MultiHomeTransport {
                             || event.added.is_empty()
                         {
                             continue;
+                        }
+                        // G1: emit BEFORE the slot mutation so the
+                        // callback fires even if `slots` is poisoned
+                        // below (the user still needs to know).
+                        if event.added.iter().any(|u| u == &primary_url) {
+                            log::info!(
+                                "multi_home primary relay denylisted mid-session: url={primary_url}",
+                            );
+                            let cb_opt =
+                                cb_slot.read().ok().and_then(|g| g.as_ref().map(Arc::clone));
+                            if let Some(cb) = cb_opt {
+                                cb(primary_url.clone());
+                            }
                         }
                         let mut guard = match slots.write() {
                             Ok(g) => g,
@@ -1266,6 +1314,102 @@ mod tests {
                 .map(|s| s.relay_url.as_str()),
             Some("wss://primary.test/v1/ws"),
             "slot 0 must survive a denylist of its own URL",
+        );
+    }
+
+    /// G1: when slot 0's primary URL appears in a `RelayUrl` block
+    /// event's `added` list, the registered callback is invoked with
+    /// the URL. Slot 0 is NOT dropped (D6 contract); the desktop shell
+    /// uses this signal to surface the conversation banner that tells
+    /// the user "your primary relay was just added to the denylist."
+    #[tokio::test]
+    async fn mid_session_primary_denylist_fires_callback() {
+        use std::sync::Mutex;
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+            Some(rx),
+        )
+        .await
+        .unwrap();
+
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cb_recorded = Arc::clone(&recorded);
+        mh.set_primary_denylisted_callback(Arc::new(move |url| {
+            cb_recorded.lock().unwrap().push(url);
+        }));
+
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://primary.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let captured = recorded.lock().unwrap().clone();
+        assert_eq!(
+            captured,
+            vec!["wss://primary.test/v1/ws".to_string()],
+            "primary-denylisted callback must fire exactly once with the matched url",
+        );
+        // And slot 0 still survives — the callback signals the UI but
+        // doesn't drop the transport (D6 invariant + see
+        // `mid_session_relay_block_does_not_drop_slot_zero`).
+        assert_eq!(
+            mh.slots_for_test()[0]
+                .as_ref()
+                .map(|s| s.relay_url.as_str()),
+            Some("wss://primary.test/v1/ws"),
+        );
+    }
+
+    /// G1: a `BlockEvent` whose `added` list does NOT include slot 0's
+    /// URL must NOT fire the callback. Pins the "primary-only" scope
+    /// so a denylist hit on a slot-1/2 URL doesn't surface the banner
+    /// (those are silent drops per D6).
+    #[tokio::test]
+    async fn mid_session_non_primary_block_skips_callback() {
+        use std::sync::Mutex;
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+            Some(rx),
+        )
+        .await
+        .unwrap();
+
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cb_recorded = Arc::clone(&recorded);
+        mh.set_primary_denylisted_callback(Arc::new(move |url| {
+            cb_recorded.lock().unwrap().push(url);
+        }));
+
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://other.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "callback must NOT fire when added list misses slot 0's URL",
         );
     }
 

@@ -25,7 +25,8 @@ mod multi_home;
 mod nonce_dedup;
 
 pub use multi_home::{
-    MultiHomeTransport, RealRelayBuilder, RelayBuilder, RelayHandle, Slot, TransportError,
+    MultiHomeTransport, PrimaryDenylistedCallback, RealRelayBuilder, RelayBuilder, RelayHandle,
+    Slot, TransportError,
 };
 pub use nonce_dedup::NonceDedup;
 

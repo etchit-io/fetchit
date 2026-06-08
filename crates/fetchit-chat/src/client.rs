@@ -338,6 +338,13 @@ pub struct Client {
     /// was supplied at boot.
     multi_home_inbound:
         Option<Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>>,
+    /// M3 G1: direct handle to the [`crate::transport::MultiHomeTransport`]
+    /// when one is wired, so the desktop shell can register a
+    /// primary-denylisted callback that emits the
+    /// `chat:relay-denylisted` Tauri event. `None` when the client was
+    /// built without a relay URL — REST-only mode has no MH instance
+    /// to attach the callback to.
+    multi_home: Option<Arc<crate::transport::MultiHomeTransport>>,
     /// M3 R-tail-5: the local primary relay URL pinned to
     /// [`crate::transport::MultiHomeTransport`]'s slot 0. Send-path
     /// helpers synthesize this into a fallback
@@ -400,24 +407,32 @@ impl Client {
         let needs_chat =
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
 
-        let (router, chat, relay, lan, lan_bound_addr, multi_home_inbound, primary_relay_url) =
-            if needs_chat {
-                announce_identity_best_effort(&http).await;
-                build_with_chat(
-                    &http,
-                    &base_url,
-                    token,
-                    relay_url,
-                    data_dir,
-                    passphrase,
-                    enable_lan_direct,
-                    contact_pubkey_lookup,
-                    x0xd_port_file,
-                )
-                .await?
-            } else {
-                (Router::new(), None, None, None, None, None, None)
-            };
+        let (
+            router,
+            chat,
+            relay,
+            lan,
+            lan_bound_addr,
+            multi_home_inbound,
+            primary_relay_url,
+            multi_home,
+        ) = if needs_chat {
+            announce_identity_best_effort(&http).await;
+            build_with_chat(
+                &http,
+                &base_url,
+                token,
+                relay_url,
+                data_dir,
+                passphrase,
+                enable_lan_direct,
+                contact_pubkey_lookup,
+                x0xd_port_file,
+            )
+            .await?
+        } else {
+            (Router::new(), None, None, None, None, None, None, None)
+        };
 
         let router = Arc::new(router);
         if let Some(chat) = chat.as_ref() {
@@ -439,6 +454,7 @@ impl Client {
             advertised_relays: Arc::new(tokio::sync::RwLock::new(initial_relays)),
             multi_home_inbound,
             primary_relay_url,
+            multi_home,
         })
     }
 
@@ -613,6 +629,21 @@ impl Client {
             hints,
         )
         .await
+    }
+
+    /// M3 G1: register a callback the multi-home transport invokes
+    /// when the user's primary relay (slot 0) is added to the
+    /// community denylist mid-session. Slot 0 is NOT dropped — that's
+    /// the D6 "Settings concern" contract — but the callback fires so
+    /// the desktop shell can emit a Tauri `chat:relay-denylisted`
+    /// event and render the conversation banner.
+    ///
+    /// No-op when the client was built without a relay URL
+    /// (REST-only mode); the callback registration silently drops.
+    pub fn set_relay_denylisted_callback(&self, cb: Arc<dyn Fn(String) + Send + Sync>) {
+        if let Some(mh) = self.multi_home.as_ref() {
+            mh.set_primary_denylisted_callback(cb);
+        }
     }
 
     /// Borrow the LAN-direct transport handle when one is wired.
@@ -1441,6 +1472,9 @@ async fn build_with_chat(
     // this into a `RendezvousHintsV1` when the recipient's stored card
     // has no v2 hints slot.
     Option<String>,
+    // M3 G1: direct handle to the `MultiHomeTransport` for the
+    // primary-denylisted callback registration on the desktop shell.
+    Option<Arc<crate::transport::MultiHomeTransport>>,
 )> {
     // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
     // chat-side work so an outdated daemon never gets a chance to
@@ -1555,6 +1589,7 @@ async fn build_with_chat(
         Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>>,
     > = None;
     let mut primary_relay_url_str: Option<String> = None;
+    let mut multi_home_handle: Option<Arc<crate::transport::MultiHomeTransport>> = None;
     if let Some(url) = relay_url {
         // The denylist gate inside `MultiHomeTransport` is `DenylistQuery`
         // (read-side trait). Until R-tail-4.x splits `DenylistCheck`'s
@@ -1608,6 +1643,7 @@ async fn build_with_chat(
         relay_handle = mh.slot_zero_handle().and_then(|h| h.relay_transport_arc());
 
         mh_inbound_slot = Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx))));
+        multi_home_handle = Some(Arc::clone(&mh));
 
         router.add(mh as Arc<dyn crate::transport::Transport>);
     }
@@ -1636,6 +1672,7 @@ async fn build_with_chat(
         lan_bound_addr,
         mh_inbound_slot,
         primary_relay_url_str,
+        multi_home_handle,
     ))
 }
 
@@ -2676,6 +2713,7 @@ mod tests {
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: None,
             primary_relay_url: None,
+            multi_home: None,
         };
         (client, dir)
     }
@@ -2958,6 +2996,7 @@ mod tests {
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: None,
+            multi_home: None,
         };
 
         // Router carries exactly one transport — MultiHomeTransport —
