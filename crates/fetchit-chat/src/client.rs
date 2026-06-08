@@ -20,6 +20,7 @@ use crate::relay_transport::RelayTransport;
 use crate::transport::{InboundEnvelope, OutboundEnvelope, OutboundKind, Router};
 use crate::{contacts, groups, identity, messages, presence};
 use base64::Engine as _;
+use fetchit_fedi::transport::FediverseTransport;
 use fetchit_relay_client::{Signer, X0xdSigner};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -354,6 +355,14 @@ pub struct Client {
     /// the transport layer be strict-on-`None`. `None` when the
     /// client was built without a relay URL (REST-only mode).
     primary_relay_url: Option<String>,
+    /// M4 Stage 5.2: shared outbound HTTPS-POST transport for the
+    /// fediverse bridge. Owns one `reqwest::Client` + the per-instance
+    /// HTTP-Signature capability cache; [`Self::publish_public_post`]
+    /// fans an `ActivityPub` `Create{Note}` out to resolved recipient
+    /// inboxes through it. Built alongside the chat stack in
+    /// [`build_with_chat`]; `None` in REST-only mode (no actor identity
+    /// vault, so nothing to sign with).
+    fediverse: Option<Arc<FediverseTransport>>,
 }
 
 impl Client {
@@ -416,6 +425,7 @@ impl Client {
             multi_home_inbound,
             primary_relay_url,
             multi_home,
+            fediverse,
         ) = if needs_chat {
             announce_identity_best_effort(&http).await;
             build_with_chat(
@@ -431,7 +441,17 @@ impl Client {
             )
             .await?
         } else {
-            (Router::new(), None, None, None, None, None, None, None)
+            (
+                Router::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         };
 
         let router = Arc::new(router);
@@ -455,6 +475,7 @@ impl Client {
             multi_home_inbound,
             primary_relay_url,
             multi_home,
+            fediverse,
         })
     }
 
@@ -466,6 +487,17 @@ impl Client {
     pub fn denylist_dropped_inbound_count(&self) -> u64 {
         self.denylist_dropped_inbound
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Shared handle to the outbound fediverse transport, when one was
+    /// wired at boot. `None` in REST-only mode (no actor identity vault,
+    /// so the bridge has nothing to sign with). The M4 Stage 5.2 driver
+    /// [`Self::publish_public_post`] delivers through this; exposed so
+    /// the desktop shell can pre-flight bridge availability before
+    /// offering the "publish to fediverse" affordance.
+    #[must_use]
+    pub fn fediverse_transport(&self) -> Option<&Arc<FediverseTransport>> {
+        self.fediverse.as_ref()
     }
 
     /// Construct an M3 denylist consumer rooted at `denylist_url_base`
@@ -1475,6 +1507,10 @@ async fn build_with_chat(
     // M3 G1: direct handle to the `MultiHomeTransport` for the
     // primary-denylisted callback registration on the desktop shell.
     Option<Arc<crate::transport::MultiHomeTransport>>,
+    // M4 Stage 5.2: shared outbound fediverse transport (one
+    // `reqwest::Client` + HTTP-Signature capability cache).
+    // `Client::publish_public_post` delivers through it.
+    Option<Arc<FediverseTransport>>,
 )> {
     // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
     // chat-side work so an outdated daemon never gets a chance to
@@ -1648,6 +1684,15 @@ async fn build_with_chat(
         router.add(mh as Arc<dyn crate::transport::Transport>);
     }
 
+    // M4 Stage 5.2: stand up the outbound fediverse transport. It carries
+    // no chat state — just a shared `reqwest::Client` + the per-instance
+    // HTTP-Signature capability cache — but is assembled here so REST-only
+    // clients (which never mint an actor identity) get `None` and the
+    // delivery path is unreachable without the chat vault.
+    let fediverse = Some(Arc::new(FediverseTransport::new().map_err(|e| {
+        ChatError::MessageTransport(format!("fediverse transport: {e}"))
+    })?));
+
     Ok((
         router,
         Some(ChatState {
@@ -1673,6 +1718,7 @@ async fn build_with_chat(
         mh_inbound_slot,
         primary_relay_url_str,
         multi_home_handle,
+        fediverse,
     ))
 }
 
@@ -2714,6 +2760,7 @@ mod tests {
             multi_home_inbound: None,
             primary_relay_url: None,
             multi_home: None,
+            fediverse: None,
         };
         (client, dir)
     }
@@ -2997,6 +3044,7 @@ mod tests {
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: None,
             multi_home: None,
+            fediverse: None,
         };
 
         // Router carries exactly one transport — MultiHomeTransport —
