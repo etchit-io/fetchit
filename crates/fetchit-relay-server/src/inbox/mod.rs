@@ -42,12 +42,14 @@ pub mod rate_limit;
 pub mod replay;
 pub mod router;
 pub mod sig_verify;
+pub mod sink;
 
 pub use metrics::{InboxMetrics, ScalarDropSnapshot};
 pub use rate_limit::InboxRateLimit;
 pub use replay::ReplayWindow;
 pub use router::{inbox_router, InboxState, PendingDelivery};
 pub use sig_verify::{InboxSignatureContext, SignatureScheme};
+pub use sink::SessionBroadcastSink;
 
 use thiserror::Error;
 

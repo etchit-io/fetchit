@@ -1,7 +1,9 @@
 //! Registry of currently-connected sessions and per-connection presence watchers.
 
 use dashmap::DashMap;
-use fetchit_relay_proto::{AgentId, Bye, ByeReason, PresenceUpdate, ServerFrame};
+use fetchit_relay_proto::{
+    AgentId, Bye, ByeReason, PresenceUpdate, ServerFrame, FEDIVERSE_BRIDGE_SENDER,
+};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc::Sender;
@@ -85,6 +87,18 @@ impl SessionRegistry {
     /// deliver inline; caller should fall back to transit buffering".
     #[must_use]
     pub fn send(&self, agent: &AgentId, frame: ServerFrame) -> bool {
+        // RIDER-1 (M4 #200): the fediverse-bridge sentinel is a
+        // *source* marker, never a delivery target. `PublicPost` is
+        // broadcast-only; refuse any directed send addressed to it so a
+        // crafted envelope cannot make the relay attempt a delivery TO
+        // the bridge sender. `by_agent` never holds the sentinel in
+        // practice (no keypair hashes to all-zeros), so this is a
+        // release-active belt-and-suspenders pinning the invariant —
+        // chosen over a `debug_assert!` so the rejection holds (and is
+        // unit-tested) in release builds, not just debug.
+        if *agent == FEDIVERSE_BRIDGE_SENDER {
+            return false;
+        }
         let Some(entry) = self.by_agent.get(agent) else {
             return false;
         };
@@ -235,6 +249,26 @@ mod tests {
             reason: ByeReason::ServerShutdown,
         });
         assert!(!r.send(&a, frame));
+    }
+
+    #[tokio::test]
+    async fn send_refuses_fediverse_bridge_sentinel_even_when_registered() {
+        // RIDER-1: the all-zeros bridge sentinel is a *source* marker,
+        // never a delivery target. Force it into the table (impossible
+        // in prod — no keypair hashes to all-zeros) to prove the guard
+        // fires before the lookup, not merely that the entry is absent.
+        let r = SessionRegistry::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        let _id = r.register(FEDIVERSE_BRIDGE_SENDER, tx);
+
+        let frame = ServerFrame::Bye(Bye {
+            reason: ByeReason::ServerShutdown,
+        });
+        assert!(!r.send(&FEDIVERSE_BRIDGE_SENDER, frame));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing may be delivered to the bridge sentinel"
+        );
     }
 
     #[tokio::test]

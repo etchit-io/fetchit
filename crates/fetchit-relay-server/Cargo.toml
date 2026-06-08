@@ -19,7 +19,12 @@ workspace = true
 # Community-relay operators opting into the fediverse-inbox role
 # build with `--features fediverse-inbox`.
 default = []
-fediverse-inbox = ["dep:fetchit-fedi", "dep:rsa"]
+# `fetchit-trust-types` is the serde-only leaf vocabulary crate (no
+# axum/reqwest/tokio); the production delivery sink pulls it in only to
+# canonicalize a verified actor URL through the SAME
+# `TargetIdentity::try_new(EntryKind::ActorUrl, ..)` path the denylist
+# uses, so attribution matches the denylist's canonical form.
+fediverse-inbox = ["dep:fetchit-fedi", "dep:rsa", "dep:fetchit-trust-types"]
 
 [[bin]]
 name = "fetchit-relay-server"
@@ -35,6 +40,7 @@ clap.workspace = true
 dashmap.workspace = true
 fetchit-fedi = { path = "../fetchit-fedi", optional = true }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+fetchit-trust-types = { path = "../fetchit-trust-types", optional = true }
 rsa = { workspace = true, optional = true }
 futures-util.workspace = true
 hex.workspace = true

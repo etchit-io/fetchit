@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod error;
 pub mod frame;
 pub mod identity;
+pub mod public_post;
 pub mod region;
 
 pub use auth::{
@@ -32,6 +33,7 @@ pub use frame::{
 pub use identity::{
     derive_agent_id, AgentId, DedupeKey, GroupId, MachineId, TenantId, AGENT_ID_DOMAIN,
 };
+pub use public_post::{PublicPostPayload, FEDIVERSE_BRIDGE_SENDER};
 pub use region::Region;
 
 /// Protocol version negotiated in the `Hello` / `Ready` exchange.

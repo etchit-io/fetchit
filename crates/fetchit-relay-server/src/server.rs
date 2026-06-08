@@ -58,6 +58,11 @@ pub struct ServerState {
 pub struct Server {
     config: ServerConfig,
     verifier: Arc<dyn SignatureVerifier>,
+    /// The live-connection registry, created at [`Server::new`] so a
+    /// production inbox delivery sink can be wired to the SAME registry
+    /// the WebSocket handler registers sessions into (see
+    /// [`Server::sessions`] / [`Server::with_inbox`]).
+    sessions: Arc<SessionRegistry>,
     #[cfg(feature = "fediverse-inbox")]
     inbox_metrics: Option<Arc<InboxMetrics>>,
     /// Fully-configured inbox state when an operator opts in via
@@ -76,11 +81,25 @@ impl Server {
         Self {
             config,
             verifier: Arc::new(MlDsa65Verifier::new()),
+            sessions: Arc::new(SessionRegistry::new()),
             #[cfg(feature = "fediverse-inbox")]
             inbox_metrics: None,
             #[cfg(feature = "fediverse-inbox")]
             inbox: None,
         }
+    }
+
+    /// The live-connection registry this server registers WebSocket
+    /// sessions into.
+    ///
+    /// Build a production inbox delivery sink
+    /// ([`crate::inbox::SessionBroadcastSink`]) from this same `Arc`
+    /// before calling [`Server::with_inbox`], so a broadcast
+    /// `EnvelopeKind::PublicPost` reaches the sessions the server
+    /// actually serves.
+    #[must_use]
+    pub fn sessions(&self) -> Arc<SessionRegistry> {
+        self.sessions.clone()
     }
 
     /// Inject a custom verifier (e.g. `AcceptAllVerifier` in tests).
@@ -149,7 +168,7 @@ impl Server {
                 self.config.transit_per_recipient,
                 self.config.transit_total_bytes_cap,
             )),
-            sessions: Arc::new(SessionRegistry::new()),
+            sessions: self.sessions,
             verifier: self.verifier,
             capability_resolver: Arc::new(CapabilityResolver::new(self.config.issuer_keys.clone())),
             ratelimit: Arc::new(RateLimiter::new()),
@@ -579,6 +598,62 @@ mod inbox_mount_tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         assert_eq!(sink.deliveries.lock().unwrap().len(), 1);
+    }
+
+    /// End-to-end #200 vertical slice: a signed `POST /inbox` that
+    /// passes every gate is fanned out by the production
+    /// `SessionBroadcastSink` — wired to the server's OWN registry via
+    /// `Server::sessions()` — to a live connected session as a
+    /// canonical-attribution `EnvelopeKind::PublicPost`.
+    #[tokio::test]
+    async fn mounted_inbox_broadcasts_public_post_to_connected_session() {
+        use crate::inbox::SessionBroadcastSink;
+        use fetchit_relay_proto::{AgentId, EnvelopeKind, PublicPostPayload, ServerFrame};
+        use tokio::sync::mpsc;
+
+        let (priv_pem, pub_pem) = keypair_pem();
+
+        // Build the server first so the sink shares its registry, then
+        // register a fake connected session on that same registry.
+        let bind = "127.0.0.1:0".parse().unwrap();
+        let server = Server::new(ServerConfig::defaults(bind, Region::Other("test".into())))
+            .with_verifier(Arc::new(crate::signature::AcceptAllVerifier));
+        let sessions = server.sessions();
+        let (tx, mut rx) = mpsc::channel(8);
+        let _id = sessions.register(AgentId::from_bytes([9u8; 32]), tx);
+
+        let sink = Arc::new(SessionBroadcastSink::new(sessions.clone()));
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink,
+        )
+        .build();
+        let router = server.with_inbox(state).router().0;
+
+        let body = br#"{"type":"Create","object":{"type":"Note"}}"#;
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let req = signed_post(
+            &priv_pem,
+            body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+        );
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // The connected session received the broadcast PublicPost,
+        // attributed to the canonical (fragment-stripped) actor URL.
+        let frame = rx
+            .try_recv()
+            .expect("connected session received a broadcast");
+        let ServerFrame::Deliver(d) = frame else {
+            panic!("expected Deliver, got {frame:?}");
+        };
+        assert_eq!(d.envelope.kind, EnvelopeKind::PublicPost);
+        let payload = PublicPostPayload::from_ciphertext(&d.envelope.ciphertext).unwrap();
+        assert_eq!(payload.verified_actor_url, "https://etchit.io/actors/josh");
+        assert_eq!(payload.activity_json, body);
     }
 
     #[tokio::test]

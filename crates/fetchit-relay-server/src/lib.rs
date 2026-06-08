@@ -25,5 +25,6 @@ pub use config::ServerConfig;
 pub use error::ServerError;
 pub use metrics::Metrics;
 pub use server::Server;
+pub use session::SessionRegistry;
 pub use signature::{AcceptAllVerifier, MlDsa65Verifier, SignatureVerifier};
 pub use transit::TransitBuffer;

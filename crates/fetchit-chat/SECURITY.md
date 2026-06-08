@@ -181,6 +181,39 @@ operationally load-bearing: an unpinned upgrade to one of these
 crates can land a wire-format change between releases that breaks
 historical messages.
 
+### 8. Fediverse public-post attribution is vouched by the bridge relay, not client-verified
+
+M4 bridges inbound `ActivityPub` public posts (`Create { Note }`) into
+the LIT Chat public feed. Each one rides an `EnvelopeKind::PublicPost`
+envelope whose attribution lives in a `PublicPostPayload`
+(`verified_actor_url`) carried out-of-band in the envelope body — **not**
+the activity's self-asserted `actor` field, which is attacker-controlled.
+
+The trust chain: a `fediverse-inbox`-enabled relay verifies the sending
+instance's HTTP Signature at `POST /inbox` (proving which **instance**
+delivered the activity), then canonicalises the signing actor URL
+through the same `TargetIdentity::try_new(EntryKind::ActorUrl, ..)` path
+the denylist uses and stamps it as `verified_actor_url`. Clients do not
+fetch the instance's RSA key or see the raw HTTP Signature, so **they
+cannot verify fediverse authorship themselves** — they trust the bridge
+relay as the fediverse-attribution authority. That makes the WSS
+client↔relay channel integrity load-bearing for this one claim. It is a
+real trust boundary, not a hole: the same trust you place in any
+fediverse server's rendering of who posted what, relocated to the relay
+you already authenticate a session against.
+
+`PublicPost` is the **sole** exemption from the chat sig/KEM verify
+regime — its body is `application/activity+json`, not chat ciphertext,
+and `sender_agent_id` is the all-zeros `FEDIVERSE_BRIDGE_SENDER`
+sentinel (which the relay's directed-send path refuses as a delivery
+target). `kind` drives the verify regime **and** the rendering
+atomically, so a DM can never be smuggled through the exemption and a
+bridged post always renders as a clearly-marked public post attributed
+to `verified_actor_url`, never as a contact DM bubble. Code:
+`crates/fetchit-relay-proto/src/public_post.rs`,
+`crates/fetchit-relay-server/src/inbox/sink.rs`, and the `/inbox` HTTP
+Signature gates in `crates/fetchit-relay-server/src/inbox/`.
+
 ## What we promise
 
 - **fetch>it never holds a wallet, never signs Autonomi transactions,
@@ -205,6 +238,11 @@ historical messages.
 - Cross-vendor MLS wire interop. The PQ TreeKEM is `saorsa-mls`'s
   RFC-9420-subset, not the IETF `draft-ietf-mls-pq-ciphersuites`
   codepoint.
+- Client-side cryptographic verification of **fediverse** post
+  authorship. Inbound bridged public posts are attributed by the bridge
+  relay's HTTP-Signature check at `/inbox`, trusted transitively over
+  the authenticated WSS session (see caveat 8); the client does not
+  independently verify the originating instance's signature.
 
 ## Reading the code yourself
 
