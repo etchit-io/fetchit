@@ -92,6 +92,31 @@ impl SessionRegistry {
         tx.try_send(frame).is_ok()
     }
 
+    /// Fan `frame` out to **every** currently-connected session,
+    /// best-effort. Returns the number of sessions the frame was handed
+    /// to (`try_send` accepted it).
+    ///
+    /// Unlike [`Self::send`], this is for **non-addressed broadcast**
+    /// traffic — the M4 `EnvelopeKind::PublicPost` public-feed fan-out,
+    /// where an `ActivityPub` `#Public` post has no single recipient and
+    /// is delivered to whoever is currently online. A session whose
+    /// outbound queue is full is skipped and not counted: a slow
+    /// consumer dropping a public post is acceptable, and (unlike
+    /// addressed sends) there is no transit buffer to fall back to —
+    /// public posts are live-only, history-pull is a post-launch
+    /// concern. `try_send` is non-blocking, so a full or closed queue
+    /// never stalls the fan-out across the other sessions.
+    pub fn broadcast(&self, frame: &ServerFrame) -> usize {
+        let mut delivered = 0usize;
+        for entry in &self.by_agent {
+            let (_, tx) = entry.value();
+            if tx.try_send(frame.clone()).is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     /// Count of currently-connected agents.
     #[must_use]
     pub fn connection_count(&self) -> usize {
@@ -407,5 +432,60 @@ mod tests {
         let res =
             tokio::time::timeout(std::time::Duration::from_millis(50), watcher_rx.recv()).await;
         assert!(res.is_err(), "displacement is not a presence transition");
+    }
+
+    #[tokio::test]
+    async fn broadcast_reaches_every_connected_session() {
+        let r = SessionRegistry::new();
+        let (tx_a, mut rx_a) = mpsc::channel(4);
+        let (tx_b, mut rx_b) = mpsc::channel(4);
+        let _ = r.register(AgentId::from_bytes([1u8; 32]), tx_a);
+        let _ = r.register(AgentId::from_bytes([2u8; 32]), tx_b);
+
+        let frame = ServerFrame::Bye(Bye {
+            reason: ByeReason::ServerShutdown,
+        });
+        let delivered = r.broadcast(&frame);
+        assert_eq!(
+            delivered, 2,
+            "both connected sessions receive the broadcast"
+        );
+        assert_eq!(rx_a.recv().await, Some(frame.clone()));
+        assert_eq!(rx_b.recv().await, Some(frame));
+    }
+
+    #[tokio::test]
+    async fn broadcast_skips_full_queue_and_counts_only_delivered() {
+        let r = SessionRegistry::new();
+        // Capacity-1 channel pre-filled so the next `try_send` hits `Full`;
+        // `_rx_full` stays in scope so the channel is full, not closed.
+        let (tx_full, _rx_full) = mpsc::channel(1);
+        tx_full
+            .try_send(ServerFrame::Bye(Bye {
+                reason: ByeReason::ServerShutdown,
+            }))
+            .unwrap();
+        let (tx_ok, mut rx_ok) = mpsc::channel(4);
+        let _ = r.register(AgentId::from_bytes([1u8; 32]), tx_full);
+        let _ = r.register(AgentId::from_bytes([2u8; 32]), tx_ok);
+
+        let frame = ServerFrame::Bye(Bye {
+            reason: ByeReason::ServerShutdown,
+        });
+        let delivered = r.broadcast(&frame);
+        assert_eq!(
+            delivered, 1,
+            "the full-queue session is skipped, not counted"
+        );
+        assert_eq!(rx_ok.recv().await, Some(frame));
+    }
+
+    #[test]
+    fn broadcast_to_empty_registry_delivers_zero() {
+        let r = SessionRegistry::new();
+        let delivered = r.broadcast(&ServerFrame::Bye(Bye {
+            reason: ByeReason::ServerShutdown,
+        }));
+        assert_eq!(delivered, 0);
     }
 }
