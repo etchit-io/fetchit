@@ -97,21 +97,23 @@ pub enum EnvelopeKind {
     /// See `private/m2.5-bridge-collapsed-spec.md` on the `m2.5-design`
     /// branch for the full spec.
     X0xdGroupMetadataEvent,
-    /// #251 Layer 2 Welcome contingency: joiner -> owner request for
-    /// the MLS Welcome blob bytes via fetchit-relay. Fires when the
-    /// joiner's bundled x0xd is below v0.21.3 (the David 63b5c63b
-    /// Welcome-retry fix lands) and the native peer-relay Welcome
-    /// fetch failed with `ReaderExit`. The owner's chat-peer fetches
-    /// the pending Welcome from local x0xd and replies with a
-    /// `WelcomeBlobResponse`. Once the bundled binary pins a release
-    /// containing 63b5c63b, the dispatch path returns `NotNeeded`
-    /// and the caller short-circuits to x0xd's native flow.
-    WelcomeBlobRequest,
-    /// #251 Layer 2 Welcome contingency: owner -> joiner response
-    /// carrying the MLS Welcome blob bytes the joiner's x0xd will
-    /// import via `POST /groups/join-from-bridged-blob`. Same gate
-    /// as `WelcomeBlobRequest`.
-    WelcomeBlobResponse,
+    /// Reserved discriminator (historically `WelcomeBlobRequest`).
+    ///
+    /// The M2.5 Welcome-blob bridge that occupied this slot was deleted
+    /// after the v0.21.3 contract-drift audit (June 2026) confirmed the
+    /// joiner-side endpoint shape never matched the daemon contract and
+    /// David's `63b5c63b` joiner-Welcome-fetch retry in v0.21.3 closes
+    /// the underlying failure window. The slot is kept reserved so the
+    /// wire discriminator (`6`) is not silently reassigned to a new
+    /// payload type that pre-deletion clients in the wild would decode
+    /// with stale semantics. MUST NOT be reused.
+    Reserved6,
+    /// Reserved discriminator (historically `WelcomeBlobResponse`).
+    ///
+    /// Same rationale as [`Self::Reserved6`]. The wire discriminator
+    /// (`7`) is reserved for compatibility with the M2.5 Welcome-blob
+    /// bridge that no longer ships. MUST NOT be reused.
+    Reserved7,
     /// M4 fediverse bridge — outbound public `ActivityPub` post
     /// (`Create { Note }`) leaving the chat-layer toward
     /// `fetchit-fedi`'s `FediverseTransport::deliver`, or an inbound
@@ -159,8 +161,8 @@ const DISC_ADMIN_EVENT: u32 = 2;
 const DISC_DELIVERY_RECEIPT: u32 = 3;
 const DISC_PRIVATE_GROUP_CHAT: u32 = 4;
 const DISC_X0XD_GROUP_METADATA_EVENT: u32 = 5;
-const DISC_WELCOME_BLOB_REQUEST: u32 = 6;
-const DISC_WELCOME_BLOB_RESPONSE: u32 = 7;
+const DISC_RESERVED_6: u32 = 6;
+const DISC_RESERVED_7: u32 = 7;
 const DISC_PUBLIC_POST: u32 = 8;
 
 impl Serialize for EnvelopeKind {
@@ -176,8 +178,8 @@ impl Serialize for EnvelopeKind {
             EnvelopeKind::DeliveryReceipt => DISC_DELIVERY_RECEIPT,
             EnvelopeKind::PrivateGroupChat => DISC_PRIVATE_GROUP_CHAT,
             EnvelopeKind::X0xdGroupMetadataEvent => DISC_X0XD_GROUP_METADATA_EVENT,
-            EnvelopeKind::WelcomeBlobRequest => DISC_WELCOME_BLOB_REQUEST,
-            EnvelopeKind::WelcomeBlobResponse => DISC_WELCOME_BLOB_RESPONSE,
+            EnvelopeKind::Reserved6 => DISC_RESERVED_6,
+            EnvelopeKind::Reserved7 => DISC_RESERVED_7,
             EnvelopeKind::PublicPost => DISC_PUBLIC_POST,
             EnvelopeKind::Unknown(n) => u32::from(*n),
         };
@@ -203,8 +205,8 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                     DISC_DELIVERY_RECEIPT => EnvelopeKind::DeliveryReceipt,
                     DISC_PRIVATE_GROUP_CHAT => EnvelopeKind::PrivateGroupChat,
                     DISC_X0XD_GROUP_METADATA_EVENT => EnvelopeKind::X0xdGroupMetadataEvent,
-                    DISC_WELCOME_BLOB_REQUEST => EnvelopeKind::WelcomeBlobRequest,
-                    DISC_WELCOME_BLOB_RESPONSE => EnvelopeKind::WelcomeBlobResponse,
+                    DISC_RESERVED_6 => EnvelopeKind::Reserved6,
+                    DISC_RESERVED_7 => EnvelopeKind::Reserved7,
                     DISC_PUBLIC_POST => EnvelopeKind::PublicPost,
                     n => match u8::try_from(n) {
                         Ok(byte) => EnvelopeKind::Unknown(byte),
@@ -230,8 +232,8 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                 "DeliveryReceipt",
                 "PrivateGroupChat",
                 "X0xdGroupMetadataEvent",
-                "WelcomeBlobRequest",
-                "WelcomeBlobResponse",
+                "Reserved6",
+                "Reserved7",
                 "PublicPost",
                 "Unknown",
             ],
@@ -428,8 +430,8 @@ mod tests {
             (EnvelopeKind::DeliveryReceipt, 3),
             (EnvelopeKind::PrivateGroupChat, 4),
             (EnvelopeKind::X0xdGroupMetadataEvent, 5),
-            (EnvelopeKind::WelcomeBlobRequest, 6),
-            (EnvelopeKind::WelcomeBlobResponse, 7),
+            (EnvelopeKind::Reserved6, 6),
+            (EnvelopeKind::Reserved7, 7),
             (EnvelopeKind::PublicPost, 8),
         ] {
             let bytes = postcard::to_allocvec(&variant).unwrap();
@@ -521,20 +523,26 @@ mod tests {
         assert_eq!(decoded.ciphertext, vec![0xee; 1024]);
     }
 
+    /// The historical M2.5 Welcome-bridge discriminators (`6`, `7`) are
+    /// retained as `Reserved6` / `Reserved7` stubs so the wire shape is
+    /// stable for any pre-deletion client that still understands those
+    /// envelope kinds. Round-tripping the stubs pins the byte
+    /// representation so a future variant can't accidentally collide.
     #[test]
-    fn envelope_kind_welcome_blob_request_round_trips() {
-        let env = EnvelopeKind::WelcomeBlobRequest;
-        let bytes = postcard::to_allocvec(&env).unwrap();
-        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(back, EnvelopeKind::WelcomeBlobRequest);
-    }
-
-    #[test]
-    fn envelope_kind_welcome_blob_response_round_trips() {
-        let env = EnvelopeKind::WelcomeBlobResponse;
-        let bytes = postcard::to_allocvec(&env).unwrap();
-        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(back, EnvelopeKind::WelcomeBlobResponse);
+    fn envelope_kind_reserved_discriminators_round_trip() {
+        for (kind, expected_disc) in [
+            (EnvelopeKind::Reserved6, 6u8),
+            (EnvelopeKind::Reserved7, 7u8),
+        ] {
+            let bytes = postcard::to_allocvec(&kind).unwrap();
+            assert_eq!(
+                bytes,
+                vec![expected_disc],
+                "{kind:?} must serialize to single varint byte {expected_disc}",
+            );
+            let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 
     /// M4 fediverse-bridge wire DISC reservation (Stage 5.1-proto).

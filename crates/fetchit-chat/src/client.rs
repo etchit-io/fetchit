@@ -763,50 +763,6 @@ impl Client {
             }
             return;
         }
-        if matches!(
-            transit.kind,
-            fetchit_relay_proto::EnvelopeKind::WelcomeBlobRequest
-        ) {
-            if let Some(chat) = self.chat.as_ref() {
-                let signer = chat.signer.clone();
-                let layout = chat.layout.clone();
-                let kem_secret = chat.identity.kem_secret_key().to_vec();
-                let machine_id = chat.local_machine_id;
-                let router = self.router.clone();
-                if let Err(e) = crate::groups::welcome_inbound::handle_inbound_welcome_request(
-                    signer.as_ref(),
-                    &router,
-                    &layout,
-                    &kem_secret,
-                    machine_id,
-                    &transit,
-                )
-                .await
-                {
-                    log::warn!("welcome-request dispatch: {e}");
-                }
-            }
-            return;
-        }
-        if matches!(
-            transit.kind,
-            fetchit_relay_proto::EnvelopeKind::WelcomeBlobResponse
-        ) {
-            if let Some(chat) = self.chat.as_ref() {
-                let kem_secret = chat.identity.kem_secret_key().to_vec();
-                let http = self.http.clone();
-                if let Err(e) = crate::groups::welcome_inbound::handle_inbound_welcome_response(
-                    &kem_secret,
-                    &http,
-                    &transit,
-                )
-                .await
-                {
-                    log::warn!("welcome-response dispatch: {e}");
-                }
-            }
-            return;
-        }
         // M3 D7: drop inbound user-content from denylisted senders
         // BEFORE the decrypt path runs. Gate sits AFTER the bridge /
         // Welcome dispatchers so group-state propagation and invite

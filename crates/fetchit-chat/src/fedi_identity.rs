@@ -229,8 +229,7 @@ mod tests {
     }
 
     /// Mock `Signer` that returns deterministic pubkey + signature
-    /// bytes for assertion. Mirrors the pattern in
-    /// `groups/welcome_inbound.rs::tests::StubSigner`.
+    /// bytes for assertion.
     struct StubSigner {
         pub_key: Vec<u8>,
         sig: Vec<u8>,

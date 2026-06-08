@@ -363,11 +363,9 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
         // on `transit.kind` and routes to the local /publish path in
         // C3. Rides the Dm shape because the chat-layer routing
         // predicate doesn't yet model bridge events.
-        RelayKind::Dm
-        | RelayKind::AdminEvent
-        | RelayKind::X0xdGroupMetadataEvent
-        | RelayKind::WelcomeBlobRequest
-        | RelayKind::WelcomeBlobResponse => OutboundKind::Dm,
+        RelayKind::Dm | RelayKind::AdminEvent | RelayKind::X0xdGroupMetadataEvent => {
+            OutboundKind::Dm
+        }
         // PrivateGroupChat rides the same inbound shape as GroupChat —
         // downstream `is_private_group_envelope` discriminates the two.
         RelayKind::GroupChat | RelayKind::PrivateGroupChat | RelayKind::DeliveryReceipt => {
@@ -397,6 +395,15 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
         RelayKind::PublicPost => {
             log::warn!(
                 "lan-direct inbound: dropping PublicPost — no chat-layer route until Stage 5.3"
+            );
+            return None;
+        }
+        // Reserved6 / Reserved7 are historical M2.5 Welcome-bridge
+        // discriminators kept reserved for wire-stability. Drop here;
+        // the bridge is no longer shipped, so no chat-layer route exists.
+        RelayKind::Reserved6 | RelayKind::Reserved7 => {
+            log::warn!(
+                "lan-direct inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind"
             );
             return None;
         }

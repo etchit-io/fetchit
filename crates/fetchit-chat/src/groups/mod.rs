@@ -36,9 +36,6 @@ pub mod bridge_member_removed;
 pub mod bridge_member_role_updated;
 pub mod bridge_policy_updated;
 pub mod dispatch;
-pub mod welcome_bridge;
-pub mod welcome_gate;
-pub mod welcome_inbound;
 
 use crate::error::{ChatError, Result};
 use crate::http::Http;

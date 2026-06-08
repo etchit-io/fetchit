@@ -185,10 +185,7 @@ fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<Inboun
                 // to the local /publish path in C3. Rides the Dm
                 // shape because the chat-layer routing predicate
                 // doesn't yet model bridge events.
-                RelayKind::Dm
-                | RelayKind::X0xdGroupMetadataEvent
-                | RelayKind::WelcomeBlobRequest
-                | RelayKind::WelcomeBlobResponse => OutboundKind::Dm,
+                RelayKind::Dm | RelayKind::X0xdGroupMetadataEvent => OutboundKind::Dm,
                 // PrivateGroupChat rides the same inbound shape as
                 // GroupChat — peer.rs's `is_private_group_envelope`
                 // predicate is what discriminates the two downstream.
@@ -220,6 +217,16 @@ fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<Inboun
                 RelayKind::PublicPost => {
                     log::warn!(
                         "relay inbound: dropping PublicPost — no chat-layer route until Stage 5.3"
+                    );
+                    continue;
+                }
+                // Reserved6 / Reserved7 are historical M2.5
+                // Welcome-bridge discriminators kept reserved for
+                // wire-stability. Drop here; the bridge is no longer
+                // shipped, so no chat-layer route exists.
+                RelayKind::Reserved6 | RelayKind::Reserved7 => {
+                    log::warn!(
+                        "relay inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind"
                     );
                     continue;
                 }
