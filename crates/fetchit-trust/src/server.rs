@@ -71,14 +71,41 @@ impl Server {
             .with_state(self.state.clone())
     }
 
-    /// Bind and serve forever.
+    /// Loopback-only admin router: `POST /admin/deny`, `POST
+    /// /admin/revoke`, `GET /admin/list`.
+    ///
+    /// Served on `config.admin_bind` (a loopback address) and NEVER
+    /// forwarded by the public reverse proxy, so the moderator
+    /// credential is shell access to the trust host. A later revision
+    /// can require an ML-DSA admin signature on these routes + bind
+    /// publicly to support remote moderators without host access; the
+    /// handlers are the on-ramp for that.
+    pub fn admin_router(&self) -> Router {
+        Router::new()
+            .route("/admin/deny", post(admin_deny))
+            .route("/admin/revoke", post(admin_revoke))
+            .route("/admin/list", get(admin_list))
+            .with_state(self.state.clone())
+    }
+
+    /// Bind and serve forever: the public API on `config.bind` and the
+    /// loopback admin API on `config.admin_bind`, concurrently.
     ///
     /// # Errors
-    /// Returns any IO error from binding or serving.
+    /// Returns any IO error from binding or serving either listener.
     pub async fn run(self) -> Result<()> {
-        let listener = TcpListener::bind(self.state.config.bind).await?;
-        info!(bind=%self.state.config.bind, "fetchit-trust listening");
-        axum::serve(listener, self.router()).await?;
+        let public_listener = TcpListener::bind(self.state.config.bind).await?;
+        let admin_listener = TcpListener::bind(self.state.config.admin_bind).await?;
+        info!(
+            public=%self.state.config.bind,
+            admin=%self.state.config.admin_bind,
+            "fetchit-trust listening",
+        );
+        let public = self.router();
+        let admin = self.admin_router();
+        let serve_public = async move { axum::serve(public_listener, public).await };
+        let serve_admin = async move { axum::serve(admin_listener, admin).await };
+        tokio::try_join!(serve_public, serve_admin)?;
         Ok(())
     }
 
@@ -222,6 +249,92 @@ async fn issuer_public_key(State(state): State<Arc<ServerState>>) -> Json<Issuer
         key_id: state.signer.key_id.clone(),
         public_key_hex: hex::encode(state.signer.public_key_bytes()),
     })
+}
+
+/// Body of `POST /admin/deny`. `value` is validated + canonicalized
+/// through [`TargetIdentity::try_new`] so a denylist entry always
+/// matches the canonical form consumers gate against (hex lowercased,
+/// URLs fragment/userinfo-stripped) — the same contract the M4 actor
+/// gate relies on.
+#[derive(Debug, Deserialize)]
+struct AdminDenyRequest {
+    kind: EntryKind,
+    value: String,
+    reason: ReportKind,
+}
+
+/// Body of `POST /admin/revoke`.
+#[derive(Debug, Deserialize)]
+struct AdminRevokeRequest {
+    kind: EntryKind,
+    value: String,
+}
+
+async fn admin_deny(
+    State(state): State<Arc<ServerState>>,
+    Json(req): Json<AdminDenyRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let target = TargetIdentity::try_new(req.kind, req.value)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    state
+        .storage
+        .deny(DenylistEntry {
+            target: target.clone(),
+            added_at_ms: now_ms(),
+            reason: req.reason,
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    info!(action = "deny", kind = ?target.kind, value = %target.value, reason = ?req.reason, "trust admin");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_revoke(
+    State(state): State<Arc<ServerState>>,
+    Json(req): Json<AdminRevokeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let target = TargetIdentity::try_new(req.kind, req.value)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    state
+        .storage
+        .allow(&target)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    info!(action = "revoke", kind = ?target.kind, value = %target.value, "trust admin");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Full moderation view: every denylist entry (all kinds) + the queued
+/// report backlog.
+#[derive(Serialize)]
+struct AdminListResponse {
+    denylist: Vec<DenylistEntry>,
+    queued_reports: Vec<Report>,
+}
+
+async fn admin_list(
+    State(state): State<Arc<ServerState>>,
+) -> Result<Json<AdminListResponse>, (StatusCode, String)> {
+    let mut denylist = Vec::new();
+    for kind in [
+        EntryKind::XorName,
+        EntryKind::AgentId,
+        EntryKind::RelayUrl,
+        EntryKind::ActorUrl,
+    ] {
+        denylist.extend(
+            state
+                .storage
+                .denylist_for(kind)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        );
+    }
+    let queued_reports = state
+        .storage
+        .list_reports()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(AdminListResponse {
+        denylist,
+        queued_reports,
+    }))
 }
 
 fn now_ms() -> u64 {

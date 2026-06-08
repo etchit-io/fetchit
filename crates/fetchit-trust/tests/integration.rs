@@ -201,3 +201,145 @@ async fn xornames_denylist_round_trips_independently() {
         .unwrap();
     assert_eq!(denylist.entries.len(), 2);
 }
+
+/// Serve the loopback admin router on its own ephemeral port, sharing
+/// the same `Server` state as the public listener. In production the
+/// public + admin routers run on separate binds (the admin one
+/// loopback-only); here both share `server`'s storage so an admin deny
+/// shows up on the public read path.
+async fn start_admin(server: &Server) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = server.admin_router();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    addr
+}
+
+#[tokio::test]
+async fn admin_deny_then_revoke_reflects_in_public_signed_denylist() {
+    let (public_addr, server) = start_test_server().await;
+    let admin_addr = start_admin(&server).await;
+    let agent = "f".repeat(64);
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{admin_addr}/admin/deny"))
+        .json(&serde_json::json!({ "kind": "agent_id", "value": agent, "reason": "harassment" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204, "deny returns 204");
+
+    // The public signed denylist now carries the entry.
+    let dl: DenylistResponse =
+        reqwest::get(format!("http://{public_addr}/v1/denylist?kind=agent_id"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(dl.entries.len(), 1);
+    assert_eq!(dl.entries[0].target.value, agent);
+    assert!(!dl.issuer_signature_hex.is_empty(), "still signed");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{admin_addr}/admin/revoke"))
+        .json(&serde_json::json!({ "kind": "agent_id", "value": agent }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204, "revoke returns 204");
+
+    let dl2: DenylistResponse =
+        reqwest::get(format!("http://{public_addr}/v1/denylist?kind=agent_id"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(dl2.entries.len(), 0, "revoke removed it");
+}
+
+#[tokio::test]
+async fn admin_deny_canonicalizes_value_and_rejects_malformed() {
+    let (public_addr, server) = start_test_server().await;
+    let admin_addr = start_admin(&server).await;
+
+    // Malformed agent_id (not 64-hex) is a 400 at the canonicalizer.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{admin_addr}/admin/deny"))
+        .json(&serde_json::json!({ "kind": "agent_id", "value": "tooshort", "reason": "spam" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // A trailing-slash actor_url is canonicalized (slash stripped) so the
+    // stored entry matches the form the M4 actor gate compares against.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{admin_addr}/admin/deny"))
+        .json(&serde_json::json!({
+            "kind": "actor_url",
+            "value": "https://mastodon.example/users/eve/",
+            "reason": "harassment",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
+
+    let dl: DenylistResponse =
+        reqwest::get(format!("http://{public_addr}/v1/denylist?kind=actor_url"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(dl.entries.len(), 1);
+    assert_eq!(
+        dl.entries[0].target.value, "https://mastodon.example/users/eve",
+        "trailing slash canonicalized away before storage",
+    );
+}
+
+#[tokio::test]
+async fn admin_list_shows_denylist_and_queued_reports() {
+    let (public_addr, server) = start_test_server().await;
+    let admin_addr = start_admin(&server).await;
+
+    // One queued report via the public intake.
+    reqwest::Client::new()
+        .post(format!("http://{public_addr}/v1/report"))
+        .json(&serde_json::json!({
+            "target": { "kind": "agent_id", "value": "a".repeat(64) },
+            "kind": "spam",
+            "reason": "x",
+            "reporter_agent_id_hex": "b".repeat(64),
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // One denied relay via the admin surface.
+    reqwest::Client::new()
+        .post(format!("http://{admin_addr}/admin/deny"))
+        .json(&serde_json::json!({
+            "kind": "relay_url",
+            "value": "wss://bad.example/v1/ws",
+            "reason": "abusive_content",
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let v: serde_json::Value = reqwest::get(format!("http://{admin_addr}/admin/list"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["denylist"].as_array().unwrap().len(), 1);
+    assert_eq!(v["queued_reports"].as_array().unwrap().len(), 1);
+}
