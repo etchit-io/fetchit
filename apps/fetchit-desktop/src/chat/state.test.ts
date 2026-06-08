@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatStore, convKey } from "./state";
 
 const ME = "a".repeat(64);
@@ -240,6 +240,52 @@ describe("ChatStore — contacts", () => {
     ]);
     const names = s.allContacts().map((c) => c.label);
     expect(names).toEqual(["Alice", "Zed"]);
+  });
+});
+
+describe("ChatStore — denylist (M3 G2)", () => {
+  const A = "a".repeat(64);
+  const B = "b".repeat(64);
+
+  it("an unknown agent is not denylisted", () => {
+    const s = new ChatStore();
+    expect(s.isDenylisted(A)).toBe(false);
+  });
+
+  it("applyDenylistUpdate adds and removes agents", () => {
+    const s = new ChatStore();
+    s.applyDenylistUpdate([A, B], []);
+    expect(s.isDenylisted(A)).toBe(true);
+    expect(s.isDenylisted(B)).toBe(true);
+    s.applyDenylistUpdate([], [A]);
+    expect(s.isDenylisted(A)).toBe(false);
+    expect(s.isDenylisted(B)).toBe(true);
+  });
+
+  it("re-adding an already-blocked agent does not emit (idempotent)", () => {
+    const s = new ChatStore();
+    s.applyDenylistUpdate([A], []);
+    const notify = vi.fn();
+    s.subscribe(notify);
+    s.applyDenylistUpdate([A], []);
+    expect(notify).not.toHaveBeenCalled();
+    expect(s.isDenylisted(A)).toBe(true);
+  });
+
+  it("removing an absent agent does not emit", () => {
+    const s = new ChatStore();
+    const notify = vi.fn();
+    s.subscribe(notify);
+    s.applyDenylistUpdate([], [A]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("a real transition emits once", () => {
+    const s = new ChatStore();
+    const notify = vi.fn();
+    s.subscribe(notify);
+    s.applyDenylistUpdate([A], []);
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 });
 

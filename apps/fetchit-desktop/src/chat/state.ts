@@ -171,6 +171,14 @@ export class ChatStore {
   /// errors (group-send failed) that would otherwise vanish silently.
   private notices = new Map<string, ChatNotice>();
   private nextNoticeId = 0;
+  /// M3 G2: agent ids on the community denylist, fed by the
+  /// `chat:denylist-updated` Tauri event (the `EntryKind::AgentId`
+  /// slice of a `BlockEvent`). The sidebar paints a blocked indicator
+  /// next to a contact in this set and the composer refuses to send to
+  /// them. Dormant until the desktop denylist consumer is energized at
+  /// boot — the set stays empty when nothing emits the event, so every
+  /// `isDenylisted` query is `false` and the UI is unchanged.
+  private denylistedAgents = new Set<AgentId>();
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -226,6 +234,32 @@ export class ChatStore {
 
   contact(id: AgentId): Contact | undefined {
     return this.contacts.get(id);
+  }
+
+  /// M3 G2: apply an `EntryKind::AgentId` denylist transition. `added`
+  /// agent ids join the blocked set, `removed` leave it. Idempotent —
+  /// re-applying the same `added` (e.g. a broadcast Lagged-gap recovery
+  /// or duplicate event) is a no-op because `Set` dedupes. Emits only
+  /// when the set actually changed so a redundant event doesn't churn
+  /// subscribers.
+  applyDenylistUpdate(added: AgentId[], removed: AgentId[]): void {
+    let changed = false;
+    for (const id of added) {
+      if (!this.denylistedAgents.has(id)) {
+        this.denylistedAgents.add(id);
+        changed = true;
+      }
+    }
+    for (const id of removed) {
+      if (this.denylistedAgents.delete(id)) changed = true;
+    }
+    if (changed) this.emit();
+  }
+
+  /// M3 G2: is this agent on the community denylist? Drives the
+  /// sidebar blocked indicator + the composer send-gate.
+  isDenylisted(id: AgentId): boolean {
+    return this.denylistedAgents.has(id);
   }
 
   /// Record a first-contact TOFU welcome. Idempotent on `groupIdHex`

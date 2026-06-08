@@ -159,6 +159,18 @@ function rowFor(
   const title = document.createElement("span");
   title.className = "chat-conv__title";
   title.textContent = conv.title;
+  // M3 G2: flag a DM whose peer is on the community denylist. Group
+  // conversations aren't agent-addressed so the indicator is DM-only.
+  const blocked = conv.key.kind === "dm" && store.isDenylisted(conv.key.peer);
+  if (blocked) {
+    li.classList.add("chat-conv--blocked");
+    const flag = document.createElement("span");
+    flag.className = "chat-conv__blocked";
+    flag.textContent = "⛔";
+    flag.title = "On the community safety denylist";
+    flag.setAttribute("aria-label", "blocked contact");
+    titleRow.appendChild(flag);
+  }
   const ts = document.createElement("time");
   ts.className = "chat-conv__ts";
   ts.textContent = relativeShort(conv.lastActivityMs);

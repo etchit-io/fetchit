@@ -7,6 +7,7 @@ vi.mock("./notify", () => ({
 
 import {
   applyChatEvent,
+  applyDenylistUpdateEvent,
   makeRelayDenylistedHandler,
   projectPendingContact,
   warnEventToCopy,
@@ -218,6 +219,27 @@ describe("warnEventToCopy", () => {
 
   it("falls back to a generic 'something went wrong' for unknown kinds", () => {
     expect(warnEventToCopy({ kind: "novel_failure_mode" })).toContain("novel_failure_mode");
+  });
+});
+
+describe("applyDenylistUpdateEvent (M3 G2)", () => {
+  const A = "a".repeat(64);
+
+  it("applies an agent_id-kind transition to the store", () => {
+    applyDenylistUpdateEvent(store, { kind: "agent_id", added: [A], removed: [] });
+    expect(store.isDenylisted(A)).toBe(true);
+  });
+
+  it("ignores non-agent_id kinds (xor_name / relay_url / actor_url)", () => {
+    applyDenylistUpdateEvent(store, { kind: "relay_url", added: [A], removed: [] });
+    applyDenylistUpdateEvent(store, { kind: "xor_name", added: [A], removed: [] });
+    applyDenylistUpdateEvent(store, { kind: "actor_url", added: [A], removed: [] });
+    expect(store.isDenylisted(A)).toBe(false);
+  });
+
+  it("tolerates missing added/removed arrays", () => {
+    applyDenylistUpdateEvent(store, { kind: "agent_id" } as never);
+    expect(store.isDenylisted(A)).toBe(false);
   });
 });
 

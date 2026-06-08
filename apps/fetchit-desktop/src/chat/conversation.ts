@@ -161,7 +161,19 @@ export function mountConversation(
       composer.setEnabled(false, "Select a conversation to start writing…");
       return;
     }
-    composer.setEnabled(true);
+    // M3 G2: refuse outbound to a denylisted DM peer. Group conversations
+    // aren't agent-addressed so the gate is DM-only; the composer stays
+    // open for groups regardless. Dormant until the denylist consumer is
+    // energized — `isDenylisted` is always false with an empty set, so
+    // the composer behaves exactly as before for every contact.
+    if (conv.key.kind === "dm" && store.isDenylisted(conv.key.peer)) {
+      composer.setEnabled(
+        false,
+        "This contact is on the community safety denylist — messages can't be sent.",
+      );
+    } else {
+      composer.setEnabled(true);
+    }
 
     subjectEl.textContent = conv.title;
     if (conv.key.kind === "dm") {

@@ -283,6 +283,15 @@ body.chat-docked {
 
 .chat-conv__body { flex: 1; min-width: 0; }
 
+/* M3 G2: denylisted DM peer — dim the row + show the inline flag. */
+.chat-conv--blocked .chat-conv__title { opacity: 0.6; }
+
+.chat-conv__blocked {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+}
+
 .chat-conv__title-row {
   display: flex;
   align-items: baseline;

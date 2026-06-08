@@ -109,6 +109,31 @@ export function projectPendingContact(
   };
 }
 
+/// Wire-shape of the daemon's `chat:denylist-updated` Tauri event —
+/// mirrors `fetchit_trust_client::BlockEvent`. `kind` is the
+/// snake_case `EntryKind` discriminant; `added` / `removed` are the
+/// canonical-form values that entered / left the denylist for that
+/// kind. The G2 contacts indicator consumes only the `agent_id` kind.
+interface DenylistUpdateEvent {
+  kind: string;
+  added: string[];
+  removed: string[];
+}
+
+/// M3 G2: apply a `chat:denylist-updated` event to the store's blocked
+/// set. Only the `agent_id` kind drives the contacts indicator —
+/// `xor_name` / `relay_url` / `actor_url` transitions are consumed by
+/// other surfaces (reader Blocked render, relay-denylisted banner,
+/// fediverse gate) and are ignored here. Exported for direct testing
+/// without a Tauri `listen` mock.
+export function applyDenylistUpdateEvent(
+  store: ChatStore,
+  ev: DenylistUpdateEvent,
+): void {
+  if (ev.kind !== "agent_id") return;
+  store.applyDenylistUpdate(ev.added ?? [], ev.removed ?? []);
+}
+
 /// M3 G1: build a stateful handler for the `chat:relay-denylisted`
 /// event (payload = the user's primary relay URL that just landed on
 /// the community denylist). Dedupes by URL for the session so a
@@ -188,6 +213,12 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       onRelayDenylisted(ev.payload);
     },
   );
+  const unsubDenylistUpdate = await listen<DenylistUpdateEvent>(
+    "chat:denylist-updated",
+    (ev) => {
+      applyDenylistUpdateEvent(store, ev.payload);
+    },
+  );
   const unsubContactReq = await listen<ContactRequestEvent>(
     "chat:contact-request",
     (ev) => {
@@ -211,6 +242,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubWarn();
     unsubRelayStatus();
     unsubRelayDenylisted();
+    unsubDenylistUpdate();
     unsubContactReq();
   };
 }
