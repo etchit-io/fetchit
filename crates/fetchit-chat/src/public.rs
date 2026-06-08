@@ -83,12 +83,14 @@ pub async fn check_publish_denylist(
 ///   the community denylist.
 pub async fn check_mention_denylist(
     denylist: &dyn DenylistCheck,
-    http: &reqwest::Client,
     mention: &str,
 ) -> Result<Url, ChatError> {
     let parsed =
         parse_mention(mention).map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))?;
-    let actor_url = resolve_handle(http, &parsed)
+    // V-2/V-5 fold: resolve_handle now owns its `reqwest::Client`
+    // construction (Policy::none + resolved-addrs pin), so callers
+    // no longer hand in a possibly-misconfigured client.
+    let actor_url = resolve_handle(&parsed)
         .await
         .map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))?;
     check_actor_url_denylist(denylist, actor_url.as_str()).await?;
@@ -194,8 +196,7 @@ mod tests {
     #[tokio::test]
     async fn check_mention_malformed_returns_invalid() {
         let d = StubDenylist::new(Vec::<String>::new());
-        let http = reqwest::Client::new();
-        let err = check_mention_denylist(&d, &http, "not-a-handle")
+        let err = check_mention_denylist(&d, "not-a-handle")
             .await
             .unwrap_err();
         match err {
@@ -209,12 +210,12 @@ mod tests {
 
     #[tokio::test]
     async fn check_mention_unreachable_instance_returns_invalid() {
+        // resolve_handle owns its reqwest::Client (V-2/V-5 fold), so
+        // the test no longer threads a tuned client — the unreachable
+        // instance still surfaces as a wrapped Invalid via lookup_host
+        // failure or transport timeout on the owned client.
         let d = StubDenylist::new(Vec::<String>::new());
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(150))
-            .build()
-            .unwrap();
-        let err = check_mention_denylist(&d, &http, "@alice@nx-mastodon-empirical.invalid")
+        let err = check_mention_denylist(&d, "@alice@nx-mastodon-empirical.invalid")
             .await
             .unwrap_err();
         match err {

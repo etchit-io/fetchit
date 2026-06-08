@@ -25,9 +25,10 @@ use std::time::Duration;
 /// without opening a parse-cost / memory inflation door.
 pub const MAX_ACTOR_BODY_BYTES: usize = 64 * 1024;
 
-/// Per-call request timeout for [`fetch_actor`]. Caller-level timeouts
-/// on the passed `reqwest::Client` still apply on top; this is the
-/// floor.
+/// Per-call request timeout for [`fetch_actor`]. The internal
+/// `reqwest::Client` is built with this as both its connect + request
+/// timeout (V-2/V-5 fold owns client construction so no caller-side
+/// timeout overrides the floor).
 pub const ACTOR_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Property URI for the post-quantum attestation extension that
@@ -430,15 +431,12 @@ pub enum FetchActorError {
 /// `Accept: application/activity+json` (Mastodon's preferred shape) and
 /// decodes the response via [`Actor::from_json_ld`].
 ///
-/// # Hardening (caller-configured)
-///
-/// The passed `reqwest::Client` **MUST** be built with
-/// `redirect::Policy::none()` (or `limited(1)` at most). Post-flight
-/// IP filtering on the response URL catches a redirected target as a
-/// backstop, but disabling redirects on the client closes the
-/// request-itself surface.
-///
 /// # Hardening enforced in code
+///
+/// All gates owned by this function (no longer caller-configured).
+/// The internal `reqwest::Client` is built with
+/// `redirect::Policy::none()` and a per-call timeout — V-5 from the
+/// polish-sec review folded by owning client construction.
 ///
 /// - **SEC-1**: response body hard-capped at
 ///   [`MAX_ACTOR_BODY_BYTES`] before JSON parse. Pre-checked against
@@ -449,24 +447,46 @@ pub enum FetchActorError {
 ///   [`ACTOR_FETCH_TIMEOUT`].
 /// - **SEC-3**: pre-flight rejects `actor_url` hosts that are IP
 ///   literals in private / loopback / link-local / unique-local /
-///   IPv4-mapped IPv6 space. Post-flight rejects responses whose
-///   final URL targets the same set when a redirect changed the host.
-///   Surfaces [`FetchActorError::PrivateInstance`].
+///   IPv4-mapped IPv6 space.
+/// - **SEC-3 (V-2 fold)**: `tokio::net::lookup_host` resolves the
+///   actor hostname upfront; any private/non-routable IP in the
+///   resolved set trips [`FetchActorError::PrivateInstance`]. The
+///   resolved addresses are pinned via
+///   `reqwest::ClientBuilder::resolve_to_addrs` so the connect-time
+///   lookup can't TTL=0 rebind to a different (private) IP.
+/// - Post-flight rejects responses whose final URL host changed and
+///   targets private IP space (backstop).
 ///
 /// # Errors
 /// Surfaces every [`FetchActorError`] variant. Inner `reqwest` errors
 /// land as [`FetchActorError::Transport`].
-pub async fn fetch_actor(
-    http: &reqwest::Client,
-    actor_url: &url::Url,
-) -> Result<Actor, FetchActorError> {
-    // SEC-3 pre-flight.
+pub async fn fetch_actor(actor_url: &url::Url) -> Result<Actor, FetchActorError> {
+    // SEC-3 pre-flight on the URL itself.
     if let Some(host) = actor_url.host() {
         if let Some(reason) = crate::webfinger::private_ip_reason(&host) {
             return Err(FetchActorError::PrivateInstance { host: reason });
         }
     }
-    fetch_actor_at_url(http, actor_url, ACTOR_FETCH_TIMEOUT).await
+    // V-2 fold: resolve hostname + pin addresses on the client.
+    let host_for_pin = actor_url
+        .host_str()
+        .ok_or_else(|| FetchActorError::Transport("URL has no host".into()))?;
+    let port = actor_url.port_or_known_default().unwrap_or(443);
+    let pinned = crate::webfinger::resolve_and_pin_host(host_for_pin, port)
+        .await
+        .map_err(|e| match e {
+            crate::webfinger::WebFingerError::PrivateInstance { host } => {
+                FetchActorError::PrivateInstance { host }
+            }
+            other => FetchActorError::Transport(other.to_string()),
+        })?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(ACTOR_FETCH_TIMEOUT)
+        .resolve_to_addrs(host_for_pin, &pinned)
+        .build()
+        .map_err(|e| FetchActorError::Transport(format!("client builder: {e}")))?;
+    fetch_actor_at_url(&client, actor_url, ACTOR_FETCH_TIMEOUT).await
 }
 
 /// Internal: HTTP fetch + body cap + post-flight + parse. Factored
@@ -740,9 +760,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_actor_rejects_private_ipv4_url() {
         let url: url::Url = "https://192.168.1.1/actors/eve".parse().unwrap();
-        let err = fetch_actor(&reqwest::Client::new(), &url)
-            .await
-            .unwrap_err();
+        let err = fetch_actor(&url).await.unwrap_err();
         match err {
             FetchActorError::PrivateInstance { host } => {
                 assert!(host.contains("192.168.1.1"), "host = {host}");
@@ -754,9 +772,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_actor_rejects_aws_metadata_url() {
         let url: url::Url = "https://169.254.169.254/latest/meta-data/".parse().unwrap();
-        let err = fetch_actor(&reqwest::Client::new(), &url)
-            .await
-            .unwrap_err();
+        let err = fetch_actor(&url).await.unwrap_err();
         assert!(matches!(err, FetchActorError::PrivateInstance { .. }));
     }
 

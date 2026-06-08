@@ -6,6 +6,7 @@
 //! in plan Stage 5.3.
 
 use serde::Deserialize;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -180,6 +181,86 @@ struct JrdLink {
 /// ([`crate::actor::fetch_actor`]) and any future fetch-from-remote
 /// helper share one canonical detection — when the IP-class table
 /// evolves (V-7 CGNAT, IPv6 fold-up), it evolves in one place.
+/// SEC-3 (V-2 fold): inspect a resolved [`IpAddr`] and return a
+/// description if it points at private / non-routable space.
+///
+/// Twin of [`private_ip_reason`] for the post-`lookup_host` path —
+/// where `private_ip_reason` checks an IP literal embedded in a URL,
+/// this checks the IPs a DNS resolver actually returns for a
+/// hostname. Logic is mirror-for-mirror so a future class extension
+/// (V-7 CGNAT, etc.) only lands in one matching pair.
+pub(crate) fn is_private_ip_addr(ip: IpAddr) -> Option<String> {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+            {
+                Some(format!("private/non-routable IPv4 {v4}"))
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                return Some(format!("non-routable IPv6 {v6}"));
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                if v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+                {
+                    return Some(format!("IPv4-mapped private IPv6 {v6}"));
+                }
+            }
+            if (v6.segments()[0] & 0xfe00) == 0xfc00 {
+                return Some(format!("unique-local IPv6 {v6}"));
+            }
+            if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                return Some(format!("link-local IPv6 {v6}"));
+            }
+            None
+        }
+    }
+}
+
+/// SEC-3 (V-2 fold): resolve `host:port` via `tokio::net::lookup_host`
+/// and validate every returned address against [`is_private_ip_addr`].
+///
+/// Any private/non-routable address in the resolved set trips the
+/// gate (partial-results-safe). Empty resolution surfaces as
+/// [`WebFingerError::Transport`]. On success returns the validated
+/// addresses so the caller can pin them via
+/// `reqwest::ClientBuilder::resolve_to_addrs`, defeating the TTL=0
+/// rebinding race where a second DNS lookup at connect time would
+/// otherwise return a different (private) IP.
+pub(crate) async fn resolve_and_pin_host(
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>, WebFingerError> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:{port}"))
+        .await
+        .map_err(|e| WebFingerError::Transport(format!("lookup_host({host}): {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(WebFingerError::Transport(format!(
+            "lookup_host({host}): empty result"
+        )));
+    }
+    for addr in &addrs {
+        if let Some(reason) = is_private_ip_addr(addr.ip()) {
+            return Err(WebFingerError::PrivateInstance { host: reason });
+        }
+    }
+    Ok(addrs)
+}
+
 pub(crate) fn private_ip_reason(host: &url::Host<&str>) -> Option<String> {
     match host {
         url::Host::Ipv4(ip) => {
@@ -233,34 +314,33 @@ pub(crate) fn private_ip_reason(host: &url::Host<&str>) -> Option<String> {
 /// `rel = "self"` and `type = "application/activity+json"` (the
 /// Mastodon-interop shape).
 ///
-/// # Hardening (caller-configured)
-///
-/// The `http` client passed in **MUST** be built with
-/// `redirect::Policy::none()` (or `limited(1)` at most). A redirect
-/// from a hostile instance can target cloud-metadata services
-/// (e.g. `169.254.169.254`) or loopback addresses; the post-flight
-/// IP filter (SEC-3) catches the response, but the request itself
-/// still fires — disable redirects to stop the request altogether.
-///
 /// # Hardening enforced in code
+///
+/// All gates owned by this function (no longer caller-configured).
+/// The internal `reqwest::Client` is built with
+/// `redirect::Policy::none()` and a per-call timeout — V-5 from the
+/// polish-sec review folded by owning client construction.
 ///
 /// - **SEC-1**: response body hard-capped at 64KB before JRD parse;
 ///   surfaces [`WebFingerError::BodyTooLarge`].
-/// - **SEC-2**: per-call request timeout of 10s; client-level timeouts
-///   on the passed `http` apply on top, this is the floor.
-/// - **SEC-3**: pre-flight rejects instance hosts that are IP literals
-///   in private / loopback / link-local space; post-flight rejects
-///   responses whose final URL targets the same set. Both surface
-///   [`WebFingerError::PrivateInstance`].
+/// - **SEC-2**: per-call request timeout of 10s.
+/// - **SEC-3**: pre-flight rejects instance hosts that are IP
+///   literals in private / loopback / link-local space.
+/// - **SEC-3 (V-2 fold)**: `tokio::net::lookup_host` resolves the
+///   instance hostname upfront; any private/non-routable IP in the
+///   resolved set trips [`WebFingerError::PrivateInstance`]. The
+///   resolved addresses are pinned via
+///   `reqwest::ClientBuilder::resolve_to_addrs` so the connect-time
+///   lookup can't TTL=0 rebind to a different (private) IP.
+/// - Post-flight rejects responses whose final URL targets private
+///   IP space (backstop for any redirect that slipped past
+///   `Policy::none()`).
 ///
 /// # Errors
 /// Surfaces every [`WebFingerError`] variant — the inner `reqwest`
 /// errors are mapped into [`WebFingerError::Transport`] rather than
 /// propagated raw so the public surface stays bounded.
-pub async fn resolve_handle(
-    http: &reqwest::Client,
-    handle: &ParsedHandle,
-) -> Result<Url, WebFingerError> {
+pub async fn resolve_handle(handle: &ParsedHandle) -> Result<Url, WebFingerError> {
     let resource = format!("acct:{}@{}", handle.local, handle.instance);
     let encoded_resource: String =
         url::form_urlencoded::byte_serialize(resource.as_bytes()).collect();
@@ -280,7 +360,23 @@ pub async fn resolve_handle(
         }
     }
 
-    resolve_handle_at_endpoint(http, &endpoint, RESOLVE_TIMEOUT).await
+    // V-2 fold: resolve hostname now + pin the resolved addresses on
+    // the client so reqwest can't rebind to a different (private) IP
+    // at connect time. Only applies when the instance is a hostname;
+    // IP-literal instances are already gated by the pre-flight above.
+    let host_for_pin = pre_url
+        .host_str()
+        .ok_or_else(|| WebFingerError::InvalidInstance("URL has no host".into()))?;
+    let pinned = resolve_and_pin_host(host_for_pin, 443).await?;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(RESOLVE_TIMEOUT)
+        .resolve_to_addrs(host_for_pin, &pinned)
+        .build()
+        .map_err(|e| WebFingerError::Transport(format!("client builder: {e}")))?;
+
+    resolve_handle_at_endpoint(&client, &endpoint, RESOLVE_TIMEOUT).await
 }
 
 /// Internal: HTTP-fetch + JRD parse + actor link extraction. Factored
@@ -576,9 +672,7 @@ mod tests {
             local: "alice".to_owned(),
             instance: "192.168.1.1".to_owned(),
         };
-        let err = resolve_handle(&reqwest::Client::new(), &handle)
-            .await
-            .unwrap_err();
+        let err = resolve_handle(&handle).await.unwrap_err();
         match err {
             WebFingerError::PrivateInstance { host } => {
                 assert!(host.contains("192.168.1.1"), "host = {host}");
@@ -593,9 +687,7 @@ mod tests {
             local: "alice".to_owned(),
             instance: "127.0.0.1".to_owned(),
         };
-        let err = resolve_handle(&reqwest::Client::new(), &handle)
-            .await
-            .unwrap_err();
+        let err = resolve_handle(&handle).await.unwrap_err();
         assert!(matches!(err, WebFingerError::PrivateInstance { .. }));
     }
 
@@ -608,9 +700,7 @@ mod tests {
             local: "alice".to_owned(),
             instance: "169.254.169.254".to_owned(),
         };
-        let err = resolve_handle(&reqwest::Client::new(), &handle)
-            .await
-            .unwrap_err();
+        let err = resolve_handle(&handle).await.unwrap_err();
         assert!(matches!(err, WebFingerError::PrivateInstance { .. }));
     }
 
@@ -650,6 +740,50 @@ mod tests {
         let url = Url::parse("https://mastodon.example/").unwrap();
         let host = url.host().unwrap();
         assert!(private_ip_reason(&host).is_none());
+    }
+
+    // ----- V-2 fold: DNS-resolution gate -----
+
+    #[tokio::test]
+    async fn resolve_and_pin_host_rejects_localhost() {
+        // `localhost` resolves to 127.0.0.1 (and possibly ::1). Either
+        // way every resolved address is private/non-routable, so the
+        // gate trips with PrivateInstance. Pins the post-lookup_host
+        // validation V-2 added; without it, `https://evil.example/`
+        // DNS-rebinding to a private IP would slip past the IP-literal
+        // pre-flight and hit the network.
+        let err = resolve_and_pin_host("localhost", 80).await.unwrap_err();
+        assert!(matches!(err, WebFingerError::PrivateInstance { .. }));
+    }
+
+    #[test]
+    fn is_private_ip_addr_flags_v4_loopback() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_private_ip_addr(ip).is_some());
+    }
+
+    #[test]
+    fn is_private_ip_addr_flags_v4_rfc1918() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_private_ip_addr(ip).is_some());
+    }
+
+    #[test]
+    fn is_private_ip_addr_flags_v4_aws_metadata() {
+        let ip: IpAddr = "169.254.169.254".parse().unwrap();
+        assert!(is_private_ip_addr(ip).is_some());
+    }
+
+    #[test]
+    fn is_private_ip_addr_flags_v6_link_local() {
+        let ip: IpAddr = "fe80::1".parse().unwrap();
+        assert!(is_private_ip_addr(ip).is_some());
+    }
+
+    #[test]
+    fn is_private_ip_addr_allows_v4_public() {
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        assert!(is_private_ip_addr(ip).is_none());
     }
 
     // ----- V-1: IPv6 link-local fe80::/10 -----
