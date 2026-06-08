@@ -17,7 +17,8 @@
 
 use crate::denylist::DenylistCheck;
 use crate::error::ChatError;
-use fetchit_fedi::PublicPost;
+use fetchit_fedi::{parse_mention, resolve_handle, PublicPost};
+use url::Url;
 
 /// Single-shot denylist check against one canonical-form actor URL.
 ///
@@ -61,6 +62,37 @@ pub async fn check_publish_denylist(
         check_actor_url_denylist(denylist, reply_to).await?;
     }
     Ok(())
+}
+
+/// Resolve a `@user@instance` mention to its canonical actor URL via
+/// `WebFinger`, then gate that URL through `denylist.is_blocked_actor`.
+///
+/// The composed-helper for Stage 5.2's per-mention publish loop: each
+/// mention on a `PublicPost` goes through here so the denylist sees the
+/// canonical actor URL (matching what M4 Stage 4.1 publishes), not the
+/// pre-resolution handle.
+///
+/// Returns the resolved [`Url`] so the caller can immediately hand it
+/// to `FediverseTransport::deliver` without re-resolving.
+///
+/// # Errors
+/// - [`ChatError::Invalid`] when the mention is malformed or
+///   `WebFinger` resolution fails (DNS / HTTP / JRD parse). The
+///   inner [`WebFingerError`] message rides in the `String` payload.
+/// - [`ChatError::DeniedActor`] when the resolved actor URL is on
+///   the community denylist.
+pub async fn check_mention_denylist(
+    denylist: &dyn DenylistCheck,
+    http: &reqwest::Client,
+    mention: &str,
+) -> Result<Url, ChatError> {
+    let parsed =
+        parse_mention(mention).map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))?;
+    let actor_url = resolve_handle(http, &parsed)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))?;
+    check_actor_url_denylist(denylist, actor_url.as_str()).await?;
+    Ok(actor_url)
 }
 
 #[cfg(test)]
@@ -157,5 +189,40 @@ mod tests {
         let d = StubDenylist::new(["https://attacker.example/users/eve"]);
         let post = post_with_reply_to(Some("https://mastodon.example/users/alice"));
         check_publish_denylist(&d, &post).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_mention_malformed_returns_invalid() {
+        let d = StubDenylist::new(Vec::<String>::new());
+        let http = reqwest::Client::new();
+        let err = check_mention_denylist(&d, &http, "not-a-handle")
+            .await
+            .unwrap_err();
+        match err {
+            ChatError::Invalid(msg) => assert!(
+                msg.contains("webfinger") && msg.contains("malformed"),
+                "expected wrapped malformed-handle error, got: {msg}",
+            ),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_mention_unreachable_instance_returns_invalid() {
+        let d = StubDenylist::new(Vec::<String>::new());
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(150))
+            .build()
+            .unwrap();
+        let err = check_mention_denylist(&d, &http, "@alice@nx-mastodon-empirical.invalid")
+            .await
+            .unwrap_err();
+        match err {
+            ChatError::Invalid(msg) => assert!(
+                msg.contains("webfinger"),
+                "expected wrapped transport error, got: {msg}",
+            ),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 }
