@@ -11,6 +11,7 @@ import { renderAudio } from "./audio";
 import { renderVideo } from "./video";
 import { renderPdf } from "./pdf";
 import { renderBinary } from "./binary";
+import { renderBlocked } from "./blocked";
 
 export function render(
   r: Rendition,
@@ -58,6 +59,9 @@ export function render(
       return;
     case "binary":
       renderBinary(r, into);
+      return;
+    case "blocked":
+      renderBlocked(r, into);
       return;
   }
   const _exhaustive: never = r;

@@ -9,4 +9,5 @@ export type Rendition =
   | { kind: "audio"; mime: string; byteLen: number }
   | { kind: "video"; mime: string; byteLen: number }
   | { kind: "pdf"; byteLen: number }
-  | { kind: "binary"; mime: string; byteLen: number };
+  | { kind: "binary"; mime: string; byteLen: number }
+  | { kind: "blocked"; reason: string };

@@ -56,6 +56,12 @@ pub enum RenditionDto {
         mime: String,
         byte_len: usize,
     },
+    /// M3 G3: the source address is on the community denylist. Serializes
+    /// as `{ kind: "blocked", reason }`; the frontend renders a
+    /// "content blocked" card naming the reason instead of the payload.
+    Blocked {
+        reason: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -114,11 +120,33 @@ impl From<Rendition> for RenditionDto {
                 mime,
                 byte_len: data.len(),
             },
+            Rendition::Blocked { reason } => Self::Blocked { reason },
             // `Rendition` is `#[non_exhaustive]`.
             other => Self::Text {
                 language: None,
                 body: format!("(unhandled rendition: {other:?})"),
             },
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocked_maps_to_blocked_dto_not_text_fallthrough() {
+        // Regression guard: before G3, Rendition::Blocked hit the
+        // #[non_exhaustive] `other` arm and rendered as an "(unhandled
+        // rendition)" text body. It must now serialize as a first-class
+        // { kind: "blocked", reason } the frontend's blockedRenderer
+        // matches on.
+        let dto = RenditionDto::from(Rendition::Blocked {
+            reason: "xor_name: 4d216f18".to_string(),
+        });
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["kind"], "blocked");
+        assert_eq!(v["reason"], "xor_name: 4d216f18");
     }
 }

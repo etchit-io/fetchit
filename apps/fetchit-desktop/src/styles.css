@@ -1907,3 +1907,26 @@ body:not([data-view="settings"]) #settings {
     transition-duration: 0.001s !important;
   }
 }
+
+/* M3 G3: "content blocked" card shown when the source address is on the
+   community denylist. Warm accent (--rust) signals the block without the
+   alarm of a hard error. */
+.blocked-notice {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rust);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+  max-width: 42rem;
+}
+.blocked-notice__title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  color: var(--rust);
+}
+.blocked-notice__reason {
+  margin: 0.5rem 0 0;
+  font-family: var(--mono, monospace);
+  font-size: 0.85rem;
+  color: var(--bone-dim);
+}
