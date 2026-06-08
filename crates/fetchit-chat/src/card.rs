@@ -379,13 +379,19 @@ pub fn verify_card_extension(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ChatError::Invalid("missing fetchit_card_signature_b64".into()))?;
 
-    // Reconstruct the x0x-card-only JSON (without the four v2 fields)
-    // so we sign the same canonical bytes the issuer signed.
+    // Reconstruct the x0x-card-only JSON so we hash the same canonical
+    // bytes the issuer signed. `extend_with_fetchit_fields` computes
+    // `canonical_x0x_bytes` from the bare x0x card BEFORE adding any
+    // `fetchit_*` field, including the reserved `fetchit_rendezvous_hints`
+    // slot. Verify must strip ALL five `fetchit_*` slots to match;
+    // omitting the hints field here breaks any card minted with
+    // [`RendezvousHintsV1`] populated.
     let mut x0x_only = obj.clone();
     x0x_only.remove("fetchit_card_version");
     x0x_only.remove("fetchit_kem_public_key_b64");
     x0x_only.remove("fetchit_agent_public_key_b64");
     x0x_only.remove("fetchit_card_signature_b64");
+    x0x_only.remove("fetchit_rendezvous_hints");
     let x0x_only_value = serde_json::Value::Object(x0x_only);
     let canonical_x0x_bytes = canonical_json(&x0x_only_value)?;
 
