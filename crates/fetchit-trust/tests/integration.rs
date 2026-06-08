@@ -343,3 +343,17 @@ async fn admin_list_shows_denylist_and_queued_reports() {
     assert_eq!(v["denylist"].as_array().unwrap().len(), 1);
     assert_eq!(v["queued_reports"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn server_refuses_non_loopback_admin_bind() {
+    // The admin API is unauthenticated; binding it anywhere but loopback
+    // would expose deny/revoke to the internet. Server::new must refuse.
+    let dir = tempdir().unwrap();
+    let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let public_only: SocketAddr = "0.0.0.0:8091".parse().unwrap();
+    let cfg = ServerConfig::new(bind, dir.path().to_path_buf(), "v1").with_admin_bind(public_only);
+    match Server::new(cfg) {
+        Ok(_) => panic!("non-loopback admin_bind must be refused"),
+        Err(e) => assert!(e.to_string().contains("loopback"), "got: {e}"),
+    }
+}

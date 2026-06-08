@@ -42,6 +42,19 @@ impl Server {
     /// # Errors
     /// Returns any IO / keygen failure encountered during setup.
     pub fn new(config: ServerConfig) -> Result<Self, TrustError> {
+        // The admin API (deny/revoke/list) is UNAUTHENTICATED; its only
+        // gate is that it binds loopback + is never reverse-proxied, so
+        // reachability means shell access to the host. Enforce that
+        // invariant in code, not just docs: refuse to start if
+        // admin_bind is non-loopback (a misconfigured
+        // FETCHIT_TRUST_ADMIN_BIND would otherwise expose deny/revoke to
+        // the internet). Mirrors the relay-server's internal_bind guard.
+        if !config.admin_bind.ip().is_loopback() {
+            return Err(TrustError::Config(format!(
+                "admin_bind must be a loopback address (the admin API is unauthenticated); got {}",
+                config.admin_bind
+            )));
+        }
         std::fs::create_dir_all(&config.data_dir)?;
         let storage = Arc::new(Storage::open(config.data_dir.join("trust-snapshot.json"))?);
         let signer = Arc::new(IssuerSigner::load_or_generate(
