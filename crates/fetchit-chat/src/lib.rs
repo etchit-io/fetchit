@@ -37,6 +37,7 @@ pub mod messages;
 pub mod pair;
 pub mod presence;
 pub mod profile;
+pub mod public;
 pub mod relay_transport;
 pub mod transport;
 

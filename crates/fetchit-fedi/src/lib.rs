@@ -30,3 +30,5 @@ pub mod signature_cache;
 pub mod signature_cavage;
 pub mod transport;
 pub mod webfinger;
+
+pub use activity::PublicPost;

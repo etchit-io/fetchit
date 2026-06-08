@@ -114,6 +114,22 @@ pub enum ChatError {
         /// 64-hex agent id of the blocked recipient.
         agent_id_hex: String,
     },
+
+    /// M4 Stage 5.1-chat: the targeted fediverse actor is on the
+    /// community-maintained denylist. Sibling of [`Self::Denied`] for
+    /// `EntryKind::ActorUrl` rather than `EntryKind::AgentId`. Raised
+    /// by [`crate::public::check_actor_url_denylist`] and
+    /// [`crate::public::check_publish_denylist`] before any outbound
+    /// HTTPS POST fires.
+    ///
+    /// `actor_url` is the canonical-form value matched against the
+    /// denylist (lowercased, no userinfo/fragment/query, single
+    /// trailing-slash strip) — what the UI should display verbatim.
+    #[error("actor {actor_url} is on the community denylist — publish refused")]
+    DeniedActor {
+        /// Canonical-form actor URL of the blocked recipient.
+        actor_url: String,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {
