@@ -401,6 +401,23 @@ impl MultiHomeTransport {
         }
     }
 
+    /// M3 D6: attach a [`fetchit_trust_client::BlockEvent`] subscriber to
+    /// an already-constructed transport.
+    ///
+    /// `MultiHomeTransport` is built in `Client::build_with_chat` before
+    /// the denylist consumer exists, so the constructor receives `None`.
+    /// `Client::install_m3_denylist` calls this once the consumer's
+    /// broadcast is live, closing the D6 mid-session loop: a `RelayUrl`
+    /// block then drops the matching slot 1/2 and fires the
+    /// primary-denylisted callback, exactly as the construction-time
+    /// path. Spawns one background drain task per call.
+    pub fn attach_block_event_subscriber(
+        &self,
+        block_events: tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>,
+    ) {
+        self.spawn_denylist_subscriber(block_events);
+    }
+
     /// Drain a [`fetchit_trust_client::BlockEvent`] broadcast and:
     ///
     /// 1. Drop any active slot 1/2 whose `relay_url` matches a
@@ -1277,6 +1294,66 @@ mod tests {
         assert!(
             urls.contains(&"wss://primary.test/v1/ws"),
             "slot 0 stays — it's the primary",
+        );
+    }
+
+    /// D6 post-construction: a transport built WITHOUT a subscriber (the
+    /// production path, since the consumer is created after the transport
+    /// in `Client::install_m3_denylist`) gains full mid-session
+    /// reactivity once `attach_block_event_subscriber` is called. A
+    /// `RelayUrl` block then drops the matching slot 1/2 just like the
+    /// construction-time `new_with_subscriber` path.
+    #[tokio::test]
+    async fn attach_block_event_subscriber_enables_mid_session_drop() {
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+
+        // Build with the no-subscriber constructor, mirroring the `None`
+        // that build_with_chat passes today.
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        // Open slot 1 so there's an active slot to drop.
+        mh.send_inner(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://later-blocked.test/v1/ws"),
+        )
+        .await
+        .unwrap();
+        assert!(mh.slots_for_test()[1].is_some());
+
+        // Attach the subscriber AFTER construction, then block slot 1's URL.
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+        mh.attach_block_event_subscriber(rx);
+
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://later-blocked.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let slots = mh.slots_for_test();
+        let urls: Vec<&str> = slots
+            .iter()
+            .filter_map(|s| s.as_ref().map(|x| x.relay_url.as_str()))
+            .collect();
+        assert!(
+            !urls.contains(&"wss://later-blocked.test/v1/ws"),
+            "post-attach block should drop the slot, got {urls:?}",
+        );
+        assert!(
+            urls.contains(&"wss://primary.test/v1/ws"),
+            "slot 0 stays after a post-attach block",
         );
     }
 

@@ -314,6 +314,14 @@ pub struct Client {
     /// blocked recipients. Cloneable across `Client` clones; the
     /// underlying refresh loop runs on the host's runtime.
     denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
+    /// M3 G4: concrete handle to the denylist consumer (the same
+    /// instance backing the `denylist` gate adapter above), retained so
+    /// the desktop shell can subscribe to its
+    /// [`fetchit_trust_client::BlockEvent`] broadcast and emit the
+    /// `chat:denylist-updated` Tauri event. Populated by
+    /// [`Self::install_m3_denylist`]; `None` until the consumer is
+    /// installed (REST-only mode, or before the install runs at boot).
+    denylist_consumer: Option<Arc<fetchit_trust_client::DenylistConsumer>>,
     /// M3 federation core: monotonic counter of inbound envelopes
     /// silently dropped by the denylist gate. Surfaced to ops via
     /// [`Self::denylist_dropped_inbound_count`] so operators can see
@@ -470,6 +478,7 @@ impl Client {
             lan,
             lan_bound_addr,
             denylist,
+            denylist_consumer: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(initial_relays)),
             multi_home_inbound,
@@ -526,10 +535,14 @@ impl Client {
     ///   consumer's default cadence; the [`tokio::task::JoinHandle`] is
     ///   currently dropped (M3 D8.2 will stash it for graceful
     ///   shutdown).
-    /// - The consumer's [`fetchit_trust_client::BlockEvent`] subscriber
-    ///   is created and dropped; D9+ will route it into
-    ///   [`crate::transport::MultiHomeTransport::new_with_subscriber`]
-    ///   so mid-session `RelayUrl` blocks drop active slots.
+    /// - When a [`crate::transport::MultiHomeTransport`] is wired, the
+    ///   consumer's [`fetchit_trust_client::BlockEvent`] broadcast is
+    ///   routed into it (via
+    ///   [`crate::transport::MultiHomeTransport::attach_block_event_subscriber`])
+    ///   so a mid-session `RelayUrl` block drops the matching slot 1/2
+    ///   and fires the primary-denylisted callback. The consumer is also
+    ///   retained on the client so the desktop shell can take its own
+    ///   subscriber via [`Self::subscribe_to_block_events`].
     ///
     /// The hardcoded issuer pubkey is
     /// [`fetchit_trust_client::etchitio_pubkey`]; pre-launch this is a
@@ -554,12 +567,18 @@ impl Client {
         ));
         consumer.load_cache_blocking();
 
-        // Subscribe before spawning the poll loop so the very first
-        // refresh's BlockEvent isn't lost. D9+ hands this receiver to
-        // MultiHomeTransport::new_with_subscriber; today it's discarded
-        // (drop closes the receiver but the consumer keeps the
-        // broadcast Sender alive, so future subscribers still work).
-        let _subscriber = consumer.subscribe();
+        // D6: route the consumer's BlockEvent broadcast into the
+        // MultiHomeTransport (when one is wired) so a mid-session
+        // `RelayUrl` block drops the matching slot 1/2 and fires the
+        // primary-denylisted callback. The transport was built before
+        // the consumer existed (build_with_chat passes `None`), so the
+        // attach happens here. Each `subscribe()` is an independent
+        // receiver; the desktop G4 pump takes its own via
+        // [`Self::subscribe_to_block_events`]. REST-only clients have no
+        // MH to attach to.
+        if let Some(mh) = self.multi_home.as_ref() {
+            mh.attach_block_event_subscriber(consumer.subscribe());
+        }
 
         // TODO(M3 D8.2): stash the JoinHandle on Client so shutdown can
         // abort the loop deterministically. Today the task lives until
@@ -567,11 +586,30 @@ impl Client {
         // spawned closure each hold one).
         let _handle = Arc::clone(&consumer).spawn_poll_loop(http);
 
-        let query: Arc<dyn fetchit_trust::DenylistQuery> = consumer;
+        let query: Arc<dyn fetchit_trust::DenylistQuery> = consumer.clone();
         let adapter: Arc<dyn crate::denylist::DenylistCheck> =
             Arc::new(crate::denylist::DenylistQueryAdapter::new(query));
         self.denylist = Some(adapter);
+        self.denylist_consumer = Some(consumer);
         Ok(())
+    }
+
+    /// M3 G4: subscribe to the installed denylist consumer's
+    /// [`fetchit_trust_client::BlockEvent`] broadcast.
+    ///
+    /// Returns a fresh broadcast receiver each call (the consumer keeps
+    /// the sender alive across subscribers), or `None` when no consumer
+    /// is installed yet, REST-only mode, or before
+    /// [`Self::install_m3_denylist`] runs. The desktop shell drains this
+    /// to emit the `chat:denylist-updated` Tauri event that drives the
+    /// contacts denylist indicator; the `RelayUrl`-driven slot drops +
+    /// primary banner are wired separately inside `install_m3_denylist`
+    /// (see [`crate::transport::MultiHomeTransport::attach_block_event_subscriber`]).
+    #[must_use]
+    pub fn subscribe_to_block_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>> {
+        self.denylist_consumer.as_ref().map(|c| c.subscribe())
     }
 
     /// Replace the relay list advertised in this client's v2 share card
@@ -2755,6 +2793,7 @@ mod tests {
             lan: None,
             lan_bound_addr: None,
             denylist: None,
+            denylist_consumer: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: None,
@@ -3039,6 +3078,7 @@ mod tests {
             lan: None,
             lan_bound_addr: None,
             denylist: None,
+            denylist_consumer: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
@@ -3112,6 +3152,10 @@ mod tests {
             client.denylist.is_none(),
             "fresh REST-only client has no denylist wired"
         );
+        assert!(
+            client.subscribe_to_block_events().is_none(),
+            "no BlockEvent subscriber before install"
+        );
 
         let http: Arc<dyn fetchit_trust_client::HttpClient + Send + Sync + 'static> =
             Arc::new(PendingHttp);
@@ -3119,6 +3163,10 @@ mod tests {
             .install_m3_denylist("https://etchit.io/v1".into(), None, http)
             .expect("install succeeds");
         assert!(client.denylist.is_some(), "denylist installed");
+        assert!(
+            client.subscribe_to_block_events().is_some(),
+            "G4: BlockEvent subscriber available after install for the desktop pump"
+        );
         assert_eq!(
             client.denylist_dropped_inbound_count(),
             0,
