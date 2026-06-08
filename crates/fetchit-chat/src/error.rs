@@ -130,6 +130,24 @@ pub enum ChatError {
         /// Canonical-form actor URL of the blocked recipient.
         actor_url: String,
     },
+
+    /// `Client::groups::join` returned 200 from x0xd but the joiner's
+    /// local x0xd never applied `MemberAdded` to the state slice that
+    /// `/secure/decrypt` reads against. Inbound owner-gossiped messages
+    /// land before convergence and 403 with "not a member"; this error
+    /// surfaces that race instead of papering over it.
+    ///
+    /// Empirically observed under x0xd v0.21.3 on degraded-NAT joiners
+    /// (gossip-into-joiner saturation window, typically ~20s on cross-NAT
+    /// pairs). The launch surface ([desktop UI, Android UI]) renders this
+    /// as "Joining the group is still in progress" and exposes a retry.
+    #[error("joiner did not converge into /groups/{group_id}/members within {waited_ms}ms")]
+    JoinerNotConverged {
+        /// Group id whose /members the joiner never appeared in active.
+        group_id: String,
+        /// Wall-clock the joiner was given before this error surfaced.
+        waited_ms: u128,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {

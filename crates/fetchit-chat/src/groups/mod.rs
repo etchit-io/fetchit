@@ -36,10 +36,13 @@ pub mod bridge_member_removed;
 pub mod bridge_member_role_updated;
 pub mod bridge_policy_updated;
 pub mod dispatch;
+pub mod membership;
+
+use std::time::Duration;
 
 use crate::error::{ChatError, Result};
 use crate::http::Http;
-use crate::identity::AgentId;
+use crate::identity::{AgentId, AgentIdentity};
 use serde::{Deserialize, Serialize};
 
 /// Opaque group identifier.
@@ -316,9 +319,55 @@ impl<'a> Endpoint<'a> {
         Ok(GroupInvite(resp.invite_link))
     }
 
-    /// Accept a `x0x://invite/…` link into the local roster.
+    /// Accept a `x0x://invite/…` link into the local roster and block
+    /// until x0xd has applied `MemberAdded` locally.
+    ///
+    /// Two-stage: `POST /groups/join` on x0xd (which David's v0.21.3
+    /// `63b5c63` patches with a Welcome-fetch retry), then
+    /// [`membership::wait_for_active_membership`] poll-loop against
+    /// `GET /groups/<id>/members` so a follow-up `/secure/decrypt` on
+    /// an owner-gossiped envelope can't race the convergence and 403
+    /// "not a member". The implicit `GET /agent` lookup resolves the
+    /// joiner's own id once per call; callers that already hold an
+    /// [`AgentId`] should reach for [`Self::join_with_membership_wait`]
+    /// to skip it.
+    ///
+    /// # Errors
+    /// - Whatever the underlying HTTP layer surfaces for `/groups/join`
+    ///   or `/agent`.
+    /// - [`ChatError::JoinerNotConverged`] when x0xd never applies
+    ///   `MemberAdded` to the joiner within
+    ///   [`membership::MEMBERSHIP_WAIT_TIMEOUT`].
     pub async fn join(&self, invite: &GroupInvite, display_name: Option<&str>) -> Result<Group> {
-        self.http
+        let me: AgentIdentity = self.http.get_json("/agent").await?;
+        self.join_with_membership_wait(
+            invite,
+            display_name,
+            &me.agent_id,
+            membership::MEMBERSHIP_WAIT_TIMEOUT,
+            membership::MEMBERSHIP_POLL_INTERVAL,
+        )
+        .await
+    }
+
+    /// Variant of [`Self::join`] that lets the caller supply the
+    /// joiner's [`AgentId`] (skipping the implicit `/agent` round-trip)
+    /// and tune the membership-convergence poll window. Used by tests
+    /// and by callers that already cached self's id during Client
+    /// construction.
+    ///
+    /// # Errors
+    /// Same as [`Self::join`] minus the `/agent` lookup.
+    pub async fn join_with_membership_wait(
+        &self,
+        invite: &GroupInvite,
+        display_name: Option<&str>,
+        self_id: &AgentId,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<Group> {
+        let group: Group = self
+            .http
             .post_json(
                 "/groups/join",
                 &JoinRequest {
@@ -326,7 +375,17 @@ impl<'a> Endpoint<'a> {
                     display_name,
                 },
             )
-            .await
+            .await?;
+        let group_id = group.group_id.clone();
+        membership::wait_for_active_membership(
+            &group_id,
+            self_id,
+            timeout,
+            poll_interval,
+            || async { self.members(&group_id).await },
+        )
+        .await?;
+        Ok(group)
     }
 
     /// Register an agent as a member of a group from the creator's

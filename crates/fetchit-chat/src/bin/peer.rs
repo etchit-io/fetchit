@@ -29,7 +29,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
-use fetchit_chat::groups::{GroupId, GroupInvite};
+use fetchit_chat::groups::GroupInvite;
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::{
     decode_direct_message, is_private_group_envelope, PrivateGroupReceive,
@@ -40,18 +40,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use url::Url;
-
-/// How long [`wait_for_active_membership`] waits before declaring the
-/// joiner-side x0xd convergence dead. Picked to cover the worst-case
-/// gossip-into-joiner saturation window seen empirically on v0.21.3
-/// across degraded NATs (≈20s convergence, padded ×3 for headroom).
-const MEMBERSHIP_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Interval between `/groups/<gid>/members` polls inside
-/// [`wait_for_active_membership`]. Tight enough that the joiner enters
-/// echo within a second of x0xd applying `MemberAdded`, slow enough that
-/// the poll itself doesn't add noticeable load to the daemon.
-const MEMBERSHIP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Decoded inbound suitable for the peer to display + reply to.
 struct PeerInbound {
@@ -301,41 +289,33 @@ async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
 }
 
 /// One step in the join sequence. Surfaced as a typed plan so the
-/// ordering invariant (`ImportOwnerCard` precedes `Join`, and
-/// `WaitForActiveMembership` precedes echo-loop entry) can be pinned
-/// by a unit test without having to spin up a real `Client` + daemon.
-/// See `plan_join_steps`.
+/// ordering invariant (`ImportOwnerCard` must precede `Join`) can be
+/// pinned by a unit test without having to spin up a real `Client` +
+/// daemon. See `plan_join_steps`. Membership-convergence polling is
+/// now folded into `Client::groups::join` itself, so the post-join
+/// step has been removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum JoinStep {
     /// Import the owner's contact card before /groups/join. Carries
     /// the path the URI is read from at execution time so the test can
     /// assert it round-trips unchanged from the CLI arg.
     ImportOwnerCard(PathBuf),
-    /// Call `Client::groups().join(invite)`.
+    /// Call `Client::groups().join(invite)`; the call blocks until
+    /// joiner-side x0xd has applied `MemberAdded`.
     Join,
-    /// Poll `/groups/<gid>/members` until the joiner's own agent id
-    /// appears active, gating dispatcher startup on the joiner-side
-    /// x0xd `MemberAdded` apply. Empirical: v0.21.3 `/groups/join`
-    /// returns OK before the joiner's local state slice reflects
-    /// membership; owner-gossiped messages landing in that window hit
-    /// `/secure/decrypt` returning 403 "not a member". Cap the poll at
-    /// 60s.
-    WaitForActiveMembership,
 }
 
 /// Build the ordered list of steps `run_join` will perform for a given
 /// `owner_card_uri_file` setting. Pure, side-effect-free; the actual
 /// I/O lives in `run_join`. Extracted so the
-/// "import-before-join when set" / "join-only when unset" /
-/// "wait-for-membership-before-echo" ordering invariants can be
-/// unit-tested without a real `Client`.
+/// "import-before-join when set" / "join-only when unset" ordering
+/// invariant can be unit-tested without a real `Client`.
 fn plan_join_steps(owner_card_uri_file: Option<&std::path::Path>) -> Vec<JoinStep> {
-    let mut steps = Vec::with_capacity(3);
+    let mut steps = Vec::with_capacity(2);
     if let Some(path) = owner_card_uri_file {
         steps.push(JoinStep::ImportOwnerCard(path.to_path_buf()));
     }
     steps.push(JoinStep::Join);
-    steps.push(JoinStep::WaitForActiveMembership);
     steps
 }
 
@@ -351,9 +331,6 @@ async fn run_join(
     // this fn. If a future refactor reorders the I/O without updating
     // `plan_join_steps`, the test starts disagreeing with reality.
     let steps = plan_join_steps(owner_card_uri_file);
-    // Captured across steps so `WaitForActiveMembership` can address the
-    // group `Join` produced without re-reading anything.
-    let mut joined_group_id: Option<GroupId> = None;
     for step in steps {
         match step {
             JoinStep::ImportOwnerCard(uri_path) => {
@@ -434,45 +411,14 @@ async fn run_join(
                     .join(&invite, Some(display_name))
                     .await
                     .context("Client::groups().join(invite)")?;
-                eprintln!("[peer] joined group {}", group.group_id.as_str());
-                joined_group_id = Some(group.group_id);
-            }
-            JoinStep::WaitForActiveMembership => {
-                // Empirical from wyse21<->wyse37 Round 3-retry:
-                // `Client::groups().join(invite)` returns OK before the
-                // joiner's x0xd applies `MemberAdded` to the local state
-                // slice `/secure/decrypt` reads. Owner-gossiped
-                // messages landing in that ~20s window hit
-                // `/secure/decrypt` returning 403 "not a member".
-                // Convergence happens ~20s later under degraded NATs.
-                //
-                // Gate dispatcher startup on the convergence by
-                // polling `/groups/<gid>/members` until the joiner's
-                // own agent id appears active. `Endpoint::members`
-                // already filters by `state == "active"` so a hit on
-                // membership IS the convergence signal — no need to
-                // re-check state out here.
-                let Some(group_id) = joined_group_id.as_ref() else {
-                    anyhow::bail!(
-                        "wait-for-membership step reached without a prior join (plan bug)"
-                    );
-                };
-                let me = client
-                    .identity()
-                    .me()
-                    .await
-                    .context("read /agent for self agent_id")?;
-                let groups = client.groups();
-                wait_for_active_membership(
-                    group_id,
-                    &me.agent_id,
-                    MEMBERSHIP_WAIT_TIMEOUT,
-                    MEMBERSHIP_POLL_INTERVAL,
-                    || async { groups.members(group_id).await },
-                )
-                .await
-                .context("wait for joiner-side x0xd membership convergence")?;
-                eprintln!("[peer] entering echo loop for group {}", group_id.as_str());
+                eprintln!(
+                    "[peer] joined group {} (membership convergence confirmed)",
+                    group.group_id.as_str(),
+                );
+                eprintln!(
+                    "[peer] entering echo loop for group {}",
+                    group.group_id.as_str()
+                );
             }
         }
     }
@@ -484,98 +430,6 @@ async fn run_join(
     // peer; the echo fires as a side effect inside
     // `decode_private_group`.
     run_echo(client, display_name).await
-}
-
-/// Poll `members_fetcher` on `interval` until `self_id` appears in the
-/// returned list (or `timeout` elapses). Drives the chat-peer's
-/// joiner-side gate: x0xd v0.21.3's `/groups/join` returns OK before
-/// the local state slice `/secure/decrypt` reads has applied
-/// `MemberAdded`, so owner-gossiped messages arriving inside that window
-/// fail with `Daemon(403) "not a member"`. Polling the public
-/// `/groups/<gid>/members` endpoint is the cheapest convergence proxy
-/// the daemon offers: it filters by `state == "active"` server-side
-/// (see `groups::Endpoint::members`), so a hit on `self_id` means the
-/// joiner's `/secure/decrypt` will now accept inbound for this group.
-///
-/// Closure-shaped so the polling logic + timeout discipline can be
-/// unit-tested without a live HTTP server — the production call site
-/// passes `client.groups().members(group_id)` as the fetcher.
-///
-/// # Errors
-/// Returns the fetcher's last error wrapped in context if `timeout`
-/// elapses while the fetcher is still failing; otherwise transient
-/// fetcher errors are logged and retried until the deadline. Returns
-/// an `anyhow` "never converged" error if the deadline is reached with
-/// the fetcher succeeding but `self_id` still missing — this is the
-/// joiner-side x0xd `MemberAdded` apply not happening, which is what
-/// degrades into the 403-on-decrypt failure mode upstream.
-async fn wait_for_active_membership<F, Fut>(
-    group_id: &GroupId,
-    self_id: &AgentId,
-    timeout: Duration,
-    poll_interval: Duration,
-    mut members_fetcher: F,
-) -> Result<()>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = std::result::Result<Vec<AgentId>, fetchit_chat::ChatError>>,
-{
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut poll_count: u32 = 0;
-    // Updated every iteration (Some on fetcher error, None on success).
-    // Initialised by the first fetcher result before any deadline read,
-    // so the binding stays uninit until the first iteration commits to
-    // a value.
-    let mut last_err: Option<fetchit_chat::ChatError>;
-    loop {
-        poll_count = poll_count.saturating_add(1);
-        match members_fetcher().await {
-            Ok(members) => {
-                if members.iter().any(|m| m == self_id) {
-                    eprintln!(
-                        "[peer] joiner converged: agent_id active in /groups/{}/members after {} poll(s)",
-                        group_id.as_str(),
-                        poll_count,
-                    );
-                    return Ok(());
-                }
-                eprintln!(
-                    "[peer] waiting for x0xd to apply MemberAdded locally on /groups/{} (poll {}, {} members visible)",
-                    group_id.as_str(),
-                    poll_count,
-                    members.len(),
-                );
-                last_err = None;
-            }
-            Err(e) => {
-                eprintln!(
-                    "[peer] /groups/{}/members poll {} errored: {} (retrying)",
-                    group_id.as_str(),
-                    poll_count,
-                    e,
-                );
-                last_err = Some(e);
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            if let Some(e) = last_err {
-                return Err(e).with_context(|| {
-                    format!(
-                        "joiner-side /members poll failed past {}s timeout; \
-                         likely v0.21.3 gossip-into-joiner saturation under degraded network",
-                        timeout.as_secs(),
-                    )
-                });
-            }
-            anyhow::bail!(
-                "joiner-side x0xd never converged /groups/{}/members in {}s; \
-                 likely v0.21.3 gossip-into-joiner saturation under degraded network",
-                group_id.as_str(),
-                timeout.as_secs(),
-            );
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
 }
 
 fn resolve_token(cli: &Cli) -> Result<String> {
@@ -1187,241 +1041,21 @@ mod tests {
         let steps = plan_join_steps(Some(owner_path.as_path()));
         assert_eq!(
             steps,
-            vec![
-                JoinStep::ImportOwnerCard(owner_path),
-                JoinStep::Join,
-                JoinStep::WaitForActiveMembership,
-            ],
-            "owner card import precedes /groups/join, which precedes the membership wait",
+            vec![JoinStep::ImportOwnerCard(owner_path), JoinStep::Join,],
+            "owner card import precedes /groups/join",
         );
     }
 
     #[test]
-    fn plan_join_steps_join_then_wait_when_owner_path_absent() {
-        // Preserve the pre-patch behavior when the joiner is being
-        // driven without an owner-card path: a previous `Import` run
-        // in the same data-dir may have already persisted the card,
-        // or the operator is intentionally exercising the
-        // fail-open-on-missing-card path that v0.21.0 shipped. The
-        // membership-wait step still has to run — the timing race it
-        // gates is independent of whether the owner card was
-        // pre-imported.
+    fn plan_join_steps_join_only_when_owner_path_absent() {
+        // When the joiner is driven without an owner-card path,
+        // either a previous `Import` run in the same data-dir
+        // persisted it or the operator is exercising the
+        // fail-open-on-missing-card path that v0.21.0 shipped.
+        // Membership-convergence polling is now folded into
+        // `Client::groups::join` itself, so the plan emits just one
+        // step here.
         let steps = plan_join_steps(None);
-        assert_eq!(
-            steps,
-            vec![JoinStep::Join, JoinStep::WaitForActiveMembership],
-        );
-    }
-
-    #[test]
-    fn plan_join_steps_wait_always_runs_after_join() {
-        // The race the wait closes (v0.21.3 /groups/join returns OK
-        // before the joiner's x0xd applies `MemberAdded`, so
-        // owner-gossiped messages arriving inside that window hit
-        // /secure/decrypt returning 403 "not a member") is specific
-        // to the AFTER-join window. A refactor that moves the wait
-        // ahead of the join would either no-op (no group_id yet) or
-        // poll a group the joiner doesn't know about — neither
-        // closes the race. Pin the ordering explicitly so the
-        // invariant doesn't dissolve in a future plan rewrite.
-        for owner_path in [None, Some(PathBuf::from("/tmp/owner.uri"))] {
-            let steps = plan_join_steps(owner_path.as_deref());
-            let join_idx = steps
-                .iter()
-                .position(|s| matches!(s, JoinStep::Join))
-                .expect("plan must contain Join");
-            let wait_idx = steps
-                .iter()
-                .position(|s| matches!(s, JoinStep::WaitForActiveMembership))
-                .expect("plan must contain WaitForActiveMembership");
-            assert!(
-                join_idx < wait_idx,
-                "WaitForActiveMembership must come AFTER Join (got join={join_idx}, wait={wait_idx})",
-            );
-        }
-    }
-
-    // ── wait_for_active_membership polling discipline ─────────────────
-
-    /// Build an `AgentId` for tests without re-validating the 64-hex
-    /// constraint per-construction (the helper takes the validated
-    /// type, the test author already knows the shape).
-    fn agent_id_for_test(byte: u8) -> AgentId {
-        let hex_byte = format!("{byte:02x}");
-        AgentId::parse(hex_byte.repeat(32)).expect("hex agent id")
-    }
-
-    fn group_id_for_test() -> GroupId {
-        let raw = format!("g{}", "0".repeat(63));
-        GroupId::parse(&raw).expect("group id")
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn wait_for_active_membership_returns_immediately_if_already_active() {
-        // Owner-side or warm-cache joiner-side: the very first poll
-        // already shows the joiner in /members. The fn must not sleep
-        // (it would add unnecessary latency to the happy path).
-        let group = group_id_for_test();
-        let me = agent_id_for_test(0xab);
-        let polls = Cell::new(0u32);
-        let result = wait_for_active_membership(
-            &group,
-            &me,
-            Duration::from_secs(30),
-            Duration::from_secs(1),
-            || {
-                polls.set(polls.get() + 1);
-                let me_clone = me.clone();
-                async move { Ok::<_, fetchit_chat::ChatError>(vec![me_clone]) }
-            },
-        )
-        .await;
-        assert!(result.is_ok(), "happy path must converge: {result:?}");
-        assert_eq!(polls.get(), 1, "must not poll past the first hit");
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn wait_for_active_membership_converges_after_a_few_misses() {
-        // The wyse21<->wyse37 empirical: /members returns the owner
-        // only for the first N polls, then the joiner-side `MemberAdded`
-        // applies and the joiner shows up. The fn must keep polling
-        // until self appears (and only until self appears — once it
-        // does, no more sleeps).
-        let group = group_id_for_test();
-        let me = agent_id_for_test(0xab);
-        let owner = agent_id_for_test(0xcd);
-        let polls = Cell::new(0u32);
-        let converge_on = 3u32;
-        let result = wait_for_active_membership(
-            &group,
-            &me,
-            Duration::from_secs(30),
-            Duration::from_secs(1),
-            || {
-                let n = polls.get() + 1;
-                polls.set(n);
-                let owner_clone = owner.clone();
-                let me_clone = me.clone();
-                async move {
-                    if n < converge_on {
-                        Ok::<_, fetchit_chat::ChatError>(vec![owner_clone])
-                    } else {
-                        Ok::<_, fetchit_chat::ChatError>(vec![owner_clone, me_clone])
-                    }
-                }
-            },
-        )
-        .await;
-        assert!(
-            result.is_ok(),
-            "must converge once self appears: {result:?}"
-        );
-        assert_eq!(polls.get(), converge_on, "polls until self appears");
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn wait_for_active_membership_bails_with_diagnostic_on_timeout() {
-        // The degraded-NAT case the wyse21<->wyse37 empirical pinned:
-        // joiner-side x0xd never applies `MemberAdded` inside the
-        // timeout window. The fn must bail with an error whose
-        // message names the timeout + the v0.21.3 saturation
-        // hypothesis so the operator (= Bob driving Round 4) doesn't
-        // have to source-dive to find the diagnostic.
-        let group = group_id_for_test();
-        let me = agent_id_for_test(0xab);
-        let owner = agent_id_for_test(0xcd);
-        let err = wait_for_active_membership(
-            &group,
-            &me,
-            Duration::from_secs(3),
-            Duration::from_secs(1),
-            || {
-                let owner_clone = owner.clone();
-                async move { Ok::<_, fetchit_chat::ChatError>(vec![owner_clone]) }
-            },
-        )
-        .await
-        .expect_err("never-converging poll must surface a timeout error");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("never converged"),
-            "diagnostic must name convergence failure: {msg}",
-        );
-        assert!(
-            msg.contains("3s"),
-            "diagnostic must name the timeout: {msg}",
-        );
-        assert!(
-            msg.contains("v0.21.3"),
-            "diagnostic must name the upstream version + hypothesis: {msg}",
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn wait_for_active_membership_retries_through_transient_errors() {
-        // Daemon hiccups (transient HTTP errors from a bouncing local
-        // x0xd) must not fail-closed the wait — they're exactly the
-        // failure mode the upstream retry-fix targets. As long as a
-        // later poll succeeds with self present, the fn must return
-        // Ok.
-        let group = group_id_for_test();
-        let me = agent_id_for_test(0xab);
-        let polls = Cell::new(0u32);
-        let result = wait_for_active_membership(
-            &group,
-            &me,
-            Duration::from_secs(30),
-            Duration::from_secs(1),
-            || {
-                let n = polls.get() + 1;
-                polls.set(n);
-                let me_clone = me.clone();
-                async move {
-                    if n < 3 {
-                        Err(fetchit_chat::ChatError::Invalid("transient".to_string()))
-                    } else {
-                        Ok(vec![me_clone])
-                    }
-                }
-            },
-        )
-        .await;
-        assert!(
-            result.is_ok(),
-            "transient errors must be retried, not fail-closed: {result:?}",
-        );
-        assert_eq!(polls.get(), 3, "polls past errors until success");
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn wait_for_active_membership_surfaces_last_error_when_polls_only_error() {
-        // The pathological case: the fetcher only ever returns errors.
-        // The wait must time out AND surface the last error as
-        // context so the operator can tell apart "joiner never
-        // converged (gossip saturation)" from "x0xd is down".
-        let group = group_id_for_test();
-        let me = agent_id_for_test(0xab);
-        let err = wait_for_active_membership(
-            &group,
-            &me,
-            Duration::from_secs(3),
-            Duration::from_secs(1),
-            || async {
-                Err::<Vec<AgentId>, _>(fetchit_chat::ChatError::Invalid(
-                    "daemon unreachable".to_string(),
-                ))
-            },
-        )
-        .await
-        .expect_err("only-errors path must surface a timeout error");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("daemon unreachable"),
-            "diagnostic must surface the underlying fetcher error: {msg}",
-        );
-        assert!(
-            msg.contains("3s"),
-            "diagnostic must still name the timeout: {msg}",
-        );
+        assert_eq!(steps, vec![JoinStep::Join]);
     }
 }

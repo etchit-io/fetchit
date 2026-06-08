@@ -5,6 +5,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::time::Duration;
+
 use fetchit_chat::contacts::TrustLevel;
 use fetchit_chat::groups::{GroupId, GroupInvite};
 use fetchit_chat::identity::{AgentCard, AgentId};
@@ -318,13 +320,29 @@ async fn groups_create_and_invite() {
 }
 
 #[tokio::test]
-async fn groups_join_returns_group() {
+async fn groups_join_waits_for_membership_then_returns_group() {
     let server = MockServer::start().await;
+    let me = id('a');
     Mock::given(method("POST"))
         .and(path("/groups/join"))
         .and(body_partial_json(json!({"invite": "x0x://invite/zzz"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "group_id": "g-2", "name": "External"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/agent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "agent_id": me.0,
+            "machine_id": "m-1",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/groups/g-2/members"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [{"agent_id": me.0, "state": "active"}]
         })))
         .mount(&server)
         .await;
@@ -335,6 +353,132 @@ async fn groups_join_returns_group() {
         .await
         .unwrap();
     assert_eq!(g.group_id, GroupId::parse("g-2").unwrap());
+}
+
+#[tokio::test]
+async fn groups_join_polls_members_until_self_appears_active() {
+    let server = MockServer::start().await;
+    let me = id('a');
+    Mock::given(method("POST"))
+        .and(path("/groups/join"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "group_id": "g-conv", "name": "Converging"
+        })))
+        .mount(&server)
+        .await;
+    // First two /members polls show only a different member, then the
+    // joiner appears active. join() must keep polling and not surface
+    // a converged group until that point.
+    Mock::given(method("GET"))
+        .and(path("/groups/g-conv/members"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [{"agent_id": id('b').0, "state": "active"}]
+        })))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/groups/g-conv/members"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [
+                {"agent_id": id('b').0, "state": "active"},
+                {"agent_id": me.0, "state": "active"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let g = client_against(&server)
+        .await
+        .groups()
+        .join_with_membership_wait(
+            &GroupInvite("x0x://invite/conv".into()),
+            None,
+            &me,
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+    assert_eq!(g.group_id, GroupId::parse("g-conv").unwrap());
+}
+
+#[tokio::test]
+async fn groups_join_surfaces_joiner_not_converged_on_timeout() {
+    let server = MockServer::start().await;
+    let me = id('a');
+    Mock::given(method("POST"))
+        .and(path("/groups/join"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "group_id": "g-slow", "name": "Slow"
+        })))
+        .mount(&server)
+        .await;
+    // Joiner never appears active; only a non-self member is ever
+    // returned. join_with_membership_wait must surface
+    // JoinerNotConverged once the timeout elapses.
+    Mock::given(method("GET"))
+        .and(path("/groups/g-slow/members"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [{"agent_id": id('b').0, "state": "active"}]
+        })))
+        .mount(&server)
+        .await;
+    let err = client_against(&server)
+        .await
+        .groups()
+        .join_with_membership_wait(
+            &GroupInvite("x0x://invite/slow".into()),
+            None,
+            &me,
+            Duration::from_millis(120),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+    match err {
+        ChatError::JoinerNotConverged {
+            group_id,
+            waited_ms,
+        } => {
+            assert_eq!(group_id, "g-slow");
+            assert_eq!(waited_ms, 120);
+        }
+        other => panic!("expected JoinerNotConverged, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn groups_join_surfaces_underlying_error_when_members_keeps_erroring() {
+    let server = MockServer::start().await;
+    let me = id('a');
+    Mock::given(method("POST"))
+        .and(path("/groups/join"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "group_id": "g-err", "name": "ErrLoop"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/groups/g-err/members"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("daemon down"))
+        .mount(&server)
+        .await;
+    let err = client_against(&server)
+        .await
+        .groups()
+        .join_with_membership_wait(
+            &GroupInvite("x0x://invite/err".into()),
+            None,
+            &me,
+            Duration::from_millis(120),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+    match err {
+        ChatError::Daemon { status, .. } => assert_eq!(status, 503),
+        other => panic!("expected Daemon(503), got {other:?}"),
+    }
 }
 
 #[tokio::test]
