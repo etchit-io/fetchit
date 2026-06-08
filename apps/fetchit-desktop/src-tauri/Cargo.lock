@@ -3262,6 +3262,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "fetchit-trust-types",
  "hex",
  "infer 0.16.0",
  "regex",
@@ -3281,6 +3282,7 @@ dependencies = [
  "fetchit-core",
  "fetchit-net",
  "fetchit-relay-proto",
+ "fetchit-trust-client",
  "filetime",
  "hex",
  "if-addrs 0.13.4",
@@ -3384,6 +3386,7 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "base64 0.22.1",
+ "fetchit-trust-types",
  "hex",
  "postcard",
  "reqwest 0.12.28",
@@ -3410,6 +3413,13 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fetchit-trust-types"
+version = "0.2.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

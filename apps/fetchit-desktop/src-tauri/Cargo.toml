@@ -65,6 +65,10 @@ fetchit-chat = { path = "../../../crates/fetchit-chat" }
 # Direct dep so the chat layer can name relay-proto types (e.g.
 # `AgentId`, `PresenceUpdate`) when wiring the new presence pump.
 fetchit-relay-proto = { path = "../../../crates/fetchit-relay-proto" }
+# Direct dep so the boot path can name `ReqwestClient` (the production
+# denylist HTTP poller) plus `BlockEvent` / `EntryKind` for the M3
+# denylist install + the chat:denylist-updated pump.
+fetchit-trust-client = { path = "../../../crates/fetchit-trust-client", features = ["reqwest"] }
 x0xd-client = { path = "../../../crates/x0xd-client" }
 semver = "1"
 hex = "0.4"

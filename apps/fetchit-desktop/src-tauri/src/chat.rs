@@ -55,6 +55,40 @@ fn ensure_chat_enabled(app_state: &AppState) -> Result<(), String> {
 
 const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Compiled-in default base URL for the M3 community denylist endpoint.
+///
+/// `None` keeps the denylist feature dormant: with no endpoint
+/// configured the consumer is never installed, so nothing is gated. Flip
+/// this to `Some("https://<trust-host>/v1")` at launch, in lockstep with
+/// baking the real ML-DSA-65 issuer key into
+/// `fetchit_trust_client::etchitio_pubkey` (the placeholder key would
+/// reject every real manifest). `FETCHIT_DENYLIST_URL` overrides this at
+/// runtime for staging against a throwaway trust node.
+const DEFAULT_DENYLIST_URL: Option<&str> = None;
+
+/// Resolve the denylist endpoint base URL for boot-time
+/// `install_m3_denylist`. The `FETCHIT_DENYLIST_URL` env value (passed
+/// in by the caller) takes precedence over the compiled-in `default`;
+/// blank/whitespace env values are treated as unset. Returns `None` when
+/// neither is set, the dormant launch-gate state.
+fn resolve_denylist_url(env: Option<String>, default: Option<&str>) -> Option<String> {
+    env.map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| default.map(str::to_string))
+}
+
+/// Build the `chat:denylist-updated` event payload from a denylist
+/// [`fetchit_trust_client::BlockEvent`]. `kind` serializes as the
+/// `snake_case` `EntryKind` discriminant (e.g. `agent_id`) that the
+/// frontend's `applyDenylistUpdateEvent` matches on.
+fn denylist_update_payload(ev: &fetchit_trust_client::BlockEvent) -> serde_json::Value {
+    serde_json::json!({
+        "kind": ev.kind,
+        "added": ev.added,
+        "removed": ev.removed,
+    })
+}
+
 /// Tauri-managed handle to the lazily-built chat client.
 #[derive(Clone)]
 pub struct ChatState {
@@ -138,7 +172,36 @@ impl ChatState {
         if let Some(ref base) = self.x0xd_base_url {
             builder = builder.base_url(base.clone());
         }
-        let c = builder.build().await.map_err(|e| e.to_string())?;
+        let mut c = builder.build().await.map_err(|e| e.to_string())?;
+        // M3: install the community denylist consumer when an endpoint is
+        // configured. Install must happen before the first clone so every
+        // cached/returned clone shares the gate + consumer. Dormant by
+        // default (DEFAULT_DENYLIST_URL is None) until the etchit.io trust
+        // service is deployed and the real ML-DSA-65 issuer key is baked
+        // into fetchit-trust-client; FETCHIT_DENYLIST_URL overrides for
+        // staging. Failures are non-fatal: chat still runs, just ungated.
+        if let Some(url) = resolve_denylist_url(
+            std::env::var("FETCHIT_DENYLIST_URL").ok(),
+            DEFAULT_DENYLIST_URL,
+        ) {
+            match fetchit_trust_client::ReqwestClient::new() {
+                Ok(http) => {
+                    let cache = self.data_dir.join("denylist");
+                    let _ = std::fs::create_dir_all(&cache);
+                    let http: std::sync::Arc<
+                        dyn fetchit_trust_client::HttpClient + Send + Sync + 'static,
+                    > = std::sync::Arc::new(http);
+                    if let Err(e) = c.install_m3_denylist(url, Some(cache), http) {
+                        log_pump(&format!("[denylist] install failed (non-fatal): {e}"));
+                    }
+                }
+                Err(e) => {
+                    log_pump(&format!(
+                        "[denylist] http client init failed (non-fatal): {e}"
+                    ));
+                }
+            }
+        }
         *guard = Some(c.clone());
         Ok(c)
     }
@@ -827,6 +890,7 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_presence(app.clone(), state.clone());
     spawn_relay_conn_state(app.clone(), state.clone());
     spawn_relay_denylist(app.clone(), state.clone());
+    spawn_denylist_events(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_unified(app, state);
 }
@@ -1352,6 +1416,71 @@ fn spawn_relay_denylist(app: AppHandle, state: ChatState) {
     });
 }
 
+/// M3 G4: drain the denylist consumer's `BlockEvent` broadcast and emit
+/// `chat:denylist-updated` so the frontend updates the contacts denylist
+/// indicator (G2). The `RelayUrl`-driven slot drops + primary banner are
+/// handled separately inside the chat client (D6 + the
+/// `chat:relay-denylisted` callback); this pump carries the agent-id /
+/// xor-name / actor-url deltas the UI surfaces.
+///
+/// `subscribe_to_block_events` returns `None` until `install_m3_denylist`
+/// has run (dormant: no endpoint configured, or REST-only) -- we park on
+/// the rebuild signal and re-check on the next client rebuild rather than
+/// spinning a timer.
+///
+/// The consumer's broadcast `Sender` is pinned alive by the poll-loop
+/// task, so `recv()` alone never observes a client swap; we select on the
+/// relay connection-state watch as the rebuild signal so a region change
+/// or daemon restart re-subscribes us to the fresh consumer. A broadcast
+/// `Lagged` gap is recoverable: the next refresh re-publishes the full
+/// per-kind snapshot.
+fn spawn_denylist_events(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let Some(mut rx) = client.subscribe_to_block_events() else {
+                match client.relay_connection_state() {
+                    Some(mut conn) => while conn.changed().await.is_ok() {},
+                    None => tokio::time::sleep(RECONNECT_BACKOFF * 6).await,
+                }
+                continue;
+            };
+            log_pump("[denylist-events] drain start");
+            let mut conn = client.relay_connection_state();
+            loop {
+                tokio::select! {
+                    recv = rx.recv() => match recv {
+                        Ok(ev) => {
+                            let _ = app.emit("chat:denylist-updated", denylist_update_payload(&ev));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            log_pump(&format!(
+                                "[denylist-events] lagged {n}; next refresh re-publishes the full snapshot"
+                            ));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    // Rebuild signal: resolves only when the connection-state
+                    // watch sender drops (client invalidated); a mere
+                    // transition keeps us draining. `pending()` disables this
+                    // arm for REST-only clients with no watch.
+                    () = async {
+                        match conn.as_mut() {
+                            Some(c) => while c.changed().await.is_ok() {},
+                            None => std::future::pending().await,
+                        }
+                    } => break,
+                }
+            }
+            log_pump("[denylist-events] drain ended; will reattach on rebuild");
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
 fn spawn_relay_presence(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1743,7 +1872,62 @@ fn ipv6_to_ipv4_mapped(addr: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::validate_relay_url;
+    use super::{denylist_update_payload, resolve_denylist_url, validate_relay_url};
+
+    #[test]
+    fn resolve_denylist_url_dormant_when_unset() {
+        // The launch-gate default: no env, no compiled-in default -> the
+        // denylist consumer is never installed.
+        assert_eq!(resolve_denylist_url(None, None), None);
+    }
+
+    #[test]
+    fn resolve_denylist_url_env_overrides_default() {
+        assert_eq!(
+            resolve_denylist_url(
+                Some("https://staging.example/v1".into()),
+                Some("https://baked-default/v1"),
+            ),
+            Some("https://staging.example/v1".to_string()),
+        );
+    }
+
+    #[test]
+    fn resolve_denylist_url_blank_env_falls_back_to_default() {
+        assert_eq!(
+            resolve_denylist_url(Some("   ".into()), Some("https://baked-default/v1")),
+            Some("https://baked-default/v1".to_string()),
+        );
+        // Blank env + no default stays dormant.
+        assert_eq!(resolve_denylist_url(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn denylist_update_payload_serializes_kind_as_snake_case() {
+        // The frontend's applyDenylistUpdateEvent matches on
+        // kind === "agent_id"; pin the serialization so a rename or
+        // serde drift surfaces here rather than as a silently-dropped
+        // contacts indicator.
+        let ev = fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust_client::EntryKind::AgentId,
+            added: vec!["a".repeat(64)],
+            removed: vec![],
+        };
+        let v = denylist_update_payload(&ev);
+        assert_eq!(v["kind"], "agent_id");
+        assert_eq!(v["added"][0], "a".repeat(64));
+        assert_eq!(v["removed"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn denylist_update_payload_relay_url_kind() {
+        let ev = fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust_client::EntryKind::RelayUrl,
+            added: vec!["wss://blocked.example/v1/ws".into()],
+            removed: vec![],
+        };
+        assert_eq!(denylist_update_payload(&ev)["kind"], "relay_url");
+    }
 
     #[test]
     fn accepts_http_with_port_no_path() {

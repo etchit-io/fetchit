@@ -16,6 +16,9 @@ mod http;
 mod index;
 
 pub use consumer::{BlockEvent, DenylistConsumer, TrustError, DEFAULT_POLL_INTERVAL};
+/// Re-exported so consumers of [`BlockEvent`] can name + match its
+/// `kind` field without depending on the trust crate directly.
+pub use fetchit_trust::EntryKind;
 pub use http::HttpClient;
 #[cfg(feature = "reqwest")]
 pub use http::ReqwestClient;
