@@ -171,6 +171,18 @@ enum Mode {
         /// `Client::groups().invite(...)`).
         #[arg(long)]
         invite_file: PathBuf,
+
+        /// Optional path to a UTF-8 file containing the owner's
+        /// `x0x://agent/<base64>` share URI. When set, the joiner
+        /// imports the owner's contact card BEFORE calling
+        /// `/groups/join`. Required when the owner's card has not been
+        /// imported through a prior `Import` run in the same data-dir;
+        /// without it the joiner has no card to verify inbound
+        /// `PrivateGroupChat` envelope signatures and every echo from
+        /// the owner is dropped with `no card for envelope sender
+        /// <owner-hex>`.
+        #[arg(long)]
+        owner_card_uri_file: Option<PathBuf>,
     },
 }
 
@@ -225,7 +237,18 @@ async fn main() -> Result<()> {
             }
         },
         Mode::Import { uri_file } => run_import(&client, &uri_file).await,
-        Mode::Join { invite_file } => run_join(&client, &cli.display_name, &invite_file).await,
+        Mode::Join {
+            invite_file,
+            owner_card_uri_file,
+        } => {
+            run_join(
+                &client,
+                &cli.display_name,
+                &invite_file,
+                owner_card_uri_file.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -265,39 +288,130 @@ async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// One step in the join sequence. Surfaced as a typed plan so the
+/// ordering invariant (`ImportOwnerCard` must precede `Join` whenever
+/// the owner-card path is set) can be pinned by a unit test without
+/// having to spin up a real `Client` + daemon. See `plan_join_steps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JoinStep {
+    /// Import the owner's contact card before /groups/join. Carries
+    /// the path the URI is read from at execution time so the test can
+    /// assert it round-trips unchanged from the CLI arg.
+    ImportOwnerCard(PathBuf),
+    /// Call `Client::groups().join(invite)`.
+    Join,
+}
+
+/// Build the ordered list of steps `run_join` will perform for a given
+/// `owner_card_uri_file` setting. Pure, side-effect-free; the actual
+/// I/O lives in `run_join`. Extracted so the
+/// "import-before-join when set" / "join-only when unset" ordering
+/// invariant can be unit-tested without a real `Client`.
+fn plan_join_steps(owner_card_uri_file: Option<&std::path::Path>) -> Vec<JoinStep> {
+    let mut steps = Vec::with_capacity(2);
+    if let Some(path) = owner_card_uri_file {
+        steps.push(JoinStep::ImportOwnerCard(path.to_path_buf()));
+    }
+    steps.push(JoinStep::Join);
+    steps
+}
+
 async fn run_join(
     client: &Client,
     display_name: &str,
     invite_file: &std::path::Path,
+    owner_card_uri_file: Option<&std::path::Path>,
 ) -> Result<()> {
-    // Read the invite payload as written by the m2_live owner-side
-    // driver: a single x0x://invite/<base64> URI on disk (trimmed of
-    // surrounding whitespace so a trailing newline from `echo` doesn't
-    // break the daemon's parser).
-    let raw = std::fs::read_to_string(invite_file)
-        .with_context(|| format!("read invite file at {}", invite_file.display()))?;
-    let invite = GroupInvite(raw.trim().to_owned());
-    if !invite.0.starts_with("x0x://invite/") {
-        anyhow::bail!(
-            "invite file does not start with x0x://invite/ (got {} bytes)",
-            invite.0.len()
-        );
+    // Pin the ordering invariant at the entry point: every step we run
+    // below is a faithful interpretation of the typed plan, so the
+    // unit test on `plan_join_steps` doubles as a contract check on
+    // this fn. If a future refactor reorders the I/O without updating
+    // `plan_join_steps`, the test starts disagreeing with reality.
+    let steps = plan_join_steps(owner_card_uri_file);
+    for step in steps {
+        match step {
+            JoinStep::ImportOwnerCard(uri_path) => {
+                // Import the owner's share URI BEFORE /groups/join so
+                // the joiner has a card to verify inbound
+                // `PrivateGroupChat` envelopes. Without this the
+                // sender-verify check inside
+                // `receive_private_group_envelope` fails closed on
+                // every envelope the owner emits and the joiner's
+                // local conversation stays empty regardless of how
+                // many round-trips succeed at the relay layer.
+                let raw = std::fs::read_to_string(&uri_path)
+                    .with_context(|| format!("read owner card URI from {}", uri_path.display()))?;
+                let uri = raw.trim();
+                if !uri.starts_with("x0x://agent/") {
+                    anyhow::bail!(
+                        "owner card URI file does not start with x0x://agent/ (got {} bytes)",
+                        uri.len()
+                    );
+                }
+                eprintln!(
+                    "[peer] importing owner card ({} bytes) from {}",
+                    uri.len(),
+                    uri_path.display(),
+                );
+                client
+                    .identity()
+                    .import_uri(uri)
+                    .await
+                    .context("import owner card URI before /groups/join")?;
+                if let Some(layout) = client.layout() {
+                    match fetchit_chat::messages::StoredContactCard::from_share_uri(uri) {
+                        Ok(stored) => {
+                            stored
+                                .save(layout)
+                                .context("StoredContactCard.save (owner card)")?;
+                            eprintln!("[peer] persisted owner contact card to local layout");
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[peer] owner v2 fields not parsed ({e}); the legacy import still landed",
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "[peer] no local layout (REST-only client); owner v2 fields not persisted"
+                    );
+                }
+            }
+            JoinStep::Join => {
+                // Read the invite payload as written by the m2_live
+                // owner-side driver: a single x0x://invite/<base64>
+                // URI on disk (trimmed of surrounding whitespace so a
+                // trailing newline from `echo` doesn't break the
+                // daemon's parser).
+                let raw = std::fs::read_to_string(invite_file)
+                    .with_context(|| format!("read invite file at {}", invite_file.display()))?;
+                let invite = GroupInvite(raw.trim().to_owned());
+                if !invite.0.starts_with("x0x://invite/") {
+                    anyhow::bail!(
+                        "invite file does not start with x0x://invite/ (got {} bytes)",
+                        invite.0.len()
+                    );
+                }
+                eprintln!(
+                    "[peer] joining group via invite ({} bytes from {})",
+                    invite.0.len(),
+                    invite_file.display(),
+                );
+                // The /groups/join call is what David's v0.21.3
+                // 63b5c63 retry-fix patches on the daemon side: if the
+                // Welcome-blob fetch from the inviter's daemon flakes
+                // (transient relay/gossip drop), x0xd now retries with
+                // backoff before failing closed.
+                let group = client
+                    .groups()
+                    .join(&invite, Some(display_name))
+                    .await
+                    .context("Client::groups().join(invite)")?;
+                eprintln!("[peer] joined group {}", group.group_id.as_str());
+            }
+        }
     }
-    eprintln!(
-        "[peer] joining group via invite ({} bytes from {})",
-        invite.0.len(),
-        invite_file.display(),
-    );
-    // The /groups/join call is what David's v0.21.3 63b5c63 retry-fix
-    // patches on the daemon side: if the Welcome-blob fetch from the
-    // inviter's daemon flakes (transient relay/gossip drop), x0xd now
-    // retries with backoff before failing closed.
-    let group = client
-        .groups()
-        .join(&invite, Some(display_name))
-        .await
-        .context("Client::groups().join(invite)")?;
-    eprintln!("[peer] joined group {}", group.group_id.as_str());
     // The Mode::Echo loop already routes private-group envelopes
     // through `decode_private_group`, which echoes the body back into
     // the same group via `send_private_group`. Once /groups/join lands
@@ -899,5 +1013,36 @@ mod tests {
         let cursor = tmp.path().join("chat-peer.cursor");
         std::fs::write(&cursor, "  17860 \n").unwrap();
         assert_eq!(read_cursor(&cursor).unwrap(), 17_860);
+    }
+
+    // ── plan_join_steps ordering invariant ────────────────────────────
+
+    #[test]
+    fn plan_join_steps_imports_owner_card_before_join_when_set() {
+        // The whole point of the owner-card-uri-file path: with the
+        // owner's card in hand before /groups/join runs, the joiner
+        // can sender-verify the owner's inbound `PrivateGroupChat`
+        // envelopes. If a refactor swaps these two steps, the joiner
+        // re-introduces the empirical-busting "no card for envelope
+        // sender" failure that motivated this patch in the first
+        // place. Pin the ordering at the type level.
+        let owner_path = PathBuf::from("/tmp/m2-live-owner-share-uri.txt");
+        let steps = plan_join_steps(Some(owner_path.as_path()));
+        assert_eq!(
+            steps,
+            vec![JoinStep::ImportOwnerCard(owner_path), JoinStep::Join,],
+            "owner card import must precede /groups/join",
+        );
+    }
+
+    #[test]
+    fn plan_join_steps_join_only_when_owner_path_absent() {
+        // Preserve the pre-patch behavior when the joiner is being
+        // driven without an owner-card path: a previous `Import` run
+        // in the same data-dir may have already persisted the card,
+        // or the operator is intentionally exercising the
+        // fail-open-on-missing-card path that v0.21.0 shipped.
+        let steps = plan_join_steps(None);
+        assert_eq!(steps, vec![JoinStep::Join]);
     }
 }

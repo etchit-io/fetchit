@@ -213,6 +213,27 @@ async fn m2_live_private_group_round_trip() {
     let me = client.identity().me().await.expect("/agent must succeed");
     eprintln!("[m2-live] local agent_id = {}", me.agent_id);
 
+    // Write owner's share URI so the joiner can pre-import it before
+    // /groups/join. Without this, the joiner has no card for the owner
+    // and inbound sender-verify fails with "no card for envelope sender
+    // <owner-hex>" on every PrivateGroupChat envelope. Matches the
+    // out-of-band "manual prep" step the original Box A<->Box B rig
+    // relied on; formalising it here so the wyse21<->wyse37 harness
+    // converges symmetrically without a human-in-the-loop card swap.
+    let owner_uri = client
+        .identity()
+        .extended_share_uri("alice")
+        .await
+        .expect("extended_share_uri");
+    let owner_uri_path = std::env::var("M2_LIVE_OWNER_SHARE_URI")
+        .unwrap_or_else(|_| "/tmp/m2-live-owner-share-uri.txt".to_string());
+    std::fs::write(&owner_uri_path, &owner_uri)
+        .unwrap_or_else(|e| panic!("write owner share uri to {owner_uri_path}: {e}"));
+    eprintln!("[m2-live] owner share URI written to {owner_uri_path}");
+    eprintln!(
+        "[m2-live] Joiner-side: pass --owner-card-uri-file {owner_uri_path} to chat-peer join"
+    );
+
     // Import Bob's share card into the hermetic TempDir vault. Without
     // this, `receive_private_group_envelope` fails closed on
     // `StoredContactCard::load(layout, sender) == None` for every echo
