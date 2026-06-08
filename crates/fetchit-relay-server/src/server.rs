@@ -4,7 +4,7 @@ use crate::auth::AuthService;
 use crate::capability::CapabilityResolver;
 use crate::config::ServerConfig;
 #[cfg(feature = "fediverse-inbox")]
-use crate::inbox::InboxMetrics;
+use crate::inbox::{inbox_router, InboxMetrics, InboxState};
 use crate::metrics::Metrics;
 use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
@@ -60,6 +60,13 @@ pub struct Server {
     verifier: Arc<dyn SignatureVerifier>,
     #[cfg(feature = "fediverse-inbox")]
     inbox_metrics: Option<Arc<InboxMetrics>>,
+    /// Fully-configured inbox state when an operator opts in via
+    /// [`Server::with_inbox`]. When `Some`, [`Server::router`] mounts
+    /// the `POST /inbox` route and splices the state's `InboxMetrics`
+    /// into `/v1/metrics`. `None` (the default) leaves the route
+    /// structurally absent.
+    #[cfg(feature = "fediverse-inbox")]
+    inbox: Option<InboxState>,
 }
 
 impl Server {
@@ -71,6 +78,8 @@ impl Server {
             verifier: Arc::new(MlDsa65Verifier::new()),
             #[cfg(feature = "fediverse-inbox")]
             inbox_metrics: None,
+            #[cfg(feature = "fediverse-inbox")]
+            inbox: None,
         }
     }
 
@@ -95,12 +104,41 @@ impl Server {
         self
     }
 
+    /// Mount the fediverse `POST /inbox` endpoint, wiring `state`'s
+    /// gate pipeline + delivery sink onto the public router, and
+    /// splice `state`'s [`InboxMetrics`] into `/v1/metrics` so handler
+    /// increments and scrape reads observe the same atomics (no
+    /// separate [`Server::with_inbox_metrics`] call needed).
+    ///
+    /// The default relay build never calls this, so the route is
+    /// structurally absent — a `POST /inbox` returns 404 unless an
+    /// operator opts in. Only available when the `fediverse-inbox`
+    /// feature is enabled.
+    #[cfg(feature = "fediverse-inbox")]
+    #[must_use]
+    pub fn with_inbox(mut self, state: InboxState) -> Self {
+        self.inbox = Some(state);
+        self
+    }
+
     /// Assemble the axum router and shared state, consuming `self`.
     pub fn router(self) -> (Router, Arc<ServerState>) {
         let metrics = Arc::new(Metrics::new(
             self.config.region.clone(),
             self.config.server_version.clone(),
         ));
+        // An attached inbox is BOTH the `/inbox` route source and the
+        // `/v1/metrics` splice source — its `InboxMetrics` is the same
+        // `Arc` the handler increments. Fall back to a metrics-only
+        // attachment (`with_inbox_metrics`) when no full inbox state
+        // was provided.
+        #[cfg(feature = "fediverse-inbox")]
+        let inbox = self.inbox;
+        #[cfg(feature = "fediverse-inbox")]
+        let inbox_metrics = inbox
+            .as_ref()
+            .map(|s| s.metrics.clone())
+            .or(self.inbox_metrics);
         let state = Arc::new(ServerState {
             auth: Arc::new(AuthService::new(
                 self.config.challenge_ttl,
@@ -119,9 +157,10 @@ impl Server {
             profiles: ProfileIndex::new(),
             config: self.config,
             #[cfg(feature = "fediverse-inbox")]
-            inbox_metrics: self.inbox_metrics,
+            inbox_metrics,
         });
-        let router = Router::new()
+        #[allow(unused_mut)]
+        let mut router = Router::new()
             .route("/v1/health", get(health))
             .route("/v1/metrics", get(metrics_handler))
             .route("/v1/auth/challenge", post(auth_challenge))
@@ -133,6 +172,13 @@ impl Server {
                 get(get_profile).delete(delete_profile),
             )
             .with_state(state.clone());
+        // Mount the opt-in fediverse inbox last so it composes onto the
+        // fully-stated base router (both are `Router<()>`). Absent by
+        // default — see [`Server::with_inbox`].
+        #[cfg(feature = "fediverse-inbox")]
+        if let Some(inbox_state) = inbox {
+            router = router.merge(inbox_router(inbox_state));
+        }
         (router, state)
     }
 
@@ -409,5 +455,199 @@ mod fediverse_inbox_metrics_tests {
         let body = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(status.is_success(), "status was {status}");
         assert!(body.contains("fedi_inbox_accepted_total 1"));
+    }
+}
+
+/// Stage 3.3b — `Server::with_inbox` mounts the `POST /inbox` route on
+/// the live router. These drive real HTTP through the mounted router
+/// (via `tower::oneshot`) to prove the endpoint is reachable, runs the
+/// gate pipeline, is absent by default, and auto-splices its metrics.
+#[cfg(all(test, feature = "fediverse-inbox"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod inbox_mount_tests {
+    use super::*;
+    use crate::inbox::{
+        InboxDenylistCheck, PendingDelivery, PendingDeliverySink, WebFingerError, WebFingerLookup,
+    };
+    use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use rsa::rand_core::OsRng;
+    use rsa::RsaPrivateKey;
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+    use tower::ServiceExt as _;
+
+    struct NoopDenylist;
+    #[async_trait]
+    impl InboxDenylistCheck for NoopDenylist {
+        async fn is_blocked_actor(&self, _: &str) -> bool {
+            false
+        }
+    }
+
+    struct StubWebFinger {
+        pem: String,
+    }
+    #[async_trait]
+    impl WebFingerLookup for StubWebFinger {
+        async fn resolve_pubkey_pem(&self, _: &str) -> Result<String, WebFingerError> {
+            Ok(self.pem.clone())
+        }
+        async fn invalidate(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        deliveries: Mutex<Vec<PendingDelivery>>,
+    }
+    #[async_trait]
+    impl PendingDeliverySink for RecordingSink {
+        async fn enqueue(&self, delivery: PendingDelivery) -> Result<(), ()> {
+            self.deliveries.lock().unwrap().push(delivery);
+            Ok(())
+        }
+    }
+
+    fn keypair_pem() -> (String, String) {
+        let priv_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let pub_key = priv_key.to_public_key();
+        let priv_pem = priv_key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+        let pub_pem = pub_key.to_public_key_pem(LineEnding::LF).unwrap();
+        (priv_pem, pub_pem)
+    }
+
+    fn test_router(state: InboxState) -> Router {
+        let bind = "127.0.0.1:0".parse().unwrap();
+        Server::new(ServerConfig::defaults(bind, Region::Other("test".into())))
+            .with_verifier(Arc::new(crate::signature::AcceptAllVerifier))
+            .with_inbox(state)
+            .router()
+            .0
+    }
+
+    /// Build a fully-signed `POST /inbox` request for the mounted route.
+    fn signed_post(priv_pem: &str, body: &[u8], key_id: &str, url: &url::Url) -> Request<Body> {
+        use fetchit_fedi::signature::HttpSignatureKey;
+        let date = fetchit_fedi::transport::format_imf_fixdate(SystemTime::now());
+        let key = HttpSignatureKey {
+            key_id: key_id.to_string(),
+            rsa_private_pem: priv_pem.to_string(),
+        };
+        let now_unix = i64::try_from(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let signed = key.sign_post_rfc9421(url, body, &date, now_unix).unwrap();
+        Request::builder()
+            .method("POST")
+            .uri("/inbox")
+            .header("host", url.host_str().unwrap())
+            .header("date", signed.date)
+            .header("content-digest", signed.content_digest)
+            .header("signature-input", signed.signature_input)
+            .header("signature", signed.signature)
+            .body(Body::from(body.to_vec()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mounted_inbox_accepts_signed_post_with_202() {
+        let (priv_pem, pub_pem) = keypair_pem();
+        let sink = Arc::new(RecordingSink::default());
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            sink.clone(),
+        )
+        .build();
+        let router = test_router(state);
+
+        let body = br#"{"type":"Create","actor":"https://etchit.io/actors/josh"}"#;
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let req = signed_post(
+            &priv_pem,
+            body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+        );
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(sink.deliveries.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mounted_inbox_runs_gates_header_less_post_400() {
+        let (_priv_pem, pub_pem) = keypair_pem();
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            Arc::new(RecordingSink::default()),
+        )
+        .build();
+        let router = test_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/inbox")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        // Not 404 — the route is mounted and a header-less body trips
+        // the missing-header gate inside `run_gates`.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn inbox_route_absent_without_with_inbox() {
+        let bind = "127.0.0.1:0".parse().unwrap();
+        let router = Server::new(ServerConfig::defaults(bind, Region::Other("test".into())))
+            .with_verifier(Arc::new(crate::signature::AcceptAllVerifier))
+            .router()
+            .0;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/inbox")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn with_inbox_auto_splices_metrics_into_v1_metrics() {
+        use crate::inbox::{DropReason, InboxMetrics};
+        let (_priv_pem, pub_pem) = keypair_pem();
+        let metrics = Arc::new(InboxMetrics::new());
+        metrics.record_drop(&DropReason::BodyTooLarge);
+        let state = InboxState::builder(
+            Arc::new(NoopDenylist),
+            Arc::new(StubWebFinger { pem: pub_pem }),
+            Arc::new(RecordingSink::default()),
+        )
+        .with_metrics(metrics)
+        .build();
+        let router = test_router(state);
+
+        let req = Request::builder()
+            .uri("/v1/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+        // `with_inbox` (not `with_inbox_metrics`) auto-wires the splice
+        // from the InboxState's own metrics Arc.
+        assert!(
+            body.contains("fedi_inbox_dropped_body_too_large_total 1"),
+            "with_inbox must auto-splice the InboxState metrics:\n{body}"
+        );
     }
 }
