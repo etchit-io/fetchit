@@ -175,7 +175,12 @@ struct JrdLink {
 /// by [`resolve_handle`] both pre-request (against the instance) and
 /// post-response (against the final URL, in case caller's client
 /// followed a redirect).
-fn private_ip_reason(host: &url::Host<&str>) -> Option<String> {
+///
+/// Exposed as `pub(crate)` so the sibling actor-fetch path
+/// ([`crate::actor::fetch_actor`]) and any future fetch-from-remote
+/// helper share one canonical detection — when the IP-class table
+/// evolves (V-7 CGNAT, IPv6 fold-up), it evolves in one place.
+pub(crate) fn private_ip_reason(host: &url::Host<&str>) -> Option<String> {
     match host {
         url::Host::Ipv4(ip) => {
             if ip.is_private()

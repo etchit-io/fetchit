@@ -18,6 +18,17 @@ use crate::attestation::MlDsaAttestation;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde_json::{json, Value};
+use std::time::Duration;
+
+/// Hard cap on actor JSON-LD response size. Mastodon actors are
+/// typically 2-5KB; 64KB comfortably accommodates extension fields
+/// without opening a parse-cost / memory inflation door.
+pub const MAX_ACTOR_BODY_BYTES: usize = 64 * 1024;
+
+/// Per-call request timeout for [`fetch_actor`]. Caller-level timeouts
+/// on the passed `reqwest::Client` still apply on top; this is the
+/// floor.
+pub const ACTOR_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Property URI for the post-quantum attestation extension that
 /// fetch>it actors publish alongside the Mastodon-compatible
@@ -363,6 +374,173 @@ fn append_path(base: &url::Url, suffix: &str) -> Result<url::Url, String> {
     raw.parse().map_err(|e| format!("{raw:?}: {e}"))
 }
 
+/// Errors surfaceable from [`fetch_actor`]. Bounded variant set so
+/// callers can render per-cause UI strings + emit
+/// bounded-cardinality failure counters.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchActorError {
+    /// SEC-3: actor URL host is an IP literal in private / loopback /
+    /// link-local space (or a redirect target landed in that space).
+    /// Closes the SSRF surface against cloud-metadata services + LAN
+    /// services + loopback.
+    #[error("actor host {host} resolves to private / non-routable IP space")]
+    PrivateInstance {
+        /// Description of the host + IP class that triggered the gate.
+        host: String,
+    },
+
+    /// SEC-1: response body exceeded [`MAX_ACTOR_BODY_BYTES`] before
+    /// the JSON parse. Stops a hostile or misconfigured instance from
+    /// inflating memory or parse cost.
+    #[error("actor body exceeded {max_bytes} byte cap")]
+    BodyTooLarge {
+        /// Hard cap that triggered the rejection.
+        max_bytes: usize,
+    },
+
+    /// `reqwest`-side error (DNS, connect, TLS, body read, timeout).
+    /// String form so the variant surface stays bounded.
+    #[error("transport: {0}")]
+    Transport(String),
+
+    /// HTTPS GET reached the actor host but the host returned a
+    /// non-2xx status. `body` is the first 256 bytes of the body for
+    /// ops diagnostics.
+    #[error("HTTP {status}: {body}")]
+    Http {
+        /// HTTP status code from the actor URL response.
+        status: u16,
+        /// First 256 bytes of the response body.
+        body: String,
+    },
+
+    /// Response body was not valid JSON.
+    #[error("JSON parse: {0}")]
+    JsonParse(String),
+
+    /// Response was structurally valid JSON but failed
+    /// [`Actor::from_json_ld`] decoding (missing required field, etc.).
+    #[error("Actor parse: {0}")]
+    Parse(#[from] ActorError),
+}
+
+/// Fetch and parse a remote `ActivityPub` Actor JSON-LD document.
+///
+/// Issues a single HTTPS GET to `actor_url` with
+/// `Accept: application/activity+json` (Mastodon's preferred shape) and
+/// decodes the response via [`Actor::from_json_ld`].
+///
+/// # Hardening (caller-configured)
+///
+/// The passed `reqwest::Client` **MUST** be built with
+/// `redirect::Policy::none()` (or `limited(1)` at most). Post-flight
+/// IP filtering on the response URL catches a redirected target as a
+/// backstop, but disabling redirects on the client closes the
+/// request-itself surface.
+///
+/// # Hardening enforced in code
+///
+/// - **SEC-1**: response body hard-capped at
+///   [`MAX_ACTOR_BODY_BYTES`] before JSON parse. Pre-checked against
+///   `Content-Length` when present + streamed via chunks with a
+///   running size accumulator as a backstop. Surfaces
+///   [`FetchActorError::BodyTooLarge`].
+/// - **SEC-2**: per-call request timeout of
+///   [`ACTOR_FETCH_TIMEOUT`].
+/// - **SEC-3**: pre-flight rejects `actor_url` hosts that are IP
+///   literals in private / loopback / link-local / unique-local /
+///   IPv4-mapped IPv6 space. Post-flight rejects responses whose
+///   final URL targets the same set when a redirect changed the host.
+///   Surfaces [`FetchActorError::PrivateInstance`].
+///
+/// # Errors
+/// Surfaces every [`FetchActorError`] variant. Inner `reqwest` errors
+/// land as [`FetchActorError::Transport`].
+pub async fn fetch_actor(
+    http: &reqwest::Client,
+    actor_url: &url::Url,
+) -> Result<Actor, FetchActorError> {
+    // SEC-3 pre-flight.
+    if let Some(host) = actor_url.host() {
+        if let Some(reason) = crate::webfinger::private_ip_reason(&host) {
+            return Err(FetchActorError::PrivateInstance { host: reason });
+        }
+    }
+    fetch_actor_at_url(http, actor_url, ACTOR_FETCH_TIMEOUT).await
+}
+
+/// Internal: HTTP fetch + body cap + post-flight + parse. Factored
+/// out so wiremock-backed tests can exercise the cap / timeout / parse
+/// behavior over `http://127.0.0.1` without tripping the loopback
+/// pre-flight that lives in the public [`fetch_actor`].
+async fn fetch_actor_at_url(
+    http: &reqwest::Client,
+    actor_url: &url::Url,
+    timeout: Duration,
+) -> Result<Actor, FetchActorError> {
+    let mut resp = http
+        .get(actor_url.as_str())
+        .header("Accept", "application/activity+json")
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| FetchActorError::Transport(e.to_string()))?;
+
+    // SEC-3 post-flight: only fires when a redirect actually moved
+    // host. If host unchanged, the pre-flight already gated this URL.
+    let req_host = actor_url.host_str().map(str::to_owned);
+    let resp_host = resp.url().host_str().map(str::to_owned);
+    if req_host != resp_host {
+        if let Some(host) = resp.url().host() {
+            if let Some(reason) = crate::webfinger::private_ip_reason(&host) {
+                return Err(FetchActorError::PrivateInstance { host: reason });
+            }
+        }
+    }
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body_full = resp
+            .text()
+            .await
+            .map_err(|e| FetchActorError::Transport(e.to_string()))?;
+        let body = body_full.chars().take(256).collect();
+        return Err(FetchActorError::Http {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    // SEC-1 pre-check via Content-Length.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_ACTOR_BODY_BYTES as u64 {
+            return Err(FetchActorError::BodyTooLarge {
+                max_bytes: MAX_ACTOR_BODY_BYTES,
+            });
+        }
+    }
+
+    // SEC-1 backstop: streamed accumulator for chunked transfer or
+    // dishonest Content-Length.
+    let mut body: Vec<u8> = Vec::with_capacity(4096);
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FetchActorError::Transport(e.to_string()))?
+    {
+        if body.len() + chunk.len() > MAX_ACTOR_BODY_BYTES {
+            return Err(FetchActorError::BodyTooLarge {
+                max_bytes: MAX_ACTOR_BODY_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let value: Value =
+        serde_json::from_slice(&body).map_err(|e| FetchActorError::JsonParse(e.to_string()))?;
+    Actor::from_json_ld(&value).map_err(FetchActorError::Parse)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -524,5 +702,139 @@ mod tests {
             urls.contains(&"https://w3id.org/security/v1"),
             "@context must include w3id security vocabulary; got {urls:?}"
         );
+    }
+
+    // ── 5.2-wire-a: fetch_actor ──────────────────────────────────
+
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Mint a valid actor JSON-LD body via the symmetric
+    /// [`Actor::from_identity`] + [`Actor::to_json_ld`] path so
+    /// `fetch_actor` tests stay coupled to whatever shape the encoder
+    /// emits, not a hand-rolled fixture that drifts.
+    fn sample_actor_body() -> String {
+        let actor = Actor::from_identity(&sample_identity()).unwrap();
+        serde_json::to_string(&actor.to_json_ld()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_happy_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/actors/josh"))
+            .and(header("Accept", "application/activity+json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sample_actor_body()))
+            .mount(&server)
+            .await;
+
+        let url: url::Url = format!("{}/actors/josh", server.uri()).parse().unwrap();
+        let client = reqwest::Client::new();
+        let actor = fetch_actor_at_url(&client, &url, Duration::from_secs(5))
+            .await
+            .expect("happy path");
+        assert_eq!(actor.preferred_username, "josh");
+        assert!(actor.inbox.as_str().ends_with("/inbox"));
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_rejects_private_ipv4_url() {
+        let url: url::Url = "https://192.168.1.1/actors/eve".parse().unwrap();
+        let err = fetch_actor(&reqwest::Client::new(), &url)
+            .await
+            .unwrap_err();
+        match err {
+            FetchActorError::PrivateInstance { host } => {
+                assert!(host.contains("192.168.1.1"), "host = {host}");
+            }
+            other => panic!("expected PrivateInstance, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_rejects_aws_metadata_url() {
+        let url: url::Url = "https://169.254.169.254/latest/meta-data/".parse().unwrap();
+        let err = fetch_actor(&reqwest::Client::new(), &url)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchActorError::PrivateInstance { .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_caps_oversized_body() {
+        let server = MockServer::start().await;
+        let big = "x".repeat(70 * 1024);
+        let body = format!(r#"{{"filler":"{big}"}}"#);
+        Mock::given(method("GET"))
+            .and(path("/actors/eve"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let url: url::Url = format!("{}/actors/eve", server.uri()).parse().unwrap();
+        let err = fetch_actor_at_url(&reqwest::Client::new(), &url, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        match err {
+            FetchActorError::BodyTooLarge { max_bytes } => {
+                assert_eq!(max_bytes, MAX_ACTOR_BODY_BYTES);
+            }
+            other => panic!("expected BodyTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_surfaces_http_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/actors/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let url: url::Url = format!("{}/actors/missing", server.uri()).parse().unwrap();
+        let err = fetch_actor_at_url(&reqwest::Client::new(), &url, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        match err {
+            FetchActorError::Http { status, body } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("not found"));
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_surfaces_json_parse_on_malformed_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/actors/garbage"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json-at-all"))
+            .mount(&server)
+            .await;
+        let url: url::Url = format!("{}/actors/garbage", server.uri()).parse().unwrap();
+        let err = fetch_actor_at_url(&reqwest::Client::new(), &url, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchActorError::JsonParse(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_actor_surfaces_actor_parse_on_missing_required_field() {
+        let server = MockServer::start().await;
+        // Valid JSON but missing `preferredUsername` / `inbox` / etc.
+        // Should land as Parse(ActorError) via the From impl.
+        Mock::given(method("GET"))
+            .and(path("/actors/bare"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"id":"https://x.example/actors/bare"}"#),
+            )
+            .mount(&server)
+            .await;
+        let url: url::Url = format!("{}/actors/bare", server.uri()).parse().unwrap();
+        let err = fetch_actor_at_url(&reqwest::Client::new(), &url, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchActorError::Parse(_)));
     }
 }
