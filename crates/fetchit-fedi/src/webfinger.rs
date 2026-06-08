@@ -367,7 +367,11 @@ pub async fn resolve_handle(handle: &ParsedHandle) -> Result<Url, WebFingerError
     let host_for_pin = pre_url
         .host_str()
         .ok_or_else(|| WebFingerError::InvalidInstance("URL has no host".into()))?;
-    let pinned = resolve_and_pin_host(host_for_pin, 443).await?;
+    // S-1 fold (Alice's cross-review): extract the port from the URL
+    // rather than hardcoding 443 so `@user@example.com:8443`-style
+    // instances (which parse_mention accepts) resolve correctly.
+    let port = pre_url.port_or_known_default().unwrap_or(443);
+    let pinned = resolve_and_pin_host(host_for_pin, port).await?;
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
