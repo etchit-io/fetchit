@@ -3087,6 +3087,7 @@ dependencies = [
  "dashmap",
  "fetchit-fedi",
  "fetchit-relay-proto",
+ "fetchit-trust-client",
  "fetchit-trust-types",
  "futures-util",
  "hex",

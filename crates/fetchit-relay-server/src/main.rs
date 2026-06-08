@@ -13,5 +13,11 @@ async fn main() -> Result<()> {
         .init();
 
     let config = ServerConfig::from_env()?;
-    Server::new(config).run().await
+    let server = Server::new(config);
+    // M4 Stage 7: opt-in fediverse-inbox role. A no-op (route absent)
+    // unless built with `--features fediverse-inbox` AND
+    // `FETCHIT_FEDIVERSE_INBOX` is set.
+    #[cfg(feature = "fediverse-inbox")]
+    let server = fetchit_relay_server::inbox::operator::attach_if_enabled(server)?;
+    server.run().await
 }

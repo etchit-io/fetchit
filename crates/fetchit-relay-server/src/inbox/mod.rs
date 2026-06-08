@@ -38,6 +38,7 @@
 //! its own.
 
 pub mod metrics;
+pub mod operator;
 pub mod rate_limit;
 pub mod replay;
 pub mod router;

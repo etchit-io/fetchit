@@ -24,7 +24,17 @@ default = []
 # canonicalize a verified actor URL through the SAME
 # `TargetIdentity::try_new(EntryKind::ActorUrl, ..)` path the denylist
 # uses, so attribution matches the denylist's canonical form.
-fediverse-inbox = ["dep:fetchit-fedi", "dep:rsa", "dep:fetchit-trust-types"]
+# `fetchit-trust-client` (with its `reqwest` feature for `ReqwestClient`)
+# backs the Stage 7 operator-inbox denylist adapter — a community relay
+# acting as a fediverse inbox gates inbound actors against the same
+# signed `etchit-io` denylist clients consult.
+fediverse-inbox = [
+    "dep:fetchit-fedi",
+    "dep:rsa",
+    "dep:fetchit-trust-types",
+    "dep:fetchit-trust-client",
+    "fetchit-trust-client/reqwest",
+]
 
 [[bin]]
 name = "fetchit-relay-server"
@@ -41,6 +51,7 @@ dashmap.workspace = true
 fetchit-fedi = { path = "../fetchit-fedi", optional = true }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust-types = { path = "../fetchit-trust-types", optional = true }
+fetchit-trust-client = { path = "../fetchit-trust-client", optional = true }
 rsa = { workspace = true, optional = true }
 futures-util.workspace = true
 hex.workspace = true
