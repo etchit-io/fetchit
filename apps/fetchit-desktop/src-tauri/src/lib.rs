@@ -980,6 +980,7 @@ pub fn run() {
             chat::chat_list_nearby,
             chat::chat_identity,
             chat::chat_card,
+            chat::chat_regenerate_card_with_relays,
             chat::chat_import_card,
             chat::chat_pair_accept,
             chat::chat_pair_share,

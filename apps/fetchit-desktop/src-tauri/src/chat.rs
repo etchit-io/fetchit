@@ -298,6 +298,30 @@ pub async fn chat_card(
     Ok(CardWithUri { card, uri })
 }
 
+/// M3 Phase E2: regenerate the v2 extended share card with a fresh
+/// list of advertised relays in its `fetchit_rendezvous_hints` slot.
+///
+/// The frontend Settings → Network → Advanced panel drives this
+/// after the user edits + saves the list. Validation (non-empty,
+/// `wss://` only, <= 8 entries, <= 256 chars per entry) happens
+/// inside [`fetchit_chat::Client::regenerate_card_with_relays`] via
+/// `RendezvousHintsV1::from_value`; a rejection surfaces as a
+/// `String` error the frontend renders verbatim.
+#[tauri::command]
+pub async fn chat_regenerate_card_with_relays(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    relays: Vec<String>,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    state
+        .get()
+        .await?
+        .regenerate_card_with_relays(relays)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn chat_import_card(
     app_state: tauri::State<'_, AppState>,
