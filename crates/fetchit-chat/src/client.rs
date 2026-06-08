@@ -1326,8 +1326,12 @@ async fn should_drop_inbound_from_denylisted(
 ///   [`crate::card::RendezvousHintsV1::from_value`] and used as-is.
 ///   Empty / non-`wss://` / oversize lists surface as
 ///   [`ChatError::Invalid`].
-/// - `explicit = None` falls back to `[primary_relay_url]` when
-///   `primary_relay_url` is `Some(s)` and `s` starts with `wss://`.
+/// - `explicit = None` falls back to `[primary_relay_url]` when the
+///   single-entry candidate validates through the same
+///   `RendezvousHintsV1::from_value` path. Threading the fallback
+///   through the same validator keeps the explicit-vs-fallback
+///   contract aligned — a future tightening of the per-entry cap or
+///   scheme rule cannot silently desync the two branches.
 /// - All other cases return an empty `Vec` and the v2 hints field
 ///   is omitted from the card until
 ///   [`Client::regenerate_card_with_relays`] populates the slot.
@@ -1336,13 +1340,15 @@ fn seed_initial_advertised_relays(
     primary_relay_url: Option<&str>,
 ) -> Result<Vec<String>> {
     if let Some(list) = explicit {
-        let hints_value = serde_json::json!({ "relays": list });
-        let _validated = crate::card::RendezvousHintsV1::from_value(&hints_value)?;
+        let _ = crate::card::RendezvousHintsV1::from_value(&serde_json::json!({"relays": list}))?;
         return Ok(list);
     }
     if let Some(url) = primary_relay_url {
-        if url.starts_with("wss://") && url.len() <= 256 {
-            return Ok(vec![url.to_owned()]);
+        let candidate = vec![url.to_owned()];
+        if crate::card::RendezvousHintsV1::from_value(&serde_json::json!({"relays": candidate}))
+            .is_ok()
+        {
+            return Ok(candidate);
         }
     }
     Ok(Vec::new())
@@ -2806,6 +2812,20 @@ mod tests {
     fn seed_initial_relays_empty_when_no_primary() {
         let seeded = super::seed_initial_advertised_relays(None, None)
             .expect("REST-only build must seed empty without error");
+        assert!(seeded.is_empty());
+    }
+
+    /// E1 follow-up (G-1): the wss-primary fallback runs through the
+    /// same `RendezvousHintsV1::from_value` validator the explicit
+    /// path does, so a too-long single-entry primary (over the per-
+    /// entry cap) lands in the empty branch rather than silently
+    /// bypassing the cap with a hand-rolled length check.
+    #[test]
+    fn seed_initial_relays_empty_when_primary_wss_exceeds_per_entry_cap() {
+        let oversize_wss = format!("wss://{}.example/v1/ws", "x".repeat(260));
+        assert!(oversize_wss.len() > 256, "fixture must exceed the cap");
+        let seeded = super::seed_initial_advertised_relays(None, Some(&oversize_wss))
+            .expect("oversize wss primary must seed empty, not error");
         assert!(seeded.is_empty());
     }
 
