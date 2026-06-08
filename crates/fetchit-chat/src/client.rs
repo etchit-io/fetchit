@@ -252,6 +252,31 @@ impl ClientBuilder {
     }
 }
 
+/// A bridged fediverse public post that passed every relay-side inbox
+/// gate and was fanned out to this client as an
+/// [`EnvelopeKind::PublicPost`](fetchit_relay_proto::EnvelopeKind::PublicPost)
+/// envelope.
+///
+/// Attribution is [`Self::verified_actor_url`] — the relay-verified,
+/// denylist-canonical signing actor — NOT anything inside
+/// [`Self::activity_json`], which is opaque, untrusted fediverse content
+/// the render surface MUST sanitize per the rendered-content-is-untrusted
+/// model (`docs`/`SECURITY.md`). The activity body's self-asserted
+/// `actor` never leaves those opaque bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicPostDelivery {
+    /// Relay-verified, denylist-canonical actor URL the post is from.
+    pub verified_actor_url: String,
+    /// Raw `application/activity+json` bytes, handed to the content
+    /// handler verbatim — untrusted; sanitize before rendering.
+    pub activity_json: Vec<u8>,
+}
+
+/// Bound on the in-memory public-post broadcast channel. A UI consumer
+/// that lags past this drops the oldest posts (broadcast `Lagged`);
+/// public posts are live-only, history-pull is a post-launch concern.
+const PUBLIC_POST_CHANNEL_CAP: usize = 256;
+
 /// Optional chat-encryption state — present whenever the caller
 /// supplied a `data_dir` or `relay_url`, absent for the bare REST-only
 /// mode used by integration tests against `wiremock`.
@@ -285,6 +310,14 @@ struct ChatState {
     /// the same brand-new group collapse to one upstream call instead
     /// of N. See [`crate::members_singleflight`].
     members_singleflight: Arc<crate::members_singleflight::MembersSingleflight>,
+    /// M4 Stage 5.3: broadcast surface for inbound bridged fediverse
+    /// public posts. The receive path
+    /// ([`Client::dispatch_inbound_public_post`]) sends decoded
+    /// [`PublicPostDelivery`]s here; the desktop shell drains it via
+    /// [`Client::subscribe_to_public_posts`] to emit the
+    /// `chat:public-post` Tauri event. Lives on `ChatState` (not a
+    /// top-level builder field) so REST-only clients expose no surface.
+    public_post_tx: tokio::sync::broadcast::Sender<PublicPostDelivery>,
 }
 
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
@@ -612,6 +645,22 @@ impl Client {
         self.denylist_consumer.as_ref().map(|c| c.subscribe())
     }
 
+    /// M4 Stage 5.3: subscribe to inbound bridged fediverse public posts.
+    ///
+    /// Returns a fresh broadcast receiver each call, or `None` in
+    /// REST-only mode (no chat state). The desktop shell drains this to
+    /// emit the `chat:public-post` Tauri event; the renderer attributes
+    /// each post to [`PublicPostDelivery::verified_actor_url`] and treats
+    /// [`PublicPostDelivery::activity_json`] as untrusted content to
+    /// sanitize. A lagging consumer drops the oldest posts
+    /// (`PUBLIC_POST_CHANNEL_CAP`); public posts are live-only.
+    #[must_use]
+    pub fn subscribe_to_public_posts(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<PublicPostDelivery>> {
+        self.chat.as_ref().map(|c| c.public_post_tx.subscribe())
+    }
+
     /// Replace the relay list advertised in this client's v2 share card
     /// with `relays`, after validating them through
     /// [`crate::card::RendezvousHintsV1::from_value`]. Subsequent calls
@@ -901,6 +950,19 @@ impl Client {
             }
             return;
         }
+        // M4 Stage 5.3: bridged fediverse public post. Recognised on
+        // `kind` BEFORE any seq/gap/denylist logic — it has no
+        // conversation, no per-message signature, and the all-zeros
+        // sentinel sender, so the conversation path (which requires a
+        // group_id + a sender card) would reject it. The decode surfaces
+        // it on the public-post broadcast for the UI; a decode failure
+        // just drops the envelope.
+        if matches!(transit.kind, fetchit_relay_proto::EnvelopeKind::PublicPost) {
+            if let Err(e) = self.dispatch_inbound_public_post(&transit) {
+                log::warn!("public-post dispatch dropped envelope: {e}");
+            }
+            return;
+        }
         // M3 D7: drop inbound user-content from denylisted senders
         // BEFORE the decrypt path runs. Gate sits AFTER the bridge /
         // Welcome dispatchers so group-state propagation and invite
@@ -1180,6 +1242,54 @@ impl Client {
             .await
             .map_err(ChatError::from)?;
         Ok(())
+    }
+
+    /// Drain an inbound [`EnvelopeKind::PublicPost`] envelope: decode the
+    /// [`PublicPostPayload`] wrapper and surface it on the public-post
+    /// broadcast that [`Self::subscribe_to_public_posts`] hands out.
+    ///
+    /// `PublicPost` is the SOLE envelope kind exempt from the chat
+    /// sig/KEM verify regime — its body is `application/activity+json`,
+    /// not chat ciphertext, and its attribution
+    /// ([`PublicPostPayload::verified_actor_url`]) was verified by the
+    /// relay at the inbox HTTP-Signature boundary (the client cannot
+    /// verify HTTP signatures itself; see `crates/fetchit-chat/SECURITY.md`
+    /// caveat 8). The exemption is structural: the envelope carries no
+    /// signature/KEM/nonce and the all-zeros sentinel sender. Dispatch is
+    /// driven by `kind` so a DM can never be smuggled through this path.
+    ///
+    /// Returns the decoded [`PublicPostDelivery`] (also broadcast). A
+    /// send with no subscribers is intentionally not an error — public
+    /// posts are live-only.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] when the envelope kind isn't `PublicPost`,
+    /// the client was built without chat state, or the wrapper fails to
+    /// decode.
+    pub fn dispatch_inbound_public_post(
+        &self,
+        transit: &fetchit_relay_proto::TransitEnvelope,
+    ) -> Result<PublicPostDelivery> {
+        if transit.kind != fetchit_relay_proto::EnvelopeKind::PublicPost {
+            return Err(ChatError::Invalid(format!(
+                "dispatch_inbound_public_post called on kind={:?}",
+                transit.kind
+            )));
+        }
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let payload = fetchit_relay_proto::PublicPostPayload::from_ciphertext(&transit.ciphertext)
+            .map_err(|e| ChatError::Invalid(format!("public-post wrapper decode: {e}")))?;
+        let delivery = PublicPostDelivery {
+            verified_actor_url: payload.verified_actor_url,
+            activity_json: payload.activity_json,
+        };
+        // Live-only fan-out: a send with zero subscribers returns
+        // Err(SendError), intentionally ignored (no UI attached yet).
+        let _ = chat.public_post_tx.send(delivery.clone());
+        Ok(delivery)
     }
 
     /// Spawn the M2.5 SSE reachability recorder: a background task that
@@ -1749,6 +1859,7 @@ async fn build_with_chat(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
             members_singleflight: Arc::new(crate::members_singleflight::MembersSingleflight::new()),
+            public_post_tx: tokio::sync::broadcast::channel(PUBLIC_POST_CHANNEL_CAP).0,
         }),
         relay_handle,
         lan_handle,
@@ -2881,6 +2992,51 @@ mod tests {
         }
     }
 
+    // ── M4 Stage 5.3 PublicPost receive path ─────────────────────
+
+    #[tokio::test]
+    async fn dispatch_inbound_public_post_surfaces_decoded_delivery() {
+        let (client, _dir) = test_client_no_denylist();
+        let mut rx = client
+            .subscribe_to_public_posts()
+            .expect("chat-state client exposes a public-post surface");
+        let body = br#"{"type":"Create","object":{"type":"Note","content":"hi"}}"#.to_vec();
+        let env = fetchit_relay_proto::TransitEnvelope::public_post(
+            "https://mastodon.example/users/alice",
+            body.clone(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+
+        let delivery = client
+            .dispatch_inbound_public_post(&env)
+            .expect("dispatch decodes + surfaces");
+        assert_eq!(
+            delivery.verified_actor_url,
+            "https://mastodon.example/users/alice"
+        );
+        assert_eq!(delivery.activity_json, body);
+
+        // The subscriber received the same delivery on the broadcast.
+        let received = rx.try_recv().expect("subscriber got the post");
+        assert_eq!(received, delivery);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_public_post_rejects_non_public_post_kind() {
+        let (client, _dir) = test_client_no_denylist();
+        let mut env = fetchit_relay_proto::TransitEnvelope::public_post(
+            "https://mastodon.example/users/eve",
+            b"{}".to_vec(),
+            0,
+        )
+        .unwrap();
+        // A DM must never be drained through the PublicPost exemption.
+        env.kind = fetchit_relay_proto::EnvelopeKind::Dm;
+        let err = client.dispatch_inbound_public_post(&env).unwrap_err();
+        assert!(matches!(err, ChatError::Invalid(_)));
+    }
+
     // ── M3 D9 regenerate_card_with_relays ────────────────────────
 
     /// Build a chat-state-enabled `Client` without going through
@@ -2933,6 +3089,7 @@ mod tests {
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
             members_singleflight: Arc::new(crate::members_singleflight::MembersSingleflight::new()),
+            public_post_tx: tokio::sync::broadcast::channel(PUBLIC_POST_CHANNEL_CAP).0,
         };
         let http = Arc::new(Http::new("http://127.0.0.1:1".into(), "tok".into()).unwrap());
         let client = Client {
@@ -3218,6 +3375,7 @@ mod tests {
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
             members_singleflight: Arc::new(crate::members_singleflight::MembersSingleflight::new()),
+            public_post_tx: tokio::sync::broadcast::channel(PUBLIC_POST_CHANNEL_CAP).0,
         };
         let http = Arc::new(Http::new("http://127.0.0.1:1".into(), "tok".into()).unwrap());
         let client = Client {
