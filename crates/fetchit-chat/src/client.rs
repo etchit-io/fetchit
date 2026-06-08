@@ -2082,6 +2082,156 @@ impl Client {
             vault.agent_id_hex,
         )))
     }
+
+    /// Publish a public post to the fediverse: wrap it as an
+    /// `ActivityPub` `Create { Note }` signed by the actor identity for
+    /// `handle`, and deliver it to every resolved recipient inbox (the
+    /// replied-to actor plus each mentioned actor).
+    ///
+    /// `handle`/`passphrase` select and unseal the signing identity,
+    /// exactly as [`Self::load_actor_identity`].
+    ///
+    /// Denylist gating runs BEFORE any delivery: `reply_to_actor_url`
+    /// and every mention (after `WebFinger` resolution) are checked
+    /// against the community denylist when one is installed; a blocked
+    /// actor aborts the whole publish with [`ChatError::DeniedActor`]
+    /// and nothing goes out. The denylist is dormant until the
+    /// launch-gate energization — absent it, resolution still runs but
+    /// nothing is blocked.
+    ///
+    /// Delivery is best-effort per recipient: an unreachable or
+    /// rejecting inbox is recorded in [`PublishReport::failed`] without
+    /// aborting the rest. A top-level post with no mentions has no
+    /// direct recipients (follower shared-inbox fan-out is a later
+    /// stage) and returns an empty report.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] when no fediverse transport is wired
+    ///   (REST-only client), chat state is uninitialised, or no actor
+    ///   identity is minted for `handle`.
+    /// - [`ChatError::DeniedActor`] when a reply-to or mention actor is
+    ///   denylisted.
+    /// - [`ChatError::Invalid`] when a mention fails `WebFinger`
+    ///   resolution or `reply_to_actor_url` is not a valid URL.
+    pub async fn publish_public_post(
+        &self,
+        handle: &str,
+        passphrase: Option<&str>,
+        post: &fetchit_fedi::PublicPost,
+    ) -> Result<PublishReport> {
+        let transport = self.fediverse.as_ref().ok_or_else(|| {
+            ChatError::Invalid("fediverse transport not configured (REST-only client)".into())
+        })?;
+
+        let identity = self
+            .load_actor_identity(handle, passphrase)
+            .await?
+            .ok_or_else(|| {
+                ChatError::Invalid(format!(
+                    "no fediverse actor identity minted for handle {handle}"
+                ))
+            })?;
+
+        // Pre-flight: gate the replied-to actor before any resolution
+        // or delivery. Mentions are gated per-resolution just below.
+        if let Some(denylist) = self.denylist.as_ref() {
+            crate::public::check_publish_denylist(denylist.as_ref(), post).await?;
+        }
+
+        // Resolve every mention to its canonical actor URL (and gate it
+        // when a denylist is installed). These feed the Create{Note}
+        // cc/tag fields and the delivery recipient set.
+        let mut resolved_mentions: Vec<(String, Url)> = Vec::with_capacity(post.mentions.len());
+        for mention in &post.mentions {
+            let url = self.resolve_and_gate_mention(mention).await?;
+            resolved_mentions.push((mention.clone(), url));
+        }
+
+        let recipients =
+            assemble_recipients(&resolved_mentions, post.reply_to_actor_url.as_deref())?;
+
+        let activity = fetchit_fedi::activity::build_create_note(
+            post,
+            identity.actor_url.as_str(),
+            &resolved_mentions,
+        );
+        let body = serde_json::to_vec(&activity)
+            .map_err(|e| ChatError::Invalid(format!("serialize activity: {e}")))?;
+
+        let key = fetchit_fedi::signature::HttpSignatureKey {
+            key_id: format!("{}#main-key", identity.actor_url),
+            rsa_private_pem: identity.rsa_priv_pem.clone(),
+        };
+
+        let mut report = PublishReport::default();
+        for actor_url in &recipients {
+            match fetchit_fedi::actor::fetch_actor(actor_url).await {
+                Ok(actor) => {
+                    match transport
+                        .deliver(&key, &body, &actor.inbox, &identity.actor_url)
+                        .await
+                    {
+                        Ok(_) => report.delivered.push(actor.inbox.to_string()),
+                        Err(e) => report.failed.push((actor.inbox.to_string(), e.to_string())),
+                    }
+                }
+                Err(e) => report.failed.push((actor_url.to_string(), e.to_string())),
+            }
+        }
+        Ok(report)
+    }
+
+    /// Resolve one `@user@instance` mention to its canonical actor URL,
+    /// gating it through the community denylist when one is installed.
+    /// Without a denylist the resolution still runs (we need the URL to
+    /// find the inbox) but nothing is blocked.
+    async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {
+        if let Some(denylist) = self.denylist.as_ref() {
+            crate::public::check_mention_denylist(denylist.as_ref(), mention).await
+        } else {
+            let parsed = fetchit_fedi::parse_mention(mention)
+                .map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))?;
+            fetchit_fedi::resolve_handle(&parsed)
+                .await
+                .map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))
+        }
+    }
+}
+
+/// Outcome of [`Client::publish_public_post`]: which recipient inboxes
+/// accepted the activity and which failed. Delivery is best-effort, so a
+/// non-empty `failed` is not itself an error — the post still reached
+/// every inbox in `delivered`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PublishReport {
+    /// Inbox URLs that returned a 2xx for the delivered activity.
+    pub delivered: Vec<String>,
+    /// `(target, error)` for each recipient that could not be reached or
+    /// rejected the activity. `target` is the inbox URL when the actor
+    /// was fetched, otherwise the actor URL (fetch itself failed).
+    pub failed: Vec<(String, String)>,
+}
+
+/// Build the de-duplicated delivery recipient set from the resolved
+/// mention URLs plus the optional replied-to actor URL. The replied-to
+/// actor is appended only when it is not already a mention, so a post
+/// that both replies to and mentions the same actor delivers once.
+///
+/// # Errors
+/// [`ChatError::Invalid`] when `reply_to` is present but not a valid URL.
+fn assemble_recipients(
+    resolved_mentions: &[(String, Url)],
+    reply_to: Option<&str>,
+) -> Result<Vec<Url>> {
+    let mut recipients: Vec<Url> = resolved_mentions.iter().map(|(_, u)| u.clone()).collect();
+    if let Some(reply_to) = reply_to {
+        let url = Url::parse(reply_to)
+            .map_err(|e| ChatError::Invalid(format!("reply_to_actor_url: {e}")))?;
+        if !recipients.contains(&url) {
+            recipients.push(url);
+        }
+    }
+    Ok(recipients)
 }
 
 fn build_actor_url(domain: &str, handle: &str) -> Result<url::Url> {
@@ -3171,6 +3321,62 @@ mod tests {
             client.denylist_dropped_inbound_count(),
             0,
             "counter starts at zero"
+        );
+    }
+
+    // ── M4 Stage 5.2 publish driver ───────────────────────────────
+
+    #[tokio::test]
+    async fn publish_public_post_errors_without_transport() {
+        // test_client_no_denylist builds a chat client with no fediverse
+        // transport (REST-only shape) — the guard must fire before any
+        // identity load or network, so this stays hermetic.
+        let (client, _dir) = test_client_no_denylist();
+        let post = fetchit_fedi::PublicPost {
+            author_handle: "@josh@etchit.io".to_owned(),
+            body_md: "hi".to_owned(),
+            created_at_ms: 0,
+            reply_to_actor_url: None,
+            mentions: vec![],
+        };
+        let err = client
+            .publish_public_post("josh", None, &post)
+            .await
+            .unwrap_err();
+        match err {
+            ChatError::Invalid(msg) => assert!(
+                msg.contains("fediverse transport not configured"),
+                "expected no-transport guard, got: {msg}"
+            ),
+            other => panic!("expected ChatError::Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assemble_recipients_dedups_reply_to_against_mentions() {
+        let alice = Url::parse("https://m.example/users/alice").unwrap();
+        let mentions = vec![("@alice@m.example".to_owned(), alice.clone())];
+
+        // reply_to that equals an existing mention → single recipient.
+        let same = assemble_recipients(&mentions, Some("https://m.example/users/alice")).unwrap();
+        assert_eq!(same, vec![alice.clone()]);
+
+        // distinct reply_to → appended as a second recipient.
+        let distinct = assemble_recipients(&mentions, Some("https://m.example/users/bob")).unwrap();
+        assert_eq!(distinct.len(), 2);
+        assert_eq!(distinct[0], alice);
+
+        // no reply_to → mentions only.
+        let none = assemble_recipients(&mentions, None).unwrap();
+        assert_eq!(none, vec![alice]);
+    }
+
+    #[test]
+    fn assemble_recipients_rejects_invalid_reply_to() {
+        let err = assemble_recipients(&[], Some("not a url")).unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("reply_to_actor_url")),
+            "expected reply_to parse error, got: {err:?}"
         );
     }
 }

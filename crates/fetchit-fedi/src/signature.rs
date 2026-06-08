@@ -39,12 +39,34 @@ use thiserror::Error;
 /// `key_id` is the fully-qualified `keyId` URL fetched and verified by
 /// the receiving server (typically `<actor_url>#main-key`).
 /// `rsa_private_pem` is the PKCS#8 PEM-encoded RSA-2048 private key.
-#[derive(Clone, Debug)]
+///
+/// The private key is a long-lived HTTP-Signature signing secret, so
+/// this type zeroizes `rsa_private_pem` on drop and redacts it from
+/// `Debug` (never log a `HttpSignatureKey`'s key material). Each
+/// `Clone` owns an independent buffer that is likewise wiped on its own
+/// drop.
+#[derive(Clone)]
 pub struct HttpSignatureKey {
     /// `keyId` URL (e.g. `https://etchit.io/actors/josh#main-key`).
     pub key_id: String,
     /// PKCS#8 PEM-encoded RSA-2048 private key.
     pub rsa_private_pem: String,
+}
+
+impl std::fmt::Debug for HttpSignatureKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpSignatureKey")
+            .field("key_id", &self.key_id)
+            .field("rsa_private_pem", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for HttpSignatureKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.rsa_private_pem.zeroize();
+    }
 }
 
 /// Headers the caller adds to an outbound `application/activity+json`

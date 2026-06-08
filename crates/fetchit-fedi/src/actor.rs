@@ -58,7 +58,13 @@ pub const PQ_ATTESTATION_PROPERTY_URI: &str = "https://etchit.io/ns#mlDsaAttesta
 /// `spki_der` is the `SubjectPublicKeyInfo` DER bytes of the RSA-2048
 /// public key — kept alongside the private PEM so [`Actor::from_identity`]
 /// can emit `publicKeyPem` without re-parsing the private key.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The RSA private key (`rsa_priv_pem`) is a long-lived HTTP-Signature
+/// signing secret: this type zeroizes it on drop and redacts it from
+/// `Debug`. The vault hands its decrypted PEM to [`Self::from_persisted`]
+/// by **move** (no second copy), so wiping it here covers the secret's
+/// full in-memory lifetime. Each `Clone` owns an independent buffer
+/// wiped on its own drop.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ActorIdentity {
     /// Local-part of the handle (e.g. `"josh"` for `@josh@etchit.io`).
     pub handle: String,
@@ -121,6 +127,26 @@ impl ActorIdentity {
             spki_der,
             ml_dsa_attestation,
         }
+    }
+}
+
+impl std::fmt::Debug for ActorIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorIdentity")
+            .field("handle", &self.handle)
+            .field("actor_url", &self.actor_url)
+            .field("agent_id_hex", &self.agent_id_hex)
+            .field("rsa_priv_pem", &"<redacted>")
+            .field("spki_der", &self.spki_der)
+            .field("ml_dsa_attestation", &self.ml_dsa_attestation)
+            .finish()
+    }
+}
+
+impl Drop for ActorIdentity {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.rsa_priv_pem.zeroize();
     }
 }
 
