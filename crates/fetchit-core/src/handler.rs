@@ -167,6 +167,23 @@ pub enum Rendition {
         /// Raw bytes, unchanged.
         data: Bytes,
     },
+    /// M3 federation core: the renderer was asked to render content
+    /// whose source identity (`XorName`, `AgentId`, `RelayUrl`, or
+    /// `ActorUrl`) is on the community-maintained denylist. Surfaces
+    /// short-circuit before any decode runs; the UI swaps in a
+    /// "blocked content" placeholder that names the reason verbatim.
+    ///
+    /// Populated by [`crate::registry::HandlerRegistry::render_with_context`]
+    /// (Phase F2) when the supplied [`fetchit_trust::DenylistQuery`]
+    /// matches; never returned by an individual handler's `render`.
+    Blocked {
+        /// Human-readable reason rendered into the placeholder.
+        /// Format: `"<kind>: <value>"` where `kind` is the
+        /// [`fetchit_trust::EntryKind`] discriminant and `value` is
+        /// the canonical-form entry that matched. Example:
+        /// `"xor_name: 4d216f18…"`.
+        reason: String,
+    },
 }
 
 /// A single member of an archive [`Rendition::Archive`].
@@ -204,4 +221,21 @@ pub trait ContentHandler: Send + Sync {
     /// are passed by `Bytes` so handlers may pass them through cheaply
     /// (image / audio / video data flows through verbatim).
     fn render(&self, bytes: Bytes, ctx: &RenderContext) -> Result<Rendition>;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rendition_blocked_carries_reason() {
+        let r = Rendition::Blocked {
+            reason: "xor_name: 4d216f18".into(),
+        };
+        match r {
+            Rendition::Blocked { reason } => assert_eq!(reason, "xor_name: 4d216f18"),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
 }
