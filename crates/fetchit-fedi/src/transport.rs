@@ -36,10 +36,12 @@
 //!
 //! - **2xx**: success.
 //! - **401**: try the opposite signature format once. If that also
-//!   401s, return [`DeliveryError::BothFormatsRejected`]. We do NOT
-//!   write the cache in `transport`; Stage 3's inbox-response
-//!   handler owns the `cache.observe(...)` call (per Alice's
-//!   deferred shape).
+//!   401s, return [`DeliveryError::BothFormatsRejected`]. If the flip
+//!   SUCCEEDS, the working format is written back to the capability
+//!   cache (#174 failure-aware correction) so the next delivery to
+//!   that instance skips the wasted 401 + flip for the 24h TTL.
+//!   Affirmative "prefers" signals from inbox-response inspection
+//!   remain a separate Stage 3 `cache.observe(...)` path.
 //! - **Other 4xx**: no retry — semantic failure, surface the status.
 //! - **5xx / network / timeout**: retry up to
 //!   [`MAX_DELIVERY_ATTEMPTS`] with 1s/2s/4s backoff.
@@ -56,8 +58,8 @@ use thiserror::Error;
 
 use crate::signature::{HttpSignatureError, HttpSignatureKey};
 use crate::signature_cache::{
-    sign_post_with_format_keyed, sign_post_with_preference_keyed, OutboundSignedHeaders,
-    SignatureCapabilityCache, SignatureFormat,
+    inbox_origin, sign_post_with_format_keyed, sign_post_with_preference_keyed,
+    OutboundSignedHeaders, SignatureCapabilityCache, SignatureFormat,
 };
 
 /// `Content-Type` value attached to every outbound activity POST.
@@ -268,8 +270,7 @@ impl FediverseTransport {
                 attempts,
             }),
             DeliveryOutcome::Unauthorized => {
-                // 401 → flip format once, retry once. Cache write is
-                // Stage 3's job (per Alice's deferred shape).
+                // 401 → flip format once, retry once.
                 let secondary_format = flip_format(primary_format);
                 let secondary = sign_post_with_format_keyed(
                     &signing_key,
@@ -284,11 +285,23 @@ impl FediverseTransport {
                     DeliveryOutcome::Success {
                         status,
                         attempts: _,
-                    } => Ok(DeliveryReport {
-                        format_used: secondary_format,
-                        status,
-                        attempts: 2,
-                    }),
+                    } => {
+                        // #174 failure-aware capability-cache correction:
+                        // the cached/default format just 401'd and the flip
+                        // worked, so record the working format for this
+                        // instance origin. Future deliveries start with it
+                        // instead of paying a wasted 401 + flip on every
+                        // send until the 24h TTL would have expired. A stale
+                        // entry (peer changed negotiation) self-heals here.
+                        if let Some(origin) = inbox_origin(inbox_url) {
+                            self.capability_cache.observe(origin, secondary_format, now);
+                        }
+                        Ok(DeliveryReport {
+                            format_used: secondary_format,
+                            status,
+                            attempts: 2,
+                        })
+                    }
                     DeliveryOutcome::Unauthorized => Err(DeliveryError::BothFormatsRejected),
                     DeliveryOutcome::ClientError { status } => {
                         Err(DeliveryError::ClientError { status })
@@ -772,6 +785,90 @@ mod tests {
         assert_eq!(report.format_used, SignatureFormat::Rfc9421);
         assert_eq!(report.attempts, 2);
         assert_eq!(report.status, 202);
+    }
+
+    #[tokio::test]
+    async fn deliver_flip_success_corrects_capability_cache() {
+        // #174: a 401-on-default followed by a flip-success must write the
+        // working format back to the capability cache, so the next delivery
+        // to this instance starts with it instead of repeating a wasted
+        // 401 + flip on every send for the 24h TTL.
+        let server = MockServer::start().await;
+        // First (cavage default) attempt → 401.
+        Mock::given(method("POST"))
+            .and(path("/inbox"))
+            .and(header_exists("signature"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Flip to RFC 9421 → accept.
+        Mock::given(method("POST"))
+            .and(path("/inbox"))
+            .and(header_exists("signature-input"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let transport = fast_transport();
+        let url = inbox_url(&server, "/inbox");
+        let origin = inbox_origin(&url).unwrap();
+
+        // Cache is cold before delivery.
+        assert!(
+            transport
+                .capability_cache()
+                .preference(&origin, SystemTime::now())
+                .is_none(),
+            "cache must start cold for this origin",
+        );
+
+        let report = transport
+            .deliver(test_key(), b"{}", &url, &actor_url())
+            .await
+            .unwrap();
+        assert_eq!(report.format_used, SignatureFormat::Rfc9421);
+
+        // The flip-success wrote the working format back.
+        assert_eq!(
+            transport
+                .capability_cache()
+                .preference(&origin, SystemTime::now()),
+            Some(SignatureFormat::Rfc9421),
+            "flip-success must correct the capability cache to the working format",
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_first_attempt_success_leaves_cache_cold() {
+        // #174 scope guard: a clean first-attempt success must NOT write
+        // the cache — only a failure-driven flip corrects it. (Affirmative
+        // "prefers" signals come from the Stage 3 inbox-response path, not
+        // from every successful POST.)
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/inbox"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let transport = fast_transport();
+        let url = inbox_url(&server, "/inbox");
+        let origin = inbox_origin(&url).unwrap();
+
+        transport
+            .deliver(test_key(), b"{}", &url, &actor_url())
+            .await
+            .unwrap();
+        assert!(
+            transport
+                .capability_cache()
+                .preference(&origin, SystemTime::now())
+                .is_none(),
+            "first-attempt success must not write the capability cache",
+        );
     }
 
     #[tokio::test]
