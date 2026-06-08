@@ -118,6 +118,65 @@ async fn submit_report_then_deny_then_fetch_signed_denylist() {
     assert!(dsa.verify(&pk, &sign_bytes, &sig).unwrap());
 }
 
+/// The canonical client contract: `fetchit-trust-client::DenylistConsumer`
+/// fetches `{base}/denylist?kind=<snake_case>` for all four kinds. The
+/// server must serve that query-param route (not just the legacy
+/// path-style `/denylist/xornames`). Empty kinds (`relay_url`,
+/// `actor_url` with no entries) must still return a validly-signed empty list so
+/// the consumer sees "feature on, nothing blocked yet" rather than a
+/// 404.
+#[tokio::test]
+async fn query_param_denylist_route_serves_all_four_kinds() {
+    let (addr, server) = start_test_server().await;
+    // Seed one agent_id so a non-empty kind is exercised too.
+    let agent = TargetIdentity::new(EntryKind::AgentId, "e".repeat(64));
+    server
+        .state()
+        .storage
+        .deny(DenylistEntry {
+            target: agent.clone(),
+            added_at_ms: 7,
+            reason: ReportKind::Harassment,
+        })
+        .unwrap();
+
+    for (kind_query, want_kind, want_len) in [
+        ("xor_name", EntryKind::XorName, 0),
+        ("agent_id", EntryKind::AgentId, 1),
+        ("relay_url", EntryKind::RelayUrl, 0),
+        ("actor_url", EntryKind::ActorUrl, 0),
+    ] {
+        let resp: DenylistResponse =
+            reqwest::get(format!("http://{addr}/v1/denylist?kind={kind_query}"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(resp.kind, want_kind, "kind mismatch for {kind_query}");
+        assert_eq!(
+            resp.entries.len(),
+            want_len,
+            "len mismatch for {kind_query}"
+        );
+        assert!(
+            !resp.issuer_signature_hex.is_empty(),
+            "empty kind must still be signed: {kind_query}",
+        );
+    }
+}
+
+/// A malformed `?kind=` value is a 4xx, not a 500 or a panic.
+#[tokio::test]
+async fn query_param_denylist_rejects_unknown_kind() {
+    let (addr, _server) = start_test_server().await;
+    let status = reqwest::get(format!("http://{addr}/v1/denylist?kind=bogus"))
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_client_error(), "got {status}");
+}
+
 #[tokio::test]
 async fn xornames_denylist_round_trips_independently() {
     let (addr, server) = start_test_server().await;

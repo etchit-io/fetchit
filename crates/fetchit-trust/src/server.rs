@@ -9,7 +9,7 @@ use crate::types::{
 };
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header::ETAG, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -63,6 +63,7 @@ impl Server {
         Router::new()
             .route("/v1/health", get(health))
             .route("/v1/report", post(submit_report))
+            .route("/v1/denylist", get(denylist_by_kind))
             .route("/v1/denylist/xornames", get(denylist_xornames))
             .route("/v1/denylist/agent_ids", get(denylist_agent_ids))
             .route("/v1/denylist/etag", get(denylist_etag))
@@ -128,6 +129,28 @@ async fn submit_report(
         .enqueue_report(report)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Query string for the canonical `GET /v1/denylist?kind=<kind>` route.
+/// `kind` deserializes from the `snake_case` [`EntryKind`] discriminant
+/// (`xor_name` / `agent_id` / `relay_url` / `actor_url`) — the exact
+/// values `fetchit-trust-client::DenylistConsumer` emits. An unknown
+/// value fails the extractor with a 400 before any handler logic runs.
+#[derive(Debug, Deserialize)]
+struct KindQuery {
+    kind: EntryKind,
+}
+
+/// Canonical denylist route consumed by `fetchit-trust-client` and the
+/// fetch>it desktop / reader clients: `GET /v1/denylist?kind=<kind>`.
+/// Dispatches all four kinds through the same signed-response path as
+/// the legacy `/denylist/xornames` route; kinds with no entries return
+/// a validly-signed empty list.
+async fn denylist_by_kind(
+    State(state): State<Arc<ServerState>>,
+    Query(q): Query<KindQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    signed_denylist(&state, q.kind)
 }
 
 async fn denylist_xornames(
