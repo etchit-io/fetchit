@@ -57,14 +57,13 @@ const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5)
 
 /// Compiled-in default base URL for the M3 community denylist endpoint.
 ///
-/// `None` keeps the denylist feature dormant: with no endpoint
-/// configured the consumer is never installed, so nothing is gated. Flip
-/// this to `Some("https://<trust-host>/v1")` at launch, in lockstep with
-/// baking the real ML-DSA-65 issuer key into
-/// `fetchit_trust_client::etchitio_pubkey` (the placeholder key would
-/// reject every real manifest). `FETCHIT_DENYLIST_URL` overrides this at
-/// runtime for staging against a throwaway trust node.
-const DEFAULT_DENYLIST_URL: Option<&str> = None;
+/// Live: the NY-Trust service (`etchit-io-v1` issuer, baked into
+/// `fetchit_trust_client::etchitio_pubkey`) serves signed manifests
+/// here, so every desktop client installs the consumer at boot and
+/// gates against it. `FETCHIT_DENYLIST_URL` overrides at runtime for
+/// staging against a throwaway trust node; an empty value disables the
+/// consumer (offline / self-host without a trust service).
+const DEFAULT_DENYLIST_URL: Option<&str> = Some("https://trust.etchit.io/v1");
 
 /// Resolve the denylist endpoint base URL for boot-time
 /// `install_m3_denylist`. The `FETCHIT_DENYLIST_URL` env value (passed
@@ -175,11 +174,10 @@ impl ChatState {
         let mut c = builder.build().await.map_err(|e| e.to_string())?;
         // M3: install the community denylist consumer when an endpoint is
         // configured. Install must happen before the first clone so every
-        // cached/returned clone shares the gate + consumer. Dormant by
-        // default (DEFAULT_DENYLIST_URL is None) until the etchit.io trust
-        // service is deployed and the real ML-DSA-65 issuer key is baked
-        // into fetchit-trust-client; FETCHIT_DENYLIST_URL overrides for
-        // staging. Failures are non-fatal: chat still runs, just ungated.
+        // cached/returned clone shares the gate + consumer. The endpoint
+        // resolves from FETCHIT_DENYLIST_URL, else DEFAULT_DENYLIST_URL
+        // (the live NY-Trust service); an empty value disables it.
+        // Failures are non-fatal: chat still runs, just ungated.
         if let Some(url) = resolve_denylist_url(
             std::env::var("FETCHIT_DENYLIST_URL").ok(),
             DEFAULT_DENYLIST_URL,
