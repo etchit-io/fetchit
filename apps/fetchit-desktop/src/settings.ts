@@ -8,6 +8,10 @@ import { fmtBytes } from "./format";
 import { addBookmark, listBookmarks, removeBookmark, type Bookmark } from "./bookmarks";
 import { MAX_BOOKMARKS_PER_QR } from "./bookmarkShare";
 import { applyTheme, loadTheme, type Theme } from "./theme/theme";
+import {
+  ADVERTISED_RELAYS_HTML,
+  initAdvertisedRelaysPanel,
+} from "./settingsAdvertisedRelays";
 
 interface ThemeOption {
   id: Theme;
@@ -105,6 +109,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     const verEl = root.querySelector<HTMLElement>("#setting-version");
     if (verEl) verEl.textContent = v;
   });
+  initAdvertisedRelaysPanel(root);
   const close = root.querySelector<HTMLButtonElement>(".settings-close");
   const enabledBox = root.querySelector<HTMLInputElement>("#cache-enabled");
   const modeSelect = root.querySelector<HTMLSelectElement>("#cache-mode");
@@ -663,13 +668,14 @@ function buildPage(): HTMLElement {
         <span>Disconnect when idle</span>
         <select id="idle-timeout"></select>
       </label>
-      <label class="setting-row">
+<label class="setting-row">
         <span>Enable LAN delivery <em class="setting-pill">experimental</em></span>
         <input type="checkbox" id="lan-direct-enabled">
       </label>
       <p class="setting-desc">
         Send chat directly between devices on the same network. Falls back to relay automatically.
       </p>
+      ${ADVERTISED_RELAYS_HTML}
     </section>
     <section class="setting-group" id="group-peers">
       <details class="setting-collapsible">
