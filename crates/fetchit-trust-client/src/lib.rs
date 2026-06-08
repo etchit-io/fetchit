@@ -23,27 +23,22 @@ pub use http::HttpClient;
 #[cfg(feature = "reqwest")]
 pub use http::ReqwestClient;
 
-// TODO(v1.0-launch): replace with real etchit-io ML-DSA-65 pubkey
-// minted by ops + signed-off by Josh. The placeholder bytes below are
-// generated from `IssuerSigner::generate("placeholder")` and exist so
-// the crate ships a buildable surface during pre-launch development.
-// The placeholder key has NO production trust value — callers
-// MUST replace the fixture before any production deploy.
-const PLACEHOLDER_ETCHITIO_PUBKEY: &[u8] = include_bytes!("../fixtures/placeholder_pubkey.bin");
+// The real etchit-io denylist issuer public key (`key_id` etchit-io-v1),
+// minted by the trust service on first boot and baked here. It's a
+// PUBLIC key, safe to commit and distribute; the matching private key
+// lives only on the trust host. Rotating the issuer means redeploying
+// the trust service with a fresh keypair and re-baking this fixture.
+const ETCHITIO_PUBKEY: &[u8] = include_bytes!("../fixtures/etchitio_pubkey.bin");
 
 /// Bytes of the etchit-io ML-DSA-65 public key clients trust as the
-/// denylist issuer at v1.0 launch.
-///
-/// # Pre-launch placeholder
-/// Until v1.0 the bytes are a deterministic placeholder committed at
-/// `crates/fetchit-trust-client/fixtures/placeholder_pubkey.bin`.
-/// Production callers MUST swap in the real key before deploying.
+/// denylist issuer (`key_id` etchit-io-v1). The `DenylistConsumer`
+/// verifies every signed denylist manifest against this key.
 ///
 /// # Returns
 /// 1952 bytes, the ML-DSA-65 public key length.
 #[must_use]
 pub fn etchitio_pubkey() -> Vec<u8> {
-    PLACEHOLDER_ETCHITIO_PUBKEY.to_vec()
+    ETCHITIO_PUBKEY.to_vec()
 }
 
 #[cfg(test)]
