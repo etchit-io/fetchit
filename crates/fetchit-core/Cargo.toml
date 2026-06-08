@@ -28,9 +28,10 @@ regex = "1.11"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 # M3 Phase F2 — DenylistQuery trait + EntryKind discriminant for the
 # render-time short-circuit (`HandlerRegistry::render_with_context`).
-# fetchit-trust is a leaf crate with no fetchit-* deps so this stays a
-# straight-line DAG.
-fetchit-trust = { path = "../fetchit-trust" }
+# fetchit-trust-types is a serde-only leaf crate, so the stateless
+# reader engine never pulls the trust server stack (axum, async runtime,
+# PQ signer) just to name these two items.
+fetchit-trust-types = { path = "../fetchit-trust-types" }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -174,12 +174,12 @@ pub enum Rendition {
     /// "blocked content" placeholder that names the reason verbatim.
     ///
     /// Populated by [`crate::registry::HandlerRegistry::render_with_context`]
-    /// (Phase F2) when the supplied [`fetchit_trust::DenylistQuery`]
+    /// (Phase F2) when the supplied [`fetchit_trust_types::DenylistQuery`]
     /// matches; never returned by an individual handler's `render`.
     Blocked {
         /// Human-readable reason rendered into the placeholder.
         /// Format: `"<kind>: <value>"` where `kind` is the
-        /// [`fetchit_trust::EntryKind`] discriminant and `value` is
+        /// [`fetchit_trust_types::EntryKind`] discriminant and `value` is
         /// the canonical-form entry that matched. Example:
         /// `"xor_name: 4d216f18…"`.
         reason: String,
@@ -206,7 +206,7 @@ pub struct RenderingContext {
     /// Optional community denylist consumer. The chat / trust-client
     /// `DenylistConsumer` is the canonical implementation; tests
     /// inject stubs.
-    pub denylist: Option<std::sync::Arc<dyn fetchit_trust::DenylistQuery>>,
+    pub denylist: Option<std::sync::Arc<dyn fetchit_trust_types::DenylistQuery>>,
     /// The 64-char lowercase hex `XorName` the caller is about to
     /// render. Required for the short-circuit; without it, the gate
     /// silently passes through.

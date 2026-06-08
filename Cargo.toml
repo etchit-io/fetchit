@@ -9,6 +9,7 @@ members = [
     "crates/fetchit-relay-server",
     "crates/fetchit-relay-client",
     "crates/fetchit-trust",
+    "crates/fetchit-trust-types",
     "crates/fetchit-trust-client",
     "crates/x0xd-client",
 ]

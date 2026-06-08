@@ -17,6 +17,7 @@ name = "fetchit-trust"
 path = "src/main.rs"
 
 [dependencies]
+fetchit-trust-types = { path = "../fetchit-trust-types" }
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true

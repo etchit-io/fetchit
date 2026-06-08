@@ -167,9 +167,9 @@ fn zip_renders_as_archive() {
 #[test]
 fn render_with_context_blocked_xorname_short_circuits_default_registry() {
     struct Block(&'static str);
-    impl fetchit_trust::DenylistQuery for Block {
-        fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
-            kind == fetchit_trust::EntryKind::XorName && value == self.0
+    impl fetchit_trust_types::DenylistQuery for Block {
+        fn is_blocked(&self, kind: fetchit_trust_types::EntryKind, value: &str) -> bool {
+            kind == fetchit_trust_types::EntryKind::XorName && value == self.0
         }
     }
     let reg = default_registry();

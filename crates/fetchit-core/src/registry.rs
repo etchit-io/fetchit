@@ -101,7 +101,7 @@ impl HandlerRegistry {
         rendering_ctx: &RenderingContext,
     ) -> Result<Rendition> {
         if let (Some(denylist), Some(addr)) = (&rendering_ctx.denylist, &rendering_ctx.addr_hex) {
-            if denylist.is_blocked(fetchit_trust::EntryKind::XorName, addr) {
+            if denylist.is_blocked(fetchit_trust_types::EntryKind::XorName, addr) {
                 return Ok(Rendition::Blocked {
                     reason: format!("xor_name: {addr}"),
                 });
@@ -253,9 +253,9 @@ mod tests {
     #[test]
     fn render_with_context_short_circuits_blocked_xorname() {
         struct Block(&'static str);
-        impl fetchit_trust::DenylistQuery for Block {
-            fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
-                kind == fetchit_trust::EntryKind::XorName && value == self.0
+        impl fetchit_trust_types::DenylistQuery for Block {
+            fn is_blocked(&self, kind: fetchit_trust_types::EntryKind, value: &str) -> bool {
+                kind == fetchit_trust_types::EntryKind::XorName && value == self.0
             }
         }
         let mut reg = HandlerRegistry::new();
@@ -294,8 +294,8 @@ mod tests {
     #[test]
     fn render_with_context_passes_through_when_gate_incomplete() {
         struct AlwaysBlock;
-        impl fetchit_trust::DenylistQuery for AlwaysBlock {
-            fn is_blocked(&self, _: fetchit_trust::EntryKind, _: &str) -> bool {
+        impl fetchit_trust_types::DenylistQuery for AlwaysBlock {
+            fn is_blocked(&self, _: fetchit_trust_types::EntryKind, _: &str) -> bool {
                 true
             }
         }
@@ -341,9 +341,9 @@ mod tests {
     #[test]
     fn render_with_context_passes_through_when_addr_not_blocked() {
         struct BlockOnly(&'static str);
-        impl fetchit_trust::DenylistQuery for BlockOnly {
-            fn is_blocked(&self, kind: fetchit_trust::EntryKind, value: &str) -> bool {
-                kind == fetchit_trust::EntryKind::XorName && value == self.0
+        impl fetchit_trust_types::DenylistQuery for BlockOnly {
+            fn is_blocked(&self, kind: fetchit_trust_types::EntryKind, value: &str) -> bool {
+                kind == fetchit_trust_types::EntryKind::XorName && value == self.0
             }
         }
         let mut reg = HandlerRegistry::new();
