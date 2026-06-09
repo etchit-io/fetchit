@@ -954,3 +954,33 @@ textarea.chat-dialog__uri {
   padding: 0.05em 0.35em;
   border-radius: 4px;
 }
+
+/* Composer emoji picker: a toggle button that floats a grid above it. */
+.chat-composer__emoji { position: relative; display: flex; }
+.chat-emoji-picker {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+  padding: 8px;
+  width: 288px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+}
+.chat-emoji-picker__cell {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chat-emoji-picker__cell:hover { background: rgba(255, 255, 255, 0.08); }

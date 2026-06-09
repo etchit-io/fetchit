@@ -91,3 +91,39 @@ describe("mountComposer — setEnabled", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 });
+
+describe("mountComposer — emoji picker", () => {
+  function emojiBtn(): HTMLButtonElement {
+    return host.querySelector<HTMLButtonElement>(".chat-composer__emoji button")!;
+  }
+
+  it("toggles the picker open and closed", () => {
+    setup();
+    expect(host.querySelector(".chat-emoji-picker")).toBeNull();
+    emojiBtn().click();
+    expect(host.querySelector(".chat-emoji-picker")).not.toBeNull();
+    emojiBtn().click();
+    expect(host.querySelector(".chat-emoji-picker")).toBeNull();
+  });
+
+  it("inserts the picked emoji at the cursor and enables Send", () => {
+    const { ta, send } = setup();
+    ta.value = "ab";
+    ta.dispatchEvent(new Event("input"));
+    ta.setSelectionRange(1, 1);
+    emojiBtn().click();
+    const cell = host.querySelector<HTMLButtonElement>(".chat-emoji-picker__cell")!;
+    cell.click();
+    expect(ta.value).toBe(`a${cell.textContent}b`);
+    expect(send.disabled).toBe(false);
+  });
+
+  it("disables the emoji button and closes the picker when disabled", () => {
+    const { api } = setup();
+    emojiBtn().click();
+    expect(host.querySelector(".chat-emoji-picker")).not.toBeNull();
+    api.setEnabled(false, "no conv");
+    expect(emojiBtn().disabled).toBe(true);
+    expect(host.querySelector(".chat-emoji-picker")).toBeNull();
+  });
+});
