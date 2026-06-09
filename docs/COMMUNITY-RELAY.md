@@ -145,7 +145,11 @@ client:
 2. **Denylist gate** — the verified actor URL is checked against the
    signed `etchit-io` denylist (`EntryKind::ActorUrl`), the same list
    desktop clients consult. A denylisted actor's post never reaches a
-   client.
+   client. Until the consumer's first poll completes (seconds after
+   boot), the list is empty and the gate is **fail-open** — a
+   freshly-started inbox briefly accepts before its first refresh.
+   `FETCHIT_DENYLIST_CACHE` narrows that window by seeding the last
+   on-disk snapshot at boot.
 3. **Replay window** — duplicate `(Content-Digest, Date)` pairs are
    dropped.
 

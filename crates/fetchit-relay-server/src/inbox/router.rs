@@ -280,10 +280,21 @@ async fn run_gates(state: InboxState, headers: HeaderMap, body: Bytes) -> Result
             }
         })?;
 
-    let scheme = verify_inbox_request(&pubkey_pem, &ctx, &body).map_err(|reason| match reason {
-        DropReason::UnsupportedAlgorithm => InboxError::forbidden(reason),
-        _ => InboxError::unauthorized(reason),
-    })?;
+    let scheme = match verify_inbox_request(&pubkey_pem, &ctx, &body) {
+        Ok(scheme) => scheme,
+        Err(reason) => {
+            // Signature verify failed against the resolved key. The cached
+            // pubkey may be stale (the actor rotated it), so drop the cache
+            // entry — the next delivery from this keyId re-fetches a fresh
+            // actor document instead of failing forever on a stale key.
+            // Honors the `WebFingerLookup::invalidate` contract.
+            state.webfinger.invalidate(&ctx.key_id).await;
+            return Err(match reason {
+                DropReason::UnsupportedAlgorithm => InboxError::forbidden(reason),
+                _ => InboxError::unauthorized(reason),
+            });
+        }
+    };
 
     // Gate 3: replay window. Run AFTER signature verify so a forged
     // (Digest, Date) pair from an unauthenticated attacker can't
@@ -383,6 +394,24 @@ mod tests {
             Ok(self.pem.clone())
         }
         async fn invalidate(&self, _: &str) {}
+    }
+
+    /// Resolver that hands back a (possibly mismatched) pubkey and records
+    /// whether `invalidate` was called — used to prove the handler drops a
+    /// stale cached key on verify failure.
+    struct RecordingInvalidateWebFinger {
+        pem: String,
+        invalidated: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait]
+    impl WebFingerLookup for RecordingInvalidateWebFinger {
+        async fn resolve_pubkey_pem(&self, _: &str) -> Result<String, WebFingerError> {
+            Ok(self.pem.clone())
+        }
+        async fn invalidate(&self, _: &str) {
+            self.invalidated
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     struct MissingWebFinger;
@@ -520,6 +549,42 @@ mod tests {
             .await
             .expect("happy path");
         assert_eq!(sink.deliveries.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn verify_failure_invalidates_cached_pubkey() {
+        // Sign with key A, but the resolver returns key B's pubkey, so the
+        // RSA verify fails. The handler must invalidate the cached key so a
+        // rotated actor key is re-fetched on the next delivery instead of
+        // failing forever on the stale one.
+        let (priv_a, _pub_a) = keypair_pem();
+        let (_priv_b, pub_b) = keypair_pem();
+        let wf = Arc::new(RecordingInvalidateWebFinger {
+            pem: pub_b,
+            invalidated: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let state = InboxState::builder(Arc::new(NoopDenylist), wf.clone(), sink.clone()).build();
+        let body = br#"{"type":"Create","actor":"https://etchit.io/actors/josh"}"#;
+        let date = now_imf_fixdate();
+        let url: url::Url = "https://relay.example/inbox".parse().unwrap();
+        let headers = signed_headers_for(
+            &priv_a,
+            body,
+            "https://etchit.io/actors/josh#main-key",
+            &url,
+            &date,
+        );
+
+        let err = handle_inbox_inner(state, headers, Bytes::from_static(body))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 401, "mismatched-key signature is unauthorized");
+        assert!(
+            wf.invalidated.load(std::sync::atomic::Ordering::SeqCst),
+            "verify failure must invalidate the cached pubkey"
+        );
+        assert!(sink.deliveries.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
