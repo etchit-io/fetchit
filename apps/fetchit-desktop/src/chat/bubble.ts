@@ -6,6 +6,7 @@
 
 import type { ChatBubble } from "./state";
 import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
+import { appendInlineMarkdown } from "./markdown";
 
 const URL_RE
   = /(autonomi:\/\/[0-9a-fA-F]{64}|x0x:\/\/(?:agent|invite)\/[A-Za-z0-9_-]+|fetchit:\/\/share\/v3\/[0-9a-fA-F]{64}\/[0-9a-fA-F]{64}\?relay=\S+)/g;
@@ -109,7 +110,7 @@ function appendBodyWithLinks(
     const start = m.index ?? 0;
     if (start > cursor) {
       const slice = body.slice(cursor, start);
-      parent.appendChild(document.createTextNode(slice));
+      appendInlineMarkdown(parent, slice);
       if (slice.trim().length > 0) hasContent = true;
     }
     const url = m[0];
@@ -123,7 +124,7 @@ function appendBodyWithLinks(
   }
   if (cursor < body.length) {
     const slice = body.slice(cursor);
-    parent.appendChild(document.createTextNode(slice));
+    appendInlineMarkdown(parent, slice);
     if (slice.trim().length > 0) hasContent = true;
   }
   return hasContent;
