@@ -11,6 +11,7 @@ import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
 import { mountDownloadProgress } from "./ui/downloadProgress";
 import { findMascotIn, mountMascot } from "./ui/mascot";
+import { icon } from "./ui/icons";
 import { mountAddressBarSuggestions } from "./ui/addressBarSuggestions";
 import { addBookmark, deriveLabel, deriveTitle, isBookmarked, removeBookmark } from "./bookmarks";
 import { encodeBookmarksForShare } from "./bookmarkShare";
@@ -45,6 +46,14 @@ export async function init(): Promise<void> {
   const setBookmarkState = (on: boolean): void => {
     bookmarkBtn.dataset.bookmarked = on ? "true" : "false";
   };
+
+  // Hydrate the header chrome with the shared inline-SVG icon set. Each
+  // button carries its own aria-label/title, so the icons are decorative.
+  backBtn.appendChild(icon("back"));
+  bookmarkBtn.appendChild(icon("bookmark"));
+  shareBtn.appendChild(icon("share"));
+  chatBtn.appendChild(icon("chat"));
+  settingsBtn.appendChild(icon("settings"));
 
   // Idle tracker — drops the Autonomi client + clears caches after the
   // user-configured timeout of no mouse / keyboard activity. The current

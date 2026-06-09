@@ -242,6 +242,7 @@ body {
 #back-toggle,
 #bookmark-toggle,
 #share-toggle,
+#chat-toggle,
 #settings-toggle {
   background: transparent;
   color: var(--ash);
@@ -259,6 +260,7 @@ body {
 }
 #bookmark-toggle:hover:not(:disabled),
 #share-toggle:hover:not(:disabled),
+#chat-toggle:hover,
 #settings-toggle:hover {
   border-color: var(--copper);
   color: var(--copper-bright);
