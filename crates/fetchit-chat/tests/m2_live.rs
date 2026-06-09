@@ -79,14 +79,16 @@ const MIN_HISTORY_FROM_BOB: usize = 5;
 /// Relay we point at; matches the production NY droplet.
 const RELAY_URL: &str = "http://67.207.94.66:8088";
 
-/// How long we wait for Bob to join after we mint the invite.
+/// How long the owner waits for the joiner to appear in `/members`
+/// after minting the invite.
 ///
-/// Bumped past the original 60s so David's v0.21.3 `63b5c63` joiner-
-/// side Welcome-fetch retry has headroom to ride out a transient gossip
-/// drop. The retry budget on the daemon side is a handful of attempts
-/// at exponential backoff; 120s comfortably covers a worst-case run
-/// without masking a genuine wedge.
-const JOIN_TIMEOUT: Duration = Duration::from_secs(120);
+/// The Jun-8 joiner build enforces a hardcoded 60s convergence bound on
+/// each `/groups/join` call with no flag to widen it, so one slow first
+/// Welcome-pull (the ReaderExit tail) makes a single attempt bail. The
+/// joiner hedges with a bounded retry-loop of up to ~8 attempts at 60s;
+/// this owner-side budget covers that whole loop plus a final
+/// convergence without masking a genuine wedge.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Poll interval while waiting for Bob's join.
 const JOIN_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -303,12 +305,12 @@ async fn m2_live_private_group_round_trip() {
     );
 
     // Poll the live roster via x0xd until member_count >= 2. The
-    // joiner's `/groups/join` + David's Welcome-fetch retry land them
-    // via gossip catch-up, which the owner observes through /members.
-    // If David's `63b5c63` fix is NOT active on the joiner box, the
-    // Welcome-fetch fails closed on the first transient drop and the
-    // joiner never reaches /members; this loop will time out with a
-    // diagnostic naming the fix explicitly.
+    // joiner's bounded `/groups/join` retry-loop lands them via gossip
+    // catch-up, which the owner observes through /members. Each join
+    // attempt has a hardcoded 60s convergence bound on the joiner box,
+    // so a slow first Welcome-pull bails one attempt; the retry-loop
+    // re-fires until it converges or exhausts its budget, at which point
+    // this loop times out with the diagnostic below.
     let join_deadline = tokio::time::Instant::now() + JOIN_TIMEOUT;
     loop {
         let members = client
@@ -330,7 +332,7 @@ async fn m2_live_private_group_round_trip() {
         }
         assert!(
             tokio::time::Instant::now() < join_deadline,
-            "joiner ({peer_agent_hex}) did not appear in /members for group {group_id_hex} within {JOIN_TIMEOUT:?}; David's 63b5c63 Welcome-retry fix may not be active on the joiner box",
+            "joiner ({peer_agent_hex}) did not appear in /members for group {group_id_hex} within {JOIN_TIMEOUT:?}; the joiner's bounded join retry-loop likely exhausted against a persistent gossip or Welcome-fetch wedge",
         );
         tokio::time::sleep(JOIN_POLL_INTERVAL).await;
     }
