@@ -931,3 +931,16 @@ textarea.chat-dialog__uri {
   cursor: pointer;
 }
 .chat-nearby__add:hover { color: var(--copper-bright); border-color: var(--copper); }
+
+/* Inline SVG icon set (src/ui/icons.ts). Color is inherited from the
+   host control via `currentColor`; default size set here, overridable
+   per host. */
+.icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex: none;
+}
+.chat-icon-btn { display: inline-flex; align-items: center; justify-content: center; }
+.chat-composer__send { display: inline-flex; align-items: center; justify-content: center; }
+.chat-composer__send .icon { width: 20px; height: 20px; }

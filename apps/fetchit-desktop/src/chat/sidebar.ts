@@ -3,6 +3,7 @@
 
 import type { ChatStore, Conversation, NearbyPeer } from "./state";
 import { convKey } from "./state";
+import { icon, type IconName } from "../ui/icons";
 
 export interface SidebarHandlers {
   onSelect: (conv: Conversation) => void;
@@ -27,9 +28,9 @@ export function mountSidebar(
 
   const actions = document.createElement("div");
   actions.className = "chat-sidebar__actions";
-  actions.appendChild(iconButton("＋", "Add contact", handlers.onNewContact));
-  actions.appendChild(iconButton("⌗", "New group", handlers.onNewGroup));
-  actions.appendChild(iconButton("↪", "Join group", handlers.onJoinGroup));
+  actions.appendChild(iconButton("add-contact", "Add contact", handlers.onNewContact));
+  actions.appendChild(iconButton("new-group", "New group", handlers.onNewGroup));
+  actions.appendChild(iconButton("join-group", "Join group", handlers.onJoinGroup));
   header.appendChild(actions);
 
   const list = document.createElement("ul");
@@ -199,7 +200,7 @@ function rowFor(
 }
 
 function iconButton(
-  glyph: string,
+  name: IconName,
   label: string,
   onClick: () => void,
 ): HTMLButtonElement {
@@ -208,7 +209,7 @@ function iconButton(
   b.type = "button";
   b.title = label;
   b.setAttribute("aria-label", label);
-  b.textContent = glyph;
+  b.appendChild(icon(name));
   b.addEventListener("click", onClick);
   return b;
 }

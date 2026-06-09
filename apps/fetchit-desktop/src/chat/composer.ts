@@ -1,6 +1,8 @@
 // Multi-line composer at the bottom of the conversation pane.
 // Enter sends; Shift+Enter inserts a newline.
 
+import { icon } from "../ui/icons";
+
 export interface ComposerHandlers {
   /// Fire-and-forget. The orchestrator owns the bubble lifecycle —
   /// the composer just clears its input and lets the store represent
@@ -33,7 +35,9 @@ export function mountComposer(
   const send = document.createElement("button");
   send.type = "button";
   send.className = "chat-composer__send";
-  send.textContent = "Send";
+  send.title = "Send";
+  send.setAttribute("aria-label", "Send");
+  send.appendChild(icon("send"));
   send.disabled = true;
 
   const tryGrow = (): void => {
