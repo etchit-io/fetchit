@@ -111,6 +111,58 @@ default.
 - **Don't impersonate operators.** A community relay is yours.
   Don't suggest it speaks for fetch>it or its maintainers.
 
+## Optional: the fediverse-inbox role
+
+A community relay can *also* opt in to bridging the fediverse —
+accepting inbound `ActivityPub` public posts at `POST /inbox` and
+fanning them into the LIT Chat public feed. This is **off by default**:
+the standard relay build ships no fediverse code or its dependency
+tree, and a default deployment has no `/inbox` route at all.
+
+To enable it, build with the feature *and* set the opt-in flag:
+
+```bash
+cargo build --release --features fediverse-inbox
+FETCHIT_FEDIVERSE_INBOX=1 ./fetchit-relay-server
+```
+
+Configuration (read from the environment):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FETCHIT_FEDIVERSE_INBOX` | unset (off) | Set to `1` (or `true`) to mount `POST /inbox`. Unset = no fediverse surface, even on a `fediverse-inbox` build. |
+| `FETCHIT_DENYLIST_URL` | `https://trust.etchit.io/v1` | Base URL of the signed denylist the inbox gates inbound actors against. Point it elsewhere to gate on a different moderation list. |
+| `FETCHIT_DENYLIST_CACHE` | unset | Optional path to an on-disk denylist snapshot so the gate survives a restart before its first refresh. |
+
+What the inbox does to every inbound activity, before it reaches any
+client:
+
+1. **Size + rate limits**, then **HTTP Signature verification** — the
+   relay fetches the signing actor's public key from its actor document
+   (SSRF-gated: private-IP and cloud-metadata targets are refused) and
+   verifies the signature. An unsigned or wrong-signature post is
+   dropped.
+2. **Denylist gate** — the verified actor URL is checked against the
+   signed `etchit-io` denylist (`EntryKind::ActorUrl`), the same list
+   desktop clients consult. A denylisted actor's post never reaches a
+   client.
+3. **Replay window** — duplicate `(Content-Digest, Date)` pairs are
+   dropped.
+
+A post that clears every gate is fanned out to connected sessions as an
+`EnvelopeKind::PublicPost`, attributed to the **relay-verified** actor
+URL — not the activity's self-asserted `actor` field, which is
+attacker-controlled.
+
+**This is a real trust boundary.** Clients can't verify the HTTP
+Signature themselves, so they trust your relay as the
+fediverse-attribution authority for the posts it bridges. Running the
+fediverse-inbox role means taking on that responsibility — and the
+moderation surface that comes with it — for your community. See
+[`crates/fetchit-chat/SECURITY.md`](../crates/fetchit-chat/SECURITY.md)
+caveat 8 for the full trust model. The default LIT Chat relay role
+carries none of this; opt in only if your community wants to bridge.
+
 ## When a relay leaves the federation
 
 We remove a relay from `DEFAULT_RELAYS` when:
