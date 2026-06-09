@@ -63,14 +63,14 @@ const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5)
 /// gates against it. `FETCHIT_DENYLIST_URL` overrides at runtime for
 /// staging against a throwaway trust node; an empty value disables the
 /// consumer (offline / self-host without a trust service).
-const DEFAULT_DENYLIST_URL: Option<&str> = Some("https://trust.etchit.io/v1");
+pub(crate) const DEFAULT_DENYLIST_URL: Option<&str> = Some("https://trust.etchit.io/v1");
 
 /// Resolve the denylist endpoint base URL for boot-time
 /// `install_m3_denylist`. The `FETCHIT_DENYLIST_URL` env value (passed
 /// in by the caller) takes precedence over the compiled-in `default`;
 /// blank/whitespace env values are treated as unset. Returns `None` when
 /// neither is set, the dormant launch-gate state.
-fn resolve_denylist_url(env: Option<String>, default: Option<&str>) -> Option<String> {
+pub(crate) fn resolve_denylist_url(env: Option<String>, default: Option<&str>) -> Option<String> {
     env.map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| default.map(str::to_string))

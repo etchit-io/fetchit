@@ -3283,6 +3283,7 @@ dependencies = [
  "fetchit-net",
  "fetchit-relay-proto",
  "fetchit-trust-client",
+ "fetchit-trust-types",
  "filetime",
  "hex",
  "if-addrs 0.13.4",

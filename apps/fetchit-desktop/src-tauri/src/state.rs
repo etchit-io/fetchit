@@ -27,6 +27,13 @@ pub struct AppState {
     /// token so the Rust task stops making progress instead of running
     /// to completion against a UI that no longer cares.
     pub fetches: Arc<StdMutex<HashMap<String, CancellationToken>>>,
+    /// Reader-side community-denylist gate. Built at boot from the same
+    /// signed NY-Trust endpoint the chat client uses, but independent of
+    /// the chat feature flag: the reader must short-circuit a denylisted
+    /// `XorName` to [`fetchit_core::Rendition::Blocked`] before any
+    /// handler runs, even when chat ships cold. `None` when no denylist
+    /// URL resolves (offline / self-host without a trust service).
+    pub reader_denylist: Option<Arc<dyn fetchit_trust_types::DenylistQuery>>,
 }
 
 impl AppState {
@@ -38,6 +45,35 @@ impl AppState {
             settings: Arc::new(StdMutex::new(settings)),
             settings_path: Arc::new(settings_path),
             fetches: Arc::new(StdMutex::new(HashMap::new())),
+            reader_denylist: None,
+        }
+    }
+
+    /// Install the reader-side denylist gate (boot-time builder). The
+    /// backing consumer polls the signed trust endpoint independently of
+    /// the chat client; `None` leaves the reader ungated.
+    #[must_use]
+    pub fn with_reader_denylist(
+        mut self,
+        denylist: Option<Arc<dyn fetchit_trust_types::DenylistQuery>>,
+    ) -> Self {
+        self.reader_denylist = denylist;
+        self
+    }
+
+    /// Build the [`fetchit_core::RenderingContext`] for rendering
+    /// `addr_hex` (the canonical lowercase 64-hex `XorName`). Carries the
+    /// reader denylist so
+    /// [`fetchit_core::HandlerRegistry::render_with_context`]
+    /// short-circuits a denylisted address to
+    /// [`fetchit_core::Rendition::Blocked`] before any handler runs. With
+    /// no denylist installed the context is inert and rendering is
+    /// unchanged.
+    #[must_use]
+    pub fn rendering_context(&self, addr_hex: String) -> fetchit_core::RenderingContext {
+        fetchit_core::RenderingContext {
+            denylist: self.reader_denylist.clone(),
+            addr_hex: Some(addr_hex),
         }
     }
 
@@ -137,8 +173,19 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::disk_cache::Policy;
+    use fetchit_core::handlers::default_registry;
+    use fetchit_core::{Hint, RenderContext, Rendition};
+    use fetchit_trust_types::{DenylistQuery, EntryKind};
 
     const HEX_ONE: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    /// Denylist stub that blocks exactly one `XorName` value.
+    struct StubBlock(String);
+    impl DenylistQuery for StubBlock {
+        fn is_blocked(&self, kind: EntryKind, value: &str) -> bool {
+            kind == EntryKind::XorName && value == self.0
+        }
+    }
 
     fn make_state(tmp: &std::path::Path) -> AppState {
         let disk = Arc::new(DiskCache::new(tmp.join("disk"), Policy::default()));
@@ -228,5 +275,72 @@ mod tests {
         state.cancel_fetch("tab-1");
         assert!(!first.is_cancelled());
         assert!(second.is_cancelled());
+    }
+
+    /// M3 #342: a reader denylist that blocks a `XorName` makes
+    /// `rendering_context` produce a context that short-circuits the
+    /// render to `Rendition::Blocked` before any handler runs. Without
+    /// the denylist threaded in, the same bytes render as normal content
+    /// — this is the wiring the reader path was missing.
+    #[test]
+    fn rendering_context_blocks_a_denylisted_xorname() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocked = "ab".repeat(32);
+        let state =
+            make_state(tmp.path()).with_reader_denylist(Some(Arc::new(StubBlock(blocked.clone()))));
+        let rctx = state.rendering_context(blocked);
+        let r = default_registry()
+            .render_with_context(
+                Bytes::from_static(b"plain readable text"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx,
+            )
+            .expect("blocked short-circuit returns Ok(Blocked)");
+        assert!(
+            matches!(r, Rendition::Blocked { .. }),
+            "expected Blocked, got {r:?}"
+        );
+    }
+
+    /// M3 #342: with a denylist installed but the address NOT on it, the
+    /// reader renders normally (the common happy path).
+    #[test]
+    fn rendering_context_allows_an_unblocked_addr() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state =
+            make_state(tmp.path()).with_reader_denylist(Some(Arc::new(StubBlock("ff".repeat(32)))));
+        let rctx = state.rendering_context("ab".repeat(32));
+        let r = default_registry()
+            .render_with_context(
+                Bytes::from_static(b"plain readable text"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx,
+            )
+            .expect("unblocked addr renders normally");
+        assert!(
+            !matches!(r, Rendition::Blocked { .. }),
+            "unblocked addr must not be Blocked"
+        );
+    }
+
+    /// M3 #342: with no denylist installed (offline / self-host), the
+    /// context is inert and the reader renders unchanged.
+    #[test]
+    fn rendering_context_without_denylist_passes_through() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = make_state(tmp.path());
+        assert!(state.reader_denylist.is_none());
+        let rctx = state.rendering_context("ab".repeat(32));
+        let r = default_registry()
+            .render_with_context(
+                Bytes::from_static(b"plain readable text"),
+                &Hint::default(),
+                &RenderContext::default(),
+                &rctx,
+            )
+            .expect("inert gate renders normally");
+        assert!(!matches!(r, Rendition::Blocked { .. }));
     }
 }

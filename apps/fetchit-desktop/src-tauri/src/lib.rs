@@ -595,7 +595,12 @@ async fn fetch_and_render(
             None => fetch_bytes(&app, &state, &parsed).await?,
         };
         default_registry()
-            .render(bytes, &Hint::default(), &RenderContext::default())
+            .render_with_context(
+                bytes,
+                &Hint::default(),
+                &RenderContext::default(),
+                &state.rendering_context(parsed.to_hex()),
+            )
             .map(RenditionDto::from)
             .map_err(|e| e.to_string())
     };
@@ -901,9 +906,55 @@ pub fn run() {
             // doesn't fight a `FETCHIT_CHAT_ENABLED=1` invocation.
             let chat_enabled_at_boot = settings::resolve_chat_enabled(&loaded);
 
-            let state = AppState::new(disk_cache, loaded, settings_path);
+            // M3 reader-side denylist (#342): gate denylisted XorNames in
+            // the reader even when chat ships cold. Built from the same
+            // signed NY-Trust endpoint + baked issuer key as the chat
+            // consumer, but independent of the chat feature flag. `None`
+            // when no URL resolves (offline / self-host).
+            let reader_denylist = chat::resolve_denylist_url(
+                std::env::var("FETCHIT_DENYLIST_URL").ok(),
+                chat::DEFAULT_DENYLIST_URL,
+            )
+            .map(|url| {
+                let consumer = Arc::new(fetchit_trust_client::DenylistConsumer::new(
+                    fetchit_trust_client::etchitio_pubkey(),
+                    url,
+                    Some(app_data.join("denylist")),
+                ));
+                consumer.load_cache_blocking();
+                consumer
+            });
+
+            let state = AppState::new(disk_cache, loaded, settings_path).with_reader_denylist(
+                reader_denylist
+                    .clone()
+                    .map(|c| c as Arc<dyn fetchit_trust_types::DenylistQuery>),
+            );
             let server_state = state.clone();
             app.manage(state);
+
+            // Drive the reader denylist's signed-manifest refresh loop
+            // (needs a runtime context; the loop outlives this task via its
+            // own Arc clone). A failed HTTP-client build leaves the reader
+            // gated by the on-disk cache snapshot only.
+            if let Some(consumer) = reader_denylist {
+                match fetchit_trust_client::ReqwestClient::new() {
+                    Ok(http) => {
+                        let http: Arc<
+                            dyn fetchit_trust_client::HttpClient + Send + Sync + 'static,
+                        > = Arc::new(http);
+                        tauri::async_runtime::spawn(async move {
+                            // JoinHandle dropped on purpose: the loop runs
+                            // detached for the life of the consumer Arc.
+                            let _handle = consumer.spawn_poll_loop(http);
+                        });
+                    }
+                    Err(e) => eprintln!(
+                        "[fetchit][denylist] reader consumer http init failed: {e}; \
+                         reader gated by cache snapshot only"
+                    ),
+                }
+            }
 
             // Build + manage the chat client even when the feature is
             // off, so dev builds that flip the env var post-launch can

@@ -69,6 +69,9 @@ fetchit-relay-proto = { path = "../../../crates/fetchit-relay-proto" }
 # denylist HTTP poller) plus `BlockEvent` / `EntryKind` for the M3
 # denylist install + the chat:denylist-updated pump.
 fetchit-trust-client = { path = "../../../crates/fetchit-trust-client", features = ["reqwest"] }
+# Direct dep so `AppState` can name the `DenylistQuery` trait object the
+# reader-side denylist gate stores + threads into `render_with_context`.
+fetchit-trust-types = { path = "../../../crates/fetchit-trust-types" }
 x0xd-client = { path = "../../../crates/x0xd-client" }
 semver = "1"
 hex = "0.4"
