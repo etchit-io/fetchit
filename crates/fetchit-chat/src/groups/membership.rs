@@ -30,6 +30,29 @@ pub const MEMBERSHIP_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// noticeable load.
 pub const MEMBERSHIP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Resolve the joiner-side convergence wait, honouring the
+/// `FETCHIT_MEMBERSHIP_WAIT_SECS` environment override and falling back
+/// to [`MEMBERSHIP_WAIT_TIMEOUT`].
+///
+/// The override is an operations escape hatch for cross-NAT soak rigs
+/// where the owner's `MemberAdded` gossip can take longer than the 60s
+/// production default to saturate into the joiner's daemon. Production
+/// leaves the variable unset, keeping the 60s ceiling so a genuinely
+/// stuck join still fails fast.
+#[must_use]
+pub fn membership_wait_timeout() -> Duration {
+    resolve_membership_wait(std::env::var("FETCHIT_MEMBERSHIP_WAIT_SECS").ok())
+}
+
+/// Pure core of [`membership_wait_timeout`]: parse an optional raw
+/// seconds string, falling back to [`MEMBERSHIP_WAIT_TIMEOUT`] on absent
+/// or unparseable input. Split out so the fallback is unit-testable
+/// without mutating process environment.
+fn resolve_membership_wait(raw: Option<String>) -> Duration {
+    raw.and_then(|r| r.parse::<u64>().ok())
+        .map_or(MEMBERSHIP_WAIT_TIMEOUT, Duration::from_secs)
+}
+
 /// Poll `members_fetcher` on `poll_interval` until `self_id` appears
 /// in the returned roster, or `timeout` elapses.
 ///
@@ -86,6 +109,23 @@ mod tests {
 
     fn aid(prefix: char) -> AgentId {
         AgentId::parse(prefix.to_string().repeat(64)).unwrap()
+    }
+
+    #[test]
+    fn resolve_membership_wait_defaults_when_unset_or_unparseable() {
+        assert_eq!(resolve_membership_wait(None), MEMBERSHIP_WAIT_TIMEOUT);
+        assert_eq!(
+            resolve_membership_wait(Some("not-a-number".to_owned())),
+            MEMBERSHIP_WAIT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn resolve_membership_wait_honours_a_valid_override() {
+        assert_eq!(
+            resolve_membership_wait(Some("300".to_owned())),
+            Duration::from_secs(300)
+        );
     }
 
     #[tokio::test]

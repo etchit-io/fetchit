@@ -84,7 +84,7 @@ const RELAY_URL: &str = "http://67.207.94.66:8088";
 ///
 /// The Jun-8 joiner build enforces a hardcoded 60s convergence bound on
 /// each `/groups/join` call with no flag to widen it, so one slow first
-/// Welcome-pull (the ReaderExit tail) makes a single attempt bail. The
+/// Welcome-pull (the `ReaderExit` tail) makes a single attempt bail. The
 /// joiner hedges with a bounded retry-loop of up to ~8 attempts at 60s;
 /// this owner-side budget covers that whole loop plus a final
 /// convergence without masking a genuine wedge.
@@ -94,8 +94,15 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(600);
 const JOIN_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long we wait, after sending the last message, for Bob's echoes
-/// to round-trip back into our local conversation history.
-const ECHO_TIMEOUT: Duration = Duration::from_secs(30);
+/// to round-trip back into our local conversation history. Default;
+/// `M2_LIVE_ECHO_SECS` overrides it for cross-NAT soak rigs where the
+/// joiner converges late and can only echo after that.
+const ECHO_TIMEOUT_DEFAULT: Duration = Duration::from_secs(180);
+
+/// Pause after owner-side roster convergence before sending, so the
+/// joiner's daemon has time to finish its own convergence and arm its
+/// receive loop. `M2_LIVE_SETTLE_SECS` overrides.
+const SETTLE_DEFAULT: Duration = Duration::from_secs(20);
 
 /// Poll interval while waiting for Bob's echoes.
 const ECHO_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -112,6 +119,14 @@ fn now_ms() -> u64 {
 
 fn env_or(name: &str, default: impl FnOnce() -> String) -> String {
     std::env::var(name).unwrap_or_else(|_| default())
+}
+
+/// Read an integer-seconds env override, falling back to `default`.
+fn env_secs_or(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(default, Duration::from_secs)
 }
 
 fn env_required(name: &str) -> String {
@@ -338,6 +353,13 @@ async fn m2_live_private_group_round_trip() {
     }
     eprintln!("[m2-live] joiner converged; proceeding to message round-trip");
 
+    // Owner-side /members shows the joiner, but the joiner's own daemon
+    // may still be converging. Settle before sending so its receive loop
+    // is armed and the sends aren't dropped into a void.
+    let settle = env_secs_or("M2_LIVE_SETTLE_SECS", SETTLE_DEFAULT);
+    eprintln!("[m2-live] settling {settle:?} for joiner-side convergence before sending");
+    tokio::time::sleep(settle).await;
+
     // Send 5 messages, spaced so Bob's echo handler isn't slammed.
     let send_started_at = now_ms();
     for i in 0..MIN_HISTORY_FROM_BOB {
@@ -362,7 +384,9 @@ async fn m2_live_private_group_round_trip() {
     // defensive) and any self-echoes (impossible after Task 12's
     // self-source filter, but again defensive).
     let registry = client.registry_arc().expect("registry");
-    let echo_deadline = tokio::time::Instant::now() + ECHO_TIMEOUT;
+    let echo_timeout = env_secs_or("M2_LIVE_ECHO_SECS", ECHO_TIMEOUT_DEFAULT);
+    eprintln!("[m2-live] waiting up to {echo_timeout:?} for Bob's echoes");
+    let echo_deadline = tokio::time::Instant::now() + echo_timeout;
     let mut last_seen = 0usize;
     loop {
         let conv = registry
@@ -395,7 +419,7 @@ async fn m2_live_private_group_round_trip() {
         let total = conv.history.len();
         assert!(
             tokio::time::Instant::now() < echo_deadline,
-            "expected >= {MIN_HISTORY_FROM_BOB} echoes from Bob within {ECHO_TIMEOUT:?}; got {from_bob_len} (total conv.history = {total}). \
+            "expected >= {MIN_HISTORY_FROM_BOB} echoes from Bob within {echo_timeout:?}; got {from_bob_len} (total conv.history = {total}). \
              If Bob's echo handler is not wired yet, this assertion is the contract: Task 16 wires it.",
         );
         tokio::time::sleep(ECHO_POLL_INTERVAL).await;

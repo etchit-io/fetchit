@@ -337,14 +337,16 @@ impl<'a> Endpoint<'a> {
     ///   or `/agent`.
     /// - [`ChatError::JoinerNotConverged`] when x0xd never applies
     ///   `MemberAdded` to the joiner within
-    ///   [`membership::MEMBERSHIP_WAIT_TIMEOUT`].
+    ///   [`membership::membership_wait_timeout`] (the 60s
+    ///   [`membership::MEMBERSHIP_WAIT_TIMEOUT`] default, or the
+    ///   `FETCHIT_MEMBERSHIP_WAIT_SECS` override).
     pub async fn join(&self, invite: &GroupInvite, display_name: Option<&str>) -> Result<Group> {
         let me: AgentIdentity = self.http.get_json("/agent").await?;
         self.join_with_membership_wait(
             invite,
             display_name,
             &me.agent_id,
-            membership::MEMBERSHIP_WAIT_TIMEOUT,
+            membership::membership_wait_timeout(),
             membership::MEMBERSHIP_POLL_INTERVAL,
         )
         .await
