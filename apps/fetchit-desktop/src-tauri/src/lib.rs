@@ -1101,6 +1101,8 @@ pub fn run() {
             chat::chat_group_messages,
             chat::chat_group_leave,
             chat::chat_set_passphrase,
+            chat::chat_custody_status,
+            chat::chat_rekey_vault,
             chat::chat_confirm_contact,
             chat::chat_watch_presence,
             chat::chat_unwatch_presence,

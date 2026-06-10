@@ -804,6 +804,54 @@ pub async fn chat_set_passphrase(
     Ok(())
 }
 
+/// Blank passphrases would silently downgrade custody; reject early.
+fn validate_rekey_passphrase(p: Option<&str>) -> Result<(), String> {
+    match p {
+        Some(s) if s.trim().is_empty() => Err("passphrase must not be empty".into()),
+        _ => Ok(()),
+    }
+}
+
+/// Report the at-rest custody mode: "none" (no vault yet),
+/// "keychain", or "passphrase". Drives the Settings custody panel.
+#[tauri::command]
+pub fn chat_custody_status(state: tauri::State<'_, ChatState>) -> String {
+    match fetchit_chat::rekey::custody_status(&state.data_dir) {
+        fetchit_chat::rekey::CustodyStatus::NoVault => "none".into(),
+        fetchit_chat::rekey::CustodyStatus::Keychain => "keychain".into(),
+        fetchit_chat::rekey::CustodyStatus::Passphrase => "passphrase".into(),
+    }
+}
+
+/// Switch vault custody. `new_passphrase = Some` re-seals everything
+/// under an Argon2id passphrase; `None` re-seals under a freshly
+/// rotated OS-keychain key. With no vault on disk this only sets the
+/// passphrase the next client build will use (first-boot headless
+/// enrol, same contract as `chat_set_passphrase`). On success the
+/// client is invalidated so the next call rebuilds under the new
+/// custody; on error the in-memory state is left untouched.
+#[tauri::command]
+pub async fn chat_rekey_vault(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    new_passphrase: Option<String>,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    validate_rekey_passphrase(new_passphrase.as_deref())?;
+    let current = state.passphrase.lock().await.clone();
+    let root = state.data_dir.clone();
+    let target = new_passphrase.clone();
+    tokio::task::spawn_blocking(move || {
+        fetchit_chat::rekey::rekey_to(&root, current.as_deref(), target.as_deref())
+    })
+    .await
+    .map_err(|e| format!("rekey task join: {e}"))?
+    .map_err(|e| e.to_string())?;
+    *state.passphrase.lock().await = new_passphrase;
+    state.invalidate().await;
+    Ok(())
+}
+
 /// Flip the conversation identified by `group_id_hex` from
 /// `TrustState::Pending` to `TrustState::Confirmed` and persist.
 /// The UI calls this after the user accepts a TOFU contact request
@@ -1940,6 +1988,14 @@ fn ipv6_to_ipv4_mapped(addr: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{denylist_update_payload, resolve_denylist_url, validate_relay_url};
+
+    #[test]
+    fn rekey_passphrase_validation_rejects_blank() {
+        assert!(super::validate_rekey_passphrase(Some(" ")).is_err());
+        assert!(super::validate_rekey_passphrase(Some("")).is_err());
+        assert!(super::validate_rekey_passphrase(Some("hunter2")).is_ok());
+        assert!(super::validate_rekey_passphrase(None).is_ok());
+    }
 
     #[test]
     fn pump_guard_fires_exactly_once() {
