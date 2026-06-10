@@ -41,7 +41,7 @@ pub const CHAT_FEATURE_DISABLED_ERR: &str = "chat feature disabled";
 /// Advanced or a `FETCHIT_CHAT_ENABLED` env change takes effect on
 /// the very next IPC, matching the existing
 /// [`crate::chat_feature_enabled`] command's behaviour.
-fn ensure_chat_enabled(app_state: &AppState) -> Result<(), String> {
+pub(crate) fn ensure_chat_enabled(app_state: &AppState) -> Result<(), String> {
     let enabled = app_state
         .settings
         .lock()
@@ -147,7 +147,7 @@ impl ChatState {
         })
     }
 
-    async fn get(&self) -> Result<Client, String> {
+    pub(crate) async fn get(&self) -> Result<Client, String> {
         let mut guard = self.client.lock().await;
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());

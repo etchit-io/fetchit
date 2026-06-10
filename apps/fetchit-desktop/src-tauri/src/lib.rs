@@ -7,6 +7,7 @@ mod chat;
 mod disk_cache;
 #[cfg(feature = "e2e")]
 mod e2e;
+mod fediverse;
 mod linux_deep_link;
 mod protocol;
 mod rendition;
@@ -1059,6 +1060,9 @@ pub fn run() {
             chat::chat_confirm_contact,
             chat::chat_watch_presence,
             chat::chat_unwatch_presence,
+            fediverse::fediverse_actor_status,
+            fediverse::fediverse_mint,
+            fediverse::fediverse_publish,
         ])
         .on_window_event(|win, event| {
             // ClearMode::OnClose: wipe the on-disk cache when the user

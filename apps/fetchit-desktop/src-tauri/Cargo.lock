@@ -3280,6 +3280,7 @@ dependencies = [
  "dirs 5.0.1",
  "fetchit-chat",
  "fetchit-core",
+ "fetchit-fedi",
  "fetchit-net",
  "fetchit-relay-proto",
  "fetchit-trust-client",

@@ -62,6 +62,9 @@ tauri-plugin-log = "2"
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
 fetchit-chat = { path = "../../../crates/fetchit-chat" }
+# Direct dep for the M4 compose commands: `PublicPost` (the publish
+# payload) and `parse_mention` (the mention-extraction oracle).
+fetchit-fedi = { path = "../../../crates/fetchit-fedi" }
 # Direct dep so the chat layer can name relay-proto types (e.g.
 # `AgentId`, `PresenceUpdate`) when wiring the new presence pump.
 fetchit-relay-proto = { path = "../../../crates/fetchit-relay-proto" }

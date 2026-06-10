@@ -112,6 +112,12 @@ pub struct Settings {
     /// default to ON.
     #[serde(default = "default_chat_enabled")]
     pub chat_enabled: bool,
+    /// Active minted fediverse handle (bare, no `@`). Empty = the user
+    /// has not opted in to public posting. The per-handle key material
+    /// lives in the chat vault; this only records which handle is
+    /// active.
+    #[serde(default)]
+    pub fediverse_handle: String,
 }
 
 /// Build-flavor-dependent default for the chat feature flag.
@@ -157,6 +163,7 @@ impl Default for Settings {
             display_name: String::new(),
             lan_direct_enabled: false,
             chat_enabled: default_chat_enabled(),
+            fediverse_handle: String::new(),
         }
     }
 }
@@ -199,6 +206,17 @@ mod tests {
         let s = Settings::load(&p);
         assert!(!s.cache.enabled);
         assert_eq!(s.cache.mode, ClearMode::Persist);
+    }
+
+    #[test]
+    fn fediverse_handle_defaults_empty_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        assert!(s.fediverse_handle.is_empty());
+        s.fediverse_handle = "josh".into();
+        s.save(&p).unwrap();
+        assert_eq!(Settings::load(&p).fediverse_handle, "josh");
     }
 
     #[test]
