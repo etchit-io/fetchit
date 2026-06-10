@@ -141,6 +141,20 @@ impl MasterKey {
         }
     }
 
+    /// Delete any existing keychain master entry and mint a fresh one.
+    /// Used by custody rekey when returning to keychain mode: reusing
+    /// the prior entry would silently keep a key the user believed
+    /// replaced.
+    ///
+    /// # Errors
+    /// `ChatError::Invalid` when the keystore is unreachable.
+    pub(crate) fn rotate_keychain() -> Result<Self, ChatError> {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            let _ = entry.delete_credential();
+        }
+        Self::resolve_keychain()
+    }
+
     fn resolve_passphrase(
         passphrase: &str,
         salt: &[u8; ARGON_SALT_LEN],
@@ -276,6 +290,14 @@ pub fn read_argon_salt(path: &Path) -> Result<[u8; ARGON_SALT_LEN], ChatError> {
     let mut salt = [0u8; ARGON_SALT_LEN];
     salt.copy_from_slice(&buf[5..5 + ARGON_SALT_LEN]);
     Ok(salt)
+}
+
+/// Rotate the OS-keychain master entry and return the fresh key.
+///
+/// # Errors
+/// `ChatError::Invalid` when the keystore is unreachable.
+pub(crate) fn rotate_keychain_master() -> Result<MasterKey, ChatError> {
+    MasterKey::rotate_keychain()
 }
 
 /// Generate a fresh Argon2 salt.

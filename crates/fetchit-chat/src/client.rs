@@ -2385,7 +2385,7 @@ fn validate_actor_handle(handle: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_master_key(
+pub(crate) fn resolve_master_key(
     identity_vault_path: &std::path::Path,
     passphrase: Option<&str>,
 ) -> Result<(MasterKey, u8, Option<[u8; ARGON_SALT_LEN]>)> {
