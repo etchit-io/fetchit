@@ -118,6 +118,11 @@ pub struct Settings {
     /// active.
     #[serde(default)]
     pub fediverse_handle: String,
+    /// First-run onboarding marker. False until the welcome overlay
+    /// completes or is skipped once; the frontend gates the overlay
+    /// on this so it never re-prompts.
+    #[serde(default)]
+    pub onboarding_done: bool,
 }
 
 /// Build-flavor-dependent default for the chat feature flag.
@@ -164,6 +169,7 @@ impl Default for Settings {
             lan_direct_enabled: false,
             chat_enabled: default_chat_enabled(),
             fediverse_handle: String::new(),
+            onboarding_done: false,
         }
     }
 }
@@ -217,6 +223,29 @@ mod tests {
         s.fediverse_handle = "josh".into();
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).fediverse_handle, "josh");
+    }
+
+    #[test]
+    fn onboarding_done_defaults_false_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        assert!(!s.onboarding_done);
+        s.onboarding_done = true;
+        s.save(&p).unwrap();
+        assert!(Settings::load(&p).onboarding_done);
+    }
+
+    #[test]
+    fn missing_onboarding_done_field_in_file_defaults_false() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        fs::write(
+            &p,
+            r#"{"cache":{"enabled":false,"mode":"persist","maxBytes":1}}"#,
+        )
+        .unwrap();
+        assert!(!Settings::load(&p).onboarding_done);
     }
 
     #[test]

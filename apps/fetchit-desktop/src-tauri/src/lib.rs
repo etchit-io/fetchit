@@ -419,6 +419,22 @@ fn set_display_name(state: tauri::State<'_, AppState>, name: String) {
     let _ = s.save(&state.settings_path);
 }
 
+/// Read the first-run onboarding marker.
+#[tauri::command]
+fn onboarding_done(state: tauri::State<'_, AppState>) -> bool {
+    state.settings.lock().is_ok_and(|s| s.onboarding_done)
+}
+
+/// Mark first-run onboarding as completed (or skipped). One-way.
+#[tauri::command]
+fn set_onboarding_done(state: tauri::State<'_, AppState>) {
+    let Ok(mut s) = state.settings.lock() else {
+        return;
+    };
+    s.onboarding_done = true;
+    let _ = s.save(&state.settings_path);
+}
+
 /// Read the persisted LAN-direct opt-in flag.
 #[tauri::command]
 fn lan_direct_enabled(state: tauri::State<'_, AppState>) -> bool {
@@ -1029,6 +1045,8 @@ pub fn run() {
             idle_disconnect,
             display_name,
             set_display_name,
+            onboarding_done,
+            set_onboarding_done,
             lan_direct_enabled,
             set_lan_direct_enabled,
             chat_feature_enabled,
