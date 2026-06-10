@@ -65,6 +65,13 @@ body.chat-docked {
   font-size: 14px;
 }
 
+.chat-panel__mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--copper);
+}
+
 .chat-panel__id {
   font-family: ui-monospace, "JetBrains Mono", monospace;
   font-size: 12px;

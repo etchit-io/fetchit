@@ -1,3 +1,5 @@
+import { mark } from "./ui/icons";
+
 /// Public demo-city index address — the front door we share in
 /// announcements. Sourced from fetchit-demo-city/addresses.txt
 /// (INDEX slot). Surfaced as a one-click "try the demo city" CTA on
@@ -12,6 +14,11 @@ export function buildEmptyState(onDemo: () => void): HTMLElement {
   const e = document.createElement("div");
   e.className = "tab-empty";
 
+  // Reader brand mark on the landing: the fetch>it chevron, copper on
+  // ink, recoloring with the theme like the rest of the chrome.
+  const brand = mark("fetchit", { label: "fetch>it" });
+  brand.classList.add("tab-empty-mark");
+
   const cta = document.createElement("button");
   cta.type = "button";
   cta.className = "tab-empty-cta";
@@ -23,6 +30,6 @@ export function buildEmptyState(onDemo: () => void): HTMLElement {
   hint.className = "tab-empty-hint";
   hint.textContent = "or paste an autonomi address above";
 
-  e.append(cta, hint);
+  e.append(brand, cta, hint);
   return e;
 }

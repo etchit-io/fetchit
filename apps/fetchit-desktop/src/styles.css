@@ -1071,6 +1071,12 @@ body:not([data-view="settings"]) #settings {
   font-size: 13.5px;
   user-select: none;
 }
+.tab-empty-mark {
+  width: 56px;
+  height: 56px;
+  color: var(--copper);
+  margin-bottom: 6px;
+}
 .tab-empty-cta {
   appearance: none;
   background: var(--copper);

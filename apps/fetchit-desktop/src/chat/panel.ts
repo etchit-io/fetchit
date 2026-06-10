@@ -29,6 +29,7 @@ import { mountNewGroup } from "./newGroup";
 import { mountJoinGroup } from "./joinGroup";
 import { mountPendingContactsDialog } from "./pendingContacts";
 import { ChatStore } from "./state";
+import { mark } from "../ui/icons";
 
 export interface ChatPanelHandlers {
   onAutonomi: (addr: string) => void;
@@ -80,6 +81,10 @@ export function mountChatPanel(
 
   const headerEl = document.createElement("header");
   headerEl.className = "chat-panel__header";
+  // LIT Chat brand mark, leftmost in the header. Decorative; the
+  // adjacent title text carries the accessible name.
+  const litMark = mark("lit");
+  litMark.classList.add("chat-panel__mark");
   const titleEl = document.createElement("div");
   titleEl.className = "chat-panel__title";
   titleEl.textContent = "Chat";
@@ -129,6 +134,7 @@ export function mountChatPanel(
   closeBtn.setAttribute("aria-label", "Close chat");
   closeBtn.textContent = "✕";
 
+  headerEl.appendChild(litMark);
   headerEl.appendChild(titleEl);
   headerEl.appendChild(daemonPill);
   headerEl.appendChild(idBadge);

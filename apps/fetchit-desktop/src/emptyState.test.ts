@@ -20,6 +20,14 @@ describe("buildEmptyState", () => {
     expect(hint?.textContent).toMatch(/paste an autonomi address/i);
   });
 
+  it("shows the fetch>it brand mark above the CTA", () => {
+    const root = buildEmptyState(() => undefined);
+    const brand = root.querySelector(".tab-empty-mark");
+    expect(brand).not.toBeNull();
+    expect(brand?.tagName.toLowerCase()).toBe("svg");
+    expect(brand?.getAttribute("aria-label")).toBe("fetch>it");
+  });
+
   it("invokes onDemo exactly once per click on the CTA", () => {
     const onDemo = vi.fn();
     const root = buildEmptyState(onDemo);
