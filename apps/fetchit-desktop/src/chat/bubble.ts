@@ -4,7 +4,7 @@
 // x0x cards / invites and v3 share URIs route to the appropriate
 // chat dialog.
 
-import type { ChatBubble } from "./state";
+import type { ChatBubble, QuotedRef } from "./state";
 import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
 import { appendInlineMarkdown } from "./markdown";
 
@@ -28,7 +28,7 @@ export interface BubbleHandlers {
 /// the `chat-bubble-pop` enter animation from re-firing on every
 /// store mutation.
 export function bubbleRenderKey(b: ChatBubble): string {
-  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}`;
+  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}|${b.replyTo?.messageId ?? ""}`;
 }
 
 export function renderBubble(
@@ -41,6 +41,12 @@ export function renderBubble(
 
   const stack = document.createElement("div");
   stack.className = "chat-bubble__stack";
+
+  // Quoted parent renders above the body, independent of whether the
+  // body itself collapses to an autonomi preview card.
+  if (b.replyTo) {
+    stack.appendChild(renderQuote(b.replyTo));
+  }
 
   const addresses = extractAutonomiAddresses(b.body);
 
@@ -160,6 +166,22 @@ function unverifiedSenderBadge(): HTMLElement {
     + " It may be from someone we don't have a contact card for, or from a transport"
     + " that doesn't carry per-message signatures.";
   return span;
+}
+
+/// Render the quoted-parent strip shown above a reply's body. Text-only
+/// (sender + a short preview); no link parsing, since the preview is a
+/// plain excerpt of the original.
+function renderQuote(ref: QuotedRef): HTMLElement {
+  const quote = document.createElement("div");
+  quote.className = "chat-quote";
+  const who = document.createElement("span");
+  who.className = "chat-quote__sender";
+  who.textContent = ref.senderName;
+  const preview = document.createElement("span");
+  preview.className = "chat-quote__preview";
+  preview.textContent = ref.preview;
+  quote.append(who, preview);
+  return quote;
 }
 
 type BubbleStatusTag = "sending" | "delivered" | "failed";

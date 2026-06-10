@@ -108,6 +108,19 @@ export interface PendingContact {
   arrivedAtMs: number;
 }
 
+/// A compact snapshot of the message a bubble is replying to. Captured
+/// at reply time from local history so a quoted parent renders even if
+/// the original scrolls out of the window or was never persisted. The
+/// `messageId` ties the quote back to the parent for scroll-to / future
+/// cross-peer threading.
+export interface QuotedRef {
+  messageId: string;
+  /// Display name of the quoted message's sender at quote time.
+  senderName: string;
+  /// Short, already-truncated preview of the quoted body.
+  preview: string;
+}
+
 export interface ChatBubble {
   id: string;
   /// Chat-layer logical message id assigned by the daemon. Populated
@@ -121,6 +134,8 @@ export interface ChatBubble {
   status?: BubbleStatus;
   failureReason?: string;
   retryAttempts?: number;
+  /// Set when this message is a reply quoting an earlier one.
+  replyTo?: QuotedRef;
   /// Whether the sender's per-message signature was cryptographically
   /// verified by the local process against a cached card pubkey.
   ///

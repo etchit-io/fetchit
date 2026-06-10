@@ -699,6 +699,32 @@ body.chat-docked {
   letter-spacing: 0.02em;
 }
 
+/* Quoted-parent strip above a reply bubble. Border-led + dimmed so it
+   reads as context, not a message of its own. */
+.chat-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 4px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--copper);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.chat-quote__sender {
+  font-weight: 600;
+  color: var(--copper);
+}
+.chat-quote__preview {
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 #chat-toggle {
   position: relative;
 }

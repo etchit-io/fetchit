@@ -277,3 +277,48 @@ describe("bubbleRenderKey — keyed diff for flicker-free re-renders", () => {
     );
   });
 });
+
+describe("renderBubble — reply quote", () => {
+  it("renders a quoted-parent block carrying sender and preview", () => {
+    const row = renderBubble(
+      bubble({
+        body: "agreed",
+        replyTo: { messageId: "m0", senderName: "Bob", preview: "shall we ship?" },
+      }),
+      makeHandlers(),
+    );
+    const quote = row.querySelector(".chat-quote");
+    expect(quote).not.toBeNull();
+    expect(quote?.textContent).toContain("Bob");
+    expect(quote?.textContent).toContain("shall we ship?");
+  });
+
+  it("renders no quote block when replyTo is absent", () => {
+    const row = renderBubble(bubble({ body: "plain" }), makeHandlers());
+    expect(row.querySelector(".chat-quote")).toBeNull();
+  });
+
+  it("shows the quote even when the body is an autonomi-only preview", () => {
+    const row = renderBubble(
+      bubble({
+        body: `autonomi://${ADDR}`,
+        replyTo: { messageId: "m0", senderName: "Bob", preview: "see this" },
+      }),
+      makeHandlers(),
+    );
+    expect(row.querySelector(".chat-quote")).not.toBeNull();
+    expect(row.querySelector(".chat-preview")).not.toBeNull();
+  });
+
+  it("bubbleRenderKey changes when the quoted parent changes so the diff repaints", () => {
+    const none = bubbleRenderKey(bubble({ id: "m1" }));
+    const q1 = bubbleRenderKey(
+      bubble({ id: "m1", replyTo: { messageId: "p1", senderName: "B", preview: "x" } }),
+    );
+    const q2 = bubbleRenderKey(
+      bubble({ id: "m1", replyTo: { messageId: "p2", senderName: "B", preview: "x" } }),
+    );
+    expect(q1).not.toBe(none);
+    expect(q1).not.toBe(q2);
+  });
+});
