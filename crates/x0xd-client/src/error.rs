@@ -36,6 +36,20 @@ pub enum DiscoveryError {
     #[error("x0xd metadata malformed: {0}")]
     Malformed(String),
 
+    /// `api.port` / `api-token` exist but nothing answered at the
+    /// recorded address — almost always a stale `api.port` left behind
+    /// by a daemon that died without cleaning up. Returned by the
+    /// liveness-verified discovery paths only.
+    #[error(
+        "x0xd not running: {base_url} unreachable (stale api.port from a dead daemon?): {detail}"
+    )]
+    Unreachable {
+        /// The base URL the on-disk metadata pointed at.
+        base_url: String,
+        /// Transport-level failure, full cause chain.
+        detail: String,
+    },
+
     /// Other I/O failure — disk error, etc.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -84,7 +98,7 @@ pub enum X0xdError {
 /// failure, a dropped runtime) so an operator can tell those apart from
 /// one log line. Loopback clients are built with `.no_proxy()`, so an
 /// ambient proxy is never a hidden link in this chain.
-fn render_reqwest_chain(e: &reqwest::Error) -> String {
+pub(crate) fn render_reqwest_chain(e: &reqwest::Error) -> String {
     use std::error::Error;
     let mut out = e.to_string();
     let mut source = e.source();

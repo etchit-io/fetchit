@@ -25,7 +25,9 @@ pub mod signer;
 pub mod version;
 
 pub use discover::{discover_installed_x0xd, InstalledX0xd};
-pub use discovery::{base_url_from_api_port_line, discover_in, discover_local, DaemonEndpoint};
+pub use discovery::{
+    base_url_from_api_port_line, discover_in, discover_in_live, discover_local, DaemonEndpoint,
+};
 pub use error::{DiscoveryError, X0xdError};
 pub use identity::IdentityEndpoint;
 pub use secure::{CreatedGroup, EncryptedFrame, SecureGroupsEndpoint};

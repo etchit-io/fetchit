@@ -27,25 +27,71 @@ pub struct DaemonEndpoint {
     pub data_dir: PathBuf,
 }
 
-/// Discover the default x0xd instance for the current user.
+/// Discover the default x0xd instance for the current user and verify
+/// it answers.
+///
+/// x0xd does not remove `api.port` when it dies, so the on-disk
+/// metadata alone can describe a daemon that stopped days ago. Every
+/// production caller of this function treats success as "a daemon is
+/// there", so the endpoint is liveness-probed before being returned.
 ///
 /// # Errors
 /// Returns [`DiscoveryError::NotInstalled`] when no data directory can
 /// be located, [`DiscoveryError::NotRunning`] when the daemon's
 /// `api.port` / `api-token` are absent, [`DiscoveryError::Malformed`]
-/// when those files exist but are empty / not UTF-8, or
+/// when those files exist but are empty / not UTF-8,
+/// [`DiscoveryError::Unreachable`] when the files exist but nothing
+/// answers at the recorded address (stale metadata), or
 /// [`DiscoveryError::PermissionDenied`] / [`DiscoveryError::Io`] for
 /// filesystem-level failures.
 pub async fn discover_local() -> Result<DaemonEndpoint, DiscoveryError> {
     let dir = default_data_dir()?;
-    discover_in(&dir).await
+    discover_in_live(&dir).await
 }
 
-/// Discover an x0xd instance in a specific data directory — useful for
-/// named instances (`--name alice`) or test fixtures.
+/// [`discover_in`] plus a liveness probe of the discovered endpoint.
 ///
 /// # Errors
 /// Same variants as [`discover_local`].
+pub async fn discover_in_live(dir: &Path) -> Result<DaemonEndpoint, DiscoveryError> {
+    let ep = discover_in(dir).await?;
+    verify_alive(&ep).await?;
+    Ok(ep)
+}
+
+/// Probe `GET /health` on a discovered endpoint. Any HTTP response —
+/// including an auth rejection — proves something is listening; only a
+/// transport-level failure (connection refused, timeout) marks the
+/// metadata stale.
+async fn verify_alive(ep: &DaemonEndpoint) -> Result<(), DiscoveryError> {
+    let stale = |detail: String| DiscoveryError::Unreachable {
+        base_url: ep.base_url.clone(),
+        detail,
+    };
+    // no_proxy: loopback-only daemon, same rationale as version.rs.
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| stale(crate::error::render_reqwest_chain(&e)))?;
+    let url = format!("{}/health", ep.base_url);
+    match http.get(&url).bearer_auth(&ep.token).send().await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(stale(crate::error::render_reqwest_chain(&e))),
+    }
+}
+
+/// Read an x0xd instance's metadata from a specific data directory —
+/// useful for named instances (`--name alice`) or test fixtures.
+///
+/// Pure file parse: performs NO liveness check, so the returned
+/// endpoint may describe a daemon that is no longer running. Prefer
+/// [`discover_local`] / [`discover_in_live`] anywhere "is a daemon
+/// there?" is the actual question.
+///
+/// # Errors
+/// Same variants as [`discover_local`] except
+/// [`DiscoveryError::Unreachable`], which only the live paths return.
 pub async fn discover_in(dir: &Path) -> Result<DaemonEndpoint, DiscoveryError> {
     if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
         return Err(DiscoveryError::NotInstalled(dir.to_path_buf()));
@@ -145,6 +191,52 @@ fn default_data_dir() -> Result<PathBuf, DiscoveryError> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn discover_in_live_rejects_stale_api_port() {
+        // Port 1 is privileged and never listening — connection refused
+        // without the bind-then-drop race. Mirrors the stale-file
+        // failure: metadata present, daemon long gone.
+        let dir = tempdir().unwrap();
+        tokio::fs::write(dir.path().join("api.port"), "127.0.0.1:1\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("api-token"), "deadbeef\n")
+            .await
+            .unwrap();
+        let err = discover_in_live(dir.path()).await.unwrap_err();
+        match err {
+            DiscoveryError::Unreachable { base_url, detail } => {
+                assert_eq!(base_url, "http://127.0.0.1:1");
+                assert!(!detail.is_empty(), "detail should carry the cause chain");
+            }
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_in_live_accepts_listening_daemon() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let authority = server.uri().trim_start_matches("http://").to_owned();
+
+        let dir = tempdir().unwrap();
+        tokio::fs::write(dir.path().join("api.port"), format!("{authority}\n"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("api-token"), "tok\n")
+            .await
+            .unwrap();
+        let ep = discover_in_live(dir.path()).await.unwrap();
+        assert_eq!(ep.base_url, format!("http://{authority}"));
+        assert_eq!(ep.token, "tok");
+    }
 
     #[tokio::test]
     async fn discovers_from_explicit_dir() {
