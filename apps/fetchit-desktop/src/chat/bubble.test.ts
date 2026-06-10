@@ -323,6 +323,28 @@ describe("renderBubble — reply quote", () => {
   });
 });
 
+describe("renderBubble — quote-strip click", () => {
+  const REPLY = bubble({
+    body: "agreed",
+    replyTo: { messageId: "p1", senderName: "Bob", preview: "ship it?" },
+  });
+
+  it("fires onQuoteClick with the quoted message id", () => {
+    const onQuoteClick = vi.fn();
+    const row = renderBubble(REPLY, { ...makeHandlers(), onQuoteClick });
+    const quote = row.querySelector<HTMLElement>(".chat-quote")!;
+    expect(quote.classList.contains("chat-quote--link")).toBe(true);
+    quote.click();
+    expect(onQuoteClick).toHaveBeenCalledWith("p1");
+  });
+
+  it("renders a plain, non-clickable strip without the handler", () => {
+    const row = renderBubble(REPLY, makeHandlers());
+    const quote = row.querySelector<HTMLElement>(".chat-quote")!;
+    expect(quote.classList.contains("chat-quote--link")).toBe(false);
+  });
+});
+
 describe("renderBubble — reply affordance", () => {
   it("renders the reply button only when an onReply handler is supplied", () => {
     const without = renderBubble(bubble(), makeHandlers());

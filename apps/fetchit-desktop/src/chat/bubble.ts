@@ -23,6 +23,9 @@ export interface BubbleHandlers {
   /// now — group quotes need the wire field). When set, each bubble
   /// renders a hover reply affordance that fires with the bubble.
   onReply?: (b: ChatBubble) => void;
+  /// Fired when the user clicks a quoted-parent strip; receives the
+  /// quoted message id so the conversation can scroll to the parent.
+  onQuoteClick?: (messageId: string) => void;
 }
 
 /// A signature that uniquely identifies the rendered shape of a
@@ -49,7 +52,7 @@ export function renderBubble(
   // Quoted parent renders above the body, independent of whether the
   // body itself collapses to an autonomi preview card.
   if (b.replyTo) {
-    stack.appendChild(renderQuote(b.replyTo));
+    stack.appendChild(renderQuote(b.replyTo, handlers.onQuoteClick));
   }
 
   const addresses = extractAutonomiAddresses(b.body);
@@ -185,8 +188,12 @@ function unverifiedSenderBadge(): HTMLElement {
 
 /// Render the quoted-parent strip shown above a reply's body. Text-only
 /// (sender + a short preview); no link parsing, since the preview is a
-/// plain excerpt of the original.
-function renderQuote(ref: QuotedRef): HTMLElement {
+/// plain excerpt of the original. Clicking it jumps to the parent when
+/// the conversation supplies a handler.
+function renderQuote(
+  ref: QuotedRef,
+  onQuoteClick?: (messageId: string) => void,
+): HTMLElement {
   const quote = document.createElement("div");
   quote.className = "chat-quote";
   const who = document.createElement("span");
@@ -196,6 +203,11 @@ function renderQuote(ref: QuotedRef): HTMLElement {
   preview.className = "chat-quote__preview";
   preview.textContent = ref.preview;
   quote.append(who, preview);
+  if (onQuoteClick) {
+    quote.classList.add("chat-quote--link");
+    quote.title = "Jump to the original message";
+    quote.addEventListener("click", () => onQuoteClick(ref.messageId));
+  }
   return quote;
 }
 

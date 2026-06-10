@@ -729,6 +729,18 @@ body.chat-docked {
 
 /* Quoted-parent strip above a reply bubble. Border-led + dimmed so it
    reads as context, not a message of its own. */
+.chat-quote--link { cursor: pointer; }
+.chat-quote--link:hover { background: var(--ink-2); }
+
+/* Jump-to-parent flash after a quote-strip click. */
+.chat-row--flash .chat-bubble {
+  animation: chat-row-flash 1.2s ease-out both;
+}
+@keyframes chat-row-flash {
+  0% { box-shadow: 0 0 0 2px var(--copper); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+
 .chat-quote {
   display: flex;
   flex-direction: column;

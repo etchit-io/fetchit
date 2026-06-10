@@ -178,6 +178,32 @@ describe("mountConversation — reply flow", () => {
     );
   });
 
+  it("clicking the quote strip scrolls to and flashes the parent bubble", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    seedInbound("the original", "m1");
+    store.setActive({ kind: "dm", peer: PEER });
+    // Inbound reply quoting m1 — the slice-5 reconstruction builds the
+    // quote strip from local history.
+    store.recordDirectMessage({
+      from: PEER,
+      to: "a".repeat(64),
+      body: "the answer",
+      timestamp_ms: 2,
+      message_id: "m2",
+      reply_to_message_id: "m1",
+    });
+
+    host.querySelector<HTMLElement>(".chat-quote--link")!.click();
+    expect(scrollSpy).toHaveBeenCalled();
+    const parentRow = Array.from(
+      host.querySelectorAll<HTMLElement>(".chat-row"),
+    ).find((r) => r.dataset.key?.startsWith("m1|"))!;
+    expect(parentRow.classList.contains("chat-row--flash")).toBe(true);
+  });
+
   it("switching conversations clears a pending reply", () => {
     handle = mountConversation(host, store, noopHandlers);
     store.setPanelVisible(true);

@@ -72,11 +72,39 @@ export function mountConversation(
   root.appendChild(stream);
   root.appendChild(composerEl);
 
+  /// Quote-strip click: resolve the quoted id against local history
+  /// (sender-side parents carry it as messageId, inbound parents as
+  /// their bubble id), scroll the parent's row into view, and flash it.
+  /// A trimmed-away parent is a silent no-op — the strip already says
+  /// "(message unavailable)" in that case.
+  const scrollToMessage = (messageId: string): void => {
+    const conv = store.active();
+    if (!conv) return;
+    const parent = conv.messages.find(
+      (m) => m.messageId === messageId || m.id === messageId,
+    );
+    if (!parent) return;
+    const keyPrefix = `${parent.id}|`;
+    for (const child of Array.from(stream.children)) {
+      const el = child as HTMLElement;
+      if (el.dataset.key?.startsWith(keyPrefix)) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.remove("chat-row--flash");
+        // Force a reflow so re-adding the class restarts the animation
+        // even when the same parent is jumped to twice in a row.
+        void el.offsetWidth;
+        el.classList.add("chat-row--flash");
+        break;
+      }
+    }
+  };
+
   const bubbleHandlers: BubbleHandlers = {
     onAutonomi: handlers.onAutonomi,
     onCard: handlers.onCard,
     onInvite: handlers.onInvite,
     onProfile: handlers.onProfile,
+    onQuoteClick: scrollToMessage,
   };
   // DM bubbles get the reply affordance; group bubbles stay without it
   // until the payload carries the quote cross-peer — a reply affordance
