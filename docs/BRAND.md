@@ -101,7 +101,7 @@ other size below it. Don't introduce in-between sizes.
 | Micro chip                                | 11px |   500  | Used for tag pills, counts                             |
 | Wordmark (logo)                           | 18px |   700  | Mono family                                            |
 | Tab label                                 | 13px |   500  | `letter-spacing: 0.02em`                               |
-| Icon button glyph (★ ▦ ⚙ ×)               | 18px |   400  | Unicode glyphs; sized via the button container         |
+| Icon button glyph                         | 18px |   400  | Inline-SVG icon set (`src/ui/icons.ts`); sized by the button container |
 | Address / data-map / hex code             | 13px |   400  | Mono                                                   |
 
 Headings use `color: var(--bone)`. Descriptions/help use
@@ -110,6 +110,43 @@ Headings use `color: var(--bone)`. Descriptions/help use
 When the design needs a size that's not in this list, add it to
 the table (in both repos) before using it. Drift here is what made
 the two apps fall out of sync in May 2026.
+
+## Icons and brand marks
+
+Inline-SVG asset families in `apps/*-desktop/src/ui/icons.ts`. Both are
+built on a **24x24 grid**, use **`currentColor` only** (no hex literals,
+so they recolor with the theme by context), and are parsed with
+`DOMParser` (no script execution). Each is decorative (`aria-hidden`) by
+default and takes an accessible label on request.
+
+### UI icon set, `icon(name)`
+
+Stroked affordance glyphs (`fill="none"`, `stroke="currentColor"`, 2px
+stroke, round caps/joins). The canonical list is `ICON_NAMES`; adding
+one means extending that array (the type derives from it) plus a body
+entry. Current set: `send`, `attach`, `emoji`, `react`, `reply`,
+`close`, `dock`, `settings`, `add-contact`, `new-group`, `join-group`,
+`chat`, `fediverse`, `image`, `back`, `bookmark`, `share`, `chevron`.
+These replaced the old unicode chrome glyphs.
+
+### Brand marks, `mark(name)`
+
+The Fetch / Etch / LIT logo family: **filled** glyphs
+(`fill="currentColor"`, no stroke) on the same grid, used where an
+identity mark is wanted (window/About, the chat and fediverse pane
+headers, empty states). `MARK_NAMES`:
+
+| Mark      | Glyph         | Meaning                                    |
+|-----------|---------------|--------------------------------------------|
+| `fetchit` | `>` chevron   | the reader, forward-motion                 |
+| `etchit`  | `/` slash     | the publisher, inscription                 |
+| `lit`     | 4-point spark | LIT Chat, the spark on the sealed surface  |
+
+Single-accent copper on ink; `fetchit` and `etchit` are the wordmark
+glyphs (`>`, `/`) elevated to standalone shapes. The header wordmark
+stays live text (`#mark`) for crispness; the marks are the asset form.
+App-icon rasterization (replacing `src-tauri/icons/*`) is a downstream
+packaging step.
 
 ## Composer / canvas fonts (etch/it only)
 
