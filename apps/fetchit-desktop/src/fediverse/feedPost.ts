@@ -49,7 +49,13 @@ function displayActor(url: string): string {
 /// Render a [`PublicPostDelivery`] into a self-contained card element.
 /// Safe against hostile `activity_json`: content is inert text, never
 /// HTML, and attribution can only ever read `verifiedActorUrl`.
-export function renderFeedPost(delivery: PublicPostDelivery): HTMLElement {
+/// `onReply` (when given) adds the reply-publicly affordance; the
+/// callback receives the VERIFIED actor URL, never a body-asserted one,
+/// and public reply is the only reply option for fediverse posts.
+export function renderFeedPost(
+  delivery: PublicPostDelivery,
+  onReply?: (verifiedActorUrl: string) => void,
+): HTMLElement {
   const root = document.createElement("article");
   root.className = "feed-post";
 
@@ -93,6 +99,15 @@ export function renderFeedPost(delivery: PublicPostDelivery): HTMLElement {
     time.dateTime = published;
     time.textContent = published;
     root.appendChild(time);
+  }
+
+  if (onReply) {
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "feed-post__reply";
+    reply.textContent = "reply publicly";
+    reply.addEventListener("click", () => onReply(delivery.verifiedActorUrl));
+    root.appendChild(reply);
   }
 
   return root;

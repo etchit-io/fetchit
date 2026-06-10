@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderFeedPost, type PublicPostDelivery } from "./feedPost";
 
 // A relay-verified actor URL. Attribution must come from this field only,
@@ -83,5 +83,18 @@ describe("renderFeedPost", () => {
     };
     const el = renderFeedPost(delivery);
     expect(el.querySelector(".feed-post__body")?.textContent).toContain("bare note");
+  });
+
+  it("reply affordance fires with the VERIFIED actor, never the body actor", () => {
+    const onReply = vi.fn();
+    const el = renderFeedPost(create("x"), onReply);
+    el.querySelector<HTMLButtonElement>(".feed-post__reply")!.click();
+    expect(onReply).toHaveBeenCalledTimes(1);
+    expect(onReply).toHaveBeenCalledWith(VERIFIED);
+  });
+
+  it("renders no reply affordance without a callback", () => {
+    const el = renderFeedPost(create("x"));
+    expect(el.querySelector(".feed-post__reply")).toBeNull();
   });
 });

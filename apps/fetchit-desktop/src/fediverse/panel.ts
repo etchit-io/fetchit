@@ -6,6 +6,7 @@
 // network code of its own.
 
 import { icon } from "../ui/icons";
+import { mountCompose } from "./compose";
 import { mountFeed } from "./feed";
 import type { PublicPostDelivery } from "./feedPost";
 
@@ -64,11 +65,16 @@ export function mountFediversePanel(
 
   header.append(glyph, title, note, spacer, closeBtn);
 
+  const composeHost = document.createElement("div");
+  const compose = mountCompose(composeHost);
+
   const body = document.createElement("div");
   body.className = "fediverse-panel__body";
-  const feed = mountFeed(body);
+  // Reply-publicly on a card targets the compose surface at the
+  // relay-verified actor; public reply is the only reply option here.
+  const feed = mountFeed(body, (verifiedActorUrl) => compose.setReplyTo(verifiedActorUrl));
 
-  host.append(header, body);
+  host.append(header, body, composeHost);
 
   const open = (): void => {
     host.hidden = false;
