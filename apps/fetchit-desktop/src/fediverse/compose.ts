@@ -127,7 +127,14 @@ export function mountCompose(host: HTMLElement): ComposeApi {
         void publish();
         return;
       }
-      openConfirmModal(host, () => void publish());
+      postBtn.disabled = true;
+      openConfirmModal(
+        host,
+        () => void publish(),
+        () => {
+          postBtn.disabled = false;
+        },
+      );
     });
 
     host.append(replyChip, textarea, footer, result);
@@ -196,9 +203,13 @@ export function mountCompose(host: HTMLElement): ComposeApi {
 }
 
 /// Build + show the confirmation modal. `onAccept` runs only on the
-/// primary action; the modal gates the publish call, the backend never
-/// re-asks.
-function openConfirmModal(host: HTMLElement, onAccept: () => void): void {
+/// primary action, `onCancel` only on dismissal; the modal gates the
+/// publish call, the backend never re-asks.
+function openConfirmModal(
+  host: HTMLElement,
+  onAccept: () => void,
+  onCancel: () => void,
+): void {
   const overlay = document.createElement("div");
   overlay.className = "fediverse-confirm";
 
@@ -235,7 +246,10 @@ function openConfirmModal(host: HTMLElement, onAccept: () => void): void {
   overlay.append(box);
   host.append(overlay);
 
-  cancelBtn.addEventListener("click", () => overlay.remove());
+  cancelBtn.addEventListener("click", () => {
+    overlay.remove();
+    onCancel();
+  });
   acceptBtn.addEventListener("click", () => {
     if (tick.checked) {
       skipConfirmThisSession = true;

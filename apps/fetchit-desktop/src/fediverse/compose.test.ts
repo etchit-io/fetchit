@@ -99,6 +99,17 @@ describe("compose: publish confirmation", () => {
     expect(publishCalls()).toHaveLength(0);
   });
 
+  it("disables the post button while the modal is open, re-enables on cancel", async () => {
+    const host = await composerWithText("hello");
+    const postBtn = host.querySelector<HTMLButtonElement>(".fediverse-compose__post")!;
+    postBtn.click();
+    expect(postBtn.disabled).toBe(true);
+    postBtn.click();
+    expect(host.querySelectorAll(".fediverse-confirm")).toHaveLength(1);
+    host.querySelector<HTMLButtonElement>(".fediverse-confirm__cancel")!.click();
+    expect(postBtn.disabled).toBe(false);
+  });
+
   it("don't-ask-again skips the modal for the rest of the session", async () => {
     const host = await composerWithText("first");
     host.querySelector<HTMLButtonElement>(".fediverse-compose__post")!.click();

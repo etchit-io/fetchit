@@ -60,7 +60,9 @@ pub async fn fediverse_mint(
         .map_err(|e| e.to_string())?;
     if let Ok(mut s) = app_state.settings.lock() {
         s.fediverse_handle = handle;
-        let _ = s.save(&app_state.settings_path);
+        if let Err(e) = s.save(&app_state.settings_path) {
+            tracing::warn!("minted handle held in memory only; settings save failed: {e}");
+        }
     }
     Ok(identity.actor_url.to_string())
 }
