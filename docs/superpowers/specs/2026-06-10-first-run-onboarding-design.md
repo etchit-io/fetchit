@@ -125,11 +125,13 @@ existing chat toggle (if any) routes through the same command.
 
 ### 6. Custody consistency (engine, fetchit-chat)
 
-(a) Seal contact cards at rest. `contacts/<agent_id>.json` becomes
-`contacts/<agent_id>.json.enc` under the same master key and header
-format as identity/history. Migration on store open: a plaintext
-`.json` found is sealed, fsynced, then removed. No released users
-exist; the migration covers dogfood boxes.
+(a) Contact cards stay plaintext. Earlier drafts called the plaintext
+`contacts/` dir inconsistent; it is in fact a documented deliberate
+decision in `local_store.rs` ("cards aren't secret": cards are
+shareable signed artifacts, files 0600 in a 0700 dir). The honest
+ADR-0015 posture applies: protected exactly like the rest of the
+user's data. The aggregate social graph leaking via backup tools is
+a real but post-v1.0 hardening candidate; noted, not built here.
 
 (b) Vault rekey. New at_rest-level operation: given the open (old)
 master key and a target source, every vault file under the store root
