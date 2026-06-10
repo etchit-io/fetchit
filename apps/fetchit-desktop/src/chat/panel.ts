@@ -21,6 +21,7 @@ import {
 } from "./api";
 import { startOutboxDriver, type OutboxDriver } from "./outboxDriver";
 import { bindChatEvents } from "./events";
+import { classifyBootstrapError, renderChatUnavailableCard } from "./unavailableCard";
 import { mountSidebar } from "./sidebar";
 import { mountConversation } from "./conversation";
 import { mountCardDialog } from "./contactCard";
@@ -526,6 +527,8 @@ export function mountChatPanel(
     host.hidden = false;
     applyDock();
     store.setPanelVisible(true);
+    // Each attempt starts clean; a failure below re-renders the card.
+    host.querySelector(".chat-unavailable")?.remove();
     try {
       await health();
       const [me, persistedName] = await Promise.all([
@@ -572,6 +575,7 @@ export function mountChatPanel(
     } catch (e) {
       idBadge.textContent = "Chat unavailable";
       idBadge.title = "Tap to retry";
+      renderChatUnavailableCard(host, classifyBootstrapError(e));
       // Visible signal that something is wrong on top of the badge
       // text change. Drives the same pill the daemon-status watcher
       // uses so users get a consistent "something's wrong" cue.

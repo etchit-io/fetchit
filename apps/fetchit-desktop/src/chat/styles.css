@@ -991,3 +991,26 @@ textarea.chat-dialog__uri {
   cursor: pointer;
 }
 .chat-emoji-picker__cell:hover { background: rgba(255, 255, 255, 0.08); }
+
+/* Human card shown when the chat bootstrap fails (panel.ts catch). */
+.chat-unavailable {
+  margin: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-left: 3px solid var(--accent, #4f8cff);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel, #161a22) 88%, var(--accent, #4f8cff));
+}
+
+.chat-unavailable__msg {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: var(--fg, #e8eaf0);
+}
+
+.chat-unavailable__action {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  color: var(--fg-muted, #9aa3b2);
+}
