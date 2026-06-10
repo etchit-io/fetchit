@@ -22,7 +22,9 @@ use crate::transport::{
 };
 use async_trait::async_trait;
 use fetchit_relay_client::{ClientConfig, RelaySet, Signer};
-use fetchit_relay_proto::{AgentId as RelayAgentId, DedupeKey, EnvelopeKind as RelayKind};
+use fetchit_relay_proto::{
+    AgentId as RelayAgentId, DedupeKey, EnvelopeKind as RelayKind, TransitEnvelope,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -177,74 +179,77 @@ fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<Inboun
             let Some(delivery) = relay_set.next_delivery().await else {
                 break;
             };
-            let env = delivery.envelope;
-            let kind = match env.kind {
-                // X0xdGroupMetadataEvent: M2.5 bridge variant —
-                // wire-shape carry only at C1; the dispatcher in
-                // peer.rs discriminates on `transit.kind` and routes
-                // to the local /publish path in C3. Rides the Dm
-                // shape because the chat-layer routing predicate
-                // doesn't yet model bridge events.
-                RelayKind::Dm | RelayKind::X0xdGroupMetadataEvent => OutboundKind::Dm,
-                // PrivateGroupChat rides the same inbound shape as
-                // GroupChat — peer.rs's `is_private_group_envelope`
-                // predicate is what discriminates the two downstream.
-                RelayKind::GroupChat | RelayKind::PrivateGroupChat | RelayKind::DeliveryReceipt => {
-                    OutboundKind::Group {
-                        group_id: env
-                            .group_id
-                            .map(|g| hex::encode(g.as_bytes()))
-                            .unwrap_or_default(),
-                    }
-                }
-                RelayKind::AdminEvent => continue,
-                // Forward-compat: a newer sender used a kind we don't
-                // recognise yet. The relay passed it through verbatim;
-                // we drop it here since the chat layer has no
-                // semantics to map it to. Logged so an unexpectedly-
-                // common Unknown stream surfaces in journals.
-                RelayKind::Unknown(disc) => {
-                    log::warn!("relay inbound: dropping envelope with unknown kind disc={disc}");
-                    continue;
-                }
-                // M4 Stage 5.1-proto wire DISC reservation. PublicPost
-                // (fediverse-bridge inbound activity) routes to the
-                // chat-layer public-feed handler in Stage 5.3; until
-                // then we drop here with a log warn. Until 3.3b wires
-                // the relay-server inbox to push PublicPost on the
-                // out-stream, none of these will ever appear in
-                // production.
-                RelayKind::PublicPost => {
-                    log::warn!(
-                        "relay inbound: dropping PublicPost — no chat-layer route until Stage 5.3"
-                    );
-                    continue;
-                }
-                // Reserved6 / Reserved7 are historical M2.5
-                // Welcome-bridge discriminators kept reserved for
-                // wire-stability. Drop here; the bridge is no longer
-                // shipped, so no chat-layer route exists.
-                RelayKind::Reserved6 | RelayKind::Reserved7 => {
-                    log::warn!(
-                        "relay inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind"
-                    );
-                    continue;
-                }
-            };
-            let from = AgentId(hex::encode(env.sender_agent_id.as_bytes()));
-            let inbound = InboundEnvelope {
-                kind,
-                from,
-                payload: env.ciphertext.clone(),
-                timestamp_ms: env.timestamp_ms,
-                transport_name: TRANSPORT_NAME,
-                transit: Some(env),
+            let Some(inbound) = map_inbound_delivery(delivery.envelope) else {
+                continue;
             };
             if tx.send(inbound).is_err() {
                 break;
             }
         }
     });
+}
+
+/// Map a relay inbound [`TransitEnvelope`] to a chat-layer
+/// [`InboundEnvelope`], or `None` when the kind has no chat-layer route
+/// (the pump drops it).
+///
+/// The returned [`OutboundKind`] is only the coarse shape the chat
+/// layer keys off; the fine discrimination happens downstream on
+/// `transit.kind` (see `Client::default_dispatch_one`). That's why
+/// `Dm`, the M2.5 bridge metadata event, and a bridged `PublicPost` all
+/// ride the `Dm` shape — none has a dedicated [`OutboundKind`], and the
+/// dispatcher re-reads `transit.kind` to route the bridge event and the
+/// public post to their own handlers before any DM logic runs.
+fn map_inbound_delivery(env: TransitEnvelope) -> Option<InboundEnvelope> {
+    let kind = match env.kind {
+        // Dm, the M2.5 bridge metadata event, and a bridged fediverse
+        // PublicPost all ride the Dm shape; `default_dispatch_one`
+        // re-discriminates each on `transit.kind`
+        // (X0xdGroupMetadataEvent -> dispatch_inbound_bridge,
+        // PublicPost -> dispatch_inbound_public_post) before the
+        // conversation/DM path. PublicPost was previously dropped here
+        // on a stale "until Stage 5.3" comment; 5.3 is built, so it now
+        // forwards.
+        RelayKind::Dm | RelayKind::X0xdGroupMetadataEvent | RelayKind::PublicPost => {
+            OutboundKind::Dm
+        }
+        // PrivateGroupChat rides the same inbound shape as GroupChat —
+        // peer.rs's `is_private_group_envelope` predicate is what
+        // discriminates the two downstream.
+        RelayKind::GroupChat | RelayKind::PrivateGroupChat | RelayKind::DeliveryReceipt => {
+            OutboundKind::Group {
+                group_id: env
+                    .group_id
+                    .map(|g| hex::encode(g.as_bytes()))
+                    .unwrap_or_default(),
+            }
+        }
+        RelayKind::AdminEvent => return None,
+        // Forward-compat: a newer sender used a kind we don't recognise
+        // yet. The relay passed it through verbatim; we drop it since the
+        // chat layer has no semantics to map it to. Logged so an
+        // unexpectedly-common Unknown stream surfaces in journals.
+        RelayKind::Unknown(disc) => {
+            log::warn!("relay inbound: dropping envelope with unknown kind disc={disc}");
+            return None;
+        }
+        // Reserved6 / Reserved7 are historical M2.5 Welcome-bridge
+        // discriminators kept reserved for wire-stability. Drop here; the
+        // bridge is no longer shipped, so no chat-layer route exists.
+        RelayKind::Reserved6 | RelayKind::Reserved7 => {
+            log::warn!("relay inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind");
+            return None;
+        }
+    };
+    let from = AgentId(hex::encode(env.sender_agent_id.as_bytes()));
+    Some(InboundEnvelope {
+        kind,
+        from,
+        payload: env.ciphertext.clone(),
+        timestamp_ms: env.timestamp_ms,
+        transport_name: TRANSPORT_NAME,
+        transit: Some(env),
+    })
 }
 
 fn agent_id_to_relay(id: &AgentId) -> Result<RelayAgentId> {
@@ -330,6 +335,47 @@ mod tests {
                 ChatError::SealedRequired { caller } if caller == "RelayTransport::send",
             ),
             "expected SealedRequired{{caller=RelayTransport::send}}, got {err:?}",
+        );
+    }
+
+    /// Regression: the inbound pump used to DROP `PublicPost` envelopes
+    /// on a stale "until Stage 5.3" comment. 5.3 is built —
+    /// `Client::default_dispatch_one` routes `transit.kind == PublicPost`
+    /// to the public-post handler — so the pump MUST forward it, riding
+    /// the `Dm` shape with `transit.kind` preserved. Dropping it again
+    /// silently breaks the fediverse public feed end to end.
+    #[test]
+    fn pump_forwards_public_post_riding_dm_shape() {
+        let env = TransitEnvelope::public_post(
+            "https://mastodon.example/users/alice",
+            br#"{"type":"Create","object":{"type":"Note","content":"hi"}}"#.to_vec(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        let mapped = map_inbound_delivery(env).expect("PublicPost must be forwarded, not dropped");
+        assert!(
+            matches!(mapped.kind, OutboundKind::Dm),
+            "PublicPost rides the Dm shape; the dispatcher re-discriminates on transit.kind",
+        );
+        let transit = mapped
+            .transit
+            .expect("a forwarded envelope must carry its TransitEnvelope");
+        assert!(
+            matches!(transit.kind, RelayKind::PublicPost),
+            "transit.kind must stay PublicPost so default_dispatch_one routes it to the public-post handler",
+        );
+    }
+
+    /// The forward fix must not turn the pump into a pass-through: kinds
+    /// with no chat-layer route still drop to `None`.
+    #[test]
+    fn pump_still_drops_unroutable_kinds() {
+        let mut env =
+            TransitEnvelope::public_post("https://x.example/u/a", b"{}".to_vec(), 1).unwrap();
+        env.kind = RelayKind::AdminEvent;
+        assert!(
+            map_inbound_delivery(env).is_none(),
+            "AdminEvent has no chat-layer route and must stay dropped",
         );
     }
 }
