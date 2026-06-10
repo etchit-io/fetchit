@@ -113,6 +113,9 @@ pub struct ChatState {
     /// `None` when using an installed x0xd (discovery falls through to
     /// `discover_local()` in `fetchit_chat::Client::builder().build()`).
     x0xd_base_url: Option<String>,
+    /// One-shot latch so the event pump is spawned at most once per
+    /// process, whether at boot or via a runtime `set_chat_enabled`.
+    pump_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatState {
@@ -144,6 +147,7 @@ impl ChatState {
             passphrase: Arc::new(Mutex::new(passphrase)),
             lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(lan_direct_enabled)),
             x0xd_base_url,
+            pump_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -892,6 +896,19 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_presence(app.clone(), state.clone());
     spawn_public_posts(app.clone(), state.clone());
     spawn_unified(app, state);
+}
+
+/// True exactly once per latch: the caller that flips it owns the spawn.
+fn pump_should_start(flag: &std::sync::atomic::AtomicBool) -> bool {
+    !flag.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Spawn the chat event pump unless it is already running. Safe to
+/// call from boot and from the runtime enable path in any order.
+pub fn ensure_event_pump(app: AppHandle, state: ChatState) {
+    if pump_should_start(&state.pump_started) {
+        spawn_event_pump(app, state);
+    }
 }
 
 /// Background task that supervises the local x0xd daemon process.
@@ -1923,6 +1940,14 @@ fn ipv6_to_ipv4_mapped(addr: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{denylist_update_payload, resolve_denylist_url, validate_relay_url};
+
+    #[test]
+    fn pump_guard_fires_exactly_once() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert!(super::pump_should_start(&flag));
+        assert!(!super::pump_should_start(&flag));
+        assert!(!super::pump_should_start(&flag));
+    }
 
     #[test]
     fn resolve_denylist_url_dormant_when_unset() {

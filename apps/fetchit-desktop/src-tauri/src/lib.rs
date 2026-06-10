@@ -458,6 +458,31 @@ async fn set_lan_direct_enabled(
     Ok(())
 }
 
+/// Flip the chat feature flag at runtime. Persists the setting, then
+/// returns the RESOLVED flag (the `FETCHIT_CHAT_ENABLED` env override
+/// still wins) so the frontend reflects reality. When the resolved
+/// flag is on, starts the chat event pump if not already running.
+#[tauri::command]
+fn set_chat_enabled(
+    app: tauri::AppHandle,
+    settings_state: tauri::State<'_, AppState>,
+    chat_state: tauri::State<'_, chat::ChatState>,
+    enabled: bool,
+) -> bool {
+    if let Ok(mut s) = settings_state.settings.lock() {
+        s.chat_enabled = enabled;
+        let _ = s.save(&settings_state.settings_path);
+    }
+    let resolved = settings_state.settings.lock().map_or_else(
+        |_| cfg!(debug_assertions),
+        |s| settings::resolve_chat_enabled(&s),
+    );
+    if resolved {
+        chat::ensure_event_pump(app, chat_state.inner().clone());
+    }
+    resolved
+}
+
 /// Snapshot the fetchit-operated relay nodes the desktop knows about.
 /// The frontend reads this once and renders a region dropdown; entries
 /// are added by appending to [`settings::KNOWN_RELAYS`] without a JS
@@ -994,7 +1019,7 @@ pub fn run() {
             );
             app.manage(chat_state.clone());
             if chat_enabled_at_boot {
-                chat::spawn_event_pump(app.handle().clone(), chat_state);
+                chat::ensure_event_pump(app.handle().clone(), chat_state);
             } else {
                 eprintln!(
                     "[fetchit][chat] feature gated off (set {}=1 or Settings → \
@@ -1047,6 +1072,7 @@ pub fn run() {
             set_display_name,
             onboarding_done,
             set_onboarding_done,
+            set_chat_enabled,
             lan_direct_enabled,
             set_lan_direct_enabled,
             chat_feature_enabled,
