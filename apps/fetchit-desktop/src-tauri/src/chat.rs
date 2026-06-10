@@ -890,6 +890,7 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_denylist(app.clone(), state.clone());
     spawn_denylist_events(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
+    spawn_public_posts(app.clone(), state.clone());
     spawn_unified(app, state);
 }
 
@@ -1499,6 +1500,57 @@ fn spawn_relay_presence(app: AppHandle, state: ChatState) {
                 );
             }
             log_pump("[relay-presence] drain ended; will reattach on rebuild");
+            state.invalidate().await;
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
+/// M4 fediverse bridge: drain the chat client's inbound public-post
+/// broadcast (`Client::subscribe_to_public_posts`) and emit one
+/// `fediverse:post` window event per bridged post. The desktop feed
+/// (`src/fediverse/`) renders each; `activity_json` is forwarded as
+/// UTF-8 text and treated as untrusted by the renderer. A `Lagged`
+/// drop is tolerated (the feed is live-only); a closed channel
+/// reattaches on the next client rebuild.
+fn spawn_public_posts(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let Some(mut rx) = client.subscribe_to_public_posts() else {
+                // REST-only client (no chat state) has no broadcast.
+                log_pump("[public-posts] no broadcast; client without chat state");
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            log_pump("[public-posts] drain start");
+            loop {
+                match rx.recv().await {
+                    Ok(post) => {
+                        let activity_json =
+                            String::from_utf8_lossy(&post.activity_json).into_owned();
+                        let _ = app.emit(
+                            "fediverse:post",
+                            serde_json::json!({
+                                "verified_actor_url": post.verified_actor_url,
+                                "activity_json": activity_json,
+                            }),
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        log_pump(&format!("[public-posts] lagged; dropped {n} posts"));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        log_pump("[public-posts] channel closed; reattach on rebuild");
+                        break;
+                    }
+                }
+            }
             state.invalidate().await;
             tokio::time::sleep(RECONNECT_BACKOFF).await;
         }
