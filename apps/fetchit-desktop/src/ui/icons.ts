@@ -86,3 +86,41 @@ export function icon(name: IconName, opts: { label?: string } = {}): SVGSVGEleme
   }
   return svg;
 }
+
+/// The brand-mark family: the Fetch / Etch / LIT logo glyphs. Iterated
+/// by the test-suite so the list and the type cannot drift.
+export const MARK_NAMES = ["fetchit", "etchit", "lit"] as const;
+
+/// A brand-mark name, derived from `MARK_NAMES`.
+export type MarkName = (typeof MARK_NAMES)[number];
+
+// Same 24x24 grid as the icon set, but the marks are *filled* glyphs
+// (`fill="currentColor"`) rather than stroked affordances: the `>`
+// chevron (fetch>it, forward-motion / retrieval), the `/` slash
+// (etch/it, inscription), and the 4-point spark (LIT Chat, the quiet
+// light on the sealed surface). currentColor-only so each inherits
+// --copper / --bone by context and recolors on theme switch, like `icon`.
+const MARK_BODY: Record<MarkName, string> = {
+  fetchit: '<path d="M5 4 19 12 5 20 5 14.5 11.5 12 5 9.5Z" />',
+  etchit: '<path d="M13 4h5L11 20H6Z" />',
+  lit: '<path d="M12 2.5C12.5 7.5 14.5 9.5 19.5 10 14.5 10.5 12.5 12.5 12 17.5 11.5 12.5 9.5 10.5 4.5 10 9.5 9.5 11.5 7.5 12 2.5Z" />',
+};
+
+/// Build a live `<svg>` brand mark for `name`. Like [`icon`], decorative
+/// by default (`aria-hidden`); pass `label` for standalone identity use
+/// (window/About, pane header, empty state) so assistive tech announces
+/// the brand name.
+export function mark(name: MarkName, opts: { label?: string } = {}): SVGSVGElement {
+  const markup =
+    `<svg class="mark mark--${name}" viewBox="0 0 24 24" width="24" height="24"` +
+    ` fill="currentColor" stroke="none" xmlns="http://www.w3.org/2000/svg">${MARK_BODY[name]}</svg>`;
+  const doc = new DOMParser().parseFromString(markup, "image/svg+xml");
+  const svg = doc.documentElement as unknown as SVGSVGElement;
+  if (opts.label) {
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", opts.label);
+  } else {
+    svg.setAttribute("aria-hidden", "true");
+  }
+  return svg;
+}

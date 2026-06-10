@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ICON_NAMES, icon } from "./icons";
+import { ICON_NAMES, MARK_NAMES, icon, mark } from "./icons";
 
 describe("icon", () => {
   it("returns a well-formed <svg> on the 24x24 grid for every name", () => {
@@ -36,5 +36,45 @@ describe("icon", () => {
   it("exposes a stable, de-duplicated name list", () => {
     expect(ICON_NAMES.length).toBeGreaterThan(0);
     expect(new Set(ICON_NAMES).size).toBe(ICON_NAMES.length);
+  });
+});
+
+describe("mark", () => {
+  it("returns a well-formed <svg> on the 24x24 grid for every name", () => {
+    for (const name of MARK_NAMES) {
+      const el = mark(name);
+      expect(el.tagName.toLowerCase()).toBe("svg");
+      expect(el.getAttribute("viewBox")).toBe("0 0 24 24");
+      expect(el.classList.contains("mark")).toBe(true);
+      // A malformed body would surface as a <parsererror> node.
+      expect(el.querySelector("parsererror")).toBeNull();
+    }
+  });
+
+  it("carries no script and no baked color literal, so it stays theme-safe", () => {
+    for (const name of MARK_NAMES) {
+      const html = mark(name).outerHTML;
+      expect(html).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+      expect(html.toLowerCase()).not.toContain("rgb(");
+      expect(html.toLowerCase()).not.toContain("<script");
+    }
+  });
+
+  it("is decorative by default and labelled on request", () => {
+    const plain = mark("fetchit");
+    expect(plain.getAttribute("aria-hidden")).toBe("true");
+    expect(plain.getAttribute("aria-label")).toBeNull();
+
+    const labelled = mark("lit", { label: "LIT Chat" });
+    expect(labelled.getAttribute("role")).toBe("img");
+    expect(labelled.getAttribute("aria-label")).toBe("LIT Chat");
+    expect(labelled.getAttribute("aria-hidden")).toBeNull();
+  });
+
+  it("covers the Fetch / Etch / LIT brand family as a stable, de-duplicated list", () => {
+    expect(new Set(MARK_NAMES).size).toBe(MARK_NAMES.length);
+    expect(MARK_NAMES).toContain("fetchit");
+    expect(MARK_NAMES).toContain("etchit");
+    expect(MARK_NAMES).toContain("lit");
   });
 });
