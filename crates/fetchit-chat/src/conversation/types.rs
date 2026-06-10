@@ -381,6 +381,13 @@ pub struct MessagePayload {
     /// receipt path in that case.
     #[serde(default)]
     pub message_id: Option<String>,
+    /// `message_id` of an earlier message this one replies to. Carries
+    /// only the id — receivers reconstruct the quoted preview from
+    /// their own local history, so quoted content is never duplicated
+    /// on the wire. Absent on non-replies and on payloads from older
+    /// senders.
+    #[serde(default)]
+    pub reply_to_message_id: Option<String>,
 }
 
 /// Inner payload of a `DeliveryReceipt` envelope.
@@ -427,6 +434,28 @@ pub(super) fn now_ms() -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_payload_decodes_legacy_json_without_reply_field() {
+        let legacy = r#"{"sender_name":"A","body":"hi","ts_ms":1,"message_id":"m1"}"#;
+        let p: MessagePayload = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.reply_to_message_id, None);
+        assert_eq!(p.message_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn message_payload_round_trips_reply_field() {
+        let p = MessagePayload {
+            sender_name: Some("A".into()),
+            body: "re".into(),
+            ts_ms: 2,
+            message_id: Some("m2".into()),
+            reply_to_message_id: Some("m1".into()),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: MessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
 
     fn local_member(agent_id_hex: &str, kem_pub_b64: &str) -> Member {
         Member {

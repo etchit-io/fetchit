@@ -522,6 +522,22 @@ export class ChatStore {
     if (bubble.id && conv.messages.some((m) => m.id === bubble.id)) {
       return;
     }
+    if (dm.reply_to_message_id) {
+      // Reconstruct the quote from local history — the wire carries
+      // only the id. Sender-side copies of the parent match on the
+      // daemon-assigned messageId; inbound copies use it as their id.
+      const parent = conv.messages.find(
+        (m) =>
+          m.messageId === dm.reply_to_message_id || m.id === dm.reply_to_message_id,
+      );
+      bubble.replyTo = parent
+        ? quotedRef(parent, parent.mine ? "You" : conv.title)
+        : {
+            messageId: dm.reply_to_message_id,
+            senderName: "",
+            preview: "(message unavailable)",
+          };
+    }
     conv.messages.push(bubble);
     conv.lastActivityMs = ts;
     // "Seen" requires both: panel visible AND this conv is the active

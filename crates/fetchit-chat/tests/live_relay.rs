@@ -56,7 +56,7 @@ async fn live_chat_self_dm_round_trips_through_relay() {
     eprintln!("[live-chat] sending self-DM: {body}");
     let receipt_id = client
         .messages()
-        .send(&me.agent_id, &body, "live-test")
+        .send(&me.agent_id, &body, "live-test", None)
         .await
         .expect("send must succeed");
     eprintln!("[live-chat] sent — message id: {receipt_id:?}");
@@ -134,7 +134,7 @@ async fn live_encrypted_dm_round_trips_via_alice() {
     eprintln!("[live] sending: {body}");
     let outbound_message_id = client
         .messages()
-        .send(&alice_id, &body, "Josh")
+        .send(&alice_id, &body, "Josh", None)
         .await
         .expect("send dm");
     eprintln!("[live] outbound message_id={outbound_message_id:?}");

@@ -605,6 +605,7 @@ pub async fn chat_send_dm(
     to: String,
     body: String,
     sender_name: Option<String>,
+    reply_to_message_id: Option<String>,
 ) -> Result<Option<String>, String> {
     ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(to).map_err(|e| e.to_string())?;
@@ -613,7 +614,7 @@ pub async fn chat_send_dm(
         .get()
         .await?
         .messages()
-        .send(&id, &body, &name)
+        .send(&id, &body, &name, reply_to_message_id.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -1693,6 +1694,7 @@ async fn handle_inbound(
                     sender_name: payload.sender_name.clone(),
                     timestamp_ms: Some(payload.ts_ms),
                     message_id: payload.message_id.clone(),
+                    reply_to_message_id: payload.reply_to_message_id.clone(),
                     verified: Some(true),
                 };
                 let _ = app.emit("chat:dm", &dm);

@@ -826,6 +826,7 @@ mod tests {
             "hello bob",
             "Alice",
             "msg-id-1",
+            Some("parent-id-0"),
             &alice_id,
             [0u8; 32],
             &alice_signer,
@@ -840,6 +841,7 @@ mod tests {
             InboundDispatch::Message { payload, .. } => {
                 assert_eq!(payload.body, "hello bob");
                 assert_eq!(payload.sender_name.as_deref(), Some("Alice"));
+                assert_eq!(payload.reply_to_message_id.as_deref(), Some("parent-id-0"));
             }
             other => panic!("expected Message, got {other:?}"),
         }
@@ -1560,6 +1562,7 @@ mod tests {
             "hello bob",
             "Alice",
             "msg-id-1",
+            None,
             &alice_id,
             [0u8; 32],
             &alice_signer,

@@ -84,11 +84,13 @@ export async function sendDm(
   to: string,
   body: string,
   senderName?: string,
+  replyToMessageId?: string | null,
 ): Promise<string | null> {
   return invoke<string | null>("chat_send_dm", {
     to,
     body,
     senderName: senderName ?? null,
+    replyToMessageId: replyToMessageId ?? null,
   });
 }
 

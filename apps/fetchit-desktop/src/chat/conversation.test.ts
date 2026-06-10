@@ -16,7 +16,7 @@ vi.mock("./api", () => ({
 
 import { mountConversation, type ConversationHandle } from "./conversation";
 import { ChatStore } from "./state";
-import { groupHistory as groupHistoryMock } from "./api";
+import { groupHistory as groupHistoryMock, sendDm as sendDmMock } from "./api";
 
 let store: ChatStore;
 let host: HTMLElement;
@@ -152,7 +152,7 @@ describe("mountConversation — reply flow", () => {
     expect(chip.textContent).toContain("the original");
   });
 
-  it("sending with an active reply stamps replyTo onto the outbound bubble", () => {
+  it("sending with an active reply stamps replyTo onto the outbound bubble", async () => {
     handle = mountConversation(host, store, noopHandlers);
     store.setPanelVisible(true);
     seedInbound("the original", "m1");
@@ -171,6 +171,11 @@ describe("mountConversation — reply flow", () => {
     expect(sent.replyTo!.preview).toBe("the original");
     // The sent bubble renders its quote strip.
     expect(host.querySelector(".chat-quote")).not.toBeNull();
+    // The reply target travels to the backend send (async via the
+    // dmConnect warmup, so flush the microtask chain first).
+    await vi.waitFor(() =>
+      expect(sendDmMock).toHaveBeenCalledWith(PEER, "my answer", "Tester", "m1"),
+    );
   });
 
   it("switching conversations clears a pending reply", () => {

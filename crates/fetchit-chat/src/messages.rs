@@ -65,6 +65,11 @@ pub struct DirectMessage {
     /// LAN-direct sequence, …).
     #[serde(default)]
     pub message_id: Option<String>,
+    /// `message_id` of the earlier message this one replies to, when
+    /// the sender marked it as a reply. The UI resolves the quoted
+    /// preview from local history.
+    #[serde(default)]
+    pub reply_to_message_id: Option<String>,
     /// Whether the sender's per-message signature was cryptographically
     /// verified by THIS process against a cached card pubkey.
     ///
@@ -392,7 +397,8 @@ impl<'a> Endpoint<'a> {
     /// conversation (Welcome outbox) before the message outbox. Every
     /// outbound `TransitEnvelope` is routed verbatim through the
     /// transport `Router` (so KEM ciphertext, signature, and epoch
-    /// survive the hop).
+    /// survive the hop). `reply_to_message_id` marks the message as a
+    /// reply to an earlier logical message id.
     ///
     /// Returns the transport-assigned message id of the LAST envelope
     /// sent (for fanout > 1, callers see only the final receipt).
@@ -409,6 +415,7 @@ impl<'a> Endpoint<'a> {
         to: &AgentId,
         body: &str,
         sender_name: &str,
+        reply_to_message_id: Option<&str>,
     ) -> Result<Option<String>> {
         // M3 federation core: refuse outbound DMs to denylisted
         // peers BEFORE sealing or bootstrapping a conversation. Caller
@@ -455,6 +462,7 @@ impl<'a> Endpoint<'a> {
             body,
             sender_name,
             &message_id,
+            reply_to_message_id,
             identity,
             self.local_machine_id,
             signer.as_ref(),
@@ -1425,6 +1433,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
             sender_name: None,
             timestamp_ms: Some(inbound.timestamp_ms),
             message_id: None,
+            reply_to_message_id: None,
             verified: Some(false),
         });
     }
@@ -1436,6 +1445,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
         sender_name: env.sender_name,
         timestamp_ms: Some(env.ts),
         message_id: None,
+        reply_to_message_id: None,
         verified: Some(false),
     })
 }

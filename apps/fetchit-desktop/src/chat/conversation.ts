@@ -137,7 +137,12 @@ export function mountConversation(
             // Same warmup the driver does for retries — turns a 12s
             // cold-link timeout into a sub-second raw_quic send.
             await dmConnect(peer).catch(() => {});
-            const messageId = await sendDm(peer, body, handlers.resolveSenderName());
+            const messageId = await sendDm(
+              peer,
+              body,
+              handlers.resolveSenderName(),
+              replyTo?.messageId,
+            );
             store.markSent(peer, bubbleId, messageId);
           } catch (e) {
             store.markFailed(peer, bubbleId, (e as Error).message);

@@ -43,6 +43,7 @@ export interface DirectMessage {
   sender_name?: string | null;
   timestamp_ms?: number | null;
   message_id?: string | null;
+  reply_to_message_id?: string | null;
   verified?: boolean | null;
 }
 

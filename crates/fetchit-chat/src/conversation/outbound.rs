@@ -121,15 +121,18 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
 /// `message_id` is the logical id assigned to *this* send — every
 /// fanout envelope carries it, so a recipient's `DeliveryReceipt`
 /// always echoes the same id regardless of which device decoded the
-/// envelope.
+/// envelope. `reply_to_message_id` marks this message as a reply to an
+/// earlier one.
 ///
 /// # Errors
 /// AEAD or signing errors.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     conv: &Conversation,
     body: &str,
     sender_name: &str,
     message_id: &str,
+    reply_to_message_id: Option<&str>,
     identity: &FetchitIdentity,
     local_machine_id: [u8; 32],
     signer: &S,
@@ -140,6 +143,7 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
         body: body.to_owned(),
         ts_ms: now,
         message_id: Some(message_id.to_owned()),
+        reply_to_message_id: reply_to_message_id.map(str::to_owned),
     };
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|e| ChatError::Invalid(format!("message serialize: {e}")))?;

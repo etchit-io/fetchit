@@ -112,6 +112,66 @@ describe("ChatStore — reply quoting", () => {
     expect(conv.messages[0].replyTo).toEqual(REF);
   });
 
+  it("inbound reply reconstructs the quote from my own sent parent", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const mine = s.enqueueOutbound(PEER, "the parent");
+    s.markSent(PEER, mine, "daemon-1");
+    s.recordDirectMessage({
+      from: PEER,
+      to: ME,
+      body: "the answer",
+      timestamp_ms: 5,
+      message_id: "m9",
+      reply_to_message_id: "daemon-1",
+    });
+    const conv = s.conversationsSorted()[0];
+    const reply = conv.messages.find((m) => m.id === "m9")!;
+    expect(reply.replyTo).toBeDefined();
+    expect(reply.replyTo!.senderName).toBe("You");
+    expect(reply.replyTo!.preview).toBe("the parent");
+  });
+
+  it("inbound reply quoting the peer's own earlier message names the peer", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.recordDirectMessage({
+      from: PEER,
+      to: ME,
+      body: "peer parent",
+      timestamp_ms: 4,
+      message_id: "p1",
+    });
+    s.recordDirectMessage({
+      from: PEER,
+      to: ME,
+      body: "follow-up",
+      timestamp_ms: 5,
+      message_id: "p2",
+      reply_to_message_id: "p1",
+    });
+    const conv = s.conversationsSorted()[0];
+    const reply = conv.messages.find((m) => m.id === "p2")!;
+    expect(reply.replyTo!.senderName).toBe(conv.title);
+    expect(reply.replyTo!.preview).toBe("peer parent");
+  });
+
+  it("inbound reply to an unknown parent falls back to an honest placeholder", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.recordDirectMessage({
+      from: PEER,
+      to: ME,
+      body: "re",
+      timestamp_ms: 5,
+      message_id: "m9",
+      reply_to_message_id: "gone-1",
+    });
+    const conv = s.conversationsSorted()[0];
+    const reply = conv.messages.find((m) => m.id === "m9")!;
+    expect(reply.replyTo!.preview).toBe("(message unavailable)");
+  });
+
   it("quotedRef prefers the daemon messageId and truncates long bodies to one line", () => {
     const short = quotedRef(
       {
