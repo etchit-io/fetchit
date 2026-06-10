@@ -12,6 +12,7 @@ import {
   ADVERTISED_RELAYS_HTML,
   initAdvertisedRelaysPanel,
 } from "./settingsAdvertisedRelays";
+import { CUSTODY_PANEL_HTML, initCustodyPanel } from "./settingsCustody";
 
 interface ThemeOption {
   id: Theme;
@@ -110,6 +111,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     if (verEl) verEl.textContent = v;
   });
   initAdvertisedRelaysPanel(root);
+  initCustodyPanel(root);
   const close = root.querySelector<HTMLButtonElement>(".settings-close");
   const enabledBox = root.querySelector<HTMLInputElement>("#cache-enabled");
   const modeSelect = root.querySelector<HTMLSelectElement>("#cache-mode");
@@ -676,6 +678,10 @@ function buildPage(): HTMLElement {
         Send chat directly between devices on the same network. Falls back to relay automatically.
       </p>
       ${ADVERTISED_RELAYS_HTML}
+    </section>
+    <section class="setting-group" id="group-advanced">
+      <h2>Advanced</h2>
+      ${CUSTODY_PANEL_HTML}
     </section>
     <section class="setting-group" id="group-peers">
       <details class="setting-collapsible">
