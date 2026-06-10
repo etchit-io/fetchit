@@ -385,16 +385,21 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
             log::warn!("lan-direct inbound: dropping envelope with unknown kind disc={disc}");
             return None;
         }
-        // M4 Stage 5.1-proto wire DISC reservation. PublicPost
-        // (fediverse-bridge inbound activity) has no chat-layer
-        // semantics on the LAN-direct path — drop with a log warn
-        // until Stage 5.3 wires the public-feed handler dispatch.
-        // LAN-direct never carries a PublicPost in production today
-        // (the inbox endpoint is the only producer); the arm exists
-        // to keep the match exhaustive.
+        // PublicPost is the relay's fediverse-bridge fan-out, trusted
+        // ONLY because the relay vouches the actor attribution via HTTP
+        // Signature at its trust boundary (see public_post.rs). LAN-direct
+        // has no such trusted producer — a peer here is just another
+        // agent, not the vouching relay — so PublicPost MUST drop on this
+        // path: forwarding it would let a LAN peer inject unverified
+        // bridged posts. (RelayTransport's pump DOES forward PublicPost,
+        // because the relay IS the trusted producer.) In practice the
+        // sender-binding check above already rejects it — a PublicPost's
+        // sender is the all-zeros bridge sentinel, never a peer's
+        // authenticated id — so this arm is the explicit, security-
+        // relevant backstop and keeps the match exhaustive.
         RelayKind::PublicPost => {
             log::warn!(
-                "lan-direct inbound: dropping PublicPost — no chat-layer route until Stage 5.3"
+                "lan-direct inbound: dropping PublicPost — LAN-direct is not a trusted bridge producer"
             );
             return None;
         }
@@ -506,6 +511,26 @@ mod tests {
 
     fn aid(byte: u8) -> AgentId {
         AgentId::parse(hex::encode([byte; 32])).unwrap()
+    }
+
+    /// Security boundary: a `PublicPost` is trusted only because the RELAY
+    /// vouches its actor attribution (HTTP Signature at the relay trust
+    /// boundary). A LAN-direct peer is not that producer, so the inbound
+    /// mapper MUST drop `PublicPost` (return `None`) — forwarding it would
+    /// let a LAN peer inject unverified bridged posts. `RelayTransport`
+    /// correctly forwards `PublicPost`; this path correctly does not.
+    #[test]
+    fn inbound_drops_public_post_lan_direct_not_a_trusted_bridge_producer() {
+        let env = TransitEnvelope::public_post(
+            "https://mastodon.example/users/alice",
+            br#"{"type":"Create","object":{"type":"Note","content":"hi"}}"#.to_vec(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        assert!(
+            inbound_envelope_from_transit(aid(0x11), env).is_none(),
+            "LAN-direct must NOT forward PublicPost; only the relay is a trusted bridge producer",
+        );
     }
 
     /// Build an `OutboundEnvelope` with a sealed-enough prebuilt
