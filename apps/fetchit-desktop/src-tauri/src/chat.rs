@@ -136,9 +136,9 @@ impl ChatState {
     ) -> Result<Self, String> {
         // Go through the same validation path as `set_relay_url` so a
         // hand-edited `settings.json` with a loopback or reserved
-        // host can't sneak past the SSRF guard. The
-        // FETCHIT_ALLOW_LOCAL_RELAY env bypass still applies for dev
-        // testing.
+        // host can't sneak past the SSRF guard. Debug builds and the
+        // FETCHIT_ALLOW_LOCAL_RELAY env bypass still allow local
+        // relays for dev testing.
         let url = validate_relay_url(relay_url)?;
         Ok(Self {
             client: Arc::new(Mutex::new(None)),
@@ -1882,10 +1882,20 @@ fn log_pump(msg: &str) {
 /// fetchit-net — devs running a local relay during testing can set
 /// this; production builds simply never see it. The check is
 /// per-call so flipping the env var without restarting takes effect
-/// on the next `set_relay_url`.
+/// on the next `set_relay_url`. Debug builds imply the allowance
+/// (same posture as `default_chat_enabled`) because `tauri dev`
+/// does not reliably forward shell env into the app process.
 const ALLOW_LOCAL_RELAY_ENV: &str = "FETCHIT_ALLOW_LOCAL_RELAY";
 
 fn validate_relay_url(url: &str) -> Result<Url, String> {
+    let allow_local = cfg!(debug_assertions) || std::env::var(ALLOW_LOCAL_RELAY_ENV).is_ok();
+    validate_relay_url_with(url, allow_local)
+}
+
+/// Build-profile-independent core of [`validate_relay_url`] so tests
+/// can pin both the strict and the allowed policy regardless of
+/// `debug_assertions`.
+fn validate_relay_url_with(url: &str, allow_local: bool) -> Result<Url, String> {
     let parsed = Url::parse(url).map_err(|e| format!("invalid relay url: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -1897,7 +1907,7 @@ fn validate_relay_url(url: &str) -> Result<Url, String> {
             "relay url must be a base URL with no path (got {path:?})"
         ));
     }
-    if std::env::var(ALLOW_LOCAL_RELAY_ENV).is_err() {
+    if !allow_local {
         reject_local_or_reserved(&parsed)?;
     }
     Ok(parsed)
@@ -1987,7 +1997,9 @@ fn ipv6_to_ipv4_mapped(addr: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{denylist_update_payload, resolve_denylist_url, validate_relay_url};
+    use super::{
+        denylist_update_payload, resolve_denylist_url, validate_relay_url, validate_relay_url_with,
+    };
 
     #[test]
     fn rekey_passphrase_validation_rejects_blank() {
@@ -2137,124 +2149,101 @@ mod tests {
 
     #[test]
     fn rejects_ipv4_loopback_127_0_0_1() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://127.0.0.1:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://127.0.0.1:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv4_loopback_127_99_0_1() {
         // Full /8 is loopback, not just 127.0.0.1.
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://127.99.0.1:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://127.99.0.1:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv4_unspecified() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://0.0.0.0:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://0.0.0.0:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv4_link_local() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://169.254.0.1:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://169.254.0.1:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv4_multicast() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://224.0.0.1:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://224.0.0.1:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv6_loopback() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://[::1]:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://[::1]:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv6_unspecified() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://[::]:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://[::]:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv6_link_local() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://[fe80::1]:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://[fe80::1]:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv6_multicast() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://[ff02::1]:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://[ff02::1]:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_ipv4_mapped_ipv6_loopback() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://[::ffff:127.0.0.1]:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://[::ffff:127.0.0.1]:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_localhost_lowercase() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://localhost:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://localhost:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_localhost_mixed_case() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://LocalHost:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://LocalHost:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn rejects_dotted_localhost_suffix() {
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://my.relay.localhost:8088").unwrap_err();
-            assert!(err.contains("local or reserved"), "{err}");
-        });
+        let err = validate_relay_url_with("http://my.relay.localhost:8088", false).unwrap_err();
+        assert!(err.contains("local or reserved"), "{err}");
     }
 
     #[test]
     fn accepts_public_ipv4_relay() {
-        with_local_relay_env(false, || {
-            // Matches the shipped NYC relay address — must stay
-            // accepted or the shipped default breaks on every install.
-            let p = validate_relay_url("http://67.207.94.66:8088").unwrap();
-            assert_eq!(p.scheme(), "http");
-        });
+        // Matches the shipped NYC relay address — must stay
+        // accepted or the shipped default breaks on every install.
+        let p = validate_relay_url_with("http://67.207.94.66:8088", false).unwrap();
+        assert_eq!(p.scheme(), "http");
     }
 
     #[test]
     fn accepts_public_domain_relay() {
-        with_local_relay_env(false, || {
-            assert!(validate_relay_url("https://relay.example.com:8443").is_ok());
-        });
+        assert!(validate_relay_url_with("https://relay.example.com:8443", false).is_ok());
+    }
+
+    #[test]
+    fn allow_local_accepts_loopback() {
+        assert!(validate_relay_url_with("http://127.0.0.1:8088", true).is_ok());
+        assert!(validate_relay_url_with("http://localhost:8088", true).is_ok());
+        assert!(validate_relay_url_with("http://[::1]:8088", true).is_ok());
     }
 
     #[test]
@@ -2263,6 +2252,16 @@ mod tests {
             assert!(validate_relay_url("http://127.0.0.1:8088").is_ok());
             assert!(validate_relay_url("http://localhost:8088").is_ok());
             assert!(validate_relay_url("http://[::1]:8088").is_ok());
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_build_allows_loopback_without_env() {
+        // `tauri dev` does not reliably forward shell env into the
+        // app process, so debug builds imply the allowance.
+        with_local_relay_env(false, || {
+            assert!(validate_relay_url("http://127.0.0.1:8088").is_ok());
         });
     }
 
@@ -2325,10 +2324,8 @@ mod tests {
         // Power users discover the dev-mode bypass via the error
         // text; pin the substring so we don't drop it on a future
         // copy-tweak.
-        with_local_relay_env(false, || {
-            let err = validate_relay_url("http://127.0.0.1:8088").unwrap_err();
-            assert!(err.contains("FETCHIT_ALLOW_LOCAL_RELAY"), "{err}");
-        });
+        let err = validate_relay_url_with("http://127.0.0.1:8088", false).unwrap_err();
+        assert!(err.contains("FETCHIT_ALLOW_LOCAL_RELAY"), "{err}");
     }
 
     /// Build a minimal `AppState` carrying a `Settings` with the
