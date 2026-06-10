@@ -140,7 +140,10 @@ impl X0xdSigner {
         api_token: String,
         port_file: Option<PathBuf>,
     ) -> Result<Self, X0xdError> {
+        // no_proxy: loopback-only daemon; never route 127.0.0.1 through
+        // an ambient corporate proxy. See version.rs for the rationale.
         let http = HttpClient::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .build()?;
         let mut signer = Self {

@@ -59,7 +59,11 @@ impl X0xdVersion {
             version: Option<String>,
         }
 
+        // no_proxy: x0xd is loopback-only, so an ambient HTTP(S)_PROXY /
+        // ALL_PROXY env (common on corporate machines) must never route
+        // 127.0.0.1 through a proxy that would refuse or hang it.
         let http = HttpClient::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .build()?;
         let url = base_url.join("health").map_err(X0xdError::Url)?;

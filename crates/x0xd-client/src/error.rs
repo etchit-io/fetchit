@@ -48,8 +48,13 @@ pub enum DiscoveryError {
 /// faults, not "is it there?" questions.
 #[derive(Debug, Error)]
 pub enum X0xdError {
-    /// HTTP transport error.
-    #[error("http: {0}")]
+    /// HTTP transport error. The message carries the full `source()`
+    /// chain via [`render_reqwest_chain`], because reqwest's own
+    /// Display stops at "error sending request for url (...)" and hides
+    /// the transport cause — connection refused, DNS, a dropped tokio
+    /// runtime — which is exactly what tells a dead daemon apart from a
+    /// client-side fault.
+    #[error("http: {}", render_reqwest_chain(.0))]
     Http(#[from] reqwest::Error),
 
     /// URL was malformed.
@@ -67,4 +72,61 @@ pub enum X0xdError {
     /// callers can branch on "the bytes never left this process".
     #[error("invalid input: {0}")]
     Invalid(String),
+}
+
+/// Render a reqwest error together with its full `source()` chain.
+///
+/// reqwest's `Display` reports only the top frame (e.g. `error sending
+/// request for url (http://127.0.0.1:12700/health)`), which is the same
+/// string whether the daemon is down, the address is wrong, or the
+/// connection was reset. Appending each `source()` frame surfaces the
+/// concrete transport cause (`Connection refused (os error 111)`, a DNS
+/// failure, a dropped runtime) so an operator can tell those apart from
+/// one log line. Loopback clients are built with `.no_proxy()`, so an
+/// ambient proxy is never a hidden link in this chain.
+fn render_reqwest_chain(e: &reqwest::Error) -> String {
+    use std::error::Error;
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// A refused loopback connect must render with its underlying cause
+    /// appended, not just reqwest's generic top frame — and `.no_proxy()`
+    /// must keep the request on the direct loopback path.
+    #[tokio::test]
+    async fn http_error_renders_full_source_chain() {
+        // 127.0.0.1:1 is reserved and never bound, so connect is refused
+        // immediately and deterministically (no external network).
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let err: X0xdError = client
+            .get("http://127.0.0.1:1/health")
+            .send()
+            .await
+            .expect_err("connect to a reserved port must fail")
+            .into();
+        let rendered = err.to_string();
+        assert!(rendered.starts_with("http: "), "got {rendered:?}");
+        // The chain renderer appends at least one cause frame beyond the
+        // bare reqwest message (which has no ": " separator of its own).
+        let after_prefix = rendered.trim_start_matches("http: ");
+        assert!(
+            after_prefix.contains(": "),
+            "expected an appended source frame, got {rendered:?}"
+        );
+    }
 }

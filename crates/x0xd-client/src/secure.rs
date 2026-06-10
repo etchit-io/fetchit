@@ -218,7 +218,10 @@ impl SecureGroupsEndpoint {
     /// Returns [`X0xdError::Http`] if the underlying reqwest client
     /// fails to build (timeout/TLS configuration error).
     pub fn new(base_url: Url, api_token: impl Into<String>) -> Result<Self, X0xdError> {
+        // no_proxy: loopback-only daemon; never route 127.0.0.1 through
+        // an ambient corporate proxy. See version.rs for the rationale.
         let http = HttpClient::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .build()?;
         Ok(Self {
