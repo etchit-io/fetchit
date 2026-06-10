@@ -822,6 +822,11 @@ fn spawn_reader(
                         }
                         ServerFrame::Pong(Pong { nonce }) => {
                             outbox.record_pong(nonce);
+                            // Steady heartbeat line: external liveness probes
+                            // (journal-recency watchdogs) key on this, since
+                            // inbound traffic alone can't distinguish a quiet
+                            // peer from a hung process.
+                            tracing::debug!("relay keepalive pong");
                         }
                         ServerFrame::Throttle(Throttle { .. }) | ServerFrame::Ready(_) => {
                             // Throttle observable via metrics in a future pass.
