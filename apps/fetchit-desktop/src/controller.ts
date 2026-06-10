@@ -18,6 +18,7 @@ import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
 import { mountChatPanel, type ChatPanelApi } from "./chat";
+import { initOnboarding } from "./onboarding/welcome";
 import { mountFediversePanel } from "./fediverse/panel";
 import { bindFediverseEvents } from "./fediverse/events";
 import { DEMO_CITY_INDEX, buildEmptyState } from "./emptyState";
@@ -115,14 +116,15 @@ export async function init(): Promise<void> {
   // shortcut handler below can call into the panel when it's mounted
   // and no-op when it isn't.
   let chat: ChatPanelApi | null = null;
-  if (!chatOn) {
-    chatBtn.hidden = true;
-    chatHost.hidden = true;
-    // The fediverse pane consumes the chat client's public-post
-    // broadcast, so it shares the chat feature gate.
-    fediverseBtn.hidden = true;
-    fediverseHost.hidden = true;
-  } else {
+  let chatSurfaceMounted = false;
+  // Mounts the chat + fediverse surfaces. Runs at boot when the
+  // feature resolves on, or live from the first-run onboarding flow
+  // after set_chat_enabled succeeds. Idempotent.
+  const mountChatSurface = (): void => {
+    if (chatSurfaceMounted) return;
+    chatSurfaceMounted = true;
+    chatBtn.hidden = false;
+    fediverseBtn.hidden = false;
     const chatBadge = document.createElement("span");
     chatBadge.className = "chat-toggle__badge";
     chatBadge.hidden = true;
@@ -175,7 +177,29 @@ export async function init(): Promise<void> {
     });
     void bindFediverseEvents(fediverse);
     fediverseBtn.addEventListener("click", () => fediverse.toggle());
+  };
+  if (!chatOn) {
+    chatBtn.hidden = true;
+    chatHost.hidden = true;
+    // The fediverse pane consumes the chat client's public-post
+    // broadcast, so it shares the chat feature gate.
+    fediverseBtn.hidden = true;
+    fediverseHost.hidden = true;
+  } else {
+    mountChatSurface();
   }
+
+  // First-run welcome overlay: one name question, chat enabled live on
+  // Start (no restart), Skip just marks done. Mounted over the live
+  // app; gated by the persisted onboarding_done flag.
+  void initOnboarding(need<HTMLElement>("onboarding"), {
+    onChatStart: async () => {
+      mountChatSurface();
+      if (chat && !chat.isOpen()) {
+        await chat.toggle();
+      }
+    },
+  });
 
   const toggleBookmark = async (): Promise<void> => {
     const active = store.active();
