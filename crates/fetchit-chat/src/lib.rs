@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod at_rest;
+pub mod attachment;
 pub mod card;
 pub mod chat_crypto;
 pub mod chat_identity;
