@@ -388,6 +388,10 @@ pub struct MessagePayload {
     /// senders.
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
+    /// Optional inline image attachment. Absent on text-only messages
+    /// and on payloads from older senders that do not support spec 2.4.
+    #[serde(default)]
+    pub attachment: Option<crate::attachment::Attachment>,
 }
 
 /// Inner payload of a `DeliveryReceipt` envelope.
@@ -422,6 +426,11 @@ pub struct HistoryEntry {
     /// Logical message id (hex). Same value future delivery-receipts
     /// will echo back.
     pub message_id: String,
+    /// Optional inline image attachment. Unlike `reply_to_message_id`
+    /// (which the receiver can reconstruct from local history), image
+    /// bytes cannot be re-derived, so they must survive a vault reload.
+    #[serde(default)]
+    pub attachment: Option<crate::attachment::Attachment>,
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -451,10 +460,36 @@ mod tests {
             ts_ms: 2,
             message_id: Some("m2".into()),
             reply_to_message_id: Some("m1".into()),
+            attachment: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: MessagePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn message_payload_round_trips_attachment_field() {
+        use crate::attachment::Attachment;
+        let att = Attachment::from_raw("image/png", 4, 4, &[0xABu8; 16]).unwrap();
+        let p = MessagePayload {
+            sender_name: Some("A".into()),
+            body: "look".into(),
+            ts_ms: 3,
+            message_id: Some("m3".into()),
+            reply_to_message_id: None,
+            attachment: Some(att),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: MessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn message_payload_decodes_legacy_json_without_attachment_field() {
+        // Old payloads that predate spec 2.4 must decode to attachment: None.
+        let legacy = r#"{"sender_name":"A","body":"hi","ts_ms":1,"message_id":"m1","reply_to_message_id":null}"#;
+        let p: MessagePayload = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.attachment, None);
     }
 
     fn local_member(agent_id_hex: &str, kem_pub_b64: &str) -> Member {
@@ -756,6 +791,7 @@ mod tests {
                 body: format!("m{i}"),
                 ts_ms: i,
                 message_id: format!("id{i}"),
+                attachment: None,
             });
         }
         assert_eq!(conv.history.len(), Conversation::HISTORY_CAP);

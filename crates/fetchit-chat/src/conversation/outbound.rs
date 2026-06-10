@@ -122,10 +122,12 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
 /// fanout envelope carries it, so a recipient's `DeliveryReceipt`
 /// always echoes the same id regardless of which device decoded the
 /// envelope. `reply_to_message_id` marks this message as a reply to an
-/// earlier one.
+/// earlier one. `attachment` is an optional inline image (spec 2.4);
+/// when `Some`, it is validated before sealing — oversize or
+/// disallowed-MIME images are rejected with [`ChatError::Invalid`].
 ///
 /// # Errors
-/// AEAD or signing errors.
+/// AEAD or signing errors, or attachment validation failure.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     conv: &Conversation,
@@ -133,10 +135,15 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     sender_name: &str,
     message_id: &str,
     reply_to_message_id: Option<&str>,
+    attachment: Option<&crate::attachment::Attachment>,
     identity: &FetchitIdentity,
     local_machine_id: [u8; 32],
     signer: &S,
 ) -> Result<Vec<OutboundEnvelope>, ChatError> {
+    if let Some(att) = attachment {
+        att.validate()
+            .map_err(|e| ChatError::Invalid(format!("attachment: {e}")))?;
+    }
     let now = now_ms();
     let payload = MessagePayload {
         sender_name: Some(sender_name.to_owned()),
@@ -144,6 +151,7 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
         ts_ms: now,
         message_id: Some(message_id.to_owned()),
         reply_to_message_id: reply_to_message_id.map(str::to_owned),
+        attachment: attachment.cloned(),
     };
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|e| ChatError::Invalid(format!("message serialize: {e}")))?;

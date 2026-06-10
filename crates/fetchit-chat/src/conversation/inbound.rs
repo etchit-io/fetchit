@@ -316,8 +316,21 @@ async fn dispatch_message(
             epoch: envelope.epoch,
         });
     };
-    let payload: MessagePayload = serde_json::from_slice(&plaintext)
+    let mut payload: MessagePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("message payload parse: {e}")))?;
+    // Receive-side attachment validation (spec 2.4): a hostile peer could
+    // craft a payload with an oversize, SVG, or corrupt-base64 attachment.
+    // Validate here and strip on failure so the UI always sees either a
+    // well-formed attachment or None — never a bad one. The message body
+    // is surfaced intact regardless.
+    if let Some(att) = payload.attachment.take() {
+        match att.validate() {
+            Ok(_) => payload.attachment = Some(att),
+            Err(e) => {
+                log::warn!("dropping invalid inbound attachment: {e}");
+            }
+        }
+    }
     Ok(InboundDispatch::Message {
         group_id_hex,
         sender_agent_id_hex: sender_hex,
@@ -827,6 +840,7 @@ mod tests {
             "Alice",
             "msg-id-1",
             Some("parent-id-0"),
+            None,
             &alice_id,
             [0u8; 32],
             &alice_signer,
@@ -842,6 +856,7 @@ mod tests {
                 assert_eq!(payload.body, "hello bob");
                 assert_eq!(payload.sender_name.as_deref(), Some("Alice"));
                 assert_eq!(payload.reply_to_message_id.as_deref(), Some("parent-id-0"));
+                assert_eq!(payload.attachment, None);
             }
             other => panic!("expected Message, got {other:?}"),
         }
@@ -1563,6 +1578,7 @@ mod tests {
             "Alice",
             "msg-id-1",
             None,
+            None,
             &alice_id,
             [0u8; 32],
             &alice_signer,
@@ -1589,6 +1605,106 @@ mod tests {
                 assert_eq!(sender_agent_id_hex, aid_a);
             }
             other => panic!("expected ReplayDetected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_oversize_attachment_is_stripped_body_intact() {
+        // Spec 2.4 receive path: a payload carrying an attachment whose
+        // base64 decodes to MAX_ATTACHMENT_BYTES + 1 bytes must have the
+        // attachment stripped to None on dispatch; the message body must
+        // survive intact.
+        use crate::attachment::{Attachment, MAX_ATTACHMENT_BYTES};
+        use crate::chat_crypto::{aead_seal, canonical_envelope_bytes, message_aad, random_nonce};
+        use base64::engine::general_purpose::STANDARD as B64e;
+        use base64::Engine as _;
+        use fetchit_relay_proto::{AgentId as ProtoAgentId, EnvelopeKind, GroupId, MachineId};
+        use rand::rngs::OsRng;
+        use super::super::types::MessagePayload;
+
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Hand-craft an oversize attachment bypassing from_raw's guard —
+        // identical technique as attachment.rs::validate_rejects_oversize_on_the_wire.
+        let oversize_raw = vec![0u8; MAX_ATTACHMENT_BYTES + 1];
+        let forged_att = Attachment {
+            mime: "image/png".to_owned(),
+            width: 1,
+            height: 1,
+            bytes_b64: B64e.encode(&oversize_raw),
+        };
+
+        // Seal a MessagePayload containing the forged attachment directly,
+        // bypassing build_message_outbox so the validation guard there
+        // does not fire. This is the same hand-roll used by the welcome
+        // drop-path tests in this module.
+        let group_id_bytes = conv.group_id_bytes().unwrap();
+        let key = conv.current_key().unwrap();
+        let aad = message_aad(&group_id_bytes, conv.current_epoch);
+        let payload = MessagePayload {
+            sender_name: Some("Alice".into()),
+            body: "body text".into(),
+            ts_ms: 1,
+            message_id: Some("forged-id".into()),
+            reply_to_message_id: None,
+            attachment: Some(forged_att),
+        };
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let nonce = random_nonce(&mut OsRng);
+        let ciphertext = aead_seal(&key, &nonce, &payload_bytes, &aad).unwrap();
+        let mut local_agent_bytes = [0u8; 32];
+        hex::decode_to_slice(&aid_a, &mut local_agent_bytes).unwrap();
+        let group_id_bytes_arr: [u8; 32] = group_id_bytes;
+        let mut env = fetchit_relay_proto::TransitEnvelope {
+            version: fetchit_relay_proto::WIRE_VERSION,
+            kind: EnvelopeKind::GroupChat,
+            group_id: Some(GroupId::from_bytes(group_id_bytes_arr)),
+            tenant_id: None,
+            sender_agent_id: ProtoAgentId::from_bytes(local_agent_bytes),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 1,
+            epoch: conv.current_epoch,
+            ciphertext,
+            nonce: nonce.to_vec(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let canonical = canonical_envelope_bytes(&env).unwrap();
+        let mut sign_bytes =
+            Vec::with_capacity(crate::chat_crypto::SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(crate::chat_crypto::SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        env.sender_signature = alice_signer.sign(&sign_bytes).await.unwrap();
+
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        match result {
+            InboundDispatch::Message { payload, .. } => {
+                assert_eq!(payload.body, "body text", "body must survive the strip");
+                assert_eq!(
+                    payload.attachment, None,
+                    "oversize attachment must be stripped to None",
+                );
+            }
+            other => panic!("expected Message, got {other:?}"),
         }
     }
 

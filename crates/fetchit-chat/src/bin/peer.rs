@@ -712,7 +712,7 @@ async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
         // it produces awaits, which the borrow checker rejects.
         let messages = client.messages();
         let sender = send_with_retry("echo send", || {
-            messages.send(&dm.from, &reply, display_name, None)
+            messages.send(&dm.from, &reply, display_name, None, None)
         })
         .await;
         match sender {
@@ -760,7 +760,7 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         // as in `run_echo` — see comment there.
         let messages = client.messages();
         let send_result = send_with_retry("chat send", || {
-            messages.send(&peer, &line, display_name, None)
+            messages.send(&peer, &line, display_name, None, None)
         })
         .await;
         match send_result {
@@ -865,7 +865,7 @@ async fn run_chat_outbox(
             }
             let messages = client.messages();
             let send_result = send_with_retry("chat send", || {
-                messages.send(&peer, &line, display_name, None)
+                messages.send(&peer, &line, display_name, None, None)
             })
             .await;
             match send_result {

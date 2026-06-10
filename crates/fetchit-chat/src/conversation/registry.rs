@@ -1087,6 +1087,7 @@ mod tests {
                 body: format!("body-{i}"),
                 ts_ms: u64::try_from(i + 1).unwrap(),
                 message_id: format!("{i:032x}"),
+                attachment: None,
             };
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;

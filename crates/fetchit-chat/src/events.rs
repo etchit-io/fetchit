@@ -198,6 +198,7 @@ fn decode_dm(value: serde_json::Value) -> Result<DirectMessage> {
         timestamp_ms: env.ts.or(raw.received_at),
         message_id: raw.message_id,
         reply_to_message_id: None,
+        attachment: None,
         verified: raw.verified,
     })
 }

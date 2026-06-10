@@ -1695,6 +1695,7 @@ async fn handle_inbound(
                     timestamp_ms: Some(payload.ts_ms),
                     message_id: payload.message_id.clone(),
                     reply_to_message_id: payload.reply_to_message_id.clone(),
+                    attachment: payload.attachment.clone(),
                     verified: Some(true),
                 };
                 let _ = app.emit("chat:dm", &dm);

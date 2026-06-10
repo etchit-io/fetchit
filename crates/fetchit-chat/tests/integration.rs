@@ -210,7 +210,7 @@ async fn dm_send_without_relay_transport_errors_with_no_transport() {
     let err = client_against(&server)
         .await
         .messages()
-        .send(&peer, "hello", "Alice", None)
+        .send(&peer, "hello", "Alice", None, None)
         .await
         .unwrap_err();
     assert!(matches!(err, fetchit_chat::ChatError::NoTransportAvailable));
@@ -259,7 +259,7 @@ async fn legacy_x0xd_dm_send_path_is_removed() {
     let _ = client_against(&server)
         .await
         .messages()
-        .send(&peer, "hi there", "Alice", None)
+        .send(&peer, "hi there", "Alice", None, None)
         .await;
     let requests = server.received_requests().await.unwrap();
     let direct_send_count = requests

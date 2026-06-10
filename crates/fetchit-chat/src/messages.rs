@@ -70,6 +70,10 @@ pub struct DirectMessage {
     /// preview from local history.
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
+    /// Optional inline image attachment (spec 2.4). Already validated
+    /// on the receive path — the UI may render it directly.
+    #[serde(default)]
+    pub attachment: Option<crate::attachment::Attachment>,
     /// Whether the sender's per-message signature was cryptographically
     /// verified by THIS process against a cached card pubkey.
     ///
@@ -398,7 +402,8 @@ impl<'a> Endpoint<'a> {
     /// outbound `TransitEnvelope` is routed verbatim through the
     /// transport `Router` (so KEM ciphertext, signature, and epoch
     /// survive the hop). `reply_to_message_id` marks the message as a
-    /// reply to an earlier logical message id.
+    /// reply to an earlier logical message id. `attachment` carries an
+    /// optional inline image (spec 2.4); it is validated before sealing.
     ///
     /// Returns the transport-assigned message id of the LAST envelope
     /// sent (for fanout > 1, callers see only the final receipt).
@@ -416,6 +421,7 @@ impl<'a> Endpoint<'a> {
         body: &str,
         sender_name: &str,
         reply_to_message_id: Option<&str>,
+        attachment: Option<&crate::attachment::Attachment>,
     ) -> Result<Option<String>> {
         // M3 federation core: refuse outbound DMs to denylisted
         // peers BEFORE sealing or bootstrapping a conversation. Caller
@@ -463,6 +469,7 @@ impl<'a> Endpoint<'a> {
             sender_name,
             &message_id,
             reply_to_message_id,
+            attachment,
             identity,
             self.local_machine_id,
             signer.as_ref(),
@@ -985,6 +992,7 @@ impl<'a> Endpoint<'a> {
             body,
             ts_ms: env.timestamp_ms,
             message_id: hex::encode(envelope_dedupe_bytes(env)),
+            attachment: None,
         };
         let entry_for_closure = entry.clone();
 
@@ -1434,6 +1442,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
             timestamp_ms: Some(inbound.timestamp_ms),
             message_id: None,
             reply_to_message_id: None,
+            attachment: None,
             verified: Some(false),
         });
     }
@@ -1446,6 +1455,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
         timestamp_ms: Some(env.ts),
         message_id: None,
         reply_to_message_id: None,
+        attachment: None,
         verified: Some(false),
     })
 }
