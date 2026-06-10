@@ -406,11 +406,9 @@ function startIn(
   query = "",
   recordHistory = true,
 ): void {
-  // Cancel any prior fetch on this tab so a refetch (refresh, retry,
-  // re-paste of the same address) stops the previous Rust task
-  // instead of leaving it running to completion in the background.
-  // Fire-and-forget: the backend tolerates no-op cancel calls.
-  void invoke("cancel_fetch", { tabId: tab.id }).catch(() => {});
+  // No explicit cancel here: registering the new fetch supersedes (and
+  // cancels) any prior in-flight fetch for this tab atomically on the
+  // Rust side, so a refetch never races a separate cancel message.
   // If a previous mascot is still mounted (e.g. user re-submitted the
   // address while the first fetch was in flight) dispose it so its
   // idle-behavior timers stop before we mount a fresh one.

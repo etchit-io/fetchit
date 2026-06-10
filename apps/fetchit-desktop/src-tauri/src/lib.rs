@@ -588,7 +588,7 @@ async fn fetch_and_render(
     let parsed: Address = addr
         .parse()
         .map_err(|e: fetchit_core::Error| e.to_string())?;
-    let token = state.register_fetch(tab_id.clone());
+    let (token, generation) = state.register_fetch(tab_id.clone());
     let work = async {
         let bytes = match state.cached_bytes(&parsed) {
             Some(b) => b,
@@ -608,7 +608,7 @@ async fn fetch_and_render(
         r = work => r,
         () = token.cancelled() => Err("fetch cancelled".to_string()),
     };
-    state.finish_fetch(&tab_id);
+    state.finish_fetch(&tab_id, generation);
     result
 }
 

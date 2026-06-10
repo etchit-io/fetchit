@@ -9,6 +9,7 @@ use fetchit_core::Address;
 use fetchit_net::{AutonomiClient, DEFAULT_PEERS};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -22,11 +23,16 @@ pub struct AppState {
     /// operations through the std mutex (critical sections never `.await`).
     pub settings: Arc<StdMutex<Settings>>,
     pub settings_path: Arc<PathBuf>,
-    /// Cancellation tokens for in-flight fetches, keyed by tab id.
-    /// Closing a tab or refetching the same tab fires the matching
-    /// token so the Rust task stops making progress instead of running
-    /// to completion against a UI that no longer cares.
-    pub fetches: Arc<StdMutex<HashMap<String, CancellationToken>>>,
+    /// Cancellation tokens for in-flight fetches, keyed by tab id and
+    /// tagged with a registration generation. Closing a tab fires the
+    /// matching token; re-registering the same tab cancels the prior
+    /// token atomically so the superseded Rust task stops making
+    /// progress instead of running to completion against a UI that no
+    /// longer cares. The generation lets a superseded fetch finish late
+    /// without evicting its replacement's token.
+    pub fetches: Arc<StdMutex<HashMap<String, (u64, CancellationToken)>>>,
+    /// Monotonic source for fetch registration generations.
+    fetch_generation: Arc<AtomicU64>,
     /// Reader-side community-denylist gate. Built at boot from the same
     /// signed NY-Trust endpoint the chat client uses, but independent of
     /// the chat feature flag: the reader must short-circuit a denylisted
@@ -45,6 +51,7 @@ impl AppState {
             settings: Arc::new(StdMutex::new(settings)),
             settings_path: Arc::new(settings_path),
             fetches: Arc::new(StdMutex::new(HashMap::new())),
+            fetch_generation: Arc::new(AtomicU64::new(0)),
             reader_denylist: None,
         }
     }
@@ -77,26 +84,33 @@ impl AppState {
         }
     }
 
-    /// Register a cancellation token for `tab_id`'s in-flight fetch,
-    /// replacing any prior one. Returns the freshly-registered token
-    /// the caller should `tokio::select!` against.
-    pub fn register_fetch(&self, tab_id: String) -> CancellationToken {
+    /// Register a cancellation token for `tab_id`'s in-flight fetch.
+    /// Any prior fetch still registered for the same tab is cancelled
+    /// here, under the registry lock, so callers never race a separate
+    /// cancel against the new registration. Returns the token to
+    /// `tokio::select!` against plus the generation tag to pass back to
+    /// [`Self::finish_fetch`].
+    pub fn register_fetch(&self, tab_id: String) -> (CancellationToken, u64) {
         let token = CancellationToken::new();
+        let generation = self.fetch_generation.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut map) = self.fetches.lock() {
-            // Drop any prior token without cancelling — the caller is
-            // the one starting a new fetch on the same tab, so the
-            // previous one's cancellation is its own concern (or
-            // already happened via `cancel_fetch`).
-            map.insert(tab_id, token.clone());
+            if let Some((_, superseded)) = map.insert(tab_id, (generation, token.clone())) {
+                superseded.cancel();
+            }
         }
-        token
+        (token, generation)
     }
 
     /// Remove the entry for `tab_id` once the fetch finishes (success,
-    /// error, or cancellation). Idempotent.
-    pub fn finish_fetch(&self, tab_id: &str) {
+    /// error, or cancellation) — but only while it still belongs to
+    /// this registration. A superseded fetch finishing late must not
+    /// evict its replacement's token, or the replacement becomes
+    /// uncancellable. Idempotent.
+    pub fn finish_fetch(&self, tab_id: &str, generation: u64) {
         if let Ok(mut map) = self.fetches.lock() {
-            map.remove(tab_id);
+            if map.get(tab_id).is_some_and(|(g, _)| *g == generation) {
+                map.remove(tab_id);
+            }
         }
     }
 
@@ -104,7 +118,7 @@ impl AppState {
     /// no fetch is registered.
     pub fn cancel_fetch(&self, tab_id: &str) {
         if let Ok(map) = self.fetches.lock() {
-            if let Some(token) = map.get(tab_id) {
+            if let Some((_, token)) = map.get(tab_id) {
                 token.cancel();
             }
         }
@@ -236,7 +250,7 @@ mod tests {
     fn cancel_fetch_flips_the_registered_token() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = make_state(tmp.path());
-        let token = state.register_fetch("tab-1".into());
+        let (token, _) = state.register_fetch("tab-1".into());
         assert!(!token.is_cancelled());
         state.cancel_fetch("tab-1");
         assert!(token.is_cancelled());
@@ -254,26 +268,41 @@ mod tests {
     fn finish_fetch_removes_the_entry_so_later_cancels_are_noops() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = make_state(tmp.path());
-        let token = state.register_fetch("tab-1".into());
-        state.finish_fetch("tab-1");
+        let (token, generation) = state.register_fetch("tab-1".into());
+        state.finish_fetch("tab-1", generation);
         state.cancel_fetch("tab-1");
         // The token we held a reference to never fires after finish.
         assert!(!token.is_cancelled());
     }
 
     #[test]
-    fn register_fetch_replaces_a_prior_token_without_cancelling_it() {
+    fn register_fetch_cancels_the_superseded_token() {
         // Re-registration is what happens when the user refetches the
-        // same tab: the controller cancels the prior token explicitly
-        // before registering the new one. `register_fetch` itself
-        // doesn't fire the previous token — that's the controller's
-        // contract.
+        // same tab (refresh, retry, back-nav). Cancelling the prior
+        // token here, under the registry lock, means no caller has to
+        // race a separate cancel against the new registration.
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = make_state(tmp.path());
-        let first = state.register_fetch("tab-1".into());
-        let second = state.register_fetch("tab-1".into());
+        let (first, _) = state.register_fetch("tab-1".into());
+        let (second, _) = state.register_fetch("tab-1".into());
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
         state.cancel_fetch("tab-1");
-        assert!(!first.is_cancelled());
+        assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn finish_fetch_from_a_superseded_fetch_leaves_the_replacement_registered() {
+        // The superseded task observes its cancellation and calls
+        // finish_fetch AFTER the replacement registered. A generation-
+        // blind finish would evict the replacement's token, making it
+        // uncancellable for the rest of its run.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = make_state(tmp.path());
+        let (_, first_generation) = state.register_fetch("tab-1".into());
+        let (second, _) = state.register_fetch("tab-1".into());
+        state.finish_fetch("tab-1", first_generation);
+        state.cancel_fetch("tab-1");
         assert!(second.is_cancelled());
     }
 
