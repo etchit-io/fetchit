@@ -1,0 +1,20 @@
+name = "fetchit-bridge-worker"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+
+# Bind on the etchit.io zone to ONLY the fediverse routes. Every other
+# path (the marketing site) is served straight from GitHub Pages and
+# never reaches this Worker. Deployed on the etchit.io Cloudflare account
+# (Josh-direct). `wrangler deploy` binds these routes.
+routes = [
+  { pattern = "etchit.io/.well-known/webfinger", zone_name = "etchit.io" },
+  { pattern = "etchit.io/actors", zone_name = "etchit.io" },
+  { pattern = "etchit.io/actors/*", zone_name = "etchit.io" },
+]
+
+[vars]
+# The deployed bridge's HTTPS origin, e.g. https://bridge.etchit.io
+# Left empty here on purpose; set the real value at deploy time:
+#   wrangler deploy --var BRIDGE_ORIGIN:https://<bridge-host>
+# The Worker returns 503 until BRIDGE_ORIGIN is set.
+BRIDGE_ORIGIN = ""
