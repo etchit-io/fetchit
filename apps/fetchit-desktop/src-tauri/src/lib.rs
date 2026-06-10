@@ -865,7 +865,14 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_log::Builder::default().build())
+        .plugin(
+            // Info floor: saorsa_transport instruments every packet drive/recv
+            // with tracing spans (mirrored to the log facade), which flood at
+            // the plugin's default Trace. Warn/Error from all crates still show.
+            tauri_plugin_log::Builder::default()
+                .level(tauri_plugin_log::log::LevelFilter::Info)
+                .build(),
+        )
         .register_asynchronous_uri_scheme_protocol("fetchit", protocol::handle)
         .register_asynchronous_uri_scheme_protocol("autonomi", protocol::handle)
         .setup(move |app| {
