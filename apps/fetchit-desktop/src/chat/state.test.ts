@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatStore, convKey } from "./state";
+import { ChatStore, convKey, quotedRef } from "./state";
 
 const ME = "a".repeat(64);
 const PEER = "b".repeat(64);
@@ -86,6 +86,61 @@ describe("ChatStore — DM bookkeeping", () => {
     expect(s.conversationsSorted()[0].unread).toBe(1);
     s.setPanelVisible(true);
     expect(s.conversationsSorted()[0].unread).toBe(0);
+  });
+});
+
+describe("ChatStore — reply quoting", () => {
+  const REF = { messageId: "p1", senderName: "Bob", preview: "the parent" };
+
+  it("enqueueOutbound stamps replyTo onto the optimistic bubble", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const id = s.enqueueOutbound(PEER, "a reply", REF);
+    const conv = s.conversationsSorted()[0];
+    const b = conv.messages.find((m) => m.id === id)!;
+    expect(b.replyTo).toEqual(REF);
+  });
+
+  it("replyTo survives the localStorage round-trip", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.enqueueOutbound(PEER, "a reply", REF);
+
+    const reloaded = new ChatStore();
+    reloaded.setIdentity({ agent_id: ME, machine_id: "m" });
+    const conv = reloaded.conversationsSorted()[0];
+    expect(conv.messages[0].replyTo).toEqual(REF);
+  });
+
+  it("quotedRef prefers the daemon messageId and truncates long bodies to one line", () => {
+    const short = quotedRef(
+      {
+        id: "local-1",
+        messageId: "daemon-9",
+        from: PEER,
+        body: "line one\nline two",
+        timestampMs: 0,
+        mine: false,
+      },
+      "Bob",
+    );
+    expect(short.messageId).toBe("daemon-9");
+    expect(short.senderName).toBe("Bob");
+    expect(short.preview).toBe("line one line two");
+
+    const long = quotedRef(
+      {
+        id: "local-2",
+        from: PEER,
+        body: "x".repeat(300),
+        timestampMs: 0,
+        mine: false,
+      },
+      "Bob",
+    );
+    expect(long.messageId).toBe("local-2");
+    expect(long.preview.length).toBeLessThanOrEqual(120);
+    expect(long.preview.endsWith("…")).toBe(true);
   });
 });
 

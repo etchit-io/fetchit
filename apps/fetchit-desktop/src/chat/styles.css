@@ -408,6 +408,7 @@ body.chat-docked {
 }
 
 .chat-row {
+  position: relative;
   display: flex;
   flex-direction: column;
   max-width: min(640px, 75%);
@@ -415,6 +416,33 @@ body.chat-docked {
 }
 .chat-row--out { align-self: flex-end; }
 .chat-row--in { align-self: flex-start; }
+
+/* Hover reply affordance — floats at the bubble's stream-side edge so
+   it never collides with the meta line below. Hidden (and click-inert)
+   until the row is hovered. */
+.chat-bubble__reply-btn {
+  position: absolute;
+  top: 0;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ash);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 7px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-micro) ease;
+}
+.chat-row--in .chat-bubble__reply-btn { right: -30px; }
+.chat-row--out .chat-bubble__reply-btn { left: -30px; }
+.chat-row:hover .chat-bubble__reply-btn,
+.chat-bubble__reply-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chat-bubble__reply-btn:hover { color: var(--copper); }
 
 .chat-bubble {
   padding: 8px 12px;
@@ -759,11 +787,58 @@ body.chat-docked {
 
 .chat-composer {
   display: flex;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 12px 18px;
   border-top: 1px solid var(--line);
   background: var(--ink-2);
 }
+
+.chat-composer__row {
+  display: flex;
+  gap: 10px;
+}
+
+/* Pending-reply chip above the input. Mirrors the .chat-quote strip
+   so the composer preview matches what the sent bubble will show. */
+.chat-composer__reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-left: 3px solid var(--copper);
+  border-radius: 6px;
+  padding: 4px 10px;
+  background: var(--ink);
+  font-size: 12px;
+}
+.chat-composer__reply[hidden] { display: none; }
+
+.chat-composer__reply-sender {
+  color: var(--copper);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-composer__reply-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ash);
+}
+
+.chat-composer__reply-clear {
+  background: none;
+  border: none;
+  color: var(--ash);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.chat-composer__reply-clear:hover { color: var(--bone); }
 
 .chat-composer__input {
   flex: 1;

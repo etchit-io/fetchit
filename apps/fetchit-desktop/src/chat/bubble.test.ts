@@ -322,3 +322,21 @@ describe("renderBubble — reply quote", () => {
     expect(q1).not.toBe(q2);
   });
 });
+
+describe("renderBubble — reply affordance", () => {
+  it("renders the reply button only when an onReply handler is supplied", () => {
+    const without = renderBubble(bubble(), makeHandlers());
+    expect(without.querySelector(".chat-bubble__reply-btn")).toBeNull();
+
+    const with_ = renderBubble(bubble(), { ...makeHandlers(), onReply: vi.fn() });
+    expect(with_.querySelector(".chat-bubble__reply-btn")).not.toBeNull();
+  });
+
+  it("clicking the reply button fires onReply with the bubble", () => {
+    const onReply = vi.fn();
+    const b = bubble({ id: "m7", body: "quote me" });
+    const row = renderBubble(b, { ...makeHandlers(), onReply });
+    row.querySelector<HTMLButtonElement>(".chat-bubble__reply-btn")!.click();
+    expect(onReply).toHaveBeenCalledWith(b);
+  });
+});

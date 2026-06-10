@@ -19,6 +19,10 @@ export interface BubbleHandlers {
   /// `onCard` but the dialog will dispatch the import to the v3
   /// pair-accept command instead of the legacy import path.
   onProfile: (uri: string) => void;
+  /// Present only when the conversation supports replying (DMs for
+  /// now — group quotes need the wire field). When set, each bubble
+  /// renders a hover reply affordance that fires with the bubble.
+  onReply?: (b: ChatBubble) => void;
 }
 
 /// A signature that uniquely identifies the rendered shape of a
@@ -96,6 +100,17 @@ export function renderBubble(
   meta.dateTime = new Date(b.timestampMs).toISOString();
 
   row.appendChild(stack);
+  if (handlers.onReply) {
+    const onReply = handlers.onReply;
+    const replyBtn = document.createElement("button");
+    replyBtn.type = "button";
+    replyBtn.className = "chat-bubble__reply-btn";
+    replyBtn.title = "Reply";
+    replyBtn.setAttribute("aria-label", "Reply");
+    replyBtn.textContent = "↩";
+    replyBtn.addEventListener("click", () => onReply(b));
+    row.appendChild(replyBtn);
+  }
   row.appendChild(meta);
   return row;
 }

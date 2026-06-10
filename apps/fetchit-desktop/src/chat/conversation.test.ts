@@ -106,6 +106,88 @@ describe("mountConversation — stopPolling vs dispose contract", () => {
   });
 });
 
+describe("mountConversation — reply flow", () => {
+  const PEER = "b".repeat(64);
+
+  function seedInbound(body: string, messageId: string): void {
+    store.recordDirectMessage({
+      from: PEER,
+      to: "a".repeat(64),
+      body,
+      timestamp_ms: 1,
+      message_id: messageId,
+    });
+  }
+
+  it("DM bubbles carry the reply affordance; group bubbles do not", () => {
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    seedInbound("quote me", "m1");
+    store.setActive({ kind: "dm", peer: PEER });
+    expect(host.querySelector(".chat-bubble__reply-btn")).not.toBeNull();
+
+    store.loadGroups([{ group_id: "g1", name: "Demo" }]);
+    store.setActive({ kind: "group", groupId: "g1" });
+    store.recordGroupHistory("g1", [
+      {
+        group_id: "g1",
+        from: PEER,
+        body: "group msg",
+        timestamp_ms: 2,
+        kind: "message",
+        message_id: "gm1",
+      },
+    ]);
+    expect(host.querySelector(".chat-bubble__reply-btn")).toBeNull();
+  });
+
+  it("clicking reply shows the composer chip naming the peer", () => {
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    seedInbound("the original", "m1");
+    store.setActive({ kind: "dm", peer: PEER });
+    host.querySelector<HTMLButtonElement>(".chat-bubble__reply-btn")!.click();
+    const chip = host.querySelector<HTMLElement>(".chat-composer__reply")!;
+    expect(chip.hidden).toBe(false);
+    expect(chip.textContent).toContain("the original");
+  });
+
+  it("sending with an active reply stamps replyTo onto the outbound bubble", () => {
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    seedInbound("the original", "m1");
+    store.setActive({ kind: "dm", peer: PEER });
+    host.querySelector<HTMLButtonElement>(".chat-bubble__reply-btn")!.click();
+
+    const ta = host.querySelector<HTMLTextAreaElement>(".chat-composer__input")!;
+    ta.value = "my answer";
+    ta.dispatchEvent(new Event("input"));
+    host.querySelector<HTMLButtonElement>(".chat-composer__send")!.click();
+
+    const conv = store.active()!;
+    const sent = conv.messages.find((m) => m.body === "my answer")!;
+    expect(sent.replyTo).toBeDefined();
+    expect(sent.replyTo!.messageId).toBe("m1");
+    expect(sent.replyTo!.preview).toBe("the original");
+    // The sent bubble renders its quote strip.
+    expect(host.querySelector(".chat-quote")).not.toBeNull();
+  });
+
+  it("switching conversations clears a pending reply", () => {
+    handle = mountConversation(host, store, noopHandlers);
+    store.setPanelVisible(true);
+    seedInbound("the original", "m1");
+    const peerC = "c".repeat(64);
+    store.ensureDm(peerC);
+    store.setActive({ kind: "dm", peer: PEER });
+    host.querySelector<HTMLButtonElement>(".chat-bubble__reply-btn")!.click();
+    expect(host.querySelector<HTMLElement>(".chat-composer__reply")!.hidden).toBe(false);
+
+    store.setActive({ kind: "dm", peer: peerC });
+    expect(host.querySelector<HTMLElement>(".chat-composer__reply")!.hidden).toBe(true);
+  });
+});
+
 describe("mountConversation — group poll lifecycle across panel visibility", () => {
   it("starts the poll when entering a group with the panel visible", async () => {
     handle = mountConversation(host, store, noopHandlers);

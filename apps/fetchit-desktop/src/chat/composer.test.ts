@@ -30,7 +30,7 @@ describe("mountComposer — basic send flow", () => {
     ta.value = "  hello world  ";
     ta.dispatchEvent(new Event("input"));
     send.click();
-    expect(onSend).toHaveBeenCalledWith("hello world");
+    expect(onSend).toHaveBeenCalledWith("hello world", null);
   });
 
   it("clears the textarea on successful send", () => {
@@ -89,6 +89,60 @@ describe("mountComposer — setEnabled", () => {
     api.setEnabled(false, "no conv");
     ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe("mountComposer — reply chip", () => {
+  const ref = {
+    messageId: "m1",
+    senderName: "Bob",
+    preview: "the original text",
+  };
+
+  function chip(): HTMLElement {
+    return host.querySelector<HTMLElement>(".chat-composer__reply")!;
+  }
+
+  it("setReplyTo shows the chip with sender and preview", () => {
+    const { api } = setup();
+    api.setReplyTo(ref);
+    expect(chip().hidden).toBe(false);
+    expect(chip().querySelector(".chat-composer__reply-sender")!.textContent).toBe("Bob");
+    expect(chip().querySelector(".chat-composer__reply-preview")!.textContent).toBe(
+      "the original text",
+    );
+  });
+
+  it("clear button dismisses the chip and the next send carries no reply", () => {
+    const { api, ta, send, onSend } = setup();
+    api.setReplyTo(ref);
+    host.querySelector<HTMLButtonElement>(".chat-composer__reply-clear")!.click();
+    expect(chip().hidden).toBe(true);
+    ta.value = "no quote";
+    ta.dispatchEvent(new Event("input"));
+    send.click();
+    expect(onSend).toHaveBeenCalledWith("no quote", null);
+  });
+
+  it("send carries the pending ref once, then clears", () => {
+    const { api, ta, send, onSend } = setup();
+    api.setReplyTo(ref);
+    ta.value = "a reply";
+    ta.dispatchEvent(new Event("input"));
+    send.click();
+    expect(onSend).toHaveBeenCalledWith("a reply", ref);
+    expect(chip().hidden).toBe(true);
+    ta.value = "second";
+    ta.dispatchEvent(new Event("input"));
+    send.click();
+    expect(onSend).toHaveBeenLastCalledWith("second", null);
+  });
+
+  it("Escape clears the chip when the emoji picker is closed", () => {
+    const { api, ta } = setup();
+    api.setReplyTo(ref);
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(chip().hidden).toBe(true);
   });
 });
 

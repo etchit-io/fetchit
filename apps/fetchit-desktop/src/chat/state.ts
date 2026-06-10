@@ -121,6 +121,19 @@ export interface QuotedRef {
   preview: string;
 }
 
+const QUOTE_PREVIEW_MAX = 120;
+
+/// Snapshot a bubble into the QuotedRef a reply to it will carry. The
+/// preview is plain text, single-line, truncated — the quote strip
+/// never parses links or markdown. Prefers the daemon-assigned
+/// messageId (stable across peers) over the local optimistic id.
+export function quotedRef(b: ChatBubble, senderName: string): QuotedRef {
+  const flat = b.body.replace(/\s+/g, " ").trim();
+  const preview =
+    flat.length > QUOTE_PREVIEW_MAX ? `${flat.slice(0, QUOTE_PREVIEW_MAX - 1)}…` : flat;
+  return { messageId: b.messageId ?? b.id, senderName, preview };
+}
+
 export interface ChatBubble {
   id: string;
   /// Chat-layer logical message id assigned by the daemon. Populated
@@ -627,8 +640,9 @@ export class ChatStore {
 
   /// Append an outbound bubble in "sending" state and return its id so
   /// the caller can flip it through sent → delivered/failed as the send
-  /// resolves and the recipient's receipt arrives.
-  enqueueOutbound(peer: AgentId, body: string): string {
+  /// resolves and the recipient's receipt arrives. `replyTo` carries
+  /// the quoted-parent snapshot when this message is a reply.
+  enqueueOutbound(peer: AgentId, body: string, replyTo?: QuotedRef): string {
     const me = this.myId() ?? "";
     const ts = Date.now();
     const id = `local-${ts}-${Math.random().toString(36).slice(2, 8)}`;
@@ -641,6 +655,7 @@ export class ChatStore {
       mine: true,
       status: "sending",
       retryAttempts: 0,
+      ...(replyTo ? { replyTo } : {}),
     });
     conv.lastActivityMs = ts;
     this.persistDms();

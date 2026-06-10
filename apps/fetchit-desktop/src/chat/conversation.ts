@@ -4,7 +4,7 @@
 import { bubbleRenderKey, renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
-import { convKey, type ChatStore, type Conversation } from "./state";
+import { convKey, quotedRef, type ChatStore, type Conversation } from "./state";
 import { dmConnect, groupHistory, sendDm, sendGroupMessage } from "./api";
 import { friendlyError } from "./errors";
 import { mountTrustMenu } from "./trustMenu";
@@ -78,6 +78,19 @@ export function mountConversation(
     onInvite: handlers.onInvite,
     onProfile: handlers.onProfile,
   };
+  // DM bubbles get the reply affordance; group bubbles stay without it
+  // until the payload carries the quote cross-peer — a reply affordance
+  // whose quote silently vanishes on the recipients would be a broken
+  // promise.
+  const dmBubbleHandlers: BubbleHandlers = {
+    ...bubbleHandlers,
+    onReply: (b) => {
+      const conv = store.active();
+      if (!conv || conv.key.kind !== "dm") return;
+      const senderName = b.mine ? handlers.resolveSenderName() : conv.title;
+      composer.setReplyTo(quotedRef(b, senderName));
+    },
+  };
 
   let lastConv: Conversation | null = null;
   /// Signature of the most recent bubble list we rendered, used to
@@ -113,12 +126,12 @@ export function mountConversation(
   };
 
   const composer = mountComposer(composerEl, {
-    onSend: (body) => {
+    onSend: (body, replyTo) => {
       const conv = store.active();
       if (!conv) return;
       if (conv.key.kind === "dm") {
         const peer = conv.key.peer;
-        const bubbleId = store.enqueueOutbound(peer, body);
+        const bubbleId = store.enqueueOutbound(peer, body, replyTo ?? undefined);
         void (async () => {
           try {
             // Same warmup the driver does for retries — turns a 12s
@@ -279,6 +292,8 @@ export function mountConversation(
         const key = (child as HTMLElement).dataset.key;
         if (key) existing.set(key, child as HTMLElement);
       }
+      const activeBubbleHandlers =
+        conv.key.kind === "dm" ? dmBubbleHandlers : bubbleHandlers;
       const ordered: HTMLElement[] = [];
       for (const b of conv.messages) {
         const key = bubbleRenderKey(b);
@@ -287,7 +302,7 @@ export function mountConversation(
           existing.delete(key);
           ordered.push(reused);
         } else {
-          ordered.push(renderBubble(b, bubbleHandlers));
+          ordered.push(renderBubble(b, activeBubbleHandlers));
         }
       }
       stream.replaceChildren(...ordered);
@@ -303,6 +318,9 @@ export function mountConversation(
     }
     if (lastConv !== conv) {
       composer.focus();
+      // A reply pending against the previous conversation must never
+      // attach to a message sent in this one.
+      composer.setReplyTo(null);
       // Conv changed — tear down whatever conv-specific machinery was
       // running so we can start fresh below. Group→group switch was
       // previously buggy: the line below was inside a DM-only branch,

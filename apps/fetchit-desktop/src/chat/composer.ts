@@ -3,12 +3,14 @@
 
 import { icon } from "../ui/icons";
 import { createEmojiPicker } from "./emojiPicker";
+import type { QuotedRef } from "./state";
 
 export interface ComposerHandlers {
   /// Fire-and-forget. The orchestrator owns the bubble lifecycle —
   /// the composer just clears its input and lets the store represent
-  /// delivery state via bubble status icons.
-  onSend: (body: string) => void;
+  /// delivery state via bubble status icons. `replyTo` is the pending
+  /// reply target when the user sent from an active reply chip.
+  onSend: (body: string, replyTo: QuotedRef | null) => void;
 }
 
 export interface ComposerApi {
@@ -18,6 +20,9 @@ export interface ComposerApi {
   /// placeholder reflects the supplied hint. Used when no conversation
   /// is selected so typing-into-the-void can't happen.
   setEnabled(enabled: boolean, hint?: string): void;
+  /// Show (or clear, with null) the reply chip above the input. The
+  /// next send carries the ref; sending or dismissing clears it.
+  setReplyTo(ref: QuotedRef | null): void;
 }
 
 export function mountComposer(
@@ -53,6 +58,22 @@ export function mountComposer(
   send.appendChild(icon("send"));
   send.disabled = true;
 
+  // Reply chip — hidden until the orchestrator hands us a quote target.
+  const replyChip = document.createElement("div");
+  replyChip.className = "chat-composer__reply";
+  replyChip.hidden = true;
+  const replySender = document.createElement("span");
+  replySender.className = "chat-composer__reply-sender";
+  const replyPreview = document.createElement("span");
+  replyPreview.className = "chat-composer__reply-preview";
+  const replyClear = document.createElement("button");
+  replyClear.type = "button";
+  replyClear.className = "chat-composer__reply-clear";
+  replyClear.title = "Cancel reply";
+  replyClear.setAttribute("aria-label", "Cancel reply");
+  replyClear.textContent = "×";
+  replyChip.append(replySender, replyPreview, replyClear);
+
   const tryGrow = (): void => {
     ta.style.height = "auto";
     const max = 6 * 22; // ~6 rows
@@ -60,7 +81,25 @@ export function mountComposer(
   };
 
   let enabled = true;
+  let pendingReply: QuotedRef | null = null;
   const DEFAULT_PLACEHOLDER = "Write a message…";
+
+  const setReplyTo = (ref: QuotedRef | null): void => {
+    pendingReply = ref;
+    if (ref) {
+      replySender.textContent = ref.senderName;
+      replyPreview.textContent = ref.preview;
+      replyChip.hidden = false;
+      if (enabled) ta.focus();
+    } else {
+      replyChip.hidden = true;
+    }
+  };
+
+  replyClear.addEventListener("click", () => {
+    setReplyTo(null);
+    ta.focus();
+  });
 
   const trySend = (): void => {
     if (!enabled) return;
@@ -69,7 +108,8 @@ export function mountComposer(
     ta.value = "";
     tryGrow();
     send.disabled = true;
-    handlers.onSend(body);
+    handlers.onSend(body, pendingReply);
+    setReplyTo(null);
   };
 
   // Emoji picker open/close + insert-at-cursor. Function declarations so
@@ -132,14 +172,21 @@ export function mountComposer(
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       trySend();
+    } else if (e.key === "Escape" && !picker && pendingReply) {
+      // Picker-open Escape belongs to the picker's own handler.
+      setReplyTo(null);
     }
   });
 
   send.addEventListener("click", trySend);
 
-  root.appendChild(ta);
-  root.appendChild(emojiWrap);
-  root.appendChild(send);
+  const inputRow = document.createElement("div");
+  inputRow.className = "chat-composer__row";
+  inputRow.appendChild(ta);
+  inputRow.appendChild(emojiWrap);
+  inputRow.appendChild(send);
+  root.appendChild(replyChip);
+  root.appendChild(inputRow);
 
   const setEnabled = (next: boolean, hint?: string): void => {
     enabled = next;
@@ -158,5 +205,6 @@ export function mountComposer(
   return {
     focus: () => ta.focus(),
     setEnabled,
+    setReplyTo,
   };
 }
