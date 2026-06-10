@@ -18,6 +18,8 @@ import { encodeBookmarksForShare } from "./bookmarkShare";
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { startIdleTracker } from "./idle";
 import { mountChatPanel, type ChatPanelApi } from "./chat";
+import { mountFediversePanel } from "./fediverse/panel";
+import { bindFediverseEvents } from "./fediverse/events";
 import { DEMO_CITY_INDEX, buildEmptyState } from "./emptyState";
 
 const HEX_64 = /^[0-9a-fA-F]{64}$/;
@@ -39,6 +41,8 @@ export async function init(): Promise<void> {
   const shareBtn = need<HTMLButtonElement>("share-toggle");
   const chatBtn = need<HTMLButtonElement>("chat-toggle");
   const chatHost = need<HTMLElement>("chat-panel");
+  const fediverseBtn = need<HTMLButtonElement>("fediverse-toggle");
+  const fediverseHost = need<HTMLElement>("fediverse-panel");
   const qrHost = need<HTMLElement>("qr-modal");
   const statusEl = need<HTMLElement>("status");
   const stripEl = need<HTMLElement>("tabs");
@@ -53,6 +57,7 @@ export async function init(): Promise<void> {
   bookmarkBtn.appendChild(icon("bookmark"));
   shareBtn.appendChild(icon("share"));
   chatBtn.appendChild(icon("chat"));
+  fediverseBtn.appendChild(icon("fediverse"));
   settingsBtn.appendChild(icon("settings"));
 
   // Idle tracker — drops the Autonomi client + clears caches after the
@@ -113,6 +118,10 @@ export async function init(): Promise<void> {
   if (!chatOn) {
     chatBtn.hidden = true;
     chatHost.hidden = true;
+    // The fediverse pane consumes the chat client's public-post
+    // broadcast, so it shares the chat feature gate.
+    fediverseBtn.hidden = true;
+    fediverseHost.hidden = true;
   } else {
     const chatBadge = document.createElement("span");
     chatBadge.className = "chat-toggle__badge";
@@ -154,6 +163,18 @@ export async function init(): Promise<void> {
     chatBtn.addEventListener("click", () => {
       void chat?.toggle().then(() => renderChatBadge(lastUnread));
     });
+
+    // M4 fediverse pane: the public read-feed surface. The event
+    // bridge drains the chat client's inbound bridged-post broadcast
+    // (Client::subscribe_to_public_posts) and renders each as an inert
+    // card. Standalone overlay; opening it leaves chat as-is.
+    const fediverse = mountFediversePanel(fediverseHost, {
+      onClose: () => {
+        /* nothing to reconcile on close */
+      },
+    });
+    void bindFediverseEvents(fediverse);
+    fediverseBtn.addEventListener("click", () => fediverse.toggle());
   }
 
   const toggleBookmark = async (): Promise<void> => {
