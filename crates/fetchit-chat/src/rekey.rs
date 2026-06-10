@@ -3,17 +3,25 @@
 //!
 //! Order matters: conversations and fedi actor identities first,
 //! `identity.json.enc` LAST. The identity header is the custody-mode
-//! authority `resolve_master_key` consults at boot, so a crash before
-//! the final write leaves the store fully bootable under the old key.
-//! Each file is resumable: one that no longer opens under the old key
-//! but opens under the new key is counted as already migrated.
+//! authority `resolve_master_key` consults at boot. Each file is
+//! resumable: one that no longer opens under the old key but opens
+//! under the new key is counted as already migrated.
 //!
-//! Honest caveat: a keychain-target rekey rotates the keychain entry
-//! before the file pass. A crash inside the pass can strand
-//! not-yet-migrated files with no recoverable key. The window is one
-//! file loop; the documented product recovery floor (new identity,
-//! contacts re-added by QR) applies. Do not "fix" this with a
-//! key-next-to-data escrow file.
+//! Crash posture differs by target, because whether the *old* key
+//! survives the pass differs:
+//!
+//! * Passphrase target: the old key stays re-derivable from the old
+//!   passphrase for the whole pass (the identity header carrying the
+//!   new salt is written last), so a crash before that final write
+//!   leaves the store fully bootable under the old key. Clean.
+//! * Keychain target: `rotate_keychain` deletes the old keychain entry
+//!   before the pass -- a single keychain slot cannot hold both keys,
+//!   and keeping the old one would silently retain a key the user
+//!   believed replaced. Past that point the old key is gone, so a crash
+//!   inside the pass strands the not-yet-migrated files with no
+//!   recoverable key. The window is one file loop; the documented
+//!   product recovery floor (new identity, contacts re-added by QR)
+//!   applies. Do not "fix" this with a key-next-to-data escrow file.
 
 use crate::at_rest::{
     fresh_argon_salt, kdf_id_argon2, kdf_id_keychain, open_from_path, read_kdf_id,
