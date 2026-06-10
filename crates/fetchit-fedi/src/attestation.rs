@@ -188,6 +188,97 @@ pub enum SigningInputError {
     },
 }
 
+/// Errors from [`verify_binding`]. Any variant means the actor MUST
+/// NOT be treated as bound to a chat identity.
+#[derive(Debug, Error)]
+pub enum AttestationVerifyError {
+    /// Reconstructing the canonical signing input failed (empty
+    /// handle, oversized field). The derived agent id is well-formed
+    /// by construction, so this points at the actor fields.
+    #[error("attestation signing-input: {0}")]
+    SigningInput(#[from] SigningInputError),
+    /// `ml_dsa_pubkey` is not a valid ML-DSA-65 public key.
+    #[error("attestation ml_dsa_pubkey rejected: {0}")]
+    PubkeyParse(String),
+    /// `signature` is not a structurally valid ML-DSA-65 signature.
+    #[error("attestation signature rejected: {0}")]
+    SignatureParse(String),
+    /// The ML-DSA backend errored while verifying.
+    #[error("attestation ML-DSA verify errored: {0}")]
+    VerifyBackend(String),
+    /// The signature does not verify over the reconstructed input
+    /// under the attested public key.
+    #[error("attestation signature does not verify under the attested key")]
+    SignatureInvalid,
+}
+
+/// Cryptographically verify an attestation against the actor fields it
+/// claims to bind, returning the **derived** chat `agent_id_hex`.
+///
+/// The agent id is never read from a claim: it is derived from the
+/// attested ML-DSA-65 pubkey via [`fetchit_relay_proto::derive_agent_id`]
+/// (`SHA-256("AUTONOMI_PEER_ID_V2:" || pubkey)`, the rule x0x applies to
+/// every agent identity; upstream
+/// `ant_quic::derive_peer_id_from_public_key`). The canonical
+/// [`signing_input`] is then reconstructed from
+/// `(handle, actor_url, derived_hex, spki_der)` and the ML-DSA-65
+/// signature checked under the attested pubkey.
+///
+/// Deriving instead of trusting a claimed id is what makes the binding
+/// unforgeable: a signer who embeds someone else's agent id produces an
+/// input that no longer matches what this function reconstructs from
+/// their own pubkey, so the signature rejects. Conversely, a valid
+/// result proves the holder of the ML-DSA key that *hashes to* the
+/// returned agent id signed exactly this `(handle, actor_url, RSA key)`
+/// tuple.
+///
+/// # Errors
+///
+/// See [`AttestationVerifyError`].
+pub fn verify_binding(
+    handle: &str,
+    actor_url: &url::Url,
+    spki_der: &[u8],
+    attestation: &MlDsaAttestation,
+) -> Result<String, AttestationVerifyError> {
+    use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
+
+    let derived = hex::encode(fetchit_relay_proto::derive_agent_id(
+        &attestation.ml_dsa_pubkey,
+    ));
+    let input = signing_input(handle, actor_url, &derived, spki_der)?;
+    let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &attestation.ml_dsa_pubkey)
+        .map_err(|e| AttestationVerifyError::PubkeyParse(e.to_string()))?;
+    let sig = MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &attestation.signature)
+        .map_err(|e| AttestationVerifyError::SignatureParse(e.to_string()))?;
+    let ok = MlDsa::new(MlDsaVariant::MlDsa65)
+        .verify(&pk, &input, &sig)
+        .map_err(|e| AttestationVerifyError::VerifyBackend(e.to_string()))?;
+    if !ok {
+        return Err(AttestationVerifyError::SignatureInvalid);
+    }
+    Ok(derived)
+}
+
+/// Test-only factory: mint a real ML-DSA-65 keypair, derive the agent
+/// id from the pubkey, and sign the canonical input. Returns the
+/// attestation plus the derived lowercase `agent_id_hex`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) fn test_attested(
+    handle: &str,
+    actor_url: &url::Url,
+    spki_der: &[u8],
+) -> (MlDsaAttestation, String) {
+    use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let derived = hex::encode(fetchit_relay_proto::derive_agent_id(&pk.to_bytes()));
+    let input = signing_input(handle, actor_url, &derived, spki_der).unwrap();
+    let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+    (MlDsaAttestation::new(pk.to_bytes(), sig), derived)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -365,5 +456,78 @@ mod tests {
         let bad = r#"{"ml_dsa_pubkey":"!!!not-valid-b64!!!","signature":"AQID"}"#;
         let result: Result<MlDsaAttestation, _> = serde_json::from_str(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_binding_round_trips_with_real_keys() {
+        let u = url("https://etchit.io/actors/josh");
+        let der = [0xAA_u8; 16];
+        let (att, derived) = test_attested("josh", &u, &der);
+        let got = verify_binding("josh", &u, &der, &att).unwrap();
+        assert_eq!(got, derived);
+    }
+
+    #[test]
+    fn verify_binding_rejects_signature_from_a_different_key() {
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let u = url("https://etchit.io/actors/josh");
+        let der = [0xAA_u8; 16];
+        let (att, _) = test_attested("josh", &u, &der);
+        // Swap in a different keypair's pubkey: the derived id changes
+        // and the signature cannot verify under the substituted key.
+        let (other_pk, _) = MlDsa::new(MlDsaVariant::MlDsa65)
+            .generate_keypair()
+            .unwrap();
+        let forged = MlDsaAttestation::new(other_pk.to_bytes(), att.signature);
+        let err = verify_binding("josh", &u, &der, &forged).unwrap_err();
+        assert!(
+            matches!(err, AttestationVerifyError::SignatureInvalid),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_binding_rejects_tampered_handle() {
+        let u = url("https://etchit.io/actors/josh");
+        let der = [0xAA_u8; 16];
+        let (att, _) = test_attested("josh", &u, &der);
+        let err = verify_binding("alice", &u, &der, &att).unwrap_err();
+        assert!(
+            matches!(err, AttestationVerifyError::SignatureInvalid),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_binding_rejects_garbage_pubkey() {
+        let u = url("https://etchit.io/actors/josh");
+        let att = MlDsaAttestation::new(vec![1, 2, 3], vec![0; 8]);
+        let err = verify_binding("josh", &u, &[0x01], &att).unwrap_err();
+        assert!(
+            matches!(err, AttestationVerifyError::PubkeyParse(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_binding_rejects_forged_agent_id_claim() {
+        // The attack the derive step exists to kill: sign the canonical
+        // input carrying SOMEONE ELSE's agent id under your own key.
+        // The verifier derives the id from the attested pubkey instead
+        // of trusting a claim, reconstructs a different input, and the
+        // signature rejects.
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let u = url("https://etchit.io/actors/josh");
+        let der = [0xAA_u8; 16];
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let input = signing_input("josh", &u, VALID_AGENT_HEX, &der).unwrap();
+        let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let att = MlDsaAttestation::new(pk.to_bytes(), sig);
+        let err = verify_binding("josh", &u, &der, &att).unwrap_err();
+        assert!(
+            matches!(err, AttestationVerifyError::SignatureInvalid),
+            "got {err:?}"
+        );
     }
 }

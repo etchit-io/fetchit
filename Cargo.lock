@@ -3004,8 +3004,11 @@ name = "fetchit-fedi"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "fetchit-relay-proto",
+ "hex",
  "reqwest 0.12.28",
  "rsa",
+ "saorsa-pqc 0.5.1",
  "serde",
  "serde_json",
  "sha2",

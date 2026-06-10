@@ -329,6 +329,40 @@ impl Actor {
                 .unwrap_or(Value::Null),
         })
     }
+
+    /// Cryptographically verify the actor's PQ attestation and return
+    /// the **derived** chat `agent_id_hex` it binds this actor to.
+    ///
+    /// Decodes `publicKeyPem` back to the exact SPKI DER bytes that
+    /// were signed and delegates to
+    /// [`crate::attestation::verify_binding`] (derive-then-verify; see
+    /// its docs for why the agent id is derived from the attested
+    /// pubkey rather than read from any claim). Parsing a document
+    /// ([`Self::from_json_ld`]) is **structural only** — callers that
+    /// gate trust on the PQ binding (the relay inbox, any attribution
+    /// surface) MUST call this and treat any error as "not a
+    /// fetch>it-native actor".
+    ///
+    /// # Errors
+    ///
+    /// - [`ActorError::InvalidField`] when `publicKeyPem` is not a
+    ///   decodable PEM envelope.
+    /// - [`ActorError::AttestationVerify`] when the attestation fails
+    ///   cryptographic verification.
+    pub fn verify_attestation(&self) -> Result<String, ActorError> {
+        let spki_der = spki_pem_to_der(&self.rsa_public_key_pem).map_err(|reason| {
+            ActorError::InvalidField {
+                name: "publicKey.publicKeyPem".into(),
+                reason,
+            }
+        })?;
+        Ok(crate::attestation::verify_binding(
+            &self.preferred_username,
+            &self.id,
+            &spki_der,
+            &self.ml_dsa_attestation,
+        )?)
+    }
 }
 
 /// Errors from `Actor` construction, rendering, or decoding.
@@ -357,6 +391,10 @@ pub enum ActorError {
     /// The PQ attestation value failed structural deserialization.
     #[error("Actor PQ attestation decode failed: {0}")]
     Attestation(String),
+    /// The PQ attestation failed cryptographic verification
+    /// ([`Actor::verify_attestation`]).
+    #[error(transparent)]
+    AttestationVerify(#[from] crate::attestation::AttestationVerifyError),
 }
 
 fn required_str<'a>(value: &'a Value, name: &str) -> Result<&'a str, ActorError> {
@@ -394,6 +432,24 @@ pub fn spki_der_to_pem(der: &[u8]) -> String {
     }
     pem.push_str("-----END PUBLIC KEY-----\n");
     pem
+}
+
+/// Decode a `BEGIN PUBLIC KEY` PEM envelope back to the raw SPKI DER
+/// bytes. Exact inverse of [`spki_der_to_pem`]: marker lines are
+/// stripped and the base64 body decoded verbatim — never re-encoded
+/// through an RSA parser — so the bytes handed to attestation
+/// verification are byte-identical to the bytes that were signed.
+///
+/// # Errors
+///
+/// Returns a description when the envelope has no base64 body or the
+/// body is not valid base64.
+pub fn spki_pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    if body.is_empty() {
+        return Err("PEM body is empty".into());
+    }
+    B64.decode(body).map_err(|e| format!("PEM base64: {e}"))
 }
 
 fn append_path(base: &url::Url, suffix: &str) -> Result<url::Url, String> {
@@ -878,5 +934,37 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FetchActorError::Parse(_)));
+    }
+
+    #[test]
+    fn spki_pem_to_der_inverts_spki_der_to_pem() {
+        let der: Vec<u8> = (0..96).collect();
+        assert_eq!(spki_pem_to_der(&spki_der_to_pem(&der)).unwrap(), der);
+    }
+
+    #[test]
+    fn verify_attestation_passes_after_json_ld_round_trip() {
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let spki_der = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let (att, derived) = crate::attestation::test_attested("josh", &actor_url, &spki_der);
+        let identity = ActorIdentity::new(
+            "josh".into(),
+            actor_url,
+            derived.clone(),
+            "PRIV".into(),
+            spki_der,
+            att,
+        );
+        let actor = Actor::from_identity(&identity).unwrap();
+        let parsed = Actor::from_json_ld(&actor.to_json_ld()).unwrap();
+        assert_eq!(parsed.verify_attestation().unwrap(), derived);
+    }
+
+    #[test]
+    fn verify_attestation_rejects_dummy_attestation() {
+        // The "costume" case the inbox gate must drop: a structurally
+        // valid doc whose attestation bytes are garbage.
+        let actor = Actor::from_identity(&sample_identity()).unwrap();
+        assert!(actor.verify_attestation().is_err());
     }
 }

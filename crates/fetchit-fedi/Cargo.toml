@@ -14,8 +14,11 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+hex.workspace = true
 reqwest.workspace = true
 rsa.workspace = true
+saorsa-pqc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["oid"] }
