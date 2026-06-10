@@ -614,7 +614,7 @@ pub async fn chat_send_dm(
         .get()
         .await?
         .messages()
-        .send(&id, &body, &name, reply_to_message_id.as_deref())
+        .send(&id, &body, &name, reply_to_message_id.as_deref(), None)
         .await
         .map_err(|e| e.to_string())
 }
