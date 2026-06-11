@@ -161,6 +161,42 @@ export function makeRelayDenylistedHandler(
   };
 }
 
+/// Wire-shape of the backend's `chat:relay-failover` Tauri event (T9).
+/// `kind` is `"migrated"` (home relay was swapped to a live fallback) or
+/// `"failed"` (no fallback reachable). The backend persists the new relay
+/// URL on `migrated`, so the Settings → Network region picker re-reads the
+/// live primary the next time it mounts (`refreshRelay`); this handler only
+/// surfaces the transient banner.
+interface RelayFailoverEvent {
+  kind: "migrated" | "failed";
+  from?: string;
+  to?: string;
+  dead?: string;
+}
+
+/// T9: build a handler for the `chat:relay-failover` event. A `migrated`
+/// event paints an info notice naming the new relay; a `failed` event paints
+/// a warning. Exported so the copy + severity mapping is unit-testable
+/// without a Tauri `listen` mock.
+export function makeRelayFailoverHandler(
+  store: ChatStore,
+): (ev: RelayFailoverEvent) => void {
+  return (ev: RelayFailoverEvent) => {
+    if (ev.kind === "migrated" && ev.to) {
+      store.pushNotice(
+        "info",
+        `Relay connection moved to ${ev.to}. Your contacts update automatically.`,
+      );
+    } else if (ev.kind === "failed") {
+      store.pushNotice(
+        "warn",
+        "Lost your home relay and couldn't reach a backup. "
+          + "Check Settings → Network to pick another region.",
+      );
+    }
+  };
+}
+
 export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
   const unsubEvent = await listen<ChatEvent>("chat:event", (ev) => {
     applyChatEvent(store, ev.payload);
@@ -213,6 +249,14 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       onRelayDenylisted(ev.payload);
     },
   );
+  const onRelayFailover = makeRelayFailoverHandler(store);
+  const unsubRelayFailover = await listen<RelayFailoverEvent>(
+    "chat:relay-failover",
+    (ev) => {
+      console.warn("[chat:relay-failover]", ev.payload);
+      onRelayFailover(ev.payload);
+    },
+  );
   const unsubDenylistUpdate = await listen<DenylistUpdateEvent>(
     "chat:denylist-updated",
     (ev) => {
@@ -242,6 +286,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubWarn();
     unsubRelayStatus();
     unsubRelayDenylisted();
+    unsubRelayFailover();
     unsubDenylistUpdate();
     unsubContactReq();
   };

@@ -336,10 +336,29 @@ struct ChatState {
     public_post_tx: tokio::sync::broadcast::Sender<PublicPostDelivery>,
 }
 
-/// Stored shape of the home-relay failover callback (T8b). Mirrors the G1
-/// `PrimaryDenylistedCallback`: the watcher invokes it with the new primary
-/// URL on success, or the dead URL on a failed / no-fallback signal.
-type RelayFailoverCallback = Arc<dyn Fn(String) + Send + Sync>;
+/// Outcome of a home-relay failover attempt, delivered to the callback
+/// registered via [`Client::set_relay_failover_callback`].
+#[derive(Debug, Clone)]
+pub enum RelayFailoverEvent {
+    /// Slot 0 migrated from the dead relay to a live fallback.
+    Migrated {
+        /// The relay that was abandoned.
+        from: String,
+        /// The new live primary.
+        to: String,
+    },
+    /// No migration happened: no fallback candidate, or the swap failed.
+    Failed {
+        /// The dead (still-current) primary.
+        dead: String,
+    },
+}
+
+/// Stored shape of the home-relay failover callback (T8b / T9). Mirrors the
+/// G1 `PrimaryDenylistedCallback`: the watcher invokes it with a typed
+/// [`RelayFailoverEvent`] describing whether the primary migrated to a live
+/// fallback or the attempt failed.
+type RelayFailoverCallback = Arc<dyn Fn(RelayFailoverEvent) + Send + Sync>;
 
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
 /// the relay-routed message transport, the local chat identity, and
@@ -426,13 +445,13 @@ pub struct Client {
     /// `tokio::sync::RwLock` to match `advertised_relays` and stay
     /// await-friendly at the async read sites.
     primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
-    /// T8b: optional callback the home-relay failover watcher fires after
-    /// migrating slot 0 to a fallback relay. The argument is the NEW
-    /// primary URL on success, or the dead URL on a "failed / no fallback"
-    /// signal (see [`Self::set_relay_failover_callback`]). The desktop
-    /// shell registers an emitter for a Tauri toast; `None` until then,
-    /// and a no-op in REST-only mode (no watcher is spawned). Mirrors the
-    /// G1 primary-denylisted callback storage shape.
+    /// T8b / T9: optional callback the home-relay failover watcher (and
+    /// [`Self::migrate_primary`]) fires after attempting to migrate slot 0.
+    /// The argument is a typed [`RelayFailoverEvent`] (see
+    /// [`Self::set_relay_failover_callback`]). The desktop shell registers
+    /// an emitter for a Tauri toast; `None` until then, and a no-op in
+    /// REST-only mode (no watcher is spawned). Mirrors the G1
+    /// primary-denylisted callback storage shape.
     relay_failover_cb: Arc<tokio::sync::RwLock<Option<RelayFailoverCallback>>>,
     /// T8b: abort handle for the background failover watcher task. The
     /// watcher holds its own `Client` clone, so it is NOT stopped by
@@ -843,17 +862,19 @@ impl Client {
         }
     }
 
-    /// T8b: register a callback the home-relay failover watcher fires
-    /// after it migrates slot 0 to a fallback relay. The argument is the
-    /// NEW primary URL on a successful migration. The desktop shell wires
-    /// this to a Tauri event so the user sees a "switched relays" toast;
-    /// it later also lets the UI re-render the share card the watcher
-    /// pruned the dead relay out of.
+    /// T8b / T9: register a callback the home-relay failover watcher (and
+    /// the manual [`Self::migrate_primary`] path) fires after attempting to
+    /// migrate slot 0. The argument is a typed [`RelayFailoverEvent`]:
+    /// [`RelayFailoverEvent::Migrated`] with the old and new URLs on a
+    /// successful swap, or [`RelayFailoverEvent::Failed`] with the dead URL
+    /// when no fallback was reachable. The desktop shell wires this to a
+    /// Tauri event so the user sees a "switched relays" toast and the
+    /// persisted relay-url setting tracks the new primary.
     ///
     /// Replaces any prior callback. No-op when the client was built
     /// without a relay URL (REST-only mode never spawns a watcher), but
     /// the registration is still stored harmlessly.
-    pub fn set_relay_failover_callback(&self, cb: Arc<dyn Fn(String) + Send + Sync>) {
+    pub fn set_relay_failover_callback(&self, cb: RelayFailoverCallback) {
         // Block briefly on the write lock from a sync surface: the only
         // contention is the watcher's read at trigger time, so this never
         // stalls. `try_write` would risk dropping the desktop's
@@ -945,17 +966,17 @@ impl Client {
     ///
     /// Steps, in order:
     /// 1. Pick the first [`Self::advertised_relays`] entry that is not
-    ///    `dead_url`. None -> fire the callback in its "no fallback" form
-    ///    (the dead URL) and return `Err(())` so the watcher backs off.
+    ///    `dead_url`. None -> fire [`RelayFailoverEvent::Failed`] and return
+    ///    `Err(())` so the watcher backs off.
     /// 2. [`crate::transport::MultiHomeTransport::replace_primary`] to the
-    ///    candidate. On error, fire the "failed" callback (dead URL) and
+    ///    candidate. On error, fire [`RelayFailoverEvent::Failed`] and
     ///    return `Err(())`.
     /// 3. Update the live `primary_relay_url` to the candidate so the
     ///    publish + send paths advertise it.
     /// 4. Republish the pair record at the new relay (best-effort).
     /// 5. Prune `dead_url` from the advertised list + regenerate the share
     ///    card (best-effort).
-    /// 6. Fire the failover callback with the NEW primary URL.
+    /// 6. Fire [`RelayFailoverEvent::Migrated`] with the old + new URLs.
     ///
     /// Returns `Ok(new_url)` on a successful migration so the watcher
     /// re-subscribes to the new slot 0 and keeps watching (sticky: no
@@ -976,7 +997,8 @@ impl Client {
             log::warn!(
                 "[chat] home-relay failover: primary {dead_url} is down and no fallback relay is configured"
             );
-            self.fire_failover_callback(dead_url).await;
+            self.fire_failover_callback(RelayFailoverEvent::Failed { dead: dead_url })
+                .await;
             return Err(());
         };
 
@@ -984,7 +1006,8 @@ impl Client {
             log::warn!(
                 "[chat] home-relay failover: replace_primary to {candidate} failed: {e}; keeping watch"
             );
-            self.fire_failover_callback(dead_url).await;
+            self.fire_failover_callback(RelayFailoverEvent::Failed { dead: dead_url })
+                .await;
             return Err(());
         }
 
@@ -1017,17 +1040,163 @@ impl Client {
             }
         }
 
-        self.fire_failover_callback(candidate.clone()).await;
+        self.fire_failover_callback(RelayFailoverEvent::Migrated {
+            from: dead_url,
+            to: candidate.clone(),
+        })
+        .await;
         Ok(candidate)
     }
 
-    /// Fire the registered T8b failover callback with `url`, if one was
+    /// T9: manually migrate the pinned primary (slot 0) to `new_url`.
+    ///
+    /// This is the user-driven region change, distinct from the automatic
+    /// [`Self::failover_to_next_relay`] in one crucial way: the OLD relay is
+    /// still ALIVE, so the T7 forwarding record posted at it can heal stale
+    /// senders that still deposit per the old pair record. (Failover cannot
+    /// do this -- you can neither POST nor FETCH a forwarding record at a
+    /// dead relay.)
+    ///
+    /// Steps, in order:
+    /// 1. Snapshot the current primary (the old url). Reject when the client
+    ///    has no chat state or no multi-home transport (relay-mode only API).
+    /// 2. `new_url == old` -> `Ok(())` no-op.
+    /// 3. [`crate::transport::MultiHomeTransport::replace_primary`] to
+    ///    `new_url`. A failed swap leaves slot 0 intact, so the error is
+    ///    propagated and no client state is touched.
+    /// 4. Update the live `primary_relay_url` to `new_url`.
+    /// 5. Republish the pair record at the new relay (best-effort).
+    /// 6. Post a signed forwarding record at the OLD (still-alive) relay
+    ///    pointing to the new one -- the layer-2 heal (best-effort).
+    /// 7. Replace the old url with the new one in `advertised_relays` and
+    ///    regenerate the share card (best-effort).
+    /// 8. Fire [`RelayFailoverEvent::Migrated`] so the desktop toast +
+    ///    persistence path is shared with the failover watcher.
+    ///
+    /// The failover watcher is NOT restarted: after `replace_primary` the
+    /// old slot-0 state stream closes, the watcher's `changed()` errs, and it
+    /// re-subscribes to the new slot 0 on its own.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::Invalid`] when the client is REST-only or has no primary
+    /// pinned. [`ChatError::MessageTransport`] when the slot-0 swap fails
+    /// (slot 0 stays on the old relay in that case).
+    pub async fn migrate_primary(&self, new_url: &str) -> Result<()> {
+        let Some(mh) = self.multi_home.as_ref() else {
+            return Err(ChatError::Invalid(
+                "no relay transport; migrate_primary requires relay mode".into(),
+            ));
+        };
+        let old = {
+            let snapshot = self.primary_relay_url.read().await.clone();
+            snapshot.ok_or_else(|| {
+                ChatError::Invalid("no primary relay pinned; nothing to migrate".into())
+            })?
+        };
+
+        if new_url == old {
+            return Ok(());
+        }
+
+        // The old relay is alive: a failed swap MUST leave slot 0 intact, so
+        // propagate the error and touch nothing.
+        mh.replace_primary(new_url)
+            .await
+            .map_err(|e| ChatError::MessageTransport(format!("replace_primary: {e}")))?;
+
+        // Slot 0 is now new_url. Point the live primary at it BEFORE the
+        // republish so the pair record advertises the new relay.
+        *self.primary_relay_url.write().await = Some(new_url.to_owned());
+        log::info!("[chat] region migration: migrated primary {old} -> {new_url}");
+
+        // Best-effort republish at the new relay so peers rediscover us.
+        if let Err(e) = self.publish_pair_record().await {
+            log::warn!("[chat] region migration: pair-record republish at {new_url} failed: {e}");
+        }
+
+        // Layer-2 heal: post a forwarding record AT THE OLD (alive) relay
+        // pointing to the new one, so stale senders depositing per the old
+        // pair record get redirected. Best-effort: the migration already
+        // committed.
+        self.post_forwarding_at(&old, new_url).await;
+
+        // Replace the old url with the new one in the advertised list +
+        // re-mint the card. Best-effort: a regenerate failure (e.g. the
+        // swapped list fails validation) must not unwind the committed swap.
+        let swapped: Vec<String> = {
+            let advertised = self.advertised_relays.read().await;
+            advertised
+                .iter()
+                .map(|r| {
+                    if r == &old {
+                        new_url.to_owned()
+                    } else {
+                        r.clone()
+                    }
+                })
+                .collect()
+        };
+        if !swapped.is_empty() {
+            if let Err(e) = self.regenerate_card_with_relays(swapped).await {
+                log::warn!(
+                    "[chat] region migration: card regenerate after swapping {old} -> {new_url} failed: {e}"
+                );
+            }
+        }
+
+        self.fire_failover_callback(RelayFailoverEvent::Migrated {
+            from: old,
+            to: new_url.to_owned(),
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Best-effort T9 layer-2 heal: build, sign, and POST a forwarding
+    /// record at the OLD (still-alive) relay pointing at `new_url`. Logs and
+    /// returns on any failure; the migration has already committed.
+    async fn post_forwarding_at(&self, old_relay: &str, new_url: &str) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let old = match url::Url::parse(old_relay) {
+            Ok(u) => u,
+            Err(e) => {
+                log::warn!("[chat] region migration: old relay url parse for forwarding: {e}");
+                return;
+            }
+        };
+        let http = reqwest::Client::new();
+        match crate::pair_record::post_forwarding_record(
+            &old,
+            &chat.identity,
+            chat.signer.as_ref(),
+            vec![new_url.to_owned()],
+            &chat.layout,
+            &http,
+        )
+        .await
+        {
+            Ok(crate::pair_record::ForwardingOutcome::Written) => {
+                log::info!("[chat] region migration: forwarding record posted at {old_relay}");
+            }
+            Ok(crate::pair_record::ForwardingOutcome::SkippedNoPairRecord) => {}
+            Err(e) => {
+                log::warn!(
+                    "[chat] region migration: forwarding record post at {old_relay} failed: {e}"
+                );
+            }
+        }
+    }
+
+    /// Fire the registered failover callback with `event`, if one was
     /// registered. Cloned out under the read guard so the closure runs
     /// without holding the lock.
-    async fn fire_failover_callback(&self, url: String) {
+    async fn fire_failover_callback(&self, event: RelayFailoverEvent) {
         let cb = self.relay_failover_cb.read().await.clone();
         if let Some(cb) = cb {
-            cb(url);
+            cb(event);
         }
     }
 
@@ -1756,6 +1925,16 @@ impl Client {
     ) -> Option<tokio::sync::watch::Receiver<fetchit_relay_client::ConnState>> {
         let relay = self.relay.as_ref()?;
         Some(relay.relay_set().primary_connection_state())
+    }
+
+    /// Whether this client has a wired multi-home transport (slot 0 / a
+    /// pinned primary relay). `true` only for relay-mode clients;
+    /// REST-only / LAN-only builds return `false`. The desktop region
+    /// switch consults this to decide between a clean
+    /// [`Self::migrate_primary`] hot-swap and a full rebuild.
+    #[must_use]
+    pub fn has_multi_home(&self) -> bool {
+        self.multi_home.is_some()
     }
 
     /// Publish a fresh signed [`fetchit_relay_proto::pair_record::PairRecordV1`]
@@ -4453,6 +4632,170 @@ mod tests {
             client.primary_relay_url.read().await.clone(),
             Some("wss://after.test/v1/ws".to_string()),
             "a write through one clone must be visible through the other",
+        );
+    }
+
+    // ── T9 migrate_primary ────────────────────────────────────────────────
+
+    /// No-op denylist gate for the test multi-home transport.
+    struct MigrateNoopDenylist;
+    impl fetchit_trust::DenylistQuery for MigrateNoopDenylist {
+        fn is_blocked(&self, _: fetchit_trust::EntryKind, _: &str) -> bool {
+            false
+        }
+    }
+
+    /// Stub relay builder: returns a `RelayHandle::mock(url)` for any URL.
+    /// Mock handles have no inner `RelayTransport`, so
+    /// `MultiHomeTransport::replace_primary` skips the liveness wait and the
+    /// swap commits immediately -- exactly the seam `migrate_primary` needs
+    /// to be unit-testable without a live relay.
+    #[derive(Default)]
+    struct MigrateStubBuilder;
+
+    #[async_trait]
+    impl crate::transport::RelayBuilder for MigrateStubBuilder {
+        async fn build(
+            &self,
+            url: &str,
+        ) -> std::result::Result<Arc<crate::transport::RelayHandle>, crate::transport::TransportError>
+        {
+            Ok(Arc::new(crate::transport::RelayHandle::mock(
+                url.to_owned(),
+            )))
+        }
+    }
+
+    /// Build a test client wired with a real `MultiHomeTransport` (over the
+    /// mock builder) so `migrate_primary`'s full state-transition path runs.
+    /// The primary is seeded to `primary`; advertised relays start as
+    /// `[primary]`. The forwarding-record + pair-record HTTP halves point at
+    /// an unreachable host and are best-effort, so they no-op without
+    /// affecting the asserted state transitions (wire coverage lives in the
+    /// T3/T7 wiremock suites + the live mission).
+    async fn test_client_with_mh(primary: &str) -> (Client, tempfile::TempDir) {
+        let (mut client, dir) = test_client_no_denylist();
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(MigrateNoopDenylist);
+        let builder: Arc<dyn crate::transport::RelayBuilder> = Arc::new(MigrateStubBuilder);
+        let mh = crate::transport::MultiHomeTransport::new(
+            primary.to_owned(),
+            denylist,
+            Arc::new(|_env| {}),
+            builder,
+        )
+        .await
+        .expect("mock multi-home transport builds");
+        client.multi_home = Some(Arc::new(mh));
+        *client.primary_relay_url.write().await = Some(primary.to_owned());
+        *client.advertised_relays.write().await = vec![primary.to_owned()];
+        (client, dir)
+    }
+
+    /// REST-only client (no multi-home) rejects `migrate_primary` with an
+    /// Invalid error -- it is a relay-mode-only API.
+    #[tokio::test]
+    async fn migrate_primary_rest_only_rejected() {
+        let (client, _dir) = test_client_no_denylist();
+        let err = client
+            .migrate_primary("wss://new.test/v1/ws")
+            .await
+            .expect_err("no multi-home must reject");
+        assert!(matches!(err, ChatError::Invalid(_)));
+    }
+
+    /// Migrating to the same url already pinned is a no-op success and does
+    /// not fire the callback.
+    #[tokio::test]
+    async fn migrate_primary_same_url_is_noop() {
+        let (client, _dir) = test_client_with_mh("wss://same.test/v1/ws").await;
+        let fired = Arc::new(std::sync::Mutex::new(Vec::<RelayFailoverEvent>::new()));
+        let sink = Arc::clone(&fired);
+        client.set_relay_failover_callback(Arc::new(move |ev| {
+            sink.lock().unwrap().push(ev);
+        }));
+
+        client
+            .migrate_primary("wss://same.test/v1/ws")
+            .await
+            .expect("same-url migration is a no-op success");
+
+        assert_eq!(
+            client.primary_relay_url.read().await.clone(),
+            Some("wss://same.test/v1/ws".to_string()),
+        );
+        assert!(
+            fired.lock().unwrap().is_empty(),
+            "a same-url no-op must not fire the failover callback",
+        );
+    }
+
+    /// Happy path: migrating to a fresh url swaps slot 0, updates the live
+    /// primary, replaces the old url in the advertised list, and fires
+    /// `Migrated { from, to }`. Uses `wss://` urls so the best-effort card
+    /// regenerate (which validates the relay scheme) actually commits the
+    /// advertised-list swap.
+    #[tokio::test]
+    async fn migrate_primary_swaps_state_and_fires_migrated() {
+        let old = "wss://old.test/v1/ws";
+        let new = "wss://new.test/v1/ws";
+        let (client, _dir) = test_client_with_mh(old).await;
+
+        let fired = Arc::new(std::sync::Mutex::new(Vec::<RelayFailoverEvent>::new()));
+        let sink = Arc::clone(&fired);
+        client.set_relay_failover_callback(Arc::new(move |ev| {
+            sink.lock().unwrap().push(ev);
+        }));
+
+        client
+            .migrate_primary(new)
+            .await
+            .expect("migration over the mock transport succeeds");
+
+        // Live primary now points at the new relay.
+        assert_eq!(
+            client.primary_relay_url.read().await.clone(),
+            Some(new.to_string()),
+            "primary must be updated to the new url",
+        );
+        // Advertised list swapped old -> new.
+        assert_eq!(
+            client.advertised_relays.read().await.clone(),
+            vec![new.to_string()],
+            "the old url must be replaced by the new one in the advertised list",
+        );
+        // Callback fired once with Migrated carrying both urls.
+        let events = fired.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "exactly one failover event must fire");
+        match &events[0] {
+            RelayFailoverEvent::Migrated { from, to } => {
+                assert_eq!(from, old);
+                assert_eq!(to, new);
+            }
+            other @ RelayFailoverEvent::Failed { .. } => {
+                panic!("expected Migrated, got {other:?}")
+            }
+        }
+    }
+
+    /// `migrate_primary` with extra advertised entries preserves the others
+    /// and swaps only the matching old url.
+    #[tokio::test]
+    async fn migrate_primary_preserves_other_advertised_entries() {
+        let old = "wss://old.test/v1/ws";
+        let new = "wss://new.test/v1/ws";
+        let (client, _dir) = test_client_with_mh(old).await;
+        *client.advertised_relays.write().await =
+            vec![old.to_string(), "wss://other.test/v1/ws".to_string()];
+
+        client
+            .migrate_primary(new)
+            .await
+            .expect("migration succeeds");
+
+        assert_eq!(
+            client.advertised_relays.read().await.clone(),
+            vec![new.to_string(), "wss://other.test/v1/ws".to_string()],
+            "only the matching old entry is swapped; others are preserved",
         );
     }
 }

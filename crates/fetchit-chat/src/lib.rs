@@ -50,7 +50,7 @@ mod http;
 mod members_singleflight;
 
 pub use chat_identity::FetchitIdentity;
-pub use client::{Client, ClientBuilder};
+pub use client::{Client, ClientBuilder, RelayFailoverEvent};
 pub use denylist::DenylistCheck;
 pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};

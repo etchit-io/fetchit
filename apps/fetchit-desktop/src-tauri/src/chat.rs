@@ -88,6 +88,42 @@ fn denylist_update_payload(ev: &fetchit_trust_client::BlockEvent) -> serde_json:
     })
 }
 
+/// Serializable wire shape of the `chat:relay-failover` Tauri event.
+///
+/// A thin DTO so the lib's [`fetchit_chat::RelayFailoverEvent`] enum stays
+/// serde-free (matches the `chat:relay-denylisted` shape, which also hand-
+/// builds its payload rather than deriving on the lib type). `kind` is
+/// `"migrated"` or `"failed"`; the other fields are populated per variant.
+#[derive(Debug, Clone, Serialize)]
+struct RelayFailoverPayload {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dead: Option<String>,
+}
+
+impl RelayFailoverPayload {
+    fn from_event(ev: &fetchit_chat::RelayFailoverEvent) -> Self {
+        match ev {
+            fetchit_chat::RelayFailoverEvent::Migrated { from, to } => Self {
+                kind: "migrated",
+                from: Some(from.clone()),
+                to: Some(to.clone()),
+                dead: None,
+            },
+            fetchit_chat::RelayFailoverEvent::Failed { dead } => Self {
+                kind: "failed",
+                from: None,
+                to: None,
+                dead: Some(dead.clone()),
+            },
+        }
+    }
+}
+
 /// Tauri-managed handle to the lazily-built chat client.
 #[derive(Clone)]
 pub struct ChatState {
@@ -225,20 +261,48 @@ impl ChatState {
         self.data_dir.clone()
     }
 
-    /// Swap the relay URL and force a client rebuild so the next chat
-    /// call connects to the new region. Delegates to
-    /// [`validate_relay_url`] for the parse + scheme + path checks.
+    /// Switch the chat client to a new region's relay.
+    ///
+    /// Validates `url` (parse + scheme + path + SSRF checks) via
+    /// [`validate_relay_url`], records it as the `ChatState` relay URL so a
+    /// later rebuild reconnects there, then takes one of two paths:
+    ///
+    /// - **Live relay client cached** — call
+    ///   [`fetchit_chat::Client::migrate_primary`], which cleanly swaps
+    ///   slot 0 in place (no drop-and-rebuild, no leaked transport state or
+    ///   stacked watchers, fixing #358). The cached client stays; on a
+    ///   migration error slot 0 is left intact by the lib and the error is
+    ///   returned to the frontend with nothing else touched.
+    /// - **No live client (chat not booted yet, or REST/LAN-only)** —
+    ///   [`Self::invalidate`] so the next chat op rebuilds against the new
+    ///   relay.
     ///
     /// # Errors
     /// Returns an error if the URL is malformed, uses an unsupported
-    /// scheme (anything other than `http`/`https`), or has a non-root
-    /// path component.
+    /// scheme (anything other than `http`/`https`), has a non-root path
+    /// component, fails the SSRF guard, or the in-place migration fails.
     pub async fn set_relay_url(&self, url: &str) -> Result<(), String> {
         let parsed = validate_relay_url(url)?;
         match self.relay_url.lock() {
             Ok(mut g) => *g = parsed,
             Err(p) => *p.into_inner() = parsed,
         }
+
+        // Prefer an in-place migration over a rebuild when a live relay
+        // client is cached: it preserves transport state and stops the
+        // immortal-watcher stacking the old hot-swap caused.
+        let cached = self.client.lock().await.clone();
+        if let Some(client) = cached {
+            if client.has_multi_home() {
+                // The cached client stays; migrate_primary swaps slot 0 and
+                // re-fires the failover callback as Migrated. On error the
+                // lib guarantees slot 0 is untouched, so surface it and leave
+                // everything as-was.
+                return client.migrate_primary(url).await.map_err(|e| e.to_string());
+            }
+        }
+
+        // No live relay client to migrate: rebuild on the next chat op.
         self.invalidate().await;
         Ok(())
     }
@@ -262,8 +326,20 @@ impl ChatState {
 
     /// Force the next call to rebuild — used after a daemon restart
     /// or relay reconnect invalidates the cached client.
+    ///
+    /// Stops the cached client's home-relay failover watcher BEFORE
+    /// dropping it. The watcher task holds its own `Client` clone and so
+    /// outlives the dropped handle; without this, every rebuild (relay
+    /// switch, LAN toggle, daemon restart) would stack another immortal
+    /// watcher pinning a torn-down transport stack (#358 class). This is
+    /// the single seam every rebuild goes through, so the stop happens at
+    /// all call sites at once.
     async fn invalidate(&self) {
-        *self.client.lock().await = None;
+        let mut guard = self.client.lock().await;
+        if let Some(c) = guard.as_ref() {
+            c.stop_failover_watcher();
+        }
+        *guard = None;
     }
 }
 
@@ -955,6 +1031,7 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_relay_presence(app.clone(), state.clone());
     spawn_relay_conn_state(app.clone(), state.clone());
     spawn_relay_denylist(app.clone(), state.clone());
+    spawn_relay_failover(app.clone(), state.clone());
     spawn_denylist_events(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_public_posts(app.clone(), state.clone());
@@ -1495,6 +1572,70 @@ fn spawn_relay_denylist(app: AppHandle, state: ChatState) {
     });
 }
 
+/// Persist `url` as the active relay-url setting. Reused by the failover
+/// pump so an automatic home-relay migration survives the next app boot
+/// (otherwise the persisted setting still names the dead relay and the
+/// rebuild reconnects to it). Mirrors the persistence in the `set_relay_url`
+/// Tauri command.
+fn persist_relay_url(app: &AppHandle, url: &str) {
+    use tauri::Manager;
+    // Clone the shared settings + path handles out of the State guard so the
+    // guard's temporary doesn't outlive the lock's MutexGuard borrow.
+    let (settings, settings_path) = {
+        let app_state = app.state::<AppState>();
+        (
+            Arc::clone(&app_state.settings),
+            Arc::clone(&app_state.settings_path),
+        )
+    };
+    let Ok(mut guard) = settings.lock() else {
+        return;
+    };
+    url.clone_into(&mut guard.relay_url);
+    let _ = guard.save(&settings_path);
+}
+
+/// T9: register the home-relay failover callback on each freshly built chat
+/// client and emit `chat:relay-failover` to the frontend when it fires.
+///
+/// Mirrors [`spawn_relay_denylist`]: the callback lives on the client and a
+/// fresh one is built on every rebuild, so we re-register each cycle using
+/// the relay connection-state watch as the rebuild signal. REST-only clients
+/// (no relay) have no watch — sleep + retry.
+///
+/// On a `Migrated` event we ALSO persist the new relay URL as the active
+/// setting (via [`persist_relay_url`]) so the next app boot reconnects to the
+/// live relay rather than the dead one. The manual region-change path
+/// (`set_relay_url` command) persists separately before the migrate; the
+/// callback covers the AUTOMATIC failover path where no command ran.
+fn spawn_relay_failover(app: AppHandle, state: ChatState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let app_for_cb = app.clone();
+            client.set_relay_failover_callback(std::sync::Arc::new(
+                move |ev: fetchit_chat::RelayFailoverEvent| {
+                    if let fetchit_chat::RelayFailoverEvent::Migrated { to, .. } = &ev {
+                        persist_relay_url(&app_for_cb, to);
+                    }
+                    let payload = RelayFailoverPayload::from_event(&ev);
+                    let _ = app_for_cb.emit("chat:relay-failover", payload);
+                },
+            ));
+            // Park on the connection-state watch as the rebuild signal,
+            // exactly as spawn_relay_denylist does.
+            if let Some(mut rx) = client.relay_connection_state() {
+                while rx.changed().await.is_ok() {}
+            } else {
+                tokio::time::sleep(RECONNECT_BACKOFF * 6).await;
+            }
+        }
+    });
+}
+
 /// M3 G4: drain the denylist consumer's `BlockEvent` broadcast and emit
 /// `chat:denylist-updated` so the frontend updates the contacts denylist
 /// indicator (G2). The `RelayUrl`-driven slot drops + primary banner are
@@ -2016,7 +2157,9 @@ fn ipv6_to_ipv4_mapped(addr: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 mod tests {
     use super::{
         denylist_update_payload, resolve_denylist_url, validate_relay_url, validate_relay_url_with,
+        RelayFailoverPayload,
     };
+    use fetchit_chat::RelayFailoverEvent;
 
     #[test]
     fn rekey_passphrase_validation_rejects_blank() {
@@ -2400,5 +2543,33 @@ mod tests {
             None => std::env::remove_var(key),
         }
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[test]
+    fn relay_failover_payload_migrated_carries_from_and_to() {
+        let ev = RelayFailoverEvent::Migrated {
+            from: "http://old.test:8088".into(),
+            to: "http://new.test:8088".into(),
+        };
+        let payload = RelayFailoverPayload::from_event(&ev);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["kind"], "migrated");
+        assert_eq!(json["from"], "http://old.test:8088");
+        assert_eq!(json["to"], "http://new.test:8088");
+        // `dead` is skipped on the Migrated variant.
+        assert!(json.get("dead").is_none());
+    }
+
+    #[test]
+    fn relay_failover_payload_failed_carries_dead_only() {
+        let ev = RelayFailoverEvent::Failed {
+            dead: "http://dead.test:8088".into(),
+        };
+        let payload = RelayFailoverPayload::from_event(&ev);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["kind"], "failed");
+        assert_eq!(json["dead"], "http://dead.test:8088");
+        assert!(json.get("from").is_none());
+        assert!(json.get("to").is_none());
     }
 }

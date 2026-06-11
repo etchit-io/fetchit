@@ -9,6 +9,7 @@ import {
   applyChatEvent,
   applyDenylistUpdateEvent,
   makeRelayDenylistedHandler,
+  makeRelayFailoverHandler,
   projectPendingContact,
   warnEventToCopy,
 } from "./events";
@@ -271,6 +272,34 @@ describe("makeRelayDenylistedHandler (M3 G1)", () => {
     handler(RELAY);
     handler("wss://fra.etchit.io/v1/ws");
     expect(store.allNotices()).toHaveLength(2);
+  });
+});
+
+describe("makeRelayFailoverHandler (T9)", () => {
+  const NEW_RELAY = "http://159.89.11.217:8088";
+
+  it("pushes an info notice naming the new relay on migrated", () => {
+    const handler = makeRelayFailoverHandler(store);
+    handler({ kind: "migrated", from: "http://old:8088", to: NEW_RELAY });
+    const notices = store.allNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0].severity).toBe("info");
+    expect(notices[0].body).toContain(NEW_RELAY);
+  });
+
+  it("pushes a warn notice on failed", () => {
+    const handler = makeRelayFailoverHandler(store);
+    handler({ kind: "failed", dead: "http://dead:8088" });
+    const notices = store.allNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0].severity).toBe("warn");
+    expect(notices[0].body).toContain("Settings → Network");
+  });
+
+  it("ignores a migrated event missing the target url", () => {
+    const handler = makeRelayFailoverHandler(store);
+    handler({ kind: "migrated" });
+    expect(store.allNotices()).toHaveLength(0);
   });
 });
 

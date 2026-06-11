@@ -6,9 +6,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Pinned x0xd version we bundle. v0.23.1 carries the send_replace
+/// Pinned x0xd version we bundle. v0.23.1 carries the `send_replace`
 /// DM-capability fix (stock since v0.22.0, formerly our x0x#101 fork),
-/// the ant-quic read_to_end zero-fill fix (v0.22.1), and the detached
+/// the `ant-quic` `read_to_end` zero-fill fix (v0.22.1), and the detached
 /// ML-DSA verify endpoint (`POST /agent/verify`).
 const X0XD_PIN_VERSION: &str = "0.23.1";
 
