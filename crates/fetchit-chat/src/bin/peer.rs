@@ -184,6 +184,34 @@ enum Mode {
         #[arg(long)]
         owner_card_uri_file: Option<PathBuf>,
     },
+    /// Mint (or reuse) the fediverse actor identity for `--handle`,
+    /// write the registration-ready actor JSON-LD document, and print
+    /// the curl line that POSTs it to the bridge's `POST /actors`.
+    /// The document is self-verified via `Actor::verify_attestation`
+    /// before it is written, so an emitted file always passes the
+    /// bridge's identity gate or this command fails loudly instead.
+    MintActor {
+        /// Local-part to claim (`@<handle>@<domain>`). The bridge
+        /// accepts ASCII alphanumerics plus `_` and `-`, max 64 chars,
+        /// and rejects reserved handles with 403.
+        #[arg(long)]
+        handle: String,
+
+        /// Fediverse host the bridge serves the handle under.
+        #[arg(long, default_value = "etchit.io")]
+        domain: String,
+
+        /// Where to write the actor JSON-LD document.
+        #[arg(long, default_value = "actor.json")]
+        out: PathBuf,
+
+        /// Registration endpoint for the printed curl line. Defaults
+        /// to `https://<domain>/actors`; point it at the bridge origin
+        /// directly when the fronting Worker does not route the bare
+        /// `/actors` path.
+        #[arg(long)]
+        post_url: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -191,6 +219,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let token = resolve_token(&cli)?;
     let passphrase = resolve_passphrase(&cli)?;
+    // The fedi vault unseals with the same passphrase as the at-rest
+    // vault; keep a copy since the builder consumes the original.
+    let vault_passphrase = passphrase.clone();
 
     let mut builder = Client::builder()
         .base_url(&cli.x0xd_base)
@@ -249,7 +280,98 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Mode::MintActor {
+            handle,
+            domain,
+            out,
+            post_url,
+        } => {
+            let live_agent = me.agent_id.to_string();
+            run_mint_actor(
+                &client,
+                &live_agent,
+                &handle,
+                &domain,
+                &out,
+                post_url.as_deref(),
+                vault_passphrase.as_deref(),
+            )
+            .await
+        }
     }
+}
+
+async fn run_mint_actor(
+    client: &Client,
+    live_agent_id: &str,
+    handle: &str,
+    domain: &str,
+    out: &std::path::Path,
+    post_url: Option<&str>,
+    passphrase: Option<&str>,
+) -> Result<()> {
+    let identity = if let Some(existing) = client
+        .load_actor_identity(handle, passphrase)
+        .await
+        .context("load_actor_identity")?
+    {
+        eprintln!("[peer] reusing persisted actor identity for {handle:?}");
+        existing
+    } else {
+        eprintln!("[peer] minting fresh actor identity for {handle:?} on {domain}");
+        client
+            .mint_actor_identity(handle, domain, passphrase)
+            .await
+            .context("mint_actor_identity")?
+    };
+
+    if identity.agent_id_hex != live_agent_id {
+        // Still self-consistent (the bridge will accept it), but the
+        // handle would bind to a key other than the one this daemon
+        // currently holds — almost always a stale vault.
+        eprintln!(
+            "[peer] WARNING: persisted actor identity binds agent {}, but the live x0xd agent \
+             is {live_agent_id}; delete the fedi vault for {handle:?} and re-run to bind the \
+             live key",
+            identity.agent_id_hex
+        );
+    }
+
+    let actor =
+        fetchit_fedi::actor::Actor::from_identity(&identity).context("Actor::from_identity")?;
+    let derived = actor
+        .verify_attestation()
+        .context("self-verify attestation")?;
+    anyhow::ensure!(
+        derived == identity.agent_id_hex,
+        "self-verify derived agent {derived} but the identity claims {}; refusing to emit",
+        identity.agent_id_hex
+    );
+
+    let doc =
+        serde_json::to_string_pretty(&actor.to_json_ld()).context("serialize actor JSON-LD")?;
+    std::fs::write(out, &doc).with_context(|| format!("write {}", out.display()))?;
+
+    let target = post_url.map_or_else(|| default_actors_post_url(domain), str::to_string);
+    eprintln!("[peer] actor document self-verified (agent {derived})");
+    eprintln!("[peer] wrote {} ({} bytes)", out.display(), doc.len());
+    eprintln!(
+        "[peer] register with the line below \
+         (201 created / 200 idempotent / 403 reserved-or-foreign-id / 409 handle taken):"
+    );
+    println!("{}", registration_curl_line(&target, out));
+    Ok(())
+}
+
+fn default_actors_post_url(domain: &str) -> String {
+    format!("https://{domain}/actors")
+}
+
+fn registration_curl_line(post_url: &str, doc: &std::path::Path) -> String {
+    format!(
+        "curl -sS -i -X POST '{post_url}' -H 'content-type: application/json' --data-binary @'{}'",
+        doc.display()
+    )
 }
 
 async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
@@ -1061,5 +1183,50 @@ mod tests {
         // step here.
         let steps = plan_join_steps(None);
         assert_eq!(steps, vec![JoinStep::Join]);
+    }
+
+    // ── mint-actor registration emission ──────────────────────────────
+
+    #[test]
+    fn default_actors_post_url_targets_the_bare_actors_route() {
+        // The bridge mounts registration at exactly `/actors` — no
+        // version prefix, no trailing slash. A drifted default here
+        // would emit curl lines that 404 at the edge.
+        assert_eq!(
+            default_actors_post_url("etchit.io"),
+            "https://etchit.io/actors"
+        );
+    }
+
+    #[test]
+    fn registration_curl_line_posts_the_doc_as_json() {
+        let line = registration_curl_line(
+            "https://etchit.io/actors",
+            std::path::Path::new("actor.json"),
+        );
+        assert!(
+            line.contains("-X POST 'https://etchit.io/actors'"),
+            "{line}"
+        );
+        assert!(line.contains("content-type: application/json"), "{line}");
+        assert!(line.contains("--data-binary @'actor.json'"), "{line}");
+        // `-i` so the operator sees the status line the bridge picked
+        // (201 created vs 200 idempotent vs 403/409 rejections).
+        assert!(line.contains(" -i "), "{line}");
+    }
+
+    #[test]
+    fn registration_curl_line_respects_a_custom_post_url() {
+        // The Worker-vs-direct-origin question is an operator decision;
+        // the override must flow through verbatim.
+        let line = registration_curl_line(
+            "https://bridge-origin.etchit.io/actors",
+            std::path::Path::new("/tmp/hello.json"),
+        );
+        assert!(
+            line.contains("'https://bridge-origin.etchit.io/actors'"),
+            "{line}"
+        );
+        assert!(line.contains("@'/tmp/hello.json'"), "{line}");
     }
 }
