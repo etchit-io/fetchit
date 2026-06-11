@@ -397,7 +397,9 @@ async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
     if let Some(layout) = client.layout() {
         match fetchit_chat::messages::StoredContactCard::from_share_uri(uri) {
             Ok(stored) => {
-                stored.save(layout).context("StoredContactCard.save")?;
+                stored
+                    .save_imported(layout)
+                    .context("StoredContactCard.save")?;
                 eprintln!("[peer] persisted v2 contact card to local layout");
             }
             Err(e) => {
@@ -487,7 +489,7 @@ async fn run_join(
                     match fetchit_chat::messages::StoredContactCard::from_share_uri(uri) {
                         Ok(stored) => {
                             stored
-                                .save(layout)
+                                .save_imported(layout)
                                 .context("StoredContactCard.save (owner card)")?;
                             eprintln!("[peer] persisted owner contact card to local layout");
                         }
