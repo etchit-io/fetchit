@@ -36,6 +36,18 @@ export interface Contact {
   last_seen?: number | null;
 }
 
+/// An inline image attachment carried inside a sealed message payload.
+/// Mirrors `fetchit_chat::attachment::Attachment` (the wire type Bob's
+/// lane validates on both send and receive). `bytes_b64` is standard
+/// base64 (no line wrapping) of the raw image bytes. Raster only — the
+/// backend rejects `image/svg+xml` because SVG can carry script.
+export interface Attachment {
+  mime: string;
+  width: number;
+  height: number;
+  bytes_b64: string;
+}
+
 export interface DirectMessage {
   from: AgentId;
   to?: AgentId | null;
@@ -44,6 +56,11 @@ export interface DirectMessage {
   timestamp_ms?: number | null;
   message_id?: string | null;
   reply_to_message_id?: string | null;
+  /// Optional inline image, already validated on the receive path by
+  /// `fetchit-chat` (oversize / non-raster / bad-base64 stripped to
+  /// null before this reaches the UI). The UI re-sniffs as
+  /// defense-in-depth before rendering.
+  attachment?: Attachment | null;
   verified?: boolean | null;
 }
 
