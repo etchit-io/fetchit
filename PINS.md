@@ -30,7 +30,7 @@ These aren't Cargo deps but ship lockstep with the binaries above:
 
 | Asset                  | Pin                                  | Why                                                            |
 |------------------------|--------------------------------------|----------------------------------------------------------------|
-| `x0xd`                 | `0.19.x` (currently 0.19.53)          | Daemon REST + SSE + WS contract; v0.18 wire-broke after yank.  |
+| `x0xd`                 | `v0.23.1` (tag `4b09b85`)             | Daemon REST + SSE + WS contract; bundled by desktop `build.rs` (`X0XD_PIN_VERSION`/`X0XD_PIN_SHA`). |
 | `ant-quic`             | (Saorsa fork of ant-quic, not yet used) | M2 Contract B dependency.                                  |
 | Relay region defaults  | NYC `67.207.94.66:8088`, FRA `159.89.11.217:8088` | Shipped `KNOWN_RELAYS` table in `apps/fetchit-desktop/src-tauri/src/settings.rs`. |
 
