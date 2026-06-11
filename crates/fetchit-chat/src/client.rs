@@ -434,6 +434,14 @@ pub struct Client {
     /// and a no-op in REST-only mode (no watcher is spawned). Mirrors the
     /// G1 primary-denylisted callback storage shape.
     relay_failover_cb: Arc<tokio::sync::RwLock<Option<RelayFailoverCallback>>>,
+    /// T8b: abort handle for the background failover watcher task. The
+    /// watcher holds its own `Client` clone, so it is NOT stopped by
+    /// dropping other clones; teardown paths that rebuild the `Client`
+    /// (the desktop relay switch / daemon restart) MUST call
+    /// [`Self::stop_failover_watcher`] first or every rebuild stacks
+    /// another immortal watcher pinning the dead transport stack.
+    /// Shared across clones so any clone can stop it.
+    failover_watcher_abort: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
     /// M4 Stage 5.2: shared outbound HTTPS-POST transport for the
     /// fediverse bridge. Owns one `reqwest::Client` + the per-instance
     /// HTTP-Signature capability cache; [`Self::publish_public_post`]
@@ -560,6 +568,7 @@ impl Client {
             denylist,
             denylist_consumer: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            failover_watcher_abort: Arc::new(std::sync::Mutex::new(None)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(initial_relays)),
             multi_home_inbound,
             primary_relay_url,
@@ -877,13 +886,29 @@ impl Client {
     /// No-op (returns without spawning) when no
     /// [`crate::transport::MultiHomeTransport`] is wired — slot 0 only
     /// exists there. Caller (in `from_parts`) already gates on that.
+    /// Stop the background home-relay failover watcher, if one is
+    /// running. Idempotent; callable from any clone.
+    ///
+    /// The watcher task holds its own `Client` clone and therefore
+    /// outlives every other clone; rebuild paths (the desktop's relay
+    /// switch, daemon restart) call this before dropping the old
+    /// `Client` so the watcher does not keep observing, and keeping
+    /// alive, a torn-down transport stack.
+    pub fn stop_failover_watcher(&self) {
+        if let Ok(guard) = self.failover_watcher_abort.lock() {
+            if let Some(h) = guard.as_ref() {
+                h.abort();
+            }
+        }
+    }
+
     fn spawn_failover_watcher(&self) {
         let Some(mh) = self.multi_home.clone() else {
             return;
         };
         let primary_for_read = Arc::clone(&self.primary_relay_url);
         let action_client = self.clone();
-        tokio::spawn(async move {
+        let watcher = tokio::spawn(async move {
             run_failover_watcher(
                 {
                     let mh = Arc::clone(&mh);
@@ -906,6 +931,13 @@ impl Client {
             )
             .await;
         });
+        if let Ok(mut guard) = self.failover_watcher_abort.lock() {
+            // One watcher per Client build; abort any prior one so a
+            // double-spawn can never stack immortal watchers.
+            if let Some(prev) = guard.replace(watcher.abort_handle()) {
+                prev.abort();
+            }
+        }
     }
 
     /// T8b action: migrate the pinned primary off `dead_url` to the next
@@ -934,6 +966,10 @@ impl Client {
         };
         let candidate = {
             let advertised = self.advertised_relays.read().await;
+            // Denylist-aware candidate filtering is deferred: the transport
+            // layer's DenylistQuery is a documented no-op until the
+            // trust-client relocation lands, so a filter here would be
+            // decorative. Tracked follow-up.
             pick_failover_candidate(&advertised, &dead_url)
         };
         let Some(candidate) = candidate else {
@@ -2379,8 +2415,10 @@ fn pick_failover_candidate(advertised: &[String], dead_url: &str) -> Option<Stri
 ///
 /// `resubscribe` returning `None` (slot 0 not ready, or a transport-less
 /// mock) is treated as transient: the watcher sleeps `backoff` and tries
-/// again. The loop never returns under normal operation; the spawning
-/// task is dropped when the owning `Client` is.
+/// again. The loop never returns under normal operation, and the spawned
+/// watcher holds its own `Client` clone, so it is NOT stopped by dropping
+/// other clones; teardown paths abort it explicitly via
+/// [`Client::stop_failover_watcher`].
 async fn run_failover_watcher<RS, CP, AC, Fut>(
     mut resubscribe: RS,
     current_primary: CP,
@@ -2455,10 +2493,12 @@ async fn run_failover_watcher<RS, CP, AC, Fut>(
                             continue;
                         }
                         () = tokio::time::sleep_until(at) => {
-                            // Window elapsed. Re-check: only trigger if
-                            // STILL disconnected (a connect that landed
-                            // exactly at the deadline clears it).
-                            if !is_disconnected(&states.borrow()) {
+                            // Window elapsed. Only a live Connected clears
+                            // the armed deadline; a Connecting blip landing
+                            // exactly at the deadline must not grant another
+                            // full window (the primary has been gone the
+                            // whole time). Anything not Connected triggers.
+                            if is_connected(&states.borrow()) {
                                 deadline = None;
                                 continue;
                             }
@@ -2486,6 +2526,15 @@ async fn run_failover_watcher<RS, CP, AC, Fut>(
             // (slot 0 is unchanged) and re-attempt at a bounded pace.
             if action(dead_url).await.is_err() {
                 tokio::time::sleep(backoff).await;
+            } else {
+                // Starvation guard: the immediate-trigger path (resubscribe
+                // hands back a still-terminal receiver and the action keeps
+                // succeeding) otherwise has no await point that yields, which
+                // would starve a current-thread runtime unkillably. Production
+                // cannot reach that cycle (success implies the new relay just
+                // liveness-gated Connected), but one yield makes the watcher
+                // starvation-proof against any misbehaving seam.
+                tokio::task::yield_now().await;
             }
             continue 'outer;
         }
@@ -3663,6 +3712,7 @@ mod tests {
             denylist: None,
             denylist_consumer: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            failover_watcher_abort: Arc::new(std::sync::Mutex::new(None)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: None,
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
@@ -3950,6 +4000,7 @@ mod tests {
             denylist: None,
             denylist_consumer: None,
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            failover_watcher_abort: Arc::new(std::sync::Mutex::new(None)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
@@ -4256,16 +4307,37 @@ mod tests {
 
     /// `PermanentlyDisconnected` triggers a failover immediately —
     /// without waiting for the disconnect window.
+    ///
+    /// The resubscribe stub models the swap exactly like the sticky test
+    /// above: the FIRST subscription is the dying relay (driven Permanent
+    /// below); post-migration subscriptions hand back a fresh healthy
+    /// `Connected` receiver so the watcher parks on `changed().await`. A
+    /// stub that kept returning the stuck-Permanent receiver would spin
+    /// the watcher in an unyielding trigger/action cycle and starve the
+    /// current-thread test runtime (the abort below would never land).
     #[tokio::test(start_paused = true)]
     async fn permanently_disconnected_triggers_immediately() {
         let (tx, rx) = watch::channel(vec![st_connected()]);
+        // Keep the post-migration sender alive for the whole test so its
+        // receiver never closes.
+        let (_new_tx, new_rx) = watch::channel(vec![st_connected()]);
         let probe = WatcherProbe::new();
+        let probe_rs = Arc::clone(&probe);
         let probe_ac = Arc::clone(&probe);
         let rx_for_sub = rx.clone();
 
         let watcher = tokio::spawn(async move {
             run_failover_watcher(
-                move || Some(rx_for_sub.clone()),
+                move || {
+                    let n = probe_rs
+                        .resubscribes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n == 0 {
+                        Some(rx_for_sub.clone())
+                    } else {
+                        Some(new_rx.clone())
+                    }
+                },
                 || Some("wss://dead.test/v1/ws".to_string()),
                 // A long window: if the trigger waited for it, the test
                 // would see no action in its short sleep below.
