@@ -801,7 +801,7 @@ fn boot_x0xd_supervisor_blocking() -> Option<String> {
     use x0xd_supervisor::{BinaryChoice, SupervisorConfig};
 
     let bundled_version = option_env!("FETCHIT_BUNDLED_X0XD_VERSION")
-        .unwrap_or("0.21.3")
+        .unwrap_or("0.23.1")
         .parse::<semver::Version>()
         .ok();
 

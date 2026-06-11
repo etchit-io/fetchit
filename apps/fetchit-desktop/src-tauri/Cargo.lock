@@ -3378,12 +3378,15 @@ dependencies = [
 name = "fetchit-relay-proto"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "hex",
  "postcard",
+ "saorsa-pqc 0.5.1",
  "serde",
  "sha2",
  "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]

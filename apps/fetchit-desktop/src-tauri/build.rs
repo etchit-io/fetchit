@@ -6,13 +6,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Pinned x0xd version we bundle. v0.21.3 carries David's 63b5c63
-/// joiner-welcome-retry fix (the #287 cross-NAT class).
-const X0XD_PIN_VERSION: &str = "0.21.3";
+/// Pinned x0xd version we bundle. v0.23.1 carries the send_replace
+/// DM-capability fix (stock since v0.22.0, formerly our x0x#101 fork),
+/// the ant-quic read_to_end zero-fill fix (v0.22.1), and the detached
+/// ML-DSA verify endpoint (`POST /agent/verify`).
+const X0XD_PIN_VERSION: &str = "0.23.1";
 
-/// Pinned upstream tag commit in saorsa-labs/x0x — `v0.21.3`.
+/// Pinned upstream tag commit in saorsa-labs/x0x — `v0.23.1`.
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "aec35ab25b64374539ffeaa205a57d983e027226";
+const X0XD_PIN_SHA: &str = "4b09b85fc3cf74347e6471979042c0bb543c065b";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
