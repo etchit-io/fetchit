@@ -99,6 +99,11 @@ pub enum PairError {
     /// malformed fields, etc.).
     #[error("pair record verify: {0}")]
     PairRecordVerify(String),
+    /// [`fetchit_relay_proto::pair_record::verify_forwarding_record`] rejected
+    /// the returned `ForwardingRecordV1` (bad signature, derivation mismatch,
+    /// malformed fields, etc.).
+    #[error("forwarding record verify: {0}")]
+    ForwardingVerify(String),
 }
 
 const ALL_ZEROS_PROFILE_ADDR: &str =
@@ -249,6 +254,58 @@ pub async fn fetch_pair_record_by_id(
         serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
     fetchit_relay_proto::pair_record::verify_pair_record(&record)
         .map_err(|e| PairError::PairRecordVerify(e.to_string()))?;
+    if record.agent_id_hex != agent_id_hex {
+        return Err(PairError::AgentIdMismatch);
+    }
+    Ok(record)
+}
+
+/// HTTP GET `{relay}/v1/forwarding/{agent_id_hex}`, verify the returned
+/// [`fetchit_relay_proto::pair_record::ForwardingRecordV1`], and
+/// cross-check that the returned `agent_id_hex` matches the request.
+///
+/// Verification calls
+/// [`fetchit_relay_proto::pair_record::verify_forwarding_record`] (ML-DSA-65
+/// sig + agent-id derive binding). The caller supplies the contact's
+/// ML-DSA-65 public key as base64 (STANDARD encoding).
+///
+/// # Errors
+/// Transport, non-2xx relay status, malformed body, agent-id mismatch,
+/// or signature / derivation verification failure.
+pub async fn fetch_forwarding_record_by_id(
+    relay: &url::Url,
+    agent_id_hex: &str,
+    pubkey_b64: &str,
+    http: &reqwest::Client,
+) -> std::result::Result<fetchit_relay_proto::pair_record::ForwardingRecordV1, PairError> {
+    use base64::engine::general_purpose::STANDARD as B64STD;
+    use base64::Engine as _;
+
+    let url = relay
+        .join(&format!("v1/forwarding/{agent_id_hex}"))
+        .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
+    let resp = http
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(PairError::RelayStatus(resp.status().as_u16()));
+    }
+    let raw = resp
+        .bytes()
+        .await
+        .map_err(|e| PairError::Decode(format!("relay body read: {e}")))?;
+    if raw.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
+        return Err(PairError::Decode("relay body exceeds size cap".into()));
+    }
+    let record: fetchit_relay_proto::pair_record::ForwardingRecordV1 =
+        serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
+    let pubkey_bytes = B64STD
+        .decode(pubkey_b64)
+        .map_err(|e| PairError::FieldDecode(format!("pubkey_b64: {e}")))?;
+    fetchit_relay_proto::pair_record::verify_forwarding_record(&record, &pubkey_bytes)
+        .map_err(|e| PairError::ForwardingVerify(e.to_string()))?;
     if record.agent_id_hex != agent_id_hex {
         return Err(PairError::AgentIdMismatch);
     }
@@ -792,6 +849,159 @@ mod tests {
         let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let http = reqwest::Client::new();
         match fetch_pair_record_by_id(&relay, &"b".repeat(64), &http).await {
+            Err(PairError::RelayStatus(404)) => {}
+            other => panic!("expected RelayStatus(404), got {other:?}"),
+        }
+    }
+
+    // Build a valid ForwardingRecordV1 signed by a fresh ML-DSA-65 keypair.
+    fn mk_signed_forwarding_record(
+        dsa: &MlDsa,
+        sk: &saorsa_pqc::api::sig::MlDsaSecretKey,
+        pk_bytes: &[u8],
+        moved_to: &[&str],
+        issued_at_ms: u64,
+    ) -> fetchit_relay_proto::pair_record::ForwardingRecordV1 {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use fetchit_relay_proto::pair_record::{forwarding_signing_input, ForwardingRecordV1};
+        let agent_id_hex = hex::encode(fetchit_relay_proto::derive_agent_id(pk_bytes));
+        let relay_strs: Vec<String> = moved_to
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let input = forwarding_signing_input(&agent_id_hex, &relay_strs, issued_at_ms).unwrap();
+        let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+        ForwardingRecordV1 {
+            agent_id_hex,
+            moved_to_relays: relay_strs,
+            issued_at_ms,
+            sig_b64: B64STD.encode(sig),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_forwarding_record_by_id_happy_path() {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let record = mk_signed_forwarding_record(
+            &dsa,
+            &sk,
+            &pk_bytes,
+            &["https://new-relay.example.com"],
+            5_000,
+        );
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/forwarding/{}", record.agent_id_hex)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let pubkey_b64 = B64STD.encode(&pk_bytes);
+        let got = fetch_forwarding_record_by_id(&relay, &record.agent_id_hex, &pubkey_b64, &http)
+            .await
+            .unwrap();
+        assert_eq!(got.agent_id_hex, record.agent_id_hex);
+        assert_eq!(got.issued_at_ms, 5_000);
+        assert_eq!(got.moved_to_relays, vec!["https://new-relay.example.com"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_forwarding_record_by_id_rejects_forged_sig() {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let mut record = mk_signed_forwarding_record(
+            &dsa,
+            &sk,
+            &pk_bytes,
+            &["https://new-relay.example.com"],
+            1_000,
+        );
+        // Flip a byte in the signature.
+        let mut sig_bytes = B64STD.decode(&record.sig_b64).unwrap();
+        sig_bytes[0] ^= 0xff;
+        record.sig_b64 = B64STD.encode(&sig_bytes);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let pubkey_b64 = B64STD.encode(&pk_bytes);
+        match fetch_forwarding_record_by_id(&relay, &record.agent_id_hex, &pubkey_b64, &http).await
+        {
+            Err(PairError::ForwardingVerify(_)) => {}
+            other => panic!("expected ForwardingVerify, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_forwarding_record_by_id_rejects_agent_id_mismatch() {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let record = mk_signed_forwarding_record(
+            &dsa,
+            &sk,
+            &pk_bytes,
+            &["https://new-relay.example.com"],
+            2_000,
+        );
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let pubkey_b64 = B64STD.encode(&pk_bytes);
+        // Request a different agent id — the record's agent_id_hex won't match.
+        let wrong_id = "a".repeat(64);
+        match fetch_forwarding_record_by_id(&relay, &wrong_id, &pubkey_b64, &http).await {
+            Err(PairError::AgentIdMismatch) => {}
+            other => panic!("expected AgentIdMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_forwarding_record_by_id_404_returns_relay_status() {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        // Pubkey doesn't matter for 404 path.
+        let pubkey_b64 = B64STD.encode([0u8; 1952]);
+        match fetch_forwarding_record_by_id(&relay, &"b".repeat(64), &pubkey_b64, &http).await {
             Err(PairError::RelayStatus(404)) => {}
             other => panic!("expected RelayStatus(404), got {other:?}"),
         }

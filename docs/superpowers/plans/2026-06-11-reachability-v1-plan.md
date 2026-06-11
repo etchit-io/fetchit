@@ -224,3 +224,99 @@ shared URI never 404s on import; honest "you're offline, can't import" state.
 server only causes ONE 404'd GET there (that server has no signed record for
 the agent), so amplification is bounded; the existing signature+derive binding
 defends impersonation. No action; recorded so it isn't re-raised.
+
+---
+
+## Task 13: SSRF guard on relay-bound requests (`fetchit-chat`) -- SECURITY, launch-gate
+
+**Found 2026-06-11** during the T4 pointer-URI edge-hunt. The deposit model is the
+first time the client issues HTTP requests to relay URLs SUPPLIED BY CONTACTS
+(advertised_relays in a signed pair/forwarding record, or a scanned pair URI).
+The relay-proto validator checks scheme(http/https)+host+no-userinfo but NOT the
+address range. So a malicious-but-paired contact can advertise
+`http://127.0.0.1:<port>` / `http://169.254.169.254` / `http://[::1]` / RFC1918
+as their relay, and the client will dial it on deposit (POST via the pool),
+pair-record GET, and forwarding GET. Desktop-side the main risk is loopback /
+link-local probing of the user's own local services (x0xd, media server); the
+response must still verify as a signed record so it is blind/probe SSRF, not
+direct exfil -- but it is a real trust-boundary expansion for a security-first,
+grandma-ready app. Pre-existing on `fetch_pair_record_by_id` (T3); T7 mirrors it.
+
+**Files:** Modify `crates/fetchit-chat/src/pair.rs` (both fetch fns), the deposit
+client construction in `relay_transport.rs`, and add a shared
+`reject_private_relay_host(url) -> Result<()>` helper (new small module or in
+pair_record.rs) reused by every relay-bound request.
+
+- [ ] Failing tests: the guard rejects IP-literal loopback / link-local
+  (169.254/16, fe80::/10) / RFC1918 (10/8, 172.16/12, 192.168/16) / ULA (fc00::/7)
+  / 0.0.0.0 / metadata 169.254.169.254; accepts public IP literals and DNS names;
+  a DEV carve-out (env `FETCHIT_ALLOW_LOCAL_RELAY=1`, matching the #349 dev-relay
+  precedent) permits loopback so local dev + the m2_live localhost topology keep
+  working. Each relay-bound call site rejects a private URL before dialing.
+- [ ] Set `reqwest` redirect policy to `Policy::none()` on these requests (a
+  302 -> 169.254.169.254 bypasses a URL-only check). Resolve-and-recheck DNS
+  hostnames where cheap; full DNS-rebind race defense is explicitly DEFERRED
+  post-v1 (documented limitation in SECURITY.md).
+- [ ] Gates; commit. Cross-review with Bob (he owns the M3 trust-path SSRF fold
+  #332/#335; reuse his validator if one exists rather than writing a parallel).
+
+**Decision needed from Josh (non-blocking, has a sane default):** how permissive
+the dev carve-out is. DEFAULT chosen: loopback allowed ONLY when
+`FETCHIT_ALLOW_LOCAL_RELAY=1` (off in shipped builds), private ranges always
+rejected in release. Flag if a different posture is wanted.
+
+---
+
+## Post-T6 harden items (do in the T7 review-harden; pair.rs is locked by T7 impl until then)
+
+- **[P1, Bob cross-review 2026-06-11] pair_accept sibling of the import bypass.**
+  `pair.rs::pair_accept` does `record_into_stored_contact(...)` (builds card with
+  `last_hint_epoch_ms: None`, `rendezvous_hints: None`) then plain
+  `stored.save(layout)` -- no CARD_UPDATE_LOCK, no watermark preservation. Same
+  downgrade-window re-open that ca695b4 closed in `import_pair_uri`, but on the
+  LIVE v3 profile-pair path (`chat_pair_accept` Tauri cmd -> panel.ts). FIX: route
+  through `StoredContactCard::save_imported(layout)` (the helper added in ca695b4).
+  One line + a regression test mirroring `save_imported_preserves_hint_watermark_*`.
+- **[LOW, Bob cross-review 2026-06-11] absurd-future epoch permanently bricks a
+  contact's auto-heal.** A malicious verified contact (or a pre-c34355c glitched
+  peer) can send ONE `hint_epoch_ms` = huge; `apply_relay_hint` then stores it and
+  rejects every real future hint (strict-greater) forever, and `save_imported`
+  deliberately preserves it so even a QR rescan can't recover (only deleting the
+  contact does). T7 re-resolve also persists via apply_relay_hint so it inherits
+  the brick (send still heals per-send via the fetched moved_to, just never
+  caches). FIX (cannot be a re-import recovery -- that re-opens the downgrade
+  window): clamp at apply time -- reject `hint_epoch_ms > now_ms + MAX_FUTURE_SKEW`
+  (generous, e.g. 7 days). Needs `now_ms` threaded into apply_relay_hint; update
+  the T7 re-resolve call site in the same commit. Defense-in-depth, genuinely LOW.
+
+### T13 implementation blueprint (from Bob's M4 SSRF primitives, 2026-06-11)
+
+REUSE, do not re-implement. `crates/fetchit-fedi/src/webfinger.rs` already holds the
+canonical detection (M4 SSRF fold; doc at line 180 says it was scoped crate-wide
+precisely so future fetch paths share ONE detector). `fetchit-chat` already depends
+on `fetchit-fedi` (its Cargo.toml ~line 33). Three primitives, currently `pub(crate)`:
+- `private_ip_reason(&url::Host)` (line 264) -- pre-flight gate on IP literals in a
+  URL; catches `http://127.0.0.1` before any dial.
+- `is_private_ip_addr(IpAddr)` (line 192) -- post-DNS twin; covers v4 private/
+  loopback/link-local/multicast/broadcast/unspecified + v6 loopback/unspecified/
+  multicast/v4-mapped/ULA fc00::/7/link-local fe80::/10.
+- `resolve_and_pin_host(host, port)` (line 243) -- lookup_host, validates EVERY
+  resolved addr (partial-results-safe), returns SocketAddrs for reqwest
+  `resolve_to_addrs` pinning. This is the anti-DNS-rebind piece a naive
+  check-then-dial misses (TTL=0 host passes the check then resolves private at
+  connect).
+
+Plan (agreed with Bob):
+- Lift the three into a neutral `pub mod ssrf` in `fetchit-fedi` (~30 line move) with
+  a neutral error type, so `WebFingerError` does not leak into `ChatError`; webfinger
+  callers keep their unconditional gate.
+- Add CGNAT `100.64.0.0/10` (source gap flagged V-7) to BOTH twins (mirror-for-mirror,
+  one line each) -- contact-supplied relay URLs warrant it.
+- reqwest paths (`fetch_pair_record_by_id`, T7 forwarding fetch, deposit POST): pin via
+  `resolve_to_addrs` + set redirect `Policy::none()`.
+- WS pool connect (tokio-tungstenite, in `relay_transport.rs`) CANNOT use
+  `resolve_to_addrs`: connect the TCP socket to the pinned `SocketAddr` directly and
+  pass the hostname only for SNI/TLS, else the pool re-resolves and reopens the hole.
+- Dev carve-out (`FETCHIT_ALLOW_LOCAL_RELAY=1`) lives at the CALL SITE, not inside the
+  pure primitives.
+- Cross-review with Bob (he owns webfinger.rs).

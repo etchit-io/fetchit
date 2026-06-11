@@ -148,6 +148,16 @@ pub enum ChatError {
         /// Wall-clock the joiner was given before this error surfaced.
         waited_ms: u128,
     },
+
+    /// All known relays for the recipient were unreachable and forwarding
+    /// re-resolve did not recover a working deposit path. Surfaces as a
+    /// typed terminal failure so the UI can toast "could not deliver" rather
+    /// than silently dropping the message.
+    #[error("all known relays for {recipient} are unreachable")]
+    AllRelaysUnreachable {
+        /// Hex agent id of the recipient whose relays all failed.
+        recipient: String,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {

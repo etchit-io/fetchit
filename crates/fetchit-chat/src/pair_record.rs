@@ -198,7 +198,138 @@ pub async fn post_pair_record(
     )))
 }
 
-// ── (B) Logical-clock watermark ───────────────────────────────────────────────
+/// Outcome returned by [`post_forwarding_record`].
+#[derive(Debug)]
+pub enum ForwardingOutcome {
+    /// The relay accepted the forwarding record (2xx).
+    Written,
+    /// The relay returned 412 Precondition Failed: no pair-record exists
+    /// for this agent at the old relay. Non-fatal: the migration still
+    /// succeeds via the next stale hint or the new relays directly.
+    SkippedNoPairRecord,
+}
+
+/// Internal single-attempt result, including the 409 sentinel.
+enum ForwardingAttempt {
+    Written,
+    SkippedNoPairRecord,
+    WatermarkReject { current_issued_at_ms: u64 },
+}
+
+/// `POST <relay>/v1/forwarding` once, returning the raw attempt outcome.
+async fn post_forwarding_once(
+    relay: &url::Url,
+    record: &fetchit_relay_proto::pair_record::ForwardingRecordV1,
+    http: &reqwest::Client,
+) -> Result<ForwardingAttempt> {
+    let url = relay
+        .join("v1/forwarding")
+        .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
+    let resp = http
+        .post(url)
+        .json(record)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(ForwardingAttempt::Written);
+    }
+    if status.as_u16() == 409 {
+        let raw = resp
+            .bytes()
+            .await
+            .map_err(|e| ChatError::Invalid(format!("409 body read: {e}")))?;
+        if raw.len() > MAX_RELAY_BODY_BYTES {
+            return Err(ChatError::Invalid("409 body exceeds size cap".into()));
+        }
+        let body: WatermarkRejectBody = serde_json::from_slice(&raw)
+            .map_err(|e| ChatError::Invalid(format!("409 body decode: {e}")))?;
+        return Ok(ForwardingAttempt::WatermarkReject {
+            current_issued_at_ms: body.current_issued_at_ms,
+        });
+    }
+    if status.as_u16() == 412 {
+        return Ok(ForwardingAttempt::SkippedNoPairRecord);
+    }
+    if status.as_u16() == 403 {
+        return Err(ChatError::Invalid(format!(
+            "relay rejected forwarding record with 403 (bad sig) at {relay}"
+        )));
+    }
+    Err(ChatError::Invalid(format!(
+        "relay returned {s} publishing forwarding record",
+        s = status.as_u16()
+    )))
+}
+
+/// Build, sign, and `POST <relay>/v1/forwarding` with clock-bump retry.
+///
+/// Handles the TB2 contract Option A response set:
+/// - 2xx -> [`ForwardingOutcome::Written`].
+/// - 409 -> observe the relay's watermark, re-sign with a fresh
+///   `issued_at_ms`, and retry ONCE. A second 409 is a hard error.
+/// - 412 -> [`ForwardingOutcome::SkippedNoPairRecord`] (non-fatal: old
+///   relay has no pair-record for this agent, so the guard cannot apply;
+///   log and skip, the migration still succeeds).
+/// - 403 -> [`ChatError::Invalid`] (bad sig; should not happen for our
+///   own records).
+/// - Other non-2xx -> [`ChatError::Invalid`] with the status code.
+///
+/// # Errors
+///
+/// [`ChatError::Transport`] on connection failure.
+/// [`ChatError::Invalid`] for a second 409, 403, or other non-2xx.
+pub async fn post_forwarding_record(
+    relay: &url::Url,
+    identity: &crate::chat_identity::FetchitIdentity,
+    signer: &dyn fetchit_relay_client::Signer,
+    moved_to_relays: Vec<String>,
+    layout: &crate::local_store::StoreLayout,
+    http: &reqwest::Client,
+) -> Result<ForwardingOutcome> {
+    let agent_hex = identity.agent_id_hex().to_owned();
+    let wall_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+    let issued = next_issued_at_ms(layout, &agent_hex, wall_ms)?;
+    let record = build_signed_forwarding_record(identity, signer, moved_to_relays, issued).await?;
+
+    match post_forwarding_once(relay, &record, http).await? {
+        ForwardingAttempt::Written => Ok(ForwardingOutcome::Written),
+        ForwardingAttempt::SkippedNoPairRecord => {
+            log::warn!(
+                "[chat] forwarding record: relay at {relay} has no pair-record for {}; skipping (non-fatal)",
+                &agent_hex[..8],
+            );
+            Ok(ForwardingOutcome::SkippedNoPairRecord)
+        }
+        ForwardingAttempt::WatermarkReject {
+            current_issued_at_ms,
+        } => {
+            observe_external_watermark(layout, &agent_hex, current_issued_at_ms)?;
+            let wall_ms2 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+            let issued2 = next_issued_at_ms(layout, &agent_hex, wall_ms2)?;
+            let record2 =
+                build_signed_forwarding_record(identity, signer, record.moved_to_relays, issued2)
+                    .await?;
+            match post_forwarding_once(relay, &record2, http).await? {
+                ForwardingAttempt::Written => Ok(ForwardingOutcome::Written),
+                ForwardingAttempt::SkippedNoPairRecord => {
+                    log::warn!(
+                        "[chat] forwarding record retry: relay at {relay} has no pair-record; skipping",
+                    );
+                    Ok(ForwardingOutcome::SkippedNoPairRecord)
+                }
+                ForwardingAttempt::WatermarkReject { .. } => Err(ChatError::Invalid(
+                    "forwarding record publish rejected twice by relay watermark guard".into(),
+                )),
+            }
+        }
+    }
+}
 
 const WATERMARK_FILE: &str = "pair_record_watermarks.json";
 
@@ -730,6 +861,151 @@ mod tests {
         match post_pair_record(&relay, &record, &http).await {
             Err(e) => assert!(e.to_string().contains("500"), "got {e}"),
             Ok(o) => panic!("expected Err, got {o:?}"),
+        }
+    }
+
+    // ── (D) post_forwarding_record wiremock ───────────────────────────────────
+
+    fn build_test_forwarding_ctx() -> (
+        FetchitIdentity,
+        fetchit_relay_client::MlDsaSigner,
+        StoreLayout,
+    ) {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use zeroize::Zeroizing;
+
+        let dir = tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("pw".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let signer = make_signer();
+        let agent_hex = agent_hex_for(&signer);
+        let identity = FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &agent_hex,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+        let layout = StoreLayout::ensure(dir.keep()).unwrap();
+        (identity, signer, layout)
+    }
+
+    #[tokio::test]
+    async fn post_forwarding_record_written_on_200() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (identity, signer, layout) = build_test_forwarding_ctx();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let moved = vec!["https://new-relay.example.com".to_owned()];
+        match post_forwarding_record(&relay, &identity, &signer, moved, &layout, &http)
+            .await
+            .unwrap()
+        {
+            ForwardingOutcome::Written => {}
+            other @ ForwardingOutcome::SkippedNoPairRecord => {
+                panic!("expected Written, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_forwarding_record_skipped_on_412() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(412))
+            .mount(&server)
+            .await;
+
+        let (identity, signer, layout) = build_test_forwarding_ctx();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let moved = vec!["https://new-relay.example.com".to_owned()];
+        // 412 is non-fatal: must return Ok(SkippedNoPairRecord), not Err.
+        match post_forwarding_record(&relay, &identity, &signer, moved, &layout, &http)
+            .await
+            .unwrap()
+        {
+            ForwardingOutcome::SkippedNoPairRecord => {}
+            other @ ForwardingOutcome::Written => {
+                panic!("expected SkippedNoPairRecord, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_forwarding_record_bump_retry_on_409_then_written() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First call: 409 with a watermark value higher than the initial issued_at.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(json!({"current_issued_at_ms": 999_999u64})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Retry: 200.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (identity, signer, layout) = build_test_forwarding_ctx();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let moved = vec!["https://new-relay.example.com".to_owned()];
+        match post_forwarding_record(&relay, &identity, &signer, moved, &layout, &http)
+            .await
+            .unwrap()
+        {
+            ForwardingOutcome::Written => {}
+            other @ ForwardingOutcome::SkippedNoPairRecord => {
+                panic!("expected Written after 409+retry, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_forwarding_record_403_returns_err() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let (identity, signer, layout) = build_test_forwarding_ctx();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let moved = vec!["https://new-relay.example.com".to_owned()];
+        match post_forwarding_record(&relay, &identity, &signer, moved, &layout, &http).await {
+            Err(e) => assert!(
+                e.to_string().contains("403"),
+                "error must mention 403, got {e}"
+            ),
+            Ok(o) => panic!("expected Err on 403, got {o:?}"),
         }
     }
 }

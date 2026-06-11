@@ -1255,7 +1255,7 @@ impl<'a> Endpoint<'a> {
         let mut last_id = None;
         for ob in outbox {
             let recipient_hex = hex::encode(ob.recipient_agent_id.as_bytes());
-            let recipient = AgentId(recipient_hex);
+            let recipient = AgentId(recipient_hex.clone());
             let timestamp_ms = ob.envelope.timestamp_ms;
             let transport_out = TransportOutbound {
                 kind: OutboundKind::Dm,
@@ -1271,12 +1271,132 @@ impl<'a> Endpoint<'a> {
             // `resolve_hints_for`.
             let hints = self.resolve_hints_for(&recipient.0);
             let receipt = self
-                .router
-                .send(&recipient, transport_out, hints.as_ref())
+                .deposit_with_reresolve(&recipient, &recipient_hex, transport_out, hints)
                 .await?;
             last_id = receipt.message_id;
         }
         Ok(last_id)
+    }
+
+    /// Attempt to deposit `transport_out` to `recipient`. On
+    /// [`ChatError::MessageTransport`] (all known relays exhausted),
+    /// fetch forwarding records from each stale hint relay, verify, persist
+    /// via [`StoredContactCard::apply_relay_hint`] (which enforces the
+    /// monotonic watermark so a rolled-back forwarding record is ignored),
+    /// and retry the deposit ONCE at the forwarded-to relays. Bounded to ONE
+    /// hop: if the forwarded-to relays also fail, surfaces
+    /// [`ChatError::AllRelaysUnreachable`].
+    ///
+    /// Leaves best-effort and bridge sends (client.rs) untouched.
+    async fn deposit_with_reresolve(
+        &self,
+        recipient: &AgentId,
+        recipient_hex: &str,
+        transport_out: TransportOutbound,
+        hints: Option<crate::card::RendezvousHintsV1>,
+    ) -> Result<crate::transport::SendReceipt> {
+        // First attempt: use whatever hints are already on the card.
+        match self
+            .router
+            .send(recipient, transport_out.clone(), hints.as_ref())
+            .await
+        {
+            Ok(receipt) => return Ok(receipt),
+            Err(ChatError::MessageTransport(_)) => {}
+            Err(other) => return Err(other),
+        }
+
+        // All known hints failed. Try forwarding re-resolve.
+        let Some(layout) = self.layout else {
+            return Err(ChatError::AllRelaysUnreachable {
+                recipient: recipient_hex.to_owned(),
+            });
+        };
+
+        // Load the contact card to get the ML-DSA-65 pubkey for sig verification.
+        let pubkey_b64 = match StoredContactCard::load(layout, recipient_hex)? {
+            Some(card) => card.agent_public_key_b64,
+            None => None,
+        };
+
+        // Without a stored pubkey we cannot authenticate a forwarding record.
+        let Some(pubkey_b64) = pubkey_b64 else {
+            return Err(ChatError::AllRelaysUnreachable {
+                recipient: recipient_hex.to_owned(),
+            });
+        };
+
+        let stale_relays: Vec<String> = hints.map(|h| h.relays).unwrap_or_default();
+        let http = reqwest::Client::new();
+
+        for wss_url in &stale_relays {
+            // Hints are wss:// (from the card); the forwarding endpoint is HTTP.
+            let https_url = match wss_to_https_url(wss_url) {
+                Ok(u) => u,
+                Err(e) => {
+                    log::warn!(
+                        "[chat] forwarding re-resolve: cannot convert hint {wss_url} to https: {e}"
+                    );
+                    continue;
+                }
+            };
+            let record = match crate::pair::fetch_forwarding_record_by_id(
+                &https_url,
+                recipient_hex,
+                &pubkey_b64,
+                &http,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("[chat] forwarding re-resolve: no record at {wss_url}: {e}");
+                    continue;
+                }
+            };
+
+            // Persist via apply_relay_hint: enforces the per-contact
+            // monotonic watermark, so a stale/rolled-back forwarding record
+            // with issued_at_ms <= last_hint_epoch_ms is rejected here.
+            let updated = StoredContactCard::apply_relay_hint(
+                layout,
+                recipient_hex,
+                record.moved_to_relays.clone(),
+                record.issued_at_ms,
+            )?;
+            if !updated {
+                // Watermark rejected the record or no card on disk.
+                log::debug!(
+                    "[chat] forwarding re-resolve: apply_relay_hint rejected stale record at {wss_url}"
+                );
+                continue;
+            }
+
+            // Retry deposit ONCE at the forwarded-to relays. One hop only.
+            let moved_hints = crate::card::RendezvousHintsV1 {
+                relays: record.moved_to_relays,
+            };
+            match self
+                .router
+                .send(recipient, transport_out.clone(), Some(&moved_hints))
+                .await
+            {
+                Ok(receipt) => return Ok(receipt),
+                Err(e) => {
+                    log::warn!(
+                        "[chat] forwarding re-resolve: retry at moved-to relays also failed \
+                         for {}: {e}",
+                        &recipient_hex[..8.min(recipient_hex.len())],
+                    );
+                    // One hop only: do not chase the forwarded-to relay's
+                    // own forwarding record.
+                }
+            }
+        }
+
+        Err(ChatError::AllRelaysUnreachable {
+            recipient: recipient_hex.to_owned(),
+        })
     }
 
     /// List currently-open x0xd direct connections — pure compat
@@ -1309,6 +1429,27 @@ impl<'a> Endpoint<'a> {
             .await?;
         Ok(())
     }
+}
+
+/// Convert a `wss://` or `ws://` URL to its `https://` / `http://`
+/// equivalent for relay HTTP calls. Returns [`ChatError::Invalid`] when the
+/// input cannot be parsed or uses an unexpected scheme.
+fn wss_to_https_url(wss: &str) -> Result<url::Url> {
+    let mut url = wss
+        .parse::<url::Url>()
+        .map_err(|e| ChatError::Invalid(format!("hint url parse: {e}")))?;
+    let https_scheme = match url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        s => {
+            return Err(ChatError::Invalid(format!(
+                "expected wss/ws hint scheme, got {s}"
+            )));
+        }
+    };
+    url.set_scheme(https_scheme)
+        .map_err(|()| ChatError::Invalid("set_scheme failed".into()))?;
+    Ok(url)
 }
 
 fn random_message_id() -> String {
@@ -4421,5 +4562,465 @@ mod tests {
             loaded.last_hint_epoch_ms, None,
             "fresh import carries no watermark"
         );
+    }
+
+    // ── deposit_with_reresolve ────────────────────────────────────────────────
+
+    // A transport that fails on the first N calls then succeeds.
+    struct FailThenSucceedTransport {
+        fail_count: StdMutex<usize>,
+        hint_last_call: StdMutex<Option<crate::card::RendezvousHintsV1>>,
+        attempts: StdMutex<usize>,
+    }
+
+    impl FailThenSucceedTransport {
+        fn new(fail_count: usize) -> Arc<Self> {
+            Arc::new(Self {
+                fail_count: StdMutex::new(fail_count),
+                hint_last_call: StdMutex::new(None),
+                attempts: StdMutex::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for FailThenSucceedTransport {
+        fn name(&self) -> &'static str {
+            "fail-then-succeed"
+        }
+        fn reachability(&self, _: &AgentId) -> Reachability {
+            Reachability::Always
+        }
+        async fn send(
+            &self,
+            _: &AgentId,
+            _: TransportOutbound,
+            hints: Option<&crate::card::RendezvousHintsV1>,
+        ) -> Result<SendReceipt> {
+            *self.attempts.lock().unwrap() += 1;
+            *self.hint_last_call.lock().unwrap() = hints.cloned();
+            let mut fails = self.fail_count.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(ChatError::MessageTransport(
+                    "simulated relay failure".into(),
+                ));
+            }
+            Ok(SendReceipt {
+                accepted_at_ms: 1,
+                message_id: Some("reresolve-receipt".to_owned()),
+                transport_name: "fail-then-succeed",
+            })
+        }
+        fn take_inbound(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<InboundEnvelope>> {
+            None
+        }
+    }
+
+    // Build a signed ForwardingRecordV1 using saorsa-pqc directly.
+    fn mk_forwarding_record(
+        pk_bytes: &[u8],
+        sk_bytes: &[u8],
+        moved_to: Vec<String>,
+        issued_at_ms: u64,
+    ) -> fetchit_relay_proto::pair_record::ForwardingRecordV1 {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use fetchit_relay_proto::pair_record::{forwarding_signing_input, ForwardingRecordV1};
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaSecretKey, MlDsaVariant};
+        let agent_id_hex = hex::encode(fetchit_relay_proto::derive_agent_id(pk_bytes));
+        let input = forwarding_signing_input(&agent_id_hex, &moved_to, issued_at_ms).unwrap();
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let sk = MlDsaSecretKey::from_bytes(MlDsaVariant::MlDsa65, sk_bytes).unwrap();
+        let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+        ForwardingRecordV1 {
+            agent_id_hex,
+            moved_to_relays: moved_to,
+            issued_at_ms,
+            sig_b64: B64STD.encode(sig),
+        }
+    }
+
+    // Build a layout with a contact card for the given keypair.
+    fn card_layout_for(
+        pk_bytes: &[u8],
+        relays: Vec<String>,
+        epoch: Option<u64>,
+    ) -> (crate::local_store::StoreLayout, String, String) {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        let agent_id_hex = hex::encode(fetchit_relay_proto::derive_agent_id(pk_bytes));
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.keep()).unwrap();
+        let hints = if relays.is_empty() {
+            None
+        } else {
+            Some(crate::card::RendezvousHintsV1 { relays })
+        };
+        let card = StoredContactCard {
+            agent_id_hex: agent_id_hex.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: B64STD.encode(vec![0u8; 1184]),
+            agent_public_key_b64: Some(B64STD.encode(pk_bytes)),
+            rendezvous_hints: hints,
+            last_hint_epoch_ms: epoch,
+        };
+        card.save(&layout).unwrap();
+        let pubkey_b64 = B64STD.encode(pk_bytes);
+        (layout, agent_id_hex, pubkey_b64)
+    }
+
+    // Minimal outbound envelope for reresolve tests.
+    fn dummy_transport_out(recipient_hex: &str) -> TransportOutbound {
+        use fetchit_relay_proto::{AgentId as RelayAgentId, EnvelopeKind, MachineId, WIRE_VERSION};
+        let mut agent_bytes = [0u8; 32];
+        hex::decode_to_slice(recipient_hex, &mut agent_bytes).unwrap();
+        let transit = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes([0u8; 32]),
+            sender_machine_id: MachineId::from_bytes([0u8; 32]),
+            timestamp_ms: 1,
+            epoch: 0,
+            ciphertext: b"test".to_vec(),
+            nonce: vec![0u8; 12],
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        TransportOutbound {
+            kind: OutboundKind::Dm,
+            from_machine_id: None,
+            payload: Vec::new(),
+            timestamp_ms: 1,
+            transit: Some(transit),
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_with_reresolve_first_try_succeeds_no_forwarding_fetch() {
+        // Transport succeeds immediately: no forwarding fetch should happen.
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, _sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let (layout, agent_hex, _pubkey_b64) =
+            card_layout_for(&pk_bytes, vec!["wss://old.example/v1/ws".to_owned()], None);
+
+        let transport = FailThenSucceedTransport::new(0); // succeeds immediately
+        let mut router = Router::new();
+        router.add(transport.clone() as Arc<dyn Transport>);
+
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            None,
+            None,
+            None,
+            Some(&layout),
+            [0u8; 32],
+            None,
+        );
+
+        let hints = Some(crate::card::RendezvousHintsV1 {
+            relays: vec!["wss://old.example/v1/ws".to_owned()],
+        });
+        let recipient = AgentId(agent_hex.clone());
+        let result = endpoint
+            .deposit_with_reresolve(
+                &recipient,
+                &agent_hex,
+                dummy_transport_out(&agent_hex),
+                hints,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.message_id.as_deref(), Some("reresolve-receipt"));
+        assert_eq!(
+            *transport.attempts.lock().unwrap(),
+            1,
+            "only one transport attempt on immediate success"
+        );
+    }
+
+    #[tokio::test]
+    async fn deposit_with_reresolve_uses_forwarding_record_when_initial_fails() {
+        // Transport fails first time; wiremock serves a valid forwarding
+        // record; transport succeeds on retry at moved-to relays. The
+        // card must be updated after the resolve.
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let sk_bytes = sk.to_bytes();
+
+        let stale_ws = "ws://127.0.0.1:0"; // placeholder; server.uri() replaces it
+        let moved_to = vec!["https://new-relay.example.com".to_owned()];
+
+        // Build a forwarding record pointing at moved_to.
+        let record = mk_forwarding_record(&pk_bytes, &sk_bytes, moved_to.clone(), 10_000);
+
+        let server = wiremock::MockServer::start().await;
+        let agent_id_hex = record.agent_id_hex.clone();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/v1/forwarding/{agent_id_hex}"
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        // Build the hint using the actual server host:port.
+        let server_uri = server.uri(); // http://127.0.0.1:PORT
+                                       // Convert http:// to ws:// so it goes through wss_to_https_url correctly.
+        let ws_hint = server_uri.replace("http://", "ws://");
+        let (layout, agent_hex, _pubkey_b64) =
+            card_layout_for(&pk_bytes, vec![ws_hint.clone()], None);
+
+        // Transport fails on 1st call (stale hints), succeeds on 2nd (moved-to).
+        let transport = FailThenSucceedTransport::new(1);
+        let mut router = Router::new();
+        router.add(transport.clone() as Arc<dyn Transport>);
+
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            None,
+            None,
+            None,
+            Some(&layout),
+            [0u8; 32],
+            None,
+        );
+
+        let hints = Some(crate::card::RendezvousHintsV1 {
+            relays: vec![ws_hint],
+        });
+        let recipient = AgentId(agent_hex.clone());
+        let result = endpoint
+            .deposit_with_reresolve(
+                &recipient,
+                &agent_hex,
+                dummy_transport_out(&agent_hex),
+                hints,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.message_id.as_deref(), Some("reresolve-receipt"));
+
+        // Card must have been updated with moved_to relays.
+        let updated_card = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_card.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&moved_to),
+            "card relays must be updated to forwarding record's moved_to_relays"
+        );
+        assert_eq!(updated_card.last_hint_epoch_ms, Some(10_000));
+
+        // Retry was sent to the moved-to hint (second transport call).
+        let last_hints = transport.hint_last_call.lock().unwrap().clone();
+        assert_eq!(
+            last_hints.map(|h| h.relays),
+            Some(moved_to),
+            "retry must target the forwarding record's moved_to_relays"
+        );
+        assert_eq!(
+            *transport.attempts.lock().unwrap(),
+            2,
+            "one failure then one retry = 2 transport attempts"
+        );
+
+        let _ = stale_ws; // suppress unused-variable lint
+        let _ = B64STD;
+    }
+
+    #[tokio::test]
+    async fn deposit_with_reresolve_rolled_back_forwarding_rejected() {
+        // A forwarding record with issued_at_ms <= existing card epoch must be
+        // rejected by apply_relay_hint and surfaces AllRelaysUnreachable.
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let sk_bytes = sk.to_bytes();
+
+        // Card has epoch 20_000; forwarding record has issued_at_ms=5_000 (stale).
+        let moved_to = vec!["https://new-relay.example.com".to_owned()];
+        let record = mk_forwarding_record(&pk_bytes, &sk_bytes, moved_to, 5_000);
+
+        let server = wiremock::MockServer::start().await;
+        let agent_id_hex = record.agent_id_hex.clone();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/v1/forwarding/{agent_id_hex}"
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let server_uri = server.uri();
+        let ws_hint = server_uri.replace("http://", "ws://");
+        // Card already has epoch 20_000; the forwarding record's 5_000 is stale.
+        let (layout, agent_hex, _) =
+            card_layout_for(&pk_bytes, vec![ws_hint.clone()], Some(20_000));
+
+        let transport = FailThenSucceedTransport::new(999); // always fails
+        let mut router = Router::new();
+        router.add(transport.clone() as Arc<dyn Transport>);
+
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            None,
+            None,
+            None,
+            Some(&layout),
+            [0u8; 32],
+            None,
+        );
+
+        let hints = Some(crate::card::RendezvousHintsV1 {
+            relays: vec![ws_hint],
+        });
+        let recipient = AgentId(agent_hex.clone());
+        match endpoint
+            .deposit_with_reresolve(
+                &recipient,
+                &agent_hex,
+                dummy_transport_out(&agent_hex),
+                hints,
+            )
+            .await
+        {
+            Err(ChatError::AllRelaysUnreachable { recipient: r }) => {
+                assert_eq!(r, agent_hex, "AllRelaysUnreachable must name the recipient");
+            }
+            other => panic!("expected AllRelaysUnreachable, got {other:?}"),
+        }
+        // Card must NOT have been updated (stale record was rejected).
+        let card = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            card.last_hint_epoch_ms,
+            Some(20_000),
+            "card epoch must be unchanged after stale forwarding record rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn deposit_with_reresolve_no_forwarding_records_gives_all_relays_unreachable() {
+        // All relays 404; no forwarding record found; surfaces AllRelaysUnreachable.
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, _sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let server_uri = server.uri();
+        let ws_hint = server_uri.replace("http://", "ws://");
+        let (layout, agent_hex, _) = card_layout_for(&pk_bytes, vec![ws_hint.clone()], None);
+
+        let transport = FailThenSucceedTransport::new(999);
+        let mut router = Router::new();
+        router.add(transport as Arc<dyn Transport>);
+
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            None,
+            None,
+            None,
+            Some(&layout),
+            [0u8; 32],
+            None,
+        );
+
+        let hints = Some(crate::card::RendezvousHintsV1 {
+            relays: vec![ws_hint],
+        });
+        let recipient = AgentId(agent_hex.clone());
+        match endpoint
+            .deposit_with_reresolve(
+                &recipient,
+                &agent_hex,
+                dummy_transport_out(&agent_hex),
+                hints,
+            )
+            .await
+        {
+            Err(ChatError::AllRelaysUnreachable { .. }) => {}
+            other => panic!("expected AllRelaysUnreachable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_with_reresolve_legacy_contact_no_pubkey_gives_all_relays_unreachable() {
+        // Contact card has no agent_public_key_b64 (legacy v1): cannot verify
+        // a forwarding record, so AllRelaysUnreachable is returned immediately.
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, _sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let agent_id_hex = hex::encode(fetchit_relay_proto::derive_agent_id(&pk_bytes));
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.keep()).unwrap();
+        // Store a card with no agent_public_key_b64.
+        let card = StoredContactCard {
+            agent_id_hex: agent_id_hex.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None, // legacy contact: no pubkey
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://old.example/v1/ws".to_owned()],
+            }),
+            last_hint_epoch_ms: None,
+        };
+        card.save(&layout).unwrap();
+
+        let transport = FailThenSucceedTransport::new(999);
+        let mut router = Router::new();
+        router.add(transport as Arc<dyn Transport>);
+
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            None,
+            None,
+            None,
+            Some(&layout),
+            [0u8; 32],
+            None,
+        );
+
+        let hints = Some(crate::card::RendezvousHintsV1 {
+            relays: vec!["wss://old.example/v1/ws".to_owned()],
+        });
+        let recipient = AgentId(agent_id_hex.clone());
+        match endpoint
+            .deposit_with_reresolve(
+                &recipient,
+                &agent_id_hex,
+                dummy_transport_out(&agent_id_hex),
+                hints,
+            )
+            .await
+        {
+            Err(ChatError::AllRelaysUnreachable { .. }) => {}
+            other => panic!("expected AllRelaysUnreachable for legacy contact, got {other:?}"),
+        }
     }
 }
