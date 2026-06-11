@@ -382,6 +382,24 @@ body.chat-docked {
   flex: 1 1 auto;
 }
 
+.chat-conv__subject-btn {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-conv__subject-btn:hover {
+  text-decoration: underline;
+}
+
 .chat-conv-header__presence {
   font-size: 11px;
   color: var(--ash);

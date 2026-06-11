@@ -6,8 +6,16 @@ import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
 import { openImageLightbox } from "./lightbox";
 import { convKey, quotedRef, type ChatStore, type Conversation } from "./state";
-import { dmConnect, groupHistory, sendDm, sendGroupMessage } from "./api";
+import {
+  dmConnect,
+  fetchAvatar,
+  fetchProfile,
+  groupHistory,
+  sendDm,
+  sendGroupMessage,
+} from "./api";
 import { friendlyError } from "./errors";
+import { openProfileCard } from "./profileCard";
 import { mountTrustMenu } from "./trustMenu";
 import type { TrustLevel } from "./types";
 
@@ -98,6 +106,32 @@ export function mountConversation(
         break;
       }
     }
+  };
+
+  // DM header subject opens the contact's read-only profile card. The
+  // reader hand-off reuses the existing `onAutonomi`. fetch>it has no
+  // external-browser capability, so a website link copies to the
+  // clipboard behind a confirm rather than pretending to open. `onMessage`
+  // is a no-op because the user is already in this DM.
+  const viewProfile = (agentId: string): void => {
+    openProfileCard({
+      agentId,
+      fetchProfile,
+      fetchAvatar,
+      onAutonomi: handlers.onAutonomi,
+      onMessage: () => {},
+      confirmOpen: (url) => {
+        void chatConfirm({
+          title: "Copy website link",
+          message:
+            "fetch>it doesn't open external sites, so this copies the link to "
+            + "your clipboard:\n" + url,
+          confirmLabel: "Copy link",
+        }).then((ok) => {
+          if (ok) void navigator.clipboard.writeText(url).catch(() => {});
+        });
+      },
+    });
   };
 
   const bubbleHandlers: BubbleHandlers = {
@@ -234,9 +268,15 @@ export function mountConversation(
     // the wire would silently drop.
     composer.setAttachVisible(conv.key.kind === "dm");
 
-    subjectEl.textContent = conv.title;
     if (conv.key.kind === "dm") {
       const peer = conv.key.peer;
+      const subjectBtn = document.createElement("button");
+      subjectBtn.type = "button";
+      subjectBtn.className = "chat-conv__subject-btn";
+      subjectBtn.title = "View profile";
+      subjectBtn.textContent = conv.title;
+      subjectBtn.addEventListener("click", () => viewProfile(peer));
+      subjectEl.replaceChildren(subjectBtn);
       const online = store.isOnline(peer);
       presenceEl.textContent = online ? "online" : "offline";
       presenceEl.dataset.state = online ? "online" : "offline";
@@ -252,6 +292,7 @@ export function mountConversation(
         trustEl.replaceChildren();
       }
     } else {
+      subjectEl.textContent = conv.title;
       presenceEl.textContent = "group";
       presenceEl.dataset.state = "group";
       const groupId = conv.key.groupId;
