@@ -254,6 +254,15 @@ pub async fn post_forwarding(
     // to obtain the ML-DSA-65 pubkey the forwarding sig is verified
     // against. No pair-record => the agent was never reachable here =>
     // the pointer is meaningless and abusable; refuse 412.
+    // INVARIANT (future-defense): the pair-record is read here and the
+    // forwarding record is stored further down without re-checking it.
+    // Today that is race-free because `PairRecordIndex` has no removal
+    // path — a pair-record only ever moves forward. IF a pair-record
+    // DELETE/tombstone endpoint is ever added, a concurrent delete
+    // between this `get` and the `put_if_newer` below could store a
+    // forwarding record for an agent whose pair-record just vanished;
+    // gate the store against that (the consumer re-verifies end-to-end
+    // regardless, so it is a defense-in-depth concern, not a breach).
     let pair = state
         .pair_records
         .get(&record.agent_id_hex.to_ascii_lowercase())
