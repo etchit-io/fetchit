@@ -114,6 +114,17 @@ pub enum PairRecordError {
     /// A relay URL is not a valid http/https URL with a non-empty host.
     #[error("relay URL is not a valid http/https URL with a host")]
     RelayUrlInvalid,
+    /// A relay URL embeds userinfo (`user:pass@`). Credentials never
+    /// belong in a signed, relay-served pairing record.
+    #[error("relay URL must not embed credentials")]
+    RelayUrlHasCredentials,
+    /// The agent id derived from the pubkey does not match the record's
+    /// claimed `agent_id_hex` — the record is bound to a different
+    /// identity than it claims. Distinct from [`Self::SignatureInvalid`]
+    /// so defenders can tell an impersonation attempt from a malformed
+    /// signature in relay logs.
+    #[error("derived agent id does not match the claimed agent_id_hex")]
+    AgentIdMismatch,
     /// `agent_id_hex` is not lowercase 64-hex.
     #[error("agent_id_hex must be lowercase 64-hex")]
     InvalidAgentIdHex,
@@ -246,6 +257,12 @@ pub fn forwarding_signing_input(
 pub fn verify_pair_record(record: &PairRecordV1) -> Result<(), PairRecordError> {
     use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
 
+    // Cheap structural checks before any base64 allocation, so a
+    // hostile POST with multi-megabyte fields is rejected on an O(64)
+    // hex check rather than after decoding the payload.
+    validate_agent_id_hex(&record.agent_id_hex)?;
+    validate_relays(&record.advertised_relays)?;
+
     let ml_dsa_pubkey = STANDARD
         .decode(&record.ml_dsa_pubkey_b64)
         .map_err(|e| PairRecordError::Base64(e.to_string()))?;
@@ -258,7 +275,7 @@ pub fn verify_pair_record(record: &PairRecordV1) -> Result<(), PairRecordError> 
 
     let derived_hex = hex::encode(crate::derive_agent_id(&ml_dsa_pubkey));
     if derived_hex != record.agent_id_hex {
-        return Err(PairRecordError::SignatureInvalid);
+        return Err(PairRecordError::AgentIdMismatch);
     }
 
     let input = pair_signing_input(
@@ -304,13 +321,17 @@ pub fn verify_forwarding_record(
 ) -> Result<(), PairRecordError> {
     use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
 
+    // Cheap structural checks before the base64 allocation.
+    validate_agent_id_hex(&record.agent_id_hex)?;
+    validate_relays(&record.moved_to_relays)?;
+
     let sig_bytes = STANDARD
         .decode(&record.sig_b64)
         .map_err(|e| PairRecordError::Base64(e.to_string()))?;
 
     let derived_hex = hex::encode(crate::derive_agent_id(expected_pubkey));
     if derived_hex != record.agent_id_hex {
-        return Err(PairRecordError::SignatureInvalid);
+        return Err(PairRecordError::AgentIdMismatch);
     }
 
     let input = forwarding_signing_input(
@@ -360,6 +381,12 @@ fn validate_relays(relays: &[String]) -> Result<(), PairRecordError> {
         }
         if parsed.host_str().is_none_or(str::is_empty) {
             return Err(PairRecordError::RelayUrlInvalid);
+        }
+        // Credentials in a signed, relay-served URL would be handed to
+        // every depositing peer's HTTP client. Reject them at the
+        // signing boundary so no such record can ever be produced.
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(PairRecordError::RelayUrlHasCredentials);
         }
     }
     Ok(())
@@ -553,8 +580,9 @@ mod tests {
             sig_b64: STANDARD.encode(&sig_a),
         };
         let err2 = verify_pair_record(&record2).unwrap_err();
+        // record2 embeds other_pk but claims pk's id -> binding mismatch.
         assert!(
-            matches!(err2, PairRecordError::SignatureInvalid),
+            matches!(err2, PairRecordError::AgentIdMismatch),
             "got {err2:?}"
         );
     }
@@ -589,7 +617,7 @@ mod tests {
         let err = verify_pair_record(&record).unwrap_err();
         // derived id from pk_raw != claimed target_hex
         assert!(
-            matches!(err, PairRecordError::SignatureInvalid),
+            matches!(err, PairRecordError::AgentIdMismatch),
             "got {err:?}"
         );
     }
@@ -714,8 +742,32 @@ mod tests {
         // supply wrong pubkey -- derived id won't match
         let err = verify_forwarding_record(&record, &other_pk_bytes).unwrap_err();
         assert!(
-            matches!(err, PairRecordError::SignatureInvalid),
+            matches!(err, PairRecordError::AgentIdMismatch),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn signing_input_rejects_relay_with_credentials() {
+        // A signed URL carrying userinfo would be handed to every
+        // depositing peer's HTTP client -- reject at the signing boundary.
+        let relays = vec!["https://user:secret@relay.example.com".to_string()];
+        let err = pair_signing_input(&fake_agent_hex(), &[], &[], &relays, 0).unwrap_err();
+        assert!(
+            matches!(err, PairRecordError::RelayUrlHasCredentials),
+            "got {err:?}"
+        );
+        let err2 = forwarding_signing_input(&fake_agent_hex(), &relays, 0).unwrap_err();
+        assert!(
+            matches!(err2, PairRecordError::RelayUrlHasCredentials),
+            "got {err2:?}"
+        );
+        // Username-only (no password) is rejected too.
+        let user_only = vec!["https://admin@relay.example.com".to_string()];
+        let err3 = pair_signing_input(&fake_agent_hex(), &[], &[], &user_only, 0).unwrap_err();
+        assert!(
+            matches!(err3, PairRecordError::RelayUrlHasCredentials),
+            "got {err3:?}"
         );
     }
 }
