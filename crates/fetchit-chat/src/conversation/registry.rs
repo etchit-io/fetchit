@@ -521,6 +521,78 @@ impl ConversationRegistry {
             }
         }
     }
+
+    /// Mark a sent message as delivered in this conversation's history
+    /// (a delivery receipt echoed its `message_id`). Returns `Ok(true)`
+    /// when an entry was newly marked and persisted, `Ok(false)` when
+    /// nothing matched — the entry aged past `HISTORY_CAP`, the id is
+    /// unknown, or the receipt is a duplicate — which skips the disk
+    /// write entirely.
+    ///
+    /// # Errors
+    /// Returns [`ChatError::Invalid`] when no conversation exists for
+    /// `group_id_hex` (inbound dispatch resolves the conversation
+    /// before a receipt can decrypt, so a miss is stale orchestration).
+    /// Surfaces vault open / AEAD seal / JSON parse errors from the
+    /// hydrate-or-persist path; on persist failure the cached
+    /// conversation is restored from a snapshot, symmetric with
+    /// [`Self::record_nonce`].
+    pub async fn record_delivery(
+        &self,
+        group_id_hex: &str,
+        message_id: &str,
+        received_at_ms: u64,
+    ) -> Result<bool, ChatError> {
+        let mut guard = self.by_group_id.lock().await;
+
+        if !guard.contains_key(group_id_hex) {
+            let path = self.layout.conversation_path(group_id_hex);
+            if !path.exists() {
+                return Err(ChatError::Invalid(format!(
+                    "record_delivery: no conversation for group_id {group_id_hex}"
+                )));
+            }
+            let bytes = open_from_path(&path, &self.master)?;
+            let conv: Conversation = serde_json::from_slice(&bytes)
+                .map_err(|e| ChatError::Invalid(format!("conv parse: {e}")))?;
+            self.refresh_pubkey_cache(&conv);
+            guard.insert(group_id_hex.to_owned(), conv);
+        }
+
+        let snapshot = guard.get(group_id_hex).cloned();
+        let Some(conv) = guard.get_mut(group_id_hex) else {
+            return Err(ChatError::Invalid(format!(
+                "record_delivery: cache miss after hydrate for {group_id_hex}"
+            )));
+        };
+
+        if !conv.apply_delivery_receipt(message_id, received_at_ms) {
+            return Ok(false);
+        }
+
+        let path = self.layout.conversation_path(group_id_hex);
+        let persist = (|| -> Result<(), ChatError> {
+            let bytes = serde_json::to_vec(conv)
+                .map_err(|e| ChatError::Invalid(format!("conv serialize: {e}")))?;
+            seal_to_path(
+                &path,
+                &bytes,
+                &self.master,
+                self.kdf_id,
+                self.argon_salt.as_ref(),
+            )?;
+            Ok(())
+        })();
+        match persist {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                if let Some(s) = snapshot {
+                    *conv = s;
+                }
+                Err(e)
+            }
+        }
+    }
 }
 
 fn dm_with(conv: &Conversation, peer_agent_id_hex: &str) -> bool {
@@ -867,6 +939,68 @@ mod tests {
         );
     }
 
+    fn dm_with_history_entry(message_id: &str) -> Conversation {
+        let mut c = dm("aa", LOCAL, PEER, 0, 0, 0);
+        c.push_history(crate::conversation::HistoryEntry {
+            sender_agent_id_hex: LOCAL.to_owned(),
+            sender_name: None,
+            body: "out".into(),
+            ts_ms: 1,
+            message_id: message_id.to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+        });
+        c
+    }
+
+    #[tokio::test]
+    async fn record_delivery_marks_and_persists_across_cold_restart() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let r1 =
+            ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));
+        r1.save(&dm_with_history_entry("m1")).await.unwrap();
+        assert!(r1.record_delivery("aa", "m1", 123).await.unwrap());
+
+        // Cold restart: the delivered mark must come back from disk.
+        let r2 = ConversationRegistry::new(layout, master, kdf_id_argon2(), Some(salt));
+        let conv = r2.get("aa").await.unwrap().unwrap();
+        let entry = conv
+            .history
+            .iter()
+            .find(|e| e.message_id == "m1")
+            .expect("entry survives reload");
+        assert_eq!(entry.delivered_at_ms, Some(123));
+    }
+
+    #[tokio::test]
+    async fn record_delivery_duplicate_and_unknown_id_are_false_noops() {
+        let (_d, reg) = fresh_registry();
+        reg.save(&dm_with_history_entry("m1")).await.unwrap();
+        assert!(reg.record_delivery("aa", "m1", 100).await.unwrap());
+        // Duplicate receipt: no-op, first timestamp kept.
+        assert!(!reg.record_delivery("aa", "m1", 999).await.unwrap());
+        // Receipt for an id this side never recorded: no-op, no error.
+        assert!(!reg.record_delivery("aa", "zz", 100).await.unwrap());
+        let conv = reg.get("aa").await.unwrap().unwrap();
+        assert_eq!(conv.history[0].delivered_at_ms, Some(100));
+    }
+
+    #[tokio::test]
+    async fn record_delivery_errors_on_unknown_group() {
+        let (_d, reg) = fresh_registry();
+        let err = reg.record_delivery("ff", "m1", 1).await.unwrap_err();
+        assert!(err.to_string().contains("no conversation"), "got {err}");
+    }
+
     #[tokio::test]
     async fn rekey_via_mutate_in_place_preserves_recorded_nonces() {
         // The save()-clone-roundtrip clobber the old install_or_rekey
@@ -1088,6 +1222,7 @@ mod tests {
                 ts_ms: u64::try_from(i + 1).unwrap(),
                 message_id: format!("{i:032x}"),
                 attachment: None,
+                delivered_at_ms: None,
             };
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;

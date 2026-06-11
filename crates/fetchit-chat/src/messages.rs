@@ -476,6 +476,29 @@ impl<'a> Endpoint<'a> {
         )
         .await?;
         self.dispatch_outbox(outbox).await?;
+        // Persist the outbound entry so delivery receipts have a row to
+        // mark and headless readers see sent DMs from disk. Bookkeeping —
+        // the send already succeeded, so log rather than fail.
+        let entry = HistoryEntry {
+            sender_agent_id_hex: identity.agent_id_hex().to_owned(),
+            sender_name: Some(sender_name.to_owned()),
+            body: body.to_owned(),
+            ts_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            message_id: message_id.clone(),
+            attachment: attachment.cloned(),
+            delivered_at_ms: None,
+        };
+        if let Err(e) = registry
+            .mutate_in_place(&conv.group_id_hex, |c| {
+                c.push_history(entry);
+                MutateAction::Persist(())
+            })
+            .await
+        {
+            log::warn!("[chat] outbound history persist failed: {e}");
+        }
         Ok(Some(message_id))
     }
 
@@ -993,6 +1016,7 @@ impl<'a> Endpoint<'a> {
             ts_ms: env.timestamp_ms,
             message_id: hex::encode(envelope_dedupe_bytes(env)),
             attachment: None,
+            delivered_at_ms: None,
         };
         let entry_for_closure = entry.clone();
 

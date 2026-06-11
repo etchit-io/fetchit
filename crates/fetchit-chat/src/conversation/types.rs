@@ -282,6 +282,25 @@ impl Conversation {
         self.history.push_back(entry);
     }
 
+    /// Mark the history entry whose `message_id` a delivery receipt
+    /// echoed as delivered. Scans newest-first (receipts arrive for
+    /// recent sends). Returns `true` when an entry was newly marked;
+    /// `false` when nothing matched (entry evicted past
+    /// [`Self::HISTORY_CAP`], an id this side never recorded, or a
+    /// duplicate receipt) so callers can skip a redundant persist.
+    pub fn apply_delivery_receipt(&mut self, message_id: &str, received_at_ms: u64) -> bool {
+        for entry in self.history.iter_mut().rev() {
+            if entry.message_id == message_id {
+                if entry.delivered_at_ms.is_some() {
+                    return false;
+                }
+                entry.delivered_at_ms = Some(received_at_ms);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Bump epoch + install a new `current_key`. Pushes the old key into
     /// `prior_keys` with a 60s expiry.
     pub fn advance_epoch(&mut self, new_key: [u8; AEAD_KEY_LEN]) {
@@ -423,14 +442,20 @@ pub struct HistoryEntry {
     pub body: String,
     /// Sender-asserted Unix-ms timestamp (mirrors envelope `timestamp_ms`).
     pub ts_ms: u64,
-    /// Logical message id (hex). Same value future delivery-receipts
-    /// will echo back.
+    /// Logical message id (hex). Delivery receipts echo this value
+    /// back; [`Conversation::apply_delivery_receipt`] binds them.
     pub message_id: String,
     /// Optional inline image attachment. Unlike `reply_to_message_id`
     /// (which the receiver can reconstruct from local history), image
     /// bytes cannot be re-derived, so they must survive a vault reload.
     #[serde(default)]
     pub attachment: Option<crate::attachment::Attachment>,
+    /// Unix-ms when the recipient's delivery receipt for this message
+    /// arrived, or `None` while unconfirmed. Only meaningful on entries
+    /// this side sent. Persisted so headless readers and vault reloads
+    /// see delivery state without replaying receipt events.
+    #[serde(default)]
+    pub delivered_at_ms: Option<u64>,
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -792,11 +817,55 @@ mod tests {
                 ts_ms: i,
                 message_id: format!("id{i}"),
                 attachment: None,
+                delivered_at_ms: None,
             });
         }
         assert_eq!(conv.history.len(), Conversation::HISTORY_CAP);
         assert_eq!(conv.history.front().unwrap().body, "m1");
         assert_eq!(conv.history.back().unwrap().body, "m1000");
+    }
+
+    fn history_entry(message_id: &str) -> HistoryEntry {
+        HistoryEntry {
+            sender_agent_id_hex: "a".repeat(64),
+            sender_name: None,
+            body: "hi".into(),
+            ts_ms: 1,
+            message_id: message_id.into(),
+            attachment: None,
+            delivered_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn apply_delivery_receipt_marks_the_matching_entry() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(history_entry("aa"));
+        conv.push_history(history_entry("bb"));
+        assert!(conv.apply_delivery_receipt("aa", 777));
+        let marked = conv.history.iter().find(|e| e.message_id == "aa").unwrap();
+        assert_eq!(marked.delivered_at_ms, Some(777));
+        let other = conv.history.iter().find(|e| e.message_id == "bb").unwrap();
+        assert_eq!(other.delivered_at_ms, None);
+    }
+
+    #[test]
+    fn apply_delivery_receipt_unknown_id_is_false() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(history_entry("aa"));
+        assert!(!conv.apply_delivery_receipt("zz", 777));
+    }
+
+    #[test]
+    fn apply_delivery_receipt_duplicate_is_false_and_keeps_first_ts() {
+        // A duplicate receipt must not move the recorded time and must
+        // signal no-op so the registry skips a redundant disk write.
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(history_entry("aa"));
+        assert!(conv.apply_delivery_receipt("aa", 100));
+        assert!(!conv.apply_delivery_receipt("aa", 999));
+        let e = conv.history.iter().find(|e| e.message_id == "aa").unwrap();
+        assert_eq!(e.delivered_at_ms, Some(100));
     }
 
     #[test]

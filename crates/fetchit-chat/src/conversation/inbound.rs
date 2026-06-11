@@ -262,6 +262,19 @@ async fn dispatch_receipt(
     };
     let payload: DeliveryReceiptPayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("receipt payload parse: {e}")))?;
+    // Persist delivery-state into the conversation history so headless
+    // readers and vault reloads see "delivered" without the caller
+    // threading receipt events back. Bookkeeping, not security — a
+    // persist failure must not eat the receipt event itself.
+    if let Err(e) = registry
+        .record_delivery(&group_id_hex, &payload.message_id, payload.received_at_ms)
+        .await
+    {
+        log::warn!(
+            "[chat] receipt delivery-state persist failed for {}: {e}",
+            payload.message_id
+        );
+    }
     Ok(InboundDispatch::Receipt {
         group_id_hex,
         sender_agent_id_hex: sender_hex,
@@ -330,6 +343,27 @@ async fn dispatch_message(
                 log::warn!("dropping invalid inbound attachment: {e}");
             }
         }
+    }
+    // Persist the inbound entry so headless readers and vault reloads
+    // see the transcript without replaying events. Bookkeeping — a
+    // persist failure must not drop the message dispatch itself.
+    let entry = super::types::HistoryEntry {
+        sender_agent_id_hex: sender_hex.clone(),
+        sender_name: payload.sender_name.clone(),
+        body: payload.body.clone(),
+        ts_ms: payload.ts_ms,
+        message_id: payload.message_id.clone().unwrap_or_default(),
+        attachment: payload.attachment.clone(),
+        delivered_at_ms: None,
+    };
+    if let Err(e) = registry
+        .mutate_in_place(&group_id_hex, |conv| {
+            conv.push_history(entry);
+            super::registry::MutateAction::Persist(())
+        })
+        .await
+    {
+        log::warn!("[chat] inbound history persist failed: {e}");
     }
     Ok(InboundDispatch::Message {
         group_id_hex,
@@ -777,7 +811,19 @@ mod tests {
             kdf_id_argon2(),
             Some(salt_a2),
         );
-        registry_a.save(&conv).await.unwrap();
+        // Seed Alice's history with the entry the receipt will echo so
+        // the dispatch's delivery-state persistence has a row to mark.
+        let mut conv_a = conv.clone();
+        conv_a.push_history(crate::conversation::HistoryEntry {
+            sender_agent_id_hex: aid_a.clone(),
+            sender_name: None,
+            body: "ping".into(),
+            ts_ms: 1,
+            message_id: "deadbeef".into(),
+            attachment: None,
+            delivered_at_ms: None,
+        });
+        registry_a.save(&conv_a).await.unwrap();
 
         let receipt_outbox = build_receipt_outbox(
             &conv,
@@ -809,6 +855,15 @@ mod tests {
             }
             other => panic!("expected Receipt, got {other:?}"),
         }
+        // The dispatch must also have PERSISTED the delivered mark —
+        // this is what headless readers and vault reloads consume.
+        let stored = registry_a.get(&conv.group_id_hex).await.unwrap().unwrap();
+        let entry = stored
+            .history
+            .iter()
+            .find(|e| e.message_id == "deadbeef")
+            .expect("seeded entry present");
+        assert_eq!(entry.delivered_at_ms, Some(1_700_000_000_001));
     }
 
     #[tokio::test]
