@@ -382,10 +382,15 @@ pub struct Endpoint<'a> {
     /// M3 R-tail-5: the local primary relay URL the send path uses
     /// to synthesize a fallback `RendezvousHintsV1` when the
     /// recipient's stored card has no `v2_rendezvous_hints` slot.
-    /// `None` when the client was built without a relay URL
+    /// Empty cell when the client was built without a relay URL
     /// (REST-only / unit-test mode); send paths then pass through
     /// `None` and the no-transport gate trips first anyway.
-    primary_relay_url: Option<&'a str>,
+    ///
+    /// Shared cell (T8b), not a borrowed `&str`: the home-relay failover
+    /// watcher rewrites `Client::primary_relay_url` after migrating slot
+    /// 0, and the send path reads this LIVE at dispatch time so its
+    /// fallback hint points at the NEW primary rather than the dead one.
+    primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 impl<'a> Endpoint<'a> {
@@ -415,7 +420,9 @@ impl<'a> Endpoint<'a> {
             local_machine_id,
             members_singleflight,
             None,
-            None,
+            // Empty primary cell: the test-facing path leaves the
+            // fallback hint unset (send paths pass `None` through).
+            Arc::new(tokio::sync::RwLock::new(None)),
         )
     }
 
@@ -435,7 +442,7 @@ impl<'a> Endpoint<'a> {
         local_machine_id: [u8; 32],
         members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
         denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
-        primary_relay_url: Option<&'a str>,
+        primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
     ) -> Self {
         Self {
             http,
@@ -466,7 +473,11 @@ impl<'a> Endpoint<'a> {
     /// Owned return (not `&RendezvousHintsV1`) so the synthesized
     /// fallback's lifetime survives the `.await` point on the
     /// subsequent `Router::send` call.
-    fn resolve_hints_for(
+    ///
+    /// Async (T8b): the primary fallback now reads the shared, interior-
+    /// mutable `primary_relay_url` cell so the hint follows slot 0 across
+    /// a home-relay failover.
+    async fn resolve_hints_for(
         &self,
         recipient_agent_id_hex: &str,
     ) -> Option<crate::card::RendezvousHintsV1> {
@@ -483,6 +494,9 @@ impl<'a> Endpoint<'a> {
         // pre-R-tail-5 None path, just expressed as Some(hints) so
         // the transport surface can be strict.
         self.primary_relay_url
+            .read()
+            .await
+            .as_deref()
             .map(|url| crate::card::RendezvousHintsV1 {
                 relays: vec![url.to_owned()],
             })
@@ -561,7 +575,11 @@ impl<'a> Endpoint<'a> {
         let own_agent_hex = identity.agent_id_hex();
         let hint_epoch_ms = current_watermark(layout, own_agent_hex).ok().flatten();
         let advertised_relays = if hint_epoch_ms.is_some() {
-            self.primary_relay_url.map(|url| vec![url.to_owned()])
+            self.primary_relay_url
+                .read()
+                .await
+                .as_deref()
+                .map(|url| vec![url.to_owned()])
         } else {
             None
         };
@@ -924,7 +942,7 @@ impl<'a> Endpoint<'a> {
             // The lookup is a single file stat + (when present) a
             // small JSON decode against `layout`, cheap enough to do
             // per-member in a fanout loop.
-            let hints = self.resolve_hints_for(&member.0);
+            let hints = self.resolve_hints_for(&member.0).await;
             match self
                 .router
                 .send(&member, transport_out, hints.as_ref())
@@ -1269,7 +1287,7 @@ impl<'a> Endpoint<'a> {
             // their primary differs from ours. Legacy v1 contacts
             // fall back to our own primary URL synthesized in
             // `resolve_hints_for`.
-            let hints = self.resolve_hints_for(&recipient.0);
+            let hints = self.resolve_hints_for(&recipient.0).await;
             let receipt = self
                 .deposit_with_reresolve(&recipient, &recipient_hex, transport_out, hints)
                 .await?;
@@ -1739,6 +1757,12 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Wrap an optional primary URL into the shared interior-mutable cell
+    /// `Endpoint::new_with_denylist` now takes (T8b). Test-only.
+    fn primary_cell(url: Option<&str>) -> Arc<tokio::sync::RwLock<Option<String>>> {
+        Arc::new(tokio::sync::RwLock::new(url.map(str::to_owned)))
+    }
 
     /// Capturing transport: stores the most recent `TransitEnvelope` it
     /// was asked to send, then returns a synthetic receipt. Used by the
@@ -2432,7 +2456,7 @@ mod tests {
             [0u8; 32],
             None,
             Some(&denylist),
-            None,
+            primary_cell(None),
         );
 
         let err = endpoint
@@ -4098,7 +4122,7 @@ mod tests {
             [0u8; 32],
             None,
             None,
-            Some(primary),
+            primary_cell(Some(primary)),
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -4154,7 +4178,7 @@ mod tests {
             [0u8; 32],
             None,
             None,
-            Some(primary),
+            primary_cell(Some(primary)),
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")

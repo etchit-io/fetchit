@@ -797,6 +797,34 @@ impl MultiHomeTransport {
             .and_then(|s| s.as_ref().map(|s| Arc::clone(&s.handle)))
     }
 
+    /// Borrow slot 0's per-relay connection-state stream — the clean
+    /// seam the home-relay failover watcher (T8b, in `client.rs`)
+    /// subscribes to. Walks
+    /// [`Self::slot_zero_handle`] ->
+    /// [`RelayHandle::relay_transport_arc`] ->
+    /// [`crate::relay_transport::RelayTransport::relay_set`] ->
+    /// [`fetchit_relay_client::RelaySet::states_receiver`].
+    ///
+    /// Each slot wraps a single-URL `RelaySet`, so the watched vector has
+    /// length 1; index 0 is slot 0's relay. After a [`Self::replace_primary`]
+    /// swap, slot 0 is a fresh handle with a FRESH `RelaySet`, so the
+    /// watcher MUST call this again to re-subscribe — the old receiver
+    /// only ever reports the torn-down relay.
+    ///
+    /// Returns `None` when slot 0 has been cleared (unreachable in
+    /// production — slot 0 is pinned at boot and never evicted) or when
+    /// slot 0 is a transport-less mock handle (the test fixtures expose
+    /// no `RelaySet`, which is why the watcher state machine is unit-tested
+    /// against a hand-driven [`tokio::sync::watch`] channel instead).
+    #[must_use]
+    pub fn slot_zero_states(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<Vec<fetchit_relay_client::ConnState>>> {
+        let handle = self.slot_zero_handle()?;
+        let transport = handle.relay_transport_arc()?;
+        Some(transport.relay_set().states_receiver())
+    }
+
     /// Rebuild slot 0 against `new_url`, the lib primitive behind
     /// home-relay failover (a region change or a dead primary). The
     /// POLICY that decides *when* to call this lives in a later task;

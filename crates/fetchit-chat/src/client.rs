@@ -33,6 +33,22 @@ use zeroize::Zeroizing;
 /// How often the auto-rekey sweeper fires.
 const AUTO_REKEY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
+/// T8b: how long slot 0 may stay continuously
+/// [`fetchit_relay_client::ConnState::Disconnected`] before the
+/// home-relay failover watcher migrates the pinned primary to a fallback
+/// relay. A return to `Connected` resets the timer;
+/// [`fetchit_relay_client::ConnState::PermanentlyDisconnected`] bypasses
+/// it and triggers immediately. Production passes this to
+/// [`run_failover_watcher`]; tests inject a short override.
+const FAILOVER_AFTER_MS: Duration = Duration::from_secs(120);
+
+/// T8b: how long the failover watcher waits after a failed migration
+/// (no fallback candidate, or [`crate::transport::MultiHomeTransport::replace_primary`]
+/// errored) before re-attempting. Paces the retry loop so a dead primary
+/// with no reachable fallback never busy-spins. Tests inject a short
+/// override.
+const FAILOVER_RETRY_BACKOFF: Duration = Duration::from_secs(15);
+
 /// File name that gates whether vault state already exists for this
 /// data dir. The chat identity vault is the first file written, so its
 /// presence implies the rest of the layout was initialised under a
@@ -320,6 +336,11 @@ struct ChatState {
     public_post_tx: tokio::sync::broadcast::Sender<PublicPostDelivery>,
 }
 
+/// Stored shape of the home-relay failover callback (T8b). Mirrors the G1
+/// `PrimaryDenylistedCallback`: the watcher invokes it with the new primary
+/// URL on success, or the dead URL on a failed / no-fallback signal.
+type RelayFailoverCallback = Arc<dyn Fn(String) + Send + Sync>;
+
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
 /// the relay-routed message transport, the local chat identity, and
 /// the conversation registry.
@@ -395,7 +416,24 @@ pub struct Client {
     /// keeps legacy v1 contacts routable through slot 0 while letting
     /// the transport layer be strict-on-`None`. `None` when the
     /// client was built without a relay URL (REST-only mode).
-    primary_relay_url: Option<String>,
+    ///
+    /// Interior-mutable (T8b): the home-relay failover watcher rewrites
+    /// this after migrating slot 0 to a fallback relay, so the publish
+    /// path ([`Self::publish_pair_record`]) and the send-path fallback
+    /// hints (`messages::Endpoint`, the auto-rekey sweeper) advertise the
+    /// NEW primary rather than the dead one. `Arc`-wrapped so `Client`
+    /// clones (the spawned publish task, the watcher) share one cell;
+    /// `tokio::sync::RwLock` to match `advertised_relays` and stay
+    /// await-friendly at the async read sites.
+    primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// T8b: optional callback the home-relay failover watcher fires after
+    /// migrating slot 0 to a fallback relay. The argument is the NEW
+    /// primary URL on success, or the dead URL on a "failed / no fallback"
+    /// signal (see [`Self::set_relay_failover_callback`]). The desktop
+    /// shell registers an emitter for a Tauri toast; `None` until then,
+    /// and a no-op in REST-only mode (no watcher is spawned). Mirrors the
+    /// G1 primary-denylisted callback storage shape.
+    relay_failover_cb: Arc<tokio::sync::RwLock<Option<RelayFailoverCallback>>>,
     /// M4 Stage 5.2: shared outbound HTTPS-POST transport for the
     /// fediverse bridge. Owns one `reqwest::Client` + the per-instance
     /// HTTP-Signature capability cache; [`Self::publish_public_post`]
@@ -495,13 +533,22 @@ impl Client {
             )
         };
 
-        let router = Arc::new(router);
-        if let Some(chat) = chat.as_ref() {
-            spawn_auto_rekey_sweeper(&router, chat, primary_relay_url.clone());
-        }
-
+        // Seed advertised_relays from the boot-time primary snapshot
+        // BEFORE wrapping the URL into its shared cell: the seed is a
+        // one-shot derivation, not a live read.
         let initial_relays =
             seed_initial_advertised_relays(advertised_relays, primary_relay_url.as_deref())?;
+
+        // Interior-mutable primary URL: the failover watcher rewrites it
+        // after a migration. The auto-rekey sweeper takes an `Arc` clone
+        // (not a snapshot) so its per-tick fallback hints follow slot 0
+        // across a failover instead of routing rekeys to the dead relay.
+        let primary_relay_url = Arc::new(tokio::sync::RwLock::new(primary_relay_url));
+
+        let router = Arc::new(router);
+        if let Some(chat) = chat.as_ref() {
+            spawn_auto_rekey_sweeper(&router, chat, Arc::clone(&primary_relay_url));
+        }
 
         let client = Self {
             http,
@@ -518,18 +565,26 @@ impl Client {
             primary_relay_url,
             multi_home,
             fediverse,
+            relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         // Best-effort pair-record publish: runs once at connect time so
         // peers can discover this agent via `GET /v1/pair-record/<id>`.
         // A failure only logs a warning and never blocks or fails startup.
-        if client.chat.is_some() && client.primary_relay_url.is_some() {
+        if client.chat.is_some() && client.primary_relay_url.read().await.is_some() {
             let client_for_publish = client.clone();
             tokio::spawn(async move {
                 if let Err(e) = client_for_publish.publish_pair_record().await {
                     log::warn!("[chat] pair-record publish failed at connect: {e}");
                 }
             });
+            // T8b: spawn the home-relay failover watcher. It observes slot
+            // 0's connection state and migrates the pinned primary to the
+            // next advertised relay when the current one dies. Gated on a
+            // wired MultiHomeTransport (slot 0 only exists there).
+            if client.multi_home.is_some() {
+                client.spawn_failover_watcher();
+            }
         }
 
         Ok(client)
@@ -779,6 +834,167 @@ impl Client {
         }
     }
 
+    /// T8b: register a callback the home-relay failover watcher fires
+    /// after it migrates slot 0 to a fallback relay. The argument is the
+    /// NEW primary URL on a successful migration. The desktop shell wires
+    /// this to a Tauri event so the user sees a "switched relays" toast;
+    /// it later also lets the UI re-render the share card the watcher
+    /// pruned the dead relay out of.
+    ///
+    /// Replaces any prior callback. No-op when the client was built
+    /// without a relay URL (REST-only mode never spawns a watcher), but
+    /// the registration is still stored harmlessly.
+    pub fn set_relay_failover_callback(&self, cb: Arc<dyn Fn(String) + Send + Sync>) {
+        // Block briefly on the write lock from a sync surface: the only
+        // contention is the watcher's read at trigger time, so this never
+        // stalls. `try_write` would risk dropping the desktop's
+        // registration on a spurious miss.
+        let slot = Arc::clone(&self.relay_failover_cb);
+        if let Ok(mut guard) = slot.try_write() {
+            *guard = Some(cb);
+            return;
+        }
+        // Extremely unlikely fallback: spawn the store so we never block
+        // a sync caller on the async lock.
+        tokio::spawn(async move {
+            *slot.write().await = Some(cb);
+        });
+    }
+
+    /// T8b: spawn the background home-relay failover watcher.
+    ///
+    /// Wires the three production seams into [`run_failover_watcher`]:
+    /// 1. **resubscribe** — re-fetch slot 0's live state stream from the
+    ///    [`crate::transport::MultiHomeTransport`]. Called once at start
+    ///    and again after every migration, so the watcher sticks to the
+    ///    NEW slot 0 (whose `RelaySet` is fresh).
+    /// 2. **`current_primary`** — snapshot the live (interior-mutable)
+    ///    primary URL so the action knows which relay just died.
+    /// 3. **action** — [`Self::failover_to_next_relay`], which picks a
+    ///    candidate, swaps slot 0, updates state, republishes, prunes, and
+    ///    fires the callback.
+    ///
+    /// No-op (returns without spawning) when no
+    /// [`crate::transport::MultiHomeTransport`] is wired — slot 0 only
+    /// exists there. Caller (in `from_parts`) already gates on that.
+    fn spawn_failover_watcher(&self) {
+        let Some(mh) = self.multi_home.clone() else {
+            return;
+        };
+        let primary_for_read = Arc::clone(&self.primary_relay_url);
+        let action_client = self.clone();
+        tokio::spawn(async move {
+            run_failover_watcher(
+                {
+                    let mh = Arc::clone(&mh);
+                    move || mh.slot_zero_states()
+                },
+                move || {
+                    // Read the live primary without blocking the watcher
+                    // loop: `try_read` misses only under a concurrent
+                    // failover write, and the next state change re-drives
+                    // this. On a miss, return None -> the watcher backs off
+                    // rather than acting on a stale URL.
+                    primary_for_read.try_read().ok().and_then(|g| g.clone())
+                },
+                FAILOVER_AFTER_MS,
+                FAILOVER_RETRY_BACKOFF,
+                move |dead_url| {
+                    let client = action_client.clone();
+                    async move { client.failover_to_next_relay(dead_url).await }
+                },
+            )
+            .await;
+        });
+    }
+
+    /// T8b action: migrate the pinned primary off `dead_url` to the next
+    /// advertised relay.
+    ///
+    /// Steps, in order:
+    /// 1. Pick the first [`Self::advertised_relays`] entry that is not
+    ///    `dead_url`. None -> fire the callback in its "no fallback" form
+    ///    (the dead URL) and return `Err(())` so the watcher backs off.
+    /// 2. [`crate::transport::MultiHomeTransport::replace_primary`] to the
+    ///    candidate. On error, fire the "failed" callback (dead URL) and
+    ///    return `Err(())`.
+    /// 3. Update the live `primary_relay_url` to the candidate so the
+    ///    publish + send paths advertise it.
+    /// 4. Republish the pair record at the new relay (best-effort).
+    /// 5. Prune `dead_url` from the advertised list + regenerate the share
+    ///    card (best-effort).
+    /// 6. Fire the failover callback with the NEW primary URL.
+    ///
+    /// Returns `Ok(new_url)` on a successful migration so the watcher
+    /// re-subscribes to the new slot 0 and keeps watching (sticky: no
+    /// auto-recover to `dead_url`).
+    async fn failover_to_next_relay(&self, dead_url: String) -> std::result::Result<String, ()> {
+        let Some(mh) = self.multi_home.as_ref() else {
+            return Err(());
+        };
+        let candidate = {
+            let advertised = self.advertised_relays.read().await;
+            pick_failover_candidate(&advertised, &dead_url)
+        };
+        let Some(candidate) = candidate else {
+            log::warn!(
+                "[chat] home-relay failover: primary {dead_url} is down and no fallback relay is configured"
+            );
+            self.fire_failover_callback(dead_url).await;
+            return Err(());
+        };
+
+        if let Err(e) = mh.replace_primary(&candidate).await {
+            log::warn!(
+                "[chat] home-relay failover: replace_primary to {candidate} failed: {e}; keeping watch"
+            );
+            self.fire_failover_callback(dead_url).await;
+            return Err(());
+        }
+
+        // Slot 0 is now the candidate. Point the live primary at it BEFORE
+        // the republish so the pair record advertises the new relay.
+        *self.primary_relay_url.write().await = Some(candidate.clone());
+        log::info!("[chat] home-relay failover: migrated primary {dead_url} -> {candidate}");
+
+        // Best-effort republish at the new relay so peers rediscover us.
+        if let Err(e) = self.publish_pair_record().await {
+            log::warn!(
+                "[chat] home-relay failover: pair-record republish at {candidate} failed: {e}"
+            );
+        }
+
+        // Prune the dead relay from the advertised list + re-mint the card.
+        // Best-effort: a regenerate failure (e.g. the pruned list is empty
+        // and fails validation) must not unwind the completed migration.
+        let pruned: Vec<String> = {
+            let advertised = self.advertised_relays.read().await;
+            advertised
+                .iter()
+                .filter(|r| *r != &dead_url)
+                .cloned()
+                .collect()
+        };
+        if !pruned.is_empty() {
+            if let Err(e) = self.regenerate_card_with_relays(pruned).await {
+                log::warn!("[chat] home-relay failover: card regenerate after pruning {dead_url} failed: {e}");
+            }
+        }
+
+        self.fire_failover_callback(candidate.clone()).await;
+        Ok(candidate)
+    }
+
+    /// Fire the registered T8b failover callback with `url`, if one was
+    /// registered. Cloned out under the read guard so the closure runs
+    /// without holding the lock.
+    async fn fire_failover_callback(&self, url: String) {
+        let cb = self.relay_failover_cb.read().await.clone();
+        if let Some(cb) = cb {
+            cb(url);
+        }
+    }
+
     /// Borrow the LAN-direct transport handle when one is wired.
     /// Returns `None` for clients built without
     /// [`ClientBuilder::enable_lan_direct`]. Desktop callers use this
@@ -826,7 +1042,7 @@ impl Client {
             self.chat.as_ref().map_or([0u8; 32], |c| c.local_machine_id),
             self.chat.as_ref().map(|c| &c.members_singleflight),
             self.denylist.as_ref(),
-            self.primary_relay_url.as_deref(),
+            Arc::clone(&self.primary_relay_url),
         )
     }
 
@@ -1175,6 +1391,9 @@ impl Client {
         // sealed bridge envelope to slot 1/2 when their primary
         // differs from ours. Legacy v1 contacts fall back to the
         // local primary URL (slot 0).
+        // Snapshot the live primary (interior-mutable post-T8b) before the
+        // closure so the fallback hint tracks slot 0 across a failover.
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
         let hints = crate::messages::StoredContactCard::resolve_recipient_hints(
             &chat.layout,
             recipient_agent_id_hex,
@@ -1182,7 +1401,7 @@ impl Client {
         .ok()
         .flatten()
         .or_else(|| {
-            self.primary_relay_url
+            primary_snapshot
                 .as_deref()
                 .map(|url| crate::card::RendezvousHintsV1 {
                     relays: vec![url.to_owned()],
@@ -1526,7 +1745,11 @@ impl Client {
         let Some(chat) = self.chat.as_ref() else {
             return Ok(());
         };
-        let Some(relay_str) = self.primary_relay_url.as_deref() else {
+        // Snapshot the live primary (interior-mutable post-T8b): after a
+        // home-relay failover this publishes the NEW primary so peers
+        // discover the migrated rendezvous, not the dead one.
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
+        let Some(relay_str) = primary_snapshot.as_deref() else {
             return Ok(());
         };
         let relay = url::Url::parse(relay_str)
@@ -2084,7 +2307,7 @@ fn derive_machine_id(machine_id: &str) -> [u8; 32] {
 fn spawn_auto_rekey_sweeper(
     router: &Arc<Router>,
     chat: &ChatState,
-    primary_relay_url: Option<String>,
+    primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
 ) {
     let registry = chat.registry.clone();
     let identity = chat.identity.clone();
@@ -2099,6 +2322,10 @@ fn spawn_auto_rekey_sweeper(
         tick.tick().await;
         loop {
             tick.tick().await;
+            // Read the live primary each tick (interior-mutable post-T8b):
+            // after a home-relay failover, rekey welcomes must fall back
+            // to the NEW primary, never the dead relay.
+            let primary_snapshot = primary_relay_url.read().await.clone();
             match sweep_auto_rekey(
                 &registry,
                 &identity,
@@ -2106,7 +2333,7 @@ fn spawn_auto_rekey_sweeper(
                 machine_id,
                 &signer,
                 &layout,
-                primary_relay_url.as_deref(),
+                primary_snapshot.as_deref(),
             )
             .await
             {
@@ -2116,6 +2343,153 @@ fn spawn_auto_rekey_sweeper(
             }
         }
     });
+}
+
+/// T8b candidate selection: the first `advertised` relay that is not the
+/// dead primary. Returns `None` when the list is empty or contains only
+/// `dead_url` (the no-fallback case the watcher backs off on).
+fn pick_failover_candidate(advertised: &[String], dead_url: &str) -> Option<String> {
+    advertised.iter().find(|r| *r != dead_url).cloned()
+}
+
+/// T8b core: the home-relay failover trigger state machine, extracted
+/// from its production wiring so it is unit-testable against a
+/// hand-driven [`tokio::sync::watch`] channel.
+///
+/// Observes slot 0's per-relay connection state (a length-1
+/// `Vec<ConnState>`; index 0 is slot 0) and fires `action` when the
+/// primary is gone:
+/// - [`fetchit_relay_client::ConnState::PermanentlyDisconnected`]
+///   triggers immediately (the supervisor gave up).
+/// - [`fetchit_relay_client::ConnState::Disconnected`] sustained for
+///   `failover_after` triggers. A return to
+///   [`fetchit_relay_client::ConnState::Connected`] before the deadline
+///   resets the timer.
+/// - [`fetchit_relay_client::ConnState::Connecting`] is neutral (in-flight
+///   reconnect): it neither arms nor clears the timer.
+///
+/// `action(dead_url)` performs the migration and returns `Ok(new_url)` on
+/// success or `Err(())` on a failed/no-fallback migration. The dead URL
+/// is read from `current_primary` at trigger time. On success the loop
+/// calls `resubscribe` to re-fetch the NEW slot 0's state stream (sticky:
+/// it keeps watching the new primary and will failover again if it also
+/// dies). On failure it sleeps `backoff` then re-subscribes and re-checks,
+/// so a terminal state with no reachable fallback retries at a bounded
+/// pace instead of busy-spinning.
+///
+/// `resubscribe` returning `None` (slot 0 not ready, or a transport-less
+/// mock) is treated as transient: the watcher sleeps `backoff` and tries
+/// again. The loop never returns under normal operation; the spawning
+/// task is dropped when the owning `Client` is.
+async fn run_failover_watcher<RS, CP, AC, Fut>(
+    mut resubscribe: RS,
+    current_primary: CP,
+    failover_after: Duration,
+    backoff: Duration,
+    mut action: AC,
+) where
+    RS: FnMut() -> Option<tokio::sync::watch::Receiver<Vec<fetchit_relay_client::ConnState>>>,
+    CP: Fn() -> Option<String>,
+    AC: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<String, ()>>,
+{
+    use fetchit_relay_client::ConnState;
+
+    let is_connected = |v: &[ConnState]| matches!(v.first(), Some(ConnState::Connected { .. }));
+    let is_permanent =
+        |v: &[ConnState]| matches!(v.first(), Some(ConnState::PermanentlyDisconnected { .. }));
+    let is_disconnected =
+        |v: &[ConnState]| matches!(v.first(), Some(ConnState::Disconnected { .. }));
+
+    'outer: loop {
+        let Some(mut states) = resubscribe() else {
+            // Slot 0 not observable yet (boot race or mock handle): wait
+            // and retry rather than spin.
+            tokio::time::sleep(backoff).await;
+            continue;
+        };
+
+        // `deadline` is armed while slot 0 is continuously Disconnected.
+        let mut deadline: Option<tokio::time::Instant> = None;
+        // Seed the state machine from the current value without waiting
+        // for the first change.
+        {
+            let v = states.borrow_and_update();
+            if is_disconnected(&v) {
+                deadline = Some(tokio::time::Instant::now() + failover_after);
+            }
+        }
+
+        loop {
+            // Decide whether to trigger NOW (permanent), wait for the
+            // disconnect deadline, or just wait for the next state change.
+            let snapshot = states.borrow().clone();
+            let trigger = if is_permanent(&snapshot) {
+                true
+            } else if is_connected(&snapshot) {
+                deadline = None;
+                false
+            } else if is_disconnected(&snapshot) {
+                if deadline.is_none() {
+                    deadline = Some(tokio::time::Instant::now() + failover_after);
+                }
+                false
+            } else {
+                // Connecting / unknown: leave the timer as-is.
+                false
+            };
+
+            if !trigger {
+                // Block until either a fresh state arrives or the armed
+                // disconnect deadline elapses.
+                let changed = states.changed();
+                if let Some(at) = deadline {
+                    tokio::select! {
+                        biased;
+                        r = changed => {
+                            if r.is_err() {
+                                // Sender dropped (slot 0 torn down):
+                                // re-subscribe to the live slot 0.
+                                continue 'outer;
+                            }
+                            continue;
+                        }
+                        () = tokio::time::sleep_until(at) => {
+                            // Window elapsed. Re-check: only trigger if
+                            // STILL disconnected (a connect that landed
+                            // exactly at the deadline clears it).
+                            if !is_disconnected(&states.borrow()) {
+                                deadline = None;
+                                continue;
+                            }
+                            // fall through to trigger below.
+                        }
+                    }
+                } else {
+                    if changed.await.is_err() {
+                        continue 'outer;
+                    }
+                    continue;
+                }
+            }
+
+            // Triggered. Resolve the dead URL and run the migration.
+            let Some(dead_url) = current_primary() else {
+                // No primary to migrate off (transient read miss): back off
+                // and re-evaluate.
+                tokio::time::sleep(backoff).await;
+                continue;
+            };
+            // Sticky: on success re-subscribe to the NEW slot 0 and keep
+            // watching (fresh RelaySet state stream). On failure (no fallback
+            // or replace_primary errored) back off first, then re-subscribe
+            // (slot 0 is unchanged) and re-attempt at a bounded pace.
+            if action(dead_url).await.is_err() {
+                tokio::time::sleep(backoff).await;
+            }
+            continue 'outer;
+        }
+    }
 }
 
 /// Try to rotate one conversation's epoch and build the welcomes that
@@ -3291,9 +3665,10 @@ mod tests {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: None,
-            primary_relay_url: None,
+            primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             multi_home: None,
             fediverse: None,
+            relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (client, dir)
     }
@@ -3577,9 +3952,10 @@ mod tests {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
-            primary_relay_url: None,
+            primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             multi_home: None,
             fediverse: None,
+            relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         // Router carries exactly one transport — MultiHomeTransport —
@@ -3722,6 +4098,289 @@ mod tests {
         assert!(
             matches!(err, ChatError::Invalid(ref m) if m.contains("reply_to_actor_url")),
             "expected reply_to parse error, got: {err:?}"
+        );
+    }
+
+    // ── T8b home-relay failover ───────────────────────────────────────────────
+
+    use fetchit_relay_client::ConnState;
+    use fetchit_relay_proto::EffectiveCapabilities;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::watch;
+
+    fn st_connected() -> ConnState {
+        ConnState::Connected {
+            effective_capabilities: EffectiveCapabilities::default_profile(),
+        }
+    }
+    fn st_disconnected() -> ConnState {
+        ConnState::Disconnected {
+            reason: "test".into(),
+            retry_at: None,
+        }
+    }
+    fn st_permanent() -> ConnState {
+        ConnState::PermanentlyDisconnected {
+            reason: "test".into(),
+            attempts: 3,
+        }
+    }
+
+    /// Records `(dead_url)` for each action invocation and returns a
+    /// canned result; counts resubscribe calls so a test can prove the
+    /// watcher re-subscribed to the new slot 0 after a migration.
+    struct WatcherProbe {
+        actions: StdMutex<Vec<String>>,
+        resubscribes: std::sync::atomic::AtomicUsize,
+    }
+    impl WatcherProbe {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                actions: StdMutex::new(Vec::new()),
+                resubscribes: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn actions(&self) -> Vec<String> {
+            self.actions.lock().unwrap().clone()
+        }
+        fn resubscribe_count(&self) -> usize {
+            self.resubscribes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A `Disconnected` that stays disconnected past `failover_after`
+    /// triggers exactly one migration, the action sees the dead URL, and
+    /// the watcher then re-subscribes (sticky) to the NEW slot 0.
+    ///
+    /// The resubscribe stub models a real swap: the FIRST subscription is
+    /// the dying relay (`rx`, driven Disconnected below); after the
+    /// migration it hands back a fresh, healthy (`Connected`) receiver, so
+    /// a correct watcher fails over exactly once and then sits quiet.
+    #[tokio::test(start_paused = true)]
+    async fn disconnected_past_window_triggers_failover() {
+        let (tx, rx) = watch::channel(vec![st_connected()]);
+        // Keep the post-migration sender alive for the whole test so its
+        // receiver never closes.
+        let (_new_tx, new_rx) = watch::channel(vec![st_connected()]);
+        let probe = WatcherProbe::new();
+        let probe_rs = Arc::clone(&probe);
+        let probe_ac = Arc::clone(&probe);
+        let rx_for_sub = rx.clone();
+
+        let watcher = tokio::spawn(async move {
+            run_failover_watcher(
+                move || {
+                    let n = probe_rs
+                        .resubscribes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // First subscription = the dying relay; subsequent =
+                    // the healthy migrated slot 0.
+                    if n == 0 {
+                        Some(rx_for_sub.clone())
+                    } else {
+                        Some(new_rx.clone())
+                    }
+                },
+                || Some("wss://dead.test/v1/ws".to_string()),
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                move |dead| {
+                    let p = Arc::clone(&probe_ac);
+                    async move {
+                        p.actions.lock().unwrap().push(dead);
+                        Ok::<String, ()>("wss://new.test/v1/ws".to_string())
+                    }
+                },
+            )
+            .await;
+        });
+
+        // Drop to Disconnected and let the window elapse.
+        tx.send(vec![st_disconnected()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            probe.actions(),
+            vec!["wss://dead.test/v1/ws".to_string()],
+            "a sustained Disconnected past the window must trigger exactly one failover with the dead url",
+        );
+        // resubscribe is called at least twice: once for the initial
+        // subscription and once more after the successful migration.
+        assert!(
+            probe.resubscribe_count() >= 2,
+            "watcher must re-subscribe after a successful migration, got {} calls",
+            probe.resubscribe_count(),
+        );
+        watcher.abort();
+    }
+
+    /// A return to `Connected` before the window elapses resets the
+    /// timer: no failover fires.
+    #[tokio::test(start_paused = true)]
+    async fn disconnected_then_reconnected_resets_timer() {
+        let (tx, rx) = watch::channel(vec![st_connected()]);
+        let probe = WatcherProbe::new();
+        let probe_ac = Arc::clone(&probe);
+        let rx_for_sub = rx.clone();
+
+        let watcher = tokio::spawn(async move {
+            run_failover_watcher(
+                move || Some(rx_for_sub.clone()),
+                || Some("wss://dead.test/v1/ws".to_string()),
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+                move |dead| {
+                    let p = Arc::clone(&probe_ac);
+                    async move {
+                        p.actions.lock().unwrap().push(dead);
+                        Ok::<String, ()>("wss://new.test/v1/ws".to_string())
+                    }
+                },
+            )
+            .await;
+        });
+
+        tx.send(vec![st_disconnected()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        // Reconnect before the 100ms window elapses.
+        tx.send(vec![st_connected()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        assert!(
+            probe.actions().is_empty(),
+            "a reconnect within the window must reset the timer and skip failover, got {:?}",
+            probe.actions(),
+        );
+        watcher.abort();
+    }
+
+    /// `PermanentlyDisconnected` triggers a failover immediately —
+    /// without waiting for the disconnect window.
+    #[tokio::test(start_paused = true)]
+    async fn permanently_disconnected_triggers_immediately() {
+        let (tx, rx) = watch::channel(vec![st_connected()]);
+        let probe = WatcherProbe::new();
+        let probe_ac = Arc::clone(&probe);
+        let rx_for_sub = rx.clone();
+
+        let watcher = tokio::spawn(async move {
+            run_failover_watcher(
+                move || Some(rx_for_sub.clone()),
+                || Some("wss://dead.test/v1/ws".to_string()),
+                // A long window: if the trigger waited for it, the test
+                // would see no action in its short sleep below.
+                Duration::from_secs(600),
+                Duration::from_millis(50),
+                move |dead| {
+                    let p = Arc::clone(&probe_ac);
+                    async move {
+                        p.actions.lock().unwrap().push(dead);
+                        Ok::<String, ()>("wss://new.test/v1/ws".to_string())
+                    }
+                },
+            )
+            .await;
+        });
+
+        tx.send(vec![st_permanent()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(
+            probe.actions(),
+            vec!["wss://dead.test/v1/ws".to_string()],
+            "PermanentlyDisconnected must trigger immediately, not wait for the window",
+        );
+        watcher.abort();
+    }
+
+    /// When the action fails (no candidate / `replace_primary` error) the
+    /// watcher backs off and retries rather than spinning tight or
+    /// crashing. With a terminal state + a short backoff it re-attempts,
+    /// so we observe more than one action over the window.
+    #[tokio::test(start_paused = true)]
+    async fn action_failure_backs_off_and_retries() {
+        let (tx, rx) = watch::channel(vec![st_connected()]);
+        let probe = WatcherProbe::new();
+        let probe_ac = Arc::clone(&probe);
+        let rx_for_sub = rx.clone();
+
+        let watcher = tokio::spawn(async move {
+            run_failover_watcher(
+                move || Some(rx_for_sub.clone()),
+                || Some("wss://dead.test/v1/ws".to_string()),
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                move |dead| {
+                    let p = Arc::clone(&probe_ac);
+                    async move {
+                        p.actions.lock().unwrap().push(dead);
+                        Err::<String, ()>(())
+                    }
+                },
+            )
+            .await;
+        });
+
+        tx.send(vec![st_permanent()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(180)).await;
+
+        let n = probe.actions().len();
+        assert!(
+            n >= 2,
+            "on action failure the watcher must back off and retry (saw {n} attempts), not give up after one",
+        );
+        watcher.abort();
+    }
+
+    /// Candidate selection: the first advertised relay that is not the
+    /// dead primary wins.
+    #[test]
+    fn pick_failover_candidate_skips_dead_primary() {
+        let advertised = vec![
+            "wss://a.test/v1/ws".to_string(),
+            "wss://b.test/v1/ws".to_string(),
+            "wss://c.test/v1/ws".to_string(),
+        ];
+        assert_eq!(
+            pick_failover_candidate(&advertised, "wss://a.test/v1/ws"),
+            Some("wss://b.test/v1/ws".to_string()),
+            "the dead primary must be skipped; the next entry wins",
+        );
+    }
+
+    /// Candidate selection: an empty list, or a list containing only the
+    /// dead primary, yields no candidate (no-fallback path).
+    #[test]
+    fn pick_failover_candidate_none_when_only_dead_or_empty() {
+        assert_eq!(pick_failover_candidate(&[], "wss://a.test/v1/ws"), None);
+        assert_eq!(
+            pick_failover_candidate(&["wss://a.test/v1/ws".to_string()], "wss://a.test/v1/ws"),
+            None,
+            "a list with only the dead primary must yield no candidate",
+        );
+    }
+
+    /// `primary_relay_url` is interior-mutable: a write through the
+    /// `Arc<RwLock<..>>` is visible through a second `Client` clone
+    /// (they share the same lock).
+    #[tokio::test]
+    async fn primary_relay_url_is_shared_across_clones() {
+        let (client, _dir) = test_client_no_denylist();
+        let clone = client.clone();
+
+        // Seed a value, then mutate through the original handle.
+        *client.primary_relay_url.write().await = Some("wss://before.test/v1/ws".to_string());
+        assert_eq!(
+            clone.primary_relay_url.read().await.clone(),
+            Some("wss://before.test/v1/ws".to_string()),
+            "the clone must observe the seeded primary (shared lock)",
+        );
+
+        *clone.primary_relay_url.write().await = Some("wss://after.test/v1/ws".to_string());
+        assert_eq!(
+            client.primary_relay_url.read().await.clone(),
+            Some("wss://after.test/v1/ws".to_string()),
+            "a write through one clone must be visible through the other",
         );
     }
 }
