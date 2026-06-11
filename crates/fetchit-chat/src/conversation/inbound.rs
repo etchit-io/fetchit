@@ -344,6 +344,22 @@ async fn dispatch_message(
             }
         }
     }
+    // In-band relay-hint refresh (Task 6). This runs AFTER the signature
+    // verify (verify_sender called before dispatch_message) and AFTER the
+    // AEAD open, so only authenticated + decrypted payloads can update the
+    // contact card. The monotonic guard in apply_relay_hint rejects stale
+    // or replayed hints so a compromised-key replay of an old payload
+    // cannot downgrade the stored relay list.
+    if let (Some(relays), Some(epoch)) = (payload.advertised_relays.clone(), payload.hint_epoch_ms)
+    {
+        let layout = registry.layout();
+        if let Err(e) = StoredContactCard::apply_relay_hint(layout, &sender_hex, relays, epoch) {
+            log::warn!(
+                "[chat] relay-hint update failed for {}: {e}",
+                &sender_hex[..8.min(sender_hex.len())]
+            );
+        }
+    }
     // Persist the inbound entry so headless readers and vault reloads
     // see the transcript without replaying events. Bookkeeping — a
     // persist failure must not drop the message dispatch itself.
@@ -414,6 +430,7 @@ async fn dispatch_welcome(
         // fallback keeps replies routable until the peer re-pastes
         // an updated card.
         rendezvous_hints: None,
+        last_hint_epoch_ms: None,
     });
 
     let result = install_or_rekey_conversation(
@@ -677,6 +694,7 @@ mod tests {
             kem_public_key_b64: B64.encode(kem_pub),
             agent_public_key_b64: Some(B64.encode(signer.public_key())),
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         card.save(layout).unwrap();
     }
@@ -899,6 +917,8 @@ mod tests {
             &alice_id,
             [0u8; 32],
             &alice_signer,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -933,6 +953,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: Some(B64.encode(synthetic_signer.public_key())),
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         synthetic_card.save(&layout_b).unwrap();
         let registry_b =
@@ -1142,6 +1163,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         no_pk_card.save(&layout_b).unwrap();
         let registry_b =
@@ -1637,6 +1659,8 @@ mod tests {
             &alice_id,
             [0u8; 32],
             &alice_signer,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1722,6 +1746,8 @@ mod tests {
             message_id: Some("forged-id".into()),
             reply_to_message_id: None,
             attachment: Some(forged_att),
+            advertised_relays: None,
+            hint_epoch_ms: None,
         };
         let payload_bytes = serde_json::to_vec(&payload).unwrap();
         let nonce = random_nonce(&mut OsRng);
@@ -1905,5 +1931,237 @@ mod tests {
         sign_bytes.extend_from_slice(&canonical);
         env.sender_signature = signer.sign(&sign_bytes).await.unwrap();
         env
+    }
+
+    // ── Task 6: in-band relay-hint refresh ───────────────────────────────────
+
+    /// Build a real signed + encrypted Message envelope wrapping
+    /// `payload`, sealed to `conv`'s current key and signed by
+    /// `sender_signer`.
+    async fn seal_message_envelope(
+        conv: &Conversation,
+        payload: &MessagePayload,
+        sender_aid_hex: &str,
+        sender_signer: &MlDsaSigner,
+    ) -> TransitEnvelope {
+        use crate::chat_crypto::{aead_seal, canonical_envelope_bytes, message_aad, random_nonce};
+        let key = conv.current_key().unwrap();
+        let group_id_bytes = conv.group_id_bytes().unwrap();
+        let aad = message_aad(&group_id_bytes, conv.current_epoch);
+        let payload_bytes = serde_json::to_vec(payload).unwrap();
+        let nonce = random_nonce(&mut OsRng);
+        let ciphertext = aead_seal(&key, &nonce, &payload_bytes, &aad).unwrap();
+        let mut sender_bytes = [0u8; 32];
+        hex::decode_to_slice(sender_aid_hex, &mut sender_bytes).unwrap();
+        let mut env = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::GroupChat,
+            group_id: Some(GroupId::from_bytes(group_id_bytes)),
+            tenant_id: None,
+            sender_agent_id: AgentId::from_bytes(sender_bytes),
+            sender_machine_id: MachineId::from_bytes([0; 32]),
+            timestamp_ms: 1,
+            epoch: conv.current_epoch,
+            ciphertext,
+            nonce: nonce.to_vec(),
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let canonical = canonical_envelope_bytes(&env).unwrap();
+        let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
+        sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
+        sign_bytes.extend_from_slice(&canonical);
+        env.sender_signature = sender_signer.sign(&sign_bytes).await.unwrap();
+        env
+    }
+
+    #[tokio::test]
+    async fn verified_inbound_with_newer_hint_epoch_updates_card_relays() {
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b = ConversationRegistry::new(
+            layout_b.clone(),
+            Arc::new(master_b),
+            kdf_id_argon2(),
+            Some(salt_b),
+        );
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Alice sends a message carrying relay hints with epoch 1_000.
+        let payload = MessagePayload {
+            sender_name: Some("Alice".into()),
+            body: "ping".into(),
+            ts_ms: 1,
+            message_id: Some("m1".into()),
+            reply_to_message_id: None,
+            attachment: None,
+            advertised_relays: Some(vec!["wss://new-relay.example.com".to_owned()]),
+            hint_epoch_ms: Some(1_000),
+        };
+        let env = seal_message_envelope(&conv, &payload, &aid_a, &alice_signer).await;
+        let result = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+        assert!(
+            matches!(result, InboundDispatch::Message { .. }),
+            "expected Message, got {result:?}",
+        );
+
+        // Alice's stored card on Bob's side must now carry the new relays.
+        let card = StoredContactCard::load(&layout_b, &aid_a)
+            .unwrap()
+            .expect("card exists");
+        assert_eq!(
+            card.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://new-relay.example.com".to_owned()]),
+            "relay slot must be updated by the verified inbound hint",
+        );
+        assert_eq!(
+            card.last_hint_epoch_ms,
+            Some(1_000),
+            "hint epoch must be recorded",
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_inbound_with_older_or_equal_hint_epoch_does_not_update_card() {
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b = ConversationRegistry::new(
+            layout_b.clone(),
+            Arc::new(master_b),
+            kdf_id_argon2(),
+            Some(salt_b),
+        );
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Apply a fresh hint at epoch 5_000 to seed the stored watermark.
+        let payload_fresh = MessagePayload {
+            sender_name: Some("Alice".into()),
+            body: "first".into(),
+            ts_ms: 1,
+            message_id: Some("m1".into()),
+            reply_to_message_id: None,
+            attachment: None,
+            advertised_relays: Some(vec!["wss://current-relay.example.com".to_owned()]),
+            hint_epoch_ms: Some(5_000),
+        };
+        let env_fresh = seal_message_envelope(&conv, &payload_fresh, &aid_a, &alice_signer).await;
+        let _ = dispatch_inbound(env_fresh, &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Simulate a stale/replayed hint at epoch 3_000 (strictly less).
+        let payload_stale = MessagePayload {
+            sender_name: Some("Alice".into()),
+            body: "stale".into(),
+            ts_ms: 2,
+            message_id: Some("m2".into()),
+            reply_to_message_id: None,
+            attachment: None,
+            advertised_relays: Some(vec!["wss://old-relay.example.com".to_owned()]),
+            hint_epoch_ms: Some(3_000),
+        };
+        let env_stale = seal_message_envelope(&conv, &payload_stale, &aid_a, &alice_signer).await;
+        let _ = dispatch_inbound(env_stale, &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Card must still carry the original (higher-epoch) relay.
+        let card = StoredContactCard::load(&layout_b, &aid_a)
+            .unwrap()
+            .expect("card exists");
+        assert_eq!(
+            card.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://current-relay.example.com".to_owned()]),
+            "stale hint must not downgrade the stored relay list",
+        );
+        assert_eq!(
+            card.last_hint_epoch_ms,
+            Some(5_000),
+            "epoch must stay at the higher value",
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_message_without_hint_fields_does_not_touch_card() {
+        // Pre-Task-6 senders (no advertised_relays / hint_epoch_ms) must
+        // leave the existing card untouched.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b = ConversationRegistry::new(
+            layout_b.clone(),
+            Arc::new(master_b),
+            kdf_id_argon2(),
+            Some(salt_b),
+        );
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        let payload_no_hint = MessagePayload {
+            sender_name: Some("Alice".into()),
+            body: "no hint".into(),
+            ts_ms: 1,
+            message_id: Some("m1".into()),
+            reply_to_message_id: None,
+            attachment: None,
+            advertised_relays: None,
+            hint_epoch_ms: None,
+        };
+        let env = seal_message_envelope(&conv, &payload_no_hint, &aid_a, &alice_signer).await;
+        let _ = dispatch_inbound(env, &bob_id, &registry_b).await.unwrap();
+
+        let card = StoredContactCard::load(&layout_b, &aid_a)
+            .unwrap()
+            .expect("card exists");
+        assert_eq!(
+            card.last_hint_epoch_ms, None,
+            "no-hint message must leave last_hint_epoch_ms untouched",
+        );
     }
 }

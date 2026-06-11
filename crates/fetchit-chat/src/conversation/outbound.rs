@@ -125,6 +125,9 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
 /// earlier one. `attachment` is an optional inline image (spec 2.4);
 /// when `Some`, it is validated before sealing — oversize or
 /// disallowed-MIME images are rejected with [`ChatError::Invalid`].
+/// `advertised_relays` and `hint_epoch_ms` carry the sender's current
+/// relay list and pair-record watermark for in-band hint refresh;
+/// both are `None` when the sender has no published pair record yet.
 ///
 /// # Errors
 /// AEAD or signing errors, or attachment validation failure.
@@ -139,6 +142,8 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     identity: &FetchitIdentity,
     local_machine_id: [u8; 32],
     signer: &S,
+    advertised_relays: Option<Vec<String>>,
+    hint_epoch_ms: Option<u64>,
 ) -> Result<Vec<OutboundEnvelope>, ChatError> {
     if let Some(att) = attachment {
         att.validate()
@@ -152,6 +157,8 @@ pub async fn build_message_outbox<S: fetchit_relay_client::Signer + ?Sized>(
         message_id: Some(message_id.to_owned()),
         reply_to_message_id: reply_to_message_id.map(str::to_owned),
         attachment: attachment.cloned(),
+        advertised_relays,
+        hint_epoch_ms,
     };
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|e| ChatError::Invalid(format!("message serialize: {e}")))?;

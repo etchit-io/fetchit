@@ -306,6 +306,7 @@ pub fn record_into_stored_contact(record: &ProfileIndexRecord) -> StoredContactC
         // primary URL). Wire-up tracked alongside the M3 profile
         // republish work in apps/fetchit-desktop/src-tauri.
         rendezvous_hints: None,
+        last_hint_epoch_ms: None,
     }
 }
 

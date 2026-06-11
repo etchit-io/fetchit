@@ -78,6 +78,12 @@ impl ConversationRegistry {
         }
     }
 
+    /// Borrow the store layout so callers can derive contact-card paths.
+    #[must_use]
+    pub fn layout(&self) -> &StoreLayout {
+        &self.layout
+    }
+
     /// Synchronous lookup of a peer's ML-DSA-65 public key (raw bytes,
     /// decoded from the on-card base64). Returns `None` for unknown
     /// peers or for peers whose member device records have no

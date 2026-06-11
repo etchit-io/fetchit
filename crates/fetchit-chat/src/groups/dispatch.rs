@@ -739,6 +739,7 @@ mod tests {
             kem_public_key_b64: B64.encode(kem_pub),
             agent_public_key_b64: None,
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         card.save(layout).unwrap();
     }
@@ -1212,6 +1213,7 @@ mod tests {
             rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
                 relays: vec![advertised.to_owned()],
             }),
+            last_hint_epoch_ms: None,
         };
         v2_card.save(&layout).unwrap();
 
@@ -1223,6 +1225,7 @@ mod tests {
             kem_public_key_b64: B64.encode(&pk_v1),
             agent_public_key_b64: None,
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         v1_card.save(&layout).unwrap();
 

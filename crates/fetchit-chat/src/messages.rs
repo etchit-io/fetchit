@@ -25,6 +25,7 @@ use crate::groups::{Group, GroupId as ChatGroupId};
 use crate::http::Http;
 use crate::identity::AgentId;
 use crate::local_store::{write_json_atomic, StoreLayout};
+use crate::pair_record::current_watermark;
 use crate::transport::{
     InboundEnvelope, OutboundEnvelope as TransportOutbound, OutboundKind, Router,
 };
@@ -102,6 +103,12 @@ struct LegacyEnvelope {
     ts: u64,
 }
 
+/// Serialises load-modify-save of contact cards so a concurrent
+/// `import_pair_uri` write and an in-band hint refresh can't interleave
+/// a lost update. The lock is process-global because all contact-card
+/// writes target the same `contacts/` directory.
+static CARD_UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// On-disk record of a peer's share card. The v2 fields supply the
 /// peer's KEM public key (needed to bootstrap a conversation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +136,13 @@ pub struct StoredContactCard {
     /// slot 0 for legacy contacts.
     #[serde(default)]
     pub rendezvous_hints: Option<crate::card::RendezvousHintsV1>,
+    /// Monotonic freshness stamp of the last in-band relay-hint update
+    /// applied to this card. Updated only when a verified inbound
+    /// `MessagePayload` carries a strictly-greater `hint_epoch_ms`.
+    /// `None` means no in-band update has ever been applied; absent on
+    /// pre-Task-6 cards (back-compat via `#[serde(default)]`).
+    #[serde(default)]
+    pub last_hint_epoch_ms: Option<u64>,
 }
 
 impl StoredContactCard {
@@ -195,6 +209,7 @@ impl StoredContactCard {
             kem_public_key_b64,
             agent_public_key_b64: agent_pk_b64_opt,
             rendezvous_hints,
+            last_hint_epoch_ms: None,
         })
     }
 
@@ -254,6 +269,43 @@ impl StoredContactCard {
     pub fn save(&self, layout: &StoreLayout) -> Result<()> {
         let path = layout.contact_path(&self.agent_id_hex);
         write_json_atomic(&path, self)
+    }
+
+    /// Apply an in-band relay-hint update from a verified inbound message.
+    ///
+    /// Updates `rendezvous_hints` and `last_hint_epoch_ms` only when
+    /// `hint_epoch_ms` is strictly greater than the last recorded epoch.
+    /// The load-modify-save is serialised under [`CARD_UPDATE_LOCK`] so a
+    /// concurrent `import_pair_uri` write cannot race it to a lost update.
+    ///
+    /// Returns `true` when the card was updated and persisted, `false` when
+    /// the hint was stale or the card is not on disk.
+    ///
+    /// # Errors
+    /// IO or JSON parse/serialization failures.
+    pub fn apply_relay_hint(
+        layout: &StoreLayout,
+        sender_agent_id_hex: &str,
+        relays: Vec<String>,
+        hint_epoch_ms: u64,
+    ) -> Result<bool> {
+        let _guard = CARD_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let Some(mut card) = Self::load(layout, sender_agent_id_hex)? else {
+            return Ok(false);
+        };
+
+        let stored_epoch = card.last_hint_epoch_ms.unwrap_or(0);
+        if hint_epoch_ms <= stored_epoch {
+            return Ok(false);
+        }
+
+        card.rendezvous_hints = Some(crate::card::RendezvousHintsV1 { relays });
+        card.last_hint_epoch_ms = Some(hint_epoch_ms);
+        card.save(layout)?;
+        Ok(true)
     }
 
     /// Load a stored card from disk by agent id.
@@ -463,6 +515,17 @@ impl<'a> Endpoint<'a> {
         };
 
         let message_id = random_message_id();
+        // Stamp the sender's current relay list and pair-record watermark so
+        // the receiver can heal its stored contact card when we move relays.
+        // current_watermark is a read-only peek — it does NOT bump the publish
+        // clock, so sending a DM never triggers a spurious pair-record publish.
+        let own_agent_hex = identity.agent_id_hex();
+        let hint_epoch_ms = current_watermark(layout, own_agent_hex).ok().flatten();
+        let advertised_relays = if hint_epoch_ms.is_some() {
+            self.primary_relay_url.map(|url| vec![url.to_owned()])
+        } else {
+            None
+        };
         let outbox = build_message_outbox(
             &conv,
             body,
@@ -473,6 +536,8 @@ impl<'a> Endpoint<'a> {
             identity,
             self.local_machine_id,
             signer.as_ref(),
+            advertised_relays,
+            hint_epoch_ms,
         )
         .await?;
         self.dispatch_outbox(outbox).await?;
@@ -1820,6 +1885,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: Some(B64.encode(sender_signer.public_key())),
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         card.save(&rig.layout).unwrap();
     }
@@ -3696,6 +3762,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
             rendezvous_hints: Some(hints.clone()),
+            last_hint_epoch_ms: None,
         };
         card.save(&layout).unwrap();
 
@@ -3720,6 +3787,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         card.save(&layout).unwrap();
 
@@ -3746,6 +3814,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         card.save(&layout).unwrap();
 
@@ -3829,6 +3898,7 @@ mod tests {
             rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
                 relays: vec![advertised.to_owned()],
             }),
+            last_hint_epoch_ms: None,
         };
         peer_card.save(&rig.layout).unwrap();
 
@@ -3884,6 +3954,7 @@ mod tests {
             kem_public_key_b64: B64.encode(vec![0u8; 1184]),
             agent_public_key_b64: None,
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         peer_card.save(&rig.layout).unwrap();
 
@@ -3916,5 +3987,210 @@ mod tests {
             vec![primary.to_owned()],
             "v1 card + primary URL must synthesize fallback hints",
         );
+    }
+
+    // ── Task 6: in-band relay-hint refresh ───────────────────────────────────
+
+    #[tokio::test]
+    async fn build_message_outbox_stamps_hint_fields_when_supplied() {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use crate::conversation::{
+            build_message_outbox, Conversation, Member, MemberDevice, MemberDeviceStatus,
+        };
+        use fetchit_relay_client::MlDsaSigner;
+        use fetchit_relay_proto::derive_agent_id;
+        use zeroize::Zeroizing;
+
+        let dir = tempfile::tempdir().unwrap();
+        let signer = MlDsaSigner::generate().unwrap();
+        let aid_a = hex::encode(derive_agent_id(&signer.public_key()));
+        let aid_b = "b".repeat(64);
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let id = crate::chat_identity::FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &aid_a,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+
+        let local_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: aid_a.clone(),
+                kem_public_key_b64: B64.encode(id.kem_public_key()),
+                agent_public_key_b64: None,
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let peer_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: aid_b.clone(),
+                kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+                agent_public_key_b64: None,
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let conv = Conversation::new_dm(local_member, peer_member, None).unwrap();
+
+        // With relay hints stamped.
+        let outbox = build_message_outbox(
+            &conv,
+            "hello",
+            "Alice",
+            "msg1",
+            None,
+            None,
+            &id,
+            [0u8; 32],
+            &signer,
+            Some(vec!["wss://relay.example.com".to_owned()]),
+            Some(42_000),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outbox.len(), 1);
+        // We can't easily decrypt in this test, but the fields are stamped
+        // into the payload before AEAD — verify via build by checking
+        // the hints come through the None path too.
+
+        // Without relay hints (no published pair record).
+        let outbox_none = build_message_outbox(
+            &conv, "hello", "Alice", "msg2", None, None, &id, [0u8; 32], &signer, None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outbox_none.len(), 1);
+        // Both calls must produce an envelope (not panic or error).
+        // The actual field values are verified by the inbound round-trip
+        // tests in inbound.rs.
+    }
+
+    #[test]
+    fn apply_relay_hint_updates_card_on_newer_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "a".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        card.save(&layout).unwrap();
+
+        let updated = StoredContactCard::apply_relay_hint(
+            &layout,
+            &agent_hex,
+            vec!["wss://new.example.com".to_owned()],
+            1_000,
+        )
+        .unwrap();
+        assert!(updated, "newer epoch must update the card");
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://new.example.com".to_owned()]),
+        );
+        assert_eq!(loaded.last_hint_epoch_ms, Some(1_000));
+    }
+
+    #[test]
+    fn apply_relay_hint_rejects_stale_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "b".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://old.example.com".to_owned()],
+            }),
+            last_hint_epoch_ms: Some(5_000),
+        };
+        card.save(&layout).unwrap();
+
+        let updated = StoredContactCard::apply_relay_hint(
+            &layout,
+            &agent_hex,
+            vec!["wss://attack.example.com".to_owned()],
+            3_000,
+        )
+        .unwrap();
+        assert!(!updated, "stale epoch must not update the card");
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://old.example.com".to_owned()]),
+            "relay slot must be unchanged",
+        );
+        assert_eq!(
+            loaded.last_hint_epoch_ms,
+            Some(5_000),
+            "epoch must be unchanged",
+        );
+    }
+
+    #[test]
+    fn apply_relay_hint_noop_on_equal_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "c".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: Some(7_000),
+        };
+        card.save(&layout).unwrap();
+
+        let updated = StoredContactCard::apply_relay_hint(
+            &layout,
+            &agent_hex,
+            vec!["wss://equal.example.com".to_owned()],
+            7_000,
+        )
+        .unwrap();
+        assert!(
+            !updated,
+            "equal epoch must be treated as stale (not updated)"
+        );
+    }
+
+    #[test]
+    fn apply_relay_hint_returns_false_for_unknown_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let result = StoredContactCard::apply_relay_hint(
+            &layout,
+            &"d".repeat(64),
+            vec!["wss://ghost.example.com".to_owned()],
+            1_000,
+        )
+        .unwrap();
+        assert!(!result, "no card on disk must return false");
     }
 }

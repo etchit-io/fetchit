@@ -411,6 +411,15 @@ pub struct MessagePayload {
     /// and on payloads from older senders that do not support spec 2.4.
     #[serde(default)]
     pub attachment: Option<crate::attachment::Attachment>,
+    /// Sender's current advertised relay list (in-band relay-hint
+    /// refresh). Absent on payloads from pre-Task-6 senders.
+    #[serde(default)]
+    pub advertised_relays: Option<Vec<String>>,
+    /// Sender's current pair-record `issued_at_ms` (freshness watermark
+    /// for `advertised_relays`). Absent on payloads from pre-Task-6
+    /// senders.
+    #[serde(default)]
+    pub hint_epoch_ms: Option<u64>,
 }
 
 /// Inner payload of a `DeliveryReceipt` envelope.
@@ -486,6 +495,8 @@ mod tests {
             message_id: Some("m2".into()),
             reply_to_message_id: Some("m1".into()),
             attachment: None,
+            advertised_relays: None,
+            hint_epoch_ms: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: MessagePayload = serde_json::from_str(&json).unwrap();
@@ -503,6 +514,8 @@ mod tests {
             message_id: Some("m3".into()),
             reply_to_message_id: None,
             attachment: Some(att),
+            advertised_relays: None,
+            hint_epoch_ms: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: MessagePayload = serde_json::from_str(&json).unwrap();
@@ -515,6 +528,34 @@ mod tests {
         let legacy = r#"{"sender_name":"A","body":"hi","ts_ms":1,"message_id":"m1","reply_to_message_id":null}"#;
         let p: MessagePayload = serde_json::from_str(legacy).unwrap();
         assert_eq!(p.attachment, None);
+    }
+
+    #[test]
+    fn message_payload_pre_task6_json_decodes_hint_fields_as_none() {
+        // Pre-Task-6 payloads (no advertised_relays / hint_epoch_ms) must
+        // deserialize with both fields None.
+        let legacy = r#"{"sender_name":"A","body":"hi","ts_ms":1,"message_id":"m1"}"#;
+        let p: MessagePayload = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.advertised_relays, None);
+        assert_eq!(p.hint_epoch_ms, None);
+    }
+
+    #[test]
+    fn message_payload_round_trips_hint_fields() {
+        let p = MessagePayload {
+            sender_name: Some("A".into()),
+            body: "hi".into(),
+            ts_ms: 1,
+            message_id: Some("m1".into()),
+            reply_to_message_id: None,
+            attachment: None,
+            advertised_relays: Some(vec!["wss://relay.example.com".to_owned()]),
+            hint_epoch_ms: Some(42_000),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: MessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.advertised_relays, p.advertised_relays);
+        assert_eq!(back.hint_epoch_ms, p.hint_epoch_ms);
     }
 
     fn local_member(agent_id_hex: &str, kem_pub_b64: &str) -> Member {

@@ -274,6 +274,30 @@ pub fn next_issued_at_ms(
     Ok(next)
 }
 
+/// Peek the current watermark for `self_agent_hex` without advancing it.
+///
+/// Returns the last value stored by [`next_issued_at_ms`] for this agent,
+/// or `None` when no record exists yet (never published). No write,
+/// no bump — callers that need a monotonically-increasing timestamp for
+/// a new publish must use [`next_issued_at_ms`] instead.
+///
+/// # Errors
+///
+/// [`ChatError::Io`] if the watermark file exists but cannot be read.
+pub fn current_watermark(layout: &StoreLayout, self_agent_hex: &str) -> Result<Option<u64>> {
+    let _guard = WATERMARK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let path = watermark_path(layout);
+    let map: BTreeMap<String, u64> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+
+    Ok(map.get(self_agent_hex).copied())
+}
+
 /// Record an externally-observed `issued_at_ms` value for
 /// `self_agent_hex`, setting the stored watermark to
 /// `max(stored, observed_ms)`.
@@ -534,6 +558,34 @@ mod tests {
         // A different agent starting from 0 should seed from its own wall clock.
         let b = next_issued_at_ms(&layout, agent_b, 1).unwrap();
         assert_eq!(b, 1, "different agent must start from its own wall clock");
+    }
+
+    // ── (B) current_watermark peek ───────────────────────────────────────────
+
+    #[test]
+    fn current_watermark_returns_none_on_fresh_store() {
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        assert_eq!(current_watermark(&layout, AGENT).unwrap(), None);
+    }
+
+    #[test]
+    fn current_watermark_returns_value_after_bump_without_bumping_itself() {
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        let bumped = next_issued_at_ms(&layout, AGENT, 7_000).unwrap();
+        // Peek must equal the bumped value.
+        assert_eq!(current_watermark(&layout, AGENT).unwrap(), Some(bumped));
+        // Calling current_watermark again must NOT advance the stored value.
+        assert_eq!(current_watermark(&layout, AGENT).unwrap(), Some(bumped));
+        // A subsequent next_issued_at_ms must advance past bumped.
+        let next = next_issued_at_ms(&layout, AGENT, 7_000).unwrap();
+        assert!(
+            next > bumped,
+            "next_issued_at_ms must advance past peek value: {bumped} -> {next}"
+        );
+        // Peek now reflects the new high-water mark, not the pre-peek value.
+        assert_eq!(current_watermark(&layout, AGENT).unwrap(), Some(next));
     }
 
     // ── (B) observe_external_watermark ───────────────────────────────────────

@@ -1646,6 +1646,7 @@ impl Client {
             kem_public_key_b64: record.kem_pubkey_b64.clone(),
             agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
             rendezvous_hints: None,
+            last_hint_epoch_ms: None,
         };
         stored.save(layout)?;
 
