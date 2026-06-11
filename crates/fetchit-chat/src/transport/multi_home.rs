@@ -877,20 +877,31 @@ impl MultiHomeTransport {
                 last_traffic_at: SystemTime::now(),
                 fan_in,
             });
-            if let Ok(mut g) = self.primary_url.write() {
-                *g = new_url.to_string();
+            match self.primary_url.write() {
+                Ok(mut g) => *g = new_url.to_string(),
+                Err(e) => log::warn!(
+                    "multi_home primary_url lock poisoned during replace_primary; \
+                     primary may desync from slot 0: {e}",
+                ),
             }
             old
         };
 
-        // 4. Tear the OLD slot down explicitly. NEW is live and installed;
-        // the shared dedup gate absorbs the brief two-fan-in overlap.
+        // 4. Tear the OLD slot down explicitly. NEW is live and installed.
+        // Drain the OLD transport FIRST: shutdown() flushes the pump's
+        // remaining deliveries through the fan-in rx (an unbounded channel
+        // yields all buffered items before None), so any in-flight OLD-relay
+        // envelope is dispatched, not dropped mid-map -- this matters on a
+        // planned migration where the old relay is still alive and delivering
+        // at the swap instant. The fan-in then exits naturally when the pump
+        // drops its tx; the explicit abort afterward is a no-op backstop. (The
+        // shared dedup gate absorbs the brief two-fan-in overlap before this.)
         if let Some(old) = old_slot {
-            if let Some(h) = &old.fan_in {
-                h.abort();
-            }
             if let Some(old_transport) = old.handle.relay_transport_arc() {
                 old_transport.shutdown().await;
+            }
+            if let Some(h) = &old.fan_in {
+                h.abort();
             }
             drop(old);
         }
@@ -909,13 +920,29 @@ impl MultiHomeTransport {
         // Each slot wraps a single-URL RelaySet, so the state vector has
         // length 1; index 0 is that relay.
         let connected = |v: &Vec<ConnState>| matches!(v.first(), Some(ConnState::Connected { .. }));
-        if connected(&states.borrow()) {
-            return true;
+        // PermanentlyDisconnected is terminal (the supervisor gave up). Fast
+        // fail on it instead of burning the full timeout, to bound user-facing
+        // failover latency when the new relay is already dead.
+        let terminal = |v: &Vec<ConnState>| {
+            matches!(v.first(), Some(ConnState::PermanentlyDisconnected { .. }))
+        };
+        {
+            let v = states.borrow();
+            if connected(&v) {
+                return true;
+            }
+            if terminal(&v) {
+                return false;
+            }
         }
         let wait = async {
             while states.changed().await.is_ok() {
-                if connected(&states.borrow()) {
+                let v = states.borrow();
+                if connected(&v) {
                     return true;
+                }
+                if terminal(&v) {
+                    return false;
                 }
             }
             // Sender dropped without ever reaching Connected.
