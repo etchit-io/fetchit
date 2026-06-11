@@ -322,6 +322,19 @@ impl ChatState {
         }
     }
 
+    /// Adopt the relay URL an automatic failover migrated to, so client
+    /// rebuilds, the share-URI command, and cross-relay checks in this
+    /// session track the live primary (the manual `set_relay_url` path
+    /// stores its own update; the persisted setting is written
+    /// separately by `persist_relay_url`). The URL names the transport
+    /// that just went live, so a parse failure is unreachable in
+    /// practice and leaves the previous value in place.
+    pub(crate) fn adopt_live_relay(&self, to: &str) {
+        if let Ok(parsed) = Url::parse(to) {
+            self.store_relay_url(parsed);
+        }
+    }
+
     /// Read the current opt-in flag for LAN-direct delivery. Used by
     /// the Nearby-section frontend wiring (lands in a follow-up
     /// commit alongside the sidebar surface).
@@ -1684,11 +1697,13 @@ fn persist_relay_url(app: &AppHandle, url: &str) {
 /// the relay connection-state watch as the rebuild signal. REST-only clients
 /// (no relay) have no watch — sleep + retry.
 ///
-/// On a `Migrated` event we ALSO persist the new relay URL as the active
-/// setting (via [`persist_relay_url`]) so the next app boot reconnects to the
-/// live relay rather than the dead one. The manual region-change path
-/// (`set_relay_url` command) persists separately before the migrate; the
-/// callback covers the AUTOMATIC failover path where no command ran.
+/// On a `Migrated` event we ALSO adopt the new relay URL in-memory (via
+/// [`ChatState::adopt_live_relay`], so rebuilds and the share-URI command in
+/// this session follow the live primary) and persist it as the active setting
+/// (via [`persist_relay_url`]) so the next app boot reconnects to the live
+/// relay rather than the dead one. The manual region-change path
+/// (`set_relay_url` command) stores + persists separately after its migrate;
+/// the callback covers the AUTOMATIC failover path where no command ran.
 fn spawn_relay_failover(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1697,9 +1712,11 @@ fn spawn_relay_failover(app: AppHandle, state: ChatState) {
                 continue;
             };
             let app_for_cb = app.clone();
+            let state_for_cb = state.clone();
             client.set_relay_failover_callback(std::sync::Arc::new(
                 move |ev: fetchit_chat::RelayFailoverEvent| {
                     if let fetchit_chat::RelayFailoverEvent::Migrated { to, .. } = &ev {
+                        state_for_cb.adopt_live_relay(to);
                         persist_relay_url(&app_for_cb, to);
                     }
                     let payload = RelayFailoverPayload::from_event(&ev);
@@ -2256,6 +2273,25 @@ mod tests {
         assert!(super::pump_should_start(&flag));
         assert!(!super::pump_should_start(&flag));
         assert!(!super::pump_should_start(&flag));
+    }
+
+    #[test]
+    fn adopt_live_relay_updates_in_memory_relay_url() {
+        // The automatic-failover callback adopts the migrated-to relay so
+        // rebuilds and the share-URI command stop naming the dead primary.
+        let state = super::ChatState::new(
+            "https://relay-a.example.com/",
+            std::path::PathBuf::from("/tmp/fetchit-test-chat-state"),
+            None,
+            false,
+            None,
+        )
+        .expect("valid relay url");
+        state.adopt_live_relay("https://relay-b.example.com/");
+        assert_eq!(state.relay_url().as_str(), "https://relay-b.example.com/");
+        // A malformed URL is ignored and leaves the adopted value intact.
+        state.adopt_live_relay("not a url");
+        assert_eq!(state.relay_url().as_str(), "https://relay-b.example.com/");
     }
 
     #[test]

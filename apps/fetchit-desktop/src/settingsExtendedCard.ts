@@ -12,6 +12,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { getDisplayName } from "./chat/api";
+
 /// DOM ids the panel reads from its mount root. Centralised so the HTML
 /// template in `settings.ts` and the wire-up code stay in lockstep.
 export const EXTENDED_CARD_IDS = {
@@ -58,9 +60,11 @@ export function initExtendedCardPanel(root: HTMLElement): void {
       const prev = genBtn.textContent;
       genBtn.textContent = "Generating…";
       try {
-        // Empty display name: the v2 card embeds whatever the daemon
-        // has on file; the display name is edited elsewhere.
-        const result = await invoke<CardWithUri>("chat_card", { displayName: "" });
+        // The daemon stamps the supplied name into the card verbatim,
+        // so pass the stored display name; a failed lookup degrades to
+        // a nameless card rather than blocking generation.
+        const displayName = await getDisplayName().catch(() => "");
+        const result = await invoke<CardWithUri>("chat_card", { displayName });
         uriBox.value = result.uri;
         copyBtn.disabled = false;
       } catch (err) {
