@@ -1614,13 +1614,13 @@ mod tests {
         // base64 decodes to MAX_ATTACHMENT_BYTES + 1 bytes must have the
         // attachment stripped to None on dispatch; the message body must
         // survive intact.
+        use super::super::types::MessagePayload;
         use crate::attachment::{Attachment, MAX_ATTACHMENT_BYTES};
         use crate::chat_crypto::{aead_seal, canonical_envelope_bytes, message_aad, random_nonce};
         use base64::engine::general_purpose::STANDARD as B64e;
         use base64::Engine as _;
         use fetchit_relay_proto::{AgentId as ProtoAgentId, EnvelopeKind, GroupId, MachineId};
         use rand::rngs::OsRng;
-        use super::super::types::MessagePayload;
 
         let tmp_a = tempdir().unwrap();
         let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
