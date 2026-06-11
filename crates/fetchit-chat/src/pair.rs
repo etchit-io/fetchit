@@ -94,6 +94,11 @@ pub enum PairError {
     /// bytes (wrong length, bad format).
     #[error("pqc: {0}")]
     Pqc(String),
+    /// [`fetchit_relay_proto::pair_record::verify_pair_record`] rejected
+    /// the returned `PairRecordV1` (bad signature, derivation mismatch,
+    /// malformed fields, etc.).
+    #[error("pair record verify: {0}")]
+    PairRecordVerify(String),
 }
 
 const ALL_ZEROS_PROFILE_ADDR: &str =
@@ -201,6 +206,42 @@ pub async fn fetch_index_record_by_id(
     }
     verify_index_record(&record)?;
     if record.agent_id != agent_id {
+        return Err(PairError::AgentIdMismatch);
+    }
+    Ok(record)
+}
+
+/// HTTP GET `{relay}/v1/pair-record/{agent_id_hex}`, verify the
+/// returned [`fetchit_relay_proto::pair_record::PairRecordV1`], and
+/// cross-check that the returned `agent_id_hex` matches what was
+/// requested. Mirrors the `fetch_index_record_by_id` pattern exactly.
+///
+/// # Errors
+/// Transport, non-2xx relay status, malformed body, agent-id mismatch,
+/// or signature / derivation verification failure.
+pub async fn fetch_pair_record_by_id(
+    relay: &url::Url,
+    agent_id_hex: &str,
+    http: &reqwest::Client,
+) -> std::result::Result<fetchit_relay_proto::pair_record::PairRecordV1, PairError> {
+    let url = relay
+        .join(&format!("v1/pair-record/{agent_id_hex}"))
+        .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
+    let resp = http
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(PairError::RelayStatus(resp.status().as_u16()));
+    }
+    let record: fetchit_relay_proto::pair_record::PairRecordV1 = resp
+        .json()
+        .await
+        .map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
+    fetchit_relay_proto::pair_record::verify_pair_record(&record)
+        .map_err(|e| PairError::PairRecordVerify(e.to_string()))?;
+    if record.agent_id_hex != agent_id_hex {
         return Err(PairError::AgentIdMismatch);
     }
     Ok(record)
@@ -596,6 +637,154 @@ mod tests {
         match fetch_index_record_by_id(&relay, &record.agent_id, &http).await {
             Err(PairError::Tombstoned) => {}
             other => panic!("expected Tombstoned, got {other:?}"),
+        }
+    }
+
+    // Build a valid PairRecordV1 signed by a fresh ML-DSA-65 keypair.
+    fn mk_signed_pair_record(
+        dsa: &MlDsa,
+        sk: &saorsa_pqc::api::sig::MlDsaSecretKey,
+        pk_bytes: &[u8],
+        relays: &[&str],
+        issued_at_ms: u64,
+    ) -> fetchit_relay_proto::pair_record::PairRecordV1 {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use fetchit_relay_proto::pair_record::{pair_signing_input, PairRecordV1};
+        let agent_id_hex = hex::encode(fetchit_relay_proto::derive_agent_id(pk_bytes));
+        let relay_strs: Vec<String> = relays
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let kem_pk = vec![0u8; 1184];
+        let input = pair_signing_input(&agent_id_hex, pk_bytes, &kem_pk, &relay_strs, issued_at_ms)
+            .unwrap();
+        let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+        PairRecordV1 {
+            agent_id_hex,
+            ml_dsa_pubkey_b64: B64STD.encode(pk_bytes),
+            kem_pubkey_b64: B64STD.encode(&kem_pk),
+            advertised_relays: relay_strs,
+            issued_at_ms,
+            sig_b64: B64STD.encode(sig),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_pair_record_by_id_happy_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let record = mk_signed_pair_record(
+            &dsa,
+            &sk,
+            &pk.to_bytes(),
+            &["https://relay.example.com"],
+            1_000,
+        );
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/pair-record/{}", record.agent_id_hex)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let got = fetch_pair_record_by_id(&relay, &record.agent_id_hex, &http)
+            .await
+            .unwrap();
+        assert_eq!(got.agent_id_hex, record.agent_id_hex);
+        assert_eq!(got.issued_at_ms, 1_000);
+        fetchit_relay_proto::pair_record::verify_pair_record(&got)
+            .expect("returned record must verify");
+    }
+
+    #[tokio::test]
+    async fn fetch_pair_record_by_id_rejects_tampered_signature() {
+        use base64::engine::general_purpose::STANDARD as B64STD;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let mut record = mk_signed_pair_record(
+            &dsa,
+            &sk,
+            &pk.to_bytes(),
+            &["https://relay.example.com"],
+            2_000,
+        );
+        // Flip a byte in the signature.
+        let mut sig_bytes = B64STD.decode(&record.sig_b64).unwrap();
+        sig_bytes[0] ^= 0xff;
+        record.sig_b64 = B64STD.encode(&sig_bytes);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match fetch_pair_record_by_id(&relay, &record.agent_id_hex, &http).await {
+            Err(PairError::PairRecordVerify(_)) => {}
+            other => panic!("expected PairRecordVerify, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_pair_record_by_id_rejects_mismatched_returned_id() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        // Build a valid record for pk's agent_id.
+        let real_record = mk_signed_pair_record(
+            &dsa,
+            &sk,
+            &pk.to_bytes(),
+            &["https://relay.example.com"],
+            3_000,
+        );
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&real_record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        // Request a DIFFERENT (wrong) agent id — the relay returns the real record but
+        // agent_id_hex won't match the requested id.
+        let wrong_id = "a".repeat(64);
+        match fetch_pair_record_by_id(&relay, &wrong_id, &http).await {
+            Err(PairError::AgentIdMismatch) => {}
+            other => panic!("expected AgentIdMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_pair_record_by_id_surfaces_non_2xx() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match fetch_pair_record_by_id(&relay, &"b".repeat(64), &http).await {
+            Err(PairError::RelayStatus(404)) => {}
+            other => panic!("expected RelayStatus(404), got {other:?}"),
         }
     }
 

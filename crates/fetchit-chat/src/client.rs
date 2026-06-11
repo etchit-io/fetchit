@@ -503,7 +503,7 @@ impl Client {
         let initial_relays =
             seed_initial_advertised_relays(advertised_relays, primary_relay_url.as_deref())?;
 
-        Ok(Self {
+        let client = Self {
             http,
             router,
             chat,
@@ -518,7 +518,21 @@ impl Client {
             primary_relay_url,
             multi_home,
             fediverse,
-        })
+        };
+
+        // Best-effort pair-record publish: runs once at connect time so
+        // peers can discover this agent via `GET /v1/pair-record/<id>`.
+        // A failure only logs a warning and never blocks or fails startup.
+        if client.chat.is_some() && client.primary_relay_url.is_some() {
+            let client_for_publish = client.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client_for_publish.publish_pair_record().await {
+                    log::warn!("[chat] pair-record publish failed at connect: {e}");
+                }
+            });
+        }
+
+        Ok(client)
     }
 
     /// Snapshot of the cumulative inbound-drop counter — number of
@@ -1487,6 +1501,84 @@ impl Client {
     ) -> Option<tokio::sync::watch::Receiver<fetchit_relay_client::ConnState>> {
         let relay = self.relay.as_ref()?;
         Some(relay.relay_set().primary_connection_state())
+    }
+
+    /// Publish a fresh signed [`fetchit_relay_proto::pair_record::PairRecordV1`]
+    /// to the configured relay's `POST /v1/pair-record` endpoint.
+    ///
+    /// On a 409 `WatermarkReject` response the method observes the
+    /// relay's current watermark, computes a new `issued_at_ms`, rebuilds
+    /// the record, and retries **once**. A second 409 is a hard error.
+    ///
+    /// The `advertised_relays` list sent in the record is the single
+    /// configured relay URL (the full multi-relay list is a later task;
+    /// 1..=4 entries are valid per the proto spec).
+    ///
+    /// Returns `Ok(())` when the relay accepted the record. No-op when
+    /// the client was built without a relay URL or without chat state.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::Invalid`] when the relay returns a second 409, or
+    /// on other non-2xx responses. [`ChatError::Transport`] on connection
+    /// failure.
+    pub async fn publish_pair_record(&self) -> Result<()> {
+        let Some(chat) = self.chat.as_ref() else {
+            return Ok(());
+        };
+        let Some(relay_str) = self.primary_relay_url.as_deref() else {
+            return Ok(());
+        };
+        let relay = url::Url::parse(relay_str)
+            .map_err(|e| ChatError::Invalid(format!("relay url: {e}")))?;
+        let advertised_relays = vec![relay_str.to_owned()];
+        let agent_hex = chat.identity.agent_id_hex().to_owned();
+
+        let wall_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+
+        let issued = crate::pair_record::next_issued_at_ms(&chat.layout, &agent_hex, wall_ms)?;
+        let record = crate::pair_record::build_signed_pair_record(
+            &chat.identity,
+            chat.signer.as_ref(),
+            advertised_relays.clone(),
+            issued,
+        )
+        .await?;
+
+        let http = reqwest::Client::new();
+        let outcome = crate::pair_record::post_pair_record(&relay, &record, &http).await?;
+        if let crate::pair_record::PostOutcome::WatermarkReject {
+            current_issued_at_ms,
+        } = outcome
+        {
+            crate::pair_record::observe_external_watermark(
+                &chat.layout,
+                &agent_hex,
+                current_issued_at_ms,
+            )?;
+            let wall_ms2 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let issued2 =
+                crate::pair_record::next_issued_at_ms(&chat.layout, &agent_hex, wall_ms2)?;
+            let record2 = crate::pair_record::build_signed_pair_record(
+                &chat.identity,
+                chat.signer.as_ref(),
+                advertised_relays,
+                issued2,
+            )
+            .await?;
+            if let crate::pair_record::PostOutcome::WatermarkReject { .. } =
+                crate::pair_record::post_pair_record(&relay, &record2, &http).await?
+            {
+                return Err(ChatError::Invalid(
+                    "pair-record publish rejected twice by relay watermark guard".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

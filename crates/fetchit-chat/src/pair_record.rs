@@ -20,8 +20,10 @@ use fetchit_relay_client::Signer;
 use fetchit_relay_proto::pair_record::{
     forwarding_signing_input, pair_signing_input, ForwardingRecordV1, PairRecordV1,
 };
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 // ── (A) Record builders ───────────────────────────────────────────────────────
 
@@ -117,6 +119,72 @@ fn ensure_identity_binds_signer(agent_id_hex: &str, ml_dsa_pubkey: &[u8]) -> Res
     }
 }
 
+// ── (C) HTTP publish ─────────────────────────────────────────────────────────
+
+/// Outcome of a single `POST /v1/pair-record` attempt.
+#[derive(Debug)]
+pub enum PostOutcome {
+    /// The relay accepted the record (2xx).
+    Accepted,
+    /// The relay rejected with 409 Conflict: our `issued_at_ms` was not
+    /// strictly greater than the relay's stored watermark. The relay body
+    /// carries the value we must exceed on a retry.
+    WatermarkReject {
+        /// The relay's current stored `issued_at_ms` for this agent.
+        current_issued_at_ms: u64,
+    },
+}
+
+/// 409 response body from the relay's watermark guard.
+#[derive(Deserialize)]
+struct WatermarkRejectBody {
+    current_issued_at_ms: u64,
+}
+
+/// `POST <relay>/v1/pair-record` with a 10-second timeout.
+///
+/// - 2xx → [`PostOutcome::Accepted`].
+/// - 409 → parse the `{"current_issued_at_ms": N}` body →
+///   [`PostOutcome::WatermarkReject`].
+/// - Any other non-2xx → [`ChatError::Invalid`] with the status code.
+///
+/// # Errors
+///
+/// [`ChatError::Transport`] on connection failure, or
+/// [`ChatError::Invalid`] for non-2xx (other than 409).
+pub async fn post_pair_record(
+    relay: &url::Url,
+    record: &PairRecordV1,
+    http: &reqwest::Client,
+) -> Result<PostOutcome> {
+    let url = relay
+        .join("v1/pair-record")
+        .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
+    let resp = http
+        .post(url)
+        .json(record)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(PostOutcome::Accepted);
+    }
+    if status.as_u16() == 409 {
+        let body: WatermarkRejectBody = resp
+            .json()
+            .await
+            .map_err(|e| ChatError::Invalid(format!("409 body decode: {e}")))?;
+        return Ok(PostOutcome::WatermarkReject {
+            current_issued_at_ms: body.current_issued_at_ms,
+        });
+    }
+    Err(ChatError::Invalid(format!(
+        "relay returned {s} publishing pair record",
+        s = status.as_u16()
+    )))
+}
+
 // ── (B) Logical-clock watermark ───────────────────────────────────────────────
 
 const WATERMARK_FILE: &str = "pair_record_watermarks.json";
@@ -182,6 +250,59 @@ pub fn next_issued_at_ms(
     std::fs::rename(&tmp, &path)?;
 
     Ok(next)
+}
+
+/// Record an externally-observed `issued_at_ms` value for
+/// `self_agent_hex`, setting the stored watermark to
+/// `max(stored, observed_ms)`.
+///
+/// This is used by the 409-retry path in
+/// [`crate::client::Client::publish_pair_record`]: when the relay
+/// rejects our record because our `issued_at_ms` was not strictly
+/// greater than its stored value, we observe its current value here so
+/// the subsequent call to [`next_issued_at_ms`] returns `observed + 1`.
+///
+/// Refuses to store `u64::MAX` (same corrupt-guard as
+/// [`next_issued_at_ms`]). If the current stored watermark already
+/// exceeds or equals `observed_ms`, this is a no-op.
+///
+/// # Errors
+///
+/// [`ChatError::Io`] if the watermark file cannot be written, or
+/// [`ChatError::Invalid`] if `observed_ms == u64::MAX`.
+pub fn observe_external_watermark(
+    layout: &StoreLayout,
+    self_agent_hex: &str,
+    observed_ms: u64,
+) -> Result<()> {
+    if observed_ms == u64::MAX {
+        return Err(ChatError::Invalid(
+            "pair-record watermark is corrupt (u64::MAX)".into(),
+        ));
+    }
+
+    let _guard = WATERMARK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let path = watermark_path(layout);
+    let mut map: BTreeMap<String, u64> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+
+    let stored = map.get(self_agent_hex).copied().unwrap_or(0);
+    if observed_ms <= stored {
+        return Ok(());
+    }
+
+    map.insert(self_agent_hex.to_owned(), observed_ms);
+    let bytes = serde_json::to_vec(&map)
+        .map_err(|e| ChatError::Invalid(format!("watermark serialize: {e}")))?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -378,5 +499,150 @@ mod tests {
         // A different agent starting from 0 should seed from its own wall clock.
         let b = next_issued_at_ms(&layout, agent_b, 1).unwrap();
         assert_eq!(b, 1, "different agent must start from its own wall clock");
+    }
+
+    // ── (B) observe_external_watermark ───────────────────────────────────────
+
+    #[test]
+    fn observe_external_watermark_bumps_next_past_observed() {
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        let observed: u64 = 50_000;
+        observe_external_watermark(&layout, AGENT, observed).unwrap();
+        // next_issued_at_ms must return > observed
+        let next = next_issued_at_ms(&layout, AGENT, 1).unwrap();
+        assert!(
+            next > observed,
+            "next_issued_at_ms must exceed observed watermark {observed}, got {next}"
+        );
+    }
+
+    #[test]
+    fn observe_external_watermark_is_monotonic() {
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        // Seed a high watermark.
+        next_issued_at_ms(&layout, AGENT, 100_000).unwrap();
+        // Observing a lower value must not regress the stored watermark.
+        observe_external_watermark(&layout, AGENT, 1_000).unwrap();
+        let next = next_issued_at_ms(&layout, AGENT, 1).unwrap();
+        assert!(
+            next > 100_000,
+            "lower observe must not regress stored watermark; got {next}"
+        );
+    }
+
+    #[test]
+    fn observe_external_watermark_rejects_max() {
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        let err = observe_external_watermark(&layout, AGENT, u64::MAX).unwrap_err();
+        assert!(err.to_string().contains("corrupt"), "got {err}");
+    }
+
+    // ── (C) post_pair_record wiremock ─────────────────────────────────────────
+
+    /// Helper: build a valid `PairRecordV1` using a fresh ML-DSA-65 keypair.
+    async fn build_test_pair_record(
+        relays: Vec<String>,
+        issued_at_ms: u64,
+    ) -> (PairRecordV1, fetchit_relay_client::MlDsaSigner) {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use zeroize::Zeroizing;
+
+        let dir = tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("pw".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let signer = make_signer();
+        let agent_hex = agent_hex_for(&signer);
+        let identity = FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            &agent_hex,
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+        let record = build_signed_pair_record(&identity, &signer, relays, issued_at_ms)
+            .await
+            .unwrap();
+        (record, signer)
+    }
+
+    #[tokio::test]
+    async fn post_pair_record_accepted_on_200() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (record, _) =
+            build_test_pair_record(vec!["https://relay.example.com".to_owned()], 1_000).await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match post_pair_record(&relay, &record, &http).await.unwrap() {
+            PostOutcome::Accepted => {}
+            other @ PostOutcome::WatermarkReject { .. } => {
+                panic!("expected Accepted, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_pair_record_watermark_reject_on_409() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(json!({"current_issued_at_ms": 99_999u64})),
+            )
+            .mount(&server)
+            .await;
+
+        let (record, _) =
+            build_test_pair_record(vec!["https://relay.example.com".to_owned()], 1_000).await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match post_pair_record(&relay, &record, &http).await.unwrap() {
+            PostOutcome::WatermarkReject {
+                current_issued_at_ms,
+            } => {
+                assert_eq!(current_issued_at_ms, 99_999);
+            }
+            other @ PostOutcome::Accepted => panic!("expected WatermarkReject, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_pair_record_error_on_other_non_2xx() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let (record, _) =
+            build_test_pair_record(vec!["https://relay.example.com".to_owned()], 1_000).await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match post_pair_record(&relay, &record, &http).await {
+            Err(e) => assert!(e.to_string().contains("500"), "got {e}"),
+            Ok(o) => panic!("expected Err, got {o:?}"),
+        }
     }
 }
