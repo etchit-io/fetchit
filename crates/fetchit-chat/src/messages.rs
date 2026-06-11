@@ -289,6 +289,21 @@ impl StoredContactCard {
         relays: Vec<String>,
         hint_epoch_ms: u64,
     ) -> Result<bool> {
+        // Cap the inbound list before persisting. The relays come from a
+        // verified sender, but a malicious one could otherwise bloat the
+        // card file without bound. Mirrors the `RendezvousHintsV1::from_value`
+        // caps; an empty, over-count, or over-length list is ignored, not
+        // stored (scheme is intentionally not checked here -- advertised
+        // relays are http(s) and the send path normalizes them).
+        if relays.is_empty()
+            || relays.len() > crate::card::MAX_HINT_RELAYS
+            || relays
+                .iter()
+                .any(|u| u.len() > crate::card::MAX_HINT_URL_LEN)
+        {
+            return Ok(false);
+        }
+
         let _guard = CARD_UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -306,6 +321,30 @@ impl StoredContactCard {
         card.last_hint_epoch_ms = Some(hint_epoch_ms);
         card.save(layout)?;
         Ok(true)
+    }
+
+    /// Persist a freshly-imported contact card under [`CARD_UPDATE_LOCK`]
+    /// without regressing the monotonic relay-hint watermark. Any
+    /// `last_hint_epoch_ms` already on disk (set by an in-band hint that
+    /// arrived before this import) is preserved along with the relays it
+    /// refers to, so a re-import cannot reset the downgrade guard to zero
+    /// and re-admit a stale hint. Identity fields (keys, display name)
+    /// from `self` are always written.
+    ///
+    /// # Errors
+    /// IO or JSON parse/serialization failures.
+    pub fn save_imported(mut self, layout: &StoreLayout) -> Result<()> {
+        let _guard = CARD_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if let Some(existing) = Self::load(layout, &self.agent_id_hex)? {
+            if existing.last_hint_epoch_ms.is_some() {
+                self.last_hint_epoch_ms = existing.last_hint_epoch_ms;
+                self.rendezvous_hints = existing.rendezvous_hints;
+            }
+        }
+        self.save(layout)
     }
 
     /// Load a stored card from disk by agent id.
@@ -4192,5 +4231,195 @@ mod tests {
         )
         .unwrap();
         assert!(!result, "no card on disk must return false");
+    }
+
+    #[test]
+    fn apply_relay_hint_rejects_oversized_relay_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "e".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://good.example.com".to_owned()],
+            }),
+            last_hint_epoch_ms: Some(1_000),
+        };
+        card.save(&layout).unwrap();
+
+        // Nine relays (> MAX_HINT_RELAYS = 8) with a strictly-newer epoch.
+        let flood: Vec<String> = (0..9).map(|i| format!("wss://r{i}.example.com")).collect();
+        let updated =
+            StoredContactCard::apply_relay_hint(&layout, &agent_hex, flood, 2_000).unwrap();
+        assert!(!updated, "an over-count list must be ignored, not stored");
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://good.example.com".to_owned()]),
+            "card relays must be untouched by a rejected hint",
+        );
+        assert_eq!(
+            loaded.last_hint_epoch_ms,
+            Some(1_000),
+            "epoch must be untouched"
+        );
+    }
+
+    #[test]
+    fn apply_relay_hint_rejects_overlong_relay_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "f".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        card.save(&layout).unwrap();
+
+        // One URL of 257 bytes (> MAX_HINT_URL_LEN = 256).
+        let long = format!("wss://{}", "a".repeat(257));
+        let updated =
+            StoredContactCard::apply_relay_hint(&layout, &agent_hex, vec![long], 1_000).unwrap();
+        assert!(!updated, "an over-length URL must be ignored, not stored");
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert!(
+            loaded.rendezvous_hints.is_none(),
+            "no hint must be persisted"
+        );
+    }
+
+    #[test]
+    fn apply_relay_hint_rejects_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "1".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://good.example.com".to_owned()],
+            }),
+            last_hint_epoch_ms: Some(1_000),
+        };
+        card.save(&layout).unwrap();
+
+        let updated =
+            StoredContactCard::apply_relay_hint(&layout, &agent_hex, Vec::new(), 2_000).unwrap();
+        assert!(!updated, "an empty list must not wipe known-good relays");
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://good.example.com".to_owned()]),
+        );
+    }
+
+    #[test]
+    fn save_imported_preserves_hint_watermark_and_blocks_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "2".repeat(64);
+
+        // A card that has learned a fresh in-band hint at epoch 5000.
+        let original = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://good.example.com".to_owned()],
+            }),
+            last_hint_epoch_ms: Some(5_000),
+        };
+        original.save(&layout).unwrap();
+
+        // User re-imports the peer (e.g. rescans the QR): a fresh card with
+        // no hint watermark but a rotated KEM key.
+        let reimport = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![1u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        reimport.save_imported(&layout).unwrap();
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        // The downgrade watermark and the relays it refers to survive the
+        // re-import (not reset to zero / None).
+        assert_eq!(
+            loaded.last_hint_epoch_ms,
+            Some(5_000),
+            "re-import must not reset the downgrade watermark",
+        );
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://good.example.com".to_owned()]),
+        );
+        // Identity fields from the import ARE written.
+        assert_eq!(
+            loaded.kem_public_key_b64,
+            B64.encode(vec![1u8; 1184]),
+            "import must still refresh identity fields",
+        );
+
+        // The replay the preserved watermark must keep rejecting: a stale
+        // hint at epoch 4000 must not redirect the contact's relays.
+        let updated = StoredContactCard::apply_relay_hint(
+            &layout,
+            &agent_hex,
+            vec!["wss://attacker.example.com".to_owned()],
+            4_000,
+        )
+        .unwrap();
+        assert!(
+            !updated,
+            "a stale hint must stay rejected after re-import (downgrade window not reopened)",
+        );
+    }
+
+    #[test]
+    fn save_imported_writes_fresh_card_when_none_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "3".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: B64.encode(vec![9u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        card.save_imported(&layout).unwrap();
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.kem_public_key_b64, B64.encode(vec![9u8; 1184]));
+        assert_eq!(
+            loaded.last_hint_epoch_ms, None,
+            "fresh import carries no watermark"
+        );
     }
 }

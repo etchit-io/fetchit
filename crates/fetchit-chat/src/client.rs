@@ -1648,7 +1648,10 @@ impl Client {
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
         };
-        stored.save(layout)?;
+        // Persist under CARD_UPDATE_LOCK, preserving any newer in-band
+        // relay-hint watermark already on disk so a re-import can't reset
+        // the per-contact downgrade guard.
+        stored.save_imported(layout)?;
 
         // Build a minimal legacy AgentCard URI and forward it to x0xd's
         // /agent/card/import endpoint so the daemon-backed contact list

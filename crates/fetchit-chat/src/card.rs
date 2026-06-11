@@ -85,8 +85,8 @@ pub struct RendezvousHints {
     pub data: serde_json::Value,
 }
 
-const MAX_HINT_RELAYS: usize = 8;
-const MAX_HINT_URL_LEN: usize = 256;
+pub(crate) const MAX_HINT_RELAYS: usize = 8;
+pub(crate) const MAX_HINT_URL_LEN: usize = 256;
 
 /// V1 payload for the [`RendezvousHints::data`] slot.
 ///
