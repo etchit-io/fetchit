@@ -108,6 +108,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 const WATERMARK_FILE: &str = "profile_fetch_watermark.json";
 
@@ -130,13 +131,23 @@ pub fn load_watermark(chat_root: &Path, agent_id: &str) -> Option<u64> {
     map.get(agent_id).copied()
 }
 
+/// Serialises the watermark file's read-modify-write so concurrent
+/// profile fetches for different ids can't clobber each other's entry.
+static WATERMARK_LOCK: Mutex<()> = Mutex::new(());
+
 /// Persist `issued_at_ms` for `agent_id` when it is newer than the
 /// stored value (monotonic). Best-effort: a write error is non-fatal
-/// (the downgrade check already ran against the loaded value).
+/// (the downgrade check already ran against the loaded value). The
+/// read-modify-write is serialised and the write is atomic (temp +
+/// rename) so a crash mid-write can't truncate the file into unparseable
+/// JSON, which would silently drop every contact's watermark.
 ///
 /// # Errors
 /// Propagates a filesystem write error.
 pub fn save_watermark(chat_root: &Path, agent_id: &str, issued_at_ms: u64) -> std::io::Result<()> {
+    let _guard = WATERMARK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = watermark_path(chat_root);
     let mut map: BTreeMap<String, u64> = std::fs::read(&path)
         .ok()
@@ -147,7 +158,9 @@ pub fn save_watermark(chat_root: &Path, agent_id: &str, issued_at_ms: u64) -> st
         *entry = issued_at_ms;
     }
     let bytes = serde_json::to_vec(&map).unwrap_or_default();
-    std::fs::write(&path, bytes)
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)
 }
 
 /// Identify a raster image purely from its leading magic bytes. Returns
@@ -224,6 +237,10 @@ pub async fn chat_fetch_profile(
     agent_id: String,
 ) -> Result<ProfileOutcome, String> {
     crate::chat::ensure_chat_enabled(&app_state)?;
+    // Validate the id at the boundary before it reaches the relay URL
+    // path. The record.agent_id == agent_id binding backstops correctness;
+    // this rejects a malformed id early and is path-manipulation defense.
+    fetchit_chat::identity::AgentId::parse(&agent_id).map_err(|e| e.to_string())?;
     let relay = state.relay_url();
     let http = reqwest::Client::new();
     let record = match fetchit_chat::pair::fetch_index_record_by_id(&relay, &agent_id, &http).await
