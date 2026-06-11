@@ -1536,7 +1536,10 @@ impl Client {
 
         let wall_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            // 0 (not u64::MAX) on the unreachable overflow branch: feeding
+            // u64::MAX into the watermark would persist the corrupt sentinel
+            // and brick publishing. next_issued_at_ms handles wall=0 fine.
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
 
         let issued = crate::pair_record::next_issued_at_ms(&chat.layout, &agent_hex, wall_ms)?;
         let record = crate::pair_record::build_signed_pair_record(
@@ -1560,7 +1563,7 @@ impl Client {
             )?;
             let wall_ms2 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
             let issued2 =
                 crate::pair_record::next_issued_at_ms(&chat.layout, &agent_hex, wall_ms2)?;
             let record2 = crate::pair_record::build_signed_pair_record(

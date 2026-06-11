@@ -121,6 +121,11 @@ fn ensure_identity_binds_signer(agent_id_hex: &str, ml_dsa_pubkey: &[u8]) -> Res
 
 // ── (C) HTTP publish ─────────────────────────────────────────────────────────
 
+/// Upper bound on a relay response body we will buffer. Pair records and
+/// 409 bodies are a few KB; this stops a hostile relay from streaming an
+/// unbounded body to OOM the client.
+pub(crate) const MAX_RELAY_BODY_BYTES: usize = 64 * 1024;
+
 /// Outcome of a single `POST /v1/pair-record` attempt.
 #[derive(Debug)]
 pub enum PostOutcome {
@@ -171,9 +176,17 @@ pub async fn post_pair_record(
         return Ok(PostOutcome::Accepted);
     }
     if status.as_u16() == 409 {
-        let body: WatermarkRejectBody = resp
-            .json()
+        // Cap the body: a hostile/buggy relay must not be able to stream
+        // an unbounded 409 body and OOM the client. The real body is a few
+        // bytes of JSON.
+        let raw = resp
+            .bytes()
             .await
+            .map_err(|e| ChatError::Invalid(format!("409 body read: {e}")))?;
+        if raw.len() > MAX_RELAY_BODY_BYTES {
+            return Err(ChatError::Invalid("409 body exceeds size cap".into()));
+        }
+        let body: WatermarkRejectBody = serde_json::from_slice(&raw)
             .map_err(|e| ChatError::Invalid(format!("409 body decode: {e}")))?;
         return Ok(PostOutcome::WatermarkReject {
             current_issued_at_ms: body.current_issued_at_ms,
@@ -240,6 +253,15 @@ pub fn next_issued_at_ms(
     // advance past a prior 0). saturating_add is defense-in-depth; the
     // guard above already rules out the only overflowing input.
     let next = wall_clock_ms.max(last.saturating_add(1));
+    // Never persist the corrupt sentinel, regardless of how `next` got
+    // there (a u64::MAX wall clock, or last == MAX-1). This keeps any
+    // future caller from bricking publishing by passing a bad wall clock,
+    // independent of the call-site fallback discipline.
+    if next == u64::MAX {
+        return Err(ChatError::Invalid(
+            "pair-record watermark would reach u64::MAX (corrupt clock input)".into(),
+        ));
+    }
 
     map.insert(self_agent_hex.to_owned(), next);
 
@@ -473,6 +495,19 @@ mod tests {
         let layout = make_layout(dir.path());
         let got = next_issued_at_ms(&layout, AGENT, 0).unwrap();
         assert!(got > 0, "wall=0 first call must advance past 0, got {got}");
+    }
+
+    #[test]
+    fn watermark_wall_clock_max_input_errors_not_bricks() {
+        // A u64::MAX wall clock (overflow fallback) must error rather than
+        // persist the corrupt sentinel and brick all future publishes.
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        let err = next_issued_at_ms(&layout, AGENT, u64::MAX).unwrap_err();
+        assert!(err.to_string().contains("corrupt"), "got {err}");
+        // And a normal call afterward still works (nothing corrupt persisted).
+        let ok = next_issued_at_ms(&layout, AGENT, 5_000).unwrap();
+        assert_eq!(ok, 5_000);
     }
 
     #[test]

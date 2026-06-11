@@ -235,10 +235,18 @@ pub async fn fetch_pair_record_by_id(
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }
-    let record: fetchit_relay_proto::pair_record::PairRecordV1 = resp
-        .json()
+    // Cap the body before buffering: a hostile relay must not be able to
+    // stream an unbounded response and OOM the client. A PairRecordV1 is
+    // a few KB.
+    let raw = resp
+        .bytes()
         .await
-        .map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
+        .map_err(|e| PairError::Decode(format!("relay body read: {e}")))?;
+    if raw.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
+        return Err(PairError::Decode("relay body exceeds size cap".into()));
+    }
+    let record: fetchit_relay_proto::pair_record::PairRecordV1 =
+        serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
     fetchit_relay_proto::pair_record::verify_pair_record(&record)
         .map_err(|e| PairError::PairRecordVerify(e.to_string()))?;
     if record.agent_id_hex != agent_id_hex {
