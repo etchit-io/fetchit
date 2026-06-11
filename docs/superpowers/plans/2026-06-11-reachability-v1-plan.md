@@ -112,6 +112,7 @@ Share pointer URI: `x0x://pair/<agent_id_hex>?r=<urlencoded-relay>[&r=...]` (1..
 
 - [ ] Failing tests: `write_forwarding_record(old_relay, moved_to, ...)` POSTs signed record; on deposit walk exhausting all hints, send fetches `/v1/forwarding/<id>` from each stale hint, verifies (sig + derive + watermark), retries deposit at `moved_to_relays`, persists the refreshed card; forged/rolled-back forwarding rejected.
 - [ ] Implement; bound the re-resolve to one hop (no forwarding chains — a forwarded-to relay's record is final for this send; log if it also fails).
+- [ ] **Forwarding POST response handling (TB2 contract, decided 2026-06-11 — Option A):** the relay verifies the forwarding sig server-side against the agent's stored pair-record. So `write_forwarding_record` must handle: `409 {"current_issued_at_ms":N}` → bump logical clock to N+1, re-sign, retry once (same as pair-record publish); `412 Precondition Failed` (old relay has no pair-record for this agent — evicted edge) → NON-FATAL: log and skip the forwarding write, the migration still succeeds and healing falls back to the in-band hint refresh (Task 6) + Autonomi manifest republish (Task 9). Never fail a region migration because the forwarding write 412'd. `403` (bad sig — shouldn't happen for our own records) → real error.
 - [ ] Gates; commit.
 
 ### Task 8: home-relay failover (`fetchit-chat`)
