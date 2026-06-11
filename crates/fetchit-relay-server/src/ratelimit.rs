@@ -100,6 +100,25 @@ mod tests {
         assert!(!rl.allow(&a, 10));
     }
 
+    #[test]
+    fn pooled_sessions_for_one_agent_share_a_single_bucket() {
+        // Reachability V1 / TB3 — pooled-deposit auth parity. The limiter
+        // is keyed by `AgentId`, and the WS send path passes the
+        // connection's *authenticated* `auth.agent_id`
+        // (`ws.rs`: `ratelimit.allow(&auth.agent_id, …)`). So N pooled
+        // connections for one agent all index the SAME bucket — opening a
+        // second connection cannot multiply an agent's send budget.
+        let rl = RateLimiter::new();
+        let agent = AgentId::from_bytes([0x33; 32]);
+        // First "connection" spends the only token at cap=1…
+        assert!(rl.allow(&agent, 1));
+        // …the second same-agent "connection" finds it already drained.
+        assert!(!rl.allow(&agent, 1));
+        // A different agent has an independent bucket.
+        let other = AgentId::from_bytes([0x44; 32]);
+        assert!(rl.allow(&other, 1));
+    }
+
     #[tokio::test]
     async fn bucket_refills_over_time() {
         let rl = RateLimiter::new();
