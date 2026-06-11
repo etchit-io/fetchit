@@ -29,6 +29,41 @@ async function flushPromises(): Promise<void> {
   }
 }
 
+describe("outboxDriver — boot orphan sweep", () => {
+  it("fails a pre-session sending bubble with no messageId", async () => {
+    const id = store.enqueueOutbound(PEER, "orphan from last run");
+    // Classify everything existing as pre-session by starting the
+    // driver with a session boundary in the future.
+    driver = startOutboxDriver(store, { sendDm, connect }, Date.now() + 60_000);
+    const b = store.conversationsSorted()[0].messages.find((m) => m.id === id);
+    expect(b?.status).toBe("failed");
+    expect(b?.failureReason).toBe("send interrupted by app restart");
+    // Now retryable through the normal machinery.
+    sendDm.mockResolvedValue("server-id-9");
+    store.applyPresenceTransition({ agent_id: PEER, event: "online" });
+    await flushPromises();
+    expect(sendDm).toHaveBeenCalledWith(PEER, "orphan from last run");
+  });
+
+  it("leaves current-session in-flight sends untouched", () => {
+    const id = store.enqueueOutbound(PEER, "genuinely in flight");
+    driver = startOutboxDriver(store, { sendDm, connect });
+    const b = store.conversationsSorted()[0].messages.find((m) => m.id === id);
+    // Enqueued after module load — its promise may be live, hands off.
+    expect(b?.status).toBe("sending");
+  });
+
+  it("leaves pre-session bubbles that already hold a messageId alone", () => {
+    const id = store.enqueueOutbound(PEER, "acked last run");
+    store.markSent(PEER, id, "server-id-old");
+    driver = startOutboxDriver(store, { sendDm, connect }, Date.now() + 60_000);
+    const b = store.conversationsSorted()[0].messages.find((m) => m.id === id);
+    // Relay-acked: already reachable by the retry paths, not an orphan.
+    expect(b?.status).toBe("sending");
+    expect(b?.messageId).toBe("server-id-old");
+  });
+});
+
 describe("ChatStore — outbox bookkeeping", () => {
   it("enqueueOutbound appends a sending bubble with retry counter zero", () => {
     const id = store.enqueueOutbound(PEER, "hello");

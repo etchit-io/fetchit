@@ -14,6 +14,14 @@ import type { AgentId } from "./types";
 /// to "failed". The user can still manually retry afterwards.
 const SEND_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
+/// When this module loaded. A bubble that is still "sending" without a
+/// messageId but predates the JS session cannot have a live in-flight
+/// promise (the world that owned it is gone), so the boot sweep may
+/// safely flip it to "failed" without double-send risk. Module-level on
+/// purpose: panel remounts restart the driver but do not reload the
+/// module, so bubbles from the current session are never misclassified.
+const SESSION_START_MS = Date.now();
+
 /// How often the timeout sweeper runs. One minute is fine — the
 /// timeout granularity is hours.
 const SWEEP_INTERVAL_MS = 60_000;
@@ -49,8 +57,21 @@ function isRetryable(bubble: ChatBubble): boolean {
 export function startOutboxDriver(
   store: ChatStore,
   deps: OutboxDriverDeps,
+  sessionStartMs: number = SESSION_START_MS,
 ): OutboxDriver {
   const inflight = new Set<string>();
+
+  // Boot sweep: a "sending" bubble with no messageId is excluded from
+  // every retry path (isRetryable) to avoid double-sends — but one that
+  // predates this session is provably orphaned (its in-flight promise
+  // died with the previous app run). Flip it to an honest "failed" so
+  // the ⚠ shows and the normal retry machinery can reach it.
+  for (const { peer, bubble } of store.pendingOutbound()) {
+    if (bubble.status !== "sending") continue;
+    if (bubble.messageId !== undefined) continue;
+    if (bubble.timestampMs >= sessionStartMs) continue;
+    store.markFailed(peer, bubble.id, "send interrupted by app restart");
+  }
   // Tracks each peer's most recent online/offline state so we can
   // detect offline→online edges and trigger one retry sweep per edge.
   const lastOnline = new Map<AgentId, boolean>();

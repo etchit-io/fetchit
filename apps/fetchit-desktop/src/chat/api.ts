@@ -82,6 +82,13 @@ export async function removeContact(agentId: string): Promise<void> {
   await invoke("chat_remove_contact", { agentId });
 }
 
+/// Upper bound on one chat_send_dm round trip. The Rust side already
+/// bounds the WS write (5s) and the relay ack wait (10s); this catches
+/// the pathological cases those can't — a wedged invoke or a backend
+/// path that never resolves — so the bubble fails honestly instead of
+/// sitting in "sending" until the 24h sweep.
+export const SEND_DM_TIMEOUT_MS = 30_000;
+
 export async function sendDm(
   to: string,
   body: string,
@@ -89,13 +96,24 @@ export async function sendDm(
   replyToMessageId?: string | null,
   attachment?: Attachment | null,
 ): Promise<string | null> {
-  return invoke<string | null>("chat_send_dm", {
+  const send = invoke<string | null>("chat_send_dm", {
     to,
     body,
     senderName: senderName ?? null,
     replyToMessageId: replyToMessageId ?? null,
     attachment: attachment ?? null,
   });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error("send timed out after 30s"));
+    }, SEND_DM_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([send, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function dmConnect(agentId: string): Promise<void> {
