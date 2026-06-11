@@ -14,7 +14,6 @@ import {
   presenceOnline,
   removeContact,
   sendDm,
-  setDisplayName,
   setTrust,
   unwatchPresence,
   watchPresence,
@@ -24,7 +23,7 @@ import { bindChatEvents } from "./events";
 import { classifyBootstrapError, renderChatUnavailableCard } from "./unavailableCard";
 import { mountSidebar } from "./sidebar";
 import { mountConversation } from "./conversation";
-import { mountCardDialog } from "./contactCard";
+import { mountShareCard } from "./shareCard";
 import { mountAddContact } from "./addContact";
 import { mountNewGroup } from "./newGroup";
 import { mountJoinGroup } from "./joinGroup";
@@ -251,17 +250,7 @@ export function mountChatPanel(
 
   const openShareCard = (): void => {
     showDialog((root) => {
-      void mountCardDialog(
-        root,
-        resolveName(),
-        {
-          onClose: hideDialog,
-          onRename: async (newName) => {
-            displayName = newName;
-            await setDisplayName(newName);
-          },
-        },
-      );
+      mountShareCard(root, { onClose: hideDialog });
     });
   };
 

@@ -67,6 +67,24 @@ export async function pairShare(): Promise<string> {
   return invoke<string>("chat_pair_share");
 }
 
+/// Republish the local reachability (pair) record to the relay and
+/// return the QR-sized pointer URI (`x0x://pair/<id>?r=<relay>`). The
+/// republish-before-return is the confirmation that a shared URI will
+/// not 404 on import; the invoke rejects (with a plain-English string)
+/// when the relay can't be reached, so the caller can render an honest
+/// offline state.
+export async function pairShareUri(): Promise<string> {
+  return invoke<string>("chat_pair_share_uri");
+}
+
+/// Import a contact from a pointer URI (`x0x://pair/<id>?r=<relay>`).
+/// Resolves the signer's pair record from the first reachable relay,
+/// verifies it, and persists the contact card. Rejects with a
+/// plain-English string when every advertised relay is unreachable.
+export async function importPairUri(uri: string): Promise<void> {
+  await invoke("chat_import_pair_uri", { uri });
+}
+
 export async function listContacts(): Promise<Contact[]> {
   return invoke<Contact[]>("chat_contacts");
 }

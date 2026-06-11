@@ -1115,6 +1115,8 @@ pub fn run() {
             chat::chat_import_card,
             chat::chat_pair_accept,
             chat::chat_pair_share,
+            chat::chat_pair_share_uri,
+            chat::chat_import_pair_uri,
             profile::chat_fetch_profile,
             profile::chat_fetch_avatar,
             chat::chat_contacts,

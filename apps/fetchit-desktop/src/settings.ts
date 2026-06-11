@@ -13,6 +13,7 @@ import {
   initAdvertisedRelaysPanel,
 } from "./settingsAdvertisedRelays";
 import { CUSTODY_PANEL_HTML, initCustodyPanel } from "./settingsCustody";
+import { EXTENDED_CARD_HTML, initExtendedCardPanel } from "./settingsExtendedCard";
 
 interface ThemeOption {
   id: Theme;
@@ -112,6 +113,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   });
   initAdvertisedRelaysPanel(root);
   initCustodyPanel(root);
+  initExtendedCardPanel(root);
   const close = root.querySelector<HTMLButtonElement>(".settings-close");
   const enabledBox = root.querySelector<HTMLInputElement>("#cache-enabled");
   const modeSelect = root.querySelector<HTMLSelectElement>("#cache-mode");
@@ -652,6 +654,7 @@ function buildPage(): HTMLElement {
         <select id="relay-region"></select>
       </label>
       <p class="setting-desc" id="relay-region-desc"></p>
+      <p class="setting-desc">Moving relays republishes your reachability record; your contacts update automatically.</p>
       <details class="setting-collapsible" id="relay-custom-details">
         <summary>Use a custom relay</summary>
         <p class="setting-desc">
@@ -682,6 +685,7 @@ function buildPage(): HTMLElement {
     <section class="setting-group" id="group-advanced">
       <h2>Advanced</h2>
       ${CUSTODY_PANEL_HTML}
+      ${EXTENDED_CARD_HTML}
     </section>
     <section class="setting-group" id="group-peers">
       <details class="setting-collapsible">

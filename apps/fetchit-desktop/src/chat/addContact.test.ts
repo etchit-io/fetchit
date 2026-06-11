@@ -9,10 +9,12 @@ const pairAcceptMock = vi.fn<
     crossRelay?: boolean;
   }>
 >();
+const importPairUriMock = vi.fn<(uri: string) => Promise<void>>();
 
 vi.mock("./api", () => ({
   importCard: (uri: string) => importCardMock(uri),
   pairAccept: (uri: string) => pairAcceptMock(uri),
+  importPairUri: (uri: string) => importPairUriMock(uri),
 }));
 
 const VALID = "x0x://agent/abcdefghijklmnop";
@@ -22,12 +24,15 @@ const VALID_V3
     + "/"
     + "bb".repeat(32)
     + "?relay=https://relay.example/";
+const VALID_POINTER
+  = "x0x://pair/" + "ab".repeat(32) + "?r=https%3A%2F%2Frelay.example";
 
 let host: HTMLElement;
 
 beforeEach(() => {
   importCardMock.mockReset();
   pairAcceptMock.mockReset();
+  importPairUriMock.mockReset();
   host = document.createElement("div");
   document.body.appendChild(host);
 });
@@ -258,5 +263,56 @@ describe("mountAddContact", () => {
     expect(input.tagName).toBe("TEXTAREA");
     expect(input.rows).toBeGreaterThanOrEqual(2);
     expect(input.getAttribute("aria-label")).toBe("Card URI");
+  });
+
+  it("enables Add for an x0x://pair/ pointer URI", () => {
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const btn = getAddBtn();
+    const input = getInput();
+
+    input.value = VALID_POINTER;
+    input.dispatchEvent(new Event("input"));
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("routes a pointer URI to importPairUri (not importCard / pairAccept)", async () => {
+    importPairUriMock.mockResolvedValueOnce(undefined);
+    const onImported = vi.fn();
+    mountAddContact(host, { onClose: () => {}, onImported });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = `  ${VALID_POINTER}\n`;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(importPairUriMock).toHaveBeenCalledWith(VALID_POINTER);
+    expect(importCardMock).not.toHaveBeenCalled();
+    expect(pairAcceptMock).not.toHaveBeenCalled();
+    expect(onImported).toHaveBeenCalledTimes(1);
+    expect(getStatus().textContent).toBe("Imported.");
+  });
+
+  it("renders an honest 'ask them to re-share' error when the relay is unreachable", async () => {
+    importPairUriMock.mockRejectedValueOnce(
+      new Error("could not reach any of their relays: timed out"),
+    );
+    const onImported = vi.fn();
+    mountAddContact(host, { onClose: () => {}, onImported });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = VALID_POINTER;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const status = getStatus().textContent ?? "";
+    expect(status).toMatch(/re-share/i);
+    expect(btn.disabled).toBe(false);
+    expect(onImported).not.toHaveBeenCalled();
   });
 });

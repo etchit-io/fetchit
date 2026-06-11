@@ -646,6 +646,72 @@ pub async fn chat_pair_share(
         .map_err(|e| e.to_string())
 }
 
+/// Republish the local reachability record, then return the QR-sized
+/// pointer URI (`x0x://pair/<agent_id_hex>?r=<relay>`) the recipient
+/// imports via [`chat_import_pair_uri`].
+///
+/// The publish happens FIRST and the URI is built only on success: a
+/// confirmed-live record is the guarantee that a shared URI will not
+/// 404 when the recipient resolves it. On publish failure the error
+/// surfaces to the frontend, which renders an honest offline state
+/// rather than handing the user a link that can't be resolved.
+///
+/// The advertised relay list in the URI mirrors what
+/// [`fetchit_chat::Client::publish_pair_record`] wrote: the client's
+/// current primary relay.
+///
+/// # Errors
+/// Returns a stringified error when chat is disabled, the client can't
+/// be built, the record fails to publish, or the agent id / relay fail
+/// pointer-URI validation.
+#[tauri::command]
+pub async fn chat_pair_share_uri(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<String, String> {
+    ensure_chat_enabled(&app_state)?;
+    let client = state.get().await?;
+    // Publish-before-return: confirm the record is live so the shared
+    // URI cannot 404 on import. A failure here is surfaced verbatim.
+    client
+        .publish_pair_record()
+        .await
+        .map_err(|e| e.to_string())?;
+    let me = client.identity().me().await.map_err(|e| e.to_string())?;
+    // The pointer advertises the same relay the record was published to
+    // (the client's current primary), normalized through `Url`.
+    let relay = state.relay_url();
+    let relays = vec![relay.as_str().to_owned()];
+    fetchit_chat::pair_uri::emit_pair_uri(&me.agent_id.0, &relays).map_err(|e| e.to_string())
+}
+
+/// Import a contact from a pointer URI (`x0x://pair/<id>?r=<relay>`).
+///
+/// Wraps [`fetchit_chat::Client::import_pair_uri`], which parses the
+/// URI, walks the advertised relays in order, resolves and verifies the
+/// signer's pair record, and persists the contact card. Errors map to
+/// strings the frontend renders honestly (the lib already returns a
+/// "could not reach any of their relays" message when every hint
+/// fails).
+///
+/// # Errors
+/// Returns a stringified error when chat is disabled, the URI is
+/// malformed, the import is a self-import, or every advertised relay is
+/// unreachable.
+#[tauri::command]
+pub async fn chat_import_pair_uri(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    uri: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let client = state.get().await?;
+    client
+        .import_pair_uri(&uri)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn chat_contacts(
     app_state: tauri::State<'_, AppState>,

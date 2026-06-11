@@ -1,8 +1,8 @@
-// Add-contact dialog — accepts either a pasted v2 `x0x://agent/…`
-// card URI or a v3 `fetchit://share/v3/…` profile share URI and
-// forwards it to the matching daemon command.
+// Add-contact dialog — accepts a pasted pointer URI (`x0x://pair/…`),
+// a v2 `x0x://agent/…` card URI, or a v3 `fetchit://share/v3/…`
+// profile share URI and forwards it to the matching daemon command.
 
-import { importCard, pairAccept } from "./api";
+import { importCard, importPairUri, pairAccept } from "./api";
 import { friendlyError } from "./errors";
 
 export interface AddContactHandlers {
@@ -14,13 +14,15 @@ export interface AddContactHandlers {
   onImported: (result?: { agentIdHex: string }) => void;
 }
 
-type UriKind = "v2" | "v3";
+type UriKind = "pointer" | "v2" | "v3";
 
+const POINTER_PREFIX = "x0x://pair/";
 const V2_PREFIX = "x0x://agent/";
 const V3_PREFIX = "fetchit://share/v3/";
 
 function detectUriKind(value: string): UriKind | null {
   const t = value.trim();
+  if (t.startsWith(POINTER_PREFIX)) return "pointer";
   if (t.startsWith(V2_PREFIX)) return "v2";
   if (t.startsWith(V3_PREFIX)) return "v3";
   return null;
@@ -42,7 +44,7 @@ export function mountAddContact(
   const help = document.createElement("p");
   help.className = "chat-dialog__help";
   help.textContent
-    = "Paste a share URI from someone you trust — either x0x://agent/… or fetchit://share/v3/…";
+    = "Paste a share link from someone you trust — usually x0x://pair/…";
 
   // Share URIs are long (KEM/ML-DSA keys + signature add up to ~17KB).
   // A single-line <input> forces the text engine to lay out the entire
@@ -50,7 +52,7 @@ export function mountAddContact(
   // past 65535 px; textarea wraps visually and keeps the box bounded.
   const input = document.createElement("textarea");
   input.className = "chat-dialog__uri";
-  input.placeholder = "x0x://agent/… or fetchit://share/v3/…";
+  input.placeholder = "x0x://pair/… (or x0x://agent/…, fetchit://share/v3/…)";
   input.spellcheck = false;
   input.rows = 4;
   input.wrap = "soft";
@@ -97,23 +99,44 @@ export function mountAddContact(
     const kind = detectUriKind(input.value);
     if (kind === null) return;
     addBtn.disabled = true;
-    status.textContent = kind === "v3" ? "Fetching profile…" : "Importing…";
+    status.textContent = inFlightStatus(kind);
     try {
       const uri = input.value.trim();
       if (kind === "v3") {
         const result = await pairAccept(uri);
         status.textContent = "Imported.";
         handlers.onImported(result);
+      } else if (kind === "pointer") {
+        await importPairUri(uri);
+        status.textContent = "Imported.";
+        handlers.onImported();
       } else {
         await importCard(uri);
         status.textContent = "Imported.";
         handlers.onImported();
       }
     } catch (e) {
-      status.textContent = `Failed: ${friendlyError(e)}`;
+      status.textContent = importErrorCopy(kind, e);
       addBtn.disabled = false;
     }
   });
 
   setTimeout(() => input.focus(), 0);
+}
+
+/// In-flight status copy while an add is resolving, keyed by URI kind.
+function inFlightStatus(kind: UriKind): string {
+  if (kind === "v3") return "Fetching profile…";
+  if (kind === "pointer") return "Looking them up…";
+  return "Importing…";
+}
+
+/// Honest, plain-English failure copy. For a pointer URI the common
+/// failure is an unreachable relay, so the message tells the user the
+/// actionable next step: ask the contact to re-share.
+function importErrorCopy(kind: UriKind, e: unknown): string {
+  if (kind === "pointer") {
+    return `Couldn't reach their relay — ask them to re-share. (${friendlyError(e)})`;
+  }
+  return `Failed: ${friendlyError(e)}`;
 }

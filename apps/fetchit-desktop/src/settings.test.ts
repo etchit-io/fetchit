@@ -174,6 +174,14 @@ describe("relay region picker", () => {
     expect(descEl().textContent).toContain("67.207.94.66:8088");
   });
 
+  it("explains that moving relays republishes reachability and updates contacts", () => {
+    mountSettings(host, defaultHooks());
+    const network = host.querySelector<HTMLElement>("#group-network");
+    expect(network?.textContent ?? "").toContain(
+      "Moving relays republishes your reachability record; your contacts update automatically.",
+    );
+  });
+
   it("invokes set_relay_url with the canonical URL when a region is picked", async () => {
     (invoke as unknown as InvokeMock).mockImplementation(makeRouter());
     const api = mountSettings(host, defaultHooks());
