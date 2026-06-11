@@ -56,10 +56,12 @@ export interface DirectMessage {
   timestamp_ms?: number | null;
   message_id?: string | null;
   reply_to_message_id?: string | null;
-  /// Optional inline image, already validated on the receive path by
-  /// `fetchit-chat` (oversize / non-raster / bad-base64 stripped to
-  /// null before this reaches the UI). The UI re-sniffs as
-  /// defense-in-depth before rendering.
+  /// Optional inline image. On receive it is validated by `fetchit-chat`
+  /// (oversize / non-raster / bad-base64 stripped to null before it
+  /// reaches the UI); on send the desktop sniffs the bytes at attach
+  /// time. It always renders through an `<img>` data-URL built from the
+  /// validated raster MIME, so the bytes decode as that image format and
+  /// can never execute as markup.
   attachment?: Attachment | null;
   verified?: boolean | null;
 }

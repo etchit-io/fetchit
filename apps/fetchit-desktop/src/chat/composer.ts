@@ -40,6 +40,9 @@ export interface ComposerApi {
   /// cannot carry an inline image (groups), so the button never makes a
   /// promise the wire can't keep. Hiding also clears any staged image.
   setAttachVisible(visible: boolean): void;
+  /// Discard any staged image. Called on conversation change so a
+  /// picture chosen for one peer never sends to the next.
+  clearAttachment(): void;
 }
 
 export function mountComposer(
@@ -312,5 +315,6 @@ export function mountComposer(
     setEnabled,
     setReplyTo,
     setAttachVisible,
+    clearAttachment,
   };
 }

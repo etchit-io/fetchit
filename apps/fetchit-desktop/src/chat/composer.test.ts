@@ -262,4 +262,13 @@ describe("mountComposer — image attach", () => {
     api.setEnabled(false, "no conv");
     expect(attachBtn.disabled).toBe(true);
   });
+
+  it("clearAttachment discards a staged image (conversation change)", async () => {
+    const { api, send, file } = setupAttach();
+    pick(file);
+    await vi.waitFor(() => expect(chip()).not.toBeNull());
+    api.clearAttachment();
+    expect(chip()).toBeNull();
+    expect(send.disabled).toBe(true);
+  });
 });

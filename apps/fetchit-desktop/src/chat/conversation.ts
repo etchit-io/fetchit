@@ -364,9 +364,10 @@ export function mountConversation(
     }
     if (lastConv !== conv) {
       composer.focus();
-      // A reply pending against the previous conversation must never
-      // attach to a message sent in this one.
+      // A reply or staged image pending against the previous
+      // conversation must never attach to a message sent in this one.
       composer.setReplyTo(null);
+      composer.clearAttachment();
       // Conv changed — tear down whatever conv-specific machinery was
       // running so we can start fresh below. Group→group switch was
       // previously buggy: the line below was inside a DM-only branch,
