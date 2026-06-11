@@ -134,9 +134,9 @@ Share pointer URI: `x0x://pair/<agent_id_hex>?r=<urlencoded-relay>[&r=...]` (1..
 ### Task 10: desktop — share UI swap + import + Advanced demotion (frontend)
 
 **Files:** Modify `apps/fetchit-desktop/src/chat/panel.ts` (Share my card button → pointer URI + QR via existing `src/qr.ts`), `apps/fetchit-desktop/src/chat/api.ts` (+`pairShareUri()`, `importPairUri()` invokes), the add-contact dialog module (accept `x0x://pair/` URIs), `apps/fetchit-desktop/src/settings.ts` (v2 extended URI moves under Advanced with honest copy), matching `src-tauri` commands `chat_pair_share_uri` / `chat_import_pair_uri` wrapping the lib.
-- [ ] Failing vitest cases first: share dialog renders QR + copyable short URI; add-contact accepts pair URIs and routes to the new invoke; v2 share absent from the chat header flow, present under Advanced; import error states render honestly ("couldn't reach their relay — ask them to re-share").
-- [ ] Implement; region picker copy gains: "Moving relays republishes your reachability record; your contacts update automatically."
-- [ ] Gates (tsc + vitest full suite); commit.
+- [x] Failing vitest cases first: share dialog renders QR + copyable short URI; add-contact accepts pair URIs and routes to the new invoke; v2 share absent from the chat header flow, present under Advanced; import error states render honestly ("couldn't reach their relay — ask them to re-share").
+- [x] Implement; region picker copy gains: "Moving relays republishes your reachability record; your contacts update automatically."
+- [x] Gates (tsc + vitest full suite); commit.
 
 ### Task 11: headless chat-peer subcommands (`fetchit-chat` bin)
 
@@ -320,3 +320,90 @@ Plan (agreed with Bob):
 - Dev carve-out (`FETCHIT_ALLOW_LOCAL_RELAY=1`) lives at the CALL SITE, not inside the
   pure primitives.
 - Cross-review with Bob (he owns webfinger.rs).
+
+**T13 UPDATE 2026-06-11: fedi half DONE (Bob, reachability-tb `4760eab`).** New
+`crates/fetchit-fedi/src/ssrf.rs` -- `pub is_private_ip_addr` / `private_ip_reason`
+/ `resolve_and_pin_host` + neutral `SsrfError {Resolve, PrivateAddress}`; shared
+`is_private_v4` folds CGNAT 100.64/10 everywhere incl the IPv4-mapped-IPv6 arm;
+boundary tests pin the /10; webfinger+actor callers map locally (zero behavior
+change); module docs spell out the 3-step call pattern + dev-carve-out-at-call-site
+rule; 19 ssrf tests, gates green. Arrives in `chat` via the reachability-tb merge.
+REMAINING (my chat-side, post-T7/T8): wire the 3 reqwest fetch paths
+(`fetch_pair_record_by_id`, T7 `fetch_forwarding_record_by_id`, deposit POST) with
+`resolve_to_addrs` pin + redirect `Policy::none()`; the WS pool connect with a
+pinned-SocketAddr direct TCP + hostname-only SNI; `FETCHIT_ALLOW_LOCAL_RELAY=1`
+carve-out at each call site.
+
+---
+
+## Task 8 REVISED (2026-06-11, after code-explorer mapped the real architecture)
+
+The plan's original "failover = reconnect with the next URL" framing was WRONG for
+the actual stack. Reality (explorer, file:line cited):
+- Production chat uses `MultiHomeTransport` (transport/multi_home.rs), NOT RelaySet's
+  fan-out, for own-relay listening. 3 slots: slot 0 = pinned PRIMARY (the only relay
+  receiving INBOUND at boot, eviction-IMMUNE), slots 1/2 = LRU outbound-to-contacts.
+- Each slot = single-URL RelayTransport -> RelaySet(one URL) -> one Client supervisor.
+- #127 reconnect retries the SAME url, backoff 1s..60s, max_reconnect_attempts=20
+  (~20 min), then `ConnState::PermanentlyDisconnected` = dead handle, must rebuild.
+  NO cross-URL fallback exists anywhere below or at MultiHomeTransport.
+- `publish_pair_record` POSTs to `primary_relay_url` and advertises ONLY
+  `[primary_relay_url]` (NOT the advertised_relays RwLock).
+
+So T8 is NEW machinery, NOT extending reconnect:
+- **T8a -- `MultiHomeTransport::replace_primary(new_url)` primitive (the hard part).**
+  Cleanly tear down slot 0 (abort the old inbound pump task, drop the old transport,
+  no leaked WS), connect the new URL, spawn the new fan-in pump, swap the slot-0
+  handle. MUST verify inbound actually flows on the new relay before declaring success
+  (a "connected but deaf" swap is the #358 failure mode). This primitive is shared:
+  failover (T8b) and the T9 desktop region-migration both call it, and building it
+  right FIXES #358 (set_relay_url hot-swap leaks old WS + detaches inbound pump ->
+  silent deaf client) AT THE LIB LAYER. T9 then becomes "call replace_primary".
+- **T8b -- failover trigger/policy.** Observe slot-0 `states_receiver()`; when it is
+  PermanentlyDisconnected (or Disconnected continuously for FAILOVER_AFTER_MS = 2min,
+  no wall-clock gate exists today so add one), pick the next advertised URL, call
+  replace_primary, update `Client.primary_relay_url`, republish the pair record at the
+  new relay, prune the dead relay from advertised_relays + regenerate the share card,
+  emit a state callback (desktop toast). Sticky (no auto-recover to primary in v1).
+- Risk: this is the highest-risk task in the plan (slot-0 inbound pump teardown = the
+  silent-deaf surface). Bar: tests must assert inbound LIVENESS post-swap, not just
+  "connected". Bob cross-reviews (he owns the relay-client reconnect machinery).
+- Key files: transport/multi_home.rs (slot-0 pinning, acquire_slot skips idx 0 -> add
+  replace_primary), relay_transport.rs (connect + spawn_inbound_pump), client.rs
+  (primary_relay_url:398, advertised_relays:370, publish_pair_record:1525), relay-client
+  client.rs (ConnState::PermanentlyDisconnected, states_receiver, max_reconnect_attempts).
+
+### T8 model RESOLVED (explorer + Bob reconciled, 2026-06-11)
+
+Definitive (multi_home.rs:6-24 module docs + relay_transport.rs:88 + client.rs):
+- Production = `MultiHomeTransport`. Slot 0 = primary, PINNED at boot, NEVER evicted,
+  and the ONLY relay listening inbound until outbound traffic to a differently-homed
+  contact opens slot 1/2 (those then also fan in). Each slot = single-URL
+  RelayTransport -> RelaySet(1 url) -> one Client supervisor.
+- Bob was describing the RelaySet PRIMITIVE (all its urls receive) which each slot
+  wraps with exactly one url; not a contradiction.
+- Per-Client reconnect: same url, backoff, max_reconnect_attempts(~20) ->
+  PermanentlyDisconnected = dead, rebuild required. NO cross-url switch anywhere.
+- pair-record publish advertises ONLY `[primary_relay_url]` (client.rs:1534), HTTP
+  path independent of the WS set.
+
+Failover = REBUILD (set is fixed-size, nothing to promote/swap):
+watch slot-0 states_receiver() -> PermanentlyDisconnected (or sustained Disconnected
+past FAILOVER_AFTER_MS=2min, add the wall-clock gate) -> build a replacement
+Client/slot-0 transport on the next advertised url (clean teardown of the old slot-0
+inbound pump = the #358 deaf surface; assert inbound LIVENESS post-swap) -> update
+Client.primary_relay_url -> republish pair record at the new relay -> prune dead relay
+from advertised_relays + regenerate card -> state callback. Sticky, no auto-recover.
+
+DESIGN SUBTLETY (document, do not over-build): the forwarding record (T7) does NOT
+heal the dead-primary case -- you cannot POST or FETCH a forwarding record at a DEAD
+relay, and the pair record lists only the dead primary. So a stale sender depositing
+per your old pair record is stuck until (a) you send them a DM from the new relay
+(T6 in-band hint refresh updates their card) or (b) they read your Autonomi v3 manifest
+(T9, wallet tier). Free-tier home-relay-DEATH healing for inbound-from-stale-senders is
+therefore best-effort; contacts you actively message heal immediately. Note in
+SECURITY.md / the failover state-callback copy. (Region MIGRATION, T9, is different:
+the old relay is ALIVE so the forwarding record DOES heal it.)
+
+Bob's T7 cross-review: pair_accept fix VERIFIED clean (save_imported + regression);
+full forwarding-vs-TB2 verdict shortly.
