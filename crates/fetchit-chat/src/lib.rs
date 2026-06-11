@@ -36,6 +36,7 @@ pub mod lan_static;
 pub mod local_store;
 pub mod messages;
 pub mod pair;
+pub mod pair_record;
 pub mod presence;
 pub mod profile;
 pub mod public;
