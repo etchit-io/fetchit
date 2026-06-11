@@ -146,3 +146,68 @@ Share pointer URI: `x0x://pair/<agent_id_hex>?r=<urlencoded-relay>[&r=...]` (1..
 - **TB1:** relay-server `/v1/pair-record` store/serve: POST validates `verify_pair_record` + per-agent watermark (RAM + the same persistence posture as the profile index), GET serves by agent id. Rate-limit POSTs per sender like profile.
 - **TB2:** `/v1/forwarding/<id>` store/serve with ~30-day TTL sweep; same validation discipline.
 - **TB3:** confirm pooled deposit connections hit the same auth/rate-limit path as primary sessions (expected zero code; verify + test).
+
+---
+
+## Hardening folded from the haiku edge-hunt (2026-06-11)
+
+Kept findings, mapped to owning tasks. Each becomes a test or a small guard
+in that task — not new tasks, except the clock item which changes Task 2.
+
+**DESIGN CHANGE — Task 2 (and retro-fixes #191 profile watermark):**
+A pure wall-clock millisecond watermark **permanently bricks publishing** if a
+device's clock ever moves backward (battery-dead reset, VM snapshot, manual
+change) — strict-greater rejects every future publish forever. Grandma
+hardware does this. FIX: the publishing side uses a **logical monotonic clock**
+— `next = max(wall_clock_ms, last_watermark + 1)`, persisted — so local
+publishes are always increasing regardless of the system clock; the relay
+keeps its strict-greater check unchanged. Task 2's watermark store implements
+this; the same helper should be retrofitted to the src-tauri profile watermark
+(`profile.rs`) since it has the identical latent brick. Document
+single-agent-multi-device as explicitly unsupported in v1 (two devices racing
+the same logical clock is out of scope).
+
+**Task 1 (proto) — already covers** strict lowercase-64-hex, http(s)+host-only
+relay scheme, ≤256-byte relay, 1..=4 relays. ADD: reject relay URLs carrying
+userinfo (`user:pass@`) — credentials never belong in a pair record.
+
+**Task 4 (URI parse) — ADD tests + guards:** total URI length cap (≤512 bytes,
+rejects un-scannable QR before render); URL-normalize relays (lowercase host,
+strip default port, strip trailing slash) so cosmetic dupes collapse; reject
+duplicate-after-normalize relays; honest user-facing error on bad scheme (not
+silent); reject importing one's OWN agent id (warn).
+
+**Task 5 (pool/deposit) — ADD tests:** pool keys on the NORMALIZED relay URL
+(no duplicate connections for cosmetic variants); a pooled connection whose
+auth fails is PURGED, not retained-dead (health-check on checkout); a hint list
+containing the sender's own relay reuses the listen session, not a dup.
+
+**Task 5/7 — terminal honest failure (ties to #355):** when the deposit walk
+AND forwarding re-resolve both exhaust, the send surfaces a typed
+`AllRelaysUnreachable` error to the UI — never a silent drop. Test it.
+
+**Task 6 (in-band refresh) — concurrency + security:** the StoredContactCard
+update must be atomic against a concurrent manual import (mutex or CAS); a
+verified inbound hint older-or-equal to the stored hint watermark is ignored.
+DOC the known limit: a compromised key that published a higher-watermark
+record before rotation can poison hints until the victim republishes — key
+revocation is the real fix, out of v1 scope; note it in SECURITY.md.
+
+**Task 8 (failover) — ADD:** on failover, prune the dead relay from the local
+advertised list and republish, so contacts stop wasting deposits on it.
+
+**Task 9 (migration) — already returns MigrationReport.** ADD: on next boot,
+if the persisted relay differs from where the last PairRecord published
+(detectable via the watermark store's recorded relay), retry publish +
+forwarding — closes the killed-mid-migration gap. Do NOT commit the settings
+relay change until the new-relay connect succeeds (avoid the deaf-offline
+state).
+
+**Task 10 (share UI) — ADD:** gate the "Share my card" affordance on
+PairRecord publish confirmation (show "Publishing…" until confirmed) so a
+shared URI never 404s on import; honest "you're offline, can't import" state.
+
+**Amplification note (P3, no code):** a contact advertising a third party's
+server only causes ONE 404'd GET there (that server has no signed record for
+the agent), so amplification is bounded; the existing signature+derive binding
+defends impersonation. No action; recorded so it isn't re-raised.
