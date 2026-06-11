@@ -9,6 +9,9 @@ mod disk_cache;
 mod e2e;
 mod fediverse;
 mod linux_deep_link;
+// DTOs + verify core; Tauri commands follow in the next task.
+#[allow(dead_code)]
+mod profile;
 mod protocol;
 mod rendition;
 mod server;
