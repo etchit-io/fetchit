@@ -433,7 +433,11 @@ pub async fn pair_accept(
     let (_uri, record) = fetch_from_uri(uri_str, http).await?;
     let stored = record_into_stored_contact(&record);
     let agent_id_hex = stored.agent_id_hex.clone();
-    stored.save(layout)?;
+    // Persist under CARD_UPDATE_LOCK, preserving any newer in-band relay-hint
+    // watermark already on disk: re-accepting a v3 pair URI for an existing
+    // contact must not reset the per-contact downgrade guard (same class as the
+    // import_pair_uri fix).
+    stored.save_imported(layout)?;
     Ok(PairAccepted {
         agent_id_hex,
         record,
@@ -570,6 +574,56 @@ mod tests {
             Some(r.ml_dsa_pubkey.as_str())
         );
         assert_eq!(card.display_name, ""); // filled by phase 4 Autonomi fetch
+    }
+
+    #[test]
+    fn pair_accept_path_preserves_existing_hint_watermark() {
+        // Reproduces pair_accept's persist composition
+        // (record_into_stored_contact -> save_imported) to prove a re-accept
+        // of an existing contact does not zero the per-contact relay-hint
+        // watermark a plain save() would have clobbered.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        // Build the record first; its agent id is derived from the pubkey.
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let r = mk_signed_record(&dsa, &sk, &pk.to_bytes(), &"b".repeat(64), 1);
+        let agent_hex = r.agent_id.clone();
+
+        // Card for that same contact that already learned an in-band relay hint
+        // at epoch 9000.
+        let seeded = crate::messages::StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: "seed-kem".into(),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://good.example.com".to_owned()],
+            }),
+            last_hint_epoch_ms: Some(9_000),
+        };
+        seeded.save(&layout).unwrap();
+
+        // Re-accept the same contact.
+        record_into_stored_contact(&r)
+            .save_imported(&layout)
+            .unwrap();
+
+        let loaded = crate::messages::StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.last_hint_epoch_ms,
+            Some(9_000),
+            "re-accept must not reset the downgrade watermark",
+        );
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["wss://good.example.com".to_owned()]),
+        );
+        // Identity fields from the freshly-accepted record are still written.
+        assert_eq!(loaded.kem_public_key_b64, r.kem_pubkey);
     }
 
     /// Spins a wiremock relay, returns a signed record on GET, and
