@@ -104,6 +104,102 @@ fn map_profile_err(e: ProfileError) -> String {
     }
 }
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+const WATERMARK_FILE: &str = "profile_fetch_watermark.json";
+
+/// Hard ceiling on avatar bytes regardless of the manifest's declared
+/// length. The manifest caps the avatar at 256x256 webp; 512 KiB is
+/// comfortably above any honest encoding and well below a `DoS`.
+const MAX_AVATAR_BYTES: usize = 512 * 1024;
+
+const RASTER_MIMES: &[&str] = &["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+fn watermark_path(chat_root: &Path) -> std::path::PathBuf {
+    chat_root.join(WATERMARK_FILE)
+}
+
+/// Last-seen `issued_at_ms` for a contact, or None on first view. Plain
+/// JSON map at rest (non-secret monotonic timestamps).
+pub fn load_watermark(chat_root: &Path, agent_id: &str) -> Option<u64> {
+    let raw = std::fs::read(watermark_path(chat_root)).ok()?;
+    let map: BTreeMap<String, u64> = serde_json::from_slice(&raw).ok()?;
+    map.get(agent_id).copied()
+}
+
+/// Persist `issued_at_ms` for `agent_id` when it is newer than the
+/// stored value (monotonic). Best-effort: a write error is non-fatal
+/// (the downgrade check already ran against the loaded value).
+///
+/// # Errors
+/// Propagates a filesystem write error.
+pub fn save_watermark(chat_root: &Path, agent_id: &str, issued_at_ms: u64) -> std::io::Result<()> {
+    let path = watermark_path(chat_root);
+    let mut map: BTreeMap<String, u64> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let entry = map.entry(agent_id.to_string()).or_insert(0);
+    if issued_at_ms > *entry {
+        *entry = issued_at_ms;
+    }
+    let bytes = serde_json::to_vec(&map).unwrap_or_default();
+    std::fs::write(&path, bytes)
+}
+
+/// Identify a raster image purely from its leading magic bytes. Returns
+/// the canonical MIME, or None for anything not an allowed raster format
+/// (SVG, HTML, etc. fall through to None).
+fn sniff_raster_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] {
+        return Some("image/png");
+    }
+    if bytes.len() >= 6
+        && &bytes[0..4] == b"GIF8"
+        && (bytes[4] == 0x37 || bytes[4] == 0x39)
+        && bytes[5] == 0x61
+    {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+/// Validate fetched avatar bytes and return a `data:` URL. Rejects bytes
+/// over the declared length or the hard cap, and rejects bytes whose
+/// magic-byte type is not the declared raster image (never trust the
+/// manifest's mime string alone). The returned URL uses the SNIFFED mime
+/// so the browser decodes the bytes as that raster format.
+///
+/// # Errors
+/// Returns a user-facing string when the bytes are oversize, the declared
+/// mime is not an allowed raster type, or the bytes do not match it.
+pub fn validate_avatar_to_data_url(
+    bytes: &[u8],
+    declared_mime: &str,
+    declared_bytes_len: u32,
+) -> Result<String, String> {
+    if bytes.len() > MAX_AVATAR_BYTES || bytes.len() as u64 > u64::from(declared_bytes_len) {
+        return Err("avatar image is larger than declared".to_string());
+    }
+    if !RASTER_MIMES.contains(&declared_mime) {
+        return Err("avatar mime is not an allowed raster image".to_string());
+    }
+    let sniffed = sniff_raster_mime(bytes);
+    if sniffed != Some(declared_mime) {
+        return Err("avatar bytes do not match the declared image type".to_string());
+    }
+    Ok(format!("data:{declared_mime};base64,{}", B64.encode(bytes)))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -161,5 +257,48 @@ mod tests {
             panic!()
         };
         assert!(dto.avatar.is_none());
+    }
+
+    #[test]
+    fn watermark_roundtrip_and_monotonic() {
+        let tmp = std::env::temp_dir().join(format!("pw-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let aid = "aa".repeat(32);
+        assert_eq!(load_watermark(&tmp, &aid), None);
+        save_watermark(&tmp, &aid, 100).unwrap();
+        assert_eq!(load_watermark(&tmp, &aid), Some(100));
+        save_watermark(&tmp, &aid, 50).unwrap(); // older never lowers
+        assert_eq!(load_watermark(&tmp, &aid), Some(100));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn avatar_valid_webp_returns_data_url() {
+        let mut bytes = vec![0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50];
+        bytes.extend_from_slice(&[0u8; 20]);
+        let len = u32::try_from(bytes.len()).unwrap();
+        let url = validate_avatar_to_data_url(&bytes, "image/webp", len).unwrap();
+        assert!(url.starts_with("data:image/webp;base64,"));
+    }
+
+    #[test]
+    fn avatar_oversize_rejected() {
+        let bytes = vec![0u8; 600 * 1024];
+        let len = u32::try_from(bytes.len()).unwrap();
+        assert!(validate_avatar_to_data_url(&bytes, "image/webp", len).is_err());
+    }
+
+    #[test]
+    fn avatar_non_raster_bytes_rejected() {
+        let bytes = b"<svg xmlns='...'/>".to_vec();
+        let len = u32::try_from(bytes.len()).unwrap();
+        assert!(validate_avatar_to_data_url(&bytes, "image/webp", len).is_err());
+    }
+
+    #[test]
+    fn avatar_over_declared_len_rejected() {
+        let mut bytes = vec![0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50];
+        bytes.extend_from_slice(&[0u8; 100]);
+        assert!(validate_avatar_to_data_url(&bytes, "image/webp", 10).is_err());
     }
 }

@@ -3276,6 +3276,7 @@ dependencies = [
 name = "fetchit-desktop"
 version = "0.2.8"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "dirs 5.0.1",
  "fetchit-chat",
