@@ -44,6 +44,7 @@ pub async fn build_signed_pair_record(
     let agent_id_hex = identity.agent_id_hex().to_owned();
     let ml_dsa_pubkey = signer.public_key();
     let kem_pubkey = identity.kem_public_key();
+    ensure_identity_binds_signer(&agent_id_hex, &ml_dsa_pubkey)?;
 
     let input = pair_signing_input(
         &agent_id_hex,
@@ -83,6 +84,7 @@ pub async fn build_signed_forwarding_record(
 ) -> Result<ForwardingRecordV1> {
     let agent_id_hex = identity.agent_id_hex().to_owned();
     let ml_dsa_pubkey = signer.public_key();
+    ensure_identity_binds_signer(&agent_id_hex, &ml_dsa_pubkey)?;
 
     let input = forwarding_signing_input(&agent_id_hex, &moved_to_relays, issued_at_ms)
         .map_err(|e| ChatError::Invalid(format!("forwarding_signing_input: {e}")))?;
@@ -92,16 +94,27 @@ pub async fn build_signed_forwarding_record(
         .await
         .map_err(|e| ChatError::Invalid(format!("ml-dsa sign: {e}")))?;
 
-    // `ml_dsa_pubkey` is not part of the forwarding record wire format but
-    // is consumed above; binding it here keeps the borrow alive past `sign`.
-    let _ = &ml_dsa_pubkey;
-
     Ok(ForwardingRecordV1 {
         agent_id_hex,
         moved_to_relays,
         issued_at_ms,
         sig_b64: STANDARD.encode(&sig),
     })
+}
+
+/// Fail loudly when the identity's `agent_id_hex` is not the id derived
+/// from the signer's pubkey. Without this a mis-wired (identity, signer)
+/// pair silently produces a record that every relay rejects with
+/// `AgentIdMismatch` -- a confusing remote failure for a local bug.
+fn ensure_identity_binds_signer(agent_id_hex: &str, ml_dsa_pubkey: &[u8]) -> Result<()> {
+    let derived = hex::encode(fetchit_relay_proto::derive_agent_id(ml_dsa_pubkey));
+    if derived == agent_id_hex {
+        Ok(())
+    } else {
+        Err(ChatError::Invalid(format!(
+            "identity agent_id_hex does not match signer-derived id (derived {derived})"
+        )))
+    }
 }
 
 // ── (B) Logical-clock watermark ───────────────────────────────────────────────
@@ -145,12 +158,20 @@ pub fn next_issued_at_ms(
         .unwrap_or_default();
 
     let last = map.get(self_agent_hex).copied().unwrap_or(0);
-    // Monotonic clock: never go back, even if the wall clock does.
-    let next = if last > 0 {
-        wall_clock_ms.max(last + 1)
-    } else {
-        wall_clock_ms
-    };
+    // A stored watermark at u64::MAX is corrupt state (~584 million years
+    // past epoch, unreachable legitimately): refuse rather than hand out a
+    // duplicate or wrap to a smaller value that would let a relay reject
+    // the agent forever.
+    if last == u64::MAX {
+        return Err(ChatError::Invalid(
+            "pair-record watermark is corrupt (u64::MAX)".into(),
+        ));
+    }
+    // Logical monotonic clock: never regress, even when the wall clock
+    // does (battery reset, VM snapshot) or is 0 (first call must still
+    // advance past a prior 0). saturating_add is defense-in-depth; the
+    // guard above already rules out the only overflowing input.
+    let next = wall_clock_ms.max(last.saturating_add(1));
 
     map.insert(self_agent_hex.to_owned(), next);
 
@@ -320,6 +341,31 @@ mod tests {
             second > first,
             "re-read persisted value must advance monotonically: {first} -> {second}"
         );
+    }
+
+    #[test]
+    fn watermark_wall_clock_zero_first_call_advances_past_zero() {
+        // Regression: a first call at wall=0 must NOT return 0 (a second
+        // wall=0 call would then duplicate it and a strict-greater relay
+        // would reject the second record).
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        let got = next_issued_at_ms(&layout, AGENT, 0).unwrap();
+        assert!(got > 0, "wall=0 first call must advance past 0, got {got}");
+    }
+
+    #[test]
+    fn watermark_corrupt_max_returns_error_not_panic() {
+        // A persisted u64::MAX is corrupt; the call must error rather than
+        // panic (debug overflow), wrap (release), or hand out a duplicate.
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        let mut map: BTreeMap<String, u64> = BTreeMap::new();
+        map.insert(AGENT.to_owned(), u64::MAX);
+        std::fs::write(watermark_path(&layout), serde_json::to_vec(&map).unwrap()).unwrap();
+
+        let err = next_issued_at_ms(&layout, AGENT, 1_000).unwrap_err();
+        assert!(err.to_string().contains("corrupt"), "got {err}");
     }
 
     #[test]
