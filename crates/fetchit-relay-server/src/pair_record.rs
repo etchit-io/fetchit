@@ -67,9 +67,40 @@ impl PairRecordIndex {
 
     /// Store `record` keyed by its `agent_id_hex`. The caller must have
     /// already verified the signature + agent-id derivation +
-    /// monotonicity.
+    /// monotonicity. Prefer [`Self::put_if_newer`] on the write path —
+    /// this primitive does no watermark check and is for tests / callers
+    /// that have already ratcheted under their own lock.
     pub fn put(&self, record: PairRecordV1) {
         self.by_agent.insert(record.agent_id_hex.clone(), record);
+    }
+
+    /// Atomically store `record` iff its `issued_at_ms` is strictly
+    /// greater than any record currently held for the same agent. Returns
+    /// `Err(current)` — the stored watermark — when the record is not
+    /// newer, so the caller can surface the 409 `current_issued_at_ms`
+    /// contract.
+    ///
+    /// The compare-and-store runs inside `DashMap`'s per-key entry lock, so
+    /// two concurrent same-agent POSTs cannot both observe a stale
+    /// watermark and let the lower `issued_at_ms` win the write (the
+    /// check-then-`put` TOCTOU). The loser is rejected, not silently
+    /// overwritten.
+    pub fn put_if_newer(&self, record: PairRecordV1) -> Result<(), u64> {
+        use dashmap::mapref::entry::Entry;
+        match self.by_agent.entry(record.agent_id_hex.clone()) {
+            Entry::Occupied(mut e) => {
+                let current = e.get().issued_at_ms;
+                if record.issued_at_ms <= current {
+                    return Err(current);
+                }
+                e.insert(record);
+                Ok(())
+            }
+            Entry::Vacant(e) => {
+                e.insert(record);
+                Ok(())
+            }
+        }
     }
 
     /// Count of stored records. Test-only.
@@ -208,14 +239,15 @@ pub async fn post_pair_record(
         return Err(PairRecordHttpError::RateLimited);
     }
 
-    if let Some(prev) = state.pair_records.current_issued_at(&record.agent_id_hex) {
-        if record.issued_at_ms <= prev {
-            return Err(PairRecordHttpError::NonMonotonic {
-                current_issued_at_ms: prev,
-            });
-        }
-    }
-    state.pair_records.put(record);
+    // Atomic compare-and-store: the watermark check and the write share
+    // DashMap's per-key lock, so concurrent same-agent POSTs can't both
+    // pass a stale read and let the lower issued_at_ms win.
+    state
+        .pair_records
+        .put_if_newer(record)
+        .map_err(|current_issued_at_ms| PairRecordHttpError::NonMonotonic {
+            current_issued_at_ms,
+        })?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -272,6 +304,47 @@ mod tests {
         idx.put(mk_record(&id, 3));
         idx.put(mk_record(&id, 9));
         assert_eq!(idx.current_issued_at(&id), Some(9));
+    }
+
+    #[test]
+    fn put_if_newer_is_a_compare_and_swap() {
+        let idx = PairRecordIndex::new();
+        let id = hex::encode([0xcc; 32]);
+        // First write into a vacant slot always wins.
+        assert_eq!(idx.put_if_newer(mk_record(&id, 100)), Ok(()));
+        // Strictly-greater replaces.
+        assert_eq!(idx.put_if_newer(mk_record(&id, 101)), Ok(()));
+        assert_eq!(idx.current_issued_at(&id), Some(101));
+        // Equal is rejected, returning the stored watermark.
+        assert_eq!(idx.put_if_newer(mk_record(&id, 101)), Err(101));
+        // Older is rejected; the store is unchanged.
+        assert_eq!(idx.put_if_newer(mk_record(&id, 50)), Err(101));
+        assert_eq!(idx.current_issued_at(&id), Some(101));
+    }
+
+    #[test]
+    fn put_if_newer_under_concurrency_keeps_the_max() {
+        // Many threads race to publish the same agent with issued_at in
+        // 1..=n in scrambled order. Regardless of interleave, the highest
+        // issued_at must end up stored and the watermark must never
+        // regress (the property the read-then-put TOCTOU violated).
+        let n: u64 = 64;
+        let idx = PairRecordIndex::new(); // already an Arc<Self>
+        let id = hex::encode([0xab; 32]);
+        let mut handles = Vec::new();
+        for k in 0..n {
+            // Scramble arrival order so the max is not written last.
+            let issued = ((k * 37) % n) + 1;
+            let idx = std::sync::Arc::clone(&idx);
+            let id = id.clone();
+            handles.push(std::thread::spawn(move || {
+                let _ = idx.put_if_newer(mk_record(&id, issued));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(idx.current_issued_at(&id), Some(n));
     }
 
     // ── error -> status mapping ───────────────────────────────────────
