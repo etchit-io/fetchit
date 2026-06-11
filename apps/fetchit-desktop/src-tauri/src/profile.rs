@@ -261,6 +261,7 @@ pub async fn chat_fetch_avatar(
     mime: String,
     bytes_len: u32,
 ) -> Result<String, String> {
+    crate::chat::ensure_chat_enabled(&app_state)?;
     let bytes = crate::fetch_autonomi_bytes(&app_state, &addr, MAX_AVATAR_FETCH_BYTES)
         .await
         .map_err(|e| format!("couldn't load the avatar ({e})"))?;
