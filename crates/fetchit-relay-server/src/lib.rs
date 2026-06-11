@@ -10,6 +10,7 @@ pub mod auth;
 pub mod capability;
 pub mod config;
 pub mod error;
+pub mod forwarding;
 #[cfg(feature = "fediverse-inbox")]
 pub mod inbox;
 pub mod metrics;

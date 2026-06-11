@@ -178,7 +178,7 @@ impl PairRecordHttpError {
 /// claimed id does not derive from the pubkey, or the signature does not
 /// verify — is **403**; malformed fields/URLs are **400**; a backend
 /// crypto fault is **500** (the relay's problem, not the client's).
-fn verify_status(e: &PairRecordError) -> StatusCode {
+pub(crate) fn verify_status(e: &PairRecordError) -> StatusCode {
     match e {
         PairRecordError::AgentIdMismatch | PairRecordError::SignatureInvalid => {
             StatusCode::FORBIDDEN
