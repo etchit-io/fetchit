@@ -119,9 +119,40 @@ impl ProfileIndex {
 
     /// Store `record` keyed by its `agent_id`. Caller is responsible
     /// for having already verified the sig + `agent_id` derivation +
-    /// monotonicity.
+    /// monotonicity. Prefer [`Self::put_if_newer`] on the write path —
+    /// this primitive does no watermark check and is for tests / callers
+    /// that have already ratcheted under their own lock.
     pub fn put(&self, record: ProfileIndexRecord) {
         self.by_agent.insert(record.agent_id.clone(), record);
+    }
+
+    /// Atomically store `record` iff its `issued_at_ms` is strictly
+    /// greater than any record (live OR tombstone) currently held for the
+    /// same agent. Returns `Err(current)` — the stored watermark — when
+    /// the record is not newer.
+    ///
+    /// The compare-and-store runs inside `DashMap`'s per-key entry lock so
+    /// two concurrent same-agent writes cannot both observe a stale
+    /// watermark and let the lower `issued_at_ms` win the write (the
+    /// check-then-`put` TOCTOU). The loser is rejected, not silently
+    /// overwritten — which on this endpoint also means a later legitimate
+    /// record can't be wrongly 409'd by a regressed watermark.
+    pub fn put_if_newer(&self, record: ProfileIndexRecord) -> Result<(), u64> {
+        use dashmap::mapref::entry::Entry;
+        match self.by_agent.entry(record.agent_id.clone()) {
+            Entry::Occupied(mut e) => {
+                let current = e.get().issued_at_ms;
+                if record.issued_at_ms <= current {
+                    return Err(current);
+                }
+                e.insert(record);
+                Ok(())
+            }
+            Entry::Vacant(e) => {
+                e.insert(record);
+                Ok(())
+            }
+        }
     }
 
     /// Count of currently-stored records (including tombstones).
@@ -263,12 +294,12 @@ pub async fn post_profile(
     let record: ProfileIndexRecord =
         serde_json::from_slice(&body).map_err(|_| ProfileError::Malformed("invalid JSON body"))?;
     verify_record(&record, state.verifier.as_ref())?;
-    if let Some(prev) = state.profiles.current_issued_at(&record.agent_id) {
-        if record.issued_at_ms <= prev {
-            return Err(ProfileError::NonMonotonic);
-        }
-    }
-    state.profiles.put(record);
+    // Atomic compare-and-store: the watermark check and the write share
+    // DashMap's per-key lock, closing the read-then-put TOCTOU.
+    state
+        .profiles
+        .put_if_newer(record)
+        .map_err(|_| ProfileError::NonMonotonic)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -312,12 +343,12 @@ pub async fn delete_profile(
         ));
     }
     verify_record(&record, state.verifier.as_ref())?;
-    if let Some(prev) = state.profiles.current_issued_at(&record.agent_id) {
-        if record.issued_at_ms <= prev {
-            return Err(ProfileError::NonMonotonic);
-        }
-    }
-    state.profiles.put(record);
+    // Atomic compare-and-store (same TOCTOU close as post_profile); the
+    // undelete path monotonic-checks against tombstones too.
+    state
+        .profiles
+        .put_if_newer(record)
+        .map_err(|_| ProfileError::NonMonotonic)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -362,6 +393,56 @@ mod tests {
         let idx = ProfileIndex::new();
         idx.put(mk_record(0xcc, 5, TOMBSTONE_PROFILE_ADDR));
         assert_eq!(idx.current_issued_at(&hex::encode([0xcc; 32])), Some(5));
+    }
+
+    #[test]
+    fn put_if_newer_is_a_compare_and_swap_across_tombstones() {
+        let idx = ProfileIndex::new();
+        let id = hex::encode([0xce; 32]);
+        // Vacant slot accepts.
+        assert_eq!(
+            idx.put_if_newer(mk_record(0xce, 100, &"a".repeat(64))),
+            Ok(())
+        );
+        // Tombstone with a higher issued_at replaces (a delete).
+        assert_eq!(
+            idx.put_if_newer(mk_record(0xce, 101, TOMBSTONE_PROFILE_ADDR)),
+            Ok(())
+        );
+        assert!(idx.get_live(&id).is_none());
+        // An undelete must out-rank the tombstone's watermark.
+        assert_eq!(
+            idx.put_if_newer(mk_record(0xce, 101, &"b".repeat(64))),
+            Err(101)
+        );
+        assert_eq!(
+            idx.put_if_newer(mk_record(0xce, 102, &"b".repeat(64))),
+            Ok(())
+        );
+        assert_eq!(idx.get_live(&id).unwrap().issued_at_ms, 102);
+    }
+
+    #[test]
+    fn put_if_newer_under_concurrency_keeps_the_max() {
+        // Concurrent same-agent writes in scrambled order must leave the
+        // highest issued_at stored — the watermark must never regress
+        // (the property the read-then-put TOCTOU violated on this live
+        // endpoint).
+        let n: u64 = 64;
+        let idx = ProfileIndex::new(); // already an Arc<Self>
+        let id = hex::encode([0xcf; 32]);
+        let mut handles = Vec::new();
+        for k in 0..n {
+            let issued = ((k * 37) % n) + 1;
+            let idx = std::sync::Arc::clone(&idx);
+            handles.push(std::thread::spawn(move || {
+                let _ = idx.put_if_newer(mk_record(0xcf, issued, &"a".repeat(64)));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(idx.current_issued_at(&id), Some(n));
     }
 
     #[test]
