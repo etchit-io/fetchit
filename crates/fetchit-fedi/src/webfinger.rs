@@ -6,7 +6,6 @@
 //! in plan Stage 5.3.
 
 use serde::Deserialize;
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -171,140 +170,6 @@ struct JrdLink {
     href: Option<String>,
 }
 
-/// Inspect a parsed `url::Host` and return a description string if it
-/// points at private / non-routable IP space. SSRF gate primitive used
-/// by [`resolve_handle`] both pre-request (against the instance) and
-/// post-response (against the final URL, in case caller's client
-/// followed a redirect).
-///
-/// Exposed as `pub(crate)` so the sibling actor-fetch path
-/// ([`crate::actor::fetch_actor`]) and any future fetch-from-remote
-/// helper share one canonical detection — when the IP-class table
-/// evolves (V-7 CGNAT, IPv6 fold-up), it evolves in one place.
-/// SEC-3 (V-2 fold): inspect a resolved [`IpAddr`] and return a
-/// description if it points at private / non-routable space.
-///
-/// Twin of [`private_ip_reason`] for the post-`lookup_host` path —
-/// where `private_ip_reason` checks an IP literal embedded in a URL,
-/// this checks the IPs a DNS resolver actually returns for a
-/// hostname. Logic is mirror-for-mirror so a future class extension
-/// (V-7 CGNAT, etc.) only lands in one matching pair.
-pub(crate) fn is_private_ip_addr(ip: IpAddr) -> Option<String> {
-    match ip {
-        IpAddr::V4(v4) => {
-            if v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-            {
-                Some(format!("private/non-routable IPv4 {v4}"))
-            } else {
-                None
-            }
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
-                return Some(format!("non-routable IPv6 {v6}"));
-            }
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                if v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_multicast()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-                {
-                    return Some(format!("IPv4-mapped private IPv6 {v6}"));
-                }
-            }
-            if (v6.segments()[0] & 0xfe00) == 0xfc00 {
-                return Some(format!("unique-local IPv6 {v6}"));
-            }
-            if (v6.segments()[0] & 0xffc0) == 0xfe80 {
-                return Some(format!("link-local IPv6 {v6}"));
-            }
-            None
-        }
-    }
-}
-
-/// SEC-3 (V-2 fold): resolve `host:port` via `tokio::net::lookup_host`
-/// and validate every returned address against [`is_private_ip_addr`].
-///
-/// Any private/non-routable address in the resolved set trips the
-/// gate (partial-results-safe). Empty resolution surfaces as
-/// [`WebFingerError::Transport`]. On success returns the validated
-/// addresses so the caller can pin them via
-/// `reqwest::ClientBuilder::resolve_to_addrs`, defeating the TTL=0
-/// rebinding race where a second DNS lookup at connect time would
-/// otherwise return a different (private) IP.
-pub(crate) async fn resolve_and_pin_host(
-    host: &str,
-    port: u16,
-) -> Result<Vec<SocketAddr>, WebFingerError> {
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:{port}"))
-        .await
-        .map_err(|e| WebFingerError::Transport(format!("lookup_host({host}): {e}")))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(WebFingerError::Transport(format!(
-            "lookup_host({host}): empty result"
-        )));
-    }
-    for addr in &addrs {
-        if let Some(reason) = is_private_ip_addr(addr.ip()) {
-            return Err(WebFingerError::PrivateInstance { host: reason });
-        }
-    }
-    Ok(addrs)
-}
-
-pub(crate) fn private_ip_reason(host: &url::Host<&str>) -> Option<String> {
-    match host {
-        url::Host::Ipv4(ip) => {
-            if ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_multicast()
-                || ip.is_broadcast()
-                || ip.is_unspecified()
-            {
-                Some(format!("private/non-routable IPv4 {ip}"))
-            } else {
-                None
-            }
-        }
-        url::Host::Ipv6(ip) => {
-            if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-                return Some(format!("non-routable IPv6 {ip}"));
-            }
-            if let Some(v4) = ip.to_ipv4_mapped() {
-                if v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_multicast()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-                {
-                    return Some(format!("IPv4-mapped private IPv6 {ip}"));
-                }
-            }
-            // Unique-local fc00::/7
-            if (ip.segments()[0] & 0xfe00) == 0xfc00 {
-                return Some(format!("unique-local IPv6 {ip}"));
-            }
-            // Link-local fe80::/10
-            if (ip.segments()[0] & 0xffc0) == 0xfe80 {
-                return Some(format!("link-local IPv6 {ip}"));
-            }
-            None
-        }
-        url::Host::Domain(_) => None,
-    }
-}
-
 /// Resolve `handle` to its canonical `ActivityPub` actor URL via
 /// `WebFinger`.
 ///
@@ -355,7 +220,7 @@ pub async fn resolve_handle(handle: &ParsedHandle) -> Result<Url, WebFingerError
     let pre_url =
         Url::parse(&endpoint).map_err(|e| WebFingerError::InvalidInstance(e.to_string()))?;
     if let Some(host) = pre_url.host() {
-        if let Some(reason) = private_ip_reason(&host) {
+        if let Some(reason) = crate::ssrf::private_ip_reason(&host) {
             return Err(WebFingerError::PrivateInstance { host: reason });
         }
     }
@@ -371,7 +236,14 @@ pub async fn resolve_handle(handle: &ParsedHandle) -> Result<Url, WebFingerError
     // rather than hardcoding 443 so `@user@example.com:8443`-style
     // instances (which parse_mention accepts) resolve correctly.
     let port = pre_url.port_or_known_default().unwrap_or(443);
-    let pinned = resolve_and_pin_host(host_for_pin, port).await?;
+    let pinned = crate::ssrf::resolve_and_pin_host(host_for_pin, port)
+        .await
+        .map_err(|e| match e {
+            crate::ssrf::SsrfError::PrivateAddress { host } => {
+                WebFingerError::PrivateInstance { host }
+            }
+            crate::ssrf::SsrfError::Resolve(msg) => WebFingerError::Transport(msg),
+        })?;
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -411,7 +283,7 @@ async fn resolve_handle_at_endpoint(
     let resp_host = resp.url().host_str().map(str::to_owned);
     if req_host != resp_host {
         if let Some(host) = resp.url().host() {
-            if let Some(reason) = private_ip_reason(&host) {
+            if let Some(reason) = crate::ssrf::private_ip_reason(&host) {
                 return Err(WebFingerError::PrivateInstance { host: reason });
             }
         }
@@ -708,109 +580,10 @@ mod tests {
         assert!(matches!(err, WebFingerError::PrivateInstance { .. }));
     }
 
-    #[test]
-    fn private_ip_reason_flags_ipv6_loopback() {
-        let url = Url::parse("https://[::1]/").unwrap();
-        let host = url.host().unwrap();
-        assert!(private_ip_reason(&host).is_some());
-    }
-
-    #[test]
-    fn private_ip_reason_flags_ipv6_unique_local() {
-        let url = Url::parse("https://[fc00::1]/").unwrap();
-        let host = url.host().unwrap();
-        let reason = private_ip_reason(&host).expect("unique-local fc00::/7 must flag");
-        assert!(reason.contains("unique-local"), "reason = {reason}");
-    }
-
-    #[test]
-    fn private_ip_reason_flags_ipv4_mapped_ipv6() {
-        // ::ffff:192.168.1.1 — IPv4-mapped IPv6 of an RFC1918 address.
-        let url = Url::parse("https://[::ffff:c0a8:0101]/").unwrap();
-        let host = url.host().unwrap();
-        let reason = private_ip_reason(&host).expect("IPv4-mapped private must flag");
-        assert!(reason.contains("IPv4-mapped"), "reason = {reason}");
-    }
-
-    #[test]
-    fn private_ip_reason_allows_public_ipv4() {
-        let url = Url::parse("https://1.1.1.1/").unwrap();
-        let host = url.host().unwrap();
-        assert!(private_ip_reason(&host).is_none());
-    }
-
-    #[test]
-    fn private_ip_reason_allows_domain() {
-        let url = Url::parse("https://mastodon.example/").unwrap();
-        let host = url.host().unwrap();
-        assert!(private_ip_reason(&host).is_none());
-    }
-
-    // ----- V-2 fold: DNS-resolution gate -----
-
-    #[tokio::test]
-    async fn resolve_and_pin_host_rejects_localhost() {
-        // `localhost` resolves to 127.0.0.1 (and possibly ::1). Either
-        // way every resolved address is private/non-routable, so the
-        // gate trips with PrivateInstance. Pins the post-lookup_host
-        // validation V-2 added; without it, `https://evil.example/`
-        // DNS-rebinding to a private IP would slip past the IP-literal
-        // pre-flight and hit the network.
-        let err = resolve_and_pin_host("localhost", 80).await.unwrap_err();
-        assert!(matches!(err, WebFingerError::PrivateInstance { .. }));
-    }
-
-    #[test]
-    fn is_private_ip_addr_flags_v4_loopback() {
-        let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(is_private_ip_addr(ip).is_some());
-    }
-
-    #[test]
-    fn is_private_ip_addr_flags_v4_rfc1918() {
-        let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        assert!(is_private_ip_addr(ip).is_some());
-    }
-
-    #[test]
-    fn is_private_ip_addr_flags_v4_aws_metadata() {
-        let ip: IpAddr = "169.254.169.254".parse().unwrap();
-        assert!(is_private_ip_addr(ip).is_some());
-    }
-
-    #[test]
-    fn is_private_ip_addr_flags_v6_link_local() {
-        let ip: IpAddr = "fe80::1".parse().unwrap();
-        assert!(is_private_ip_addr(ip).is_some());
-    }
-
-    #[test]
-    fn is_private_ip_addr_allows_v4_public() {
-        let ip: IpAddr = "1.1.1.1".parse().unwrap();
-        assert!(is_private_ip_addr(ip).is_none());
-    }
-
-    // ----- V-1: IPv6 link-local fe80::/10 -----
-
-    #[test]
-    fn private_ip_reason_flags_ipv6_link_local() {
-        // fe80::/10 — IPv6 link-local. Reachable on the local segment
-        // without routing; SSRF target equivalent to IPv4 169.254/16.
-        let url = Url::parse("https://[fe80::1]/").unwrap();
-        let host = url.host().unwrap();
-        let reason = private_ip_reason(&host).expect("fe80::/10 must flag");
-        assert!(reason.contains("link-local"), "reason = {reason}");
-    }
-
-    #[test]
-    fn private_ip_reason_flags_ipv6_link_local_high_in_range() {
-        // febf:: is the top of the fe80::/10 prefix (segments[0] = 0xfebf
-        // still passes the 0xffc0 mask comparison). Pins the mask, not
-        // just the canonical fe80:: prefix.
-        let url = Url::parse("https://[febf::1]/").unwrap();
-        let host = url.host().unwrap();
-        assert!(private_ip_reason(&host).is_some());
-    }
+    // The unit tests for the SSRF primitives themselves (IP-class
+    // tables, lookup_host gate) live in `crate::ssrf::tests`; this
+    // module keeps the tests that exercise them THROUGH the resolve
+    // flow (pre-flight, post-flight redirect backstop).
 
     // ----- V-3: post-flight IP filter catches redirect target -----
 

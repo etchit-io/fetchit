@@ -28,6 +28,7 @@ pub mod attestation;
 pub mod signature;
 pub mod signature_cache;
 pub mod signature_cavage;
+pub mod ssrf;
 pub mod transport;
 pub mod webfinger;
 

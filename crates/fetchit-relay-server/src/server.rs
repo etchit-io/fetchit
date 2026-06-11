@@ -3,9 +3,11 @@
 use crate::auth::AuthService;
 use crate::capability::CapabilityResolver;
 use crate::config::ServerConfig;
+use crate::forwarding::{get_forwarding, post_forwarding, ForwardingIndex};
 #[cfg(feature = "fediverse-inbox")]
 use crate::inbox::{inbox_router, InboxMetrics, InboxState};
 use crate::metrics::Metrics;
+use crate::pair_record::{get_pair_record, post_pair_record, PairRecordIndex};
 use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
 use crate::session::SessionRegistry;
@@ -44,6 +46,12 @@ pub struct ServerState {
     /// In-RAM profile-index map (`agent_id` → latest record). See
     /// `docs/profile-manifest-v1.md` § 4 + `docs/qr-pairing-v1.md`.
     pub profiles: Arc<ProfileIndex>,
+    /// In-RAM pair-record index (`agent_id` → latest signed reachability
+    /// pointer). Reachability V1 / TB1.
+    pub pair_records: Arc<PairRecordIndex>,
+    /// In-RAM forwarding index (`agent_id` → signed relay redirect), TTL
+    /// swept. Reachability V1 / TB2.
+    pub forwarding: Arc<ForwardingIndex>,
     /// Optional shared [`InboxMetrics`] when the relay-server is
     /// built with `--features fediverse-inbox`. When `Some`, the
     /// `/v1/metrics` endpoint splices the inbox counter family into
@@ -174,6 +182,8 @@ impl Server {
             ratelimit: Arc::new(RateLimiter::new()),
             metrics,
             profiles: ProfileIndex::new(),
+            pair_records: PairRecordIndex::new(),
+            forwarding: ForwardingIndex::new(),
             config: self.config,
             #[cfg(feature = "fediverse-inbox")]
             inbox_metrics,
@@ -190,6 +200,10 @@ impl Server {
                 "/v1/profile/:agent_id",
                 get(get_profile).delete(delete_profile),
             )
+            .route("/v1/pair-record", post(post_pair_record))
+            .route("/v1/pair-record/:agent_id", get(get_pair_record))
+            .route("/v1/forwarding", post(post_forwarding))
+            .route("/v1/forwarding/:agent_id", get(get_forwarding))
             .with_state(state.clone());
         // Mount the opt-in fediverse inbox last so it composes onto the
         // fully-stated base router (both are `Router<()>`). Absent by
@@ -281,6 +295,10 @@ fn spawn_sweeper(state: Arc<ServerState>) {
             let evicted = state.transit.sweep_expired();
             let _ = state.auth.sweep_expired();
             state.ratelimit.sweep_idle(Duration::from_secs(3600));
+            // Reachability V1 / TB2: drop forwarding pointers past their
+            // ~30-day TTL. RAM-only, no metric — a forwarding record is a
+            // transitional aid, not a tracked steady-state resource.
+            let _ = state.forwarding.sweep_expired(crate::forwarding::now_ms());
             let buffered = i64::try_from(state.transit.len()).unwrap_or(i64::MAX);
             state.metrics.set_transit_buffer_envelopes(buffered);
             // Count every TTL-evicted envelope into the dropped-by-TTL

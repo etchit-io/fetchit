@@ -545,7 +545,7 @@ pub enum FetchActorError {
 pub async fn fetch_actor(actor_url: &url::Url) -> Result<Actor, FetchActorError> {
     // SEC-3 pre-flight on the URL itself.
     if let Some(host) = actor_url.host() {
-        if let Some(reason) = crate::webfinger::private_ip_reason(&host) {
+        if let Some(reason) = crate::ssrf::private_ip_reason(&host) {
             return Err(FetchActorError::PrivateInstance { host: reason });
         }
     }
@@ -554,13 +554,13 @@ pub async fn fetch_actor(actor_url: &url::Url) -> Result<Actor, FetchActorError>
         .host_str()
         .ok_or_else(|| FetchActorError::Transport("URL has no host".into()))?;
     let port = actor_url.port_or_known_default().unwrap_or(443);
-    let pinned = crate::webfinger::resolve_and_pin_host(host_for_pin, port)
+    let pinned = crate::ssrf::resolve_and_pin_host(host_for_pin, port)
         .await
         .map_err(|e| match e {
-            crate::webfinger::WebFingerError::PrivateInstance { host } => {
+            crate::ssrf::SsrfError::PrivateAddress { host } => {
                 FetchActorError::PrivateInstance { host }
             }
-            other => FetchActorError::Transport(other.to_string()),
+            crate::ssrf::SsrfError::Resolve(msg) => FetchActorError::Transport(msg),
         })?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -594,7 +594,7 @@ async fn fetch_actor_at_url(
     let resp_host = resp.url().host_str().map(str::to_owned);
     if req_host != resp_host {
         if let Some(host) = resp.url().host() {
-            if let Some(reason) = crate::webfinger::private_ip_reason(&host) {
+            if let Some(reason) = crate::ssrf::private_ip_reason(&host) {
                 return Err(FetchActorError::PrivateInstance { host: reason });
             }
         }

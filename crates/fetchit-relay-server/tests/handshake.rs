@@ -451,6 +451,64 @@ async fn connection_count(addr: SocketAddr) -> u64 {
 }
 
 #[tokio::test]
+async fn ws_upgrade_without_a_valid_bearer_is_rejected() {
+    // Reachability V1 / TB3 — pooled-deposit auth parity. A pooled
+    // deposit connection is a real WS upgrade and must present a valid
+    // bearer; there is no unauthenticated path onto the relay. An
+    // invalid/forged token fails the upgrade (`ws.rs`: `validate_bearer`
+    // returns `None` → the upgrade is refused before `handle_socket`).
+    let addr = start_test_server().await;
+    let url = format!("ws://{addr}/v1/ws?token=not-a-real-bearer-token");
+    let req = url.into_client_request().unwrap();
+    assert!(
+        connect_async(req).await.is_err(),
+        "WS upgrade with an invalid bearer must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn deposit_with_spoofed_sender_agent_id_is_not_delivered() {
+    // Reachability V1 / TB3 — over any (pooled or primary) connection you
+    // can only deposit AS your authenticated agent. An envelope whose
+    // `sender_agent_id` differs from the connection's authed agent is
+    // dropped at the relay (`ws.rs`: `envelope.sender_agent_id !=
+    // auth.agent_id`), so it never reaches the recipient.
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let bob_pk = b"bob-pubkey-bytes-here";
+    let bob_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(bob_pk));
+    // A sender id that is NOT alice's authenticated agent.
+    let spoofed = AgentId::from_bytes([0x77; 32]);
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let bob_tok = obtain_bearer(addr, bob_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    let mut bob = connect_ws(addr, &bob_tok).await;
+    send_hello(&mut alice).await;
+    send_hello(&mut bob).await;
+    let _ = expect_ready(&mut alice).await;
+    let _ = expect_ready(&mut bob).await;
+
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: bob_id,
+        envelope: envelope_from(spoofed, b"forged sender"),
+        dedupe_key: DedupeKey::from_bytes([0xde; 16]),
+    });
+    alice
+        .send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+
+    // Bob must receive nothing — the spoofed-sender deposit was dropped.
+    let got = tokio::time::timeout(Duration::from_millis(500), bob.next()).await;
+    assert!(
+        got.is_err(),
+        "recipient must receive no Deliver for a spoofed-sender deposit, got {got:?}"
+    );
+}
+
+#[tokio::test]
 async fn watch_presence_echoes_offline_then_online_then_offline() {
     let addr = start_test_server().await;
 
