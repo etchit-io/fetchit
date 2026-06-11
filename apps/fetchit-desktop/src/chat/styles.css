@@ -400,6 +400,113 @@ body.chat-docked {
   text-decoration: underline;
 }
 
+/* Read-only profile card (profile-tab). Overlay + bounded panel, same
+   webkit2gtk-safe singleton pattern as .chat-lightbox / .chat-dialog.
+   z-index 55 sits above the chat panel (50) but below the confirm
+   dialog (60) so a website-link confirm paints over the card. */
+.chat-profile {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 55;
+  display: grid;
+  place-items: center;
+  animation: chat-dialog-fade var(--dur-trans) ease both;
+}
+.chat-profile[hidden] { display: none; }
+.chat-profile__panel {
+  position: relative;
+  width: min(420px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 24px;
+}
+.chat-profile__close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--ash);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chat-profile__close:hover { color: var(--bone); }
+.chat-profile__body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+.chat-profile__avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  flex: none;
+}
+.chat-profile__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.chat-profile__name {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--bone);
+  word-break: break-word;
+}
+.chat-profile__bio {
+  font-size: 13px;
+  color: var(--ash);
+  word-break: break-word;
+}
+.chat-profile__website {
+  background: none;
+  border: none;
+  color: var(--copper);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  word-break: break-all;
+  max-width: 100%;
+}
+.chat-profile__website:hover { text-decoration: underline; }
+.chat-profile__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.chat-profile__link {
+  background: transparent;
+  color: var(--copper);
+  border: 1px solid var(--copper);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-micro) ease;
+}
+.chat-profile__link:hover { background: rgba(201, 115, 43, 0.12); }
+.chat-profile__loading,
+.chat-profile__empty,
+.chat-profile__error {
+  font-size: 13px;
+  color: var(--ash);
+  padding: 16px 0;
+}
+.chat-profile__error { color: var(--rust); }
+
 .chat-conv-header__presence {
   font-size: 11px;
   color: var(--ash);
