@@ -44,6 +44,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use fetchit_chat::attachment::Attachment;
 use fetchit_chat::conversation::{confirms_delivery, dispatch_inbound, InboundDispatch};
 use fetchit_chat::groups::{GroupId, GroupInvite, JoinOutcome};
 use fetchit_chat::identity::AgentId;
@@ -307,6 +308,41 @@ enum Mode {
         #[arg(long)]
         group: String,
     },
+    /// Send a single DM to `--peer`, optionally with an inline image
+    /// attachment, wait briefly for a delivery receipt, then exit. The
+    /// scriptable primitive for headless smoke tests — no stdin, no
+    /// human at the keyboard. Pairs with an `echo`/`chat` peer on the
+    /// other end (or any client) to assert end-to-end DM + inline-image
+    /// delivery without driving the GUI.
+    Send {
+        /// Hex agent id of the recipient.
+        #[arg(long)]
+        peer: String,
+
+        /// Message body. May be empty for an image-only message.
+        #[arg(long, default_value = "")]
+        body: String,
+
+        /// Path to an image file to attach inline. `png` and `gif`
+        /// dimensions are auto-detected; for `jpeg`/`webp` pass
+        /// `--attach-mime` + `--attach-width` + `--attach-height`.
+        #[arg(long)]
+        attach: Option<PathBuf>,
+
+        /// Override the attachment MIME (one of image/png, image/jpeg,
+        /// image/webp, image/gif). Required for formats this CLI cannot
+        /// sniff.
+        #[arg(long)]
+        attach_mime: Option<String>,
+
+        /// Override the attachment intrinsic pixel width.
+        #[arg(long)]
+        attach_width: Option<u32>,
+
+        /// Override the attachment intrinsic pixel height.
+        #[arg(long)]
+        attach_height: Option<u32>,
+    },
 }
 
 /// Parsed `group-chat` arguments. A standalone [`clap::Args`] group so
@@ -479,7 +515,154 @@ async fn main() -> Result<()> {
         Mode::GroupCreate { name } => run_group_create(&client, &cli.display_name, &name).await,
         Mode::GroupChat(args) => run_group_chat(&client, &cli.display_name, &args).await,
         Mode::GroupInvite { group } => run_group_invite(&client, &group).await,
+        Mode::Send {
+            peer,
+            body,
+            attach,
+            attach_mime,
+            attach_width,
+            attach_height,
+        } => {
+            run_send(
+                &client,
+                &cli.display_name,
+                &peer,
+                &body,
+                attach.as_deref(),
+                attach_mime.as_deref(),
+                attach_width,
+                attach_height,
+            )
+            .await
+        }
     }
+}
+
+/// Detect `(mime, width, height)` from raw image bytes for the formats
+/// whose dimensions can be read from a fixed header offset: PNG (IHDR
+/// big-endian) and GIF (logical-screen little-endian). Returns `None`
+/// for JPEG/WebP/anything else — the caller falls back to the explicit
+/// `--attach-mime/--attach-width/--attach-height` overrides. Kept
+/// dependency-free on purpose: a test rig shouldn't drag an image-decode
+/// crate into the chat library's build.
+fn detect_image(raw: &[u8]) -> Option<(&'static str, u32, u32)> {
+    // PNG: 8-byte signature, then the IHDR chunk; width/height are
+    // big-endian u32 at byte offsets 16 and 20.
+    if raw.len() >= 24 && raw.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let w = u32::from_be_bytes(raw[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(raw[20..24].try_into().ok()?);
+        return Some(("image/png", w, h));
+    }
+    // GIF: "GIF87a"/"GIF89a", then logical-screen width/height as
+    // little-endian u16 at offsets 6 and 8.
+    if raw.len() >= 10 && (raw.starts_with(b"GIF87a") || raw.starts_with(b"GIF89a")) {
+        let w = u32::from(u16::from_le_bytes(raw[6..8].try_into().ok()?));
+        let h = u32::from(u16::from_le_bytes(raw[8..10].try_into().ok()?));
+        return Some(("image/gif", w, h));
+    }
+    None
+}
+
+/// Read an image file and build a validated [`Attachment`]. PNG/GIF
+/// dimensions + MIME are auto-detected; any field can be overridden, and
+/// overrides are *required* for formats [`detect_image`] can't sniff
+/// (JPEG/WebP). The final `Attachment::from_raw` enforces the MIME
+/// allow-list, non-zero dimensions, and the 256 KiB cap.
+fn build_attachment(
+    path: &std::path::Path,
+    mime_override: Option<&str>,
+    width_override: Option<u32>,
+    height_override: Option<u32>,
+) -> Result<Attachment> {
+    let raw = std::fs::read(path).with_context(|| format!("read attachment {}", path.display()))?;
+    let detected = detect_image(&raw);
+    let mime = mime_override
+        .map(str::to_owned)
+        .or_else(|| detected.map(|d| d.0.to_owned()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not sniff MIME for {} — pass --attach-mime",
+                path.display()
+            )
+        })?;
+    let width = width_override.or(detected.map(|d| d.1)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not sniff width for {} — pass --attach-width",
+            path.display()
+        )
+    })?;
+    let height = height_override.or(detected.map(|d| d.2)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not sniff height for {} — pass --attach-height",
+            path.display()
+        )
+    })?;
+    Attachment::from_raw(&mime, width, height, &raw)
+        .map_err(|e| anyhow::anyhow!("attachment rejected: {e}"))
+}
+
+/// Send exactly one DM (with an optional inline image), keep the inbound
+/// reader alive briefly so a delivery receipt prints, then exit. The
+/// scriptable counterpart to a human clicking "send" in the GUI: an
+/// automated smoke asserts on this process's `sent — id=…` line and the
+/// peer's inbound, with no keyboard in the loop.
+#[allow(clippy::too_many_arguments)]
+async fn run_send(
+    client: &Client,
+    display_name: &str,
+    peer_hex: &str,
+    body: &str,
+    attach: Option<&std::path::Path>,
+    attach_mime: Option<&str>,
+    attach_width: Option<u32>,
+    attach_height: Option<u32>,
+) -> Result<()> {
+    let attachment = match attach {
+        Some(path) => Some(build_attachment(
+            path,
+            attach_mime,
+            attach_width,
+            attach_height,
+        )?),
+        None => None,
+    };
+    let attachment = attachment.as_ref();
+    let peer = AgentId::parse(peer_hex.to_owned()).context("invalid peer agent id")?;
+    let mut inbound = client
+        .take_transport_inbound("relay")
+        .context("relay inbound already taken")?;
+    let client_clone = client.clone();
+    let reader = tokio::spawn(async move {
+        while let Some(env) = inbound.recv().await {
+            if let Some(dm) = decode_inbound(&client_clone, env).await {
+                println!("[{}] {}", short(&dm.from.0), dm.body);
+            }
+        }
+    });
+
+    let messages = client.messages();
+    let sent = send_with_retry("one-shot send", || {
+        messages.send(&peer, body, display_name, None, attachment)
+    })
+    .await
+    .context("send one-shot DM")?;
+    eprintln!(
+        "[peer] sent — to={} id={sent:?} body_len={} attachment={}",
+        short(peer_hex),
+        body.len(),
+        attachment.is_some()
+    );
+
+    // Hold the connection open so the relay can return a delivery
+    // receipt (the recipient decrypt-acked); the reader prints
+    // `got receipt for message_id=…`, which the smoke asserts on.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures_util::future::pending::<()>(),
+    )
+    .await;
+    drop(reader);
+    Ok(())
 }
 
 async fn run_mint_actor(
@@ -2195,5 +2378,86 @@ mod tests {
             }
             other => panic!("expected GroupChat, got {other:?}"),
         }
+    }
+
+    // ── attachment detection + build ──────────────────────────────────
+
+    fn fake_png(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        v.extend_from_slice(&[0, 0, 0, 13]); // IHDR length field
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth/colour — unread by the sniffer
+        v
+    }
+
+    fn fake_gif(w: u16, h: u16) -> Vec<u8> {
+        let mut v = b"GIF89a".to_vec();
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&h.to_le_bytes());
+        v.push(0x00);
+        v
+    }
+
+    #[test]
+    fn detect_image_reads_png_dimensions() {
+        assert_eq!(
+            detect_image(&fake_png(120, 80)),
+            Some(("image/png", 120, 80))
+        );
+    }
+
+    #[test]
+    fn detect_image_reads_gif_dimensions() {
+        assert_eq!(detect_image(&fake_gif(64, 48)), Some(("image/gif", 64, 48)));
+    }
+
+    #[test]
+    fn detect_image_unsniffable_header_is_none() {
+        // JPEG magic is deliberately NOT sniffed (needs a marker walk);
+        // it falls through to the explicit-override path.
+        assert_eq!(detect_image(b"\xff\xd8\xff\xe0 jpeg-ish"), None);
+        assert_eq!(detect_image(b"not an image at all"), None);
+    }
+
+    #[test]
+    fn build_attachment_png_autodetects_mime_and_dims() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.png");
+        std::fs::write(&p, fake_png(10, 20)).unwrap();
+        let a = build_attachment(&p, None, None, None).unwrap();
+        assert_eq!(a.mime, "image/png");
+        assert_eq!((a.width, a.height), (10, 20));
+    }
+
+    #[test]
+    fn build_attachment_overrides_cover_unsniffable_formats() {
+        // A webp body the sniffer skips still builds when the operator
+        // supplies all three overrides.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.webp");
+        std::fs::write(&p, b"RIFF....WEBPVP8 ....").unwrap();
+        let a = build_attachment(&p, Some("image/webp"), Some(5), Some(6)).unwrap();
+        assert_eq!(a.mime, "image/webp");
+        assert_eq!((a.width, a.height), (5, 6));
+    }
+
+    #[test]
+    fn build_attachment_disallowed_mime_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.bin");
+        std::fs::write(&p, b"\x00\x01\x02\x03").unwrap();
+        let err = build_attachment(&p, Some("image/tiff"), Some(4), Some(4)).unwrap_err();
+        assert!(err.to_string().contains("attachment rejected"), "{err}");
+    }
+
+    #[test]
+    fn build_attachment_unsniffable_without_overrides_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.bin");
+        std::fs::write(&p, b"\xff\xd8\xff\xe0 jpeg-ish").unwrap();
+        let err = build_attachment(&p, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("--attach-mime"), "{err}");
     }
 }
