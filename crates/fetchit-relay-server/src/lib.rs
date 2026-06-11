@@ -13,6 +13,7 @@ pub mod error;
 #[cfg(feature = "fediverse-inbox")]
 pub mod inbox;
 pub mod metrics;
+pub mod pair_record;
 pub mod profile;
 pub mod ratelimit;
 pub mod server;

@@ -6,6 +6,7 @@ use crate::config::ServerConfig;
 #[cfg(feature = "fediverse-inbox")]
 use crate::inbox::{inbox_router, InboxMetrics, InboxState};
 use crate::metrics::Metrics;
+use crate::pair_record::{get_pair_record, post_pair_record, PairRecordIndex};
 use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
 use crate::session::SessionRegistry;
@@ -44,6 +45,9 @@ pub struct ServerState {
     /// In-RAM profile-index map (`agent_id` → latest record). See
     /// `docs/profile-manifest-v1.md` § 4 + `docs/qr-pairing-v1.md`.
     pub profiles: Arc<ProfileIndex>,
+    /// In-RAM pair-record index (`agent_id` → latest signed reachability
+    /// pointer). Reachability V1 / TB1.
+    pub pair_records: Arc<PairRecordIndex>,
     /// Optional shared [`InboxMetrics`] when the relay-server is
     /// built with `--features fediverse-inbox`. When `Some`, the
     /// `/v1/metrics` endpoint splices the inbox counter family into
@@ -174,6 +178,7 @@ impl Server {
             ratelimit: Arc::new(RateLimiter::new()),
             metrics,
             profiles: ProfileIndex::new(),
+            pair_records: PairRecordIndex::new(),
             config: self.config,
             #[cfg(feature = "fediverse-inbox")]
             inbox_metrics,
@@ -190,6 +195,8 @@ impl Server {
                 "/v1/profile/:agent_id",
                 get(get_profile).delete(delete_profile),
             )
+            .route("/v1/pair-record", post(post_pair_record))
+            .route("/v1/pair-record/:agent_id", get(get_pair_record))
             .with_state(state.clone());
         // Mount the opt-in fediverse inbox last so it composes onto the
         // fully-stated base router (both are `Router<()>`). Absent by
