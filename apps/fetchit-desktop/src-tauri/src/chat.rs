@@ -264,8 +264,10 @@ impl ChatState {
     /// Switch the chat client to a new region's relay.
     ///
     /// Validates `url` (parse + scheme + path + SSRF checks) via
-    /// [`validate_relay_url`], records it as the `ChatState` relay URL so a
-    /// later rebuild reconnects there, then takes one of two paths:
+    /// [`validate_relay_url`], then takes one of two paths; the validated
+    /// url is recorded as the `ChatState` relay URL only once the chosen
+    /// path commits, so a failed migration leaves the recorded url naming
+    /// the still-working relay:
     ///
     /// - **Live relay client cached** — call
     ///   [`fetchit_chat::Client::migrate_primary`], which cleanly swaps
@@ -283,10 +285,6 @@ impl ChatState {
     /// component, fails the SSRF guard, or the in-place migration fails.
     pub async fn set_relay_url(&self, url: &str) -> Result<(), String> {
         let parsed = validate_relay_url(url)?;
-        match self.relay_url.lock() {
-            Ok(mut g) => *g = parsed,
-            Err(p) => *p.into_inner() = parsed,
-        }
 
         // Prefer an in-place migration over a rebuild when a live relay
         // client is cached: it preserves transport state and stops the
@@ -294,17 +292,34 @@ impl ChatState {
         let cached = self.client.lock().await.clone();
         if let Some(client) = cached {
             if client.has_multi_home() {
-                // The cached client stays; migrate_primary swaps slot 0 and
-                // re-fires the failover callback as Migrated. On error the
-                // lib guarantees slot 0 is untouched, so surface it and leave
-                // everything as-was.
-                return client.migrate_primary(url).await.map_err(|e| e.to_string());
+                // Pass the NORMALIZED form so the lib's same-url no-op check
+                // matches the url the client was built with (the raw input
+                // can differ on trivial formatting like a trailing slash).
+                // On error the lib guarantees slot 0 is untouched; surface
+                // it WITHOUT recording the url, so a later rebuild does not
+                // chase a relay that just failed to go live.
+                client
+                    .migrate_primary(parsed.as_str())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.store_relay_url(parsed);
+                return Ok(());
             }
         }
 
-        // No live relay client to migrate: rebuild on the next chat op.
+        // No live relay client to migrate: record the url and rebuild on
+        // the next chat op.
+        self.store_relay_url(parsed);
         self.invalidate().await;
         Ok(())
+    }
+
+    /// Record `parsed` as the relay URL future rebuilds connect to.
+    fn store_relay_url(&self, parsed: Url) {
+        match self.relay_url.lock() {
+            Ok(mut g) => *g = parsed,
+            Err(p) => *p.into_inner() = parsed,
+        }
     }
 
     /// Read the current opt-in flag for LAN-direct delivery. Used by
