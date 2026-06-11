@@ -1583,6 +1583,87 @@ impl Client {
         }
         Ok(())
     }
+
+    /// Import a contact from a `x0x://pair/<agent_id_hex>?r=<relay>...` URI.
+    ///
+    /// Parses the URI, rejects importing your own agent id, walks the
+    /// advertised relays in order calling
+    /// [`crate::pair::fetch_pair_record_by_id`] on each, and on the first
+    /// verified record persists a [`crate::messages::StoredContactCard`]
+    /// and runs the x0xd legacy import via
+    /// [`crate::identity::Endpoint::import_uri`].
+    ///
+    /// Returns a clear error when all relays are unreachable rather than
+    /// silently succeeding.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::Invalid`] for a malformed URI, self-import attempt,
+    /// or when every relay fails. [`ChatError::Transport`] on underlying
+    /// HTTP failure.
+    pub async fn import_pair_uri(&self, uri: &str) -> Result<()> {
+        use crate::pair_uri::{parse_pair_uri, PairUriError};
+
+        let parsed = parse_pair_uri(uri).map_err(|e| match e {
+            PairUriError::TooLong => ChatError::Invalid("pair URI too long".into()),
+            other => ChatError::Invalid(other.to_string()),
+        })?;
+
+        // Reject self-import before any network call.
+        if let Some(chat) = self.chat.as_ref() {
+            if chat.identity.agent_id_hex() == parsed.agent_id_hex {
+                return Err(ChatError::Invalid("that is your own pairing link".into()));
+            }
+        }
+
+        let layout = self.layout().ok_or_else(|| {
+            ChatError::Invalid("chat state not built; cannot import a pair URI".into())
+        })?;
+
+        let http = reqwest::Client::new();
+        let mut last_err = String::new();
+        let mut record_opt = None;
+        for relay_str in &parsed.relays {
+            let relay = url::Url::parse(relay_str)
+                .map_err(|e| ChatError::Invalid(format!("relay URL in pair URI: {e}")))?;
+            match crate::pair::fetch_pair_record_by_id(&relay, &parsed.agent_id_hex, &http).await {
+                Ok(r) => {
+                    record_opt = Some(r);
+                    break;
+                }
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+
+        let record = record_opt.ok_or_else(|| {
+            ChatError::Invalid(format!("could not reach any of their relays: {last_err}"))
+        })?;
+
+        // Build and persist the stored contact card.
+        let stored = crate::messages::StoredContactCard {
+            agent_id_hex: record.agent_id_hex.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: record.kem_pubkey_b64.clone(),
+            agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
+            rendezvous_hints: None,
+        };
+        stored.save(layout)?;
+
+        // Build a minimal legacy AgentCard URI and forward it to x0xd's
+        // /agent/card/import endpoint so the daemon-backed contact list
+        // reflects the new peer (mirrors the pair_accept flow).
+        let agent_id = crate::identity::AgentId(record.agent_id_hex.clone());
+        let card = crate::identity::AgentCard {
+            agent_id,
+            display_name: String::new(),
+            created_at: None,
+            addresses: Vec::new(),
+            extra: serde_json::Value::Null,
+        };
+        self.identity().import(&card).await?;
+
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Client {
