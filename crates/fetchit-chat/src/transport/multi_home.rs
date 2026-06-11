@@ -46,6 +46,13 @@ use crate::transport::{InboundEnvelope, OutboundEnvelope, OutboundKind, SendRece
 
 const TRANSPORT_NAME: &str = "multi-home";
 
+/// Upper bound on how long [`MultiHomeTransport::replace_primary`] waits
+/// for the freshly built slot-0 relay to report
+/// [`fetchit_relay_client::ConnState::Connected`] before declaring the
+/// swap failed. On timeout the new session is torn down and the old slot
+/// 0 is left intact.
+const REPLACE_PRIMARY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Concrete handle returned by [`RelayBuilder::build`]. Production
 /// wraps an `Arc<RelayTransport>` ([`RelayHandle::from_transport`]);
 /// tests use [`RelayHandle::mock`] which records sends in an internal
@@ -274,6 +281,17 @@ pub enum TransportError {
     /// The candidate URL is on the active denylist (enforced by D5+).
     #[error("blocked by denylist: {0}")]
     Blocked(String),
+    /// A [`MultiHomeTransport::replace_primary`] swap built a session to
+    /// the new relay but it did not reach
+    /// [`fetchit_relay_client::ConnState::Connected`] within
+    /// [`REPLACE_PRIMARY_CONNECT_TIMEOUT`]. The new session was torn down
+    /// and the existing slot 0 left untouched, so the caller can retry or
+    /// keep the old primary.
+    #[error("relay swap did not go live: {url}")]
+    SwapNotLive {
+        /// The relay URL the failed swap targeted.
+        url: String,
+    },
 }
 
 /// One occupied slot in [`MultiHomeTransport`]. Carries the URL, the
@@ -288,6 +306,14 @@ pub struct Slot {
     pub handle: Arc<RelayHandle>,
     /// Last inbound-or-outbound traffic timestamp; used by D3's LRU.
     pub last_traffic_at: SystemTime,
+    /// Abort handle for this slot's fan-in task (the loop draining the
+    /// per-slot inbound stream into the shared dedup gate). Held so
+    /// teardown (e.g. [`MultiHomeTransport::replace_primary`]) can stop
+    /// the fan-in deterministically. `None` only for slots whose handle
+    /// exposed no inbound receiver. Dropping an
+    /// [`tokio::task::AbortHandle`] does NOT abort the task — teardown
+    /// must call `.abort()` explicitly.
+    pub fan_in: Option<tokio::task::AbortHandle>,
 }
 
 /// M3 G1 — closure shape the primary-denylisted callback registers.
@@ -303,11 +329,19 @@ pub type PrimaryDenylistedCallback = Arc<dyn Fn(String) + Send + Sync>;
 /// occupied. Inbound deliveries fan into a single dispatch stream
 /// gated by [`NonceDedup`] (D4).
 pub struct MultiHomeTransport {
-    /// Slot-0 URL the transport was constructed with. Retained for
-    /// diagnostics, the G1 primary-denylisted match, and future
-    /// fallback-policy work; the live slot 0 is owned by
-    /// [`Self::slots`] and reachable via [`Self::slot_zero_handle`].
-    primary_url: String,
+    /// URL that names slot 0 — the user's pinned primary. Retained for
+    /// diagnostics, the G1 primary-denylisted match (the denylist
+    /// subscriber reads it), and future fallback-policy work; the live
+    /// slot 0 is owned by [`Self::slots`] and reachable via
+    /// [`Self::slot_zero_handle`].
+    ///
+    /// Interior-mutable so [`Self::replace_primary`] can keep it accurate
+    /// across a home-relay failover: the only reader is the denylist
+    /// subscriber's primary match, which must follow the live slot-0 URL
+    /// or it would key off a stale value after a swap. `Arc`-wrapped so
+    /// the spawned subscriber task can share ownership and read the live
+    /// value across its `await` points.
+    primary_url: Arc<RwLock<String>>,
     builder: Arc<dyn RelayBuilder>,
     slots: Arc<RwLock<[Option<Slot>; 3]>>,
     inbox_dedup: Arc<std::sync::Mutex<NonceDedup>>,
@@ -364,17 +398,22 @@ impl MultiHomeTransport {
         block_events: Option<tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>>,
     ) -> Result<Self, TransportError> {
         let handle = builder.build(&primary_url).await?;
+        let dedup = NonceDedup::new(10_000, std::time::Duration::from_secs(300));
+        let inbox_dedup = Arc::new(std::sync::Mutex::new(dedup));
+        let fan_in = Self::spawn_fan_in_for_slot(
+            Arc::clone(&handle),
+            Arc::clone(&inbox_dedup),
+            Arc::clone(&on_inbound),
+        );
         let primary_slot = Slot {
             relay_url: primary_url.clone(),
             handle: Arc::clone(&handle),
             last_traffic_at: SystemTime::now(),
+            fan_in,
         };
         let initial_slots: [Option<Slot>; 3] = [Some(primary_slot), None, None];
-        let dedup = NonceDedup::new(10_000, std::time::Duration::from_secs(300));
-        let inbox_dedup = Arc::new(std::sync::Mutex::new(dedup));
-        Self::spawn_fan_in_for_slot(handle, Arc::clone(&inbox_dedup), Arc::clone(&on_inbound));
         let mh = Self {
-            primary_url,
+            primary_url: Arc::new(RwLock::new(primary_url)),
             builder,
             slots: Arc::new(RwLock::new(initial_slots)),
             inbox_dedup,
@@ -433,7 +472,9 @@ impl MultiHomeTransport {
         mut rx: tokio::sync::broadcast::Receiver<fetchit_trust_client::BlockEvent>,
     ) {
         let slots = Arc::clone(&self.slots);
-        let primary_url = self.primary_url.clone();
+        // Share the primary-URL lock with the task so it reads the live
+        // slot-0 URL on every event, tracking a `replace_primary` swap.
+        let primary_url = Arc::clone(&self.primary_url);
         let cb_slot = Arc::clone(&self.primary_denylisted_cb);
         tokio::spawn(async move {
             loop {
@@ -444,17 +485,36 @@ impl MultiHomeTransport {
                         {
                             continue;
                         }
+                        // Snapshot the live slot-0 URL for this event so the
+                        // match tracks a `replace_primary` failover. On poison
+                        // fall back to None: skip ONLY the G1 primary-denylist
+                        // callback, never the slot 1/2 drop below -- a poisoned
+                        // primary_url lock must not disable denylist
+                        // enforcement for the other slots. (Poison is
+                        // practically unreachable: the sole writer,
+                        // replace_primary, only assigns a String.)
+                        let primary = match primary_url.read() {
+                            Ok(g) => Some(g.clone()),
+                            Err(e) => {
+                                log::warn!(
+                                    "multi_home primary_url lock poisoned in denylist subscriber: {e}",
+                                );
+                                None
+                            }
+                        };
                         // G1: emit BEFORE the slot mutation so the
                         // callback fires even if `slots` is poisoned
                         // below (the user still needs to know).
-                        if event.added.iter().any(|u| u == &primary_url) {
-                            log::info!(
-                                "multi_home primary relay denylisted mid-session: url={primary_url}",
-                            );
-                            let cb_opt =
-                                cb_slot.read().ok().and_then(|g| g.as_ref().map(Arc::clone));
-                            if let Some(cb) = cb_opt {
-                                cb(primary_url.clone());
+                        if let Some(ref primary) = primary {
+                            if event.added.iter().any(|u| u == primary) {
+                                log::info!(
+                                    "multi_home primary relay denylisted mid-session: url={primary}",
+                                );
+                                let cb_opt =
+                                    cb_slot.read().ok().and_then(|g| g.as_ref().map(Arc::clone));
+                                if let Some(cb) = cb_opt {
+                                    cb(primary.clone());
+                                }
                             }
                         }
                         let mut guard = match slots.write() {
@@ -612,7 +672,7 @@ impl MultiHomeTransport {
         };
 
         let handle = self.builder.build(target_url).await?;
-        Self::spawn_fan_in_for_slot(
+        let fan_in = Self::spawn_fan_in_for_slot(
             Arc::clone(&handle),
             Arc::clone(&self.inbox_dedup),
             Arc::clone(&self.on_inbound),
@@ -623,20 +683,39 @@ impl MultiHomeTransport {
             relay_url: target_url.to_string(),
             handle: Arc::clone(&handle),
             last_traffic_at: SystemTime::now(),
+            fan_in,
         });
         Ok(handle)
     }
 
-    /// Wire a slot's inbound stream into the dedup + dispatch path.
+    /// Wire a slot's inbound stream into the dedup + dispatch path,
+    /// returning the spawned task's [`tokio::task::AbortHandle`] (or
+    /// `None` when the handle exposed no inbound receiver). The caller
+    /// stores it on the [`Slot`] for deterministic teardown.
+    ///
     /// Spawned per slot at slot-construction time (during init for
     /// slot 0; during [`Self::acquire_slot`] for slots 1 + 2).
     ///
-    /// The spawned task does NOT keep an [`Arc<RelayHandle>`] alive;
-    /// it consumes only the `UnboundedReceiver` taken out of the
-    /// handle so that when the slot is evicted the
-    /// [`Arc<RelayHandle>`] drops, its `inbound_tx` field drops, the
-    /// channel closes, and the task exits naturally on the next
-    /// `recv()`.
+    /// The spawned task does NOT keep an [`Arc<RelayHandle>`] alive; it
+    /// consumes only the `UnboundedReceiver` taken out of the handle.
+    /// How that receiver closes depends on the path:
+    ///
+    /// - Test-mock path: the receiver is fed by the mock handle's
+    ///   `inbound_tx`. Dropping the last [`Arc<RelayHandle>`] drops that
+    ///   sender, the channel closes, and the task exits on the next
+    ///   `recv()`.
+    /// - Production path: the receiver is fed by
+    ///   [`crate::relay_transport::RelayTransport`]'s inbound pump, which
+    ///   holds its own `Arc<RelaySet>`. Dropping the `RelayHandle` does
+    ///   NOT close that channel — the pump keeps the sender alive. The
+    ///   fan-in exits only once the merged channel closes, which happens
+    ///   when [`crate::relay_transport::RelayTransport::shutdown`] runs
+    ///   [`fetchit_relay_client::RelaySet::shutdown`] (supervisors drop
+    ///   their `inbox_tx` -> forwarders exit -> merged channel closes ->
+    ///   pump breaks and drops its tx -> this loop's `recv()` returns
+    ///   `None`). Eviction that merely drops the slot therefore does NOT
+    ///   stop a production fan-in; teardown must `.abort()` the returned
+    ///   handle (or call `shutdown`) explicitly.
     ///
     /// Production handles drain
     /// [`crate::relay_transport::RelayTransport::take_inbound`]; test
@@ -646,7 +725,7 @@ impl MultiHomeTransport {
         slot_handle: Arc<RelayHandle>,
         dedup: Arc<std::sync::Mutex<NonceDedup>>,
         on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync>,
-    ) {
+    ) -> Option<tokio::task::AbortHandle> {
         let url = slot_handle.url().to_string();
         let rx = if let Some(transport) = &slot_handle.transport {
             <crate::relay_transport::RelayTransport as crate::transport::Transport>::take_inbound(
@@ -662,11 +741,9 @@ impl MultiHomeTransport {
                 None
             }
         };
-        let Some(mut rx) = rx else {
-            return;
-        };
+        let mut rx = rx?;
         drop(slot_handle);
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             while let Some(env) = rx.recv().await {
                 let Some(transit) = env.transit.as_ref() else {
                     // No transit envelope means no canonical nonce to
@@ -693,6 +770,7 @@ impl MultiHomeTransport {
                 }
             }
         });
+        Some(join.abort_handle())
     }
 
     /// Snapshot the current slot array for test inspection. Not
@@ -717,6 +795,137 @@ impl MultiHomeTransport {
             .expect("slots lock")
             .first()
             .and_then(|s| s.as_ref().map(|s| Arc::clone(&s.handle)))
+    }
+
+    /// Rebuild slot 0 against `new_url`, the lib primitive behind
+    /// home-relay failover (a region change or a dead primary). The
+    /// POLICY that decides *when* to call this lives in a later task;
+    /// this method only performs the swap, correctly.
+    ///
+    /// Order is load-bearing: the NEW session is built and its inbound
+    /// path verified LIVE before the OLD slot 0 is torn down, so a FAILED
+    /// swap leaves the working primary intact (important when the old
+    /// relay is still alive and the caller is merely migrating):
+    ///
+    /// 1. Build the new handle and spawn its fan-in.
+    /// 2. Verify inbound liveness: wait until the new relay reports
+    ///    [`fetchit_relay_client::ConnState::Connected`], bounded by
+    ///    [`REPLACE_PRIMARY_CONNECT_TIMEOUT`]. On timeout, abort the new
+    ///    fan-in, drain the new session via
+    ///    [`crate::relay_transport::RelayTransport::shutdown`], and return
+    ///    [`TransportError::SwapNotLive`] WITHOUT touching slot 0. (Mock
+    ///    handles expose no transport and skip the wait; their tests
+    ///    assert liveness behaviorally.)
+    /// 3. Install the new slot under the write lock (guard dropped before
+    ///    any await) and point [`Self::primary_url`] at `new_url` so the
+    ///    G1 denylist match keys off the live primary.
+    /// 4. Tear the old slot down explicitly: abort its fan-in and drain
+    ///    its session. The shared [`NonceDedup`] absorbs the brief window
+    ///    where both fan-ins are alive, so the overlap is safe.
+    ///
+    /// This is the lib-layer fix for #358: the old session is drained via
+    /// the deterministic [`fetchit_relay_client::RelaySet::shutdown`]
+    /// cascade, leaking neither the WebSocket nor the inbound pump.
+    ///
+    /// # Errors
+    /// - [`TransportError::BuildFailed`] when `new_url` cannot be dialed.
+    /// - [`TransportError::SwapNotLive`] when the new session is built but
+    ///   does not go [`fetchit_relay_client::ConnState::Connected`] in
+    ///   time. In both error cases slot 0 is unchanged.
+    #[allow(clippy::expect_used)] // RwLock poison is unrecoverable; panic matches `slots_for_test`.
+    pub async fn replace_primary(&self, new_url: &str) -> Result<(), TransportError> {
+        // 1. Build + wire the NEW slot-0 candidate.
+        let new_handle = self.builder.build(new_url).await?;
+        let fan_in = Self::spawn_fan_in_for_slot(
+            Arc::clone(&new_handle),
+            Arc::clone(&self.inbox_dedup),
+            Arc::clone(&self.on_inbound),
+        );
+
+        // 2. Verify inbound liveness on the new relay BEFORE committing.
+        // Production handles expose a transport with a per-relay state
+        // stream; mock handles do not and skip the wait.
+        if let Some(transport) = new_handle.relay_transport_arc() {
+            if !Self::await_slot_connected(&transport).await {
+                // Swap failed to go live: tear the new session down and
+                // leave slot 0 untouched.
+                if let Some(h) = &fan_in {
+                    h.abort();
+                }
+                transport.shutdown().await;
+                drop(new_handle);
+                return Err(TransportError::SwapNotLive {
+                    url: new_url.to_string(),
+                });
+            }
+        }
+
+        // 3. Commit the swap: capture the OLD slot, install the NEW one, and
+        // update primary_url ATOMICALLY under the slots write lock so the
+        // (slot 0, primary_url) pair can never desync across overlapping
+        // swaps -- primary_url is the value the G1 denylist subscriber
+        // matches on, so a stale pairing would key the security check off the
+        // wrong relay. Nesting slots -> primary_url cannot deadlock: the only
+        // other primary_url holder (the denylist subscriber) releases its
+        // primary_url read guard before it ever takes the slots lock. The
+        // guard is dropped before any await below.
+        let old_slot = {
+            let mut slots = self.slots.write().expect("slots lock");
+            let old = slots[0].replace(Slot {
+                relay_url: new_url.to_string(),
+                handle: Arc::clone(&new_handle),
+                last_traffic_at: SystemTime::now(),
+                fan_in,
+            });
+            if let Ok(mut g) = self.primary_url.write() {
+                *g = new_url.to_string();
+            }
+            old
+        };
+
+        // 4. Tear the OLD slot down explicitly. NEW is live and installed;
+        // the shared dedup gate absorbs the brief two-fan-in overlap.
+        if let Some(old) = old_slot {
+            if let Some(h) = &old.fan_in {
+                h.abort();
+            }
+            if let Some(old_transport) = old.handle.relay_transport_arc() {
+                old_transport.shutdown().await;
+            }
+            drop(old);
+        }
+
+        Ok(())
+    }
+
+    /// Whether the slot's single-URL relay reaches
+    /// [`fetchit_relay_client::ConnState::Connected`] within
+    /// [`REPLACE_PRIMARY_CONNECT_TIMEOUT`]. `false` means it never went
+    /// live in time (the caller maps that to
+    /// [`TransportError::SwapNotLive`]) or its state stream closed first.
+    async fn await_slot_connected(transport: &Arc<crate::relay_transport::RelayTransport>) -> bool {
+        use fetchit_relay_client::ConnState;
+        let mut states = transport.relay_set().states_receiver();
+        // Each slot wraps a single-URL RelaySet, so the state vector has
+        // length 1; index 0 is that relay.
+        let connected = |v: &Vec<ConnState>| matches!(v.first(), Some(ConnState::Connected { .. }));
+        if connected(&states.borrow()) {
+            return true;
+        }
+        let wait = async {
+            while states.changed().await.is_ok() {
+                if connected(&states.borrow()) {
+                    return true;
+                }
+            }
+            // Sender dropped without ever reaching Connected.
+            false
+        };
+        // `Err` from `timeout` means the deadline elapsed -> not live in time.
+        matches!(
+            tokio::time::timeout(REPLACE_PRIMARY_CONNECT_TIMEOUT, wait).await,
+            Ok(true)
+        )
     }
 }
 
@@ -765,7 +974,15 @@ impl crate::transport::Transport for MultiHomeTransport {
                 TransportError::Blocked(msg) => {
                     crate::error::ChatError::Denied { agent_id_hex: msg }
                 }
+                // `send_inner` never produces `SwapNotLive` (that is a
+                // `replace_primary`-only failure), but the mapper must be
+                // total; a swap-not-live is a transport-reachability
+                // failure, so it folds into the same variant as a build
+                // failure.
                 TransportError::BuildFailed(msg) => crate::error::ChatError::MessageTransport(msg),
+                TransportError::SwapNotLive { url } => crate::error::ChatError::MessageTransport(
+                    format!("relay swap did not go live: {url}"),
+                ),
             })?;
         // Re-stamp transport_name so receipts attribute to multi-home
         // rather than the underlying single-relay transport that
@@ -1658,5 +1875,207 @@ mod tests {
         assert_eq!(slot0_handle.traffic_count_for_test(), 0);
         assert!(mh.slots_for_test()[1].is_none());
         assert!(mh.slots_for_test()[2].is_none());
+    }
+
+    // ── T8a replace_primary ──────────────────────────────────────────────────
+
+    /// After `replace_primary`, slot 0 reports the new URL and the live
+    /// slot-0 handle is the freshly built one. The OLD handle is not the
+    /// one a follow-up `slot_zero_handle()` hands back.
+    #[tokio::test]
+    async fn replace_primary_installs_new_slot_zero() {
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://relay-a.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let old_handle = mh.slot_zero_handle().expect("slot 0 present");
+
+        mh.replace_primary("wss://relay-b.test/v1/ws")
+            .await
+            .expect("replace_primary succeeds");
+
+        assert_eq!(
+            mh.slot_zero_handle().map(|h| h.url().to_string()),
+            Some("wss://relay-b.test/v1/ws".to_string()),
+            "slot 0 must report the new URL after the swap",
+        );
+        let slots = mh.slots_for_test();
+        assert_eq!(
+            slots[0].as_ref().map(|s| s.relay_url.as_str()),
+            Some("wss://relay-b.test/v1/ws"),
+        );
+        let new_handle = mh.slot_zero_handle().expect("slot 0 present");
+        assert!(
+            !Arc::ptr_eq(&old_handle, &new_handle),
+            "the live slot-0 handle must be the rebuilt one, not the old handle",
+        );
+    }
+
+    /// THE CORRECTNESS BAR: inbound liveness follows the swap. An inbound
+    /// delivered via the NEW slot-0 handle reaches `on_inbound`; an inbound
+    /// delivered via the OLD (torn-down) handle does NOT.
+    #[tokio::test]
+    async fn replace_primary_inbound_lives_on_new_dies_on_old() {
+        use std::sync::Mutex;
+
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let received_cb = Arc::clone(&received);
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = Arc::new(move |env| {
+            received_cb.lock().unwrap().push(env.from.0.clone());
+        });
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://relay-a.test/v1/ws".into(),
+            denylist,
+            on_inbound,
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        // Grab the OLD slot-0 handle before the swap so we can poke it after.
+        let old_handle = mh.slot_zero_handle().expect("slot 0 present");
+
+        mh.replace_primary("wss://relay-b.test/v1/ws")
+            .await
+            .expect("replace_primary succeeds");
+
+        // Inbound on the NEW slot-0 handle must reach on_inbound.
+        let new_handle = mh.slot_zero_handle().expect("slot 0 present");
+        new_handle.deliver_inbound(sample_inbound_envelope("on-new", [1u8; 12]));
+
+        // Inbound on the OLD handle must NOT reach on_inbound — its fan-in
+        // was aborted during teardown.
+        old_handle.deliver_inbound(sample_inbound_envelope("on-old", [2u8; 12]));
+
+        // Abort is asynchronous; let both the new fan-in drain and the old
+        // fan-in's abort take effect.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let got = received.lock().unwrap().clone();
+        assert!(
+            got.contains(&"on-new".to_string()),
+            "inbound on the NEW slot-0 handle must reach on_inbound, got {got:?}",
+        );
+        assert!(
+            !got.contains(&"on-old".to_string()),
+            "inbound on the OLD (torn-down) handle must NOT reach on_inbound, got {got:?}",
+        );
+    }
+
+    /// `replace_primary` only touches slot 0: an already-open slot 1
+    /// survives the swap untouched.
+    #[tokio::test]
+    async fn replace_primary_leaves_slots_1_2_untouched() {
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://relay-a.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        // Open slot 1 via an outbound send to a second relay.
+        mh.send_inner(
+            &sample_recipient(),
+            sample_envelope(),
+            &hints("wss://secondary.test/v1/ws"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mh.slots_for_test()[1]
+                .as_ref()
+                .map(|s| s.relay_url.as_str()),
+            Some("wss://secondary.test/v1/ws"),
+        );
+
+        mh.replace_primary("wss://relay-b.test/v1/ws")
+            .await
+            .expect("replace_primary succeeds");
+
+        let slots = mh.slots_for_test();
+        assert_eq!(
+            slots[0].as_ref().map(|s| s.relay_url.as_str()),
+            Some("wss://relay-b.test/v1/ws"),
+            "slot 0 swapped to relay-b",
+        );
+        assert_eq!(
+            slots[1].as_ref().map(|s| s.relay_url.as_str()),
+            Some("wss://secondary.test/v1/ws"),
+            "slot 1 must survive replace_primary untouched",
+        );
+        assert!(slots[2].is_none());
+    }
+
+    /// After a failover, the G1 primary-denylisted match keys off the NEW
+    /// primary URL (`primary_url` is interior-mutable and kept in sync).
+    /// Blocking the OLD primary URL no longer fires the callback; blocking
+    /// the NEW one does.
+    #[tokio::test]
+    async fn replace_primary_keeps_g1_denylist_match_in_sync() {
+        use std::sync::Mutex;
+        use tokio::sync::broadcast;
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let (tx, rx) = broadcast::channel::<fetchit_trust_client::BlockEvent>(16);
+
+        let mh = MultiHomeTransport::new_with_subscriber(
+            "wss://relay-a.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+            Some(rx),
+        )
+        .await
+        .unwrap();
+
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cb_recorded = Arc::clone(&recorded);
+        mh.set_primary_denylisted_callback(Arc::new(move |url| {
+            cb_recorded.lock().unwrap().push(url);
+        }));
+
+        mh.replace_primary("wss://relay-b.test/v1/ws")
+            .await
+            .expect("replace_primary succeeds");
+
+        // Block the OLD primary — must NOT fire the callback anymore.
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://relay-a.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "blocking the OLD primary after a swap must not fire the callback",
+        );
+
+        // Block the NEW primary — must fire.
+        let _ = tx.send(fetchit_trust_client::BlockEvent {
+            kind: fetchit_trust::EntryKind::RelayUrl,
+            added: vec!["wss://relay-b.test/v1/ws".to_string()],
+            removed: vec![],
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            recorded.lock().unwrap().clone(),
+            vec!["wss://relay-b.test/v1/ws".to_string()],
+            "blocking the NEW primary after a swap must fire the callback",
+        );
     }
 }

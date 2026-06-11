@@ -60,6 +60,18 @@ pub struct RelayTransport {
     relay_set: Arc<RelaySet>,
     counter: AtomicU64,
     inbound: StdMutex<Option<mpsc::UnboundedReceiver<InboundEnvelope>>>,
+    /// `JoinHandle` of the inbound pump spawned by [`spawn_inbound_pump`].
+    /// Held so [`Self::shutdown`] can await the pump to completion after
+    /// [`RelaySet::shutdown`] closes the merged channel (the orderly-drain
+    /// teardown). Taken out (`Option::take`) by the first `shutdown` call.
+    pump_join: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Abort handle for the inbound pump, derived from `pump_join` at
+    /// connect time. Used only as the [`Drop`] backstop and as the
+    /// timeout fallback inside [`Self::shutdown`]; never the primary
+    /// teardown path. Aborting releases the pump's `Arc<RelaySet>` clone
+    /// so the WS closes once the last `Client` Arc drops (the #358 leak
+    /// backstop).
+    pump_abort: tokio::task::AbortHandle,
     /// Local agent id captured from the signer at connect time. Used
     /// to populate `TransitEnvelope::sender_agent_id` for outbound
     /// sends; the relay rejects sends whose `sender_agent_id` doesn't
@@ -114,7 +126,8 @@ impl RelayTransport {
         let relay_set = Arc::new(relay_set);
         // TODO(perf): bound this channel once we measure realistic inbound rates.
         let (tx, rx) = mpsc::unbounded_channel();
-        spawn_inbound_pump(relay_set.clone(), tx);
+        let pump_join = spawn_inbound_pump(relay_set.clone(), tx);
+        let pump_abort = pump_join.abort_handle();
         Ok(Arc::new(Self {
             relay_set,
             counter: AtomicU64::new(0),
@@ -123,6 +136,8 @@ impl RelayTransport {
             signer,
             pool: StdMutex::new(HashMap::new()),
             own_relay_keys,
+            pump_join: StdMutex::new(Some(pump_join)),
+            pump_abort,
         }))
     }
 
@@ -142,6 +157,50 @@ impl RelayTransport {
     #[must_use]
     pub fn relay_set(&self) -> &Arc<RelaySet> {
         &self.relay_set
+    }
+
+    /// Tear this transport down by orderly drain, closing its WebSocket
+    /// and stopping its inbound pump with no leaked task and no in-flight
+    /// envelope dropped mid-map.
+    ///
+    /// Mechanism (the deterministic cascade, not an abort):
+    /// 1. [`RelaySet::shutdown`] awaits every `Client` supervisor's
+    ///    `JoinHandle`. Each supervisor drops its `inbox_tx`, so each
+    ///    per-relay forwarder sees `None`, exits, and drops its merged-tx
+    ///    clone; the merged channel then closes and
+    ///    [`RelaySet::next_delivery`] returns `None`.
+    /// 2. The pump's loop breaks on that `None` and drops the chat `tx`.
+    ///    This method then awaits the pump `JoinHandle` to completion so
+    ///    any last in-flight envelope finishes mapping before we return.
+    ///
+    /// The `JoinHandle` await is bounded by a 5s timeout; on overrun the
+    /// pump is aborted so production teardown can never hang. Idempotent:
+    /// a second call finds the handle already taken and only re-signals
+    /// the (already shut-down) [`RelaySet`].
+    pub async fn shutdown(&self) {
+        self.relay_set.shutdown().await;
+        // Never hold a std Mutex guard across an await: take the handle,
+        // drop the guard, then await it.
+        let taken = self.pump_join.lock().ok().and_then(|mut g| g.take());
+        if let Some(jh) = taken {
+            if tokio::time::timeout(Duration::from_secs(5), jh)
+                .await
+                .is_err()
+            {
+                // Pump overran the orderly-drain budget; fall back to the
+                // abort backstop so teardown returns promptly.
+                self.pump_abort.abort();
+            }
+        }
+    }
+
+    /// Test-only: whether [`Self::shutdown`] has taken the pump
+    /// `JoinHandle` out of `pump_join` (i.e. the orderly-drain
+    /// take-then-await path ran, not just `relay_set.shutdown()`). Guards
+    /// the load-bearing half of the #358 fix.
+    #[cfg(test)]
+    pub(crate) fn pump_handle_taken_for_test(&self) -> bool {
+        self.pump_join.lock().map_or(true, |g| g.is_none())
     }
 
     fn next_dedupe_key(&self) -> DedupeKey {
@@ -318,6 +377,20 @@ impl RelayTransport {
     }
 }
 
+impl Drop for RelayTransport {
+    /// Leak backstop for the #358 detached-pump WebSocket leak: any code
+    /// path that drops a [`RelayTransport`] without first awaiting
+    /// [`Self::shutdown`] still aborts the inbound pump here. Aborting
+    /// releases the pump's cloned `Arc<RelaySet>`, so the underlying WS
+    /// closes once the last `Client` Arc drops. `Drop` cannot await, so
+    /// this is abort-only and NOT the correctness path — `shutdown` (an
+    /// orderly drain) is. A second abort after `shutdown` already took the
+    /// handle is a harmless no-op.
+    fn drop(&mut self) {
+        self.pump_abort.abort();
+    }
+}
+
 #[async_trait]
 impl Transport for RelayTransport {
     fn name(&self) -> &'static str {
@@ -361,7 +434,17 @@ impl Transport for RelayTransport {
     }
 }
 
-fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<InboundEnvelope>) {
+/// Spawn the inbound pump and return its [`tokio::task::JoinHandle`].
+///
+/// The pump drains the merged [`RelaySet`] delivery stream, maps each
+/// envelope to an [`InboundEnvelope`], and forwards it on `tx`. It exits
+/// when `relay_set.next_delivery()` returns `None` (every supervisor shut
+/// down) or when `tx` is closed. [`RelayTransport::connect_multi`] stores
+/// the handle for the orderly-drain teardown in [`RelayTransport::shutdown`].
+fn spawn_inbound_pump(
+    relay_set: Arc<RelaySet>,
+    tx: mpsc::UnboundedSender<InboundEnvelope>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let Some(delivery) = relay_set.next_delivery().await else {
@@ -374,7 +457,7 @@ fn spawn_inbound_pump(relay_set: Arc<RelaySet>, tx: mpsc::UnboundedSender<Inboun
                 break;
             }
         }
-    });
+    })
 }
 
 /// Map a relay inbound [`TransitEnvelope`] to a chat-layer
@@ -957,6 +1040,42 @@ mod tests {
             0,
             "reap with zero threshold must drop all entries"
         );
+    }
+
+    /// After `shutdown().await` the inbound path is dead: the orderly
+    /// drain runs [`RelaySet::shutdown`] then awaits the pump to
+    /// completion, so the merged delivery stream is closed and
+    /// `next_delivery()` returns `None`. A second `shutdown()` is an
+    /// idempotent no-op.
+    #[tokio::test]
+    async fn shutdown_drains_inbound_path() {
+        let addr = start_relay_server().await;
+        let base = url::Url::parse(&format!("http://{addr}/")).unwrap();
+        let signer = make_signer(b"shutdown-drain-sender");
+        let transport = RelayTransport::connect(base, signer).await.unwrap();
+
+        transport.shutdown().await;
+
+        // The orderly drain must have TAKEN (and awaited) the pump
+        // JoinHandle, not merely run relay_set.shutdown(). This guards the
+        // load-bearing half of the #358 fix: a regression that dropped the
+        // pump-await would leave the handle untaken and trip this assert
+        // (relay_set.shutdown() alone still makes next_delivery() -> None).
+        assert!(
+            transport.pump_handle_taken_for_test(),
+            "shutdown must take + await the pump JoinHandle (orderly drain), not skip it",
+        );
+
+        // The merged inbox closed as the cascade unwound — no further
+        // deliveries can ever arrive.
+        assert!(
+            transport.relay_set().next_delivery().await.is_none(),
+            "after shutdown the merged inbox must be closed (next_delivery -> None)",
+        );
+
+        // Idempotent: a second shutdown finds the pump handle already
+        // taken and does not hang or panic.
+        transport.shutdown().await;
     }
 
     /// Auth: a pooled connection must complete the challenge/verify handshake.
