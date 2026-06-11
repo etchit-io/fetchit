@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod error;
 pub mod frame;
 pub mod identity;
+pub mod pair_record;
 pub mod public_post;
 pub mod region;
 

@@ -13,12 +13,16 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
 hex.workspace = true
 postcard.workspace = true
+saorsa-pqc.workspace = true
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 postcard.workspace = true
+serde_json.workspace = true
