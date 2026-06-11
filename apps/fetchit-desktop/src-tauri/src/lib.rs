@@ -9,8 +9,6 @@ mod disk_cache;
 mod e2e;
 mod fediverse;
 mod linux_deep_link;
-// DTOs + verify core; Tauri commands follow in the next task.
-#[allow(dead_code)]
 mod profile;
 mod protocol;
 mod rendition;
@@ -623,6 +621,33 @@ async fn fetch_bytes(
     Ok(bytes)
 }
 
+/// Fetch raw bytes for a 64-hex Autonomi address via the `AppState`
+/// client, rejecting a blob larger than `cap` (a sanity bound: the
+/// caller knows the expected size class). Used by the profile commands.
+///
+/// # Errors
+/// Returns a user-facing string when the address is malformed, the
+/// fetch fails, or the blob exceeds `cap`.
+pub(crate) async fn fetch_autonomi_bytes(
+    app_state: &tauri::State<'_, AppState>,
+    addr_hex: &str,
+    cap: usize,
+) -> Result<Vec<u8>, String> {
+    use fetchit_core::NetworkClient as _;
+    let addr: Address = addr_hex
+        .parse()
+        .map_err(|e: fetchit_core::Error| e.to_string())?;
+    let client = ensure_client(app_state, &app_state.effective_peers()).await?;
+    let bytes = client.fetch(&addr).await.map_err(|e| e.to_string())?;
+    if bytes.len() > cap {
+        return Err(format!(
+            "blob is larger than expected ({} > {cap} bytes)",
+            bytes.len()
+        ));
+    }
+    Ok(bytes.to_vec())
+}
+
 #[tauri::command]
 async fn fetch_and_render(
     app: tauri::AppHandle,
@@ -1090,6 +1115,8 @@ pub fn run() {
             chat::chat_import_card,
             chat::chat_pair_accept,
             chat::chat_pair_share,
+            profile::chat_fetch_profile,
+            profile::chat_fetch_avatar,
             chat::chat_contacts,
             chat::chat_set_trust,
             chat::chat_remove_contact,

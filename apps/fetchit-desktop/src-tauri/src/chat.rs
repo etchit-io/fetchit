@@ -218,6 +218,13 @@ impl ChatState {
             .map_or_else(|p| p.into_inner().clone(), |g| g.clone())
     }
 
+    /// The chat data-dir root. Used by the profile commands to read and
+    /// write the per-contact downgrade watermark.
+    #[must_use]
+    pub fn store_root(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
     /// Swap the relay URL and force a client rebuild so the next chat
     /// call connects to the new region. Delegates to
     /// [`validate_relay_url`] for the parse + scheme + path checks.

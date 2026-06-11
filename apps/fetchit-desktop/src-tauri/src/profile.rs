@@ -200,6 +200,73 @@ pub fn validate_avatar_to_data_url(
     Ok(format!("data:{declared_mime};base64,{}", B64.encode(bytes)))
 }
 
+/// Hard ceiling on a fetched profile manifest. The v3 manifest is small
+/// JSON; 64 KiB is well above any honest encoding and below a `DoS`.
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+
+/// Hard ceiling on fetched avatar bytes. Matches `MAX_AVATAR_BYTES`; the
+/// per-byte declared-length check in `validate_avatar_to_data_url` tightens
+/// it further.
+const MAX_AVATAR_FETCH_BYTES: usize = 512 * 1024;
+
+/// Resolve a contact's published profile: look up their profile-index
+/// record on the relay, fetch + verify the manifest off Autonomi, and
+/// return a render-ready DTO. A tombstone or relay 404 is the honest
+/// non-error [`ProfileOutcome::None`] (the contact hasn't published).
+///
+/// # Errors
+/// Returns a user-facing string when the relay is unreachable, the
+/// network fetch fails, or the manifest fails verification.
+#[tauri::command]
+pub async fn chat_fetch_profile(
+    app_state: tauri::State<'_, crate::AppState>,
+    state: tauri::State<'_, crate::chat::ChatState>,
+    agent_id: String,
+) -> Result<ProfileOutcome, String> {
+    crate::chat::ensure_chat_enabled(&app_state)?;
+    let relay = state.relay_url();
+    let http = reqwest::Client::new();
+    let record = match fetchit_chat::pair::fetch_index_record_by_id(&relay, &agent_id, &http).await
+    {
+        Ok(r) => r,
+        Err(
+            fetchit_chat::pair::PairError::Tombstoned
+            | fetchit_chat::pair::PairError::RelayStatus(404),
+        ) => return Ok(ProfileOutcome::None),
+        Err(e) => return Err(format!("couldn't reach the profile index ({e})")),
+    };
+    let bytes = crate::fetch_autonomi_bytes(&app_state, &record.profile_addr, MAX_MANIFEST_BYTES)
+        .await
+        .map_err(|e| format!("couldn't reach the network ({e})"))?;
+    let chat_root = state.store_root();
+    let watermark = load_watermark(&chat_root, &agent_id);
+    let outcome = build_profile_outcome(&agent_id, &record.agent_id, &bytes, watermark)?;
+    if let ProfileOutcome::Profile(ref dto) = outcome {
+        let _ = save_watermark(&chat_root, &agent_id, dto.issued_at_ms);
+    }
+    Ok(outcome)
+}
+
+/// Fetch and validate an avatar referenced by a verified profile,
+/// returning a `data:` URL. The bytes are size-capped and magic-byte
+/// checked against the declared mime before encoding.
+///
+/// # Errors
+/// Returns a user-facing string when the fetch fails or the bytes fail
+/// avatar validation.
+#[tauri::command]
+pub async fn chat_fetch_avatar(
+    app_state: tauri::State<'_, crate::AppState>,
+    addr: String,
+    mime: String,
+    bytes_len: u32,
+) -> Result<String, String> {
+    let bytes = crate::fetch_autonomi_bytes(&app_state, &addr, MAX_AVATAR_FETCH_BYTES)
+        .await
+        .map_err(|e| format!("couldn't load the avatar ({e})"))?;
+    validate_avatar_to_data_url(&bytes, &mime, bytes_len)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
