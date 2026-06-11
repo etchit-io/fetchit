@@ -45,6 +45,15 @@ pub struct ForwardingRecordV1 {
 
 Verification everywhere: `hex(derive_agent_id(ml_dsa_pubkey)) == agent_id_hex`, signature valid, `issued_at_ms` strictly greater than the last accepted value for that agent (watermark).
 
+**Watermark-reject wire shape (TB1 ↔ Task 3 contract):** a POST whose
+`issued_at_ms` is not strictly greater than the relay's stored value is
+rejected with `409 Conflict` and body `{ "current_issued_at_ms": <u64> }`.
+The client publish path treats this as non-fatal: bump the logical clock to
+`current_issued_at_ms + 1`, re-sign, retry **once**. Any other non-2xx
+(400 bad-sig/parse, 5xx) is a real error surfaced to the caller. This is the
+only reject the client auto-recovers — it carries the value so no extra GET
+is needed. Forwarding-record POST uses the identical shape.
+
 Share pointer URI: `x0x://pair/<agent_id_hex>?r=<urlencoded-relay>[&r=...]` (1..=4 relay params).
 
 ---
@@ -162,8 +171,11 @@ hardware does this. FIX: the publishing side uses a **logical monotonic clock**
 — `next = max(wall_clock_ms, last_watermark + 1)`, persisted — so local
 publishes are always increasing regardless of the system clock; the relay
 keeps its strict-greater check unchanged. Task 2's watermark store implements
-this; the same helper should be retrofitted to the src-tauri profile watermark
-(`profile.rs`) since it has the identical latent brick. Document
+this. NOTE (corrected post-build): fetch>it's `src-tauri/profile.rs` watermark
+is CONSUMER-side downgrade-defense (strict-reject is correct there, no brick).
+The publish-side brick analogue lives in **etch>it's** profile publisher
+(separate repo) -- flag as a cross-repo follow-up when in that repo; nothing
+to retrofit in fetch>it. Document
 single-agent-multi-device as explicitly unsupported in v1 (two devices racing
 the same logical clock is out of scope).
 
