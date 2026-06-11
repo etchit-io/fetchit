@@ -445,3 +445,46 @@ describe("ChatStore — daemon status", () => {
     expect(calls).toBe(2);
   });
 });
+
+describe("ChatStore — inline image attachments", () => {
+  const ATT = {
+    mime: "image/png",
+    width: 8,
+    height: 6,
+    bytes_b64: "iVBORw0KAAA=",
+  };
+
+  it("carries an inbound DM attachment onto the bubble", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.recordDirectMessage({
+      from: PEER,
+      to: ME,
+      body: "look at this",
+      timestamp_ms: 1,
+      message_id: "m1",
+      attachment: ATT,
+    });
+    expect(s.conversationsSorted()[0].messages[0].attachment).toEqual(ATT);
+  });
+
+  it("leaves attachment undefined for a plain text DM", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.recordDirectMessage({ from: PEER, to: ME, body: "hi", timestamp_ms: 1, message_id: "m1" });
+    expect(s.conversationsSorted()[0].messages[0].attachment).toBeUndefined();
+  });
+
+  it("stamps the attachment onto an optimistic outbound bubble and persists it", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const id = s.enqueueOutbound(PEER, "", undefined, ATT);
+    const bubble = s.conversationsSorted()[0].messages.find((m) => m.id === id);
+    expect(bubble?.attachment).toEqual(ATT);
+
+    // Survives a reload from localStorage (image bytes can't be refetched).
+    const reloaded = new ChatStore();
+    reloaded.setIdentity({ agent_id: ME, machine_id: "m" });
+    expect(reloaded.conversationsSorted()[0].messages[0].attachment).toEqual(ATT);
+  });
+});

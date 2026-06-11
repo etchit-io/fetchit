@@ -5,8 +5,10 @@
 // chat dialog.
 
 import type { ChatBubble, QuotedRef } from "./state";
+import type { Attachment } from "./types";
 import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
 import { appendInlineMarkdown } from "./markdown";
+import { attachmentDataUrl } from "./imageAttach";
 
 const URL_RE
   = /(autonomi:\/\/[0-9a-fA-F]{64}|x0x:\/\/(?:agent|invite)\/[A-Za-z0-9_-]+|fetchit:\/\/share\/v3\/[0-9a-fA-F]{64}\/[0-9a-fA-F]{64}\?relay=\S+)/g;
@@ -26,6 +28,9 @@ export interface BubbleHandlers {
   /// Fired when the user clicks a quoted-parent strip; receives the
   /// quoted message id so the conversation can scroll to the parent.
   onQuoteClick?: (messageId: string) => void;
+  /// Fired when the user clicks an inline-image thumbnail; receives the
+  /// attachment so the conversation can open it full-size.
+  onImageOpen?: (att: Attachment) => void;
 }
 
 /// A signature that uniquely identifies the rendered shape of a
@@ -35,7 +40,8 @@ export interface BubbleHandlers {
 /// the `chat-bubble-pop` enter animation from re-firing on every
 /// store mutation.
 export function bubbleRenderKey(b: ChatBubble): string {
-  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}|${b.replyTo?.messageId ?? ""}`;
+  const att = b.attachment ? `${b.attachment.mime}:${b.attachment.width}x${b.attachment.height}` : "";
+  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}|${b.replyTo?.messageId ?? ""}|${att}`;
 }
 
 export function renderBubble(
@@ -69,14 +75,22 @@ export function renderBubble(
     handlers,
     /* skipAutonomi */ addresses.length > 0,
   );
+  // Inline image rides at the top of the bubble; any body text becomes
+  // its caption underneath. Click opens the full-size view.
+  if (b.attachment) {
+    bubble.insertBefore(
+      renderImageThumb(b.attachment, handlers.onImageOpen),
+      bubble.firstChild,
+    );
+  }
   if (showStatus) {
     bubble.appendChild(statusIcon(b.status as BubbleStatusTag, b.failureReason));
   }
   // Suppress the text bubble entirely when the only content was
   // autonomi:// links — the preview card below already represents
-  // the address. Keep it around when there's surrounding text, or
-  // when we still need to show a sending / failed status indicator.
-  if (hasSurroundingText || addresses.length === 0 || showStatus) {
+  // the address. Keep it around when there's surrounding text, an
+  // inline image, or a sending / failed status indicator.
+  if (hasSurroundingText || addresses.length === 0 || showStatus || !!b.attachment) {
     stack.appendChild(bubble);
   }
 
@@ -209,6 +223,27 @@ function renderQuote(
     quote.addEventListener("click", () => onQuoteClick(ref.messageId));
   }
   return quote;
+}
+
+/// Render the bounded, clickable inline-image thumbnail. The `<img>`
+/// renders directly from a `data:` URL built with the validated raster
+/// MIME, so the browser decodes it as that image format and never as
+/// markup. CSS bounds the displayed size; clicking opens the full view.
+function renderImageThumb(
+  att: Attachment,
+  onOpen?: (att: Attachment) => void,
+): HTMLElement {
+  const img = document.createElement("img");
+  img.className = "chat-attachment";
+  img.alt = "image attachment";
+  img.draggable = false;
+  img.src = attachmentDataUrl(att);
+  if (onOpen) {
+    img.classList.add("chat-attachment--clickable");
+    img.title = "Click to view full size";
+    img.addEventListener("click", () => onOpen(att));
+  }
+  return img;
 }
 
 type BubbleStatusTag = "sending" | "delivered" | "failed";

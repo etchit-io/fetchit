@@ -362,3 +362,41 @@ describe("renderBubble — reply affordance", () => {
     expect(onReply).toHaveBeenCalledWith(b);
   });
 });
+
+describe("renderBubble — inline image attachment", () => {
+  const ATT = { mime: "image/png", width: 8, height: 6, bytes_b64: "iVBORw0KAAA=" };
+
+  it("renders a thumbnail img from the attachment data URL", () => {
+    const row = renderBubble(bubble({ body: "", attachment: ATT }), makeHandlers());
+    const img = row.querySelector<HTMLImageElement>("img.chat-attachment");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KAAA=");
+  });
+
+  it("fires onImageOpen with the attachment when the thumbnail is clicked", () => {
+    const onImageOpen = vi.fn();
+    const row = renderBubble(bubble({ attachment: ATT }), { ...makeHandlers(), onImageOpen });
+    row.querySelector<HTMLImageElement>("img.chat-attachment")!.click();
+    expect(onImageOpen).toHaveBeenCalledWith(ATT);
+  });
+
+  it("renders an image-only bubble (empty body) without suppressing it", () => {
+    const row = renderBubble(
+      bubble({ mine: false, body: "", attachment: ATT }),
+      makeHandlers(),
+    );
+    expect(row.querySelector("img.chat-attachment")).not.toBeNull();
+  });
+
+  it("renders a caption alongside the image", () => {
+    const row = renderBubble(bubble({ body: "my cat", attachment: ATT }), makeHandlers());
+    expect(row.querySelector("img.chat-attachment")).not.toBeNull();
+    expect(row.querySelector(".chat-bubble")?.textContent).toContain("my cat");
+  });
+
+  it("bubbleRenderKey changes when an attachment is present", () => {
+    expect(bubbleRenderKey(bubble({ attachment: ATT }))).not.toBe(
+      bubbleRenderKey(bubble({ attachment: undefined })),
+    );
+  });
+});

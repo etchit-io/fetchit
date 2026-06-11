@@ -6,6 +6,7 @@
 import type {
   AgentId,
   AgentIdentity,
+  Attachment,
   Contact,
   DirectMessage,
   Group,
@@ -149,6 +150,10 @@ export interface ChatBubble {
   retryAttempts?: number;
   /// Set when this message is a reply quoting an earlier one.
   replyTo?: QuotedRef;
+  /// Inline image attachment (spec 2.4), validated on the receive path
+  /// before it reaches the store. Persists with the bubble so the image
+  /// survives a reload — its bytes cannot be re-fetched.
+  attachment?: Attachment;
   /// Whether the sender's per-message signature was cryptographically
   /// verified by the local process against a cached card pubkey.
   ///
@@ -518,6 +523,7 @@ export class ChatStore {
       // (mine) leaves it undefined — we don't render an unverified
       // badge on our own messages.
       verified: dm.from === me ? undefined : dm.verified ?? undefined,
+      ...(dm.attachment ? { attachment: dm.attachment } : {}),
     };
     if (bubble.id && conv.messages.some((m) => m.id === bubble.id)) {
       return;
@@ -658,7 +664,12 @@ export class ChatStore {
   /// the caller can flip it through sent → delivered/failed as the send
   /// resolves and the recipient's receipt arrives. `replyTo` carries
   /// the quoted-parent snapshot when this message is a reply.
-  enqueueOutbound(peer: AgentId, body: string, replyTo?: QuotedRef): string {
+  enqueueOutbound(
+    peer: AgentId,
+    body: string,
+    replyTo?: QuotedRef,
+    attachment?: Attachment,
+  ): string {
     const me = this.myId() ?? "";
     const ts = Date.now();
     const id = `local-${ts}-${Math.random().toString(36).slice(2, 8)}`;
@@ -672,6 +683,7 @@ export class ChatStore {
       status: "sending",
       retryAttempts: 0,
       ...(replyTo ? { replyTo } : {}),
+      ...(attachment ? { attachment } : {}),
     });
     conv.lastActivityMs = ts;
     this.persistDms();
