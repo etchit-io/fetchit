@@ -3,14 +3,27 @@
 
 import { icon } from "../ui/icons";
 import { createEmojiPicker } from "./emojiPicker";
+import { attachmentDataUrl, fileToAttachment } from "./imageAttach";
 import type { QuotedRef } from "./state";
+import type { Attachment } from "./types";
 
 export interface ComposerHandlers {
   /// Fire-and-forget. The orchestrator owns the bubble lifecycle —
   /// the composer just clears its input and lets the store represent
   /// delivery state via bubble status icons. `replyTo` is the pending
-  /// reply target when the user sent from an active reply chip.
-  onSend: (body: string, replyTo: QuotedRef | null) => void;
+  /// reply target when the user sent from an active reply chip;
+  /// `attachment` is the staged inline image, when one is present.
+  onSend: (
+    body: string,
+    replyTo: QuotedRef | null,
+    attachment: Attachment | null,
+  ) => void;
+  /// Build a validated [`Attachment`] from a picked file. Injectable for
+  /// tests; defaults to [`fileToAttachment`]. Rejects on an invalid or
+  /// oversize image.
+  buildAttachment?: (file: File) => Promise<Attachment>;
+  /// Surface an attach failure (invalid/oversize image) to the user.
+  onAttachError?: (message: string) => void;
 }
 
 export interface ComposerApi {
@@ -23,6 +36,10 @@ export interface ComposerApi {
   /// Show (or clear, with null) the reply chip above the input. The
   /// next send carries the ref; sending or dismissing clears it.
   setReplyTo(ref: QuotedRef | null): void;
+  /// Show or hide the attach affordance. Hidden for conversations that
+  /// cannot carry an inline image (groups), so the button never makes a
+  /// promise the wire can't keep. Hiding also clears any staged image.
+  setAttachVisible(visible: boolean): void;
 }
 
 export function mountComposer(
@@ -37,6 +54,21 @@ export function mountComposer(
   ta.placeholder = "Write a message…";
   ta.rows = 1;
   ta.setAttribute("aria-label", "Compose message");
+
+  // Attach affordance: a button that opens an image-only file picker,
+  // plus the hidden input it drives.
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.className = "chat-composer__file";
+  fileInput.accept = "image/jpeg,image/png,image/gif,image/webp";
+  fileInput.hidden = true;
+
+  const attachBtn = document.createElement("button");
+  attachBtn.type = "button";
+  attachBtn.className = "chat-icon-btn chat-composer__attach";
+  attachBtn.title = "Attach image";
+  attachBtn.setAttribute("aria-label", "Attach image");
+  attachBtn.appendChild(icon("attach"));
 
   // Emoji affordance: a toggle button that floats a picker above it.
   const emojiWrap = document.createElement("div");
@@ -74,6 +106,25 @@ export function mountComposer(
   replyClear.textContent = "×";
   replyChip.append(replySender, replyPreview, replyClear);
 
+  // Attachment chip — a thumbnail + dimensions + remove, shown while an
+  // image is staged for the next send.
+  const attachChip = document.createElement("div");
+  attachChip.className = "chat-composer__attachment";
+  attachChip.hidden = true;
+  const attachThumb = document.createElement("img");
+  attachThumb.className = "chat-composer__attachment-thumb";
+  attachThumb.alt = "attachment preview";
+  attachThumb.draggable = false;
+  const attachLabel = document.createElement("span");
+  attachLabel.className = "chat-composer__attachment-label";
+  const attachRemove = document.createElement("button");
+  attachRemove.type = "button";
+  attachRemove.className = "chat-composer__attachment-remove";
+  attachRemove.title = "Remove image";
+  attachRemove.setAttribute("aria-label", "Remove image");
+  attachRemove.textContent = "×";
+  attachChip.append(attachThumb, attachLabel, attachRemove);
+
   const tryGrow = (): void => {
     ta.style.height = "auto";
     const max = 6 * 22; // ~6 rows
@@ -82,7 +133,14 @@ export function mountComposer(
 
   let enabled = true;
   let pendingReply: QuotedRef | null = null;
+  let pendingAttachment: Attachment | null = null;
   const DEFAULT_PLACEHOLDER = "Write a message…";
+
+  // Send is live when the composer is enabled and there is something to
+  // send — body text or a staged image.
+  const refreshSend = (): void => {
+    send.disabled = !(enabled && (ta.value.trim().length > 0 || pendingAttachment !== null));
+  };
 
   const setReplyTo = (ref: QuotedRef | null): void => {
     pendingReply = ref;
@@ -96,20 +154,59 @@ export function mountComposer(
     }
   };
 
+  const stageAttachment = (att: Attachment): void => {
+    pendingAttachment = att;
+    attachThumb.src = attachmentDataUrl(att);
+    attachLabel.textContent = `${att.width}×${att.height}`;
+    attachChip.hidden = false;
+    refreshSend();
+    if (enabled) ta.focus();
+  };
+
+  const clearAttachment = (): void => {
+    pendingAttachment = null;
+    attachChip.hidden = true;
+    attachThumb.removeAttribute("src");
+    refreshSend();
+  };
+
   replyClear.addEventListener("click", () => {
     setReplyTo(null);
     ta.focus();
   });
 
+  attachRemove.addEventListener("click", () => {
+    clearAttachment();
+    ta.focus();
+  });
+
+  attachBtn.addEventListener("click", () => {
+    if (!enabled) return;
+    // Reset so re-picking the same file still fires `change`.
+    fileInput.value = "";
+    fileInput.click();
+  });
+
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    const build = handlers.buildAttachment ?? fileToAttachment;
+    void build(file)
+      .then(stageAttachment)
+      .catch((e) => handlers.onAttachError?.((e as Error).message));
+  });
+
   const trySend = (): void => {
     if (!enabled) return;
     const body = ta.value.trim();
-    if (!body) return;
+    if (!body && !pendingAttachment) return;
+    const att = pendingAttachment;
     ta.value = "";
+    clearAttachment();
     tryGrow();
-    send.disabled = true;
-    handlers.onSend(body, pendingReply);
+    handlers.onSend(body, pendingReply, att);
     setReplyTo(null);
+    refreshSend();
   };
 
   // Emoji picker open/close + insert-at-cursor. Function declarations so
@@ -164,7 +261,7 @@ export function mountComposer(
 
   ta.addEventListener("input", () => {
     if (!enabled) return;
-    send.disabled = ta.value.trim().length === 0;
+    refreshSend();
     tryGrow();
   });
 
@@ -183,28 +280,37 @@ export function mountComposer(
   const inputRow = document.createElement("div");
   inputRow.className = "chat-composer__row";
   inputRow.appendChild(ta);
+  inputRow.appendChild(attachBtn);
   inputRow.appendChild(emojiWrap);
   inputRow.appendChild(send);
   root.appendChild(replyChip);
+  root.appendChild(attachChip);
   root.appendChild(inputRow);
+  root.appendChild(fileInput);
 
   const setEnabled = (next: boolean, hint?: string): void => {
     enabled = next;
     ta.disabled = !next;
     emojiBtn.disabled = !next;
+    attachBtn.disabled = !next;
     if (!next) {
       closePicker();
       ta.placeholder = hint ?? DEFAULT_PLACEHOLDER;
-      send.disabled = true;
     } else {
       ta.placeholder = DEFAULT_PLACEHOLDER;
-      send.disabled = ta.value.trim().length === 0;
     }
+    refreshSend();
+  };
+
+  const setAttachVisible = (visible: boolean): void => {
+    attachBtn.hidden = !visible;
+    if (!visible) clearAttachment();
   };
 
   return {
     focus: () => ta.focus(),
     setEnabled,
     setReplyTo,
+    setAttachVisible,
   };
 }

@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentIdentity,
+  Attachment,
   CardWithUri,
   Contact,
   Group,
@@ -85,12 +86,14 @@ export async function sendDm(
   body: string,
   senderName?: string,
   replyToMessageId?: string | null,
+  attachment?: Attachment | null,
 ): Promise<string | null> {
   return invoke<string | null>("chat_send_dm", {
     to,
     body,
     senderName: senderName ?? null,
     replyToMessageId: replyToMessageId ?? null,
+    attachment: attachment ?? null,
   });
 }
 

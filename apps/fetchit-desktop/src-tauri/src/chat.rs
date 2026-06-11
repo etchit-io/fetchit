@@ -606,6 +606,7 @@ pub async fn chat_send_dm(
     body: String,
     sender_name: Option<String>,
     reply_to_message_id: Option<String>,
+    attachment: Option<fetchit_chat::attachment::Attachment>,
 ) -> Result<Option<String>, String> {
     ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(to).map_err(|e| e.to_string())?;
@@ -614,7 +615,13 @@ pub async fn chat_send_dm(
         .get()
         .await?
         .messages()
-        .send(&id, &body, &name, reply_to_message_id.as_deref(), None)
+        .send(
+            &id,
+            &body,
+            &name,
+            reply_to_message_id.as_deref(),
+            attachment.as_ref(),
+        )
         .await
         .map_err(|e| e.to_string())
 }

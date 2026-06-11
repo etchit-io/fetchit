@@ -174,7 +174,7 @@ describe("mountConversation — reply flow", () => {
     // The reply target travels to the backend send (async via the
     // dmConnect warmup, so flush the microtask chain first).
     await vi.waitFor(() =>
-      expect(sendDmMock).toHaveBeenCalledWith(PEER, "my answer", "Tester", "m1"),
+      expect(sendDmMock).toHaveBeenCalledWith(PEER, "my answer", "Tester", "m1", null),
     );
   });
 

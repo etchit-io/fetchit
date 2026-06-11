@@ -4,6 +4,7 @@
 import { bubbleRenderKey, renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
+import { openImageLightbox } from "./lightbox";
 import { convKey, quotedRef, type ChatStore, type Conversation } from "./state";
 import { dmConnect, groupHistory, sendDm, sendGroupMessage } from "./api";
 import { friendlyError } from "./errors";
@@ -105,6 +106,7 @@ export function mountConversation(
     onInvite: handlers.onInvite,
     onProfile: handlers.onProfile,
     onQuoteClick: scrollToMessage,
+    onImageOpen: openImageLightbox,
   };
   // DM bubbles get the reply affordance; group bubbles stay without it
   // until the payload carries the quote cross-peer — a reply affordance
@@ -154,12 +156,18 @@ export function mountConversation(
   };
 
   const composer = mountComposer(composerEl, {
-    onSend: (body, replyTo) => {
+    onAttachError: (msg) => store.pushNotice("warn", msg),
+    onSend: (body, replyTo, attachment) => {
       const conv = store.active();
       if (!conv) return;
       if (conv.key.kind === "dm") {
         const peer = conv.key.peer;
-        const bubbleId = store.enqueueOutbound(peer, body, replyTo ?? undefined);
+        const bubbleId = store.enqueueOutbound(
+          peer,
+          body,
+          replyTo ?? undefined,
+          attachment ?? undefined,
+        );
         void (async () => {
           try {
             // Same warmup the driver does for retries — turns a 12s
@@ -170,6 +178,7 @@ export function mountConversation(
               body,
               handlers.resolveSenderName(),
               replyTo?.messageId,
+              attachment,
             );
             store.markSent(peer, bubbleId, messageId);
           } catch (e) {
@@ -220,6 +229,10 @@ export function mountConversation(
     } else {
       composer.setEnabled(true);
     }
+    // Inline images ride the DM payload only; groups carry no attachment
+    // field yet, so hide the affordance there rather than promise a send
+    // the wire would silently drop.
+    composer.setAttachVisible(conv.key.kind === "dm");
 
     subjectEl.textContent = conv.title;
     if (conv.key.kind === "dm") {

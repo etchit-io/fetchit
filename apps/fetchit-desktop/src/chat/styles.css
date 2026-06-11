@@ -852,6 +852,90 @@ body.chat-docked {
 }
 .chat-composer__reply-clear:hover { color: var(--bone); }
 
+/* Inline-image attach (spec 2.4): button glyph + staged-attachment chip. */
+.chat-composer__attach .icon { width: 18px; height: 18px; }
+.chat-composer__attach[hidden] { display: none; }
+
+.chat-composer__attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-left: 3px solid var(--copper);
+  border-radius: 6px;
+  padding: 4px 10px;
+  background: var(--ink);
+  font-size: 12px;
+}
+.chat-composer__attachment[hidden] { display: none; }
+.chat-composer__attachment-thumb {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex: none;
+}
+.chat-composer__attachment-label { color: var(--ash); flex: 1; min-width: 0; }
+.chat-composer__attachment-remove {
+  background: none;
+  border: none;
+  color: var(--ash);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+.chat-composer__attachment-remove:hover { color: var(--bone); }
+
+/* Inline-image thumbnail inside a bubble + the full-view lightbox. */
+.chat-attachment {
+  display: block;
+  max-width: min(240px, 100%);
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border-radius: 8px;
+  margin-bottom: 4px;
+}
+.chat-attachment--clickable { cursor: zoom-in; }
+
+.chat-lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  animation: chat-dialog-fade var(--dur-trans) ease both;
+}
+.chat-lightbox[hidden] { display: none; }
+.chat-lightbox__panel {
+  position: relative;
+  display: flex;
+  max-width: 92vw;
+  max-height: 92vh;
+}
+.chat-lightbox__image img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.chat-lightbox__close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--ink);
+  color: var(--bone);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .chat-composer__input {
   flex: 1;
   resize: none;

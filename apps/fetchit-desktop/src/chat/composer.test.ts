@@ -30,7 +30,7 @@ describe("mountComposer — basic send flow", () => {
     ta.value = "  hello world  ";
     ta.dispatchEvent(new Event("input"));
     send.click();
-    expect(onSend).toHaveBeenCalledWith("hello world", null);
+    expect(onSend).toHaveBeenCalledWith("hello world", null, null);
   });
 
   it("clears the textarea on successful send", () => {
@@ -121,7 +121,7 @@ describe("mountComposer — reply chip", () => {
     ta.value = "no quote";
     ta.dispatchEvent(new Event("input"));
     send.click();
-    expect(onSend).toHaveBeenCalledWith("no quote", null);
+    expect(onSend).toHaveBeenCalledWith("no quote", null, null);
   });
 
   it("send carries the pending ref once, then clears", () => {
@@ -130,12 +130,12 @@ describe("mountComposer — reply chip", () => {
     ta.value = "a reply";
     ta.dispatchEvent(new Event("input"));
     send.click();
-    expect(onSend).toHaveBeenCalledWith("a reply", ref);
+    expect(onSend).toHaveBeenCalledWith("a reply", ref, null);
     expect(chip().hidden).toBe(true);
     ta.value = "second";
     ta.dispatchEvent(new Event("input"));
     send.click();
-    expect(onSend).toHaveBeenLastCalledWith("second", null);
+    expect(onSend).toHaveBeenLastCalledWith("second", null, null);
   });
 
   it("Escape clears the chip when the emoji picker is closed", () => {
@@ -179,5 +179,87 @@ describe("mountComposer — emoji picker", () => {
     api.setEnabled(false, "no conv");
     expect(emojiBtn().disabled).toBe(true);
     expect(host.querySelector(".chat-emoji-picker")).toBeNull();
+  });
+});
+
+describe("mountComposer — image attach", () => {
+  const ATT = { mime: "image/png", width: 8, height: 6, bytes_b64: "AAA=" };
+
+  function setupAttach(
+    onSend = vi.fn(),
+    buildAttachment = vi.fn().mockResolvedValue(ATT),
+    onAttachError = vi.fn(),
+  ): {
+    api: ReturnType<typeof mountComposer>;
+    send: HTMLButtonElement;
+    attachBtn: HTMLButtonElement;
+    file: HTMLInputElement;
+    onSend: ReturnType<typeof vi.fn>;
+    onAttachError: ReturnType<typeof vi.fn>;
+  } {
+    const api = mountComposer(host, { onSend, buildAttachment, onAttachError });
+    const send = host.querySelector<HTMLButtonElement>(".chat-composer__send")!;
+    const attachBtn = host.querySelector<HTMLButtonElement>(".chat-composer__attach")!;
+    const file = host.querySelector<HTMLInputElement>(".chat-composer__file")!;
+    return { api, send, attachBtn, file, onSend, onAttachError };
+  }
+
+  function pick(input: HTMLInputElement): void {
+    const f = new File([new Uint8Array([1, 2, 3])], "pic.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { value: [f], configurable: true });
+    input.dispatchEvent(new Event("change"));
+  }
+
+  function chip(): HTMLElement | null {
+    return host.querySelector<HTMLElement>(".chat-composer__attachment:not([hidden])");
+  }
+
+  it("renders an attach button and a hidden image-only file input", () => {
+    const { attachBtn, file } = setupAttach();
+    expect(attachBtn).not.toBeNull();
+    expect(file.getAttribute("type")).toBe("file");
+    expect(file.getAttribute("accept")).toContain("image/");
+  });
+
+  it("stages a picked image: shows a preview chip and enables Send with empty body", async () => {
+    const { send, file } = setupAttach();
+    expect(send.disabled).toBe(true);
+    pick(file);
+    await vi.waitFor(() => expect(chip()).not.toBeNull());
+    expect(send.disabled).toBe(false);
+  });
+
+  it("send carries the staged attachment, then clears it", async () => {
+    const { send, file, onSend } = setupAttach();
+    pick(file);
+    await vi.waitFor(() => expect(chip()).not.toBeNull());
+    send.click();
+    expect(onSend).toHaveBeenCalledWith("", null, ATT);
+    expect(chip()).toBeNull();
+    expect(send.disabled).toBe(true);
+  });
+
+  it("remove button discards the staged attachment", async () => {
+    const { send, file } = setupAttach();
+    pick(file);
+    await vi.waitFor(() => expect(chip()).not.toBeNull());
+    host.querySelector<HTMLButtonElement>(".chat-composer__attachment-remove")!.click();
+    expect(chip()).toBeNull();
+    expect(send.disabled).toBe(true);
+  });
+
+  it("surfaces an invalid image via onAttachError and stages nothing", async () => {
+    const buildAttachment = vi.fn().mockRejectedValue(new Error("Only JPEG, PNG, GIF, or WebP"));
+    const onAttachError = vi.fn();
+    const { file } = setupAttach(vi.fn(), buildAttachment, onAttachError);
+    pick(file);
+    await vi.waitFor(() => expect(onAttachError).toHaveBeenCalledWith("Only JPEG, PNG, GIF, or WebP"));
+    expect(chip()).toBeNull();
+  });
+
+  it("disables the attach button when the composer is disabled", () => {
+    const { api, attachBtn } = setupAttach();
+    api.setEnabled(false, "no conv");
+    expect(attachBtn.disabled).toBe(true);
   });
 });
