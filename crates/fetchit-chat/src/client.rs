@@ -1660,7 +1660,14 @@ impl Client {
             addresses: Vec::new(),
             extra: serde_json::Value::Null,
         };
-        self.identity().import(&card).await?;
+        // Best-effort legacy sync. The local StoredContactCard saved above
+        // is the messaging source of truth (it carries the ML-KEM key the
+        // send path seals to); the x0xd daemon-side contact list is a
+        // convenience mirror. A daemon hiccup must not fail an import whose
+        // essential work is done -- the next import or connect re-syncs.
+        if let Err(e) = self.identity().import(&card).await {
+            log::warn!("[chat] pair import: x0xd card sync failed (contact saved locally): {e}");
+        }
 
         Ok(())
     }
