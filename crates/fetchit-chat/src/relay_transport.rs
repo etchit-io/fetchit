@@ -198,7 +198,15 @@ impl RelayTransport {
             }
         }
 
-        // Not in pool — open a new authenticated connection.
+        // Not in pool — open a new authenticated connection. The pool
+        // lock is intentionally released before this await (holding a
+        // std MutexGuard across an await would serialize every send
+        // behind a slow connect and is a !Send footgun). The tradeoff:
+        // two concurrent first-contact sends to the same new relay may
+        // each open a connection; the loser's Arc drops on return and
+        // its supervisor shuts down cleanly. First-contact races are
+        // rare and self-healing, so this is accepted over per-key
+        // locking that would reintroduce the across-await hold.
         let config = ClientConfig::new(https_url);
         let client = Client::connect(config, self.signer.clone())
             .await
