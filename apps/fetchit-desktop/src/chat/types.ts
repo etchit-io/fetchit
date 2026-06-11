@@ -97,6 +97,33 @@ export interface GroupMessage {
   message_id: string;
 }
 
+export interface ProfileAvatarMeta {
+  addr: string;
+  mime: string;
+  w: number;
+  h: number;
+  bytesLen: number;
+}
+
+export interface ProfileLinkDto {
+  kind: string;
+  label: string;
+  addr: string;
+}
+
+export interface ProfileDto {
+  displayName: string;
+  bio?: string | null;
+  website?: string | null;
+  links: ProfileLinkDto[];
+  avatar?: ProfileAvatarMeta | null;
+  issuedAtMs: number;
+}
+
+export type ProfileOutcome =
+  | ({ kind: "profile" } & ProfileDto)
+  | { kind: "none" };
+
 // Discriminated union mirroring `fetchit_chat::events::Event`.
 export type ChatEvent =
   | ({ kind: "direct_message" } & DirectMessage)

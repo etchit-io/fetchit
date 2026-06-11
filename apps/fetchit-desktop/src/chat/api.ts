@@ -11,6 +11,7 @@ import type {
   Group,
   GroupMessage,
   OnlineAgent,
+  ProfileOutcome,
   TrustLevel,
 } from "./types";
 
@@ -164,6 +165,18 @@ export async function groupHistory(groupId: string): Promise<GroupMessage[]> {
 
 export async function leaveGroup(groupId: string): Promise<void> {
   await invoke("chat_group_leave", { groupId });
+}
+
+export async function fetchProfile(agentId: string): Promise<ProfileOutcome> {
+  return invoke<ProfileOutcome>("chat_fetch_profile", { agentId });
+}
+
+export async function fetchAvatar(
+  addr: string,
+  mime: string,
+  bytesLen: number,
+): Promise<string> {
+  return invoke<string>("chat_fetch_avatar", { addr, mime, bytesLen });
 }
 
 export async function getDisplayName(): Promise<string> {
