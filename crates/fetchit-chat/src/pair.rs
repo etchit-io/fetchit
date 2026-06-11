@@ -167,6 +167,45 @@ pub fn verify_index_record(record: &ProfileIndexRecord) -> std::result::Result<V
     Ok(pubkey_bytes)
 }
 
+/// Resolve a contact's relay index record by relay base URL + agent id
+/// (no share URI needed). GETs `{relay}/v1/profile/{agent_id}`, verifies
+/// the record's ML-DSA signature and self-derivation, cross-checks the
+/// returned `agent_id` against the request, and maps the all-zeros
+/// address to [`PairError::Tombstoned`].
+///
+/// # Errors
+/// Transport, non-2xx relay status, malformed body, agent-id mismatch,
+/// failed verification, or a tombstoned profile.
+pub async fn fetch_index_record_by_id(
+    relay: &url::Url,
+    agent_id: &str,
+    http: &reqwest::Client,
+) -> std::result::Result<ProfileIndexRecord, PairError> {
+    let url = relay
+        .join(&format!("v1/profile/{agent_id}"))
+        .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
+    let resp = http
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(PairError::RelayStatus(resp.status().as_u16()));
+    }
+    let record: ProfileIndexRecord = resp
+        .json()
+        .await
+        .map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
+    if record.profile_addr == ALL_ZEROS_PROFILE_ADDR {
+        return Err(PairError::Tombstoned);
+    }
+    verify_index_record(&record)?;
+    if record.agent_id != agent_id {
+        return Err(PairError::AgentIdMismatch);
+    }
+    Ok(record)
+}
+
 /// HTTP GET `{relay}/v1/profile/{agent_id}` and return the
 /// deserialised + verified record. The `agent_id` in the path is
 /// taken from the parsed URI; the relay's response is verified
@@ -180,30 +219,7 @@ pub async fn fetch_index_record(
     uri: &V3ShareUri,
     http: &reqwest::Client,
 ) -> std::result::Result<ProfileIndexRecord, PairError> {
-    let path = format!("v1/profile/{}", uri.agent_id);
-    let url = uri.relay.join(&path).map_err(|e| {
-        PairError::Decode(format!(
-            "could not build relay URL from {} + {path}: {e}",
-            uri.relay
-        ))
-    })?;
-    let resp = http
-        .get(url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(PairError::RelayStatus(resp.status().as_u16()));
-    }
-    let record: ProfileIndexRecord = resp
-        .json()
-        .await
-        .map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
-    if record.agent_id != uri.agent_id {
-        return Err(PairError::AgentIdMismatch);
-    }
-    verify_index_record(&record)?;
-    Ok(record)
+    fetch_index_record_by_id(&uri.relay, &uri.agent_id, http).await
 }
 
 /// Convenience: parse a v3 share URI string + fetch + verify in one
@@ -532,6 +548,54 @@ mod tests {
         match fetch_index_record(&uri, &http).await {
             Err(PairError::AgentIdMismatch) => {}
             other => panic!("expected AgentIdMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_by_id_returns_verified_record() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let record = mk_signed_record(&dsa, &sk, &pk.to_bytes(), &"e".repeat(64), 99);
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/profile/{}", record.agent_id)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let got = fetch_index_record_by_id(&relay, &record.agent_id, &http)
+            .await
+            .unwrap();
+        assert_eq!(got.agent_id, record.agent_id);
+    }
+
+    #[tokio::test]
+    async fn fetch_by_id_tombstone_maps_to_tombstoned() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let record = mk_signed_record(&dsa, &sk, &pk.to_bytes(), ALL_ZEROS_PROFILE_ADDR, 1);
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/profile/{}", record.agent_id)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match fetch_index_record_by_id(&relay, &record.agent_id, &http).await {
+            Err(PairError::Tombstoned) => {}
+            other => panic!("expected Tombstoned, got {other:?}"),
         }
     }
 
