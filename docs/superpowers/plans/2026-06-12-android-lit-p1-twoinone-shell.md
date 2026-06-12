@@ -452,4 +452,6 @@ private fun setMode(mode: Mode) {
 - [ ] **Step 4:** Commit `chore(android): P1 gates + device smoke checklist`, then run the full repo gates from the worktree root (`cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace 2>&1 | tail -3; echo EXIT:${PIPESTATUS[0]}`) to confirm nothing Rust-side drifted, and push the branch.
 
 ## Deferred (explicitly NOT in this plan)
-Foreground service for background receive (specialUse FGS: needs Play declaration; lands as its own plan once the in-foreground loop is device-proven - a deliberate deviation from the brief's P1 line, flagged to Josh), share-from-browse "send to chat contact" (the brief's own "only if cheap, else first fast-follow"), message-history persistence, image attachments, presence, contact-list FFI accessor (Kotlin store suffices for v1), relay region picker UI, fediverse publishing.
+Foreground service for background receive (specialUse FGS: needs Play declaration; lands as its own plan once the in-foreground loop is device-proven - a deliberate deviation from the brief's P1 line, flagged to Josh), message-history persistence, image attachments, presence, contact-list FFI accessor (Kotlin store suffices for v1), relay region picker UI, fediverse publishing.
+
+Shipped as same-day fast-follows after this plan: branded QR card for pair URIs (Task 4 review M1) and the share-from-browse "send in chat" bridge (the brief's "only if cheap, else first fast-follow").
