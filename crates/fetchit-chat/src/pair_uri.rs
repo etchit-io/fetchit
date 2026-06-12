@@ -460,6 +460,125 @@ mod tests {
         let uri = format!("x0x://pair/{AGENT}");
         assert_eq!(parse_pair_uri(&uri), Err(PairUriError::NoRelays));
     }
+
+    // ── adversarial edge-case pins ────────────────────────────────────────
+
+    #[test]
+    fn parse_empty_r_value_errors_invalid_relay() {
+        // `?r=` with no value: the empty string fails URL parse ("relative
+        // URL without a base"), surfacing as InvalidRelay rather than a
+        // silent empty-relay accept.
+        let uri = format!("x0x://pair/{AGENT}?r=");
+        assert!(matches!(
+            parse_pair_uri(&uri),
+            Err(PairUriError::InvalidRelay(_))
+        ));
+    }
+
+    #[test]
+    fn parse_percent_encoded_null_in_host_is_rejected() {
+        // A `%00` decoded into the host portion makes the relay an invalid
+        // IDNA host, so validate_relay's re-parse rejects it.
+        let uri = format!("x0x://pair/{AGENT}?r=https://re%00lay.io/");
+        assert!(matches!(
+            parse_pair_uri(&uri),
+            Err(PairUriError::InvalidRelay(_))
+        ));
+    }
+
+    #[test]
+    fn parse_trailing_control_chars_are_stripped_not_rejected() {
+        // FINDING: trailing `%0A%00` after the path do NOT reject — the url
+        // crate strips trailing control characters on re-parse, so the relay
+        // normalizes to the clean host. Pinned to document the actual
+        // (lenient) behavior, not the assumed rejection.
+        let uri = format!("x0x://pair/{AGENT}?r=https://relay.io/%0A%00");
+        let parsed =
+            parse_pair_uri(&uri).expect("trailing control chars are stripped, not rejected");
+        assert_eq!(parsed.relays, vec!["https://relay.io".to_string()]);
+    }
+
+    #[test]
+    fn parse_uppercase_scheme_is_accepted_url_crate_lowercases() {
+        // The url crate lowercases the scheme on parse, so `X0X://` matches
+        // the `x0x` scheme check and the URI is accepted.
+        let uri = format!("X0X://pair/{AGENT}?r={RELAY_A}");
+        let parsed = parse_pair_uri(&uri).expect("uppercase scheme lowercased by url crate");
+        assert_eq!(parsed.agent_id_hex, AGENT);
+        assert_eq!(parsed.relays, relays(&[RELAY_A]));
+    }
+
+    #[test]
+    fn parse_rejects_63_char_agent_id() {
+        let short = "a".repeat(63);
+        let uri = format!("x0x://pair/{short}?r={RELAY_A}");
+        assert_eq!(parse_pair_uri(&uri), Err(PairUriError::InvalidAgentId));
+    }
+
+    #[test]
+    fn parse_rejects_65_char_agent_id() {
+        let long = "a".repeat(65);
+        let uri = format!("x0x://pair/{long}?r={RELAY_A}");
+        assert_eq!(parse_pair_uri(&uri), Err(PairUriError::InvalidAgentId));
+    }
+
+    #[test]
+    fn parse_rejects_64_char_id_with_non_hex_char() {
+        // 'g' is not a hex digit; a 64-char id that is otherwise hex must
+        // still be rejected.
+        let bad = format!("g{}", "0".repeat(63));
+        assert_eq!(bad.len(), 64);
+        let uri = format!("x0x://pair/{bad}?r={RELAY_A}");
+        assert_eq!(parse_pair_uri(&uri), Err(PairUriError::InvalidAgentId));
+    }
+
+    #[test]
+    fn parse_boundary_512_bytes_ok_513_too_long() {
+        // The total-length gate runs before any relay validation. Build two
+        // distinct valid relays whose values pad the URI to an exact byte
+        // count: 512 parses, 513 errors TooLong.
+        fn uri_of_len(total: usize) -> String {
+            // fixed bytes: "x0x://pair/" (11) + AGENT (64) + "?r=" (3)
+            // + "&r=" (3) = 81; two relays at 11 bytes overhead each.
+            let pad_budget = total - 81 - 22;
+            let pad1 = pad_budget / 2;
+            let pad2 = pad_budget - pad1;
+            let r1 = format!("https://{}.io", "a".repeat(pad1));
+            let r2 = format!("https://{}.io", "b".repeat(pad2));
+            format!("x0x://pair/{AGENT}?r={r1}&r={r2}")
+        }
+
+        let ok = uri_of_len(512);
+        assert_eq!(ok.len(), 512, "test setup: must be exactly 512 bytes");
+        assert!(
+            parse_pair_uri(&ok).is_ok(),
+            "a 512-byte URI must parse: {:?}",
+            parse_pair_uri(&ok)
+        );
+
+        let too_long = uri_of_len(513);
+        assert_eq!(too_long.len(), 513, "test setup: must be exactly 513 bytes");
+        assert_eq!(parse_pair_uri(&too_long), Err(PairUriError::TooLong));
+    }
+
+    #[test]
+    fn parse_rejects_multi_segment_path() {
+        // `x0x://pair/<64-hex>/extra` puts "<64-hex>/extra" in the path; that
+        // is not 64-hex, so the agent-id check rejects it (no mangling).
+        let uri = format!("x0x://pair/{AGENT}/extra?r={RELAY_A}");
+        assert_eq!(parse_pair_uri(&uri), Err(PairUriError::InvalidAgentId));
+    }
+
+    #[test]
+    fn parse_relay_fragment_is_preserved_through_normalization() {
+        // A relay URL carrying a percent-encoded `#fragment` keeps it: the
+        // fragment is part of the relay value, normalization neither strips
+        // nor rejects it (the trailing-slash strip only fires on an empty
+        // path, which a fragment-bearing url::to_string never ends in).
+        let uri = format!("x0x://pair/{AGENT}?r=https://relay.io/%23frag");
+        let parsed = parse_pair_uri(&uri).expect("fragment-bearing relay parses");
+        assert_eq!(parsed.relays, vec!["https://relay.io/#frag".to_string()]);
+    }
 }
 
 // ── integration tests (wiremock) ──────────────────────────────────────────────

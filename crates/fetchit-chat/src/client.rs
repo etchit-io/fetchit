@@ -4777,6 +4777,116 @@ mod tests {
         }
     }
 
+    /// Best-effort semantics (client.rs:1113-1122): when the OLD relay is
+    /// unreachable so the forwarding POST fails, the migration still returns
+    /// Ok, the primary cell holds the new url, and Migrated fires. The
+    /// layer-2 heal is advisory; its failure must not unwind the committed
+    /// swap.
+    #[tokio::test]
+    async fn migrate_primary_old_relay_unreachable_still_migrates() {
+        // A closed loopback port: the forwarding POST gets connection-refused
+        // fast (no timeout wait) and is swallowed as best-effort.
+        let old = "http://127.0.0.1:1/v1/ws";
+        let new = "wss://new.test/v1/ws";
+        let (client, _dir) = test_client_with_mh(old).await;
+
+        let fired = Arc::new(std::sync::Mutex::new(Vec::<RelayFailoverEvent>::new()));
+        let sink = Arc::clone(&fired);
+        client.set_relay_failover_callback(Arc::new(move |ev| {
+            sink.lock().unwrap().push(ev);
+        }));
+
+        client
+            .migrate_primary(new)
+            .await
+            .expect("migration succeeds even when the old-relay forwarding POST fails");
+
+        assert_eq!(
+            client.primary_relay_url.read().await.clone(),
+            Some(new.to_string()),
+            "primary cell must hold the new url",
+        );
+        let events = fired.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "Migrated must still fire");
+        assert!(
+            matches!(&events[0], RelayFailoverEvent::Migrated { to, .. } if to == new),
+            "event must be Migrated to the new url, got {:?}",
+            events[0]
+        );
+    }
+
+    /// Migrating to a url that already occupies an outbound slot (1/2):
+    /// `replace_primary` always installs the new url into slot 0 regardless
+    /// of the LRU slots, so slot 0 ends up the new url with no panic. The
+    /// transient duplicate in slot 1/2 is benign (the next `acquire_slot`
+    /// reuses by url).
+    #[tokio::test]
+    async fn migrate_primary_to_url_in_outbound_slot_keeps_slot0_consistent() {
+        use fetchit_relay_proto::{
+            AgentId as RelayAgentId, EnvelopeKind, MachineId, TransitEnvelope, WIRE_VERSION,
+        };
+
+        let old = "wss://old.test/v1/ws";
+        let new = "wss://new.test/v1/ws";
+        let (client, _dir) = test_client_with_mh(old).await;
+
+        // Open slot 1 on `new` via an outbound send through the multi-home
+        // transport, so `new` already occupies an LRU slot before migration.
+        let mh = client.multi_home.clone().expect("multi-home wired");
+        let envelope = TransitEnvelope {
+            version: WIRE_VERSION,
+            kind: EnvelopeKind::Dm,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: RelayAgentId::from_bytes([0x11u8; 32]),
+            sender_machine_id: MachineId::from_bytes([0x22u8; 32]),
+            timestamp_ms: 1_700_000_000_000,
+            epoch: 0,
+            ciphertext: vec![0xaa; 16],
+            nonce: vec![0xbb; 12],
+            kem_ciphertext: vec![0xcc; 32],
+            sender_signature: vec![0xdd; 64],
+        };
+        let to = crate::identity::AgentId("1".repeat(64));
+        let hints = crate::card::RendezvousHintsV1 {
+            relays: vec![new.to_string()],
+        };
+        mh.send_inner(&to, envelope, &hints)
+            .await
+            .expect("mock send opens slot 1 on the new url");
+        assert!(
+            mh.slots_for_test()[1]
+                .as_ref()
+                .is_some_and(|s| s.relay_url == new),
+            "precondition: new url must occupy slot 1",
+        );
+
+        client
+            .migrate_primary(new)
+            .await
+            .expect("migration to a slot-occupying url succeeds without panic");
+
+        let slots = mh.slots_for_test();
+        assert_eq!(
+            slots[0].as_ref().map(|s| s.relay_url.clone()),
+            Some(new.to_string()),
+            "slot 0 must be the new url after migration",
+        );
+        assert_eq!(
+            client.primary_relay_url.read().await.clone(),
+            Some(new.to_string()),
+        );
+    }
+
+    /// `stop_failover_watcher` is idempotent: a second call (or a call when
+    /// no watcher was ever spawned) is a no-op and never panics.
+    #[tokio::test]
+    async fn stop_failover_watcher_twice_is_noop() {
+        let (client, _dir) = test_client_with_mh("wss://primary.test/v1/ws").await;
+        client.stop_failover_watcher();
+        client.stop_failover_watcher();
+    }
+
     /// `migrate_primary` with extra advertised entries preserves the others
     /// and swaps only the matching old url.
     #[tokio::test]

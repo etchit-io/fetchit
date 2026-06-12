@@ -758,6 +758,36 @@ mod tests {
         assert!(err.to_string().contains("corrupt"), "got {err}");
     }
 
+    #[test]
+    fn observe_then_next_with_wall_zero_exceeds_observed() {
+        // The 409-retry contract: after observing the relay's watermark,
+        // the next issued_at must be strictly greater than it even when the
+        // wall clock reads 0.
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        observe_external_watermark(&layout, AGENT, 1_000).unwrap();
+        let next = next_issued_at_ms(&layout, AGENT, 0).unwrap();
+        assert!(next > 1_000, "next must exceed observed 1000, got {next}");
+    }
+
+    #[test]
+    fn observe_near_ceiling_then_next_hits_corrupt_guard() {
+        // Observe u64::MAX - 1, then next_issued_at_ms with wall 0 computes
+        // (MAX-1)+1 == MAX and must error on the corrupt-sentinel guard
+        // rather than persist u64::MAX and brick future publishes.
+        let dir = tempdir().unwrap();
+        let layout = make_layout(dir.path());
+        observe_external_watermark(&layout, AGENT, u64::MAX - 1).unwrap();
+        let err = next_issued_at_ms(&layout, AGENT, 0).unwrap_err();
+        assert!(err.to_string().contains("corrupt"), "got {err}");
+        // The corrupt sentinel was never persisted: the stored value is the
+        // observed MAX-1, not MAX.
+        assert_eq!(
+            current_watermark(&layout, AGENT).unwrap(),
+            Some(u64::MAX - 1)
+        );
+    }
+
     // ── (C) post_pair_record wiremock ─────────────────────────────────────────
 
     /// Helper: build a valid `PairRecordV1` using a fresh ML-DSA-65 keypair.
@@ -1006,6 +1036,94 @@ mod tests {
                 "error must mention 403, got {e}"
             ),
             Ok(o) => panic!("expected Err on 403, got {o:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_pair_record_409_empty_body_is_decode_error() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 409 whose body lacks current_issued_at_ms must surface a decode
+        // error, never a silent WatermarkReject with a default value.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let (record, _) =
+            build_test_pair_record(vec!["https://relay.example.com".to_owned()], 1_000).await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match post_pair_record(&relay, &record, &http).await {
+            Err(e) => assert!(e.to_string().contains("decode"), "got {e}"),
+            Ok(o) => panic!("expected decode error, got {o:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_forwarding_record_409_twice_errors_rejected_twice() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Both the initial POST and the bump-retry get 409: the second 409
+        // is a hard error, not an infinite retry.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(json!({"current_issued_at_ms": 999_999u64})),
+            )
+            .mount(&server)
+            .await;
+
+        let (identity, signer, layout) = build_test_forwarding_ctx();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let moved = vec!["https://new-relay.example.com".to_owned()];
+        match post_forwarding_record(&relay, &identity, &signer, moved, &layout, &http).await {
+            Err(e) => assert!(e.to_string().contains("rejected twice"), "got {e}"),
+            Ok(o) => panic!("expected rejected-twice error, got {o:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_forwarding_record_409_then_412_skips() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First POST: 409 with a watermark to bump past.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(json!({"current_issued_at_ms": 999_999u64})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Retry: 412 (old relay has no pair-record) -> non-fatal skip.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(412))
+            .mount(&server)
+            .await;
+
+        let (identity, signer, layout) = build_test_forwarding_ctx();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let moved = vec!["https://new-relay.example.com".to_owned()];
+        match post_forwarding_record(&relay, &identity, &signer, moved, &layout, &http)
+            .await
+            .unwrap()
+        {
+            ForwardingOutcome::SkippedNoPairRecord => {}
+            other @ ForwardingOutcome::Written => {
+                panic!("expected SkippedNoPairRecord after 409+412, got {other:?}")
+            }
         }
     }
 }
