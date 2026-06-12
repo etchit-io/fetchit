@@ -19,7 +19,7 @@
         android:layout_height="match_parent"
         android:padding="12dp">
 
-        <!-- Top bar: full-width address + QR scan + ★ -->
+        <!-- Top bar: full-width address + ✉ chat mode + QR scan + ★ -->
         <EditText
             android:id="@+id/addressInput"
             android:layout_width="0dp"
@@ -32,9 +32,24 @@
             android:textColorHint="?attr/fetchitAsh"
             android:fontFamily="monospace"
             android:textSize="13sp"
-            app:layout_constraintEnd_toStartOf="@+id/scanButton"
+            app:layout_constraintEnd_toStartOf="@+id/modeChatButton"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
+
+        <Button
+            android:id="@+id/modeChatButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/mode_chat_glyph"
+            android:textColor="?attr/fetchitCopper"
+            android:textSize="20sp"
+            android:backgroundTint="?attr/fetchitInk3"
+            android:contentDescription="@string/mode_chat_glyph"
+            android:minWidth="44dp"
+            android:layout_marginStart="6dp"
+            app:layout_constraintBottom_toBottomOf="@+id/addressInput"
+            app:layout_constraintEnd_toStartOf="@+id/scanButton"
+            app:layout_constraintTop_toTopOf="@+id/addressInput" />
 
         <Button
             android:id="@+id/scanButton"
@@ -364,6 +379,47 @@
 
     </androidx.constraintlayout.widget.ConstraintLayout>
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+    <!-- Chat mode container. Visibility toggled by setMode() in MainActivity.
+         Task 4 inflates the chat screens inside here via ChatModeView. -->
+    <FrameLayout
+        android:id="@+id/chatContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:background="?attr/fetchitInk">
+
+        <!-- Minimal chat top bar shown while the container is visible. -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="12dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/chat_mode_label"
+                android:textColor="?attr/fetchitBone"
+                android:fontFamily="monospace"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/modeBrowseButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mode_browse_glyph"
+                android:textColor="@color/copper"
+                android:textSize="20sp"
+                android:backgroundTint="?attr/fetchitInk3"
+                android:contentDescription="@string/mode_browse_glyph"
+                android:minWidth="44dp" />
+
+        </LinearLayout>
+
+    </FrameLayout>
 
     <!-- Persistent settings sheet — peek shows just the drag handle. -->
     <LinearLayout

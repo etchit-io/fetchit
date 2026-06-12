@@ -19,6 +19,7 @@ import androidx.media3.common.util.UnstableApi
 import com.google.android.material.snackbar.Snackbar
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import io.etchit.fetchit.chat.ChatModeView
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,8 +68,35 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      */
     private val backStack = ArrayDeque<String>()
 
+    private enum class Mode { BROWSE, CHAT }
+    private var currentMode = Mode.BROWSE
+    private lateinit var chatModeView: ChatModeView
+
+    private fun setMode(mode: Mode) {
+        if (mode == currentMode) return
+        currentMode = mode
+        val browse = mode == Mode.BROWSE
+        binding.swipeRefresh.isEnabled = browse
+        binding.swipeRefresh.visibility = if (browse) View.VISIBLE else View.GONE
+        binding.chatContainer.visibility = if (browse) View.GONE else View.VISIBLE
+        if (!browse) {
+            // Chat mode always needs back enabled so the gesture returns to browse.
+            backCallback.isEnabled = true
+            chatModeView.onShown()
+        } else {
+            // Restore browse back-stack logic: only enabled when there is history.
+            backCallback.isEnabled = backStack.size >= 2 || viewingArchiveEntry
+        }
+    }
+
     private val backCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
+            // Chat mode: let chat consume the back press first; if it
+            // doesn't (stack at root), flip back to browse.
+            if (currentMode == Mode.CHAT) {
+                if (!chatModeView.onBack()) setMode(Mode.BROWSE)
+                return
+            }
             // Inner-archive nav: viewing an entry preview, back returns
             // to the listing — no refetch, no address-stack change.
             val ctx = archiveContext
@@ -230,12 +258,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
         settingsSheet = SettingsSheet(binding, this).also { it.bind() }
+        chatModeView = ChatModeView(binding.chatContainer)
 
         binding.fetchButton.setOnTapListener { onFetchClicked() }
         binding.bookmarkButton.setOnClickListener {
             BookmarkSheet().show(supportFragmentManager, "bookmarks")
         }
         binding.scanButton.setOnClickListener { onScanClicked() }
+        binding.modeChatButton.setOnClickListener { setMode(Mode.CHAT) }
+        binding.modeBrowseButton.setOnClickListener { setMode(Mode.BROWSE) }
         binding.closeButton.setOnClickListener {
             archiveContext = null
             viewingArchiveEntry = false

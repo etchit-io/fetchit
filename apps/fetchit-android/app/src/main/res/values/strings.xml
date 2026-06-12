@@ -122,6 +122,11 @@
     <!-- Footer of the Settings panel — version of the app the user is on. -->
     <string name="settings_version">fetch&gt;it &#xb7; v%1$s</string>
 
+    <!-- Mode switch glyphs -->
+    <string name="mode_chat_glyph">✉</string>
+    <string name="mode_browse_glyph">❯</string>
+    <string name="chat_mode_label">chat</string>
+
     <!-- Archive viewer -->
     <string name="archive_summary">application/zip · %1$d entries</string>
     <string name="archive_save_all">save archive…</string>
