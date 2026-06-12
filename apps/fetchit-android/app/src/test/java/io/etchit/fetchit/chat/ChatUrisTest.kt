@@ -78,4 +78,11 @@ class ChatUrisTest {
         val upper = "A".repeat(64)
         assertTrue(ChatUris.autonomiAddresses("autonomi://$upper").isEmpty())
     }
+
+    @Test
+    fun hexRunLongerThan64IsNotMatched() {
+        // A 65-char hex run must not match — prevents truncated false links.
+        val longHex = "a".repeat(65)
+        assertTrue(ChatUris.autonomiAddresses("autonomi://$longHex").isEmpty())
+    }
 }

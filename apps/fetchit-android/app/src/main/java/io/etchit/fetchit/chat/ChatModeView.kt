@@ -83,6 +83,15 @@ class ChatModeView(
     // Job for the feed post-flow collector; cancelled on screen switch.
     private var feedCollectJob: Job? = null
 
+    // Jobs for the two list-screen flow collectors (contacts + pump state).
+    // Launched exactly once behind the listView==null guard; stored here so
+    // any future re-inflation path must cancel them first.
+    private var listContactsJob: Job? = null
+    private var listPumpStateJob: Job? = null
+
+    // Job for the active DM send; cancelled wherever threadCollectJob is cancelled.
+    private var sendJob: Job? = null
+
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     private val settingsStore by lazy { SettingsStore(context) }
@@ -157,6 +166,8 @@ class ChatModeView(
                 // Cancel sub-screen collectors on return to list.
                 threadCollectJob?.cancel()
                 threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
                 feedCollectJob?.cancel()
                 feedCollectJob = null
                 if (listView == null) {
@@ -164,7 +175,9 @@ class ChatModeView(
                     inflateListScreen()
                 } else {
                     // Re-attach the cached list view without re-inflating or
-                    // launching duplicate collectors.
+                    // launching duplicate collectors. listContactsJob and
+                    // listPumpStateJob are live for the ChatModeView lifetime;
+                    // any future re-inflation path must cancel them first.
                     if (listView!!.parent == null) {
                         container.removeAllViews()
                         container.addView(listView)
@@ -175,16 +188,21 @@ class ChatModeView(
                 // Cancel any running feed collector; thread gets its own fresh one.
                 feedCollectJob?.cancel()
                 feedCollectJob = null
-                // Cancel any collector for the PREVIOUS peer before binding the new one.
+                // Cancel any collector and in-flight send for the PREVIOUS peer
+                // before binding the new one.
                 threadCollectJob?.cancel()
                 threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
                 container.removeAllViews()
                 bindThreadScreen(screen.peer)
             }
             is Screen.Feed -> {
-                // Cancel any running thread collector.
+                // Cancel any running thread collector and in-flight send.
                 threadCollectJob?.cancel()
                 threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
                 feedCollectJob?.cancel()
                 feedCollectJob = null
                 container.removeAllViews()
@@ -218,7 +236,7 @@ class ChatModeView(
         rv.adapter = adapter
 
         // Observe contacts + last messages to drive list visibility.
-        lifecycleScope.launch {
+        listContactsJob = lifecycleScope.launch {
             controller.contacts.contacts.collect { contacts ->
                 val hasContacts = contacts.isNotEmpty()
                 rv.visibility = if (hasContacts) View.VISIBLE else View.GONE
@@ -231,7 +249,7 @@ class ChatModeView(
         }
 
         // Observe pump state to show connection-lost banner.
-        lifecycleScope.launch {
+        listPumpStateJob = lifecycleScope.launch {
             controller.pumpState.collect { state ->
                 lostBanner.visibility =
                     if (state == PumpState.STOPPED_ERROR) View.VISIBLE else View.GONE
@@ -353,9 +371,13 @@ class ChatModeView(
             val body = messageInput.text.toString().trim()
             if (body.isEmpty()) return@setOnClickListener
             messageInput.text.clear()
-            lifecycleScope.launch {
+            sendJob?.cancel()
+            sendJob = lifecycleScope.launch {
                 val gw = controller.gateway() ?: run {
-                    messageInput.setText(body)
+                    // Only restore text if this thread is still the active screen.
+                    if (screenStack.lastOrNull() == Screen.Thread(peer)) {
+                        messageInput.setText(body)
+                    }
                     snackbar(context.getString(R.string.chat_not_connected))
                     return@launch
                 }
@@ -372,7 +394,10 @@ class ChatModeView(
                         ),
                     )
                 }.onFailure { e ->
-                    messageInput.setText(body)
+                    // Only restore text if this thread is still the active screen.
+                    if (screenStack.lastOrNull() == Screen.Thread(peer)) {
+                        messageInput.setText(body)
+                    }
                     val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
                     snackbar(context.getString(R.string.thread_send_failed, reason))
                 }
@@ -382,8 +407,11 @@ class ChatModeView(
         // Collect messages for this peer; job cancelled on screen switch.
         threadCollectJob = lifecycleScope.launch {
             controller.conversations.messagesFor(peer).collect { msgs ->
-                adapter.submitList(msgs.map { MessageRow.Dm(it) })
-                if (msgs.isNotEmpty()) rv.scrollToPosition(msgs.size - 1)
+                val prevSize = adapter.itemCount
+                val rows = msgs.map { MessageRow.Dm(it) }
+                adapter.submitList(rows)
+                // Scroll only when new messages arrive, not on receipt-tick rebinds.
+                if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
         }
     }
@@ -412,9 +440,11 @@ class ChatModeView(
 
         feedCollectJob = lifecycleScope.launch {
             controller.feed.posts.collect { posts ->
+                val prevSize = adapter.itemCount
                 val rows = posts.map { MessageRow.Post(it) }
                 adapter.submitList(rows)
-                if (rows.isNotEmpty()) rv.scrollToPosition(rows.size - 1)
+                // Scroll only when new posts arrive, not on content-only updates.
+                if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
         }
     }
@@ -517,19 +547,25 @@ class ChatModeView(
         data class Post(val post: FeedPost) : MessageRow()
     }
 
+    private val msgDiff = object : DiffUtil.ItemCallback<MessageRow>() {
+        override fun areItemsTheSame(old: MessageRow, new: MessageRow): Boolean =
+            when {
+                old is MessageRow.Dm && new is MessageRow.Dm ->
+                    if (old.msg.messageId != null) old.msg.messageId == new.msg.messageId
+                    else old.msg.sentAtMs == new.msg.sentAtMs && old.msg.body == new.msg.body
+                old is MessageRow.Post && new is MessageRow.Post ->
+                    old.post.actorUrl == new.post.actorUrl &&
+                        old.post.body == new.post.body
+                else -> false
+            }
+
+        override fun areContentsTheSame(old: MessageRow, new: MessageRow): Boolean =
+            old == new
+    }
+
     private inner class MessageAdapter(
         private val onLinkTap: (String) -> Unit,
-    ) : androidx.recyclerview.widget.RecyclerView.Adapter<MessageAdapter.VH>() {
-
-        private val items = mutableListOf<MessageRow>()
-
-        fun submitList(list: List<MessageRow>) {
-            items.clear()
-            items.addAll(list)
-            notifyDataSetChanged()
-        }
-
-        override fun getItemCount() = items.size
+    ) : ListAdapter<MessageRow, MessageAdapter.VH>(msgDiff) {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val v = LayoutInflater.from(parent.context)
@@ -538,7 +574,7 @@ class ChatModeView(
         }
 
         override fun onBindViewHolder(holder: VH, position: Int) {
-            when (val row = items[position]) {
+            when (val row = getItem(position)) {
                 is MessageRow.Dm -> holder.bindDm(row.msg, onLinkTap)
                 is MessageRow.Post -> holder.bindPost(row.post)
             }
@@ -616,6 +652,7 @@ class ChatModeView(
                 meta.text = post.actorUrl
             }
         }
+
     }
 
     // ── contact list adapter ──────────────────────────────────────────

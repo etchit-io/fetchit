@@ -9,8 +9,10 @@ object ChatUris {
 
     private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
 
-    /** Matches `autonomi://` followed by exactly 64 lowercase hex chars. */
-    private val AUTONOMI_LINK = Regex("autonomi://([0-9a-f]{64})")
+    /** Matches `autonomi://` followed by exactly 64 lowercase hex chars.
+     *  The negative lookahead (?![0-9a-f]) prevents matching the first 64
+     *  chars of a longer hex run (truncated or false link). */
+    private val AUTONOMI_LINK = Regex("autonomi://([0-9a-f]{64})(?![0-9a-f])")
 
     /**
      * Extract every `autonomi://<64-hex>` address embedded in [text].
