@@ -125,6 +125,8 @@
     <!-- Mode switch glyphs -->
     <string name="mode_chat_glyph">✉</string>
     <string name="mode_browse_glyph">❯</string>
+    <string name="mode_chat_desc">switch to chat</string>
+    <string name="mode_browse_desc">switch to browse</string>
     <string name="chat_mode_label">chat</string>
 
     <!-- Archive viewer -->

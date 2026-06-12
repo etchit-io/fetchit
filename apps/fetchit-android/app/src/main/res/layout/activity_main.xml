@@ -44,7 +44,7 @@
             android:textColor="?attr/fetchitCopper"
             android:textSize="20sp"
             android:backgroundTint="?attr/fetchitInk3"
-            android:contentDescription="@string/mode_chat_glyph"
+            android:contentDescription="@string/mode_chat_desc"
             android:minWidth="44dp"
             android:layout_marginStart="6dp"
             app:layout_constraintBottom_toBottomOf="@+id/addressInput"
@@ -411,10 +411,10 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/mode_browse_glyph"
-                android:textColor="@color/copper"
+                android:textColor="?attr/fetchitCopper"
                 android:textSize="20sp"
                 android:backgroundTint="?attr/fetchitInk3"
-                android:contentDescription="@string/mode_browse_glyph"
+                android:contentDescription="@string/mode_browse_desc"
                 android:minWidth="44dp" />
 
         </LinearLayout>
