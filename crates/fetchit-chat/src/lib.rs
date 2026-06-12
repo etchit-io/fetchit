@@ -48,6 +48,7 @@ pub mod transport;
 mod client;
 mod http;
 mod members_singleflight;
+mod relay_http;
 
 pub use chat_identity::FetchitIdentity;
 pub use client::{Client, ClientBuilder, RelayFailoverEvent};
