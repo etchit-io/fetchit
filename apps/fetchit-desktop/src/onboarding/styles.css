@@ -1,5 +1,5 @@
 /* First-run welcome overlay. Sits above the live app; dismissed only
-   via Start or Skip. Palette keys off the shared theme variables. */
+   via Start or Skip. Palette keys off the shared theme tokens. */
 
 .onboarding {
   position: fixed;
@@ -8,7 +8,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--bg, #0f1115) 72%, transparent);
+  background: color-mix(in srgb, var(--ink) 72%, transparent);
   backdrop-filter: blur(3px);
 }
 
@@ -18,17 +18,17 @@
   gap: 14px;
   width: min(420px, calc(100vw - 48px));
   padding: 28px 26px 22px;
-  border: 1px solid var(--border, #2a2f3a);
-  border-radius: 12px;
-  background: var(--panel, #161a22);
-  box-shadow: 0 18px 48px rgb(0 0 0 / 45%);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  box-shadow: var(--elev-3), var(--edge-highlight);
 }
 
 .onboarding__title {
   margin: 0;
-  font-size: 1.35rem;
-  font-weight: 650;
-  color: var(--fg, #e8eaf0);
+  font: 400 26px/1.25 var(--font-display);
+  color: var(--bone);
 }
 
 .onboarding__question {
@@ -36,42 +36,57 @@
   flex-direction: column;
   gap: 6px;
   font-size: 0.95rem;
-  color: var(--fg, #e8eaf0);
+  color: var(--bone);
 }
 
 .onboarding__name {
   padding: 9px 11px;
-  border: 1px solid var(--border, #2a2f3a);
-  border-radius: 8px;
-  background: var(--bg, #0f1115);
-  color: var(--fg, #e8eaf0);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--ink);
+  color: var(--bone);
   font-size: 1rem;
 }
 
 .onboarding__name:focus {
-  outline: 2px solid var(--accent, #4f8cff);
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--copper);
+  box-shadow: var(--focus-ring);
 }
 
 .onboarding__honesty {
   margin: 0;
   font-size: 0.84rem;
   line-height: 1.45;
-  color: var(--fg-muted, #9aa3b2);
+  color: var(--ash);
 }
 
 .onboarding__start {
   padding: 10px 14px;
   border: none;
-  border-radius: 8px;
-  background: var(--accent, #4f8cff);
-  color: #fff;
+  border-radius: var(--r-ctl);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  color: var(--ink);
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
+}
+
+.onboarding__start:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+
+.onboarding__start:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
 }
 
 .onboarding__start:disabled {
+  background: var(--ash);
+  box-shadow: none;
   opacity: 0.45;
   cursor: default;
 }
@@ -81,8 +96,12 @@
   padding: 2px 4px;
   border: none;
   background: none;
-  color: var(--fg-muted, #9aa3b2);
+  color: var(--ash);
   font-size: 0.82rem;
   text-decoration: underline;
   cursor: pointer;
+}
+
+.onboarding__skip:hover {
+  color: var(--bone);
 }

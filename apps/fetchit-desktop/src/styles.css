@@ -584,13 +584,17 @@ body:not([data-view="settings"]) #settings {
   justify-content: space-between;
   margin-bottom: 24px;
   padding-bottom: 16px;
-  border-bottom: 1px solid var(--line);
+  background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--copper) 55%, transparent),
+      transparent 320px
+    )
+    bottom left / 100% 1px no-repeat;
 }
 .settings-head h1 {
-  font-size: 22px;
+  font: 400 26px/1.2 var(--font-display);
   margin: 0;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 .settings-close {
   background: transparent;
@@ -611,8 +615,10 @@ body:not([data-view="settings"]) #settings {
   margin-bottom: 32px;
   padding: 20px 22px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .setting-group h2 {
   font-size: 15px;
@@ -663,6 +669,7 @@ body:not([data-view="settings"]) #settings {
 .setting-row input[type="number"]:focus {
   outline: none;
   border-color: var(--copper);
+  box-shadow: var(--focus-ring);
 }
 .setting-row select option {
   background: var(--ink);
@@ -716,9 +723,14 @@ body:not([data-view="settings"]) #settings {
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
+  box-shadow: var(--edge-highlight);
+  transition: border-color var(--dur-micro), transform var(--dur-micro),
+    box-shadow var(--dur-micro);
 }
 .bookmark-row:hover {
   border-color: var(--copper);
+  transform: translateY(-1px);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .bookmark-select {
   flex: 0 0 auto;
@@ -850,12 +862,15 @@ body:not([data-view="settings"]) #settings {
   border-radius: 8px;
   cursor: pointer;
   background: var(--ink);
-  transition: border-color var(--dur-micro) ease, background var(--dur-micro) ease;
+  transition: border-color var(--dur-micro), background var(--dur-micro),
+    box-shadow var(--dur-micro);
 }
 .settings-theme-option:hover { border-color: var(--copper); }
 .settings-theme-option:has(input:checked) {
   border-color: var(--copper);
   background: color-mix(in srgb, var(--copper) 8%, var(--ink));
+  box-shadow: 0 0 0 1px var(--copper),
+    0 2px 12px color-mix(in srgb, var(--copper) 25%, transparent);
 }
 .settings-theme-option input[type="radio"] {
   appearance: none;
@@ -988,17 +1003,23 @@ body:not([data-view="settings"]) #settings {
   background: transparent;
   color: var(--bone);
   border: 1px solid var(--copper);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 7px 14px;
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   margin-top: 4px;
+  transition: background var(--dur-micro), color var(--dur-micro),
+    transform var(--dur-micro);
 }
 .setting-action:hover {
   background: var(--copper);
   color: var(--ink);
+  transform: translateY(-1px);
+}
+.setting-action:active {
+  transform: scale(0.98);
 }
 .setting-action:disabled {
   opacity: 0.4;
@@ -1017,6 +1038,18 @@ body:not([data-view="settings"]) #settings {
   display: flex;
   gap: 10px;
   margin-top: 4px;
+}
+.setting-pill {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px 2px;
+  font: 500 11px/1.6 ui-sans-serif, system-ui, sans-serif;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
 }
 .setting-error {
   margin: 8px 0 0;
@@ -1066,6 +1099,7 @@ body:not([data-view="settings"]) #settings {
 #peers-editor:focus {
   outline: none;
   border-color: var(--copper);
+  box-shadow: var(--focus-ring);
 }
 
 #tabs {
