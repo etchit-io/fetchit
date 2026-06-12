@@ -328,6 +328,17 @@ impl RelayTransport {
                     continue;
                 }
             };
+            // SSRF guard (T13): a contact-supplied hint pointing at loopback /
+            // link-local / RFC1918 / ULA space must not be dialed. Skip the
+            // blocked hint and try the next, mirroring the unreachable-relay
+            // fallback. The dev / FETCHIT_ALLOW_LOCAL_RELAY carve-out keeps
+            // localhost relays working in tests and dev.
+            if let Err(e) = crate::relay_http::guard_relay_url(&https_url).await {
+                last_err = Some(ChatError::MessageTransport(format!(
+                    "relay blocked {wss_key}: {e}"
+                )));
+                continue;
+            }
             let client = match self.get_or_create_pool_conn(wss_key, https_url).await {
                 Ok(c) => c,
                 Err(e) => {
