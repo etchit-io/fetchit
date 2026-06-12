@@ -105,6 +105,15 @@ impl StoreLayout {
     pub fn actor_identity_path(&self, handle: &str) -> PathBuf {
         self.fedi_dir.join(format!("{handle}.json.enc"))
     }
+
+    /// Path of the handle-resolution continuity ledger (M5.1): a JSON
+    /// map of canonical fediverse handle to the agent id it last
+    /// verifiably resolved to. Plaintext: every value in it is public
+    /// directory data.
+    #[must_use]
+    pub fn fedi_resolutions_path(&self) -> PathBuf {
+        self.fedi_dir.join("handle_resolutions.json")
+    }
 }
 
 /// Atomic plaintext-JSON write at 0600 perms.
