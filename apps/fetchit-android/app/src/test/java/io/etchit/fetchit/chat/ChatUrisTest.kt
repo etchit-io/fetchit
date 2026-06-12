@@ -34,4 +34,11 @@ class ChatUrisTest {
     fun nonHexSegmentReturnsNull() {
         assertNull(ChatUris.pairUriAgentId("x0x://pair/${"g".repeat(64)}"))
     }
+
+    @Test
+    fun uppercasePairUriIsNormalizedToLowercase() {
+        val upper = "A".repeat(64)
+        val uri = "x0x://pair/$upper?r=relay"
+        assertEquals(upper.lowercase(), ChatUris.pairUriAgentId(uri))
+    }
 }

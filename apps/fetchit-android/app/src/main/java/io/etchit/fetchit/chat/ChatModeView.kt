@@ -131,11 +131,28 @@ class ChatModeView(
         if (pushToStack) {
             if (screenStack.lastOrNull() != screen) screenStack.addLast(screen)
         }
-        container.removeAllViews()
         when (screen) {
-            is Screen.List -> inflateListScreen()
-            is Screen.Thread -> inflateThreadStub(screen.peer)
-            is Screen.Feed -> inflateFeedStub()
+            is Screen.List -> {
+                if (listView == null) {
+                    container.removeAllViews()
+                    inflateListScreen()
+                } else {
+                    // Re-attach the cached list view without re-inflating or
+                    // launching duplicate collectors.
+                    if (listView!!.parent == null) {
+                        container.removeAllViews()
+                        container.addView(listView)
+                    }
+                }
+            }
+            is Screen.Thread -> {
+                container.removeAllViews()
+                inflateThreadStub(screen.peer)
+            }
+            is Screen.Feed -> {
+                container.removeAllViews()
+                inflateFeedStub()
+            }
         }
     }
 
@@ -169,6 +186,7 @@ class ChatModeView(
                 val hasContacts = contacts.isNotEmpty()
                 rv.visibility = if (hasContacts) View.VISIBLE else View.GONE
                 emptyState.visibility = if (hasContacts) View.GONE else View.VISIBLE
+                addBtn.visibility = if (hasContacts) View.VISIBLE else View.GONE
                 if (hasContacts) {
                     adapter.submitContactList(contacts)
                 }

@@ -624,7 +624,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.bookmarkButton.visibility = chrome
         binding.kindText.visibility = chrome
         binding.closeButton.visibility = chrome
-        binding.settingsSheet.visibility = chrome
+        if (currentMode == Mode.BROWSE) binding.settingsSheet.visibility = chrome
 
         val insets = WindowCompat.getInsetsController(window, window.decorView)
         if (on) {
