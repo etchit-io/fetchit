@@ -6,8 +6,11 @@
 # DM delivery, then one peer migrates to the other's relay and we assert
 # the heal landed: the new relay serves the migrated peer's pair record,
 # the old relay serves a forwarding record, and a post-migration DM still
-# arrives. This is the live, joint-run end of Task 12 in the
-# reachability-v1 plan; it stands in for CI's #[ignore]-style opt-in.
+# arrives. The peer then migrates back home and we assert supersession:
+# the home relay's newer pair record retires its stale forwarding record
+# (GET reads 404) while delivery still lands. This is the live, joint-run
+# end of Task 12 in the reachability-v1 plan; it stands in for CI's
+# #[ignore]-style opt-in.
 #
 # Topology mirrors the m2_live env-contract style: it refuses to run
 # unless the live relays + vault passphrase are supplied, so a plain
@@ -227,6 +230,11 @@ http_ok_nonempty() {
     [[ -n "$body" ]]
 }
 
+# Echo the HTTP status code of GET `url` (000 on transport failure).
+http_status() {
+    curl -s -o /dev/null --max-time 10 -w '%{http_code}' "$1"
+}
+
 PASS_COUNT=0
 step_pass() {
     echo "[mission] step $1: PASS -- $2"
@@ -359,8 +367,10 @@ OUTBOX_B2="${WORKDIR}/outbox-b2.txt"; CURSOR_B2="${WORKDIR}/cursor-b2"
 # B re-homes on relay A (where it migrated); A stays on relay A.
 spawn_peer_chat "$DATA_B" "$PORT_B" "$RELAY_A" "$OUT_B2" "$ERR_B2" \
     "$NAME_B" "$AGENT_A" "$OUTBOX_B2" "$CURSOR_B2"
+CHAT_B2_PID="${PIDS[-1]}"
 spawn_peer_chat "$DATA_A" "$PORT_A" "$RELAY_A" "$OUT_A2" "$ERR_A2" \
     "$NAME_A" "$AGENT_B" "$OUTBOX_A2" "$CURSOR_A2"
+CHAT_A2_PID="${PIDS[-1]}"
 sleep 3
 
 MSG_POST="mission-post-migrate-${RUN_TAG}"
@@ -369,7 +379,57 @@ grep_within "$MSG_POST" "$OUT_B2" \
     || step_fail 5 "post-migration A->B DM not delivered"
 step_pass 5 "heal: pair-record at new relay, forwarding at old, DM delivered"
 
-# ── step 6: summary ───────────────────────────────────────────────────
+# Stop the step-5 readers before the return migration rebinds B again.
+kill "$CHAT_A2_PID" "$CHAT_B2_PID" 2>/dev/null || true
+sleep 2
+
+# ── step 6: return home -- newer pair record supersedes stale pointer ──
+
+# B migrates back to its original home relay. That re-publishes B's pair
+# record at relay B with a newer issued_at_ms than the stale step-4
+# forwarding record there, which must now read as absent (suppressed,
+# not removed), while the fresh forwarding record at relay A serves.
+run_peer "$DATA_B" "$PORT_B" "$RELAY_A" \
+    "${WORKDIR}/return-b.out" "${WORKDIR}/return-b.err" "$NAME_B" \
+    pair-migrate --to "$RELAY_B" \
+    || step_fail 6 "peer B pair-migrate back to relay B"
+RETURNED_TO="$(tr -d '\n' <"${WORKDIR}/return-b.out")"
+[[ "$RETURNED_TO" == "$RELAY_B" ]] \
+    || step_fail 6 "return migrate did not echo home relay (got '$RETURNED_TO')"
+
+# (a) B's pair record is re-asserted at its home relay.
+http_ok_nonempty "${RELAY_B%/}/v1/pair-record/${AGENT_B}" \
+    || step_fail 6 "pair-record for B absent at home relay B after return"
+# (b) the stale step-4 forwarding record at home is superseded: 404.
+FWD_HOME_STATUS="$(http_status "${RELAY_B%/}/v1/forwarding/${AGENT_B}")"
+[[ "$FWD_HOME_STATUS" == "404" ]] \
+    || step_fail 6 "stale forwarding at home relay B not superseded (got ${FWD_HOME_STATUS}, want 404)"
+# (c) the fresh return-leg forwarding record at relay A serves.
+http_ok_nonempty "${RELAY_A%/}/v1/forwarding/${AGENT_B}" \
+    || step_fail 6 "forwarding record for B absent at relay A after return"
+
+# (d) delivery after the return: B reads from home again; A's send walks
+# the relay-A Moved pointer (or hits home directly) and must land either
+# way -- deposits at home buffer+Ack instead of bouncing on the stale
+# pointer.
+OUT_A3="${WORKDIR}/chat-a3.out"; ERR_A3="${WORKDIR}/chat-a3.err"
+OUT_B3="${WORKDIR}/chat-b3.out"; ERR_B3="${WORKDIR}/chat-b3.err"
+OUTBOX_A3="${WORKDIR}/outbox-a3.txt"; CURSOR_A3="${WORKDIR}/cursor-a3"
+OUTBOX_B3="${WORKDIR}/outbox-b3.txt"; CURSOR_B3="${WORKDIR}/cursor-b3"
+
+spawn_peer_chat "$DATA_B" "$PORT_B" "$RELAY_B" "$OUT_B3" "$ERR_B3" \
+    "$NAME_B" "$AGENT_A" "$OUTBOX_B3" "$CURSOR_B3"
+spawn_peer_chat "$DATA_A" "$PORT_A" "$RELAY_A" "$OUT_A3" "$ERR_A3" \
+    "$NAME_A" "$AGENT_B" "$OUTBOX_A3" "$CURSOR_A3"
+sleep 3
+
+MSG_RETURN="mission-return-home-${RUN_TAG}"
+echo "$MSG_RETURN" >>"$OUTBOX_A3"
+grep_within "$MSG_RETURN" "$OUT_B3" \
+    || step_fail 6 "post-return A->B DM not delivered"
+step_pass 6 "return home: stale pointer superseded (404), records sane, DM delivered"
+
+# ── summary ───────────────────────────────────────────────────────────
 
 echo "[mission] ----------------------------------------"
 echo "[mission] summary:"
@@ -378,6 +438,7 @@ echo "[mission]   2 cross-import ................ PASS"
 echo "[mission]   3 bidirectional DM ............ PASS"
 echo "[mission]   4 region change (migrate) ..... PASS"
 echo "[mission]   5 heal (records + delivery) ... PASS"
+echo "[mission]   6 return home (supersede) ..... PASS"
 echo "[mission] ----------------------------------------"
 echo "[mission] ALL ${PASS_COUNT} STEPS PASSED"
 exit 0
