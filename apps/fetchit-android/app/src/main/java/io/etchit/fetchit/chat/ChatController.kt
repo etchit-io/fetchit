@@ -1,13 +1,38 @@
 package io.etchit.fetchit.chat
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
 import java.io.File
+
+/**
+ * Lifecycle of the inbound event pump, observable by the UI. A pump that
+ * stopped on ERROR means inbound delivery silently halted (no reconnect in
+ * v1) — the chat surface shows its degraded-connection pill off this state.
+ */
+enum class PumpState {
+    /** Chat was never started this process. */
+    IDLE,
+
+    /** The pump is draining inbound events. */
+    RUNNING,
+
+    /** The relay shut down cleanly or [ChatController.disconnect] ran. */
+    STOPPED_CLEAN,
+
+    /** The pump died on an unexpected error; inbound delivery has halted. */
+    STOPPED_ERROR,
+}
 
 /**
  * Process-scoped chat runtime.
@@ -34,29 +59,50 @@ class ChatController(private val appContext: Context, private val scope: Corouti
 
     @Volatile private var gateway: ChatGateway? = null
     private var pump: Job? = null
+    private val connectMutex = Mutex()
+
+    private val _pumpState = MutableStateFlow(PumpState.IDLE)
+
+    /** Observable pump lifecycle; see [PumpState] for the contract. */
+    val pumpState: StateFlow<PumpState> = _pumpState.asStateFlow()
 
     /**
      * Returns the active [ChatGateway], connecting to [DEFAULT_RELAY] on first
-     * call. Subsequent calls are cheap (cached). Thread-safe via `@Volatile`
-     * read + coroutine suspension on the connect path.
+     * call. Subsequent calls are cheap (cached `@Volatile` fast path). The
+     * connect path is serialized behind [connectMutex] with a double-check so
+     * concurrent entries (mode switch, pair deep link, add-contact) cannot
+     * double-connect and leak the first client's pump.
      */
     suspend fun ensureGateway(): ChatGateway {
         gateway?.let { return it }
-        val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
-        val client = ChatClient.connect(
-            DEFAULT_RELAY,
-            dataDir.absolutePath,
-            ChatSecrets(appContext).vaultPass(),
-        )
-        val gw = FfiChatGateway(client)
-        gateway = gw
-        pump = pumpEvents(gw, conversations, feed, scope)
-        return gw
+        connectMutex.withLock {
+            gateway?.let { return it }
+            val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
+            val client = ChatClient.connect(
+                DEFAULT_RELAY,
+                dataDir.absolutePath,
+                ChatSecrets(appContext).vaultPass(),
+            )
+            val gw = FfiChatGateway(client)
+            gateway = gw
+            _pumpState.value = PumpState.RUNNING
+            pump = pumpEvents(
+                gw,
+                conversations,
+                feed,
+                scope,
+                onStopped = { error ->
+                    _pumpState.value =
+                        if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
+                },
+            )
+            return gw
+        }
     }
 
     /**
      * Drop the relay connection and cancel the event pump.
-     * Safe to call when the gateway was never started (no-op).
+     * Safe and idempotent when the gateway was never started.
      * [ensureGateway] can reconnect after this.
      */
     fun disconnect() {
@@ -64,6 +110,11 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         gateway = null
         pump?.cancel()
         pump = null
+        // A deliberate teardown reads as clean even after an error stop, but
+        // a controller that never connected stays IDLE.
+        if (_pumpState.value != PumpState.IDLE) {
+            _pumpState.value = PumpState.STOPPED_CLEAN
+        }
     }
 
     companion object {
@@ -84,6 +135,13 @@ class ChatController(private val appContext: Context, private val scope: Corouti
          *   [android.text.Html.fromHtml] (requires Android framework — not
          *   available in plain JUnit). Tests pass a regex-based stripper to
          *   keep them fast and hermetic.
+         * @param onStopped Invoked exactly once when the loop exits: `true`
+         *   when an unexpected error killed it (inbound delivery has halted;
+         *   no reconnect in v1), `false` on a clean null shutdown. NOT invoked
+         *   when the pump's Job is cancelled (deliberate teardown owns its own
+         *   state).
+         * @param logWarn Diagnostic sink for the error path. Defaults to
+         *   logcat; tests inject a no-op to stay hermetic.
          */
         fun pumpEvents(
             gw: ChatGateway,
@@ -95,9 +153,21 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                     .toString()
                     .trim()
             },
+            onStopped: (error: Boolean) -> Unit = {},
+            logWarn: (String, Throwable) -> Unit = { msg, t ->
+                android.util.Log.w("fetchit.chat", msg, t)
+            },
         ): Job = scope.launch {
             while (true) {
-                val ev = runCatching { gw.nextEvent() }.getOrNull() ?: break
+                val ev = try {
+                    gw.nextEvent()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logWarn("event pump stopped on error", e)
+                    onStopped(true)
+                    return@launch
+                } ?: break
                 when (ev) {
                     is ChatEventFfi.Dm -> convo.append(
                         ev.fromAgentIdHex,
@@ -112,6 +182,7 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                     is ChatEventFfi.PublicPost -> decodePost(ev, htmlStripper)?.let(feed::append)
                 }
             }
+            onStopped(false)
         }
 
         /**

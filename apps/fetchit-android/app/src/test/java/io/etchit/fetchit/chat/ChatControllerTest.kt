@@ -61,4 +61,46 @@ class ChatControllerTest {
         assertEquals("hi there", post.body)
         assertEquals("https://m.example/u/x", post.actorUrl)
     }
+
+    @Test
+    fun pumpReportsErrorStop() = runTest {
+        val throwingGateway = object : ChatGateway {
+            override fun agentIdHex() = "f".repeat(64)
+            override suspend fun pairShareUri() = ""
+            override suspend fun importPairUri(uri: String) {}
+            override suspend fun sendDm(to: String, body: String, senderName: String): String? = null
+            override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
+            override fun disconnect() {}
+        }
+        var stopped: Boolean? = null
+        val pump = ChatController.pumpEvents(
+            throwingGateway,
+            ConversationStore(),
+            FeedStore(),
+            scope = this,
+            htmlStripper = ::stripHtml,
+            onStopped = { stopped = it },
+            logWarn = { _, _ -> },
+        )
+        pump.join()
+        assertEquals(true, stopped)
+    }
+
+    @Test
+    fun pumpReportsCleanStop() = runTest {
+        val gw = FakeGateway()
+        var stopped: Boolean? = null
+        val pump = ChatController.pumpEvents(
+            gw,
+            ConversationStore(),
+            FeedStore(),
+            scope = this,
+            htmlStripper = ::stripHtml,
+            onStopped = { stopped = it },
+            logWarn = { _, _ -> },
+        )
+        gw.events.send(null)
+        pump.join()
+        assertEquals(false, stopped)
+    }
 }
