@@ -103,7 +103,7 @@ pub struct ChatClient {
 /// Cycle break trace: after abort, each task drops its captured `Client`
 /// clone; once the Kotlin side releases the `Arc<ChatClient>` the struct's
 /// `inner` drops too; `Router` and `RelayTransport` refcounts hit zero; the
-/// transport's own `Drop` closes the WebSocket (relay_transport.rs ~380-392).
+/// transport's own `Drop` closes the WebSocket (see `impl Drop for RelayTransport` in relay_transport.rs).
 impl Drop for ChatClient {
     fn drop(&mut self) {
         self.pump_abort.abort();
