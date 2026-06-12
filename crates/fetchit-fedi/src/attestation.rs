@@ -51,15 +51,15 @@ pub struct MlDsaAttestation {
 /// portable across any base64 consumer (including future JSON-LD
 /// verifiers). The `+/` alphabet matches `ActivityPub` HTTP-Signatures
 /// + Mastodon `publicKeyPem` conventions.
-mod b64 {
+pub(crate) mod b64 {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
         STANDARD.encode(bytes).serialize(serializer)
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<u8>, D::Error> {
         let s = String::deserialize(deserializer)?;
