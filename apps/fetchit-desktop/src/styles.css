@@ -195,7 +195,6 @@ body {
 :focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-  border-radius: 4px;
 }
 
 * {
@@ -939,6 +938,7 @@ body:not([data-view="settings"]) #settings {
 .setting-row input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--copper);
   outline-offset: 1px;
+  box-shadow: none;
 }
 .setting-stats {
   margin: 14px 0;
@@ -1176,10 +1176,8 @@ body:not([data-view="settings"]) #settings {
   font: 600 14px/1 var(--font-mono, monospace);
   cursor: pointer;
 }
-.tab-empty-cta:hover,
-.tab-empty-cta:focus-visible {
+.tab-empty-cta:hover {
   filter: brightness(1.08);
-  outline: none;
 }
 .tab-empty-hint {
   margin: 0;

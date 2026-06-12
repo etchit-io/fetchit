@@ -127,7 +127,6 @@ In `body[data-theme="light"]` add:
 :focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-  border-radius: 4px;
 }
 
 * {
