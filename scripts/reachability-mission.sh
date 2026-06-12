@@ -153,9 +153,9 @@ start_x0xd() {
         curl -fsS --max-time 5 "http://127.0.0.1:${port}/health" -o /dev/null
 }
 
-# Run the peer binary once (non-interactive subcommand) and capture its
-# stderr (diagnostics) + stdout (machine-readable line). Sets globals
-# PEER_STDOUT / PEER_STDERR to the file paths.
+# Run the peer binary once (non-interactive subcommand), capturing stdout
+# (machine-readable line) and stderr (diagnostics) to the given out/err
+# file paths.
 PEER_BIN=""
 run_peer() {
     local data_dir="$1"
@@ -250,6 +250,10 @@ PEER_BIN="${REPO_ROOT}/target/debug/fetchit-chat-peer"
 
 PORT_A="$(pick_free_port)"
 PORT_B="$(pick_free_port)"
+# bind-0-close can hand back the same port twice; repick until distinct.
+while [[ "$PORT_B" == "$PORT_A" ]]; do
+    PORT_B="$(pick_free_port)"
+done
 echo "[mission] x0xd A on :${PORT_A} (name ${NAME_A})"
 echo "[mission] x0xd B on :${PORT_B} (name ${NAME_B})"
 
