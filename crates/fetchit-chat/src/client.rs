@@ -2958,6 +2958,148 @@ impl Client {
         ))
     }
 
+    /// Mint the actor identity AND its v2 attestation in one step. The
+    /// caller supplies the published profile address and the active
+    /// relay (the v3 share-URI fields); both become part of the signed
+    /// binding. The v1 attestation is still minted and emitted for
+    /// actor-document compatibility with pre-M5 verifiers.
+    ///
+    /// # Errors
+    ///
+    /// Same surface as [`Self::mint_actor_identity`], plus
+    /// signing-input validation of `profile_addr` / `relay_hint`.
+    pub async fn mint_actor_identity_v2(
+        &self,
+        handle: &str,
+        domain: &str,
+        passphrase: Option<&str>,
+        profile_addr: &str,
+        relay_hint: &str,
+        hint_epoch_ms: u64,
+    ) -> Result<fetchit_fedi::actor::ActorIdentity> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+
+        validate_actor_handle(handle)?;
+        let actor_url = build_actor_url(domain, handle)?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+
+        if chat.layout.actor_identity_path(handle).exists() {
+            log::warn!(
+                "[chat] mint_actor_identity_v2 called on handle {handle:?} which already has \
+                 a persisted vault; the prior vault will be overwritten. Consider \
+                 upgrade_actor_attestation_v2 instead."
+            );
+        }
+
+        let material = crate::fedi_identity::generate_rsa_2048().await?;
+        let attestation = crate::fedi_identity::sign_actor_attestation(
+            handle,
+            &actor_url,
+            &agent_id_hex,
+            &material.spki_der,
+            chat.signer.as_ref(),
+        )
+        .await?;
+        let attestation_v2 = crate::fedi_identity::sign_actor_attestation_v2(
+            handle,
+            &actor_url,
+            &agent_id_hex,
+            &material.spki_der,
+            profile_addr,
+            relay_hint,
+            hint_epoch_ms,
+            chat.signer.as_ref(),
+        )
+        .await?;
+
+        let vault = crate::fedi_vault::ActorIdentityVault {
+            handle: handle.to_string(),
+            actor_url: actor_url.clone(),
+            agent_id_hex: agent_id_hex.clone(),
+            rsa_priv_pem: material.priv_pem.clone(),
+            spki_der: material.spki_der.clone(),
+            ml_dsa_attestation: attestation.clone(),
+            ml_dsa_attestation_v2: Some(attestation_v2.clone()),
+        };
+        crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
+
+        Ok(fetchit_fedi::actor::ActorIdentity::new(
+            handle.to_string(),
+            actor_url,
+            agent_id_hex,
+            material.priv_pem,
+            material.spki_der,
+            attestation,
+        )
+        .with_attestation_v2(attestation_v2))
+    }
+
+    /// Re-sign the v2 attestation in place: same handle, same actor
+    /// URL, SAME RSA keypair (HTTP-Signature key continuity is the
+    /// invariant; this function never regenerates RSA material).
+    /// Returns `false` without touching the vault when the stored v2
+    /// attestation already covers the same `profile_addr` and
+    /// `relay_hint`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ChatError::Invalid`] when chat state is uninitialised, the
+    ///   handle fails validation, or no identity exists for `handle`.
+    /// - Propagates master-key resolution, vault-decrypt, signing, and
+    ///   vault-write failures verbatim.
+    pub async fn upgrade_actor_attestation_v2(
+        &self,
+        handle: &str,
+        passphrase: Option<&str>,
+        profile_addr: &str,
+        relay_hint: &str,
+        hint_epoch_ms: u64,
+    ) -> Result<bool> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        validate_actor_handle(handle)?;
+
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+
+        let Some(mut vault) =
+            crate::fedi_vault::load_actor_identity(handle, &master, &chat.layout)?
+        else {
+            return Err(ChatError::Invalid(format!(
+                "no actor identity for {handle}"
+            )));
+        };
+        if let Some(v2) = &vault.ml_dsa_attestation_v2 {
+            if v2.profile_addr == profile_addr && v2.relay_hint == relay_hint {
+                return Ok(false);
+            }
+        }
+
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+        let attestation_v2 = crate::fedi_identity::sign_actor_attestation_v2(
+            handle,
+            &vault.actor_url,
+            &agent_id_hex,
+            &vault.spki_der,
+            profile_addr,
+            relay_hint,
+            hint_epoch_ms,
+            chat.signer.as_ref(),
+        )
+        .await?;
+        vault.ml_dsa_attestation_v2 = Some(attestation_v2);
+        crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
+        Ok(true)
+    }
+
     /// Load a previously-minted [`fetchit_fedi::actor::ActorIdentity`]
     /// from the fedi vault. Returns `Ok(None)` when no vault file
     /// exists for the handle (the caller's "first run / not yet
@@ -2990,14 +3132,18 @@ impl Client {
         else {
             return Ok(None);
         };
-        Ok(Some(fetchit_fedi::actor::ActorIdentity::from_persisted(
+        let identity = fetchit_fedi::actor::ActorIdentity::from_persisted(
             vault.handle,
             vault.rsa_priv_pem,
             vault.spki_der,
             vault.ml_dsa_attestation,
             vault.actor_url,
             vault.agent_id_hex,
-        )))
+        );
+        Ok(Some(match vault.ml_dsa_attestation_v2 {
+            Some(att2) => identity.with_attestation_v2(att2),
+            None => identity,
+        }))
     }
 
     /// Publish a public post to the fediverse: wrap it as an
