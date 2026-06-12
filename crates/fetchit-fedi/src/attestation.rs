@@ -78,6 +78,48 @@ impl MlDsaAttestation {
     }
 }
 
+/// Domain separator for the v2 attestation signing input. v2 extends
+/// the attested tuple with the profile address and relay hint so a
+/// verified actor record is sufficient to bootstrap a private contact.
+///
+/// **Frozen.** Same rule as [`DOMAIN_SEPARATOR`]: changing it is a v3
+/// migration, not a patch.
+pub const DOMAIN_SEPARATOR_V2: &[u8] = b"fetchit-fedi-actor-attestation-v2";
+
+/// Hard cap on `relay_hint` byte length. Mirrors
+/// `fetchit-chat::card::MAX_HINT_URL_LEN` (this crate sits below
+/// fetchit-chat in the dependency graph, so the value is restated).
+pub const MAX_RELAY_HINT_LEN: usize = 256;
+
+/// v2 actor attestation: the signed binding now also covers the
+/// Autonomi profile address and a relay hint, making the record a
+/// self-contained pointer for the v3 share-URI bootstrap.
+///
+/// Wire shape: JSON with base64 byte fields (same [`b64`] helper as
+/// v1) plus an explicit integer `version` so consumers dispatch
+/// without sniffing fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorAttestationV2 {
+    /// Always `2`. [`verify_binding_v2`] rejects anything else.
+    pub version: u8,
+    /// Autonomi address of the actor's profile manifest, lowercase 64-hex.
+    pub profile_addr: String,
+    /// Relay URL serving the actor's profile-index record. Bounded by
+    /// [`MAX_RELAY_HINT_LEN`]; URL well-formedness is the consumer's
+    /// check (it fails closed to the public-only rendering).
+    pub relay_hint: String,
+    /// Freshness stamp. Same monotonicity semantics as card v2
+    /// rendezvous hints: registries and clients reject updates whose
+    /// epoch does not strictly increase.
+    pub hint_epoch_ms: u64,
+    /// ML-DSA-65 public key bytes (raw).
+    #[serde(with = "b64")]
+    pub ml_dsa_pubkey: Vec<u8>,
+    /// ML-DSA-65 signature over [`signing_input_v2`].
+    #[serde(with = "b64")]
+    pub signature: Vec<u8>,
+}
+
 /// Canonical signing-input bytes for an Actor attestation.
 ///
 /// Layout:
@@ -163,6 +205,79 @@ fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SigningInputError> {
     Ok(())
 }
 
+/// Canonical signing-input bytes for a v2 attestation.
+///
+/// Layout:
+/// ```text
+/// DOMAIN_SEPARATOR_V2
+/// || u32_be(len(handle))         || handle
+/// || u32_be(len(actor_url))      || actor_url
+/// || u32_be(len(agent_id_hex))   || agent_id_hex
+/// || u32_be(len(rsa_pubkey_der)) || rsa_pubkey_der
+/// || u32_be(len(profile_addr))   || profile_addr
+/// || u32_be(len(relay_hint))     || relay_hint
+/// || u64_be(hint_epoch_ms)
+/// ```
+///
+/// The first four fields carry the same constraints as
+/// [`signing_input`] (they are the same wire format, restated under
+/// the v2 domain separator). `profile_addr` must be lowercase 64-hex.
+/// `relay_hint` must be non-empty and at most [`MAX_RELAY_HINT_LEN`]
+/// bytes. `hint_epoch_ms` is fixed-width 8-byte big-endian, no length
+/// prefix.
+///
+/// # Errors
+/// A [`SigningInputError`] variant on any field-constraint violation.
+pub fn signing_input_v2(
+    handle: &str,
+    actor_url: &url::Url,
+    agent_id_hex: &str,
+    rsa_pubkey_der: &[u8],
+    profile_addr: &str,
+    relay_hint: &str,
+    hint_epoch_ms: u64,
+) -> Result<Vec<u8>, SigningInputError> {
+    if handle.is_empty() {
+        return Err(SigningInputError::EmptyHandle);
+    }
+    if !is_lowercase_64_hex(agent_id_hex) {
+        return Err(SigningInputError::InvalidAgentIdHex {
+            len: agent_id_hex.len(),
+        });
+    }
+    if !is_lowercase_64_hex(profile_addr) {
+        return Err(SigningInputError::InvalidProfileAddr {
+            len: profile_addr.len(),
+        });
+    }
+    if relay_hint.is_empty() || relay_hint.len() > MAX_RELAY_HINT_LEN {
+        return Err(SigningInputError::InvalidRelayHint {
+            len: relay_hint.len(),
+        });
+    }
+
+    let actor_url_str = actor_url.as_str();
+    let total = DOMAIN_SEPARATOR_V2
+        .len()
+        .saturating_add(4 + handle.len())
+        .saturating_add(4 + actor_url_str.len())
+        .saturating_add(4 + agent_id_hex.len())
+        .saturating_add(4 + rsa_pubkey_der.len())
+        .saturating_add(4 + profile_addr.len())
+        .saturating_add(4 + relay_hint.len())
+        .saturating_add(8);
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(DOMAIN_SEPARATOR_V2);
+    push_lp(&mut out, handle.as_bytes())?;
+    push_lp(&mut out, actor_url_str.as_bytes())?;
+    push_lp(&mut out, agent_id_hex.as_bytes())?;
+    push_lp(&mut out, rsa_pubkey_der)?;
+    push_lp(&mut out, profile_addr.as_bytes())?;
+    push_lp(&mut out, relay_hint.as_bytes())?;
+    out.extend_from_slice(&hint_epoch_ms.to_be_bytes());
+    Ok(out)
+}
+
 /// Errors from constructing the canonical signing input.
 #[derive(Debug, Error)]
 pub enum SigningInputError {
@@ -183,6 +298,18 @@ pub enum SigningInputError {
     /// or wrong-length input silently breaks signature verification.
     #[error("attestation agent_id_hex must be lowercase 64-hex (got len {len})")]
     InvalidAgentIdHex {
+        /// Length of the offending input in bytes.
+        len: usize,
+    },
+    /// `profile_addr` was not lowercase 64-hex (v2 only).
+    #[error("attestation profile_addr must be lowercase 64-hex (got len {len})")]
+    InvalidProfileAddr {
+        /// Length of the offending input in bytes.
+        len: usize,
+    },
+    /// `relay_hint` was empty or exceeded [`MAX_RELAY_HINT_LEN`] (v2 only).
+    #[error("attestation relay_hint must be 1..=256 bytes (got {len})")]
+    InvalidRelayHint {
         /// Length of the offending input in bytes.
         len: usize,
     },
@@ -529,5 +656,124 @@ mod tests {
             matches!(err, AttestationVerifyError::SignatureInvalid),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn v2_domain_separator_is_frozen() {
+        assert_eq!(DOMAIN_SEPARATOR_V2, b"fetchit-fedi-actor-attestation-v2");
+    }
+
+    #[test]
+    fn signing_input_v2_layout_is_canonical() {
+        let relay = "https://relay.example:8088/";
+        let profile_addr = "a".repeat(64);
+        let bytes = signing_input_v2(
+            "josh",
+            &url("https://etchit.io/actors/josh"),
+            VALID_AGENT_HEX,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            &profile_addr,
+            relay,
+            1_750_000_000_000,
+        )
+        .unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(DOMAIN_SEPARATOR_V2);
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(b"josh");
+        expected.extend_from_slice(&29u32.to_be_bytes());
+        expected.extend_from_slice(b"https://etchit.io/actors/josh");
+        expected.extend_from_slice(&64u32.to_be_bytes());
+        expected.extend_from_slice(VALID_AGENT_HEX.as_bytes());
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        expected.extend_from_slice(&64u32.to_be_bytes());
+        expected.extend_from_slice(profile_addr.as_bytes());
+        expected.extend_from_slice(&u32::try_from(relay.len()).unwrap().to_be_bytes());
+        expected.extend_from_slice(relay.as_bytes());
+        expected.extend_from_slice(&1_750_000_000_000u64.to_be_bytes());
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn signing_input_v2_differs_when_any_field_changes() {
+        let mk = |profile: &str, relay: &str, epoch: u64| {
+            signing_input_v2(
+                "josh",
+                &url("https://etchit.io/actors/josh"),
+                VALID_AGENT_HEX,
+                &[0x01],
+                profile,
+                relay,
+                epoch,
+            )
+            .unwrap()
+        };
+        let base = mk(&"a".repeat(64), "https://relay.example/", 7);
+        assert_ne!(base, mk(&"b".repeat(64), "https://relay.example/", 7));
+        assert_ne!(base, mk(&"a".repeat(64), "https://other.example/", 7));
+        assert_ne!(base, mk(&"a".repeat(64), "https://relay.example/", 8));
+    }
+
+    #[test]
+    fn signing_input_v2_rejects_bad_profile_addr() {
+        for bad in ["UPPERCASE", "a", "", "g"] {
+            let r = signing_input_v2(
+                "josh",
+                &url("https://etchit.io/actors/josh"),
+                VALID_AGENT_HEX,
+                &[0x01],
+                bad,
+                "https://relay.example/",
+                1,
+            );
+            assert!(
+                matches!(r, Err(SigningInputError::InvalidProfileAddr { .. })),
+                "{bad:?} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn signing_input_v2_rejects_empty_and_oversized_relay_hint() {
+        let mk = |hint: &str| {
+            signing_input_v2(
+                "josh",
+                &url("https://etchit.io/actors/josh"),
+                VALID_AGENT_HEX,
+                &[0x01],
+                &"a".repeat(64),
+                hint,
+                1,
+            )
+        };
+        assert!(matches!(
+            mk(""),
+            Err(SigningInputError::InvalidRelayHint { .. })
+        ));
+        let long = format!("https://{}/", "x".repeat(MAX_RELAY_HINT_LEN));
+        assert!(matches!(
+            mk(&long),
+            Err(SigningInputError::InvalidRelayHint { .. })
+        ));
+    }
+
+    #[test]
+    fn attestation_v2_round_trips_through_json() {
+        let a = ActorAttestationV2 {
+            version: 2,
+            profile_addr: "a".repeat(64),
+            relay_hint: "https://relay.example/".into(),
+            hint_epoch_ms: 5,
+            ml_dsa_pubkey: vec![0xDE, 0xAD],
+            signature: vec![1, 2, 3],
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("\"version\":2"), "got {json}");
+        assert!(json.contains("\"3q0=\""), "got {json}");
+        let back: ActorAttestationV2 = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
     }
 }
