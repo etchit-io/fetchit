@@ -24,7 +24,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import io.etchit.fetchit.QrShare
 import io.etchit.fetchit.R
-import io.etchit.fetchit.SettingsStore
+
 import io.etchit.fetchit.fetchitApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -101,8 +101,6 @@ class ChatModeView(
     private var sendJob: Job? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-
-    private val settingsStore by lazy { SettingsStore(context) }
 
     // ── public entry points ────────────────────────────────────────────
 
@@ -528,15 +526,8 @@ class ChatModeView(
         is ChatFfiException.Network -> e.reason
     }
 
-    /**
-     * Returns the user's chosen display name, or falls back to
-     * "agent-" + the first 6 hex chars of [gw]'s agent id when unset.
-     */
-    private fun displayNameOrDefault(gw: ChatGateway): String {
-        val saved = settingsStore.chatDisplayName()
-        if (saved.isNotEmpty()) return saved
-        return "agent-${gw.agentIdHex().take(6)}"
-    }
+    private fun displayNameOrDefault(gw: ChatGateway): String =
+        io.etchit.fetchit.chat.displayNameOrDefault(context, gw.agentIdHex())
 
     // ── message adapter ───────────────────────────────────────────────
 

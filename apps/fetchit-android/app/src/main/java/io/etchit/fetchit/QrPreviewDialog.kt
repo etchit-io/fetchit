@@ -25,6 +25,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import io.etchit.fetchit.chat.ChatMessage
+import io.etchit.fetchit.chat.displayNameOrDefault
 import kotlinx.coroutines.launch
 import uniffi.fetchit_ffi.ChatFfiException
 import java.io.File
@@ -126,6 +127,13 @@ fun showQrPreviewDialog(
                 ).show()
                 return@setOnClickListener
             }
+            // Resolve an Activity-level anchor once so in-flight Snackbars survive
+            // dialog dismissal — Snackbar.make on a detached view crashes or
+            // swallows feedback if the user dismisses while ensureGateway/sendDm
+            // is still in progress.
+            val anchorView: View =
+                (context as? android.app.Activity)
+                    ?.findViewById(android.R.id.content) ?: view
             val names = contacts.map { c ->
                 "${c.displayName} · ${c.agentIdHex.take(8)}…"
             }.toTypedArray()
@@ -145,13 +153,10 @@ fun showQrPreviewDialog(
                                     is ChatFfiException.Network -> ffi.reason
                                 }
                             } ?: e.message.orEmpty()
-                            Snackbar.make(view, reason, Snackbar.LENGTH_LONG).show()
+                            Snackbar.make(anchorView, reason, Snackbar.LENGTH_LONG).show()
                             return@launch
                         }
-                        val senderName = run {
-                            val saved = io.etchit.fetchit.SettingsStore(context).chatDisplayName()
-                            if (saved.isNotEmpty()) saved else "agent-${gw.agentIdHex().take(6)}"
-                        }
+                        val senderName = displayNameOrDefault(context, gw.agentIdHex())
                         val body = "autonomi://$address"
                         val result = runCatching { gw.sendDm(contact.agentIdHex, body, senderName) }
                         result.onSuccess { msgId ->
@@ -164,7 +169,7 @@ fun showQrPreviewDialog(
                                     messageId = msgId,
                                 ),
                             )
-                            Snackbar.make(view, context.getString(R.string.share_sent_in_chat), Snackbar.LENGTH_LONG)
+                            Snackbar.make(anchorView, context.getString(R.string.share_sent_in_chat), Snackbar.LENGTH_LONG)
                                 .setAction(context.getString(R.string.share_open_thread)) {
                                     dialog.dismiss()
                                     onOpenThread(contact.agentIdHex)
@@ -177,7 +182,7 @@ fun showQrPreviewDialog(
                                     is ChatFfiException.Network -> ffi.reason
                                 }
                             } ?: e.message.orEmpty()
-                            Snackbar.make(view, reason, Snackbar.LENGTH_LONG).show()
+                            Snackbar.make(anchorView, reason, Snackbar.LENGTH_LONG).show()
                         }
                     }
                 }
