@@ -26,6 +26,10 @@ pub struct Metrics {
     envelopes_delivered_total: AtomicU64,
     /// Envelopes that went into transit because recipient was offline.
     envelopes_buffered_total: AtomicU64,
+    /// Deposits answered with `Moved` because the recipient migrated
+    /// away (no live session + live forwarding record) — the T7b
+    /// departed signal. A rising rate is users changing home relays.
+    envelopes_moved_total: AtomicU64,
     /// Envelopes the sweeper evicted past TTL without delivering — a
     /// proxy for "recipient never came back to THIS relay". A rising
     /// counter is the operator-visible signal that peers are routing
@@ -77,6 +81,7 @@ impl Metrics {
             envelopes_sent_total: AtomicU64::new(0),
             envelopes_delivered_total: AtomicU64::new(0),
             envelopes_buffered_total: AtomicU64::new(0),
+            envelopes_moved_total: AtomicU64::new(0),
             envelopes_dropped_ttl_total: AtomicU64::new(0),
             auth_challenges_issued_total: AtomicU64::new(0),
             auth_verify_ok_total: AtomicU64::new(0),
@@ -123,6 +128,11 @@ impl Metrics {
     pub fn envelope_buffered(&self) {
         self.envelopes_buffered_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the moved-deposits counter (T7b departed-recipient signal).
+    pub fn envelope_moved(&self) {
+        self.envelopes_moved_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Bump the dropped-by-TTL counter by `count`. Called from the
@@ -243,7 +253,7 @@ impl Metrics {
     /// table. Split out of [`Self::render_prometheus`] so adding a
     /// counter doesn't push the render function over the workspace
     /// clippy too-many-lines budget.
-    fn counter_snapshot(&self) -> [(&'static str, &'static str, u64); 12] {
+    fn counter_snapshot(&self) -> [(&'static str, &'static str, u64); 13] {
         [
             (
                 "fetchit_relay_envelopes_sent_total",
@@ -259,6 +269,11 @@ impl Metrics {
                 "fetchit_relay_envelopes_buffered_total",
                 "Envelopes routed into the transit buffer (offline recipient)",
                 self.envelopes_buffered_total.load(Ordering::Relaxed),
+            ),
+            (
+                "fetchit_relay_envelopes_moved_total",
+                "Deposits answered with Moved (recipient migrated, live forwarding record)",
+                self.envelopes_moved_total.load(Ordering::Relaxed),
             ),
             (
                 "fetchit_relay_envelopes_dropped_ttl_total",

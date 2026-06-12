@@ -8,8 +8,8 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use fetchit_relay_proto::{
-    from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Ping, Pong,
-    Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, TransitEnvelope, WatchPresence,
+    from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Moved, Ping,
+    Pong, Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, TransitEnvelope, WatchPresence,
 };
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::Deserialize;
@@ -328,14 +328,30 @@ fn handle_client_frame(
             );
             if direct_pushed {
                 state.metrics.envelope_delivered();
-            } else if state.transit.enqueue(to, envelope).is_err() {
-                state.metrics.throttle_per_recipient();
-                let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
-                    retry_after_ms: 5_000,
-                    reason: ThrottleReason::PerRecipientCapacity,
-                }));
-                return true;
             } else {
+                // T7b: a recipient that migrated away leaves a signed
+                // forwarding record behind. Buffering here would be a
+                // silent black hole — the recipient no longer reads this
+                // relay, yet the deposit would Ack — so answer `Moved`
+                // and let the SENDER re-resolve the signed record and
+                // retry at the new relay. Offline WITHOUT a forwarding
+                // record keeps today's buffer+Ack: `Moved` fires only on
+                // the unambiguous departed signal, and only while the
+                // record is live (the TB2 TTL sweep bounds it).
+                let to_hex = hex::encode(to.as_bytes());
+                if state.forwarding.get_live(&to_hex, now_ms()).is_some() {
+                    state.metrics.envelope_moved();
+                    let _ = self_tx.try_send(ServerFrame::Moved(Moved { dedupe_key }));
+                    return true;
+                }
+                if state.transit.enqueue(to, envelope).is_err() {
+                    state.metrics.throttle_per_recipient();
+                    let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+                        retry_after_ms: 5_000,
+                        reason: ThrottleReason::PerRecipientCapacity,
+                    }));
+                    return true;
+                }
                 state.metrics.envelope_buffered();
             }
             state.metrics.envelope_sent();

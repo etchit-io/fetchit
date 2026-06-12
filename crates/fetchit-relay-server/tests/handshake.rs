@@ -8,13 +8,20 @@
     clippy::similar_names
 )]
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use fetchit_relay_proto::pair_record::{
+    forwarding_signing_input, pair_signing_input, ForwardingRecordV1, PairRecordV1,
+};
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
     ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, PresenceUpdate,
     Ready, Region, SendFrame, ServerFrame, TenantId, TransitEnvelope, WatchPresence, WIRE_VERSION,
 };
+use fetchit_relay_server::server::ServerState;
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
 use futures_util::{SinkExt, StreamExt};
+use saorsa_pqc::api::sig::{MlDsa, MlDsaSecretKey, MlDsaVariant};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,17 +32,21 @@ use tokio_tungstenite::{
 };
 
 async fn start_test_server() -> SocketAddr {
+    start_test_server_with_state().await.0
+}
+
+async fn start_test_server_with_state() -> (SocketAddr, Arc<ServerState>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let cfg = ServerConfig::defaults(addr, Region::Nyc);
     let server = Server::new(cfg).with_verifier(Arc::new(AcceptAllVerifier));
-    let (router, _state) = server.router();
+    let (router, state) = server.router();
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
     // tiny yield so the server is accepting before clients dial
     tokio::time::sleep(Duration::from_millis(20)).await;
-    addr
+    (addr, state)
 }
 
 async fn obtain_bearer(addr: SocketAddr, agent_pk: &[u8]) -> String {
@@ -715,4 +726,260 @@ async fn relay_rejects_unknown_wire_version() {
             }
         }
     }
+}
+
+// ---- T7b: deposit-path Moved emit (departed-recipient signal) ----
+//
+// Signing helpers mirror tests/forwarding_index.rs — a forwarding
+// record only verifies against the pubkey in the agent's stored
+// pair-record, so the happy path posts the pair-record first.
+
+fn agent_id_hex(pk_bytes: &[u8]) -> String {
+    hex::encode(fetchit_relay_server::signature::derive_agent_id(pk_bytes))
+}
+
+fn mk_signed_pair(dsa: &MlDsa, sk: &MlDsaSecretKey, pk_bytes: &[u8], issued: u64) -> PairRecordV1 {
+    let id = agent_id_hex(pk_bytes);
+    let kem = [0u8; 1184];
+    let relays = vec!["https://old.relay.example".to_string()];
+    let input = pair_signing_input(&id, pk_bytes, &kem, &relays, issued).unwrap();
+    let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+    PairRecordV1 {
+        agent_id_hex: id,
+        ml_dsa_pubkey_b64: B64.encode(pk_bytes),
+        kem_pubkey_b64: B64.encode(kem),
+        advertised_relays: relays,
+        issued_at_ms: issued,
+        sig_b64: B64.encode(sig),
+    }
+}
+
+fn mk_signed_forwarding(
+    dsa: &MlDsa,
+    sk: &MlDsaSecretKey,
+    pk_bytes: &[u8],
+    issued: u64,
+) -> ForwardingRecordV1 {
+    let id = agent_id_hex(pk_bytes);
+    let moved = vec!["https://new.relay.example".to_string()];
+    let input = forwarding_signing_input(&id, &moved, issued).unwrap();
+    let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+    ForwardingRecordV1 {
+        agent_id_hex: id,
+        moved_to_relays: moved,
+        issued_at_ms: issued,
+        sig_b64: B64.encode(sig),
+    }
+}
+
+async fn post_pair(client: &reqwest::Client, addr: SocketAddr, rec: &PairRecordV1) {
+    let r = client
+        .post(format!("http://{addr}/v1/pair-record"))
+        .json(rec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "pair-record precondition POST must succeed"
+    );
+}
+
+async fn post_forwarding(client: &reqwest::Client, addr: SocketAddr, rec: &ForwardingRecordV1) {
+    let r = client
+        .post(format!("http://{addr}/v1/forwarding"))
+        .json(rec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "forwarding precondition POST must succeed");
+}
+
+#[tokio::test]
+async fn moved_emitted_for_departed_recipient_with_live_forwarding() {
+    let addr = start_test_server().await;
+
+    // Ruth migrated away: pair-record + live forwarding record, no session.
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let pk_bytes = pk.to_bytes();
+    let http = reqwest::Client::new();
+    post_pair(&http, addr, &mk_signed_pair(&dsa, &sk, &pk_bytes, 1_000)).await;
+    post_forwarding(
+        &http,
+        addr,
+        &mk_signed_forwarding(&dsa, &sk, &pk_bytes, 2_000),
+    )
+    .await;
+    let ruth_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(&pk_bytes));
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    send_envelope_to(
+        &mut alice,
+        ruth_id,
+        envelope_from(alice_id, b"where did you go"),
+        [0xcc; 16],
+    )
+    .await;
+
+    // The deposit must answer Moved — not Ack — so the sender's
+    // forwarding re-resolve fires instead of trusting a black-hole
+    // buffer the departed recipient will never read.
+    let frame = next_server_frame(&mut alice, Duration::from_secs(2))
+        .await
+        .expect("expected a server frame after deposit");
+    let m = match frame {
+        ServerFrame::Moved(m) => m,
+        other => panic!("expected Moved, got {other:?}"),
+    };
+    assert_eq!(m.dedupe_key, DedupeKey::from_bytes([0xcc; 16]));
+
+    // Moved replaces the Ack; both for one deposit would double-signal.
+    if let Some(f) = next_server_frame(&mut alice, Duration::from_millis(400)).await {
+        assert!(
+            !matches!(f, ServerFrame::Ack(_)),
+            "Moved deposit must not also Ack: {f:?}"
+        );
+    }
+
+    // And nothing was buffered: Ruth reconnecting here drains nothing.
+    let ruth_tok = obtain_bearer(addr, &pk_bytes).await;
+    let mut ruth = connect_ws(addr, &ruth_tok).await;
+    send_hello(&mut ruth).await;
+    let _ = expect_ready(&mut ruth).await;
+    if let Some(f) = next_server_frame(&mut ruth, Duration::from_millis(400)).await {
+        assert!(
+            !matches!(f, ServerFrame::Deliver(_)),
+            "Moved deposit must not also buffer: {f:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_session_unaffected_by_forwarding_record() {
+    let addr = start_test_server().await;
+
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let pk_bytes = pk.to_bytes();
+    let http = reqwest::Client::new();
+    post_pair(&http, addr, &mk_signed_pair(&dsa, &sk, &pk_bytes, 1_000)).await;
+    post_forwarding(
+        &http,
+        addr,
+        &mk_signed_forwarding(&dsa, &sk, &pk_bytes, 2_000),
+    )
+    .await;
+    let ruth_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(&pk_bytes));
+
+    // Ruth is CONNECTED — a forwarding record she left behind (e.g.
+    // migrated away and came back) must not shadow the live session:
+    // the direct push wins before the forwarding check runs.
+    let ruth_tok = obtain_bearer(addr, &pk_bytes).await;
+    let mut ruth = connect_ws(addr, &ruth_tok).await;
+    send_hello(&mut ruth).await;
+    let _ = expect_ready(&mut ruth).await;
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    send_envelope_to(
+        &mut alice,
+        ruth_id,
+        envelope_from(alice_id, b"welcome back"),
+        [0xdd; 16],
+    )
+    .await;
+
+    let d = loop {
+        match next_server_frame(&mut ruth, Duration::from_secs(2)).await {
+            Some(ServerFrame::Deliver(d)) => break d,
+            Some(_) => {}
+            None => panic!("expected Deliver to the live session"),
+        }
+    };
+    assert_eq!(d.envelope.ciphertext, b"welcome back");
+
+    let ack = loop {
+        match next_server_frame(&mut alice, Duration::from_secs(2)).await {
+            Some(ServerFrame::Ack(a)) => break a,
+            Some(ServerFrame::Moved(m)) => {
+                panic!("live session must Ack, not Moved: {m:?}")
+            }
+            Some(_) => {}
+            None => panic!("expected Ack for the delivered deposit"),
+        }
+    };
+    assert_eq!(ack.dedupe_key, DedupeKey::from_bytes([0xdd; 16]));
+}
+
+#[tokio::test]
+async fn expired_forwarding_record_buffers_and_acks() {
+    let (addr, state) = start_test_server_with_state().await;
+
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let pk_bytes = pk.to_bytes();
+    let ruth_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(&pk_bytes));
+
+    // Liveness keys off the relay-clock `stored_at_ms`, which the HTTP
+    // POST always stamps "now" — so age the record through a direct
+    // store insert: stored at t=1 is past FORWARDING_TTL_MS for any
+    // wall-clock deposit that follows.
+    let fwd = mk_signed_forwarding(&dsa, &sk, &pk_bytes, 1);
+    state.forwarding.put_if_newer(fwd, 1).unwrap();
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    send_envelope_to(
+        &mut alice,
+        ruth_id,
+        envelope_from(alice_id, b"see you at the old relay"),
+        [0xee; 16],
+    )
+    .await;
+
+    // Expired forwarding is NOT the departed signal: today's
+    // buffer+Ack behavior must be preserved.
+    let ack = loop {
+        match next_server_frame(&mut alice, Duration::from_secs(2)).await {
+            Some(ServerFrame::Ack(a)) => break a,
+            Some(ServerFrame::Moved(m)) => {
+                panic!("expired forwarding record must not emit Moved: {m:?}")
+            }
+            Some(_) => {}
+            None => panic!("expected Ack for the buffered deposit"),
+        }
+    };
+    assert_eq!(ack.dedupe_key, DedupeKey::from_bytes([0xee; 16]));
+
+    // The deposit was buffered: Ruth drains it on connect.
+    let ruth_tok = obtain_bearer(addr, &pk_bytes).await;
+    let mut ruth = connect_ws(addr, &ruth_tok).await;
+    send_hello(&mut ruth).await;
+    let _ = expect_ready(&mut ruth).await;
+    let d = loop {
+        match next_server_frame(&mut ruth, Duration::from_secs(2)).await {
+            Some(ServerFrame::Deliver(d)) => break d,
+            Some(_) => {}
+            None => panic!("expected buffered Deliver on connect"),
+        }
+    };
+    assert_eq!(d.envelope.ciphertext, b"see you at the old relay");
 }
