@@ -13,12 +13,12 @@
 //! [`Client::connection_state`].
 
 use crate::error::ClientError;
-use crate::outbox::{Outbox, Receipt};
+use crate::outbox::{Outbox, Receipt, SendResolution};
 use crate::signer::Signer;
 use fetchit_relay_proto::{
     auth_signing_bytes, from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest,
     AuthVerifyResponse, CapabilityToken, ClientFrame, DedupeKey, Deliver, EffectiveCapabilities,
-    Hello, Ping, Pong, PresenceUpdate, Ready, SendFrame, ServerFrame, TenantId, Throttle,
+    Hello, Moved, Ping, Pong, PresenceUpdate, Ready, SendFrame, ServerFrame, TenantId, Throttle,
     TransitEnvelope, WatchPresence,
 };
 use futures_util::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
@@ -792,7 +792,8 @@ async fn do_send(
     // Ack. Either way, treat it as definitively un-sent so the user
     // can retry rather than wait indefinitely.
     match tokio::time::timeout(ack_timeout, rx).await {
-        Ok(Ok(receipt)) => Ok(receipt),
+        Ok(Ok(SendResolution::Acked(receipt))) => Ok(receipt),
+        Ok(Ok(SendResolution::RecipientMoved)) => Err(ClientError::RecipientMoved),
         Ok(Err(_)) => Err(ClientError::InboxClosed),
         Err(_) => Err(ClientError::SendTimeout(ack_timeout)),
     }
@@ -940,6 +941,13 @@ fn spawn_reader(
                         ServerFrame::Throttle(Throttle { .. }) | ServerFrame::Ready(_) => {
                             // Throttle observable via metrics in a future pass.
                             // Stray Ready outside the handshake is a no-op.
+                        }
+                        ServerFrame::Moved(Moved { dedupe_key }) => {
+                            // The recipient migrated away from this relay;
+                            // resolve the pending send so the caller's
+                            // deposit path can re-resolve via the signed
+                            // forwarding record and retry at the new relay.
+                            let _ = outbox.moved(&dedupe_key);
                         }
                         ServerFrame::Bye(b) => break format!("relay sent Bye: {:?}", b.reason),
                     }

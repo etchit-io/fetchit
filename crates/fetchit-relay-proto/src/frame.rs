@@ -55,6 +55,19 @@ pub enum ServerFrame {
     Pong(Pong),
     /// Server-initiated close (e.g. shutdown, token expiry).
     Bye(Bye),
+    /// The deposit's recipient migrated away from this relay.
+    ///
+    /// Emitted INSTEAD of [`Ack`] when the recipient has no live session
+    /// here and the relay holds a live signed forwarding record for them:
+    /// the unambiguous departed signal. An offline recipient with no
+    /// forwarding record buffers as usual. The frame deliberately carries
+    /// no relay list: the sender re-resolves through the SIGNED forwarding
+    /// record (ML-DSA verify + monotonic watermark), so the relay gains no
+    /// power to redirect deposits.
+    ///
+    /// Appended last so the discriminants of every earlier variant are
+    /// stable on the postcard wire.
+    Moved(Moved),
 }
 
 /// Opening handshake from the client.
@@ -128,6 +141,16 @@ pub struct Ack {
     pub dedupe_key: DedupeKey,
     /// Server timestamp of acceptance, milliseconds since the Unix epoch.
     pub accepted_at_ms: u64,
+}
+
+/// The deposit's recipient migrated away from this relay.
+///
+/// See [`ServerFrame::Moved`] for the emission contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Moved {
+    /// Echoes the originating [`SendFrame::dedupe_key`], so the sender
+    /// can resolve the matching in-flight send.
+    pub dedupe_key: DedupeKey,
 }
 
 /// Inbound envelope pushed to the connected agent.
@@ -267,6 +290,40 @@ mod tests {
         let bytes = postcard::to_allocvec(&ack).unwrap();
         let decoded: ServerFrame = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(ack, decoded);
+    }
+
+    #[test]
+    fn moved_roundtrips() {
+        let frame = ServerFrame::Moved(Moved {
+            dedupe_key: DedupeKey::from_bytes([3u8; DEDUPE_KEY_LEN]),
+        });
+        let bytes = postcard::to_allocvec(&frame).unwrap();
+        let decoded: ServerFrame = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn moved_does_not_shift_existing_discriminants() {
+        // Moved is appended LAST: the wire bytes of every pre-existing
+        // ServerFrame variant must be identical to what an old binary
+        // produced, or mixed-version relays and clients misparse each
+        // other. Pin Ack's encoding (discriminant 1) explicitly.
+        let ack = ServerFrame::Ack(Ack {
+            dedupe_key: DedupeKey::from_bytes([9u8; DEDUPE_KEY_LEN]),
+            accepted_at_ms: 1_000,
+        });
+        let bytes = postcard::to_allocvec(&ack).unwrap();
+        assert_eq!(bytes[0], 1, "Ack must keep postcard discriminant 1");
+        let bye = ServerFrame::Bye(Bye {
+            reason: ByeReason::ServerShutdown,
+        });
+        let bytes = postcard::to_allocvec(&bye).unwrap();
+        assert_eq!(bytes[0], 6, "Bye must keep postcard discriminant 6");
+        let moved = ServerFrame::Moved(Moved {
+            dedupe_key: DedupeKey::from_bytes([3u8; DEDUPE_KEY_LEN]),
+        });
+        let bytes = postcard::to_allocvec(&moved).unwrap();
+        assert_eq!(bytes[0], 7, "Moved is the appended discriminant 7");
     }
 
     #[test]

@@ -10,10 +10,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
-/// Pending-send record awaiting an `Ack` from the relay.
+/// Pending-send record awaiting an `Ack` (or `Moved`) from the relay.
 pub struct PendingSend {
     /// One-shot the caller awaits.
-    pub completion: oneshot::Sender<Receipt>,
+    pub completion: oneshot::Sender<SendResolution>,
     /// When the send was dispatched.
     pub sent_at: Instant,
 }
@@ -23,6 +23,18 @@ pub struct PendingSend {
 pub struct Receipt {
     /// Server-reported acceptance time, milliseconds since the Unix epoch.
     pub accepted_at_ms: u64,
+}
+
+/// How the relay resolved a pending send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendResolution {
+    /// The relay accepted the envelope into its routing buffer.
+    Acked(Receipt),
+    /// The relay answered `Moved`: the recipient migrated away and the
+    /// relay holds a live signed forwarding record for them. The sender
+    /// must re-resolve the recipient's relays via that signed record and
+    /// retry the deposit at the new relay.
+    RecipientMoved,
 }
 
 /// Concurrent map of outbound dedupe keys → pending send records.
@@ -49,9 +61,9 @@ impl Outbox {
         Self::default()
     }
 
-    /// Register a fresh pending send; returns the `Receipt` future.
+    /// Register a fresh pending send; returns the resolution future.
     #[must_use]
-    pub fn track(&self, key: DedupeKey) -> oneshot::Receiver<Receipt> {
+    pub fn track(&self, key: DedupeKey) -> oneshot::Receiver<SendResolution> {
         let (tx, rx) = oneshot::channel();
         self.by_dedupe.insert(
             key,
@@ -70,7 +82,21 @@ impl Outbox {
         let Some((_, pending)) = self.by_dedupe.remove(key) else {
             return false;
         };
-        let _ = pending.completion.send(Receipt { accepted_at_ms });
+        let _ = pending
+            .completion
+            .send(SendResolution::Acked(Receipt { accepted_at_ms }));
+        true
+    }
+
+    /// Resolve a pending send as `Moved`: the relay reports the
+    /// recipient migrated away (it holds a live signed forwarding record
+    /// for them). Returns `true` if a matching record was found.
+    #[must_use]
+    pub fn moved(&self, key: &DedupeKey) -> bool {
+        let Some((_, pending)) = self.by_dedupe.remove(key) else {
+            return false;
+        };
+        let _ = pending.completion.send(SendResolution::RecipientMoved);
         true
     }
 
@@ -127,9 +153,30 @@ mod tests {
         let key = DedupeKey::from_bytes([1u8; 16]);
         let rx = ob.track(key);
         assert!(ob.ack(&key, 1_700_000_000_000));
-        let receipt = rx.await.unwrap();
-        assert_eq!(receipt.accepted_at_ms, 1_700_000_000_000);
+        let resolution = rx.await.unwrap();
+        assert_eq!(
+            resolution,
+            SendResolution::Acked(Receipt {
+                accepted_at_ms: 1_700_000_000_000
+            })
+        );
         assert_eq!(ob.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn track_then_moved_resolves_recipient_moved() {
+        let ob = Outbox::new();
+        let key = DedupeKey::from_bytes([3u8; 16]);
+        let rx = ob.track(key);
+        assert!(ob.moved(&key));
+        assert_eq!(rx.await.unwrap(), SendResolution::RecipientMoved);
+        assert_eq!(ob.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn moved_for_unknown_key_returns_false() {
+        let ob = Outbox::new();
+        assert!(!ob.moved(&DedupeKey::from_bytes([4u8; 16])));
     }
 
     #[tokio::test]

@@ -47,6 +47,14 @@ pub enum ClientError {
     #[error("unexpected non-binary message")]
     UnexpectedMessage,
 
+    /// The relay answered `Moved` instead of `Ack`: the deposit's
+    /// recipient migrated away and the relay holds a live signed
+    /// forwarding record for them. The caller should re-resolve the
+    /// recipient's relays via that signed forwarding record and retry
+    /// the deposit at the new relay.
+    #[error("recipient moved away from this relay")]
+    RecipientMoved,
+
     /// A `send` attempt exceeded its WS-write or ack timeout. Returned
     /// when the underlying TCP send buffer is wedged (write never
     /// completed) or when the relay accepted the bytes but never

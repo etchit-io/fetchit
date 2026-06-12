@@ -28,8 +28,8 @@ pub use capability::{
 pub use envelope::{EnvelopeKind, TransitEnvelope, WIRE_VERSION};
 pub use error::ProtoError;
 pub use frame::{
-    Ack, Bye, ByeReason, ClientFrame, Deliver, Hello, Ping, Pong, PresenceUpdate, Ready, SendFrame,
-    ServerFrame, Subscribe, Throttle, ThrottleReason, WatchPresence,
+    Ack, Bye, ByeReason, ClientFrame, Deliver, Hello, Moved, Ping, Pong, PresenceUpdate, Ready,
+    SendFrame, ServerFrame, Subscribe, Throttle, ThrottleReason, WatchPresence,
 };
 pub use identity::{
     derive_agent_id, AgentId, DedupeKey, GroupId, MachineId, TenantId, AGENT_ID_DOMAIN,
