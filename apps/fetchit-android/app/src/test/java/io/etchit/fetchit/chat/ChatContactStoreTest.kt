@@ -59,4 +59,20 @@ class ChatContactStoreTest {
         s.delete("c".repeat(64))
         assertTrue(s.contacts.value.isEmpty())
     }
+
+    @Test
+    fun renameUpdatesDisplayName() {
+        val s = store()
+        s.add(ChatContact("d".repeat(64), "before", 1L))
+        s.rename("d".repeat(64), "after")
+        assertEquals("after", s.contacts.value.single().displayName)
+    }
+
+    @Test
+    fun renameUnknownAgentIsNoop() {
+        val s = store()
+        s.add(ChatContact("e".repeat(64), "keep", 1L))
+        s.rename("f".repeat(64), "ignored")
+        assertEquals("keep", s.contacts.value.single().displayName)
+    }
 }
