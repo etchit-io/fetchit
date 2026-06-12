@@ -149,7 +149,9 @@ export function mountCompose(host: HTMLElement): ComposeApi {
     help.className = "fediverse-compose__mint-help";
     help.textContent =
       "Public posting is opt-in and separate from your chat identity. " +
-      "Letters, digits, - and _ only.";
+      "Creating a handle makes you publicly findable and contactable: anyone " +
+      "who knows it can look you up and send a contact request (requests wait " +
+      "in your pending queue until you accept). Letters, digits, - and _ only.";
 
     const input = document.createElement("input");
     input.type = "text";
@@ -173,10 +175,26 @@ export function mountCompose(host: HTMLElement): ComposeApi {
       }
       error.textContent = "";
       mintBtn.disabled = true;
-      void invoke<string>("fediverse_mint", { handle })
-        .then(() => {
+      void invoke<{
+        actorUrl: string;
+        registered: boolean;
+        registrationError: string | null;
+      }>("fediverse_mint", { handle })
+        .then((outcome) => {
           host.replaceChildren();
           renderComposer();
+          if (!outcome.registered) {
+            // Honest partial-success state: the handle exists locally
+            // but the directory hasn't accepted it yet. The ensure
+            // pass retries on every pane open.
+            const note = document.createElement("div");
+            note.className = "fediverse-compose__mint-pending";
+            note.textContent =
+              "Handle created. Directory registration pending: " +
+              `${outcome.registrationError ?? "registry unreachable"}. ` +
+              "It will retry next time you open this pane.";
+            host.prepend(note);
+          }
         })
         .catch((e: unknown) => {
           error.textContent = `Could not create handle: ${String(e)}`;
@@ -191,6 +209,10 @@ export function mountCompose(host: HTMLElement): ComposeApi {
     .then((handle) => {
       if (handle) {
         renderComposer();
+        // M5.1 upgrade pass: transparently re-sign a pre-M5 identity
+        // to attestation v2 and re-assert the directory record.
+        // Best-effort; the pane stays usable on any failure.
+        void invoke("fediverse_ensure_v2").catch(() => undefined);
       } else {
         renderMint();
       }

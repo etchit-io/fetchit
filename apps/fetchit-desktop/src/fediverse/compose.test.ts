@@ -48,6 +48,12 @@ describe("compose: mint onboarding", () => {
     expect(host.querySelector(".fediverse-compose__textarea")).toBeNull();
   });
 
+  it("mint help carries the one-opt-in consent copy", async () => {
+    const host = await mountWith(null);
+    const help = host.querySelector(".fediverse-compose__mint-help")!;
+    expect(help.textContent).toContain("publicly findable and contactable");
+  });
+
   it("rejects an invalid handle client-side without invoking mint", async () => {
     const host = await mountWith(null);
     const input = host.querySelector<HTMLInputElement>(".fediverse-compose__mint-input")!;
@@ -61,7 +67,11 @@ describe("compose: mint onboarding", () => {
     const host = await mountWith(null);
     mock.mockImplementation((cmd: string) =>
       cmd === "fediverse_mint"
-        ? Promise.resolve("https://etchit.io/actors/josh")
+        ? Promise.resolve({
+            actorUrl: "https://etchit.io/actors/josh",
+            registered: true,
+            registrationError: null,
+          })
         : Promise.resolve(null),
     );
     const input = host.querySelector<HTMLInputElement>(".fediverse-compose__mint-input")!;
@@ -72,6 +82,36 @@ describe("compose: mint onboarding", () => {
     });
     const mintCall = mock.mock.calls.find((c) => c[0] === "fediverse_mint")!;
     expect(mintCall[1]).toEqual({ handle: "josh" });
+    expect(host.querySelector(".fediverse-compose__mint-pending")).toBeNull();
+  });
+
+  it("renders registration-pending honestly when the directory is unreachable", async () => {
+    const host = await mountWith(null);
+    mock.mockImplementation((cmd: string) =>
+      cmd === "fediverse_mint"
+        ? Promise.resolve({
+            actorUrl: "https://etchit.io/actors/josh",
+            registered: false,
+            registrationError: "transport: connection refused",
+          })
+        : Promise.resolve(null),
+    );
+    const input = host.querySelector<HTMLInputElement>(".fediverse-compose__mint-input")!;
+    input.value = "josh";
+    host.querySelector<HTMLButtonElement>(".fediverse-compose__mint-btn")!.click();
+    await vi.waitFor(() => {
+      expect(host.querySelector(".fediverse-compose__textarea")).not.toBeNull();
+    });
+    const pending = host.querySelector(".fediverse-compose__mint-pending")!;
+    expect(pending.textContent).toContain("Directory registration pending");
+    expect(pending.textContent).toContain("connection refused");
+  });
+
+  it("runs the v2 upgrade pass when a handle already exists", async () => {
+    await mountWith("josh");
+    await vi.waitFor(() => {
+      expect(mock.mock.calls.some((c) => c[0] === "fediverse_ensure_v2")).toBe(true);
+    });
   });
 });
 
