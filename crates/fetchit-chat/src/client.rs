@@ -55,6 +55,12 @@ const FAILOVER_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 /// matching KDF / salt pair.
 const IDENTITY_VAULT_FILE: &str = "identity.json.enc";
 
+/// Sentinel x0xd base URL for daemonless builds. Port 9 (discard) is
+/// never an x0xd, so any daemon-only endpoint that does get called in
+/// a daemonless client fails fast with an honest connection error
+/// instead of hanging on discovery.
+const DAEMONLESS_BASE_URL: &str = "http://127.0.0.1:9";
+
 /// Builder for [`Client`] with optional overrides.
 #[derive(Default)]
 pub struct ClientBuilder {
@@ -96,6 +102,15 @@ pub struct ClientBuilder {
     /// relay URL parses as `wss://`; otherwise leaves the slot
     /// empty and the v2 hints field is omitted from the card.
     advertised_relays: Option<Vec<String>>,
+    /// Build without any x0xd daemon: skip discovery, skip the `TreeKEM`
+    /// version probe, and sign with a local ML-DSA-65 keypair persisted
+    /// in the chat vault ([`crate::local_signer::LocalSignerVault`])
+    /// instead of `X0xdSigner`. Daemon-backed surfaces (M1/M2 groups,
+    /// presence, v2 card generation) fail with transport errors against
+    /// an unconnectable sentinel base URL. Meaningful only together
+    /// with `data_dir` (and usually `relay_url` + `passphrase`); the
+    /// Android shell is the primary consumer.
+    daemonless: bool,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -117,6 +132,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("x0xd_port_file", &self.x0xd_port_file)
             .field("denylist", &self.denylist.as_ref().map(|_| "<consumer>"))
             .field("advertised_relays", &self.advertised_relays)
+            .field("daemonless", &self.daemonless)
             .finish()
     }
 }
@@ -239,17 +255,32 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable the daemonless profile. See the field doc for semantics.
+    #[must_use]
+    pub fn daemonless(mut self, enabled: bool) -> Self {
+        self.daemonless = enabled;
+        self
+    }
+
     /// Build the client. Falls back to [`discover_local`] for any
     /// x0xd connection field not explicitly set.
     ///
     /// # Errors
     /// Returns discovery, HTTP, relay-handshake, or vault failures.
     pub async fn build(self) -> Result<Client> {
-        let (base_url, token) = match (self.base_url, self.token) {
-            (Some(u), Some(t)) => (u, t),
-            (u, t) => {
-                let ep = discover_local().await?;
-                (u.unwrap_or(ep.base_url), t.unwrap_or(ep.token))
+        let (base_url, token) = if self.daemonless {
+            (
+                self.base_url
+                    .unwrap_or_else(|| DAEMONLESS_BASE_URL.to_owned()),
+                self.token.unwrap_or_default(),
+            )
+        } else {
+            match (self.base_url, self.token) {
+                (Some(u), Some(t)) => (u, t),
+                (u, t) => {
+                    let ep = discover_local().await?;
+                    (u.unwrap_or(ep.base_url), t.unwrap_or(ep.token))
+                }
             }
         };
         Client::from_parts(
@@ -263,6 +294,7 @@ impl ClientBuilder {
             self.x0xd_port_file,
             self.denylist,
             self.advertised_relays,
+            self.daemonless,
         )
         .await
     }
@@ -492,6 +524,7 @@ impl Client {
             None,
             None,
             None,
+            false,
         )
         .await
     }
@@ -514,6 +547,7 @@ impl Client {
         x0xd_port_file: Option<PathBuf>,
         denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
         advertised_relays: Option<Vec<String>>,
+        daemonless: bool,
     ) -> Result<Self> {
         let http = Arc::new(match x0xd_port_file.as_ref() {
             Some(path) => Http::new_with_port_file(path.clone(), token.clone())?,
@@ -533,7 +567,9 @@ impl Client {
             multi_home,
             fediverse,
         ) = if needs_chat {
-            announce_identity_best_effort(&http).await;
+            if !daemonless {
+                announce_identity_best_effort(&http).await;
+            }
             build_with_chat(
                 &http,
                 &base_url,
@@ -544,6 +580,7 @@ impl Client {
                 enable_lan_direct,
                 contact_pubkey_lookup,
                 x0xd_port_file,
+                daemonless,
             )
             .await?
         } else {
@@ -626,6 +663,16 @@ impl Client {
     pub fn denylist_dropped_inbound_count(&self) -> u64 {
         self.denylist_dropped_inbound
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The local agent id (lowercase 64-hex), when chat state is wired.
+    /// Daemonless consumers (the Android FFI) read identity from here
+    /// instead of x0xd's `/agent`.
+    #[must_use]
+    pub fn local_agent_id_hex(&self) -> Option<String> {
+        self.chat
+            .as_ref()
+            .map(|c| c.identity.agent_id_hex().to_owned())
     }
 
     /// Shared handle to the outbound fediverse transport, when one was
@@ -2281,6 +2328,7 @@ async fn build_with_chat(
     enable_lan_direct: bool,
     contact_pubkey_lookup: Option<ContactPubkeyLookup>,
     x0xd_port_file: Option<PathBuf>,
+    daemonless: bool,
 ) -> Result<(
     Router,
     Option<ChatState>,
@@ -2304,14 +2352,9 @@ async fn build_with_chat(
     // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
     // chat-side work so an outdated daemon never gets a chance to
     // mis-handle a `private_secure` group.
-    enforce_m2_treekem_minimum(base_url, &token).await?;
-
-    // Resolve the local agent identity from x0xd. The chat identity
-    // vault is bound to this agent_id — rotating the x0xd identity
-    // forces a fresh KEM keypair.
-    let agent_identity: identity::AgentIdentity = http.get_json("/agent").await?;
-    let agent_id_hex = agent_identity.agent_id.0.clone();
-    let local_machine_id = derive_machine_id(&agent_identity.machine_id);
+    if !daemonless {
+        enforce_m2_treekem_minimum(base_url, &token).await?;
+    }
 
     let data_dir = match data_dir {
         Some(p) => p,
@@ -2323,6 +2366,31 @@ async fn build_with_chat(
     let (master, kdf_id, argon_salt) =
         resolve_master_key(identity_vault_path.as_path(), passphrase.as_deref())?;
     let master = Arc::new(master);
+
+    // Resolve the local agent identity. Daemon path: x0xd `/agent` owns
+    // the agent id + machine id. Daemonless path: both come from the
+    // local signer vault — agent id is derived from the local ML-DSA-65
+    // public key, so pair records and relay handshakes verify the same
+    // way they do for an x0xd-backed agent.
+    let (agent_id_hex, local_machine_id, local_signer): (
+        String,
+        [u8; 32],
+        Option<Arc<dyn Signer>>,
+    ) = if daemonless {
+        let vault = crate::local_signer::LocalSignerVault::load_or_create(
+            &layout.root,
+            &master,
+            kdf_id,
+            argon_salt.as_ref(),
+        )?;
+        let agent_id_hex = hex::encode(vault.signer.agent_id());
+        let machine = derive_machine_id(&vault.machine_token);
+        (agent_id_hex, machine, Some(Arc::new(vault.signer)))
+    } else {
+        let agent_identity: identity::AgentIdentity = http.get_json("/agent").await?;
+        let machine = derive_machine_id(&agent_identity.machine_id);
+        (agent_identity.agent_id.0.clone(), machine, None)
+    };
 
     let identity = Arc::new(FetchitIdentity::load_or_create(
         &layout.root,
@@ -2343,6 +2411,8 @@ async fn build_with_chat(
     // transport: each `X0xdSigner` opens its own warmup round-trip and
     // every `sign` call hits `/agent/sign`, so cloning the Arc keeps a
     // single WebSocket-paired x0xd identity instead of doubling sessions.
+    // In the daemonless profile the signer is the local ML-DSA-65 vault
+    // key resolved above — no daemon round-trips at all.
     //
     // When the caller supplied a `port_file` path
     // ([`ClientBuilder::x0xd_port_file`]), the signer self-heals across
@@ -2350,19 +2420,22 @@ async fn build_with_chat(
     // re-read of `api.port` and a one-shot retry against the new URL,
     // so long-running consumers (chat-peer, desktop app) survive a
     // daemon restart without going through their own restart cycle.
-    let x0xd_signer = Arc::new(if let Some(path) = x0xd_port_file {
-        X0xdSigner::connect_with_port_file(path, token)
+    let signer: Arc<dyn Signer> = match local_signer {
+        Some(s) => s,
+        None => Arc::new(if let Some(path) = x0xd_port_file {
+            X0xdSigner::connect_with_port_file(path, token)
+                .await
+                .map_err(|e| ChatError::MessageTransport(format!("x0xd signer (port-file): {e}")))?
+        } else {
+            X0xdSigner::connect(
+                Url::parse(base_url)
+                    .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
+                token,
+            )
             .await
-            .map_err(|e| ChatError::MessageTransport(format!("x0xd signer (port-file): {e}")))?
-    } else {
-        X0xdSigner::connect(
-            Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
-            token,
-        )
-        .await
-        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?
-    });
-    let signer: Arc<dyn Signer> = x0xd_signer.clone();
+            .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?
+        }),
+    };
 
     let mut router = Router::new();
     let mut lan_handle: Option<Arc<LanDirectTransport>> = None;
@@ -2447,7 +2520,7 @@ async fn build_with_chat(
         };
 
         let builder: Arc<dyn crate::transport::RelayBuilder> =
-            Arc::new(crate::transport::RealRelayBuilder::new(x0xd_signer.clone()));
+            Arc::new(crate::transport::RealRelayBuilder::new(signer.clone()));
 
         let url_str = url.to_string();
         primary_relay_url_str = Some(url_str.clone());
@@ -3790,6 +3863,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn daemonless_build_is_offline_and_agent_id_persists() {
+        let dir = TempDir::new().unwrap();
+        let build = || async {
+            Client::builder()
+                .daemonless(true)
+                .data_dir(dir.path().to_path_buf())
+                .passphrase("test-pass".to_owned())
+                .build()
+                .await
+                .unwrap()
+        };
+        // No relay_url, no daemon, no network: must still build (needs_chat
+        // is true via data_dir) and expose a stable 64-hex agent id.
+        let c1 = build().await;
+        let id1 = c1.local_agent_id_hex().expect("chat state present");
+        assert_eq!(id1.len(), 64);
+        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+        drop(c1);
+        let c2 = build().await;
+        assert_eq!(c2.local_agent_id_hex().unwrap(), id1);
+    }
+
     // ── M4 actor identity helpers ─────────────────────────────────
 
     #[test]
@@ -4425,6 +4521,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .expect("REST-only client construction");

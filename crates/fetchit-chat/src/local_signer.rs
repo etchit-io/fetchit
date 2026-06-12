@@ -21,8 +21,6 @@ use crate::at_rest::{fresh_argon_salt, open_from_path, seal_to_path, MasterKey};
 use crate::error::ChatError;
 
 /// Vault file name under the chat data dir, next to `identity.json.enc`.
-// dead_code: consumed by client.rs build_with_chat when the daemonless profile lands (Task 2).
-#[allow(dead_code)]
 pub(crate) const LOCAL_SIGNER_FILE: &str = "local_signer.json.enc";
 
 #[derive(Serialize, Deserialize)]
@@ -45,8 +43,6 @@ impl Drop for LocalSignerPayload {
 /// The local signing identity: an [`MlDsaSigner`] plus the per-install
 /// machine token, both persisted encrypted at
 /// `data_dir/local_signer.json.enc`.
-// dead_code: consumed by client.rs build_with_chat when the daemonless profile lands (Task 2).
-#[allow(dead_code)]
 pub(crate) struct LocalSignerVault {
     /// The ML-DSA-65 signer holding the local keypair.
     pub(crate) signer: MlDsaSigner,
@@ -63,8 +59,6 @@ impl LocalSignerVault {
     /// # Errors
     /// `ChatError::Invalid` on AEAD failure, JSON parse error, or
     /// malformed key bytes. `ChatError::Io` on filesystem errors.
-    // dead_code: consumed by client.rs build_with_chat when the daemonless profile lands (Task 2).
-    #[allow(dead_code)]
     pub(crate) fn load_or_create(
         data_dir: &Path,
         master: &MasterKey,
