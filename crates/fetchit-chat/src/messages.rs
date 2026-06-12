@@ -1347,13 +1347,14 @@ impl<'a> Endpoint<'a> {
         let stale_relays: Vec<String> = hints.map(|h| h.relays).unwrap_or_default();
         let http = crate::relay_http::guarded_client();
 
-        for wss_url in &stale_relays {
-            // Hints are wss:// (from the card); the forwarding endpoint is HTTP.
-            let https_url = match wss_to_https_url(wss_url) {
+        for hint_url in &stale_relays {
+            // Card hints arrive in ws(s) or http(s) form; the forwarding
+            // endpoint is HTTP.
+            let https_url = match hint_to_https_url(hint_url) {
                 Ok(u) => u,
                 Err(e) => {
                     log::warn!(
-                        "[chat] forwarding re-resolve: cannot convert hint {wss_url} to https: {e}"
+                        "[chat] forwarding re-resolve: cannot convert hint {hint_url} to https: {e}"
                     );
                     continue;
                 }
@@ -1368,7 +1369,7 @@ impl<'a> Endpoint<'a> {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    log::debug!("[chat] forwarding re-resolve: no record at {wss_url}: {e}");
+                    log::debug!("[chat] forwarding re-resolve: no record at {hint_url}: {e}");
                     continue;
                 }
             };
@@ -1385,7 +1386,7 @@ impl<'a> Endpoint<'a> {
             if !updated {
                 // Watermark rejected the record or no card on disk.
                 log::debug!(
-                    "[chat] forwarding re-resolve: apply_relay_hint rejected stale record at {wss_url}"
+                    "[chat] forwarding re-resolve: apply_relay_hint rejected stale record at {hint_url}"
                 );
                 continue;
             }
@@ -1449,24 +1450,31 @@ impl<'a> Endpoint<'a> {
     }
 }
 
-/// Convert a `wss://` or `ws://` URL to its `https://` / `http://`
-/// equivalent for relay HTTP calls. Returns [`ChatError::Invalid`] when the
-/// input cannot be parsed or uses an unexpected scheme.
-fn wss_to_https_url(wss: &str) -> Result<url::Url> {
-    let mut url = wss
+/// Convert a stored relay hint URL to its `https://` / `http://`
+/// equivalent for relay HTTP calls. Card hints carry whatever form their
+/// source record advertised: `ws(s)://` (QR hints) or `http(s)://`
+/// base-URL form (pair-record `advertised_relays`, forwarding
+/// `moved_to_relays`), so `http(s)` inputs pass through unchanged.
+/// Returns [`ChatError::Invalid`] when the input cannot be parsed or
+/// uses any other scheme.
+fn hint_to_https_url(hint: &str) -> Result<url::Url> {
+    let mut url = hint
         .parse::<url::Url>()
         .map_err(|e| ChatError::Invalid(format!("hint url parse: {e}")))?;
-    let https_scheme = match url.scheme() {
-        "wss" => "https",
-        "ws" => "http",
+    match url.scheme() {
+        "https" | "http" => {}
+        "wss" => url
+            .set_scheme("https")
+            .map_err(|()| ChatError::Invalid("set_scheme failed".into()))?,
+        "ws" => url
+            .set_scheme("http")
+            .map_err(|()| ChatError::Invalid("set_scheme failed".into()))?,
         s => {
             return Err(ChatError::Invalid(format!(
-                "expected wss/ws hint scheme, got {s}"
+                "hint url scheme must be ws(s) or http(s), got {s}"
             )));
         }
-    };
-    url.set_scheme(https_scheme)
-        .map_err(|()| ChatError::Invalid("set_scheme failed".into()))?;
+    }
     Ok(url)
 }
 
@@ -4590,6 +4598,37 @@ mod tests {
 
     // ── deposit_with_reresolve ────────────────────────────────────────────────
 
+    #[test]
+    fn hint_to_https_url_accepts_all_hint_schemes() {
+        assert_eq!(
+            hint_to_https_url("wss://relay.example.com/x")
+                .unwrap()
+                .as_str(),
+            "https://relay.example.com/x"
+        );
+        assert_eq!(
+            hint_to_https_url("ws://relay.example.com:8088")
+                .unwrap()
+                .as_str(),
+            "http://relay.example.com:8088/"
+        );
+        // Pair-record advertised_relays form: http(s) passes through.
+        assert_eq!(
+            hint_to_https_url("http://67.207.94.66:8088")
+                .unwrap()
+                .as_str(),
+            "http://67.207.94.66:8088/"
+        );
+        assert_eq!(
+            hint_to_https_url("https://relay.example.com")
+                .unwrap()
+                .as_str(),
+            "https://relay.example.com/"
+        );
+        assert!(hint_to_https_url("ftp://relay.example.com").is_err());
+        assert!(hint_to_https_url("not a url").is_err());
+    }
+
     // A transport that fails on the first N calls then succeeds.
     struct FailThenSucceedTransport {
         fail_count: StdMutex<usize>,
@@ -4779,7 +4818,6 @@ mod tests {
         let pk_bytes = pk.to_bytes();
         let sk_bytes = sk.to_bytes();
 
-        let stale_ws = "ws://127.0.0.1:0"; // placeholder; server.uri() replaces it
         let moved_to = vec!["https://new-relay.example.com".to_owned()];
 
         // Build a forwarding record pointing at moved_to.
@@ -4795,12 +4833,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Build the hint using the actual server host:port.
-        let server_uri = server.uri(); // http://127.0.0.1:PORT
-                                       // Convert http:// to ws:// so it goes through wss_to_https_url correctly.
-        let ws_hint = server_uri.replace("http://", "ws://");
+        // Build the hint using the actual server host:port, in the raw
+        // http:// base-URL form pair-record imports store on the card —
+        // the re-resolve path must accept it without massaging.
+        let http_hint = server.uri(); // http://127.0.0.1:PORT
         let (layout, agent_hex, _pubkey_b64) =
-            card_layout_for(&pk_bytes, vec![ws_hint.clone()], None);
+            card_layout_for(&pk_bytes, vec![http_hint.clone()], None);
 
         // Transport fails on 1st call (stale hints), succeeds on 2nd (moved-to).
         let transport = FailThenSucceedTransport::new(1);
@@ -4820,7 +4858,7 @@ mod tests {
         );
 
         let hints = Some(crate::card::RendezvousHintsV1 {
-            relays: vec![ws_hint],
+            relays: vec![http_hint],
         });
         let recipient = AgentId(agent_hex.clone());
         let result = endpoint
@@ -4858,7 +4896,6 @@ mod tests {
             "one failure then one retry = 2 transport attempts"
         );
 
-        let _ = stale_ws; // suppress unused-variable lint
         let _ = B64STD;
     }
 
