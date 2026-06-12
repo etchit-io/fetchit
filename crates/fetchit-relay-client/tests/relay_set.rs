@@ -104,8 +104,12 @@ async fn send_fans_out_to_every_relay_in_set() {
 
 /// One healthy relay plus one URL that never completes its handshake
 /// (random unbound localhost port). `connect` must succeed because at
-/// least one relay handshakes. A subsequent `send` only reaches the
-/// healthy one but still resolves Ok.
+/// least one relay handshakes. The dead-URL relay still joins the set
+/// in reconnecting mode (a failed initial connect no longer drops the
+/// relay — it self-heals in the background), so a subsequent `send`
+/// fans out to both: the healthy relay acks (the primary receipt) and
+/// the reconnecting relay reports `Disconnected` in `extras`. The send
+/// still resolves Ok because at least one relay delivered.
 #[tokio::test]
 async fn connect_partial_success_keeps_healthy_relay_alive() {
     let addr_ok = start_server().await;
@@ -152,11 +156,17 @@ async fn connect_partial_success_keeps_healthy_relay_alive() {
         .await
         .unwrap();
     assert!(outcome.primary.accepted_at_ms > 0);
-    // The dead URL never made it past handshake, so the set holds
-    // only one relay. No extras.
+    // Both relays are in the set: the healthy one produced the primary
+    // receipt, the reconnecting (dead-URL) one contributes one extra —
+    // an error, since it has no live session to send over yet.
+    assert_eq!(
+        outcome.extras.len(),
+        1,
+        "the reconnecting relay is still in the set and reports one extra",
+    );
     assert!(
-        outcome.extras.is_empty(),
-        "only the healthy relay is in the set",
+        outcome.extras[0].is_err(),
+        "the reconnecting relay has no live session, so its send errors",
     );
 
     let delivery = tokio::time::timeout(Duration::from_secs(2), bob.next_delivery())

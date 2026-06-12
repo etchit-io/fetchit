@@ -262,24 +262,67 @@ impl Client {
     /// `signer` is held by the supervisor across reconnect cycles so
     /// it must be wrapped in an `Arc<dyn Signer + Send + Sync>`.
     ///
+    /// A failed *initial* handshake no longer aborts the build: when
+    /// `open_session` fails (connect refused, timeout, auth glitch),
+    /// the client is constructed in a connecting state with the
+    /// supervisor started in reconnect mode, so the existing backoff
+    /// loop establishes the session in the background. This lets a cold
+    /// app on a flaky network start and self-heal instead of refusing
+    /// to launch. A permanent failure still surfaces as
+    /// [`ConnState::PermanentlyDisconnected`] after the bounded
+    /// reconnect budget.
+    ///
     /// # Errors
-    /// Bubbles up any HTTP, WebSocket, auth, or proto failure from the
-    /// *first* connection attempt. Once this function returns `Ok`,
-    /// subsequent disconnects are handled transparently by the
-    /// supervisor and surfaced via [`Self::connection_state`].
+    /// Returns `Err` only for non-transient setup failures (e.g. a URL
+    /// that cannot be turned into a WS request). Once this function
+    /// returns `Ok`, all disconnects — including a never-established
+    /// first session — are handled by the supervisor and surfaced via
+    /// [`Self::connection_state`].
     pub async fn connect(
         config: ClientConfig,
         signer: Arc<dyn Signer + Send + Sync>,
     ) -> Result<Self, ClientError> {
-        let initial = open_session(&config, signer.as_ref()).await?;
-
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         let (presence_tx, presence_rx) = mpsc::unbounded_channel();
-        let effective_capabilities = initial.effective_capabilities.clone();
-        let (state_tx, state_rx) = watch::channel(ConnState::Connected {
-            effective_capabilities: effective_capabilities.clone(),
-        });
+
+        let (initial_state, initial_session, effective_capabilities) = match open_session(
+            &config,
+            signer.as_ref(),
+        )
+        .await
+        {
+            Ok(s) => {
+                let caps = s.effective_capabilities.clone();
+                (
+                    ConnState::Connected {
+                        effective_capabilities: caps.clone(),
+                    },
+                    Some(s),
+                    caps,
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                        "[relay] initial connect failed ({e}); starting in reconnect mode and self-healing"
+                    );
+                // The stored `effective_capabilities` snapshot is
+                // informational only (UI affordances); the send path
+                // reads the live session's caps via the supervisor,
+                // never this field. Until the first session lands we
+                // have no negotiated limits, so seed the conservative
+                // anonymous/no-token profile (the smallest documented
+                // limits). `connection_state` carries the live value
+                // once the background reconnect completes.
+                (
+                    ConnState::Connecting,
+                    None,
+                    EffectiveCapabilities::default_profile(),
+                )
+            }
+        };
+
+        let (state_tx, state_rx) = watch::channel(initial_state);
 
         let supervisor = Supervisor {
             config,
@@ -289,7 +332,7 @@ impl Client {
             state_tx,
             cmd_tx: cmd_tx.clone(),
         };
-        let join = tokio::spawn(supervisor.run(initial, cmd_rx));
+        let join = tokio::spawn(supervisor.run(initial_session, cmd_rx));
 
         Ok(Self {
             effective_capabilities,
@@ -445,12 +488,78 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    async fn run(self, initial: OpenSession, mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCmd>) {
+    /// Establish the first `Inner` before the command loop.
+    ///
+    /// `Some(session)` installs it exactly as the legacy path did.
+    /// `None` (a failed initial connect) drives the reconnect loop once
+    /// to self-heal, mirroring the drop-then-reconnect outcome handling.
+    ///
+    /// Returns `Some(inner)` to proceed into the command loop — `inner`
+    /// is `None` only when the None-start path exhausted the reconnect
+    /// budget, in which case the loop still runs so `Send` reports
+    /// `Disconnected`. Returns `None` to signal `run` should return
+    /// (a `Shutdown` arrived before any session landed).
+    async fn bootstrap(
+        &self,
+        initial: Option<OpenSession>,
+        next_gen: &mut ConnGen,
+        backoff: &mut Duration,
+        watch_set: &mut HashSet<AgentId>,
+        cmd_rx: &mut mpsc::UnboundedReceiver<SupervisorCmd>,
+    ) -> Option<Option<Inner>> {
+        if let Some(session) = initial {
+            let inner = self.install(session, *next_gen, watch_set).await;
+            *next_gen += 1;
+            return Some(Some(inner));
+        }
+        // No session on the first connect (the cold app booted on a
+        // flaky network). Drive the existing reconnect loop once to
+        // establish the first session in the background.
+        let _ = self.state_tx.send(ConnState::Disconnected {
+            reason: "initial connect pending".into(),
+            retry_at: Some(Instant::now() + *backoff),
+        });
+        match self.reconnect(cmd_rx, backoff, watch_set).await {
+            ReconnectOutcome::Connected(session) => {
+                let inner = self.install(session, *next_gen, watch_set).await;
+                *next_gen += 1;
+                *backoff = INITIAL_BACKOFF;
+                Some(Some(inner))
+            }
+            ReconnectOutcome::Shutdown => None,
+            ReconnectOutcome::PermanentlyDisconnected { reason, attempts } => {
+                let _ = self
+                    .state_tx
+                    .send(ConnState::PermanentlyDisconnected { reason, attempts });
+                // inner stays None; fall through to the command loop
+                // where Send returns Disconnected, matching the existing
+                // post-permanent behavior.
+                Some(None)
+            }
+        }
+    }
+
+    async fn run(
+        self,
+        initial: Option<OpenSession>,
+        mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCmd>,
+    ) {
         let mut next_gen: ConnGen = 1;
         let mut watch_set: HashSet<AgentId> = HashSet::new();
-        let mut inner = Some(self.install(initial, next_gen, &watch_set).await);
-        next_gen += 1;
         let mut backoff = INITIAL_BACKOFF;
+        let Some(mut inner) = self
+            .bootstrap(
+                initial,
+                &mut next_gen,
+                &mut backoff,
+                &mut watch_set,
+                &mut cmd_rx,
+            )
+            .await
+        else {
+            // Bootstrap saw a Shutdown before any session landed.
+            return;
+        };
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
@@ -915,4 +1024,120 @@ fn random_nonce() -> u64 {
     let mut buf = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut buf);
     u64::from_le_bytes(buf)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::signer::StaticKeySigner;
+    use fetchit_relay_proto::Region;
+    use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    /// Bind an ephemeral port, then release it. The returned address is
+    /// free *right now* but nothing is listening — a connect against it
+    /// is refused fast, which is exactly the cold-flaky-network case.
+    async fn reserve_then_release() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    /// Tight reconnect budget so a permanent failure resolves quickly
+    /// and the test never waits on the production-default 20 attempts.
+    fn fast_config(base: Url) -> ClientConfig {
+        let mut cfg = ClientConfig::new(base);
+        cfg.auth_timeout = Duration::from_millis(200);
+        cfg.max_reconnect_attempts = Some(3);
+        cfg
+    }
+
+    #[tokio::test]
+    async fn connect_tolerates_unreachable_relay_and_starts_reconnecting() {
+        // A connect against an address that refuses must NOT fail the
+        // build: the client is constructed in a connecting state and the
+        // supervisor self-heals in the background.
+        let addr = reserve_then_release().await;
+        let base = Url::parse(&format!("http://{addr}/")).unwrap();
+        let signer = Arc::new(StaticKeySigner::from_public_key(
+            b"unreachable-key".to_vec(),
+        ));
+
+        let client = Client::connect(fast_config(base), signer)
+            .await
+            .expect("connect must tolerate an unreachable relay, not Err");
+
+        // Immediately after construct the supervisor has not yet
+        // established a session, so the state is Connecting (initial) or
+        // Disconnected (the None-start path's first emission) — never
+        // Connected.
+        let state = client.connection_state().borrow().clone();
+        assert!(
+            matches!(
+                state,
+                ConnState::Connecting | ConnState::Disconnected { .. }
+            ),
+            "expected Connecting/Disconnected before any session lands, got {state:?}"
+        );
+
+        // The conservative default-profile caps are seeded until the
+        // first session negotiates real limits.
+        assert_eq!(
+            client.effective_capabilities,
+            EffectiveCapabilities::default_profile()
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_self_heals_when_relay_becomes_reachable() {
+        // Start with the relay down: connect resolves Ok and the client
+        // is reconnecting. Then bring the relay up on the same address
+        // and assert the supervisor reaches Connected on its own.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Hold the bound port so the client's first connect is refused,
+        // then hand it to the server once the client is reconnecting.
+        let base = Url::parse(&format!("http://{addr}/")).unwrap();
+        let signer = Arc::new(StaticKeySigner::from_public_key(b"self-heal-key".to_vec()));
+
+        // Generous reconnect budget; backoff starts at 1s so the heal
+        // lands on the second attempt well within the timeout below.
+        let client = Client::connect(ClientConfig::new(base), signer)
+            .await
+            .expect("connect must resolve Ok while the relay is down");
+        assert!(
+            !matches!(
+                *client.connection_state().borrow(),
+                ConnState::Connected { .. }
+            ),
+            "must not be Connected before the relay comes up"
+        );
+
+        // Bring the production server up on the held listener.
+        let cfg = ServerConfig::defaults(addr, Region::Nyc);
+        let server = Server::new(cfg).with_verifier(Arc::new(AcceptAllVerifier));
+        let (router, _state) = server.router();
+        let _server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        // Wait for the supervisor's reconnect loop to land a session.
+        let mut state_rx = client.connection_state();
+        let healed = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if matches!(*state_rx.borrow_and_update(), ConnState::Connected { .. }) {
+                    return true;
+                }
+                if state_rx.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the client to self-heal to Connected");
+        assert!(healed, "state channel closed before reaching Connected");
+    }
 }
