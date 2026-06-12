@@ -109,7 +109,9 @@ pub struct ClientBuilder {
     /// presence, v2 card generation) fail with transport errors against
     /// an unconnectable sentinel base URL. Meaningful only together
     /// with `data_dir` (and usually `relay_url` + `passphrase`); the
-    /// Android shell is the primary consumer.
+    /// Android shell is the primary consumer. Supplying an explicit
+    /// `base_url` together with `daemonless` re-enables the daemon
+    /// version probe against it (the P2 in-process-router shape).
     daemonless: bool,
 }
 
@@ -2349,10 +2351,12 @@ async fn build_with_chat(
     // `Client::publish_public_post` delivers through it.
     Option<Arc<FediverseTransport>>,
 )> {
-    // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
-    // chat-side work so an outdated daemon never gets a chance to
-    // mis-handle a `private_secure` group.
-    if !daemonless {
+    // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any chat work.
+    // Daemonless skips the probe ONLY against the unconnectable sentinel:
+    // an explicitly supplied base_url in daemonless mode (the P2
+    // in-process-router shape) claims a live daemon, so the version
+    // protection must still hold.
+    if !daemonless || base_url != DAEMONLESS_BASE_URL {
         enforce_m2_treekem_minimum(base_url, &token).await?;
     }
 
@@ -3884,6 +3888,28 @@ mod tests {
         drop(c1);
         let c2 = build().await;
         assert_eq!(c2.local_agent_id_hex().unwrap(), id1);
+    }
+
+    #[tokio::test]
+    async fn daemonless_with_explicit_base_url_still_probes_daemon_version() {
+        let dir = TempDir::new().unwrap();
+        // Port 1 refuses instantly; an explicit base_url in daemonless mode
+        // claims a daemon lives there, so the TreeKEM version probe must run
+        // and surface its transport failure instead of being bypassed.
+        let err = Client::builder()
+            .daemonless(true)
+            .base_url("http://127.0.0.1:1")
+            .token(String::new())
+            .data_dir(dir.path().to_path_buf())
+            .passphrase("test-pass".to_owned())
+            .build()
+            .await
+            .expect_err("probe against a dead explicit base_url must fail the build");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/version probe"),
+            "expected the version-probe error, got: {msg}"
+        );
     }
 
     // ── M4 actor identity helpers ─────────────────────────────────
