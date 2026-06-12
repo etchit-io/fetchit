@@ -34,6 +34,7 @@ pub mod lan_direct_transport;
 pub mod lan_discovery;
 pub mod lan_noise;
 pub mod lan_static;
+pub(crate) mod local_signer;
 pub mod local_store;
 pub mod messages;
 pub mod pair;
