@@ -235,6 +235,11 @@ http_status() {
     curl -s -o /dev/null --max-time 10 -w '%{http_code}' "$1"
 }
 
+# True when GET `url` answers exactly 404 (route present, record absent).
+http_is_404() {
+    [[ "$(http_status "$1")" == "404" ]]
+}
+
 PASS_COUNT=0
 step_pass() {
     echo "[mission] step $1: PASS -- $2"
@@ -350,11 +355,16 @@ step_pass 4 "region change: B migrated to relay A"
 
 # ── step 5: heal assertions (observable only) ─────────────────────────
 
+# Record probes poll under the standard timeout: a single in-flight
+# curl against a momentarily stalled relay must not fail the mission
+# (clients retry; the mission should match).
 # (a) pair record for B now served at the NEW relay (A's).
-http_ok_nonempty "${RELAY_A%/}/v1/pair-record/${AGENT_B}" \
+wait_until "pair-record for B at new relay A" \
+    http_ok_nonempty "${RELAY_A%/}/v1/pair-record/${AGENT_B}" \
     || step_fail 5 "pair-record for B absent at new relay A"
 # (b) forwarding record for B served at the OLD relay (B's home).
-http_ok_nonempty "${RELAY_B%/}/v1/forwarding/${AGENT_B}" \
+wait_until "forwarding record for B at old relay B" \
+    http_ok_nonempty "${RELAY_B%/}/v1/forwarding/${AGENT_B}" \
     || step_fail 5 "forwarding record for B absent at old relay B"
 
 # (c) delivery after migration: A re-resolves B and a fresh DM arrives.
@@ -398,14 +408,16 @@ RETURNED_TO="$(tr -d '\n' <"${WORKDIR}/return-b.out")"
     || step_fail 6 "return migrate did not echo home relay (got '$RETURNED_TO')"
 
 # (a) B's pair record is re-asserted at its home relay.
-http_ok_nonempty "${RELAY_B%/}/v1/pair-record/${AGENT_B}" \
+wait_until "pair-record for B back at home relay B" \
+    http_ok_nonempty "${RELAY_B%/}/v1/pair-record/${AGENT_B}" \
     || step_fail 6 "pair-record for B absent at home relay B after return"
 # (b) the stale step-4 forwarding record at home is superseded: 404.
-FWD_HOME_STATUS="$(http_status "${RELAY_B%/}/v1/forwarding/${AGENT_B}")"
-[[ "$FWD_HOME_STATUS" == "404" ]] \
-    || step_fail 6 "stale forwarding at home relay B not superseded (got ${FWD_HOME_STATUS}, want 404)"
+wait_until "superseded forwarding 404 at home relay B" \
+    http_is_404 "${RELAY_B%/}/v1/forwarding/${AGENT_B}" \
+    || step_fail 6 "stale forwarding at home relay B not superseded (still serving)"
 # (c) the fresh return-leg forwarding record at relay A serves.
-http_ok_nonempty "${RELAY_A%/}/v1/forwarding/${AGENT_B}" \
+wait_until "forwarding record for B at relay A after return" \
+    http_ok_nonempty "${RELAY_A%/}/v1/forwarding/${AGENT_B}" \
     || step_fail 6 "forwarding record for B absent at relay A after return"
 
 # (d) delivery after the return: B reads from home again; A's send walks
