@@ -229,7 +229,11 @@ body {
   gap: 12px;
   padding: 10px 14px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
   border-bottom: 1px solid var(--line);
+  box-shadow: var(--edge-highlight), var(--elev-1);
+  position: relative;
+  z-index: 5;
 }
 
 #mark {
@@ -256,16 +260,18 @@ body {
   background: var(--ink);
   color: var(--bone);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 9px 12px;
   font: 13px/1 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
   outline: none;
+  transition: border-color var(--dur-micro), box-shadow var(--dur-micro);
 }
 #addr::placeholder {
   color: var(--ash);
 }
 #addr:focus {
   border-color: var(--copper);
+  box-shadow: var(--focus-ring);
 }
 
 .addr-suggestions {
@@ -276,10 +282,11 @@ body {
   margin: 0;
   padding: 4px;
   list-style: none;
-  background: var(--ink);
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  border-radius: var(--r-ctl);
+  box-shadow: var(--elev-2), var(--edge-highlight);
   z-index: 20;
   max-height: 320px;
   overflow-y: auto;
@@ -296,7 +303,7 @@ body {
 }
 .addr-suggestion:hover,
 .addr-suggestion.is-active {
-  background: rgba(255, 255, 255, 0.05);
+  background: color-mix(in srgb, var(--copper) 10%, transparent);
 }
 .addr-suggestion-label {
   color: var(--bone);
@@ -311,20 +318,28 @@ body {
 }
 
 #go {
-  background: var(--copper);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
   color: var(--ink);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 9px 18px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
-#go:hover {
-  background: var(--copper-bright);
+#go:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+#go:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
 }
 #go:disabled {
   background: var(--ash);
   cursor: default;
+  box-shadow: none;
 }
 
 #back-toggle,
@@ -335,7 +350,7 @@ body {
   background: transparent;
   color: var(--ash);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   width: 38px;
   height: 38px;
   padding: 0;
@@ -345,6 +360,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: color var(--dur-micro), border-color var(--dur-micro),
+    background var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
 #bookmark-toggle:hover:not(:disabled),
 #share-toggle:hover:not(:disabled),
@@ -352,9 +369,20 @@ body {
 #settings-toggle:hover {
   border-color: var(--copper);
   color: var(--copper-bright);
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  transform: translateY(-1px);
 }
 #back-toggle:hover:not(:disabled) {
   color: var(--bone);
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  transform: translateY(-1px);
+}
+#back-toggle:active:not(:disabled),
+#bookmark-toggle:active:not(:disabled),
+#share-toggle:active:not(:disabled),
+#chat-toggle:active:not(:disabled),
+#settings-toggle:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
 }
 #back-toggle:disabled,
 #bookmark-toggle:disabled,
@@ -1081,13 +1109,17 @@ body:not([data-view="settings"]) #settings {
   font: 12.5px/1.2 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
   white-space: nowrap;
   outline: none;
+  transition: color var(--dur-micro), background var(--dur-micro), border-color var(--dur-micro);
+  border-radius: 6px 6px 0 0;
 }
 .tab:hover {
   color: var(--bone);
+  background: color-mix(in srgb, var(--bone) 4%, transparent);
 }
 .tab.is-active {
   color: var(--bone);
   border-bottom-color: var(--copper);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--copper) 9%, transparent), transparent);
 }
 .tab.is-loading .tab-label::after {
   content: " …";
@@ -1126,6 +1158,7 @@ body:not([data-view="settings"]) #settings {
   color: var(--ash);
   font-size: 12.5px;
   border-bottom: 1px solid transparent;
+  transition: opacity var(--dur-micro);
 }
 #status:empty {
   display: none;
