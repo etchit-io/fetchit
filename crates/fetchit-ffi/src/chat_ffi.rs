@@ -46,6 +46,36 @@ pub enum ChatEventFfi {
     },
 }
 
+/// Routing verdict for one inbound transit envelope, in evaluation
+/// order: self-originated envelopes are dropped before dispatch, and
+/// the all-zeros bridge sentinel can never match a real agent id, so
+/// public posts always route.
+#[derive(Debug, PartialEq, Eq)]
+enum EnvelopeRoute {
+    /// Bridge-originated fediverse post: feed the public-post dispatcher.
+    PublicPost,
+    /// Own send echoed back by the relay: drop silently.
+    SelfSource,
+    /// Everything else: conversation dispatch.
+    Dispatch,
+}
+
+fn route_envelope(
+    kind: &fetchit_relay_proto::EnvelopeKind,
+    sender_hex: &str,
+    self_agent_id_hex: &str,
+) -> EnvelopeRoute {
+    // Keep the SAME order the pump uses today (self-source first, then
+    // PublicPost).
+    if sender_hex == self_agent_id_hex {
+        return EnvelopeRoute::SelfSource;
+    }
+    if matches!(kind, fetchit_relay_proto::EnvelopeKind::PublicPost) {
+        return EnvelopeRoute::PublicPost;
+    }
+    EnvelopeRoute::Dispatch
+}
+
 /// Daemonless chat client for the Android shell.
 ///
 /// Connect with [`ChatClient::connect`], which builds a
@@ -53,11 +83,32 @@ pub enum ChatEventFfi {
 /// signer; relay WebSocket transport in-process). Inbound events — DMs,
 /// receipts, and bridged fediverse public posts — are drained via
 /// [`ChatClient::next_event`].
+///
+/// Call [`ChatClient::disconnect`] when the app no longer needs live chat
+/// (background, account switch). [`Drop`] aborts both background tasks as a
+/// GC backstop, but `disconnect` is the deterministic path.
 #[derive(uniffi::Object)]
 pub struct ChatClient {
     inner: Client,
     relay_url: String,
     events: Mutex<mpsc::UnboundedReceiver<ChatEventFfi>>,
+    pump_abort: tokio::task::AbortHandle,
+    drain_abort: tokio::task::AbortHandle,
+}
+
+/// GC backstop: abort both background tasks if the Kotlin side releases
+/// the object without calling `disconnect` first. `disconnect` is the
+/// deterministic path; `Drop` is the safety net.
+///
+/// Cycle break trace: after abort, each task drops its captured `Client`
+/// clone; once the Kotlin side releases the `Arc<ChatClient>` the struct's
+/// `inner` drops too; `Router` and `RelayTransport` refcounts hit zero; the
+/// transport's own `Drop` closes the WebSocket (relay_transport.rs ~380-392).
+impl Drop for ChatClient {
+    fn drop(&mut self) {
+        self.pump_abort.abort();
+        self.drain_abort.abort();
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -96,9 +147,9 @@ impl ChatClient {
 
         // Subscribe to bridged fediverse public posts before spawning the
         // inbound pump so no posts are missed between build and subscribe.
-        if let Some(mut post_rx) = inner.subscribe_to_public_posts() {
+        let drain_abort = if let Some(mut post_rx) = inner.subscribe_to_public_posts() {
             let post_tx = tx.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 loop {
                     match post_rx.recv().await {
                         Ok(delivery) => {
@@ -117,15 +168,33 @@ impl ChatClient {
                     }
                 }
             });
-        }
+            handle.abort_handle()
+        } else {
+            // No public-post broadcast; park a no-op task so drain_abort
+            // is always a valid handle.
+            tokio::spawn(async {}).abort_handle()
+        };
 
-        spawn_inbound_pump(inner.clone(), tx);
+        let pump_abort = spawn_inbound_pump(inner.clone(), tx);
 
         Ok(Arc::new(Self {
             inner,
             relay_url,
             events: Mutex::new(rx),
+            pump_abort,
+            drain_abort,
         }))
+    }
+
+    /// Stop the inbound pump and feed drains, releasing the relay
+    /// connection. Idempotent; safe to call more than once. Android
+    /// calls this when the app no longer needs live chat (background,
+    /// account switch) instead of waiting for garbage collection to
+    /// drop the object. After disconnect, `next_event` drains any
+    /// already-queued events and then returns `None` forever.
+    pub fn disconnect(&self) {
+        self.pump_abort.abort();
+        self.drain_abort.abort();
     }
 
     /// The local agent id as lowercase 64-character hex.
@@ -235,18 +304,27 @@ impl ChatClient {
 ///
 /// A malformed or unrecognised envelope never panics the pump; errors are
 /// logged at `warn` level.
-fn spawn_inbound_pump(client: Client, tx: mpsc::UnboundedSender<ChatEventFfi>) {
+///
+/// Returns the [`tokio::task::AbortHandle`] for the spawned task so the
+/// caller can abort it on disconnect or drop.
+fn spawn_inbound_pump(
+    client: Client,
+    tx: mpsc::UnboundedSender<ChatEventFfi>,
+) -> tokio::task::AbortHandle {
     let rx = match client.take_transport_inbound("relay") {
         Some(r) => r,
         None => {
             log::warn!("[chat_ffi] no relay inbound channel; inbound pump not started");
-            return;
+            // Return a handle to a no-op task so the caller always holds a
+            // valid AbortHandle.
+            return tokio::spawn(async {}).abort_handle();
         }
     };
 
     tokio::spawn(async move {
         run_inbound_pump(client, rx, tx).await;
-    });
+    })
+    .abort_handle()
 }
 
 async fn run_inbound_pump(
@@ -260,20 +338,26 @@ async fn run_inbound_pump(
             None => continue,
         };
 
-        // Self-source filter: drop own-sends that echo back over the relay.
-        if let Some(identity) = client.identity_arc() {
-            if hex::encode(transit.sender_agent_id.as_bytes()) == identity.agent_id_hex() {
+        let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+        let self_hex = client
+            .identity_arc()
+            .map(|id| id.agent_id_hex().to_owned())
+            .unwrap_or_default();
+
+        match route_envelope(&transit.kind, &sender_hex, &self_hex) {
+            EnvelopeRoute::SelfSource => continue,
+
+            EnvelopeRoute::PublicPost => {
+                // M4 Stage 5.3: bridged fediverse public post. Dispatch feeds
+                // the broadcast that the public-post subscriber task drains
+                // into `tx`.
+                if let Err(e) = client.dispatch_inbound_public_post(&transit) {
+                    log::warn!("[chat_ffi] public-post dispatch dropped envelope: {e}");
+                }
                 continue;
             }
-        }
 
-        // M4 Stage 5.3: bridged fediverse public post. Dispatch feeds the
-        // broadcast that the public-post subscriber task drains into `tx`.
-        if matches!(transit.kind, fetchit_relay_proto::EnvelopeKind::PublicPost) {
-            if let Err(e) = client.dispatch_inbound_public_post(&transit) {
-                log::warn!("[chat_ffi] public-post dispatch dropped envelope: {e}");
-            }
-            continue;
+            EnvelopeRoute::Dispatch => {}
         }
 
         // M2.5 bridge: X0xdGroupMetadataEvent tunnels MLS state through
@@ -361,6 +445,64 @@ async fn run_inbound_pump(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // All-zeros hex is the bridge sentinel: 32 zero bytes = 64 '0' chars.
+    // A real agent id is SHA-256(AGENT_ID_DOMAIN || public_key), which cannot
+    // collide with the all-zeros value in practice.
+    const ZEROS_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const REAL_HEX: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
+    #[test]
+    fn route_self_source_drops_any_kind() {
+        // A GroupChat from self is dropped regardless of kind.
+        assert_eq!(
+            route_envelope(
+                &fetchit_relay_proto::EnvelopeKind::GroupChat,
+                REAL_HEX,
+                REAL_HEX,
+            ),
+            EnvelopeRoute::SelfSource,
+        );
+    }
+
+    #[test]
+    fn route_public_post_from_sentinel_routes_public_post() {
+        // The all-zeros bridge sentinel is never equal to a real agent id,
+        // so a PublicPost from it cannot be self-sourced and must route
+        // PublicPost.
+        assert_eq!(
+            route_envelope(
+                &fetchit_relay_proto::EnvelopeKind::PublicPost,
+                ZEROS_HEX,
+                REAL_HEX,
+            ),
+            EnvelopeRoute::PublicPost,
+        );
+    }
+
+    #[test]
+    fn route_ordinary_kind_from_other_agent_dispatches() {
+        assert_eq!(
+            route_envelope(&fetchit_relay_proto::EnvelopeKind::Dm, REAL_HEX, ZEROS_HEX,),
+            EnvelopeRoute::Dispatch,
+        );
+    }
+
+    #[test]
+    fn route_public_post_from_real_self_is_self_source() {
+        // Self-source check runs first: even a PublicPost whose sender_hex
+        // equals self_agent_id_hex (unusual but valid to test order) is
+        // dropped as SelfSource. This exercises the evaluation-order comment
+        // in route_envelope.
+        assert_eq!(
+            route_envelope(
+                &fetchit_relay_proto::EnvelopeKind::PublicPost,
+                REAL_HEX,
+                REAL_HEX,
+            ),
+            EnvelopeRoute::SelfSource,
+        );
+    }
 
     /// Verify that the daemonless client connects to the production NYC relay
     /// and returns a well-formed local agent id. This is the first-ever
