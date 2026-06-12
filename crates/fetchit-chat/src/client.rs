@@ -987,6 +987,12 @@ impl Client {
         };
         let candidate = {
             let advertised = self.advertised_relays.read().await;
+            // SSRF boundary: candidates come from the user's OWN
+            // advertised-relay list (self-configured), never from
+            // contact-supplied hints, so this dial is deliberately not
+            // guard_relay_url-gated — pointing at one's own LAN relay
+            // is legitimate here.
+            //
             // Denylist-aware candidate filtering is deferred: the transport
             // layer's DenylistQuery is a documented no-op until the
             // trust-client relocation lands, so a filter here would be
