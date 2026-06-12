@@ -8,6 +8,7 @@ vi.mock("./notify", () => ({
 import {
   applyChatEvent,
   applyDenylistUpdateEvent,
+  applyRelayStatusEvent,
   makeRelayDenylistedHandler,
   makeRelayFailoverHandler,
   projectPendingContact,
@@ -220,6 +221,36 @@ describe("warnEventToCopy", () => {
 
   it("falls back to a generic 'something went wrong' for unknown kinds", () => {
     expect(warnEventToCopy({ kind: "novel_failure_mode" })).toContain("novel_failure_mode");
+  });
+});
+
+describe("applyRelayStatusEvent", () => {
+  it("maps live transitions onto the relay pill state", () => {
+    applyRelayStatusEvent(store, { kind: "connecting" });
+    expect(store.getRelayStatus()).toBe("connecting");
+    applyRelayStatusEvent(store, { kind: "connected" });
+    expect(store.getRelayStatus()).toBe("connected");
+    applyRelayStatusEvent(store, { kind: "reconnecting", reason: "io" });
+    expect(store.getRelayStatus()).toBe("reconnecting");
+    expect(store.allNotices()).toHaveLength(0);
+  });
+
+  it("terminal disconnect sets down and raises the lost-connection notice", () => {
+    applyRelayStatusEvent(store, {
+      kind: "permanently_disconnected",
+      reason: "gave up",
+      attempts: 20,
+    });
+    expect(store.getRelayStatus()).toBe("down");
+    const notices = store.allNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.body).toContain("Lost connection");
+  });
+
+  it("drops unknown kinds without touching the store", () => {
+    applyRelayStatusEvent(store, { kind: "future_state" });
+    expect(store.getRelayStatus()).toBeNull();
+    expect(store.allNotices()).toHaveLength(0);
   });
 });
 

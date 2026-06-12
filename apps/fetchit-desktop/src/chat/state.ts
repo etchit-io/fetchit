@@ -70,6 +70,17 @@ export type BubbleStatus = "sending" | "delivered" | "failed";
 /// self-heals after the daemon auto-upgrades or restarts.
 export type DaemonStatus = "connected" | "reconnecting" | "down";
 
+/// Relay-link health, surfaced by the backend's `chat:relay-status`
+/// Tauri event (one per supervisor ConnState transition). Distinct
+/// from [`DaemonStatus`]: the daemon can be healthy while the relay
+/// link is still connecting or reconnecting, and the user should see
+/// why sends sit queued in either case.
+export type RelayStatus =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "down";
+
 /// One transient banner in the chat panel — used to surface
 /// otherwise-silent failures (crypto warns, send errors).
 export interface ChatNotice {
@@ -190,6 +201,7 @@ export class ChatStore {
   /// right now. `null` means the watcher hasn't reported yet (early
   /// boot); UI should treat that as "connected" until proved otherwise.
   private daemonStatus: DaemonStatus | null = null;
+  private relayStatus: RelayStatus | null = null;
   /// First-contact welcomes from previously-unknown senders, fed by
   /// the `chat:contact-request` Tauri event. Keyed by `group_id_hex`
   /// so a duplicate event for the same conversation overwrites
@@ -375,6 +387,23 @@ export class ChatStore {
   /// startup.
   getDaemonStatus(): DaemonStatus | null {
     return this.daemonStatus;
+  }
+
+  /// Update the relay-link status, fed by the `chat:relay-status`
+  /// Tauri event. Same change-only emit discipline as
+  /// [`setDaemonStatus`].
+  setRelayStatus(status: RelayStatus): void {
+    if (this.relayStatus === status) return;
+    this.relayStatus = status;
+    this.emit();
+  }
+
+  /// Current relay-link status, or `null` before the first backend
+  /// report (early-boot, or REST-only clients with no relay). The
+  /// pill stays hidden while `null` for the same reason as the
+  /// daemon's.
+  getRelayStatus(): RelayStatus | null {
+    return this.relayStatus;
   }
 
   /// Nearby peers minus any already in the contact store. The Nearby

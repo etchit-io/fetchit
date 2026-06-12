@@ -446,6 +446,38 @@ describe("ChatStore — daemon status", () => {
   });
 });
 
+describe("ChatStore — relay status", () => {
+  it("starts with null status so the header pill stays hidden during boot", () => {
+    const s = new ChatStore();
+    expect(s.getRelayStatus()).toBeNull();
+  });
+
+  it("records the latest relay status emitted by the backend pump", () => {
+    const s = new ChatStore();
+    s.setRelayStatus("connecting");
+    expect(s.getRelayStatus()).toBe("connecting");
+    s.setRelayStatus("connected");
+    expect(s.getRelayStatus()).toBe("connected");
+    s.setRelayStatus("reconnecting");
+    expect(s.getRelayStatus()).toBe("reconnecting");
+    s.setRelayStatus("down");
+    expect(s.getRelayStatus()).toBe("down");
+  });
+
+  it("only notifies subscribers when the status value actually changes", () => {
+    const s = new ChatStore();
+    let calls = 0;
+    s.subscribe(() => {
+      calls++;
+    });
+    s.setRelayStatus("connecting");
+    s.setRelayStatus("connecting");
+    expect(calls).toBe(1);
+    s.setRelayStatus("connected");
+    expect(calls).toBe(2);
+  });
+});
+
 describe("ChatStore — inline image attachments", () => {
   const ATT = {
     mime: "image/png",

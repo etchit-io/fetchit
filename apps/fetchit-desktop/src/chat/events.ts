@@ -31,13 +31,37 @@ interface NearbyEventPeer {
   lastSeenMsAgo: number;
 }
 
-/// Wire-shape of the daemon's `chat:relay-status` Tauri event.
-/// Currently emits only the terminal `permanently_disconnected`
-/// transition — transient flaky-network noise stays in-process.
-interface RelayStatusEvent {
+/// Wire-shape of the daemon's `chat:relay-status` Tauri event. One
+/// per supervisor ConnState transition: `connecting`, `connected`,
+/// `reconnecting`, and the terminal `permanently_disconnected`.
+export interface RelayStatusEvent {
   kind: string;
   reason?: string;
   attempts?: number;
+}
+
+/// Map one `chat:relay-status` payload onto the store: the header
+/// pill state for every transition, plus the lost-connection notice
+/// on the terminal one. Unknown kinds are dropped so a newer backend
+/// can grow the vocabulary without breaking an older frontend.
+export function applyRelayStatusEvent(
+  store: ChatStore,
+  payload: RelayStatusEvent,
+): void {
+  switch (payload.kind) {
+    case "connecting":
+    case "connected":
+    case "reconnecting":
+      store.setRelayStatus(payload.kind);
+      break;
+    case "permanently_disconnected":
+      store.setRelayStatus("down");
+      store.pushNotice(
+        "warn",
+        "Lost connection to the chat relay. Close and reopen Chat to reconnect.",
+      );
+      break;
+  }
 }
 
 /// Wire-shape of the daemon's `chat:warn` Tauri event. The `kind`
@@ -233,12 +257,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     "chat:relay-status",
     (ev) => {
       console.warn("[chat:relay-status]", ev.payload);
-      if (ev.payload.kind === "permanently_disconnected") {
-        store.pushNotice(
-          "warn",
-          "Lost connection to the chat relay. Close and reopen Chat to reconnect.",
-        );
-      }
+      applyRelayStatusEvent(store, ev.payload);
     },
   );
   const onRelayDenylisted = makeRelayDenylistedHandler(store);

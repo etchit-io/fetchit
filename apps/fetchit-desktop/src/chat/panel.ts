@@ -220,21 +220,35 @@ export function mountChatPanel(
   };
   store.subscribe(renderOutboxBanner);
 
-  /// Repaint the daemon-status pill on every store-emit. Plain
-  /// English copy on purpose — no "daemon" or "x0xd" — so a
-  /// non-technical user can read it without context.
+  /// Repaint the status pill on every store-emit. Plain English copy
+  /// on purpose — no "daemon", "x0xd" or "relay" jargon — so a
+  /// non-technical user can read it without context. Daemon health
+  /// wins over relay-link health: a down daemon means nothing works,
+  /// so the relay label only shows once the local service is fine.
   const renderDaemonPill = (): void => {
-    const status = store.getDaemonStatus();
-    if (!status || status === "connected") {
-      daemonPill.hidden = true;
-      daemonPill.textContent = "";
-      daemonPill.dataset.state = status ?? "connected";
+    const daemon = store.getDaemonStatus();
+    if (daemon && daemon !== "connected") {
+      daemonPill.hidden = false;
+      daemonPill.dataset.state = daemon;
+      daemonPill.textContent =
+        daemon === "reconnecting" ? "Reconnecting…" : "Chat service offline";
       return;
     }
-    daemonPill.hidden = false;
-    daemonPill.dataset.state = status;
-    daemonPill.textContent =
-      status === "reconnecting" ? "Reconnecting…" : "Chat service offline";
+    const relay = store.getRelayStatus();
+    if (relay && relay !== "connected") {
+      daemonPill.hidden = false;
+      daemonPill.dataset.state = relay;
+      daemonPill.textContent =
+        relay === "connecting"
+          ? "Connecting…"
+          : relay === "reconnecting"
+            ? "Reconnecting…"
+            : "Chat offline";
+      return;
+    }
+    daemonPill.hidden = true;
+    daemonPill.textContent = "";
+    daemonPill.dataset.state = daemon ?? "connected";
   };
   store.subscribe(renderDaemonPill);
   renderDaemonPill();

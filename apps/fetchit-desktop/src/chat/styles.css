@@ -96,6 +96,7 @@ body.chat-docked {
   letter-spacing: 0.01em;
   white-space: nowrap;
 }
+.chat-panel__daemon[data-state="connecting"],
 .chat-panel__daemon[data-state="reconnecting"] {
   color: var(--ink);
   background: var(--copper);

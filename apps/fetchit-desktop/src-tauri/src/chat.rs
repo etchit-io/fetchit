@@ -1568,12 +1568,13 @@ fn spawn_lan_inbound(app: AppHandle, state: ChatState) {
     });
 }
 
-/// Pump the relay-client's connection-state watch into a Tauri event
-/// so the frontend can surface a transient "lost connection" notice
-/// when the supervisor hits its reconnect cap and stops trying.
-/// Only emits the terminal `PermanentlyDisconnected` transition —
-/// transient Disconnected / Connecting noise stays in-process so the
-/// notice stack isn't spammed during normal flaky-network operation.
+/// Pump the relay-client's connection-state watch into `chat:relay-status`
+/// Tauri events. Every transition is forwarded — Connecting / Connected /
+/// Disconnected drive the header status pill so a user whose relay is
+/// down at startup (start-and-self-heal) or mid-session sees why sends
+/// sit queued, and the terminal `PermanentlyDisconnected` additionally
+/// raises the "lost connection" notice. The pill repaints in place, so
+/// transient flaps change one label rather than stacking notices.
 fn spawn_relay_conn_state(app: AppHandle, state: ChatState) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1588,32 +1589,44 @@ fn spawn_relay_conn_state(app: AppHandle, state: ChatState) {
                 continue;
             };
             loop {
-                let snapshot = if let fetchit_chat::RelayConnState::PermanentlyDisconnected {
-                    reason,
-                    attempts,
-                } = rx.borrow().clone()
-                {
-                    Some((reason, attempts))
-                } else {
-                    None
-                };
-                if let Some((reason, attempts)) = snapshot {
-                    let _ = app.emit(
-                        "chat:relay-status",
-                        serde_json::json!({
-                            "kind": "permanently_disconnected",
-                            "reason": reason,
-                            "attempts": attempts,
-                        }),
-                    );
-                    // Break the inner loop and fall through to the
-                    // outer loop so the next ChatState::invalidate()
-                    // (from any path — settings change, daemon
-                    // watcher, manual reconnect) rebuilds the chat
-                    // client and re-arms this pump against the new
-                    // supervisor's watch receiver. Returning here
-                    // would orphan all future terminal transitions.
-                    break;
+                let snapshot = rx.borrow().clone();
+                match snapshot {
+                    fetchit_chat::RelayConnState::Connecting => {
+                        let _ = app.emit(
+                            "chat:relay-status",
+                            serde_json::json!({ "kind": "connecting" }),
+                        );
+                    }
+                    fetchit_chat::RelayConnState::Connected { .. } => {
+                        let _ = app.emit(
+                            "chat:relay-status",
+                            serde_json::json!({ "kind": "connected" }),
+                        );
+                    }
+                    fetchit_chat::RelayConnState::Disconnected { reason, .. } => {
+                        let _ = app.emit(
+                            "chat:relay-status",
+                            serde_json::json!({ "kind": "reconnecting", "reason": reason }),
+                        );
+                    }
+                    fetchit_chat::RelayConnState::PermanentlyDisconnected { reason, attempts } => {
+                        let _ = app.emit(
+                            "chat:relay-status",
+                            serde_json::json!({
+                                "kind": "permanently_disconnected",
+                                "reason": reason,
+                                "attempts": attempts,
+                            }),
+                        );
+                        // Break the inner loop and fall through to the
+                        // outer loop so the next ChatState::invalidate()
+                        // (from any path — settings change, daemon
+                        // watcher, manual reconnect) rebuilds the chat
+                        // client and re-arms this pump against the new
+                        // supervisor's watch receiver. Returning here
+                        // would orphan all future terminal transitions.
+                        break;
+                    }
                 }
                 if rx.changed().await.is_err() {
                     break;
