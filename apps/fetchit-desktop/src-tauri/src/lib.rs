@@ -8,6 +8,7 @@ mod disk_cache;
 #[cfg(feature = "e2e")]
 mod e2e;
 mod fediverse;
+mod fediverse_lookup;
 mod linux_deep_link;
 mod profile;
 mod protocol;
@@ -1142,6 +1143,7 @@ pub fn run() {
             fediverse::fediverse_ensure_v2,
             fediverse::fediverse_mint,
             fediverse::fediverse_publish,
+            fediverse_lookup::fediverse_lookup,
         ])
         .on_window_event(|win, event| {
             // ClearMode::OnClose: wipe the on-disk cache when the user

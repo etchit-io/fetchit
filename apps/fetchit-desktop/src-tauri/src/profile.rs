@@ -215,7 +215,7 @@ pub fn validate_avatar_to_data_url(
 
 /// Hard ceiling on a fetched profile manifest. The v3 manifest is small
 /// JSON; 64 KiB is well above any honest encoding and below a `DoS`.
-const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 /// Hard ceiling on fetched avatar bytes. Matches `MAX_AVATAR_BYTES`; the
 /// per-byte declared-length check in `validate_avatar_to_data_url` tightens
