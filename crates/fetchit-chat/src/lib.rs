@@ -42,13 +42,13 @@ pub mod presence;
 pub mod profile;
 pub mod public;
 pub mod rekey;
+pub mod relay_http;
 pub mod relay_transport;
 pub mod transport;
 
 mod client;
 mod http;
 mod members_singleflight;
-mod relay_http;
 
 pub use chat_identity::FetchitIdentity;
 pub use client::{Client, ClientBuilder, RelayFailoverEvent};

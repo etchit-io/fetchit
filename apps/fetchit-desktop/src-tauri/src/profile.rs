@@ -242,7 +242,9 @@ pub async fn chat_fetch_profile(
     // this rejects a malformed id early and is path-manipulation defense.
     fetchit_chat::identity::AgentId::parse(&agent_id).map_err(|e| e.to_string())?;
     let relay = state.relay_url();
-    let http = reqwest::Client::new();
+    // Redirect-disabled client: a relay 302 must not carry the request
+    // past the SSRF host guard inside the fetch.
+    let http = fetchit_chat::relay_http::guarded_client();
     let record = match fetchit_chat::pair::fetch_index_record_by_id(&relay, &agent_id, &http).await
     {
         Ok(r) => r,

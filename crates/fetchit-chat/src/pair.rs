@@ -189,28 +189,38 @@ pub fn verify_index_record(record: &ProfileIndexRecord) -> std::result::Result<V
 /// address to [`PairError::Tombstoned`].
 ///
 /// # Errors
-/// Transport, non-2xx relay status, malformed body, agent-id mismatch,
-/// failed verification, or a tombstoned profile.
+/// Blocked relay host, transport, non-2xx relay status, malformed or
+/// oversize body, agent-id mismatch, failed verification, or a
+/// tombstoned profile.
 pub async fn fetch_index_record_by_id(
     relay: &url::Url,
     agent_id: &str,
     http: &reqwest::Client,
 ) -> std::result::Result<ProfileIndexRecord, PairError> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| PairError::RelayBlocked(e.to_string()))?;
     let url = relay
         .join(&format!("v1/profile/{agent_id}"))
         .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
-    let resp = http
-        .get(url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.get(url.clone()).timeout(Duration::from_secs(10))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }
-    let record: ProfileIndexRecord = resp
-        .json()
+    // Cap the body before buffering: a hostile relay must not be able to
+    // stream an unbounded response and OOM the client.
+    let raw = resp
+        .bytes()
         .await
-        .map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
+        .map_err(|e| PairError::Decode(format!("relay body read: {e}")))?;
+    if raw.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
+        return Err(PairError::Decode("relay body exceeds size cap".into()));
+    }
+    let record: ProfileIndexRecord =
+        serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
     if record.profile_addr == ALL_ZEROS_PROFILE_ADDR {
         return Err(PairError::Tombstoned);
     }
@@ -766,6 +776,56 @@ mod tests {
         match fetch_index_record_by_id(&relay, &record.agent_id, &http).await {
             Err(PairError::Tombstoned) => {}
             other => panic!("expected Tombstoned, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_by_id_rejects_oversize_body() {
+        // A hostile relay streaming an oversize response must be cut off
+        // at the body cap, not buffered into RAM.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let huge = vec![b'a'; crate::pair_record::MAX_RELAY_BODY_BYTES + 1];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(huge))
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match fetch_index_record_by_id(&relay, &"f".repeat(64), &http).await {
+            Err(PairError::Decode(msg)) => {
+                assert!(msg.contains("size cap"), "unexpected decode error: {msg}");
+            }
+            other => panic!("expected size-cap Decode error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_by_id_does_not_follow_redirect() {
+        // Mirrors fetch_pair_record_by_id_does_not_follow_redirect: a 302
+        // from the relay must surface as a non-2xx status, not be chased
+        // past the URL-only host guard. Uses guarded_client() as prod does.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://example.com/moved"),
+            )
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = crate::relay_http::guarded_client();
+        match fetch_index_record_by_id(&relay, &"f".repeat(64), &http).await {
+            Err(PairError::RelayStatus(s)) => {
+                assert!((300..400).contains(&s), "expected a 3xx status, got {s}");
+            }
+            other => panic!("expected RelayStatus in the 3xx range, got {other:?}"),
         }
     }
 

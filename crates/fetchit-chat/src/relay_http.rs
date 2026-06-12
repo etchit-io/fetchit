@@ -12,10 +12,11 @@
 //! parallel implementation.
 //!
 //! Every item here is consumed by the dial-site wiring: [`guard_relay_url`]
-//! gates the four relay HTTP dial boundaries (pair-record and forwarding
-//! GET in [`crate::pair`], pair-record POST and per-relay forwarding POST
-//! in [`crate::pair_record`]), and [`guarded_client`] builds the
-//! redirect-disabled client those dials run on.
+//! gates the relay HTTP dial boundaries (profile-index, pair-record and
+//! forwarding GET in [`crate::pair`], pair-record POST and per-relay
+//! forwarding POST in [`crate::pair_record`]), and [`guarded_client`]
+//! builds the redirect-disabled client those dials run on — app shells
+//! resolving records outside this crate use it for the same reason.
 
 use std::time::Duration;
 use thiserror::Error;
@@ -118,7 +119,8 @@ async fn guard_relay_url_with(relay: &url::Url, allow_local: bool) -> Result<(),
 /// not `.unwrap()`); `reqwest`'s builder only errors on TLS-backend
 /// initialization, the same condition under which `Client::new()` is
 /// the fallback `reqwest` itself uses.
-pub(crate) fn guarded_client() -> reqwest::Client {
+#[must_use]
+pub fn guarded_client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
