@@ -125,12 +125,20 @@ class ChatModeView(
     /**
      * Initiate a pair import from a scanned or deep-linked URI.
      * Runs the full connect-and-import flow then prompts for a display name.
+     *
+     * Always resets to the list screen first so that a deep link arriving
+     * while a thread is open does not stack the new import over the existing
+     * thread (which would make back return to the previous thread rather than
+     * the list).
      */
     fun importFromUri(uri: String) {
         val agentId = ChatUris.pairUriAgentId(uri) ?: run {
             snackbar(context.getString(R.string.chat_invalid_pair_uri))
             return
         }
+        // Normalize the screen stack to the list before launching the import
+        // coroutine so mid-session deep links land cleanly.
+        showList()
         lifecycleScope.launch {
             runCatching { connectWithFeedback() }.onFailure { return@launch }
             val gw = controller.gateway() ?: run {

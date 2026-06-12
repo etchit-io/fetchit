@@ -72,10 +72,19 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private var currentMode = Mode.BROWSE
     private lateinit var chatModeView: ChatModeView
 
-    private fun setMode(mode: Mode) {
+    /**
+     * Switch between browse and chat modes.
+     *
+     * @param persist when true (the default for button-click switches) the
+     *   chosen mode is written to [SettingsStore] so the app wakes into it
+     *   next launch. Pass [persist] = false for deep-link entries — a
+     *   crafted `x0x://pair/` URI must not permanently overwrite the user's
+     *   chosen wake-up mode.
+     */
+    private fun setMode(mode: Mode, persist: Boolean = true) {
         if (mode == currentMode) return
         currentMode = mode
-        SettingsStore(this).saveLastMode(if (mode == Mode.BROWSE) "browse" else "chat")
+        if (persist) SettingsStore(this).saveLastMode(if (mode == Mode.BROWSE) "browse" else "chat")
         val browse = mode == Mode.BROWSE
         binding.swipeRefresh.isEnabled = browse
         binding.swipeRefresh.visibility = if (browse) View.VISIBLE else View.GONE
@@ -245,8 +254,10 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             return@registerForActivityResult
         }
         // x0x://pair/ URIs go to the chat pairing flow BEFORE the autonomi check.
+        // persist = false: scanning a pair QR must not permanently overwrite
+        // the user's chosen wake-up mode (same policy as the deep-link path).
         if (io.etchit.fetchit.chat.ChatUris.isPairUri(raw)) {
-            setMode(Mode.CHAT)
+            setMode(Mode.CHAT, persist = false)
             chatModeView.importFromUri(raw)
             return@registerForActivityResult
         }
@@ -422,9 +433,10 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         }
         // `x0x://pair/<agent-id>?r=<relay>` deep links: switch to chat
         // mode and hand the URI to ChatModeView which runs connect-first
-        // import (Task 4 guarantees this).
+        // import (Task 4 guarantees this). persist = false so a crafted
+        // pair URI cannot permanently overwrite the user's wake-up mode.
         if (uri.scheme == "x0x" && uri.host == "pair") {
-            setMode(Mode.CHAT)
+            setMode(Mode.CHAT, persist = false)
             chatModeView.importFromUri(uri.toString())
             return
         }
