@@ -147,7 +147,7 @@ Share pointer URI: `x0x://pair/<agent_id_hex>?r=<urlencoded-relay>[&r=...]` (1..
 
 ### Task 12: cross-relay live mission + edge swarm + final gates
 
-- [ ] Script `scripts/reachability-mission.sh`: peer A on NY, peer B on FRA (fresh vaults, throwaway x0xd instances per the m2_live topology pattern), pair via pointer URI, A→B and B→A sends asserting exit 0 via Bob's receipt-wait; then simulate a region change (B migrates to NY) and assert healing via forwarding record. Runs in CI as `#[ignore]`-style opt-in.
+- [x] Script `scripts/reachability-mission.sh`: peer A on NY, peer B on FRA (fresh vaults, throwaway x0xd instances per the m2_live topology pattern), pair via pointer URI, A→B and B→A sends asserting exit 0 via Bob's receipt-wait; then simulate a region change (B migrates to NY) and assert healing via forwarding record. Runs in CI as `#[ignore]`-style opt-in.
 - [ ] Haiku edge swarm (controller dispatches, NOT a plan-task subagent): cheap-model agents generate adversarial vitest/unit cases against the new modules — malformed pair URIs, hostile relay lists (file://, 0-length, unicode hosts, 4096-char URLs), watermark rollback fuzz, pool exhaustion, migration mid-send. Findings folded as tests in a polish commit.
 - [ ] Full workspace + src-tauri + frontend gates; push; cross-review exchange with Bob (his TB1/TB2 ↔ my T5/T7 — the deposit auth and forwarding verify are the sensitive seams).
 
