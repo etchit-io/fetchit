@@ -174,6 +174,12 @@ export async function init(): Promise<void> {
       onClose: () => {
         /* nothing to reconcile on close */
       },
+      onOpenDm: (agentIdHex) => {
+        // Hand off to LIT Chat: the lookup card already imported the
+        // contact, so close the public pane and land on the DM.
+        fediverse.close();
+        void chat?.openDm(agentIdHex);
+      },
     });
     void bindFediverseEvents(fediverse);
     fediverseBtn.addEventListener("click", () => fediverse.toggle());

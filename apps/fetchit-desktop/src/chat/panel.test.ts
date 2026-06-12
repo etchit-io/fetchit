@@ -56,6 +56,16 @@ describe("mountChatPanel — dock mode", () => {
     expect(host.classList.contains("chat-panel--docked")).toBe(false);
   });
 
+  it("openDm opens the panel even when the daemon is down", async () => {
+    const api = mountChatPanel(host, {
+      onAutonomi: () => {},
+      onClose: () => {},
+    });
+    expect(api.isOpen()).toBe(false);
+    await api.openDm("a".repeat(64));
+    expect(api.isOpen()).toBe(true);
+  });
+
   it("setDocked(true) toggles the class and persists the preference", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},

@@ -46,6 +46,9 @@ export interface ChatPanelApi {
   isOpen(): boolean;
   setDocked(docked: boolean): void;
   isDocked(): boolean;
+  /// Open the panel focused on the DM with `agentIdHex` (the contact
+  /// must already exist; the fediverse lookup imports before calling).
+  openDm(agentIdHex: string): Promise<void>;
 }
 
 const DOCK_KEY = "fetchit-chat:dock";
@@ -628,6 +631,13 @@ export function mountChatPanel(
     async toggle() {
       if (host.hidden) await open();
       else close();
+    },
+    async openDm(agentIdHex: string) {
+      await open();
+      // Same post-import jump handleImported performs: select the DM
+      // and refresh so the new contact's row is present.
+      store.setActive({ kind: "dm", peer: agentIdHex });
+      void refreshContacts();
     },
   };
 

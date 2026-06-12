@@ -9,11 +9,14 @@ import { icon } from "../ui/icons";
 import { mountCompose } from "./compose";
 import { mountFeed } from "./feed";
 import type { PublicPostDelivery } from "./feedPost";
+import { mountLookup } from "./lookup";
 
 /// Callbacks the host wires into the pane.
 export interface FediversePanelHandlers {
   /// Fired when the pane is closed (host hides its launcher affordance).
   onClose: () => void;
+  /// Open the LIT Chat DM for a contact imported via the lookup card.
+  onOpenDm: (agentIdHex: string) => void;
 }
 
 /// Imperative handle over a mounted fediverse pane.
@@ -68,13 +71,18 @@ export function mountFediversePanel(
   const composeHost = document.createElement("div");
   const compose = mountCompose(composeHost);
 
+  // M5.1 handle lookup: pinned between the header and the feed so
+  // discovery is the pane's first affordance.
+  const lookupHost = document.createElement("div");
+  mountLookup(lookupHost, { onOpenDm: handlers.onOpenDm });
+
   const body = document.createElement("div");
   body.className = "fediverse-panel__body";
   // Reply-publicly on a card targets the compose surface at the
   // relay-verified actor; public reply is the only reply option here.
   const feed = mountFeed(body, (verifiedActorUrl) => compose.setReplyTo(verifiedActorUrl));
 
-  host.append(header, body, composeHost);
+  host.append(header, lookupHost, body, composeHost);
 
   const open = (): void => {
     host.hidden = false;
