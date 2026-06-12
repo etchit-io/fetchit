@@ -75,6 +75,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private fun setMode(mode: Mode) {
         if (mode == currentMode) return
         currentMode = mode
+        SettingsStore(this).saveLastMode(if (mode == Mode.BROWSE) "browse" else "chat")
         val browse = mode == Mode.BROWSE
         binding.swipeRefresh.isEnabled = browse
         binding.swipeRefresh.visibility = if (browse) View.VISIBLE else View.GONE
@@ -333,6 +334,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.htmlView.setOnAutonomiNavigate { loadAddress(it) }
         binding.htmlView.setOnAutonomiBack(::navigateBack)
 
+        // Restore the last-used mode (browse or chat). Applied before
+        // handleViewIntent so a deep-link intent can override it.
+        // setMode early-returns on BROWSE (the initial state) so this
+        // only triggers a real switch when the persisted mode is "chat".
+        val lastMode = SettingsStore(this).lastMode()
+        if (lastMode == "chat") setMode(Mode.CHAT)
+
         // External entry: another app, a QR scanner, or a clicked link
         // routed an autonomi://<addr> intent at us — pick it up.
         handleViewIntent(intent)
@@ -410,6 +418,14 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (uri.scheme == "fetchit" && uri.host == "import") {
             val parsed = parseBookmarkImportUrl(uri.toString()) ?: return
             handleBookmarkImport(parsed)
+            return
+        }
+        // `x0x://pair/<agent-id>?r=<relay>` deep links: switch to chat
+        // mode and hand the URI to ChatModeView which runs connect-first
+        // import (Task 4 guarantees this).
+        if (uri.scheme == "x0x" && uri.host == "pair") {
+            setMode(Mode.CHAT)
+            chatModeView.importFromUri(uri.toString())
             return
         }
         if (uri.scheme != "autonomi") return

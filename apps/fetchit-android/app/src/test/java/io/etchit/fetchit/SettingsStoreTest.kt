@@ -162,4 +162,44 @@ class SettingsStoreTest {
         store.saveChatDisplayName("")
         assertEquals("", store.chatDisplayName())
     }
+
+    // ── lastMode: default rule ─────────────────────────────────────────
+
+    /**
+     * True first run: no "mode" pref and no bookmarks.
+     * Default must be "chat" so the onboarding empty-state is shown.
+     */
+    @Test
+    fun lastModeDefaultsToChatOnTrueFirstRun() {
+        // No mode pref set, no bookmarks in BookmarkStore.
+        context.getSharedPreferences("fetchit_bookmarks", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        assertEquals("chat", SettingsStore(context).lastMode())
+    }
+
+    /**
+     * No mode pref but bookmarks exist — existing user whose prefs were
+     * somehow cleared.  Must default to "browse" to avoid surprising them.
+     */
+    @Test
+    fun lastModeDefaultsToBrowseWhenBookmarksExist() {
+        context.getSharedPreferences("fetchit_bookmarks", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        // Add one bookmark via BookmarkStore so the pref is populated.
+        BookmarkStore(context).add(
+            Bookmark(id = "id-1", label = "A site", address = "a".repeat(64), addedAt = 1L, kind = null),
+        )
+        // No mode pref set — should fall back to browse because bookmarks exist.
+        assertEquals("browse", SettingsStore(context).lastMode())
+    }
+
+    /** Saving "chat" then reading it back must return "chat". */
+    @Test
+    fun lastModeRoundTrips() {
+        val store = SettingsStore(context)
+        store.saveLastMode("chat")
+        assertEquals("chat", SettingsStore(context).lastMode())
+        store.saveLastMode("browse")
+        assertEquals("browse", SettingsStore(context).lastMode())
+    }
 }
