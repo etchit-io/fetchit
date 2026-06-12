@@ -336,10 +336,13 @@ fn handle_client_frame(
                 // and let the SENDER re-resolve the signed record and
                 // retry at the new relay. Offline WITHOUT a forwarding
                 // record keeps today's buffer+Ack: `Moved` fires only on
-                // the unambiguous departed signal, and only while the
-                // record is live (the TB2 TTL sweep bounds it).
+                // the unambiguous departed signal, only while the record
+                // is live (the TB2 TTL sweep bounds it), and only while
+                // the agent's own pair-record hasn't superseded it (an
+                // agent that returned home publishes a newer pair-record,
+                // which retires the stale pointer without any removal).
                 let to_hex = hex::encode(to.as_bytes());
-                if state.forwarding.get_live(&to_hex, now_ms()).is_some() {
+                if crate::forwarding::get_live_unsuperseded(state, &to_hex, now_ms()).is_some() {
                     state.metrics.envelope_moved();
                     let _ = self_tx.try_send(ServerFrame::Moved(Moved { dedupe_key }));
                     return true;

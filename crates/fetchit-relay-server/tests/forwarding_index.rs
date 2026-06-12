@@ -206,6 +206,77 @@ async fn get_unknown_forwarding_is_404() {
 }
 
 #[tokio::test]
+async fn newer_pair_record_supersedes_forwarding_get() {
+    let bound = spawn_server().await;
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let pk_bytes = pk.to_bytes();
+    let client = reqwest::Client::new();
+
+    // Migration order: pair-record, then the forwarding pointer.
+    post_pair(&client, bound, &mk_signed_pair(&dsa, &sk, &pk_bytes, 1_000)).await;
+    let fwd = mk_signed_forwarding(&dsa, &sk, &pk_bytes, 2_000);
+    let r = client
+        .post(format!("http://{bound}/v1/forwarding"))
+        .json(&fwd)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // The agent returns home: a NEWER accepted pair-record retires the
+    // stale moved-to pointer from GET without removing it.
+    post_pair(&client, bound, &mk_signed_pair(&dsa, &sk, &pk_bytes, 3_000)).await;
+    let r = client
+        .get(format!("http://{bound}/v1/forwarding/{}", fwd.agent_id_hex))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        404,
+        "superseded forwarding record must read as absent"
+    );
+
+    // The record was suppressed, not removed: the forwarding watermark
+    // still holds, so replaying the captured record is still a 409.
+    let r = client
+        .post(format!("http://{bound}/v1/forwarding"))
+        .json(&fwd)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        409,
+        "watermark must survive supersession to block replays"
+    );
+
+    // A genuinely newer forwarding record (the next migration) still
+    // lands and serves.
+    let fwd2 = mk_signed_forwarding(&dsa, &sk, &pk_bytes, 4_000);
+    let r = client
+        .post(format!("http://{bound}/v1/forwarding"))
+        .json(&fwd2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let got: ForwardingRecordV1 = client
+        .get(format!(
+            "http://{bound}/v1/forwarding/{}",
+            fwd2.agent_id_hex
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got, fwd2);
+}
+
+#[tokio::test]
 async fn post_forwarding_oversize_body_is_413() {
     let bound = spawn_server().await;
     let huge = serde_json::json!({

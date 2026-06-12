@@ -295,11 +295,38 @@ pub async fn get_forwarding(
     State(state): State<Arc<ServerState>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ForwardingRecordV1>, StatusCode> {
-    state
-        .forwarding
-        .get_live(&agent_id.to_ascii_lowercase(), now_ms())
+    get_live_unsuperseded(&state, &agent_id.to_ascii_lowercase(), now_ms())
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Live forwarding record for `agent_id_hex`, additionally suppressed
+/// when the agent's stored pair-record is **newer** than the forwarding
+/// record — both timestamps come from the same issuer's ratchet, so the
+/// freshest signed statement wins. An agent that migrated A→B and
+/// returned inside the TTL re-publishes its pair-record at A; that
+/// retires the stale moved-to-B pointer here (deposits buffer+Ack
+/// again, GET reads 404) without removing anything: the stored record
+/// keeps holding the forwarding watermark, so a captured older record
+/// still 409s on replay, and the no-removal invariant on both indexes
+/// stands. A tie reads as not superseded (today's Moved behavior).
+#[must_use]
+pub fn get_live_unsuperseded(
+    state: &ServerState,
+    agent_id_hex: &str,
+    now_ms: u64,
+) -> Option<ForwardingRecordV1> {
+    let fwd = state.forwarding.get_live(agent_id_hex, now_ms)?;
+    // A forwarding POST requires a stored pair-record (412) and
+    // pair-records have no removal path, so a live forwarding record
+    // implies the pair lookup hits; the None arm (serve unsuppressed)
+    // is defensive.
+    if let Some(pair) = state.pair_records.get(agent_id_hex) {
+        if pair.issued_at_ms > fwd.issued_at_ms {
+            return None;
+        }
+    }
+    Some(fwd)
 }
 
 /// Relay wall-clock in unix-epoch milliseconds. Mirrors the convention in

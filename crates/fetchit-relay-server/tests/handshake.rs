@@ -983,3 +983,79 @@ async fn expired_forwarding_record_buffers_and_acks() {
     };
     assert_eq!(d.envelope.ciphertext, b"see you at the old relay");
 }
+
+#[tokio::test]
+async fn returned_home_pair_record_supersedes_forwarding() {
+    let addr = start_test_server().await;
+
+    // Ruth migrated away: pair-record + live forwarding record.
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let pk_bytes = pk.to_bytes();
+    let http = reqwest::Client::new();
+    post_pair(&http, addr, &mk_signed_pair(&dsa, &sk, &pk_bytes, 1_000)).await;
+    post_forwarding(
+        &http,
+        addr,
+        &mk_signed_forwarding(&dsa, &sk, &pk_bytes, 2_000),
+    )
+    .await;
+    let ruth_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(&pk_bytes));
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    // While departed, the deposit bounces Moved.
+    send_envelope_to(
+        &mut alice,
+        ruth_id,
+        envelope_from(alice_id, b"first try"),
+        [0x01; 16],
+    )
+    .await;
+    match next_server_frame(&mut alice, Duration::from_secs(2)).await {
+        Some(ServerFrame::Moved(_)) => {}
+        other => panic!("expected Moved while departed, got {other:?}"),
+    }
+
+    // Ruth returns home inside the TTL: a NEWER accepted pair-record
+    // supersedes the stale moved-to pointer, so deposits buffer+Ack
+    // again instead of bouncing.
+    post_pair(&http, addr, &mk_signed_pair(&dsa, &sk, &pk_bytes, 3_000)).await;
+    send_envelope_to(
+        &mut alice,
+        ruth_id,
+        envelope_from(alice_id, b"second try"),
+        [0x02; 16],
+    )
+    .await;
+    let ack = loop {
+        match next_server_frame(&mut alice, Duration::from_secs(2)).await {
+            Some(ServerFrame::Ack(a)) => break a,
+            Some(ServerFrame::Moved(m)) => {
+                panic!("superseded forwarding record must not bounce: {m:?}")
+            }
+            Some(_) => {}
+            None => panic!("expected Ack after the agent returned home"),
+        }
+    };
+    assert_eq!(ack.dedupe_key, DedupeKey::from_bytes([0x02; 16]));
+
+    // And the buffered deposit reaches Ruth when she connects.
+    let ruth_tok = obtain_bearer(addr, &pk_bytes).await;
+    let mut ruth = connect_ws(addr, &ruth_tok).await;
+    send_hello(&mut ruth).await;
+    let _ = expect_ready(&mut ruth).await;
+    let d = loop {
+        match next_server_frame(&mut ruth, Duration::from_secs(2)).await {
+            Some(ServerFrame::Deliver(d)) => break d,
+            Some(_) => {}
+            None => panic!("expected buffered Deliver on connect"),
+        }
+    };
+    assert_eq!(d.envelope.ciphertext, b"second try");
+}
