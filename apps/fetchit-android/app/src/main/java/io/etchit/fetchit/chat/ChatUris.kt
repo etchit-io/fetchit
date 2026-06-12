@@ -35,12 +35,16 @@ object ChatUris {
      * path segment is not 64 hex characters.
      */
     fun pairUriAgentId(uri: String): String? {
-        if (!uri.startsWith("x0x://pair/", ignoreCase = true)) return null
+        // Normalize once at entry so a hand-typed uppercase scheme or hex
+        // segment parses the same as the lowercase form the FFI emits;
+        // removePrefix is case-sensitive, so it must see the normalized form.
+        val normalized = uri.lowercase()
+        if (!normalized.startsWith("x0x://pair/")) return null
         // Strip query / fragment then isolate the first path segment.
-        val afterScheme = uri.removePrefix("x0x://pair/")
+        val afterScheme = normalized.removePrefix("x0x://pair/")
         val segment = afterScheme.substringBefore('?').substringBefore('#').trim()
         if (!segment.matches(HEX64)) return null
-        return segment.lowercase()
+        return segment
     }
 
     /**

@@ -101,7 +101,7 @@ object QrShare {
      */
     fun renderCardForUri(uri: String, label: String? = null): Bitmap? {
         val agentId = io.etchit.fetchit.chat.ChatUris.pairUriAgentId(uri) ?: return null
-        val shortId = "${agentId.take(8)}..."
+        val shortId = "${agentId.take(8)}…"
         return renderCard(uri, shortId, label?.ifBlank { null })
     }
 
