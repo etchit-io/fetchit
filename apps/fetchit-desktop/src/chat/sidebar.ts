@@ -3,6 +3,7 @@
 
 import type { ChatStore, Conversation, NearbyPeer } from "./state";
 import { convKey } from "./state";
+import { avatarGradientClass } from "./avatarColor";
 import { icon, type IconName } from "../ui/icons";
 
 export interface SidebarHandlers {
@@ -147,6 +148,9 @@ function rowFor(
 
   const avatar = document.createElement("span");
   avatar.className = "chat-conv__avatar";
+  avatar.classList.add(
+    avatarGradientClass(conv.key.kind === "dm" ? conv.key.peer : conv.key.groupId),
+  );
   avatar.textContent = initials(conv.title);
   if (conv.key.kind === "dm" && store.isOnline(conv.key.peer)) {
     avatar.classList.add("chat-conv__avatar--online");

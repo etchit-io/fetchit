@@ -1,4 +1,5 @@
 import type { ProfileOutcome } from "./types";
+import { avatarGradientClass } from "./avatarColor";
 
 export interface ProfileCardOpts {
   agentId: string;
@@ -87,6 +88,7 @@ function renderLoaded(
 
   const avatarBox = document.createElement("div");
   avatarBox.className = "chat-profile__avatar";
+  avatarBox.classList.add(avatarGradientClass(opts.agentId));
   body.appendChild(avatarBox);
   if (p.avatar) {
     const a = p.avatar;

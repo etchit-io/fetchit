@@ -150,6 +150,20 @@ describe("mountSidebar — presence dot", () => {
     const avatar = host.querySelector(".chat-conv__avatar");
     expect(avatar?.classList.contains("chat-conv__avatar--online")).toBe(false);
   });
+
+  it("avatar carries the deterministic identity gradient class", () => {
+    const store = makeStore();
+    store.recordDirectMessage({
+      from: PEER_A, to: ME, body: "hi", timestamp_ms: 1, message_id: "1",
+    });
+    mountSidebar(host, store, noopHandlers());
+
+    const avatar = host.querySelector(".chat-conv__avatar");
+    const gradient = [...(avatar?.classList ?? [])].find((c) =>
+      c.startsWith("chat-avatar--g"),
+    );
+    expect(gradient).toBeDefined();
+  });
 });
 
 describe("mountSidebar — unread badge", () => {
