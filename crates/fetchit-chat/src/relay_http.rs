@@ -14,9 +14,11 @@
 //! Every item here is consumed by the dial-site wiring: [`guard_relay_url`]
 //! gates the relay HTTP dial boundaries (profile-index, pair-record and
 //! forwarding GET in [`crate::pair`], pair-record POST and per-relay
-//! forwarding POST in [`crate::pair_record`]), and [`guarded_client`]
-//! builds the redirect-disabled client those dials run on — app shells
-//! resolving records outside this crate use it for the same reason.
+//! forwarding POST in [`crate::pair_record`]), [`guarded_client`] builds
+//! the redirect-disabled client those dials run on — app shells resolving
+//! records outside this crate use it for the same reason — and
+//! [`read_body_capped`] bounds every relay response body those dials
+//! buffer.
 
 use std::time::Duration;
 use thiserror::Error;
@@ -125,6 +127,46 @@ pub fn guarded_client() -> reqwest::Client {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Reasons [`read_body_capped`] fails.
+#[derive(Debug, Error)]
+pub(crate) enum BodyReadError {
+    /// The declared or streamed body size exceeds the caller's cap.
+    #[error("relay body exceeds size cap")]
+    CapExceeded,
+
+    /// The underlying transport failed mid-body.
+    #[error("relay body read: {0}")]
+    Read(reqwest::Error),
+}
+
+/// Read a relay response body with `cap` enforced BEFORE buffering.
+///
+/// `Response::bytes()` buffers the entire body first, so a hostile relay
+/// could stream unbounded data into RAM ahead of any post-hoc length
+/// check. This reads incrementally instead: an honest `Content-Length`
+/// above the cap is rejected without reading the body at all, and a
+/// chunked or lying stream is aborted at the first chunk that would
+/// carry the buffer past the cap. Every relay-body read in this crate
+/// goes through here.
+pub(crate) async fn read_body_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, BodyReadError> {
+    if let Some(len) = resp.content_length() {
+        if len > u64::try_from(cap).unwrap_or(u64::MAX) {
+            return Err(BodyReadError::CapExceeded);
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(BodyReadError::Read)? {
+        if buf.len().saturating_add(chunk.len()) > cap {
+            return Err(BodyReadError::CapExceeded);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 /// Bounded retry for a relay-bound HTTP request on TRANSIENT transport
@@ -261,6 +303,104 @@ mod tests {
         // introspection; the redirect-none behavior is covered by an
         // integration-style test in the dial-site wiring task.
         let _c = guarded_client();
+    }
+
+    // ── read_body_capped ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_body_capped_returns_small_body_intact() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(b"hello".to_vec(), "text/plain"))
+            .mount(&server)
+            .await;
+
+        let resp = reqwest::get(server.uri()).await.unwrap();
+        let body = read_body_capped(resp, 16).await.unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_accepts_body_exactly_at_cap() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(vec![b'x'; 16], "application/octet-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let resp = reqwest::get(server.uri()).await.unwrap();
+        let body = read_body_capped(resp, 16).await.unwrap();
+        assert_eq!(body.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_rejects_oversize_declared_length() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(vec![b'x'; 17], "application/octet-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let resp = reqwest::get(server.uri()).await.unwrap();
+        let err = read_body_capped(resp, 16).await.unwrap_err();
+        assert!(matches!(err, BodyReadError::CapExceeded), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_aborts_chunked_stream_without_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A hostile relay streaming a chunked body (no Content-Length)
+        // must be cut off at the cap, not buffered to completion. The
+        // server tries to stream far more than the cap and bails out
+        // when the aborted client closes the connection under it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await;
+            if sock
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let chunk = [b'a'; 512];
+            let header = format!("{:x}\r\n", chunk.len());
+            for _ in 0..1024 {
+                if sock.write_all(header.as_bytes()).await.is_err()
+                    || sock.write_all(&chunk).await.is_err()
+                    || sock.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        });
+
+        let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+        assert!(
+            resp.content_length().is_none(),
+            "chunked response must carry no declared length, or this test \
+             stops exercising the streaming guard"
+        );
+        let err = read_body_capped(resp, 1024).await.unwrap_err();
+        assert!(matches!(err, BodyReadError::CapExceeded), "got: {err}");
     }
 
     // ── relay_send_with_retry ────────────────────────────────────────────────

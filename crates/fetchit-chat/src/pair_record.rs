@@ -179,16 +179,11 @@ pub async fn post_pair_record(
         return Ok(PostOutcome::Accepted);
     }
     if status.as_u16() == 409 {
-        // Cap the body: a hostile/buggy relay must not be able to stream
-        // an unbounded 409 body and OOM the client. The real body is a few
-        // bytes of JSON.
-        let raw = resp
-            .bytes()
+        // The real 409 body is a few bytes of JSON; the cap guards a
+        // hostile/buggy relay.
+        let raw = crate::relay_http::read_body_capped(resp, MAX_RELAY_BODY_BYTES)
             .await
-            .map_err(|e| ChatError::Invalid(format!("409 body read: {e}")))?;
-        if raw.len() > MAX_RELAY_BODY_BYTES {
-            return Err(ChatError::Invalid("409 body exceeds size cap".into()));
-        }
+            .map_err(|e| ChatError::Invalid(e.to_string()))?;
         let body: WatermarkRejectBody = serde_json::from_slice(&raw)
             .map_err(|e| ChatError::Invalid(format!("409 body decode: {e}")))?;
         return Ok(PostOutcome::WatermarkReject {
@@ -242,13 +237,9 @@ async fn post_forwarding_once(
         return Ok(ForwardingAttempt::Written);
     }
     if status.as_u16() == 409 {
-        let raw = resp
-            .bytes()
+        let raw = crate::relay_http::read_body_capped(resp, MAX_RELAY_BODY_BYTES)
             .await
-            .map_err(|e| ChatError::Invalid(format!("409 body read: {e}")))?;
-        if raw.len() > MAX_RELAY_BODY_BYTES {
-            return Err(ChatError::Invalid("409 body exceeds size cap".into()));
-        }
+            .map_err(|e| ChatError::Invalid(e.to_string()))?;
         let body: WatermarkRejectBody = serde_json::from_slice(&raw)
             .map_err(|e| ChatError::Invalid(format!("409 body decode: {e}")))?;
         return Ok(ForwardingAttempt::WatermarkReject {

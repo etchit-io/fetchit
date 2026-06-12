@@ -210,15 +210,9 @@ pub async fn fetch_index_record_by_id(
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }
-    // Cap the body before buffering: a hostile relay must not be able to
-    // stream an unbounded response and OOM the client.
-    let raw = resp
-        .bytes()
+    let raw = crate::relay_http::read_body_capped(resp, crate::pair_record::MAX_RELAY_BODY_BYTES)
         .await
-        .map_err(|e| PairError::Decode(format!("relay body read: {e}")))?;
-    if raw.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
-        return Err(PairError::Decode("relay body exceeds size cap".into()));
-    }
+        .map_err(|e| PairError::Decode(e.to_string()))?;
     let record: ProfileIndexRecord =
         serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
     if record.profile_addr == ALL_ZEROS_PROFILE_ADDR {
@@ -257,16 +251,9 @@ pub async fn fetch_pair_record_by_id(
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }
-    // Cap the body before buffering: a hostile relay must not be able to
-    // stream an unbounded response and OOM the client. A PairRecordV1 is
-    // a few KB.
-    let raw = resp
-        .bytes()
+    let raw = crate::relay_http::read_body_capped(resp, crate::pair_record::MAX_RELAY_BODY_BYTES)
         .await
-        .map_err(|e| PairError::Decode(format!("relay body read: {e}")))?;
-    if raw.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
-        return Err(PairError::Decode("relay body exceeds size cap".into()));
-    }
+        .map_err(|e| PairError::Decode(e.to_string()))?;
     let record: fetchit_relay_proto::pair_record::PairRecordV1 =
         serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
     fetchit_relay_proto::pair_record::verify_pair_record(&record)
@@ -311,13 +298,9 @@ pub async fn fetch_forwarding_record_by_id(
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }
-    let raw = resp
-        .bytes()
+    let raw = crate::relay_http::read_body_capped(resp, crate::pair_record::MAX_RELAY_BODY_BYTES)
         .await
-        .map_err(|e| PairError::Decode(format!("relay body read: {e}")))?;
-    if raw.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
-        return Err(PairError::Decode("relay body exceeds size cap".into()));
-    }
+        .map_err(|e| PairError::Decode(e.to_string()))?;
     let record: fetchit_relay_proto::pair_record::ForwardingRecordV1 =
         serde_json::from_slice(&raw).map_err(|e| PairError::Decode(format!("relay JSON: {e}")))?;
     let pubkey_bytes = B64STD
