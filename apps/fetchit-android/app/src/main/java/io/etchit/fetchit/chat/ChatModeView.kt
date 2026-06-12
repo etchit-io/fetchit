@@ -3,12 +3,17 @@ package io.etchit.fetchit.chat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.lifecycle.LifecycleOwner
 import androidx.recyclerview.widget.DiffUtil
@@ -18,11 +23,15 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import io.etchit.fetchit.R
+import io.etchit.fetchit.SettingsStore
 import io.etchit.fetchit.fetchitApp
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import uniffi.fetchit_ffi.ChatFfiException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Orchestrates the chat screens (list / thread / feed) and owns the
@@ -61,6 +70,22 @@ class ChatModeView(
 
     // Lazily-inflated list view.
     private var listView: View? = null
+
+    // Cached thread view — re-bound per peer rather than re-inflated.
+    private var threadView: View? = null
+
+    // Cached feed view.
+    private var feedView: View? = null
+
+    // Job for the active thread message-flow collector; cancelled on screen switch.
+    private var threadCollectJob: Job? = null
+
+    // Job for the feed post-flow collector; cancelled on screen switch.
+    private var feedCollectJob: Job? = null
+
+    private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+    private val settingsStore by lazy { SettingsStore(context) }
 
     // ── public entry points ────────────────────────────────────────────
 
@@ -118,13 +143,9 @@ class ChatModeView(
         showScreen(Screen.List, pushToStack = true)
     }
 
-    /**
-     * Hook for Task 5 — open the DM thread for [agentIdHex].
-     * Currently a labeled no-op so Task 5 has a clear seam to fill.
-     */
-    @Suppress("UNUSED_PARAMETER")
+    /** Open the DM thread for [agentIdHex]. */
     fun openThread(agentIdHex: String) {
-        // Task 5 fills this — push Screen.Thread(agentIdHex) and inflate the thread view.
+        showScreen(Screen.Thread(agentIdHex), pushToStack = true)
     }
 
     private fun showScreen(screen: Screen, pushToStack: Boolean) {
@@ -133,6 +154,11 @@ class ChatModeView(
         }
         when (screen) {
             is Screen.List -> {
+                // Cancel sub-screen collectors on return to list.
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                feedCollectJob?.cancel()
+                feedCollectJob = null
                 if (listView == null) {
                     container.removeAllViews()
                     inflateListScreen()
@@ -146,12 +172,23 @@ class ChatModeView(
                 }
             }
             is Screen.Thread -> {
+                // Cancel any running feed collector; thread gets its own fresh one.
+                feedCollectJob?.cancel()
+                feedCollectJob = null
+                // Cancel any collector for the PREVIOUS peer before binding the new one.
+                threadCollectJob?.cancel()
+                threadCollectJob = null
                 container.removeAllViews()
-                inflateThreadStub(screen.peer)
+                bindThreadScreen(screen.peer)
             }
             is Screen.Feed -> {
+                // Cancel any running thread collector.
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                feedCollectJob?.cancel()
+                feedCollectJob = null
                 container.removeAllViews()
-                inflateFeedStub()
+                bindFeedScreen()
             }
         }
     }
@@ -288,38 +325,98 @@ class ChatModeView(
             .show()
     }
 
-    // ── stub screens (Task 5 fills) ────────────────────────────────────
+    // ── thread screen ──────────────────────────────────────────────────
 
-    private fun inflateThreadStub(peer: String) {
-        val tv = TextView(context).apply {
-            text = "thread: ${peer.take(8)}…  (Task 5)"
-            setTextColor(context.getColor(android.R.color.white))
-            gravity = android.view.Gravity.CENTER
+    private fun bindThreadScreen(peer: String) {
+        val view = threadView ?: LayoutInflater.from(context)
+            .inflate(R.layout.view_chat_thread, container, false)
+            .also { threadView = it }
+
+        container.addView(view)
+
+        val contact = controller.contacts.contacts.value.find { it.agentIdHex == peer }
+        val displayName = contact?.displayName ?: "peer-${peer.take(6)}"
+
+        view.findViewById<TextView>(R.id.threadPeerName).text = displayName
+        view.findViewById<TextView>(R.id.threadPeerShortId).text = "${peer.take(8)}…"
+        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+
+        val rv = view.findViewById<RecyclerView>(R.id.messageList)
+        val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
+        rv.layoutManager = lm
+        val adapter = MessageAdapter(onOpenAutonomi)
+        rv.adapter = adapter
+
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        view.findViewById<View>(R.id.sendButton).setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.text.clear()
+            lifecycleScope.launch {
+                val gw = controller.gateway() ?: run {
+                    messageInput.setText(body)
+                    snackbar(context.getString(R.string.chat_not_connected))
+                    return@launch
+                }
+                val senderName = displayNameOrDefault(gw)
+                val result = runCatching { gw.sendDm(peer, body, senderName) }
+                result.onSuccess { msgId ->
+                    controller.conversations.append(
+                        peer,
+                        ChatMessage(
+                            outbound = true,
+                            body = body,
+                            sentAtMs = System.currentTimeMillis(),
+                            messageId = msgId,
+                        ),
+                    )
+                }.onFailure { e ->
+                    messageInput.setText(body)
+                    val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
+                    snackbar(context.getString(R.string.thread_send_failed, reason))
+                }
+            }
         }
-        val frame = FrameLayout(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-            addView(tv)
+
+        // Collect messages for this peer; job cancelled on screen switch.
+        threadCollectJob = lifecycleScope.launch {
+            controller.conversations.messagesFor(peer).collect { msgs ->
+                adapter.submitList(msgs.map { MessageRow.Dm(it) })
+                if (msgs.isNotEmpty()) rv.scrollToPosition(msgs.size - 1)
+            }
         }
-        container.addView(frame)
     }
 
-    private fun inflateFeedStub() {
-        val tv = TextView(context).apply {
-            text = context.getString(R.string.chat_feed_title)
-            setTextColor(context.getColor(android.R.color.white))
-            gravity = android.view.Gravity.CENTER
+    // ── feed screen ────────────────────────────────────────────────────
+
+    private fun bindFeedScreen() {
+        val view = feedView ?: LayoutInflater.from(context)
+            .inflate(R.layout.view_chat_thread, container, false)
+            .also { feedView = it }
+
+        container.addView(view)
+
+        view.findViewById<TextView>(R.id.threadPeerName).text =
+            context.getString(R.string.chat_feed_title)
+        view.findViewById<TextView>(R.id.threadPeerShortId).text = ""
+        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        // Feed is read-only — hide the send row.
+        view.findViewById<View>(R.id.threadSendRow).visibility = View.GONE
+
+        val rv = view.findViewById<RecyclerView>(R.id.messageList)
+        val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
+        rv.layoutManager = lm
+        val adapter = MessageAdapter(onOpenAutonomi)
+        rv.adapter = adapter
+
+        feedCollectJob = lifecycleScope.launch {
+            controller.feed.posts.collect { posts ->
+                val rows = posts.map { MessageRow.Post(it) }
+                adapter.submitList(rows)
+                if (rows.isNotEmpty()) rv.scrollToPosition(rows.size - 1)
+            }
         }
-        val frame = FrameLayout(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-            addView(tv)
-        }
-        container.addView(frame)
     }
 
     // ── gateway helpers ────────────────────────────────────────────────
@@ -403,7 +500,125 @@ class ChatModeView(
         is ChatFfiException.Network -> e.reason
     }
 
-    // ── adapter ───────────────────────────────────────────────────────
+    /**
+     * Returns the user's chosen display name, or falls back to
+     * "agent-" + the first 6 hex chars of [gw]'s agent id when unset.
+     */
+    private fun displayNameOrDefault(gw: ChatGateway): String {
+        val saved = settingsStore.chatDisplayName()
+        if (saved.isNotEmpty()) return saved
+        return "agent-${gw.agentIdHex().take(6)}"
+    }
+
+    // ── message adapter ───────────────────────────────────────────────
+
+    private sealed class MessageRow {
+        data class Dm(val msg: ChatMessage) : MessageRow()
+        data class Post(val post: FeedPost) : MessageRow()
+    }
+
+    private inner class MessageAdapter(
+        private val onLinkTap: (String) -> Unit,
+    ) : androidx.recyclerview.widget.RecyclerView.Adapter<MessageAdapter.VH>() {
+
+        private val items = mutableListOf<MessageRow>()
+
+        fun submitList(list: List<MessageRow>) {
+            items.clear()
+            items.addAll(list)
+            notifyDataSetChanged()
+        }
+
+        override fun getItemCount() = items.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+            val v = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_chat_message, parent, false)
+            return VH(v)
+        }
+
+        override fun onBindViewHolder(holder: VH, position: Int) {
+            when (val row = items[position]) {
+                is MessageRow.Dm -> holder.bindDm(row.msg, onLinkTap)
+                is MessageRow.Post -> holder.bindPost(row.post)
+            }
+        }
+
+        inner class VH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+            private val bubble: TextView = itemView.findViewById(R.id.messageBubble)
+            private val meta: TextView = itemView.findViewById(R.id.messageMeta)
+
+            fun bindDm(msg: ChatMessage, onLinkTap: (String) -> Unit) {
+                if (msg.outbound) {
+                    bubble.setBackgroundResource(R.drawable.bg_bubble_out)
+                    (bubble.layoutParams as? LinearLayout.LayoutParams)?.gravity =
+                        android.view.Gravity.END
+                    (itemView.layoutParams as? RecyclerView.LayoutParams)?.let { _ ->
+                        bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
+                    }
+                    (itemView as? LinearLayout)?.gravity = android.view.Gravity.END
+                    bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
+                    bubble.text = msg.body
+                    val tick = if (msg.delivered) " ✓" else ""
+                    meta.text = "${timeFmt.format(Date(msg.sentAtMs))}$tick"
+                    meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
+                    (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
+                        android.view.Gravity.END
+                } else {
+                    bubble.setBackgroundResource(R.drawable.bg_bubble_in)
+                    (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
+                    bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
+                    meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
+                    (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
+                        android.view.Gravity.START
+                    meta.text = timeFmt.format(Date(msg.sentAtMs))
+                    // Linkify autonomi:// addresses in inbound text.
+                    val addresses = ChatUris.autonomiAddresses(msg.body)
+                    if (addresses.isEmpty()) {
+                        bubble.text = msg.body
+                        bubble.movementMethod = null
+                    } else {
+                        val spannable = SpannableString(msg.body)
+                        addresses.forEach { addr ->
+                            val fullLink = "autonomi://$addr"
+                            var start = msg.body.indexOf(fullLink)
+                            while (start >= 0) {
+                                val end = start + fullLink.length
+                                spannable.setSpan(
+                                    object : ClickableSpan() {
+                                        override fun onClick(widget: View) {
+                                            onLinkTap(addr)
+                                        }
+                                    },
+                                    start,
+                                    end,
+                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                                )
+                                start = msg.body.indexOf(fullLink, end)
+                            }
+                        }
+                        bubble.text = spannable
+                        bubble.movementMethod = LinkMovementMethod.getInstance()
+                    }
+                }
+            }
+
+            fun bindPost(post: FeedPost) {
+                bubble.setBackgroundResource(R.drawable.bg_bubble_in)
+                (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
+                bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
+                // Feed body is already plain text (HTML was stripped by the pump).
+                bubble.text = post.body
+                bubble.movementMethod = null
+                meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
+                (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
+                    android.view.Gravity.START
+                meta.text = post.actorUrl
+            }
+        }
+    }
+
+    // ── contact list adapter ──────────────────────────────────────────
 
     /**
      * Row model for the contact list adapter.

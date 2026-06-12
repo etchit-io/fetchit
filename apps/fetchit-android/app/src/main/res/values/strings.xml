@@ -156,4 +156,20 @@
     <string name="chat_contact_name_title">name this contact</string>
     <string name="chat_contact_name_save">save</string>
     <string name="chat_contact_added">added %1$s</string>
+
+    <!-- Chat: thread screen -->
+    <string name="thread_back_glyph">‹</string>
+    <string name="thread_back_desc">back to conversation list</string>
+    <string name="thread_send_desc">send message</string>
+    <string name="thread_message_hint">message…</string>
+    <string name="chat_send_glyph">➤</string>
+    <string name="thread_send_failed">send failed: %1$s</string>
+
+    <!-- Chat: display name setting -->
+    <string name="chat_display_name">chat display name</string>
+    <string name="chat_display_name_hint">shown to contacts (optional)</string>
+    <string name="chat_display_name_saved">display name saved</string>
+
+    <!-- Chat: settings section header -->
+    <string name="settings_chat_title">chat</string>
 </resources>

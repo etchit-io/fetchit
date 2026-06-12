@@ -603,6 +603,40 @@
                     android:textColor="?attr/fetchitCopper" />
             </LinearLayout>
 
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="16dp"
+                android:background="?attr/fetchitInk3" />
+
+            <!-- Chat display name -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="@string/settings_chat_title"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
+
+            <EditText
+                android:id="@+id/chatDisplayNameEdit"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="@string/chat_display_name_hint"
+                android:inputType="textPersonName|textNoSuggestions"
+                android:maxLines="1"
+                android:textColor="?attr/fetchitBone"
+                android:textColorHint="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="13sp"
+                android:background="?attr/fetchitInk3"
+                android:padding="8dp"
+                android:imeOptions="actionDone" />
+
             <TextView
                 android:id="@+id/settingsVersionText"
                 android:layout_width="match_parent"

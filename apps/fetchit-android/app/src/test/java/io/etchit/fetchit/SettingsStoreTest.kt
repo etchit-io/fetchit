@@ -133,4 +133,33 @@ class SettingsStoreTest {
             .edit().putString("theme", "neon").commit()
         assertEquals(Theme.Dark, SettingsStore(context).theme())
     }
+
+    // ── chatDisplayName ───────────────────────────────────────────────
+
+    @Test
+    fun chatDisplayName_returns_empty_string_when_unset() {
+        assertEquals("", SettingsStore(context).chatDisplayName())
+    }
+
+    @Test
+    fun saveChatDisplayName_then_chatDisplayName_round_trips() {
+        val store = SettingsStore(context)
+        store.saveChatDisplayName("alice")
+        assertEquals("alice", store.chatDisplayName())
+    }
+
+    @Test
+    fun saveChatDisplayName_trims_whitespace() {
+        val store = SettingsStore(context)
+        store.saveChatDisplayName("  bob  ")
+        assertEquals("bob", store.chatDisplayName())
+    }
+
+    @Test
+    fun saveChatDisplayName_empty_string_clears_override() {
+        val store = SettingsStore(context)
+        store.saveChatDisplayName("carol")
+        store.saveChatDisplayName("")
+        assertEquals("", store.chatDisplayName())
+    }
 }

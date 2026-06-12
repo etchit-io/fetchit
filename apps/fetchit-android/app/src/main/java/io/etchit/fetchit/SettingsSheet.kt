@@ -37,6 +37,7 @@ class SettingsSheet(
             activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
         bindThemePicker()
         observePeerCount()
+        bindChatDisplayName()
     }
 
     private fun bindThemePicker() {
@@ -142,6 +143,24 @@ class SettingsSheet(
                     toastStr(activity.getString(R.string.settings_refresh_peers_failed, e.message ?: e.javaClass.simpleName))
                 },
             )
+        }
+    }
+
+    private fun bindChatDisplayName() {
+        binding.chatDisplayNameEdit.setText(store.chatDisplayName())
+        binding.chatDisplayNameEdit.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
+                toast(R.string.chat_display_name_saved)
+                true
+            } else {
+                false
+            }
+        }
+        binding.chatDisplayNameEdit.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
+            }
         }
     }
 

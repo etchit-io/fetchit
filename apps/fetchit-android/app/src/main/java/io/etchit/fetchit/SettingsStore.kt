@@ -52,9 +52,22 @@ class SettingsStore(context: Context) {
         prefs.edit().putString(KEY_THEME, theme.id).apply()
     }
 
+    /**
+     * User-chosen display name sent with outgoing DMs.
+     * Empty string means unset — callers should fall back to a
+     * synthesised default (e.g. "agent-" + first 6 hex of the agent id).
+     */
+    fun chatDisplayName(): String = prefs.getString(KEY_CHAT_DISPLAY_NAME, "").orEmpty()
+
+    /** Persist [name]. Pass an empty string to clear the override. */
+    fun saveChatDisplayName(name: String) {
+        prefs.edit().putString(KEY_CHAT_DISPLAY_NAME, name.trim()).apply()
+    }
+
     private companion object {
         const val PREFS_NAME = "fetchit_settings"
         const val KEY_PEERS = "bootstrap_peers"
         const val KEY_THEME = "theme"
+        const val KEY_CHAT_DISPLAY_NAME = "chat_display_name"
     }
 }
