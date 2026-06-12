@@ -167,6 +167,16 @@
                 android:text="@string/qr_preview_copy_image" />
         </LinearLayout>
 
+        <!-- Send in chat — only visible when the host passes onSendInChat. -->
+        <Button
+            android:id="@+id/qr_send_in_chat"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:visibility="gone"
+            android:maxLines="1"
+            android:text="@string/share_send_in_chat" />
+
         <!-- Brand footer. Matches the desktop modal's etchit.io copper accent. -->
         <TextView
             android:layout_width="wrap_content"

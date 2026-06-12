@@ -175,4 +175,11 @@
 
     <!-- Chat: label printed on the branded pair-code QR card. -->
     <string name="chat_pair_card_label">fetch&gt;it chat</string>
+
+    <!-- Browse-to-chat share bridge -->
+    <string name="share_send_in_chat">send in chat</string>
+    <string name="share_no_contacts">no chat contacts yet - pair in chat mode first</string>
+    <string name="share_sent_in_chat">sent</string>
+    <string name="share_open_thread">open</string>
+    <string name="share_pick_contact_title">send to</string>
 </resources>

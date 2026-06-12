@@ -774,10 +774,24 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      * user can copy the address, copy the `autonomi://` URL, share the
      * branded PNG card, or fall back to plain-text share. Visible only
      * while content is rendered (see [`RenditionRenderer`]).
+     *
+     * Passes [openThreadFromBrowse] so the dialog can surface the
+     * "send in chat" action alongside the existing share affordances.
      */
     private fun onShareCurrentClicked() {
         val addr = lastFetchAddr ?: return
-        showQrPreviewDialog(this, addr)
+        showQrPreviewDialog(this, addr, onOpenThread = ::openThreadFromBrowse)
+    }
+
+    /**
+     * Switch to chat mode and open the thread for [agentIdHex].
+     * Used as the "open" callback from the browse-to-chat share bridge
+     * (mirrors how [onOpenAutonomi] crosses the boundary in the other
+     * direction).
+     */
+    private fun openThreadFromBrowse(agentIdHex: String) {
+        setMode(Mode.CHAT)
+        chatModeView.openThread(agentIdHex)
     }
 
     private companion object {
