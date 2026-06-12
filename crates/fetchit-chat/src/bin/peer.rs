@@ -1,7 +1,7 @@
 //! `fetchit-chat-peer` — headless chat peer for testing.
 //!
 //! Drives `fetchit_chat::Client` against a local x0xd + a relay, with
-//! no GUI. Eight modes:
+//! no GUI. Nine modes:
 //!
 //! - `echo` — auto-echo every inbound DM back to its sender. Useful
 //!   for confirming relay round-trips from a different machine without
@@ -26,6 +26,10 @@
 //!   Scripts can capture the URI directly; diagnostics go to stderr.
 //! - `pair-import --uri <u>` — import a contact from a short
 //!   `x0x://pair/...` pointer URI (resolves the relay-hosted record).
+//! - `pair-migrate --to <url>` — move this peer's primary relay to
+//!   `<url>`: republish the pair record at the new relay and post a
+//!   forwarding record at the old (still-alive) one, then print the new
+//!   relay URL to stdout. The region-change half of the pairing flow.
 
 #![allow(
     clippy::unwrap_used,
@@ -238,6 +242,20 @@ enum Mode {
         #[arg(long)]
         uri: String,
     },
+    /// Migrate this peer's pinned primary relay to `--to`, the
+    /// user-driven region change. Swaps the multi-home primary, then
+    /// republishes the pair record at the new relay and posts a signed
+    /// forwarding record at the OLD (still-alive) relay so stale senders
+    /// rediscover us. Both relays must be reachable: this is the
+    /// planned-migration path, not failover. On success the new relay
+    /// URL is printed to stdout; a failed slot-0 swap exits non-zero
+    /// without touching client state.
+    PairMigrate {
+        /// The new primary relay base URL to migrate to
+        /// (e.g. `http://67.207.94.66:8088`).
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[tokio::main]
@@ -326,6 +344,7 @@ async fn main() -> Result<()> {
         }
         Mode::PairShare => run_pair_share(&client, cli.relay.as_str()).await,
         Mode::PairImport { uri } => run_pair_import(&client, &uri).await,
+        Mode::PairMigrate { to } => run_pair_migrate(&client, &to).await,
     }
 }
 
@@ -463,6 +482,22 @@ async fn run_pair_import(client: &Client, uri: &str) -> Result<()> {
         .await
         .context("import_pair_uri")?;
     eprintln!("[peer] pair import done");
+    Ok(())
+}
+
+/// Migrate the pinned primary relay to `to`, then emit the new relay URL
+/// to stdout. `migrate_primary` republishes the pair record at the new
+/// relay and posts a forwarding record at the old one; both relays must
+/// be alive for the heal to land.
+async fn run_pair_migrate(client: &Client, to: &str) -> Result<()> {
+    let to = to.trim();
+    eprintln!("[peer] migrating primary relay to {to}");
+    client
+        .migrate_primary(to)
+        .await
+        .context("migrate primary")?;
+    eprintln!("[peer] pair migrate done");
+    println!("{to}");
     Ok(())
 }
 
