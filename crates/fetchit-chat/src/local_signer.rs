@@ -15,13 +15,13 @@ use base64::Engine;
 use fetchit_relay_client::MlDsaSigner;
 use fetchit_relay_client::Signer as _;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::at_rest::{fresh_argon_salt, open_from_path, seal_to_path, MasterKey};
 use crate::error::ChatError;
 
 /// Vault file name under the chat data dir, next to `identity.json.enc`.
-// Used by Task 2 (`local_profile.rs`) when opening or creating the vault.
+// dead_code: consumed by client.rs build_with_chat when the daemonless profile lands (Task 2).
 #[allow(dead_code)]
 pub(crate) const LOCAL_SIGNER_FILE: &str = "local_signer.json.enc";
 
@@ -36,10 +36,16 @@ struct LocalSignerPayload {
     machine_token: String,
 }
 
+impl Drop for LocalSignerPayload {
+    fn drop(&mut self) {
+        self.ml_dsa_secret_key_b64.zeroize();
+    }
+}
+
 /// The local signing identity: an [`MlDsaSigner`] plus the per-install
 /// machine token, both persisted encrypted at
 /// `data_dir/local_signer.json.enc`.
-// Used by Task 2 when constructing the daemonless client profile.
+// dead_code: consumed by client.rs build_with_chat when the daemonless profile lands (Task 2).
 #[allow(dead_code)]
 pub(crate) struct LocalSignerVault {
     /// The ML-DSA-65 signer holding the local keypair.
@@ -57,7 +63,7 @@ impl LocalSignerVault {
     /// # Errors
     /// `ChatError::Invalid` on AEAD failure, JSON parse error, or
     /// malformed key bytes. `ChatError::Io` on filesystem errors.
-    // Used by Task 2.
+    // dead_code: consumed by client.rs build_with_chat when the daemonless profile lands (Task 2).
     #[allow(dead_code)]
     pub(crate) fn load_or_create(
         data_dir: &Path,
@@ -70,27 +76,35 @@ impl LocalSignerVault {
             let bytes = open_from_path(&path, master)?;
             let payload: LocalSignerPayload = serde_json::from_slice(&bytes)
                 .map_err(|e| ChatError::Invalid(format!("local signer payload parse: {e}")))?;
+            if payload.version != 1 {
+                return Err(ChatError::Invalid(format!(
+                    "local signer vault version {} unsupported (expected 1)",
+                    payload.version
+                )));
+            }
             let pk = B64
                 .decode(&payload.ml_dsa_public_key_b64)
                 .map_err(|e| ChatError::Invalid(format!("local signer pub b64: {e}")))?;
-            let sk = B64
-                .decode(&payload.ml_dsa_secret_key_b64)
-                .map_err(|e| ChatError::Invalid(format!("local signer sec b64: {e}")))?;
+            let sk = Zeroizing::new(
+                B64.decode(&payload.ml_dsa_secret_key_b64)
+                    .map_err(|e| ChatError::Invalid(format!("local signer sec b64: {e}")))?,
+            );
             let signer = MlDsaSigner::from_bytes(&pk, &sk)
                 .map_err(|e| ChatError::Invalid(format!("local signer rebuild: {e}")))?;
             return Ok(Self {
                 signer,
-                machine_token: payload.machine_token,
+                machine_token: payload.machine_token.clone(),
             });
         }
 
         let signer = MlDsaSigner::generate()
             .map_err(|e| ChatError::Invalid(format!("local signer keygen: {e}")))?;
         let machine_token = hex::encode(fresh_argon_salt());
+        let sk_bytes = Zeroizing::new(signer.secret_key_bytes());
         let payload = LocalSignerPayload {
             version: 1,
             ml_dsa_public_key_b64: B64.encode(signer.public_key()),
-            ml_dsa_secret_key_b64: B64.encode(signer.secret_key_bytes()),
+            ml_dsa_secret_key_b64: B64.encode(sk_bytes.as_slice()),
             machine_token: machine_token.clone(),
         };
         let mut plaintext = serde_json::to_vec(&payload)
