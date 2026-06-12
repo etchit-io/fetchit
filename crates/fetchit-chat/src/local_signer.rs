@@ -56,6 +56,12 @@ impl LocalSignerVault {
     /// EXISTING file is an error, never a silent regeneration —
     /// regenerating would orphan every pairing bound to the agent id.
     ///
+    /// The same orphaning risk applies across vault files: deleting
+    /// `local_signer.json.enc` while `identity.json.enc` survives mints
+    /// a fresh agent id on the next build, and the KEM identity then
+    /// regenerates to match. Back up or restore the chat data dir as a
+    /// unit, never file-by-file.
+    ///
     /// # Errors
     /// `ChatError::Invalid` on AEAD failure, JSON parse error, or
     /// malformed key bytes. `ChatError::Io` on filesystem errors.

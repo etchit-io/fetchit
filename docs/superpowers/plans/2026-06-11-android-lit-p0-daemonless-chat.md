@@ -1,4 +1,4 @@
-# Android LIT P0 — Daemonless Chat Profile + FFI Implementation Plan
+# Android LIT P0 - Daemonless Chat Profile + FFI Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,16 +12,16 @@
 
 ## Context for the implementer (read first)
 
-- **Worktree:** work ONLY in `/home/josh/Desktop/etchit-fetchit/fetchit-android-lit` (branch `android-lit`, off `origin/chat` @ ac58994). Do NOT run `cargo build` in `/home/josh/Desktop/etchit-fetchit/fetchit` — the live comms `fetchit-chat-peer` systemd unit execs from that checkout's `target/debug/` and the wedge-healer auto-restarts it.
+- **Worktree:** work ONLY in `/home/josh/Desktop/etchit-fetchit/fetchit-android-lit` (branch `android-lit`, off `origin/chat` @ ac58994). Do NOT run `cargo build` in `/home/josh/Desktop/etchit-fetchit/fetchit` - the live comms `fetchit-chat-peer` systemd unit execs from that checkout's `target/debug/` and the wedge-healer auto-restarts it.
 - **Remotes:** push only to `origin` (josh-clsn/fetchit). NEVER push to the `etchit-io` remote.
-- **Commits:** DCO required — always `git commit -s`. Conventional-commit style, e.g. `feat(chat): ...`.
-- **Lints are CI-enforced:** `cargo clippy --workspace --all-targets -- -D warnings`. `unwrap()`/`expect()` only inside `#[cfg(test)]` modules opening with `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` — but note `fetchit-chat` test modules conventionally use `#[allow(...)]` on the module (see `client.rs:3212-3213`).
+- **Commits:** DCO required - always `git commit -s`. Conventional-commit style, e.g. `feat(chat): ...`.
+- **Lints are CI-enforced:** `cargo clippy --workspace --all-targets -- -D warnings`. `unwrap()`/`expect()` only inside `#[cfg(test)]` modules opening with `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` - but note `fetchit-chat` test modules conventionally use `#[allow(...)]` on the module (see `client.rs:3212-3213`).
 - **`crates/fetchit-ffi` is workspace-EXCLUDED** (own `Cargo.lock`). Run all its cargo commands from inside `crates/fetchit-ffi/`. Root `cargo test --workspace` never touches it.
 - Key existing types you will reuse (do not redefine):
   - `fetchit_relay_client::MlDsaSigner` (`crates/fetchit-relay-client/src/signer.rs:60-135`): `generate()`, `from_bytes(pk, sk)`, `secret_key_bytes()`, `public_key()`, implements `Signer` with `agent_id() -> [u8; 32]` derived via `fetchit_relay_proto::derive_agent_id`.
-  - `crate::at_rest::{open_from_path, seal_to_path, MasterKey, fresh_argon_salt, ARGON_SALT_LEN}` — the vault sealing helpers used by `chat_identity.rs:7,81,113`.
-  - `crate::conversation::{dispatch_inbound, InboundDispatch}` — public inbound decoder (see `bin/peer.rs:39,761-804` for the canonical consumer).
-  - `Client::take_transport_inbound("relay")`, `Client::identity_arc()`, `Client::registry_arc()` — public; used by `bin/peer.rs`.
+  - `crate::at_rest::{open_from_path, seal_to_path, MasterKey, fresh_argon_salt, ARGON_SALT_LEN}` - the vault sealing helpers used by `chat_identity.rs:7,81,113`.
+  - `crate::conversation::{dispatch_inbound, InboundDispatch}` - public inbound decoder (see `bin/peer.rs:39,761-804` for the canonical consumer).
+  - `Client::take_transport_inbound("relay")`, `Client::identity_arc()`, `Client::registry_arc()` - public; used by `bin/peer.rs`.
 
 ## File structure
 
@@ -37,7 +37,7 @@
 
 ---
 
-### Task 1: `LocalSignerVault` — persisted local ML-DSA-65 identity
+### Task 1: `LocalSignerVault` - persisted local ML-DSA-65 identity
 
 **Files:**
 - Create: `crates/fetchit-chat/src/local_signer.rs`
@@ -94,7 +94,7 @@ mod tests {
             Some(&other_salt),
         )
         .unwrap();
-        // A decrypt failure must surface as an error — silently minting a
+        // A decrypt failure must surface as an error - silently minting a
         // fresh identity would orphan every contact pairing.
         let res =
             LocalSignerVault::load_or_create(dir.path(), &wrong, kdf_id_argon2(), Some(&other_salt));
@@ -123,7 +123,7 @@ Expected: compile FAIL (`LocalSignerVault` not defined).
 //! (Android, or any host without a daemon) instead persists a local
 //! keypair in the chat vault, sealed with the same master key as the
 //! KEM identity. The agent id is `derive_agent_id(public_key)`, so a
-//! local-key agent is a first-class citizen of the relay protocol —
+//! local-key agent is a first-class citizen of the relay protocol -
 //! pair records and bearer handshakes verify against the public key.
 
 use std::path::Path;
@@ -162,7 +162,7 @@ pub(crate) struct LocalSignerVault {
 impl LocalSignerVault {
     /// Load the vault, generating and persisting a fresh keypair when
     /// the file does not exist. A decrypt or parse failure on an
-    /// EXISTING file is an error, never a silent regeneration —
+    /// EXISTING file is an error, never a silent regeneration -
     /// regenerating would orphan every pairing bound to the agent id.
     pub(crate) fn load_or_create(
         data_dir: &Path,
@@ -211,7 +211,7 @@ impl LocalSignerVault {
 }
 ```
 
-Notes: `signer.public_key()` comes from the `Signer` trait — add `use fetchit_relay_client::Signer as _;` if not in scope. If `fresh_argon_salt` / `ARGON_SALT_LEN` visibility is `pub(crate)` only inside `at_rest`, that is fine (same crate). If `open_from_path`'s error type differs from `ChatError`, map it the same way `chat_identity.rs` does.
+Notes: `signer.public_key()` comes from the `Signer` trait - add `use fetchit_relay_client::Signer as _;` if not in scope. If `fresh_argon_salt` / `ARGON_SALT_LEN` visibility is `pub(crate)` only inside `at_rest`, that is fine (same crate). If `open_from_path`'s error type differs from `ChatError`, map it the same way `chat_identity.rs` does.
 
 - [ ] **Step 4: Register the module** in `crates/fetchit-chat/src/lib.rs` next to `mod chat_identity;`:
 
@@ -229,7 +229,7 @@ Expected: 2 passed.
 ```bash
 cargo fmt --all && cargo clippy -p fetchit-chat --all-targets -- -D warnings
 git add crates/fetchit-chat/src/local_signer.rs crates/fetchit-chat/src/lib.rs
-git commit -s -m "feat(chat): LocalSignerVault — persisted in-process ML-DSA-65 identity"
+git commit -s -m "feat(chat): LocalSignerVault - persisted in-process ML-DSA-65 identity"
 ```
 
 ---
@@ -237,7 +237,7 @@ git commit -s -m "feat(chat): LocalSignerVault — persisted in-process ML-DSA-6
 ### Task 2: `daemonless` builder flag + daemonless build path
 
 **Files:**
-- Modify: `crates/fetchit-chat/src/client.rs` — `ClientBuilder` (lines ~60-269), `from_parts` (~506), `build_with_chat` (~2258-2350), plus a new accessor near `denylist_dropped_inbound_count` (~626)
+- Modify: `crates/fetchit-chat/src/client.rs` - `ClientBuilder` (lines ~60-269), `from_parts` (~506), `build_with_chat` (~2258-2350), plus a new accessor near `denylist_dropped_inbound_count` (~626)
 - Test: `client.rs` tests module
 
 - [ ] **Step 1: Write the failing test** (in `client.rs` `mod tests`):
@@ -298,7 +298,7 @@ const DAEMONLESS_BASE_URL: &str = "http://127.0.0.1:9";
     daemonless: bool,
 ```
 
-Then grep for every `ClientBuilder {` literal initializer (at minimum `Client::builder()` at ~line 501) and add `daemonless: false`. Do NOT rely on the compiler alone — check for `impl Default for ClientBuilder` and any test constructing the struct directly.
+Then grep for every `ClientBuilder {` literal initializer (at minimum `Client::builder()` at ~line 501) and add `daemonless: false`. Do NOT rely on the compiler alone - check for `impl Default for ClientBuilder` and any test constructing the struct directly.
 
 (c) Add the setter in `impl ClientBuilder` (after `advertised_relays`):
 
@@ -357,7 +357,7 @@ and pass `self.daemonless` as a new trailing argument to `Client::from_parts(...
             .await?
 ```
 
-(b) `build_with_chat` (~2258): add `daemonless: bool` parameter (and extend the existing `#[allow(clippy::too_many_arguments, ...)]`). Restructure the head of the function — the probe, agent resolution, and signer become conditional; layout/master resolution moves ABOVE agent resolution (it has no daemon dependency):
+(b) `build_with_chat` (~2258): add `daemonless: bool` parameter (and extend the existing `#[allow(clippy::too_many_arguments, ...)]`). Restructure the head of the function - the probe, agent resolution, and signer become conditional; layout/master resolution moves ABOVE agent resolution (it has no daemon dependency):
 
 ```rust
     if !daemonless {
@@ -378,7 +378,7 @@ and pass `self.daemonless` as a new trailing argument to `Client::from_parts(...
 
     // Resolve the local agent identity. Daemon path: x0xd `/agent` owns
     // the agent id + machine id. Daemonless path: both come from the
-    // local signer vault — agent id is derived from the local ML-DSA-65
+    // local signer vault - agent id is derived from the local ML-DSA-65
     // public key, so pair records and relay handshakes verify the same
     // way they do for an x0xd-backed agent.
     let (agent_id_hex, local_machine_id, local_signer): (String, [u8; 32], Option<Arc<dyn Signer>>) =
@@ -420,7 +420,7 @@ Then `FetchitIdentity::load_or_create` and `ConversationRegistry::new` stay exac
     };
 ```
 
-and change the one remaining concrete use, `RealRelayBuilder::new(x0xd_signer.clone())` (~2434), to `RealRelayBuilder::new(signer.clone())` — `RealRelayBuilder::new` already takes `Arc<dyn Signer>` (`multi_home.rs:250`). Keep the existing comment block about the shared signer, updating "x0xd_signer" wording to "signer".
+and change the one remaining concrete use, `RealRelayBuilder::new(x0xd_signer.clone())` (~2434), to `RealRelayBuilder::new(signer.clone())` - `RealRelayBuilder::new` already takes `Arc<dyn Signer>` (`multi_home.rs:250`). Keep the existing comment block about the shared signer, updating "x0xd_signer" wording to "signer".
 
 (c) Add the accessor on `Client` (near `denylist_dropped_inbound_count`, ~626):
 
@@ -436,7 +436,7 @@ and change the one remaining concrete use, `RealRelayBuilder::new(x0xd_signer.cl
     }
 ```
 
-(If `FetchitIdentity::agent_id_hex()` does not exist as a getter, it does — `default_dispatch_one` calls `identity.agent_id_hex()` at `client.rs:1375`.)
+(If `FetchitIdentity::agent_id_hex()` does not exist as a getter, it does - `default_dispatch_one` calls `identity.agent_id_hex()` at `client.rs:1375`.)
 
 - [ ] **Step 5: Run the new test + the whole chat suite**
 
@@ -447,7 +447,7 @@ Run: `cargo test -p fetchit-chat daemonless_build_is_offline` → PASS, then `ca
 ```bash
 cargo fmt --all && cargo clippy -p fetchit-chat --all-targets -- -D warnings
 git add crates/fetchit-chat/src/client.rs
-git commit -s -m "feat(chat): daemonless builder profile — local signer, no x0xd discovery/probe"
+git commit -s -m "feat(chat): daemonless builder profile - local signer, no x0xd discovery/probe"
 ```
 
 ---
@@ -473,7 +473,7 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"
 - [ ] **Step 2: Write `chat_error.rs`:**
 
 ```rust
-//! Coarse, stable error surface for the FFI chat client — mirrors the
+//! Coarse, stable error surface for the FFI chat client - mirrors the
 //! shape of [`crate::error::FetchitError`]: few variants, a `reason`
 //! string (named to avoid colliding with Kotlin's `Throwable.message`),
 //! no nested causes.
@@ -481,7 +481,7 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"
 /// Errors surfaced to Kotlin/Swift by the chat FFI.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ChatFfiError {
-    /// Malformed input — bad URL, bad agent id, bad pair URI.
+    /// Malformed input - bad URL, bad agent id, bad pair URI.
     #[error("invalid: {reason}")]
     Invalid {
         /// Human-readable cause.
@@ -522,7 +522,7 @@ mod tests {
 }
 ```
 
-(If `ChatError` variants are not exhaustively matchable from outside the crate — `#[non_exhaustive]` — the `other =>` arm already covers it. If `ChatError::MessageTransport` is not pub-constructible in the test, swap the second assertion for any other pub variant; the mapping arm under test is the wildcard.)
+(If `ChatError` variants are not exhaustively matchable from outside the crate - `#[non_exhaustive]` - the `other =>` arm already covers it. If `ChatError::MessageTransport` is not pub-constructible in the test, swap the second assertion for any other pub variant; the mapping arm under test is the wildcard.)
 
 - [ ] **Step 3: Write `chat_ffi.rs`:**
 
@@ -676,7 +676,7 @@ impl ChatClient {
 
 /// Drain relay inbound → decode → receipt → queue. Mirrors
 /// `peer.rs::decode_inbound` minus the modes the MVP does not ship
-/// (bridge events and PQ group frames are skipped silently — groups
+/// (bridge events and PQ group frames are skipped silently - groups
 /// are daemon-backed and out of the daemonless profile).
 fn spawn_inbound_pump(
     client: fetchit_chat::Client,
@@ -744,7 +744,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
-    /// Live smoke against the production relay — run explicitly with
+    /// Live smoke against the production relay - run explicitly with
     /// `cargo test -p fetchit-ffi -- --ignored` on a networked box.
     #[tokio::test]
     #[ignore = "requires network + live relay"]
@@ -764,7 +764,7 @@ mod tests {
 }
 ```
 
-Adjustments the implementer owns: exact field names of `InboundDispatch::Message`/`Receipt` (verify against `crates/fetchit-chat/src/conversation.rs` — the shapes above are lifted from `peer.rs:761-795`), `AgentId::parse` error type, `messages().send` parameter order (verify against the desktop command at `apps/fetchit-desktop/src-tauri/src/chat.rs:779-804` — `(&id, &body, &name, reply_to: Option<&str>, attachment: Option<&Attachment>)`), and whether `tempfile` needs adding to `[dev-dependencies]`.
+Adjustments the implementer owns: exact field names of `InboundDispatch::Message`/`Receipt` (verify against `crates/fetchit-chat/src/conversation.rs` - the shapes above are lifted from `peer.rs:761-795`), `AgentId::parse` error type, `messages().send` parameter order (verify against the desktop command at `apps/fetchit-desktop/src-tauri/src/chat.rs:779-804` - `(&id, &body, &name, reply_to: Option<&str>, attachment: Option<&Attachment>)`), and whether `tempfile` needs adding to `[dev-dependencies]`.
 
 - [ ] **Step 4: Wire modules** in `crates/fetchit-ffi/src/lib.rs` (next to the existing `mod error;` etc.):
 
@@ -783,13 +783,13 @@ Run: `cargo clippy --all-targets -- -D warnings` → clean.
 - [ ] **Step 6: Live smoke (this box has network):**
 
 Run: `cargo test -- --ignored 2>&1 | tail -5`
-Expected: `connect_against_prod_relay_round_trips_identity ... ok` — proves daemonless connect, vault creation, pair-record publish, and URI emit end-to-end against the NYC relay.
+Expected: `connect_against_prod_relay_round_trips_identity ... ok` - proves daemonless connect, vault creation, pair-record publish, and URI emit end-to-end against the NYC relay.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add crates/fetchit-ffi/src/chat_error.rs crates/fetchit-ffi/src/chat_ffi.rs crates/fetchit-ffi/src/lib.rs crates/fetchit-ffi/Cargo.toml crates/fetchit-ffi/Cargo.lock
-git commit -s -m "feat(ffi): ChatClient — daemonless chat surface for the Android shell"
+git commit -s -m "feat(ffi): ChatClient - daemonless chat surface for the Android shell"
 ```
 
 ---
@@ -798,24 +798,24 @@ git commit -s -m "feat(ffi): ChatClient — daemonless chat surface for the Andr
 
 **Files:**
 - Generated: `apps/fetchit-android/app/src/main/jniLibs/arm64-v8a/libfetchit_ffi.so`, `apps/fetchit-android/app/src/main/java/uniffi/fetchit_ffi/fetchit_ffi.kt`
-- No script changes — `scripts/build-jni-libs.sh` already builds the crate and regenerates bindings together (the `.so` embeds uniffi checksums the Kotlin verifies at startup; NEVER regenerate one without the other).
+- No script changes - `scripts/build-jni-libs.sh` already builds the crate and regenerates bindings together (the `.so` embeds uniffi checksums the Kotlin verifies at startup; NEVER regenerate one without the other).
 
 - [ ] **Step 1: Verify toolchain**
 
 Run: `export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/27.0.12077973 && cargo ndk --version && uniffi-bindgen --version`
-Expected: cargo-ndk present; uniffi-bindgen 0.29.x matching the crate pin (`v0.29.4`/`0.29.5` — must equal the `uniffi` version in `crates/fetchit-ffi/Cargo.toml`).
+Expected: cargo-ndk present; uniffi-bindgen 0.29.x matching the crate pin (`v0.29.4`/`0.29.5` - must equal the `uniffi` version in `crates/fetchit-ffi/Cargo.toml`).
 
 - [ ] **Step 2: Run the pipeline**
 
 Run: `./scripts/build-jni-libs.sh 2>&1 | tail -15`
-Expected: `libfetchit_ffi.so` rebuilt (size will grow over the previous 24 MB — record the delta), `fetchit_ffi.kt` regenerated containing `class ChatClient` with `suspend fun` members.
+Expected: `libfetchit_ffi.so` rebuilt (size will grow over the previous 24 MB - record the delta), `fetchit_ffi.kt` regenerated containing `class ChatClient` with `suspend fun` members.
 
 - [ ] **Step 3: Sanity-check the bindings**
 
 Run: `grep -c "ChatClient\|ChatEventFfi\|pairShareUri" apps/fetchit-android/app/src/main/java/uniffi/fetchit_ffi/fetchit_ffi.kt`
 Expected: non-zero.
 
-- [ ] **Step 4: Commit** (follow existing repo policy on whether the `.so` is tracked — `git status` will show; commit the `.kt` and whatever the repo already tracks):
+- [ ] **Step 4: Commit** (follow existing repo policy on whether the `.so` is tracked - `git status` will show; commit the `.kt` and whatever the repo already tracks):
 
 ```bash
 git add apps/fetchit-android/app/src/main/java/uniffi/fetchit_ffi/fetchit_ffi.kt
@@ -842,7 +842,7 @@ Expected: all clean, `EXIT:0`.
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-- [ ] **Step 3: Document** — add to `REFERENCE.md`'s fetchit-chat section: a short paragraph on the daemonless profile (builder flag, LocalSignerVault, which surfaces work without x0xd, which don't), and to the fetchit-ffi section: the ChatClient object. Match the file's existing tone and density.
+- [ ] **Step 3: Document** - add to `REFERENCE.md`'s fetchit-chat section: a short paragraph on the daemonless profile (builder flag, LocalSignerVault, which surfaces work without x0xd, which don't), and to the fetchit-ffi section: the ChatClient object. Match the file's existing tone and density.
 
 - [ ] **Step 4: Commit + push the branch**
 
@@ -856,7 +856,7 @@ git push -u origin android-lit
 
 ## Out of scope for P0 (lands in P1/P2 plans)
 
-- Kotlin UI (conversation list, thread, QR wiring), foreground service, idle-disconnect — P1.
+- Kotlin UI (conversation list, thread, QR wiring), foreground service, idle-disconnect - P1.
 - Groups (daemon-backed today; x0x-in-process is P2, pending the upstream `lib::serve(config)` ask).
-- Honest typed `Unavailable` errors for daemon-only endpoints in daemonless mode (today: connection-refused against the sentinel — acceptable; FFI exposes none of them).
+- Honest typed `Unavailable` errors for daemon-only endpoints in daemonless mode (today: connection-refused against the sentinel - acceptable; FFI exposes none of them).
 - Android Keystore-wrapped passphrase; message-history persistence; presence.
