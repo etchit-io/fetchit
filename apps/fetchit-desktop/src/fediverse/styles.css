@@ -255,3 +255,76 @@
   cursor: pointer;
 }
 .fediverse-confirm__accept:hover { background: var(--copper-bright); }
+
+/* ---- M5.1 handle lookup + actor card ---- */
+
+.fediverse-lookup { padding: 10px 14px 12px; border-bottom: 1px solid var(--line); }
+.fediverse-lookup__form { display: flex; gap: 8px; }
+.fediverse-lookup__input {
+  flex: 1; font-size: 13px; color: var(--bone);
+  background: var(--ink-2); border: 1px solid var(--line);
+  border-radius: var(--r-ctl); padding: 6px 10px;
+}
+.fediverse-lookup__input:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.fediverse-lookup__btn {
+  font-size: 13px; color: var(--bone); cursor: pointer;
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  border: none; border-radius: var(--r-ctl); padding: 6px 14px;
+  box-shadow: var(--edge-highlight);
+  transition: filter var(--dur-micro), transform var(--dur-micro);
+}
+.fediverse-lookup__btn:hover { filter: brightness(1.08); }
+.fediverse-lookup__btn:active { transform: scale(0.98); }
+.fediverse-lookup__btn:disabled { opacity: 0.5; cursor: default; }
+.fediverse-lookup__loading, .fediverse-lookup__error { margin-top: 10px; font-size: 12px; }
+.fediverse-lookup__loading { color: var(--ash); }
+.fediverse-lookup__error { color: var(--rust); }
+
+.actor-card {
+  margin-top: 10px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--r-card);
+  background: var(--ink-2); background-image: var(--surface-grad);
+  box-shadow: var(--edge-highlight);
+}
+.actor-card__name { font-size: 15px; font-weight: 600; color: var(--bone); }
+.actor-card__handle {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px; color: var(--copper); word-break: break-all; margin-top: 2px;
+}
+.actor-card__bio { margin-top: 6px; font-size: 13px; color: var(--bone-dim); }
+.actor-card__badge { margin-top: 8px; font-size: 11px; color: var(--signal-ok); }
+.actor-card__agent {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px; color: var(--ash); margin-top: 2px;
+}
+.actor-card__note, .actor-card__status { margin-top: 8px; font-size: 12px; color: var(--ash); }
+.actor-card__warn { margin-top: 8px; font-size: 12px; color: var(--rust); }
+.actor-card__actions { display: flex; gap: 8px; margin-top: 10px; }
+.actor-card__msg-btn {
+  font-size: 12px; color: var(--bone); cursor: pointer;
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  border: none; border-radius: 999px; padding: 4px 14px;
+  box-shadow: var(--edge-highlight);
+  transition: filter var(--dur-micro), transform var(--dur-micro);
+}
+.actor-card__msg-btn:hover { filter: brightness(1.08); }
+.actor-card__msg-btn:active { transform: scale(0.98); }
+.actor-card__msg-btn:disabled { opacity: 0.5; cursor: default; }
+.actor-card__invite-btn, .actor-card__invite-send {
+  font-size: 12px; color: var(--ash); cursor: pointer;
+  background: none; border: 1px solid var(--line);
+  border-radius: 999px; padding: 4px 12px;
+  transition: color var(--dur-micro), border-color var(--dur-micro);
+}
+.actor-card__invite-btn:hover, .actor-card__invite-send:hover {
+  color: var(--copper); border-color: var(--copper);
+}
+.actor-card__invite-btn:disabled, .actor-card__invite-send:disabled {
+  opacity: 0.5; cursor: default;
+}
+.actor-card__invite-row { display: flex; gap: 8px; margin-top: 8px; }
+.actor-card__invite-select {
+  flex: 1; font-size: 12px; color: var(--bone);
+  background: var(--ink-2); border: 1px solid var(--line);
+  border-radius: var(--r-ctl); padding: 4px 8px;
+}
