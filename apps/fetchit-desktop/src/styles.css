@@ -423,7 +423,7 @@ body:not([data-view="settings"]) #settings {
 .qr-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(26, 24, 20, 0.55);
+  background: color-mix(in srgb, var(--ink) 60%, transparent);
   backdrop-filter: blur(2px);
 }
 .qr-modal-card {
@@ -434,7 +434,7 @@ body:not([data-view="settings"]) #settings {
   border-radius: 12px;
   padding: 1.25rem 1.5rem 1.5rem;
   width: min(420px, 92vw);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--elev-3);
 }
 .qr-modal-header {
   display: flex;
@@ -496,7 +496,7 @@ body:not([data-view="settings"]) #settings {
   margin: 0.7rem 0 0.15rem;
   padding: 0.5rem 0.6rem;
   text-align: center;
-  font-family: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  font-family: var(--font-display);
   font-style: italic;
   font-weight: 400;
   font-size: 1.1rem;
@@ -1383,7 +1383,7 @@ body:not([data-view="settings"]) #settings {
   top: 10px;
   right: 10px;
   padding: 3px 10px;
-  background: rgba(28, 28, 32, 0.82);
+  background: color-mix(in srgb, var(--ink) 82%, transparent);
   color: var(--signal-ok);
   border: 1px solid var(--signal-ok);
   border-radius: 999px;
@@ -1445,7 +1445,7 @@ body:not([data-view="settings"]) #settings {
 }
 .epub-toc-item:hover {
   color: var(--ink);
-  background: rgba(184, 115, 51, 0.06);
+  background: color-mix(in srgb, var(--copper) 7%, transparent);
 }
 .epub-toc-item.is-active {
   color: var(--ink);

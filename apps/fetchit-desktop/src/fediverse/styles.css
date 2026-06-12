@@ -30,7 +30,10 @@
   flex: none;
 }
 .fediverse-panel__icon { width: 22px; height: 22px; color: var(--copper); flex: none; }
-.fediverse-panel__title { font-weight: 700; letter-spacing: 0.02em; font-size: 14px; }
+.fediverse-panel__title {
+  font: 400 18px/1.3 var(--font-display);
+  letter-spacing: 0.02em;
+}
 .fediverse-panel__note {
   font-size: 11px;
   color: var(--ash);
@@ -61,7 +64,16 @@
   border-radius: 12px;
   padding: 12px 14px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
+  box-shadow: var(--edge-highlight);
   animation: feed-post-in var(--dur-micro) var(--ease-out-expo) both;
+  transition: border-color var(--dur-micro), transform var(--dur-micro),
+    box-shadow var(--dur-micro);
+}
+.feed-post:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+  border-color: color-mix(in srgb, var(--copper) 35%, var(--line));
 }
 @keyframes feed-post-in {
   from { opacity: 0; transform: translateY(6px); }
@@ -134,16 +146,26 @@
   font: inherit;
   font-weight: 600;
   color: var(--ink);
-  background: var(--copper);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
   border: none;
   border-radius: 8px;
   padding: 8px 14px;
   cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
-.fediverse-compose__mint-btn:hover,
-.fediverse-compose__post:hover { background: var(--copper-bright); }
+.fediverse-compose__mint-btn:hover:not(:disabled),
+.fediverse-compose__post:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+.fediverse-compose__mint-btn:active:not(:disabled),
+.fediverse-compose__post:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
+}
 .fediverse-compose__mint-btn:disabled,
-.fediverse-compose__post:disabled { opacity: 0.5; cursor: default; }
+.fediverse-compose__post:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
 .fediverse-compose__textarea {
   font: inherit;
   background: var(--ink);
