@@ -1167,7 +1167,7 @@ impl Client {
                 return;
             }
         };
-        let http = reqwest::Client::new();
+        let http = crate::relay_http::guarded_client();
         match crate::pair_record::post_forwarding_record(
             &old,
             &chat.identity,
@@ -1988,7 +1988,7 @@ impl Client {
         )
         .await?;
 
-        let http = reqwest::Client::new();
+        let http = crate::relay_http::guarded_client();
         let outcome = crate::pair_record::post_pair_record(&relay, &record, &http).await?;
         if let crate::pair_record::PostOutcome::WatermarkReject {
             current_issued_at_ms,
@@ -2058,7 +2058,7 @@ impl Client {
             ChatError::Invalid("chat state not built; cannot import a pair URI".into())
         })?;
 
-        let http = reqwest::Client::new();
+        let http = crate::relay_http::guarded_client();
         let mut last_err = String::new();
         let mut record_opt = None;
         for relay_str in &parsed.relays {

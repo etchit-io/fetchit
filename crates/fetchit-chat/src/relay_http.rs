@@ -11,11 +11,11 @@
 //! [`fetchit_fedi::ssrf`] private-IP primitives rather than growing a
 //! parallel implementation.
 //!
-//! Foundation piece: every item here is consumed by the dial-site
-//! wiring that lands in a follow-up task, so the whole module is
-//! `dead_code` until then. The `allow` is module-scoped rather than
-//! per-item because all of the surface is wired in one follow-up.
-#![allow(dead_code)]
+//! Every item here is consumed by the dial-site wiring: [`guard_relay_url`]
+//! gates the four relay HTTP dial boundaries (pair-record and forwarding
+//! GET in [`crate::pair`], pair-record POST and per-relay forwarding POST
+//! in [`crate::pair_record`]), and [`guarded_client`] builds the
+//! redirect-disabled client those dials run on.
 
 use thiserror::Error;
 

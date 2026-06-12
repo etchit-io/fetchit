@@ -1345,7 +1345,7 @@ impl<'a> Endpoint<'a> {
         };
 
         let stale_relays: Vec<String> = hints.map(|h| h.relays).unwrap_or_default();
-        let http = reqwest::Client::new();
+        let http = crate::relay_http::guarded_client();
 
         for wss_url in &stale_relays {
             // Hints are wss:// (from the card); the forwarding endpoint is HTTP.

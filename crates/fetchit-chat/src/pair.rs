@@ -104,6 +104,11 @@ pub enum PairError {
     /// malformed fields, etc.).
     #[error("forwarding record verify: {0}")]
     ForwardingVerify(String),
+    /// The relay URL failed the SSRF host guard before any dial: its
+    /// host is, or resolves to, private / non-routable IP space. Carries
+    /// the underlying [`crate::relay_http::RelayGuardError`] message.
+    #[error("relay blocked: {0}")]
+    RelayBlocked(String),
 }
 
 const ALL_ZEROS_PROFILE_ADDR: &str =
@@ -229,6 +234,9 @@ pub async fn fetch_pair_record_by_id(
     agent_id_hex: &str,
     http: &reqwest::Client,
 ) -> std::result::Result<fetchit_relay_proto::pair_record::PairRecordV1, PairError> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| PairError::RelayBlocked(e.to_string()))?;
     let url = relay
         .join(&format!("v1/pair-record/{agent_id_hex}"))
         .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
@@ -281,6 +289,9 @@ pub async fn fetch_forwarding_record_by_id(
     use base64::engine::general_purpose::STANDARD as B64STD;
     use base64::Engine as _;
 
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| PairError::RelayBlocked(e.to_string()))?;
     let url = relay
         .join(&format!("v1/forwarding/{agent_id_hex}"))
         .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
@@ -905,6 +916,36 @@ mod tests {
         match fetch_pair_record_by_id(&relay, &"b".repeat(64), &http).await {
             Err(PairError::RelayStatus(404)) => {}
             other => panic!("expected RelayStatus(404), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_pair_record_by_id_does_not_follow_redirect() {
+        // A relay that answers with a 302 -> elsewhere must NOT be followed
+        // by the guarded client: redirect following is disabled so a
+        // redirect cannot smuggle the request to a private target that the
+        // URL-only host guard never saw. The 3xx surfaces as a non-2xx
+        // RelayStatus instead. The client is built via guarded_client()
+        // exactly as prod does, so this exercises the redirect-none policy
+        // at a real dial.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://example.com/moved"),
+            )
+            .mount(&server)
+            .await;
+
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = crate::relay_http::guarded_client();
+        match fetch_pair_record_by_id(&relay, &"b".repeat(64), &http).await {
+            Err(PairError::RelayStatus(s)) => {
+                assert!((300..400).contains(&s), "expected a 3xx status, got {s}");
+            }
+            other => panic!("expected RelayStatus in the 3xx range, got {other:?}"),
         }
     }
 

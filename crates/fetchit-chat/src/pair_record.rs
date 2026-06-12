@@ -162,6 +162,9 @@ pub async fn post_pair_record(
     record: &PairRecordV1,
     http: &reqwest::Client,
 ) -> Result<PostOutcome> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("relay blocked: {e}")))?;
     let url = relay
         .join("v1/pair-record")
         .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
@@ -222,6 +225,9 @@ async fn post_forwarding_once(
     record: &fetchit_relay_proto::pair_record::ForwardingRecordV1,
     http: &reqwest::Client,
 ) -> Result<ForwardingAttempt> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("relay blocked: {e}")))?;
     let url = relay
         .join("v1/forwarding")
         .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
