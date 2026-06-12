@@ -98,6 +98,56 @@ describe("mountShareCard", () => {
     expect(getUriBox().value).toBe("");
   });
 
+  it("does not write to detached nodes when the dialog closes before resolve", async () => {
+    let resolveShare: ((uri: string) => void) | undefined;
+    pairShareUriMock.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveShare = resolve;
+        }),
+    );
+    mountShareCard(host, { onClose: () => {} });
+
+    // Capture the dialog's children, then close the dialog the way panel.ts
+    // hideDialog does (replaceChildren detaches `inner`).
+    const status = getStatus();
+    const uriBox = getUriBox();
+    const copyBtn = host.querySelector<HTMLButtonElement>(".chat-dialog__btn")!;
+    const qrHost = getQrHost();
+    expect(status.textContent).toMatch(/Publishing/i);
+    host.replaceChildren();
+
+    // Resolving the pending publish must not throw nor write to the now
+    // detached nodes: the guard bails on !inner.isConnected.
+    resolveShare?.(POINTER_URI);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(status.textContent).toMatch(/Publishing/i);
+    expect(uriBox.value).toBe("");
+    expect(copyBtn.disabled).toBe(true);
+    expect(qrHost.querySelector("svg")).toBeNull();
+  });
+
+  it("falls back to execCommand copy when clipboard writeText rejects", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.assign(navigator, { clipboard: { writeText } });
+    const execCommand = vi.fn().mockReturnValue(true);
+    Object.assign(document, { execCommand });
+    pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
+    mountShareCard(host, { onClose: () => {} });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const copyBtn = host.querySelector<HTMLButtonElement>(".chat-dialog__btn")!;
+    copyBtn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalled();
+    expect(execCommand).toHaveBeenCalledWith("copy");
+  });
+
   it("invokes onClose for Cancel and the backdrop", async () => {
     pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
     const onClose = vi.fn();

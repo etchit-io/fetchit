@@ -104,11 +104,16 @@ export function mountShareCard(
   void (async () => {
     try {
       const uri = await pairShareUri();
+      // The dialog host is reused across dialogs (panel.ts hideDialog
+      // replaceChildren detaches `inner`); a late resolve must not write
+      // to detached nodes.
+      if (!inner.isConnected) return;
       status.textContent = "Ready to share.";
       uriBox.value = uri;
       copyBtn.disabled = false;
       qrHost.replaceChildren(renderQrSvg(uri));
     } catch (e) {
+      if (!inner.isConnected) return;
       status.textContent
         = `You're offline — couldn't publish your card. ${friendlyError(e)}`;
       uriBox.value = "";

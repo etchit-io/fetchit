@@ -2292,6 +2292,9 @@ mod tests {
         // A malformed URL is ignored and leaves the adopted value intact.
         state.adopt_live_relay("not a url");
         assert_eq!(state.relay_url().as_str(), "https://relay-b.example.com/");
+        // An empty string fails Url::parse the same way and is a no-op.
+        state.adopt_live_relay("");
+        assert_eq!(state.relay_url().as_str(), "https://relay-b.example.com/");
     }
 
     #[test]

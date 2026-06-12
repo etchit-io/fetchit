@@ -295,6 +295,100 @@ describe("mountAddContact", () => {
     expect(getStatus().textContent).toBe("Imported.");
   });
 
+  it("detectUriKind edges: case-sensitive prefix, edge-trim only", () => {
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    // Uppercase scheme/host does NOT match: the prefix check is
+    // case-sensitive by intent (the daemon emits lowercase URIs).
+    input.value = "X0X://PAIR/" + "ab".repeat(32) + "?r=https://relay.example";
+    input.dispatchEvent(new Event("input"));
+    expect(btn.disabled).toBe(true);
+
+    // A pointer URI followed by embedded newlines + garbage still enables
+    // Add: trim() only strips the edges, so the leading prefix is intact.
+    input.value = VALID_POINTER + "\n\ngarbage";
+    input.dispatchEvent(new Event("input"));
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("surfaces the honest error when an edge-trimmed pointer URI keeps an embedded newline", async () => {
+    // trim() leaves the embedded "\n\ngarbage" in place, so the daemon's
+    // importPairUri rejects the malformed URI; the dialog shows the honest
+    // re-share copy and re-enables Add.
+    const dirty = VALID_POINTER + "\n\ngarbage";
+    importPairUriMock.mockRejectedValueOnce(new Error("invalid pair URI"));
+    const onImported = vi.fn();
+    mountAddContact(host, { onClose: () => {}, onImported });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = dirty;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The trimmed (still-dirty) value is forwarded verbatim.
+    expect(importPairUriMock).toHaveBeenCalledWith(dirty.trim());
+    const status = getStatus().textContent ?? "";
+    expect(status).toMatch(/re-share/i);
+    expect(btn.disabled).toBe(false);
+    expect(onImported).not.toHaveBeenCalled();
+  });
+
+  it("routing exclusivity: pointer hits only importPairUri", async () => {
+    importPairUriMock.mockResolvedValueOnce(undefined);
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = VALID_POINTER;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(importPairUriMock).toHaveBeenCalledTimes(1);
+    expect(importCardMock).not.toHaveBeenCalled();
+    expect(pairAcceptMock).not.toHaveBeenCalled();
+  });
+
+  it("routing exclusivity: v2 card hits only importCard", async () => {
+    importCardMock.mockResolvedValueOnce(undefined);
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = VALID;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(importCardMock).toHaveBeenCalledTimes(1);
+    expect(importPairUriMock).not.toHaveBeenCalled();
+    expect(pairAcceptMock).not.toHaveBeenCalled();
+  });
+
+  it("routing exclusivity: v3 share hits only pairAccept", async () => {
+    pairAcceptMock.mockResolvedValueOnce({ agentIdHex: "deadbeef" });
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    const btn = getAddBtn();
+
+    input.value = VALID_V3;
+    input.dispatchEvent(new Event("input"));
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pairAcceptMock).toHaveBeenCalledTimes(1);
+    expect(importCardMock).not.toHaveBeenCalled();
+    expect(importPairUriMock).not.toHaveBeenCalled();
+  });
+
   it("renders an honest 'ask them to re-share' error when the relay is unreachable", async () => {
     importPairUriMock.mockRejectedValueOnce(
       new Error("could not reach any of their relays: timed out"),
