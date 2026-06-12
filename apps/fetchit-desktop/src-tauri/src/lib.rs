@@ -1139,6 +1139,7 @@ pub fn run() {
             chat::chat_watch_presence,
             chat::chat_unwatch_presence,
             fediverse::fediverse_actor_status,
+            fediverse::fediverse_ensure_v2,
             fediverse::fediverse_mint,
             fediverse::fediverse_publish,
         ])

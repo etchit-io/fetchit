@@ -40,22 +40,105 @@ pub fn fediverse_actor_status(state: tauri::State<'_, AppState>) -> Option<Strin
     }
 }
 
-/// Opt in to public posting: mint the actor identity for `handle` and
-/// persist it as the active handle. Returns the canonical actor URL.
+/// Result of a mint: the identity is always created locally; directory
+/// registration is best-effort and reported honestly.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintOutcomeDto {
+    /// Canonical actor URL.
+    pub actor_url: String,
+    /// True when the etchit.io directory accepted the registration.
+    pub registered: bool,
+    /// Why registration is pending, when it is.
+    pub registration_error: Option<String>,
+}
+
+/// Result of the v2 upgrade pass run on pane open.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureV2Dto {
+    /// True when a fresh v2 attestation was signed and stored.
+    pub upgraded: bool,
+    /// True when the directory holds the current record.
+    pub registered: bool,
+    /// Why the pass could not complete (profile unpublished, bridge
+    /// unreachable); user-facing copy.
+    pub pending: Option<String>,
+}
+
+/// Milliseconds since the epoch (same construction `fediverse_publish`
+/// uses for `created_at_ms`).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Best-effort directory registration. Mint stays local-first: a
+/// bridge outage degrades to "registration pending", never a failed
+/// mint. POST then PUT on 409 so re-asserting our own handle after an
+/// attestation refresh self-heals (a true squat by another agent fails
+/// the PUT's same-agent-id continuity check and surfaces honestly).
+async fn register_with_directory(
+    identity: &fetchit_fedi::actor::ActorIdentity,
+) -> (bool, Option<String>) {
+    let Some(att2) = identity.ml_dsa_attestation_v2.clone() else {
+        return (false, Some("no v2 attestation on identity".into()));
+    };
+    let Ok(base) = url::Url::parse(&format!("https://{DEFAULT_FEDI_DOMAIN}/")) else {
+        return (false, Some("bad registry base URL".into()));
+    };
+    let req = fetchit_fedi::registry::RegisterActorRequest {
+        handle: identity.handle.clone(),
+        rsa_spki_der: identity.spki_der.clone(),
+        attestation_v2: att2,
+    };
+    let Ok(http) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    else {
+        return (false, Some("http client build failed".into()));
+    };
+    match fetchit_fedi::registry::register_actor(&base, &req, &http).await {
+        Ok(_) => (true, None),
+        Err(fetchit_fedi::registry::RegistryError::HandleTaken) => {
+            match fetchit_fedi::registry::update_actor(&base, &req, &http).await {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// Opt in to public posting: mint the actor identity for `handle`
+/// (with its v2 attestation binding the published profile address and
+/// active relay) and persist it as the active handle. Requires a
+/// published profile; the error copy explains how to get one.
 ///
 /// # Errors
-/// Chat feature off, chat client unavailable, or the crate-side handle
-/// validation / mint failing.
+/// Chat feature off, chat client unavailable, no published profile, or
+/// the crate-side handle validation / mint failing. Directory
+/// registration failure is NOT an error; it lands in the DTO.
 #[tauri::command]
 pub async fn fediverse_mint(
     app_state: tauri::State<'_, AppState>,
     chat_state: tauri::State<'_, ChatState>,
     handle: String,
-) -> Result<String, String> {
+) -> Result<MintOutcomeDto, String> {
     ensure_chat_enabled(&app_state)?;
+    let (record, relay) = crate::chat::self_profile_record(&chat_state).await?;
     let client = chat_state.get().await?;
     let identity = client
-        .mint_actor_identity(&handle, DEFAULT_FEDI_DOMAIN, None)
+        .mint_actor_identity_v2(
+            &handle,
+            DEFAULT_FEDI_DOMAIN,
+            None,
+            &record.profile_addr,
+            relay.as_str(),
+            now_ms(),
+        )
         .await
         .map_err(|e| e.to_string())?;
     if let Ok(mut s) = app_state.settings.lock() {
@@ -64,7 +147,72 @@ pub async fn fediverse_mint(
             tracing::warn!("minted handle held in memory only; settings save failed: {e}");
         }
     }
-    Ok(identity.actor_url.to_string())
+    let (registered, registration_error) = register_with_directory(&identity).await;
+    Ok(MintOutcomeDto {
+        actor_url: identity.actor_url.to_string(),
+        registered,
+        registration_error,
+    })
+}
+
+/// Run on pane open when a handle exists: transparently upgrade a
+/// pre-M5 (v1-only) identity to v2 and re-assert the directory record.
+/// Never errors the pane for upgrade blockers: those land in
+/// `pending`.
+///
+/// # Errors
+/// Chat feature off, chat client unavailable, or vault access failing.
+#[tauri::command]
+pub async fn fediverse_ensure_v2(
+    app_state: tauri::State<'_, AppState>,
+    chat_state: tauri::State<'_, ChatState>,
+) -> Result<EnsureV2Dto, String> {
+    ensure_chat_enabled(&app_state)?;
+    let handle = app_state
+        .settings
+        .lock()
+        .map_err(|e| format!("settings lock poisoned: {e}"))?
+        .fediverse_handle
+        .clone();
+    if handle.is_empty() {
+        return Ok(EnsureV2Dto {
+            upgraded: false,
+            registered: false,
+            pending: None,
+        });
+    }
+    let (record, relay) = match crate::chat::self_profile_record(&chat_state).await {
+        Ok(v) => v,
+        Err(reason) => {
+            return Ok(EnsureV2Dto {
+                upgraded: false,
+                registered: false,
+                pending: Some(reason),
+            })
+        }
+    };
+    let client = chat_state.get().await?;
+    let upgraded = client
+        .upgrade_actor_attestation_v2(
+            &handle,
+            None,
+            &record.profile_addr,
+            relay.as_str(),
+            now_ms(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let identity = client
+        .load_actor_identity(&handle, None)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no actor identity for {handle}"))?;
+    let (registered, err) = register_with_directory(&identity).await;
+    Ok(EnsureV2Dto {
+        upgraded,
+        registered,
+        pending: err,
+    })
 }
 
 /// Publish a public post as the active handle. Mentions are extracted
@@ -179,5 +327,31 @@ mod tests {
         let v = serde_json::to_value(&dto).unwrap();
         assert!(v.get("delivered").is_some());
         assert!(v.get("failed").is_some());
+    }
+
+    #[test]
+    fn mint_outcome_dto_serializes_camel_case() {
+        let dto = MintOutcomeDto {
+            actor_url: "https://etchit.io/actors/josh".into(),
+            registered: false,
+            registration_error: Some("connection refused".into()),
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert!(v.get("actorUrl").is_some());
+        assert_eq!(v["registered"], false);
+        assert_eq!(v["registrationError"], "connection refused");
+    }
+
+    #[test]
+    fn ensure_v2_dto_serializes_camel_case() {
+        let dto = EnsureV2Dto {
+            upgraded: true,
+            registered: false,
+            pending: None,
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["upgraded"], true);
+        assert_eq!(v["registered"], false);
+        assert!(v["pending"].is_null());
     }
 }

@@ -626,12 +626,27 @@ pub async fn chat_pair_share(
     state: tauri::State<'_, ChatState>,
 ) -> Result<String, String> {
     ensure_chat_enabled(&app_state)?;
+    let (record, relay) = self_profile_record(&state).await?;
+    fetchit_chat::profile::to_v3_share_uri(&record.agent_id, &record.profile_addr, &relay)
+        .map_err(|e| e.to_string())
+}
+
+/// User-facing copy for the publish-first gate, shared by pair-share,
+/// actor mint, and the v2 upgrade path.
+pub(crate) const PROFILE_FIRST_COPY: &str =
+    "Publish your profile first — open the Profile tab in etch>it and click Publish.";
+
+/// Self-look-up the local user's profile-index record on the active
+/// relay. Returns the record plus the relay it was served from.
+///
+/// The relay's profile-index URL is built from the client's configured
+/// relay: the chat `ClientBuilder` stores it on the state, not on the
+/// `Client` surface, so this re-reads from the source of truth.
+pub(crate) async fn self_profile_record(
+    state: &ChatState,
+) -> Result<(fetchit_chat::pair::ProfileIndexRecord, Url), String> {
     let client = state.get().await?;
     let me = client.identity().me().await.map_err(|e| e.to_string())?;
-    // Build the relay's profile-index URL from the client's
-    // configured relay. The chat ClientBuilder stores it on the
-    // state, not on the Client surface; re-read from the source of
-    // truth here.
     let relay = state.relay_url();
     let http = reqwest::Client::new();
     let url = relay
@@ -644,19 +659,14 @@ pub async fn chat_pair_share(
         .await
         .map_err(|e| format!("relay fetch: {e}"))?;
     if resp.status().as_u16() == 404 {
-        return Err(
-            "Publish your profile first — open the Profile tab in etch>it and click Publish."
-                .to_string(),
-        );
+        return Err(PROFILE_FIRST_COPY.to_string());
     }
     if !resp.status().is_success() {
         return Err(format!("relay returned {}", resp.status()));
     }
     let record: fetchit_chat::pair::ProfileIndexRecord =
         resp.json().await.map_err(|e| format!("relay JSON: {e}"))?;
-    let parsed_relay = relay.clone();
-    fetchit_chat::profile::to_v3_share_uri(&record.agent_id, &record.profile_addr, &parsed_relay)
-        .map_err(|e| e.to_string())
+    Ok((record, relay))
 }
 
 /// Republish the local reachability record, then return the QR-sized
