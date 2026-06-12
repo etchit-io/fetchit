@@ -8,7 +8,31 @@
  *   --line  dividers / hairlines        --ash      labels / muted
  *   --copper / --copper-bright accent + hover  --rust  error
  *   --signal-ok status                  color-scheme matches surface
+ *   --gold / --gold-bright  rare highlight + hover (v2)
+ *   --signal-ok retuned from lime to patina green (v2)
+ *   --elev-1/-2/-3  layered elevation shadows
+ *   --edge-highlight  inset top-edge light on raised surfaces
+ *   --surface-grad  faint top sheen gradient for cards
+ *   --grain  film-grain canvas texture (:root only, inherits)
+ *   --focus-ring  focus-visible ring (:root only, inherits)
+ *   --r-ctl / --r-card / --r-pill  corner radii (:root only, inherits)
+ *   --font-display  bundled display serif (:root only, inherits)
  */
+
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./assets/fonts/InstrumentSerif-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./assets/fonts/InstrumentSerif-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
 
 :root, body[data-theme="dark"] {
   --ink: #0a0a0a;
@@ -20,7 +44,20 @@
   --bone-dim: #d6cfc0;
   --ash: #8a8a8a;
   --rust: #ff8a7a;
-  --signal-ok: #6ab04c;
+  --signal-ok: #56b292;
+  --gold: #d9a440;
+  --gold-bright: #e8bc62;
+  --elev-1: 0 1px 2px rgba(12, 8, 4, 0.5), 0 2px 8px rgba(12, 8, 4, 0.25);
+  --elev-2: 0 4px 12px rgba(12, 8, 4, 0.45), 0 12px 32px rgba(12, 8, 4, 0.3);
+  --elev-3: 0 8px 24px rgba(12, 8, 4, 0.5), 0 24px 64px rgba(12, 8, 4, 0.35);
+  --edge-highlight: inset 0 1px 0 0 rgba(245, 242, 235, 0.05);
+  --surface-grad: linear-gradient(180deg, rgba(245, 242, 235, 0.025), transparent 56px);
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--copper) 22%, transparent);
+  --r-ctl: 8px;
+  --r-card: 12px;
+  --r-pill: 999px;
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
   color-scheme: dark;
 
   /* Motion tokens shared with etch/it. --ease-out-expo for one-shot
@@ -47,7 +84,14 @@ body[data-theme="dim"] {
   --bone-dim: #d9d2c4;
   --ash: #a09a90;
   --rust: #ff8a7a;
-  --signal-ok: #6ab04c;
+  --signal-ok: #56b292;
+  --gold: #d9a440;
+  --gold-bright: #e8bc62;
+  --elev-1: 0 1px 2px rgba(18, 12, 6, 0.45), 0 2px 8px rgba(18, 12, 6, 0.22);
+  --elev-2: 0 4px 12px rgba(18, 12, 6, 0.4), 0 12px 32px rgba(18, 12, 6, 0.26);
+  --elev-3: 0 8px 24px rgba(18, 12, 6, 0.45), 0 24px 64px rgba(18, 12, 6, 0.3);
+  --edge-highlight: inset 0 1px 0 0 rgba(245, 242, 235, 0.06);
+  --surface-grad: linear-gradient(180deg, rgba(245, 242, 235, 0.03), transparent 56px);
   color-scheme: dark;
 }
 
@@ -61,7 +105,14 @@ body[data-theme="light"] {
   --bone-dim: #1a1814;
   --ash: #3a3a3a;
   --rust: #c0392b;
-  --signal-ok: #3d7e2c;
+  --signal-ok: #2f7e62;
+  --gold: #a87a1f;
+  --gold-bright: #8f6512;
+  --elev-1: 0 1px 2px rgba(60, 44, 28, 0.14), 0 2px 8px rgba(60, 44, 28, 0.08);
+  --elev-2: 0 4px 12px rgba(60, 44, 28, 0.14), 0 12px 32px rgba(60, 44, 28, 0.1);
+  --elev-3: 0 8px 24px rgba(60, 44, 28, 0.16), 0 24px 64px rgba(60, 44, 28, 0.12);
+  --edge-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.7);
+  --surface-grad: linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 56px);
   color-scheme: light;
 }
 
@@ -127,12 +178,50 @@ body {
 
 body {
   margin: 0;
-  background: var(--ink);
+  background-color: var(--ink);
+  background-image: var(--grain);
   color: var(--bone);
   font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--copper) 32%, transparent);
+  color: var(--bone);
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ash) 38%, transparent) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ash) 32%, transparent);
+  border-radius: var(--r-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--copper) 45%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
 }
 
 #bar {
