@@ -168,12 +168,12 @@ pub async fn post_pair_record(
     let url = relay
         .join("v1/pair-record")
         .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
-    let resp = http
-        .post(url)
-        .json(record)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.post(url.clone())
+            .json(record)
+            .timeout(Duration::from_secs(10))
+    })
+    .await?;
     let status = resp.status();
     if status.is_success() {
         return Ok(PostOutcome::Accepted);
@@ -231,12 +231,12 @@ async fn post_forwarding_once(
     let url = relay
         .join("v1/forwarding")
         .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
-    let resp = http
-        .post(url)
-        .json(record)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.post(url.clone())
+            .json(record)
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await?;
     let status = resp.status();
     if status.is_success() {
         return Ok(ForwardingAttempt::Written);

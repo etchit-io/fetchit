@@ -240,11 +240,10 @@ pub async fn fetch_pair_record_by_id(
     let url = relay
         .join(&format!("v1/pair-record/{agent_id_hex}"))
         .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
-    let resp = http
-        .get(url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.get(url.clone()).timeout(Duration::from_secs(10))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }
@@ -295,11 +294,10 @@ pub async fn fetch_forwarding_record_by_id(
     let url = relay
         .join(&format!("v1/forwarding/{agent_id_hex}"))
         .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
-    let resp = http
-        .get(url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.get(url.clone()).timeout(Duration::from_secs(10))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(PairError::RelayStatus(resp.status().as_u16()));
     }

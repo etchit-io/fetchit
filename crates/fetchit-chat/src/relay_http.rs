@@ -17,6 +17,7 @@
 //! in [`crate::pair_record`]), and [`guarded_client`] builds the
 //! redirect-disabled client those dials run on.
 
+use std::time::Duration;
 use thiserror::Error;
 
 /// Opt-in env var that bypasses the relay SSRF host guard for dev /
@@ -124,6 +125,49 @@ pub(crate) fn guarded_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Bounded retry for a relay-bound HTTP request on TRANSIENT transport
+/// failures (connection refused/reset, request timeout) so a single
+/// network glitch does not fail a publish or fetch. The `build` closure
+/// must construct a fresh `RequestBuilder` each call (including its own
+/// per-attempt `.timeout(...)`), because `send` consumes the builder.
+///
+/// Only transport-level errors retry. An HTTP response, including 4xx /
+/// 5xx, is returned to the caller verbatim: those are meaningful relay
+/// decisions (e.g. 409 watermark, 412 no-pair-record), never retried.
+/// Retried requests must be idempotent at the relay; the pair-record and
+/// forwarding writes are (the relay's monotonic `put_if_newer` collapses
+/// a duplicate), and GETs are inherently idempotent.
+pub(crate) async fn relay_send_with_retry(
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> reqwest::Result<reqwest::Response> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut backoff = Duration::from_millis(400);
+    let mut attempt: u32 = 1;
+    loop {
+        match build().send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if attempt < MAX_ATTEMPTS && is_transient(&e) => {
+                log::warn!(
+                    "[chat] relay request transient failure (attempt {attempt}/{MAX_ATTEMPTS}): {e}; retrying in {}ms",
+                    backoff.as_millis()
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2);
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Whether a reqwest error is a transient transport failure worth a
+/// retry: a timeout, a connect failure, or a generic send failure where
+/// no response was received. A status / body / decode error is NOT
+/// transient.
+fn is_transient(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || e.is_request()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -215,5 +259,80 @@ mod tests {
         // introspection; the redirect-none behavior is covered by an
         // integration-style test in the dial-site wiring task.
         let _c = guarded_client();
+    }
+
+    // ── relay_send_with_retry ────────────────────────────────────────────────
+    //
+    // These cover the retry DECISION logic hermetically: a status response is
+    // never retried, a clean 200 returns straight through, and is_transient
+    // classifies a real connect/timeout failure as retryable. The full
+    // multi-attempt-then-succeed transient path (drop the connection on
+    // attempt 1, answer on attempt 2) is deliberately NOT unit-tested here:
+    // wiremock cannot drop a connection mid-stream, and standing up a raw TCP
+    // server that closes once is more apparatus than signal. That live
+    // behavior is covered by the reachability mission's cross-relay run.
+
+    #[tokio::test]
+    async fn relay_send_with_retry_succeeds_first_try() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = server.uri();
+        let resp = relay_send_with_retry(|| http.get(&url))
+            .await
+            .expect("clean 200 must return Ok");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn relay_send_with_retry_returns_4xx_without_retrying() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A 409 is a response, not a transport error: it must be returned
+        // verbatim and the server must be hit exactly once (no retry). The
+        // .expect(1) is verified on MockServer drop.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(409))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = server.uri();
+        let resp = relay_send_with_retry(|| http.post(&url))
+            .await
+            .expect("a status response is Ok, not a transport error");
+        assert_eq!(resp.status().as_u16(), 409);
+    }
+
+    #[tokio::test]
+    async fn is_transient_classifies_timeout_and_connect() {
+        // A request to a closed/refused port (or one that times out fast)
+        // yields a connect/timeout error, which is_transient must classify as
+        // retryable. 127.0.0.1:1 is a privileged port with no listener, so the
+        // connect is refused (or times out under the 50ms cap on slow CI).
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .timeout(Duration::from_millis(50))
+            .send()
+            .await
+            .expect_err("connect to a dead port must fail");
+        assert!(
+            is_transient(&err),
+            "connect/timeout failure must be transient: {err}"
+        );
+        // The false case (a status/body/decode error) is not cheaply
+        // constructible without a live response whose body we then mangle, so
+        // it is left to the no-retry-on-status integration coverage above.
     }
 }
