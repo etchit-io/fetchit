@@ -10,11 +10,24 @@ const pairAcceptMock = vi.fn<
   }>
 >();
 const importPairUriMock = vi.fn<(uri: string) => Promise<void>>();
+const lookupHandleMock = vi.fn<
+  (handle: string) => Promise<{
+    kind: "verified" | "publicOnly";
+    handle: string;
+    actorUrl: string;
+    shareUri?: string | null;
+    verifyFailure?: string | null;
+  }>
+>();
 
 vi.mock("./api", () => ({
   importCard: (uri: string) => importCardMock(uri),
   pairAccept: (uri: string) => pairAcceptMock(uri),
   importPairUri: (uri: string) => importPairUriMock(uri),
+}));
+
+vi.mock("../fediverse/api", () => ({
+  lookupHandle: (handle: string) => lookupHandleMock(handle),
 }));
 
 const VALID = "x0x://agent/abcdefghijklmnop";
@@ -33,6 +46,7 @@ beforeEach(() => {
   importCardMock.mockReset();
   pairAcceptMock.mockReset();
   importPairUriMock.mockReset();
+  lookupHandleMock.mockReset();
   host = document.createElement("div");
   document.body.appendChild(host);
 });
@@ -408,5 +422,81 @@ describe("mountAddContact", () => {
     expect(status).toMatch(/re-share/i);
     expect(btn.disabled).toBe(false);
     expect(onImported).not.toHaveBeenCalled();
+  });
+});
+
+describe("mountAddContact — fediverse handles", () => {
+  const HANDLE = "@josh@etchit.io";
+  const SHARE = `fetchit://share/v3/${"aa".repeat(32)}/${"bb".repeat(32)}?relay=x`;
+
+  it("enables Add for a well-formed handle", () => {
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    const btn = getAddBtn();
+    input.value = HANDLE;
+    input.dispatchEvent(new Event("input"));
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("imports a verified handle via lookup then pair-accept", async () => {
+    lookupHandleMock.mockResolvedValueOnce({
+      kind: "verified",
+      handle: HANDLE,
+      actorUrl: "https://etchit.io/actors/josh",
+      shareUri: SHARE,
+      verifyFailure: null,
+    });
+    pairAcceptMock.mockResolvedValueOnce({ agentIdHex: "aa".repeat(32) });
+    const onImported = vi.fn();
+    mountAddContact(host, { onClose: () => {}, onImported });
+    const input = getInput();
+    input.value = HANDLE;
+    input.dispatchEvent(new Event("input"));
+    getAddBtn().click();
+    await vi.waitFor(() => {
+      expect(onImported).toHaveBeenCalledWith({ agentIdHex: "aa".repeat(32) });
+    });
+    expect(lookupHandleMock).toHaveBeenCalledWith(HANDLE);
+    expect(pairAcceptMock).toHaveBeenCalledWith(SHARE);
+    expect(getStatus().textContent).toBe("Imported.");
+  });
+
+  it("rejects a public-only handle with honest copy", async () => {
+    lookupHandleMock.mockResolvedValueOnce({
+      kind: "publicOnly",
+      handle: "@g@m.social",
+      actorUrl: "https://m.social/users/g",
+      verifyFailure: null,
+    });
+    const onImported = vi.fn();
+    mountAddContact(host, { onClose: () => {}, onImported });
+    const input = getInput();
+    input.value = "@g@m.social";
+    input.dispatchEvent(new Event("input"));
+    const btn = getAddBtn();
+    btn.click();
+    await vi.waitFor(() => {
+      expect(getStatus().textContent).toMatch(/isn't linked to a fetch>it identity/);
+    });
+    expect(btn.disabled).toBe(false);
+    expect(onImported).not.toHaveBeenCalled();
+    expect(pairAcceptMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed attestation distinctly", async () => {
+    lookupHandleMock.mockResolvedValueOnce({
+      kind: "publicOnly",
+      handle: "@evil@etchit.io",
+      actorUrl: "https://etchit.io/actors/evil",
+      verifyFailure: "signature does not verify",
+    });
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const input = getInput();
+    input.value = "@evil@etchit.io";
+    input.dispatchEvent(new Event("input"));
+    getAddBtn().click();
+    await vi.waitFor(() => {
+      expect(getStatus().textContent).toMatch(/Couldn't verify that handle/);
+    });
   });
 });

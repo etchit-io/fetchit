@@ -1,7 +1,10 @@
 // Add-contact dialog — accepts a pasted pointer URI (`x0x://pair/…`),
-// a v2 `x0x://agent/…` card URI, or a v3 `fetchit://share/v3/…`
-// profile share URI and forwards it to the matching daemon command.
+// a v2 `x0x://agent/…` card URI, a v3 `fetchit://share/v3/…` profile
+// share URI, or a fediverse handle (`@name@domain`, M5.1) and forwards
+// it to the matching daemon command. A handle resolves through
+// `fediverse_lookup`; only a verified fetch>it identity imports.
 
+import { lookupHandle } from "../fediverse/api";
 import { importCard, importPairUri, pairAccept } from "./api";
 import { friendlyError } from "./errors";
 
@@ -14,17 +17,19 @@ export interface AddContactHandlers {
   onImported: (result?: { agentIdHex: string }) => void;
 }
 
-type UriKind = "pointer" | "v2" | "v3";
+type InputKind = "pointer" | "v2" | "v3" | "handle";
 
 const POINTER_PREFIX = "x0x://pair/";
 const V2_PREFIX = "x0x://agent/";
 const V3_PREFIX = "fetchit://share/v3/";
+const HANDLE_RE = /^@[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
-function detectUriKind(value: string): UriKind | null {
+function detectInputKind(value: string): InputKind | null {
   const t = value.trim();
   if (t.startsWith(POINTER_PREFIX)) return "pointer";
   if (t.startsWith(V2_PREFIX)) return "v2";
   if (t.startsWith(V3_PREFIX)) return "v3";
+  if (HANDLE_RE.test(t)) return "handle";
   return null;
 }
 
@@ -44,7 +49,8 @@ export function mountAddContact(
   const help = document.createElement("p");
   help.className = "chat-dialog__help";
   help.textContent
-    = "Paste a share link from someone you trust — usually x0x://pair/…";
+    = "Paste a share link from someone you trust — usually x0x://pair/… "
+      + "Or type their fediverse handle, like @name@etchit.io";
 
   // Share URIs are long (KEM/ML-DSA keys + signature add up to ~17KB).
   // A single-line <input> forces the text engine to lay out the entire
@@ -52,7 +58,7 @@ export function mountAddContact(
   // past 65535 px; textarea wraps visually and keeps the box bounded.
   const input = document.createElement("textarea");
   input.className = "chat-dialog__uri";
-  input.placeholder = "x0x://pair/… (or x0x://agent/…, fetchit://share/v3/…)";
+  input.placeholder = "x0x://pair/… or @name@etchit.io";
   input.spellcheck = false;
   input.rows = 4;
   input.wrap = "soft";
@@ -91,18 +97,31 @@ export function mountAddContact(
   });
 
   input.addEventListener("input", () => {
-    addBtn.disabled = detectUriKind(input.value) === null;
+    addBtn.disabled = detectInputKind(input.value) === null;
     status.textContent = "";
   });
 
   addBtn.addEventListener("click", async () => {
-    const kind = detectUriKind(input.value);
+    const kind = detectInputKind(input.value);
     if (kind === null) return;
     addBtn.disabled = true;
     status.textContent = inFlightStatus(kind);
     try {
       const uri = input.value.trim();
-      if (kind === "v3") {
+      if (kind === "handle") {
+        const dto = await lookupHandle(uri);
+        if (dto.kind !== "verified" || !dto.shareUri) {
+          status.textContent = dto.verifyFailure
+            ? `Couldn't verify that handle: ${dto.verifyFailure}`
+            : "That account isn't linked to a fetch>it identity, so it can't "
+              + "be added as a private contact.";
+          addBtn.disabled = false;
+          return;
+        }
+        const result = await pairAccept(dto.shareUri);
+        status.textContent = "Imported.";
+        handlers.onImported(result);
+      } else if (kind === "v3") {
         const result = await pairAccept(uri);
         status.textContent = "Imported.";
         handlers.onImported(result);
@@ -124,8 +143,9 @@ export function mountAddContact(
   setTimeout(() => input.focus(), 0);
 }
 
-/// In-flight status copy while an add is resolving, keyed by URI kind.
-function inFlightStatus(kind: UriKind): string {
+/// In-flight status copy while an add is resolving, keyed by input kind.
+function inFlightStatus(kind: InputKind): string {
+  if (kind === "handle") return "Looking up handle…";
   if (kind === "v3") return "Fetching profile…";
   if (kind === "pointer") return "Looking them up…";
   return "Importing…";
@@ -134,7 +154,7 @@ function inFlightStatus(kind: UriKind): string {
 /// Honest, plain-English failure copy. For a pointer URI the common
 /// failure is an unreachable relay, so the message tells the user the
 /// actionable next step: ask the contact to re-share.
-function importErrorCopy(kind: UriKind, e: unknown): string {
+function importErrorCopy(kind: InputKind, e: unknown): string {
   if (kind === "pointer") {
     return `Couldn't reach their relay — ask them to re-share. (${friendlyError(e)})`;
   }
