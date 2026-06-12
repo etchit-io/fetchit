@@ -337,6 +337,13 @@ pub enum AttestationVerifyError {
     /// under the attested public key.
     #[error("attestation signature does not verify under the attested key")]
     SignatureInvalid,
+    /// The attestation's `version` field is not the expected `2`
+    /// (v2 only).
+    #[error("attestation version {got} where 2 expected")]
+    WrongVersion {
+        /// The version value found on the wire.
+        got: u8,
+    },
 }
 
 /// Cryptographically verify an attestation against the actor fields it
@@ -387,6 +394,56 @@ pub fn verify_binding(
     Ok(derived)
 }
 
+/// Cryptographically verify a v2 attestation against the actor fields
+/// it claims to bind, returning the **derived** chat `agent_id_hex`.
+///
+/// Identical derive-then-verify construction to [`verify_binding`];
+/// the reconstructed input additionally covers the attestation's own
+/// `profile_addr`, `relay_hint`, and `hint_epoch_ms` fields, so
+/// tampering with any of them invalidates the signature.
+///
+/// # Errors
+///
+/// Any [`AttestationVerifyError`] means the actor MUST NOT be treated
+/// as bound to a chat identity (callers fail closed to public-only).
+pub fn verify_binding_v2(
+    handle: &str,
+    actor_url: &url::Url,
+    spki_der: &[u8],
+    attestation: &ActorAttestationV2,
+) -> Result<String, AttestationVerifyError> {
+    use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
+
+    if attestation.version != 2 {
+        return Err(AttestationVerifyError::WrongVersion {
+            got: attestation.version,
+        });
+    }
+    let derived = hex::encode(fetchit_relay_proto::derive_agent_id(
+        &attestation.ml_dsa_pubkey,
+    ));
+    let input = signing_input_v2(
+        handle,
+        actor_url,
+        &derived,
+        spki_der,
+        &attestation.profile_addr,
+        &attestation.relay_hint,
+        attestation.hint_epoch_ms,
+    )?;
+    let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &attestation.ml_dsa_pubkey)
+        .map_err(|e| AttestationVerifyError::PubkeyParse(e.to_string()))?;
+    let sig = MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &attestation.signature)
+        .map_err(|e| AttestationVerifyError::SignatureParse(e.to_string()))?;
+    let ok = MlDsa::new(MlDsaVariant::MlDsa65)
+        .verify(&pk, &input, &sig)
+        .map_err(|e| AttestationVerifyError::VerifyBackend(e.to_string()))?;
+    if !ok {
+        return Err(AttestationVerifyError::SignatureInvalid);
+    }
+    Ok(derived)
+}
+
 /// Test-only factory: mint a real ML-DSA-65 keypair, derive the agent
 /// id from the pubkey, and sign the canonical input. Returns the
 /// attestation plus the derived lowercase `agent_id_hex`.
@@ -404,6 +461,47 @@ pub(crate) fn test_attested(
     let input = signing_input(handle, actor_url, &derived, spki_der).unwrap();
     let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
     (MlDsaAttestation::new(pk.to_bytes(), sig), derived)
+}
+
+/// Test-only factory for v2: mint a real ML-DSA-65 keypair, derive the
+/// agent id from the pubkey, and sign the canonical v2 input. Returns
+/// the attestation plus the derived lowercase `agent_id_hex`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) fn test_attested_v2(
+    handle: &str,
+    actor_url: &url::Url,
+    spki_der: &[u8],
+    profile_addr: &str,
+    relay_hint: &str,
+    hint_epoch_ms: u64,
+) -> (ActorAttestationV2, String) {
+    use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+    let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+    let (pk, sk) = dsa.generate_keypair().unwrap();
+    let derived = hex::encode(fetchit_relay_proto::derive_agent_id(&pk.to_bytes()));
+    let input = signing_input_v2(
+        handle,
+        actor_url,
+        &derived,
+        spki_der,
+        profile_addr,
+        relay_hint,
+        hint_epoch_ms,
+    )
+    .unwrap();
+    let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+    (
+        ActorAttestationV2 {
+            version: 2,
+            profile_addr: profile_addr.to_string(),
+            relay_hint: relay_hint.to_string(),
+            hint_epoch_ms,
+            ml_dsa_pubkey: pk.to_bytes(),
+            signature: sig,
+        },
+        derived,
+    )
 }
 
 #[cfg(test)]
@@ -758,6 +856,97 @@ mod tests {
             mk(&long),
             Err(SigningInputError::InvalidRelayHint { .. })
         ));
+    }
+
+    #[test]
+    fn verify_binding_v2_round_trips_with_real_keys() {
+        let actor_url = url("https://etchit.io/actors/josh");
+        let (att, derived) = test_attested_v2(
+            "josh",
+            &actor_url,
+            &[9, 9],
+            &"a".repeat(64),
+            "https://relay.example/",
+            42,
+        );
+        let got = verify_binding_v2("josh", &actor_url, &[9, 9], &att).unwrap();
+        assert_eq!(got, derived);
+    }
+
+    #[test]
+    fn verify_binding_v2_rejects_wrong_version() {
+        let actor_url = url("https://etchit.io/actors/josh");
+        let (mut att, _) = test_attested_v2(
+            "josh",
+            &actor_url,
+            &[9, 9],
+            &"a".repeat(64),
+            "https://relay.example/",
+            42,
+        );
+        att.version = 1;
+        assert!(matches!(
+            verify_binding_v2("josh", &actor_url, &[9, 9], &att),
+            Err(AttestationVerifyError::WrongVersion { got: 1 })
+        ));
+    }
+
+    #[test]
+    fn verify_binding_v2_rejects_tampered_fields() {
+        let actor_url = url("https://etchit.io/actors/josh");
+        let mk = || {
+            test_attested_v2(
+                "josh",
+                &actor_url,
+                &[9, 9],
+                &"a".repeat(64),
+                "https://relay.example/",
+                42,
+            )
+            .0
+        };
+
+        let mut tampered_profile = mk();
+        tampered_profile.profile_addr = "b".repeat(64);
+        assert!(verify_binding_v2("josh", &actor_url, &[9, 9], &tampered_profile).is_err());
+
+        let mut tampered_relay = mk();
+        tampered_relay.relay_hint = "https://evil.example/".into();
+        assert!(verify_binding_v2("josh", &actor_url, &[9, 9], &tampered_relay).is_err());
+
+        let mut tampered_epoch = mk();
+        tampered_epoch.hint_epoch_ms = 43;
+        assert!(verify_binding_v2("josh", &actor_url, &[9, 9], &tampered_epoch).is_err());
+
+        // Tampered context fields (not carried on the attestation).
+        assert!(verify_binding_v2("mallory", &actor_url, &[9, 9], &mk()).is_err());
+        assert!(verify_binding_v2("josh", &actor_url, &[8, 8], &mk()).is_err());
+    }
+
+    #[test]
+    fn verify_binding_v2_derives_agent_id_rather_than_trusting_a_claim() {
+        // Swap key A's pubkey onto key B's attestation: the verifier
+        // derives B-input under A's pubkey, and A's pubkey never
+        // signed it, so verification must reject.
+        let actor_url = url("https://etchit.io/actors/josh");
+        let (att_a, _) = test_attested_v2(
+            "josh",
+            &actor_url,
+            &[9, 9],
+            &"a".repeat(64),
+            "https://relay.example/",
+            42,
+        );
+        let (mut att_b, _) = test_attested_v2(
+            "josh",
+            &actor_url,
+            &[9, 9],
+            &"a".repeat(64),
+            "https://relay.example/",
+            42,
+        );
+        att_b.ml_dsa_pubkey = att_a.ml_dsa_pubkey.clone();
+        assert!(verify_binding_v2("josh", &actor_url, &[9, 9], &att_b).is_err());
     }
 
     #[test]
