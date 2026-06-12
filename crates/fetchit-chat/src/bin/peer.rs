@@ -1,7 +1,7 @@
 //! `fetchit-chat-peer` — headless chat peer for testing.
 //!
 //! Drives `fetchit_chat::Client` against a local x0xd + a relay, with
-//! no GUI. Five modes:
+//! no GUI. Eight modes:
 //!
 //! - `echo` — auto-echo every inbound DM back to its sender. Useful
 //!   for confirming relay round-trips from a different machine without
@@ -18,6 +18,14 @@
 //!   just-joined group. Used by the `m2_live` cross-NAT empirical to
 //!   drive the joiner-side `/groups/join` -> Welcome-fetch path that
 //!   David's v0.21.3 `63b5c63` retry-fix targets.
+//! - `mint-actor` — mint (or reuse) the fediverse actor identity for a
+//!   handle, write the registration-ready actor JSON-LD document, and
+//!   print the curl line that registers it with the bridge.
+//! - `pair-share` — publish this peer's pointer pair record to the
+//!   relay, then print the resulting `x0x://pair/...` URI to stdout.
+//!   Scripts can capture the URI directly; diagnostics go to stderr.
+//! - `pair-import --uri <u>` — import a contact from a short
+//!   `x0x://pair/...` pointer URI (resolves the relay-hosted record).
 
 #![allow(
     clippy::unwrap_used,
@@ -212,6 +220,24 @@ enum Mode {
         #[arg(long)]
         post_url: Option<String>,
     },
+    /// Publish this peer's pointer pair record to the relay, then print
+    /// the resulting `x0x://pair/<agent_id_hex>?r=<relay>` URI to
+    /// stdout. The publish step guarantees the URI resolves immediately
+    /// on import; a publish failure exits non-zero and prints nothing to
+    /// stdout. Mirrors the desktop `chat_pair_share_uri` command.
+    PairShare,
+    /// Import a contact from a short pointer URI
+    /// (`x0x://pair/<agent_id_hex>?r=<relay>`). Resolves the
+    /// relay-hosted pair record, verifies it, and persists a contact
+    /// card. The URI is taken inline as `--uri` because pointer URIs are
+    /// at most 512 bytes -- unlike v2 share cards (~12 KB) which require
+    /// file indirection to avoid argv limits.
+    PairImport {
+        /// The `x0x://pair/<agent_id_hex>?r=<relay>` pointer URI to
+        /// resolve and import.
+        #[arg(long)]
+        uri: String,
+    },
 }
 
 #[tokio::main]
@@ -298,6 +324,8 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Mode::PairShare => run_pair_share(&client, cli.relay.as_str()).await,
+        Mode::PairImport { uri } => run_pair_import(&client, &uri).await,
     }
 }
 
@@ -409,6 +437,32 @@ async fn run_import(client: &Client, uri_file: &std::path::Path) -> Result<()> {
     } else {
         eprintln!("[peer] no local layout (REST-only client); v2 fields not persisted");
     }
+    Ok(())
+}
+
+/// Publish the pair record to `relay_str`, then emit the pointer URI to
+/// stdout. Publish runs first so the URI resolves immediately on import.
+async fn run_pair_share(client: &Client, relay_str: &str) -> Result<()> {
+    client
+        .publish_pair_record()
+        .await
+        .context("publish pair record")?;
+    let me = client.identity().me().await.context("read /agent")?;
+    let uri = fetchit_chat::pair_uri::emit_pair_uri(&me.agent_id.0, &[relay_str.to_owned()])
+        .map_err(|e| anyhow::anyhow!("emit pair uri: {e}"))?;
+    println!("{uri}");
+    Ok(())
+}
+
+/// Resolve and import a contact from a short pointer URI.
+async fn run_pair_import(client: &Client, uri: &str) -> Result<()> {
+    let uri = uri.trim();
+    eprintln!("[peer] importing pair URI ({} bytes)", uri.len());
+    client
+        .import_pair_uri(uri)
+        .await
+        .context("import_pair_uri")?;
+    eprintln!("[peer] pair import done");
     Ok(())
 }
 

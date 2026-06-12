@@ -142,8 +142,8 @@ Share pointer URI: `x0x://pair/<agent_id_hex>?r=<urlencoded-relay>[&r=...]` (1..
 
 **Files:** Modify `crates/fetchit-chat/src/bin/peer.rs`.
 
-- [ ] Failing tests for the pure helpers; subcommands: `pair-share` (print pointer URI), `pair-import --uri <u>` (import via lib), reusing Bob's `send`/`read` for the cross-relay mission.
-- [ ] Implement; commit.
+- [x] Failing tests for the pure helpers; subcommands: `pair-share` (print pointer URI), `pair-import --uri <u>` (import via lib), reusing Bob's `send`/`read` for the cross-relay mission.
+- [x] Implement; commit.
 
 ### Task 12: cross-relay live mission + edge swarm + final gates
 
