@@ -2944,6 +2944,7 @@ impl Client {
             rsa_priv_pem: material.priv_pem.clone(),
             spki_der: material.spki_der.clone(),
             ml_dsa_attestation: attestation.clone(),
+            ml_dsa_attestation_v2: None,
         };
         crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
 

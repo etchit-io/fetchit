@@ -21,7 +21,9 @@
 use crate::at_rest::MasterKey;
 use crate::chat_crypto::{derive_aead_key, AEAD_KEY_LEN};
 use crate::error::ChatError;
-use fetchit_fedi::attestation::{signing_input, MlDsaAttestation};
+use fetchit_fedi::attestation::{
+    signing_input, signing_input_v2, ActorAttestationV2, MlDsaAttestation,
+};
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::RsaPrivateKey;
 
@@ -142,6 +144,53 @@ pub async fn sign_actor_attestation(
         .await
         .map_err(|e| ChatError::Invalid(format!("ml-dsa sign: {e}")))?;
     Ok(MlDsaAttestation::new(signer.public_key(), signature))
+}
+
+/// Sign a v2 actor attestation over the extended field tuple (adds
+/// `profile_addr`, `relay_hint`, `hint_epoch_ms` to the binding). Same
+/// signer and error surface as [`sign_actor_attestation`].
+///
+/// # Errors
+///
+/// - [`ChatError::Invalid`] wrapping a
+///   [`fetchit_fedi::attestation::SigningInputError`] on field
+///   validation (lowercase 64-hex `profile_addr`, bounded
+///   `relay_hint`, etc.).
+/// - [`ChatError::Invalid`] wrapping the signer error string when the
+///   ML-DSA sign call fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn sign_actor_attestation_v2(
+    handle: &str,
+    actor_url: &url::Url,
+    agent_id_hex: &str,
+    spki_der: &[u8],
+    profile_addr: &str,
+    relay_hint: &str,
+    hint_epoch_ms: u64,
+    signer: &dyn x0xd_client::Signer,
+) -> Result<ActorAttestationV2, ChatError> {
+    let input = signing_input_v2(
+        handle,
+        actor_url,
+        agent_id_hex,
+        spki_der,
+        profile_addr,
+        relay_hint,
+        hint_epoch_ms,
+    )
+    .map_err(|e| ChatError::Invalid(format!("signing_input_v2: {e}")))?;
+    let signature = signer
+        .sign(&input)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("ml-dsa sign: {e}")))?;
+    Ok(ActorAttestationV2 {
+        version: 2,
+        profile_addr: profile_addr.to_string(),
+        relay_hint: relay_hint.to_string(),
+        hint_epoch_ms,
+        ml_dsa_pubkey: signer.public_key(),
+        signature,
+    })
 }
 
 #[cfg(test)]
@@ -316,6 +365,101 @@ mod tests {
         assert!(
             msg.contains("ml-dsa sign") && msg.contains("simulated"),
             "expected ml-dsa sign + simulated in error; got: {msg}"
+        );
+    }
+
+    /// Real ML-DSA-65 signer so the v2 sign half can be verified
+    /// against `verify_binding_v2` end to end.
+    struct RealSigner {
+        pk: Vec<u8>,
+        sk: saorsa_pqc::api::sig::MlDsaSecretKey,
+    }
+
+    impl RealSigner {
+        fn generate() -> Self {
+            use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+            let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+            let (pk, sk) = dsa.generate_keypair().unwrap();
+            Self {
+                pk: pk.to_bytes(),
+                sk,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl x0xd_client::Signer for RealSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            fetchit_relay_proto::derive_agent_id(&self.pk)
+        }
+        fn public_key(&self) -> Vec<u8> {
+            self.pk.clone()
+        }
+        async fn sign(&self, message: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+            let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+            Ok(dsa
+                .sign(&self.sk, message)
+                .map_err(|e| e.to_string())?
+                .to_bytes())
+        }
+    }
+
+    #[tokio::test]
+    async fn sign_actor_attestation_v2_round_trips_through_verify() {
+        let signer = RealSigner::generate();
+        let agent_id_hex = hex::encode(x0xd_client::Signer::agent_id(&signer));
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+
+        let att = sign_actor_attestation_v2(
+            "josh",
+            &actor_url,
+            &agent_id_hex,
+            &[7, 7],
+            &"a".repeat(64),
+            "https://relay.example/",
+            99,
+            &signer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(att.version, 2);
+        assert_eq!(att.profile_addr, "a".repeat(64));
+        assert_eq!(att.relay_hint, "https://relay.example/");
+        assert_eq!(att.hint_epoch_ms, 99);
+
+        let derived =
+            fetchit_fedi::attestation::verify_binding_v2("josh", &actor_url, &[7, 7], &att)
+                .unwrap();
+        assert_eq!(derived, agent_id_hex);
+    }
+
+    #[tokio::test]
+    async fn sign_actor_attestation_v2_propagates_field_validation() {
+        let signer = StubSigner {
+            pub_key: vec![0xAA; 32],
+            sig: vec![0xBB; 64],
+        };
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+
+        let err = sign_actor_attestation_v2(
+            "josh",
+            &actor_url,
+            VALID_AGENT_HEX,
+            &[0x01],
+            "NOT-64-HEX",
+            "https://relay.example/",
+            1,
+            &signer,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("signing_input_v2") && msg.contains("profile_addr"),
+            "expected signing_input_v2 + profile_addr in error; got: {msg}"
         );
     }
 }

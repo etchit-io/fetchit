@@ -248,6 +248,7 @@ mod tests {
                     .into(),
             spki_der: vec![0xDE, 0xAD, 0xBE, 0xEF],
             ml_dsa_attestation: MlDsaAttestation::new(vec![0xAA; 32], vec![0xBB; 64]),
+            ml_dsa_attestation_v2: None,
         }
     }
 

@@ -66,6 +66,11 @@ pub struct ActorIdentityVault {
     /// ML-DSA-65 attestation binding the RSA pubkey to the
     /// chat-identity key.
     pub ml_dsa_attestation: MlDsaAttestation,
+    /// v2 attestation (adds profile addr + relay hint to the signed
+    /// binding). `None` on records minted before M5; the upgrade path
+    /// re-signs in place without touching the RSA material.
+    #[serde(default)]
+    pub ml_dsa_attestation_v2: Option<fetchit_fedi::attestation::ActorAttestationV2>,
 }
 
 /// Seal an [`ActorIdentityVault`] under the master-derived fedi key
@@ -212,6 +217,7 @@ mod tests {
                     .into(),
             spki_der: vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE],
             ml_dsa_attestation: MlDsaAttestation::new(vec![0xAA; 32], vec![0xBB; 64]),
+            ml_dsa_attestation_v2: None,
         }
     }
 
@@ -231,6 +237,45 @@ mod tests {
             .unwrap()
             .expect("vault file should exist after save");
         assert_eq!(recovered, v);
+    }
+
+    #[test]
+    fn vault_round_trips_v2_attestation() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = fixture_master(0x42);
+        let mut v = sample_vault();
+        v.ml_dsa_attestation_v2 = Some(fetchit_fedi::attestation::ActorAttestationV2 {
+            version: 2,
+            profile_addr: "a".repeat(64),
+            relay_hint: "https://relay.example/".into(),
+            hint_epoch_ms: 7,
+            ml_dsa_pubkey: vec![0xAA; 8],
+            signature: vec![0xBB; 8],
+        });
+
+        save_actor_identity(&v, &master, &layout).unwrap();
+        let recovered = load_actor_identity(&v.handle, &master, &layout)
+            .unwrap()
+            .expect("vault file should exist after save");
+        assert_eq!(recovered, v);
+        assert!(recovered.ml_dsa_attestation_v2.is_some());
+    }
+
+    #[test]
+    fn legacy_vault_json_without_v2_field_deserializes_to_none() {
+        // The exact JSON shape pre-M5 vaults hold inside the AEAD; the
+        // new field must default rather than fail the decode.
+        let json = r#"{
+            "handle": "josh",
+            "actor_url": "https://etchit.io/actors/josh",
+            "agent_id_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "rsa_priv_pem": "PEM",
+            "spki_der": [1, 2, 3],
+            "ml_dsa_attestation": { "ml_dsa_pubkey": "QQ==", "signature": "Qg==" }
+        }"#;
+        let v: ActorIdentityVault = serde_json::from_str(json).unwrap();
+        assert!(v.ml_dsa_attestation_v2.is_none());
     }
 
     #[test]
