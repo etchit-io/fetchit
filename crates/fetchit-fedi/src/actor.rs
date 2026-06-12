@@ -48,6 +48,11 @@ pub const ACTOR_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// grows fetchit-operated endpoints.
 pub const PQ_ATTESTATION_PROPERTY_URI: &str = "https://etchit.io/ns#mlDsaAttestation-v1";
 
+/// JSON-LD property carrying the v2 attestation (adds the profile
+/// address + relay hint to the signed binding). Emitted alongside the
+/// frozen v1 property during the transition; verifiers prefer v2.
+pub const PQ_ATTESTATION_V2_PROPERTY_URI: &str = "https://etchit.io/ns#mlDsaAttestation-v2";
+
 /// A fetchit-issued fediverse actor: a stable identity bound to a chat
 /// `agent_id_hex`, signed under the chat-identity ML-DSA-65 key.
 ///
@@ -83,6 +88,9 @@ pub struct ActorIdentity {
     /// [`crate::attestation::signing_input`] over `spki_der`) to the
     /// chat-identity ML-DSA key.
     pub ml_dsa_attestation: MlDsaAttestation,
+    /// v2 attestation extending the binding with the profile address
+    /// and relay hint (M5.1). `None` on identities minted before v2.
+    pub ml_dsa_attestation_v2: Option<crate::attestation::ActorAttestationV2>,
 }
 
 impl ActorIdentity {
@@ -104,6 +112,7 @@ impl ActorIdentity {
             rsa_priv_pem,
             spki_der,
             ml_dsa_attestation,
+            ml_dsa_attestation_v2: None,
         }
     }
 
@@ -126,7 +135,15 @@ impl ActorIdentity {
             rsa_priv_pem,
             spki_der,
             ml_dsa_attestation,
+            ml_dsa_attestation_v2: None,
         }
+    }
+
+    /// Attach a v2 attestation (builder-style; mint paths use this).
+    #[must_use]
+    pub fn with_attestation_v2(mut self, att: crate::attestation::ActorAttestationV2) -> Self {
+        self.ml_dsa_attestation_v2 = Some(att);
+        self
     }
 }
 
@@ -139,6 +156,7 @@ impl std::fmt::Debug for ActorIdentity {
             .field("rsa_priv_pem", &"<redacted>")
             .field("spki_der", &self.spki_der)
             .field("ml_dsa_attestation", &self.ml_dsa_attestation)
+            .field("ml_dsa_attestation_v2", &self.ml_dsa_attestation_v2)
             .finish()
     }
 }
@@ -170,6 +188,9 @@ pub struct Actor {
     /// ML-DSA-65 attestation binding the RSA pubkey to the chat
     /// identity. Emitted under [`PQ_ATTESTATION_PROPERTY_URI`].
     pub ml_dsa_attestation: MlDsaAttestation,
+    /// v2 attestation when the identity carries one. Emitted under
+    /// [`PQ_ATTESTATION_V2_PROPERTY_URI`]; absent on pre-M5 documents.
+    pub ml_dsa_attestation_v2: Option<crate::attestation::ActorAttestationV2>,
 }
 
 impl Actor {
@@ -192,7 +213,15 @@ impl Actor {
             outbox,
             rsa_public_key_pem: spki_der_to_pem(&id.spki_der),
             ml_dsa_attestation: id.ml_dsa_attestation.clone(),
+            ml_dsa_attestation_v2: id.ml_dsa_attestation_v2.clone(),
         })
+    }
+
+    /// Attach a v2 attestation (builder-style; mint paths use this).
+    #[must_use]
+    pub fn with_attestation_v2(mut self, att: crate::attestation::ActorAttestationV2) -> Self {
+        self.ml_dsa_attestation_v2 = Some(att);
+        self
     }
 
     /// Decode a Mastodon-compatible `application/activity+json`
@@ -293,6 +322,16 @@ impl Actor {
         let ml_dsa_attestation: MlDsaAttestation = serde_json::from_value(attestation_raw.clone())
             .map_err(|e| ActorError::Attestation(format!("{e}")))?;
 
+        // v2 is optional on the wire (pre-M5 documents lack it), but
+        // present-but-malformed is a hard error, never a silent None.
+        let ml_dsa_attestation_v2 = match value.get(PQ_ATTESTATION_V2_PROPERTY_URI) {
+            None => None,
+            Some(raw) => Some(
+                serde_json::from_value::<crate::attestation::ActorAttestationV2>(raw.clone())
+                    .map_err(|e| ActorError::Attestation(format!("v2: {e}")))?,
+            ),
+        };
+
         Ok(Self {
             id,
             preferred_username,
@@ -300,6 +339,7 @@ impl Actor {
             outbox,
             rsa_public_key_pem,
             ml_dsa_attestation,
+            ml_dsa_attestation_v2,
         })
     }
 
@@ -310,7 +350,7 @@ impl Actor {
     pub fn to_json_ld(&self) -> Value {
         let actor_url_str = self.id.as_str();
         let key_id = format!("{actor_url_str}#main-key");
-        json!({
+        let mut v = json!({
             "@context": [
                 "https://www.w3.org/ns/activitystreams",
                 "https://w3id.org/security/v1",
@@ -327,7 +367,13 @@ impl Actor {
             },
             PQ_ATTESTATION_PROPERTY_URI: serde_json::to_value(&self.ml_dsa_attestation)
                 .unwrap_or(Value::Null),
-        })
+        });
+        if let Some(att2) = &self.ml_dsa_attestation_v2 {
+            if let (Some(obj), Ok(val)) = (v.as_object_mut(), serde_json::to_value(att2)) {
+                obj.insert(PQ_ATTESTATION_V2_PROPERTY_URI.to_string(), val);
+            }
+        }
+        v
     }
 
     /// Cryptographically verify the actor's PQ attestation and return
@@ -361,6 +407,34 @@ impl Actor {
             &self.id,
             &spki_der,
             &self.ml_dsa_attestation,
+        )?)
+    }
+
+    /// Verify the v2 attestation, returning the derived `agent_id_hex`.
+    /// Same trust rule as [`Actor::verify_attestation`]: decoding is
+    /// structural only, trust requires this call to succeed.
+    ///
+    /// # Errors
+    ///
+    /// - [`ActorError::Attestation`] when no v2 attestation is present.
+    /// - Otherwise the same failure surface as
+    ///   [`Actor::verify_attestation`].
+    pub fn verify_attestation_v2(&self) -> Result<String, ActorError> {
+        let att = self
+            .ml_dsa_attestation_v2
+            .as_ref()
+            .ok_or_else(|| ActorError::Attestation("no v2 attestation on actor".into()))?;
+        let spki_der = spki_pem_to_der(&self.rsa_public_key_pem).map_err(|reason| {
+            ActorError::InvalidField {
+                name: "publicKey.publicKeyPem".into(),
+                reason,
+            }
+        })?;
+        Ok(crate::attestation::verify_binding_v2(
+            &self.preferred_username,
+            &self.id,
+            &spki_der,
+            att,
         )?)
     }
 }
@@ -958,6 +1032,75 @@ mod tests {
         let actor = Actor::from_identity(&identity).unwrap();
         let parsed = Actor::from_json_ld(&actor.to_json_ld()).unwrap();
         assert_eq!(parsed.verify_attestation().unwrap(), derived);
+    }
+
+    #[test]
+    fn json_ld_round_trips_v2_attestation() {
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let (att2, _) = crate::attestation::test_attested_v2(
+            "josh",
+            &actor_url,
+            &[0xDE, 0xAD],
+            &"a".repeat(64),
+            "https://relay.example/",
+            9,
+        );
+        let actor = Actor::from_identity(&sample_identity())
+            .unwrap()
+            .with_attestation_v2(att2.clone());
+        let v = actor.to_json_ld();
+        assert!(v.get(PQ_ATTESTATION_V2_PROPERTY_URI).is_some());
+        let parsed = Actor::from_json_ld(&v).unwrap();
+        assert_eq!(parsed.ml_dsa_attestation_v2, Some(att2));
+    }
+
+    #[test]
+    fn json_ld_without_v2_attestation_decodes_to_none() {
+        let actor = Actor::from_identity(&sample_identity()).unwrap();
+        let v = actor.to_json_ld();
+        assert!(v.get(PQ_ATTESTATION_V2_PROPERTY_URI).is_none());
+        let parsed = Actor::from_json_ld(&v).unwrap();
+        assert_eq!(parsed.ml_dsa_attestation_v2, None);
+    }
+
+    #[test]
+    fn malformed_v2_attestation_value_is_a_hard_decode_error() {
+        let actor = Actor::from_identity(&sample_identity()).unwrap();
+        let mut v = actor.to_json_ld();
+        v.as_object_mut().unwrap().insert(
+            PQ_ATTESTATION_V2_PROPERTY_URI.into(),
+            serde_json::json!("garbage"),
+        );
+        assert!(Actor::from_json_ld(&v).is_err());
+    }
+
+    #[test]
+    fn verify_attestation_v2_returns_derived_id_and_errors_when_absent() {
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let spki_der = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let (att2, derived) = crate::attestation::test_attested_v2(
+            "josh",
+            &actor_url,
+            &spki_der,
+            &"a".repeat(64),
+            "https://relay.example/",
+            11,
+        );
+        let identity = ActorIdentity::new(
+            "josh".into(),
+            actor_url,
+            derived.clone(),
+            "PRIV".into(),
+            spki_der,
+            sample_attestation(),
+        )
+        .with_attestation_v2(att2);
+        let actor = Actor::from_identity(&identity).unwrap();
+        let parsed = Actor::from_json_ld(&actor.to_json_ld()).unwrap();
+        assert_eq!(parsed.verify_attestation_v2().unwrap(), derived);
+
+        let without = Actor::from_identity(&sample_identity()).unwrap();
+        assert!(without.verify_attestation_v2().is_err());
     }
 
     #[test]
