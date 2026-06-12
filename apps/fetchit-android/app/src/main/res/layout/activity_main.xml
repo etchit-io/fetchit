@@ -381,7 +381,8 @@
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
     <!-- Chat mode container. Visibility toggled by setMode() in MainActivity.
-         Task 4 inflates the chat screens inside here via ChatModeView. -->
+         The top bar is persistent across all chat screens; ChatModeView
+         inflates/swaps screens exclusively inside chatScreenSlot. -->
     <FrameLayout
         android:id="@+id/chatContainer"
         android:layout_width="match_parent"
@@ -389,33 +390,47 @@
         android:visibility="gone"
         android:background="?attr/fetchitInk">
 
-        <!-- Minimal chat top bar shown while the container is visible. -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:padding="12dp"
-            android:gravity="center_vertical">
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
-            <TextView
-                android:layout_width="0dp"
+            <!-- Persistent chat top bar: survives all screen swaps. -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/chat_mode_label"
-                android:textColor="?attr/fetchitBone"
-                android:fontFamily="monospace"
-                android:textSize="16sp" />
+                android:orientation="horizontal"
+                android:padding="12dp"
+                android:gravity="center_vertical">
 
-            <Button
-                android:id="@+id/modeBrowseButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/mode_browse_glyph"
-                android:textColor="?attr/fetchitCopper"
-                android:textSize="20sp"
-                android:backgroundTint="?attr/fetchitInk3"
-                android:contentDescription="@string/mode_browse_desc"
-                android:minWidth="44dp" />
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/chat_mode_label"
+                    android:textColor="?attr/fetchitBone"
+                    android:fontFamily="monospace"
+                    android:textSize="16sp" />
+
+                <Button
+                    android:id="@+id/modeBrowseButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mode_browse_glyph"
+                    android:textColor="?attr/fetchitCopper"
+                    android:textSize="20sp"
+                    android:backgroundTint="?attr/fetchitInk3"
+                    android:contentDescription="@string/mode_browse_desc"
+                    android:minWidth="44dp" />
+
+            </LinearLayout>
+
+            <!-- Screen swap surface: ChatModeView operates exclusively here. -->
+            <FrameLayout
+                android:id="@+id/chatScreenSlot"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
 
         </LinearLayout>
 

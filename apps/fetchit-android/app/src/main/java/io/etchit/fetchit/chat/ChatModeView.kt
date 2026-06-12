@@ -37,8 +37,9 @@ import java.util.Locale
  * Orchestrates the chat screens (list / thread / feed) and owns the
  * chat back-stack within [container].
  *
- * Screens inflate lazily into [container]; Task 5 fills in the thread
- * and feed renders. For now [Screen.Thread] and [Screen.Feed] are stubs.
+ * The persistent chat top bar lives directly in [container]; all screen
+ * inflation and swapping happens exclusively inside [slot] (chatScreenSlot),
+ * so the top bar is never destroyed by removeAllViews() calls.
  *
  * @param context the host Activity context
  * @param container the chatContainer FrameLayout from activity_main.xml
@@ -59,6 +60,12 @@ class ChatModeView(
     private val onLaunchScanner: () -> Unit,
     private val onOpenAutonomi: (String) -> Unit = {},
 ) {
+
+    // The dedicated screen-swap surface inside chatContainer.
+    // All inflate/add/removeAllViews operations target this slot,
+    // leaving the persistent top bar untouched.
+    private val slot: FrameLayout =
+        container.findViewById(R.id.chatScreenSlot)
 
     private sealed class Screen {
         data object List : Screen()
@@ -179,7 +186,7 @@ class ChatModeView(
                 feedCollectJob?.cancel()
                 feedCollectJob = null
                 if (listView == null) {
-                    container.removeAllViews()
+                    slot.removeAllViews()
                     inflateListScreen()
                 } else {
                     // Re-attach the cached list view without re-inflating or
@@ -187,8 +194,8 @@ class ChatModeView(
                     // listPumpStateJob are live for the ChatModeView lifetime;
                     // any future re-inflation path must cancel them first.
                     if (listView!!.parent == null) {
-                        container.removeAllViews()
-                        container.addView(listView)
+                        slot.removeAllViews()
+                        slot.addView(listView)
                     }
                 }
             }
@@ -202,7 +209,7 @@ class ChatModeView(
                 threadCollectJob = null
                 sendJob?.cancel()
                 sendJob = null
-                container.removeAllViews()
+                slot.removeAllViews()
                 bindThreadScreen(screen.peer)
             }
             is Screen.Feed -> {
@@ -213,7 +220,7 @@ class ChatModeView(
                 sendJob = null
                 feedCollectJob?.cancel()
                 feedCollectJob = null
-                container.removeAllViews()
+                slot.removeAllViews()
                 bindFeedScreen()
             }
         }
@@ -223,17 +230,18 @@ class ChatModeView(
 
     private fun inflateListScreen() {
         val view = LayoutInflater.from(context)
-            .inflate(R.layout.view_chat_list, container, true)
+            .inflate(R.layout.view_chat_list, slot, false)
+        slot.addView(view)
         listView = view
 
-        val rv = container.findViewById<RecyclerView>(R.id.chatContactList)
-        val emptyState = container.findViewById<View>(R.id.chatEmptyState)
-        val qrImage = container.findViewById<ImageView>(R.id.chatPairQr)
-        val connectingText = container.findViewById<TextView>(R.id.chatConnectingText)
-        val lostBanner = container.findViewById<TextView>(R.id.chatConnectionLostBanner)
-        val addBtn = container.findViewById<View>(R.id.addContactButton)
-        val shareBtn = container.findViewById<View>(R.id.sharePairButton)
-        val scanBtn = container.findViewById<View>(R.id.scanPairButton)
+        val rv = view.findViewById<RecyclerView>(R.id.chatContactList)
+        val emptyState = view.findViewById<View>(R.id.chatEmptyState)
+        val qrImage = view.findViewById<ImageView>(R.id.chatPairQr)
+        val connectingText = view.findViewById<TextView>(R.id.chatConnectingText)
+        val lostBanner = view.findViewById<TextView>(R.id.chatConnectionLostBanner)
+        val addBtn = view.findViewById<View>(R.id.addContactButton)
+        val shareBtn = view.findViewById<View>(R.id.sharePairButton)
+        val scanBtn = view.findViewById<View>(R.id.scanPairButton)
 
         // Adapter: pinned fediverse row at position 0, then contacts.
         val adapter = ContactListAdapter(
@@ -355,10 +363,10 @@ class ChatModeView(
 
     private fun bindThreadScreen(peer: String) {
         val view = threadView ?: LayoutInflater.from(context)
-            .inflate(R.layout.view_chat_thread, container, false)
+            .inflate(R.layout.view_chat_thread, slot, false)
             .also { threadView = it }
 
-        container.addView(view)
+        slot.addView(view)
 
         val contact = controller.contacts.contacts.value.find { it.agentIdHex == peer }
         val displayName = contact?.displayName ?: "peer-${peer.take(6)}"
@@ -428,10 +436,10 @@ class ChatModeView(
 
     private fun bindFeedScreen() {
         val view = feedView ?: LayoutInflater.from(context)
-            .inflate(R.layout.view_chat_thread, container, false)
+            .inflate(R.layout.view_chat_thread, slot, false)
             .also { feedView = it }
 
-        container.addView(view)
+        slot.addView(view)
 
         view.findViewById<TextView>(R.id.threadPeerName).text =
             context.getString(R.string.chat_feed_title)
@@ -482,8 +490,9 @@ class ChatModeView(
     }
 
     private fun showConnecting(visible: Boolean) {
-        container.post {
-            val ct = container.findViewById<TextView?>(R.id.chatConnectingText) ?: return@post
+        slot.post {
+            val ct = (listView ?: slot).findViewById<TextView?>(R.id.chatConnectingText)
+                ?: return@post
             ct.visibility = if (visible) View.VISIBLE else View.GONE
         }
     }
