@@ -146,6 +146,7 @@ body[data-theme="light"] {
   z-index: 1;
   padding: 8px 14px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   color: var(--ash);
@@ -1198,24 +1199,32 @@ body:not([data-view="settings"]) #settings {
   height: 56px;
   color: var(--copper);
   margin-bottom: 6px;
+  filter: drop-shadow(0 0 28px color-mix(in srgb, var(--copper) 35%, transparent));
 }
 .tab-empty-cta {
   appearance: none;
-  background: var(--copper);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
   color: var(--ink);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 9px 18px;
   font: 600 14px/1 var(--font-mono, monospace);
   cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
 .tab-empty-cta:hover {
-  filter: brightness(1.08);
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+.tab-empty-cta:active {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
 }
 .tab-empty-hint {
   margin: 0;
-  color: var(--ash);
-  font-size: 13px;
+  font: italic 17px/1.5 var(--font-display);
+  color: var(--bone-dim);
 }
 
 .tab-error {
@@ -1225,8 +1234,20 @@ body:not([data-view="settings"]) #settings {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
   padding: 24px;
+}
+.tab-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rust);
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+  padding: 18px 22px;
+  max-width: 560px;
 }
 .tab-error-heading {
   margin: 0;
@@ -1284,7 +1305,14 @@ body:not([data-view="settings"]) #settings {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 24px 0;
+  width: min(680px, 100%);
+  margin: 24px auto 0;
+  padding: 18px;
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .rendered-audio audio {
   width: min(640px, 100%);
@@ -1422,10 +1450,17 @@ body:not([data-view="settings"]) #settings {
   cursor: pointer;
   font-family: inherit;
   font-size: 0.85rem;
+  transition: color var(--dur-micro), border-color var(--dur-micro),
+    background var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
 .epub-nav button:hover:not(:disabled) {
   border-color: var(--copper);
   color: var(--copper);
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  transform: translateY(-1px);
+}
+.epub-nav button:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
 }
 .epub-nav button:disabled {
   opacity: 0.4;
@@ -1500,8 +1535,16 @@ body:not([data-view="settings"]) #settings {
   padding: 10px 12px;
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   flex-wrap: wrap;
+  box-shadow: var(--edge-highlight);
+  transition: border-color var(--dur-micro), transform var(--dur-micro),
+    box-shadow var(--dur-micro);
+}
+.archive-row:hover {
+  border-color: color-mix(in srgb, var(--copper) 45%, var(--line));
+  transform: translateY(-1px);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .archive-row-main {
   flex: 1;
@@ -2040,9 +2083,11 @@ body:not([data-view="settings"]) #settings {
    community denylist. Warm accent (--rust) signals the block without the
    alarm of a hard error. */
 .blocked-notice {
+  background: var(--ink-2);
   border: 1px solid var(--line);
   border-left: 3px solid var(--rust);
-  border-radius: 6px;
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
   padding: 1rem 1.25rem;
   margin: 1rem 0;
   max-width: 42rem;

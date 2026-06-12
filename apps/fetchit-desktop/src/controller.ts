@@ -487,13 +487,16 @@ function buildStageRoot(stage: HTMLElement): HTMLElement {
 function buildErrorState(msg: string): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "tab-error";
+  const card = document.createElement("div");
+  card.className = "tab-error-card";
   const heading = document.createElement("p");
   heading.className = "tab-error-heading";
   heading.textContent = "fetch failed";
   const detail = document.createElement("p");
   detail.className = "tab-error-detail";
   detail.textContent = msg;
-  wrap.append(heading, detail);
+  card.append(heading, detail);
+  wrap.appendChild(card);
   return wrap;
 }
 
