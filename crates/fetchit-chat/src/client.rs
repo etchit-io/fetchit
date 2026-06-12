@@ -2077,14 +2077,24 @@ impl Client {
             ChatError::Invalid(format!("could not reach any of their relays: {last_err}"))
         })?;
 
-        // Build and persist the stored contact card.
+        // Build and persist the stored contact card. Carry the pair
+        // record's advertised relays into the card as rendezvous hints so
+        // the deposit path routes DMs to THEIR relay (cross-relay
+        // delivery), not ours. Stamp the record's issued_at_ms as the hint
+        // watermark so a later in-band refresh only overrides a newer one.
+        // Without this the send path falls back to our own primary and a
+        // peer on a different relay never receives.
+        let rendezvous_hints =
+            (!record.advertised_relays.is_empty()).then(|| crate::card::RendezvousHintsV1 {
+                relays: record.advertised_relays.clone(),
+            });
         let stored = crate::messages::StoredContactCard {
             agent_id_hex: record.agent_id_hex.clone(),
             display_name: String::new(),
             kem_public_key_b64: record.kem_pubkey_b64.clone(),
             agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
-            rendezvous_hints: None,
-            last_hint_epoch_ms: None,
+            rendezvous_hints,
+            last_hint_epoch_ms: Some(record.issued_at_ms),
         };
         // Persist under CARD_UPDATE_LOCK, preserving any newer in-band
         // relay-hint watermark already on disk so a re-import can't reset

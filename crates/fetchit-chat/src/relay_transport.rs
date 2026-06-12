@@ -553,21 +553,35 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// Normalize a `wss://` or `ws://` URL to a canonical pool-key string:
+/// Normalize a relay hint URL to a canonical `ws(s)://` pool-key string:
+/// - convert `http(s)://` advertised-relay form to `ws(s)://`
 /// - lowercase host
 /// - strip default port (443 for wss, 80 for ws)
 /// - strip trailing `/` on an empty path
 ///
-/// Returns `Err` when the URL cannot be parsed or the scheme is not ws/wss.
+/// Advertised-relay hints (pair records, in-band refresh) are stored in
+/// `http(s)://` base-URL form, the relay's HTTP endpoint; the deposit path
+/// dials the `ws(s)://` endpoint on the same host. `apply_relay_hint`
+/// documents this contract ("the send path normalizes them"), so a hint
+/// arriving as `http(s)` is converted here rather than rejected.
+///
+/// Returns `Err` when the URL cannot be parsed or the scheme is not one of
+/// ws / wss / http / https.
 fn normalize_wss_url(raw: &str) -> std::result::Result<String, ChatError> {
     let mut url = raw
         .parse::<Url>()
         .map_err(|e| ChatError::Invalid(format!("hint url parse: {e}")))?;
     match url.scheme() {
         "wss" | "ws" => {}
+        "https" => url
+            .set_scheme("wss")
+            .map_err(|()| ChatError::Invalid("hint url set_scheme https->wss failed".into()))?,
+        "http" => url
+            .set_scheme("ws")
+            .map_err(|()| ChatError::Invalid("hint url set_scheme http->ws failed".into()))?,
         s => {
             return Err(ChatError::Invalid(format!(
-                "hint url scheme must be wss or ws, got {s}"
+                "hint url scheme must be ws(s) or http(s), got {s}"
             )));
         }
     }
@@ -675,8 +689,41 @@ mod tests {
     }
 
     #[test]
-    fn normalize_wss_url_rejects_http_scheme() {
-        assert!(normalize_wss_url("http://r.io/v1/ws").is_err());
+    fn normalize_wss_url_converts_http_to_ws() {
+        // Advertised-relay hints arrive in http(s) base-URL form; the
+        // deposit path dials the ws(s) endpoint on the same host. A plain
+        // http base normalizes to a ws key (default :80 stripped).
+        assert_eq!(normalize_wss_url("http://r.io/").unwrap(), "ws://r.io");
+        assert_eq!(
+            normalize_wss_url("http://r.io:8088/").unwrap(),
+            "ws://r.io:8088"
+        );
+    }
+
+    #[test]
+    fn normalize_wss_url_converts_https_to_wss() {
+        assert_eq!(normalize_wss_url("https://r.io/").unwrap(), "wss://r.io");
+        assert_eq!(
+            normalize_wss_url("https://r.io:443/").unwrap(),
+            "wss://r.io"
+        );
+    }
+
+    #[test]
+    fn normalize_wss_url_rejects_non_web_scheme() {
+        assert!(normalize_wss_url("ftp://r.io/").is_err());
+        assert!(normalize_wss_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn normalize_wss_url_http_and_ws_forms_converge() {
+        // The same host reached via the http advertised form and the ws
+        // form must produce the identical pool key, so an own-relay hint
+        // in either form matches own_relay_keys.
+        assert_eq!(
+            normalize_wss_url("http://r.io:8088/").unwrap(),
+            normalize_wss_url("ws://r.io:8088").unwrap()
+        );
     }
 
     use fetchit_relay_client::StaticKeySigner;
