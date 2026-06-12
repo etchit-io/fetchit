@@ -25,6 +25,7 @@
 pub mod activity;
 pub mod actor;
 pub mod attestation;
+pub mod lookup;
 pub mod signature;
 pub mod signature_cache;
 pub mod signature_cavage;

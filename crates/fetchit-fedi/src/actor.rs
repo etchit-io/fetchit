@@ -471,7 +471,7 @@ pub enum ActorError {
     AttestationVerify(#[from] crate::attestation::AttestationVerifyError),
 }
 
-fn required_str<'a>(value: &'a Value, name: &str) -> Result<&'a str, ActorError> {
+pub(crate) fn required_str<'a>(value: &'a Value, name: &str) -> Result<&'a str, ActorError> {
     value
         .get(name)
         .and_then(Value::as_str)
@@ -481,7 +481,7 @@ fn required_str<'a>(value: &'a Value, name: &str) -> Result<&'a str, ActorError>
 /// Allowlist of `type` values acceptable for an `ActivityPub` Actor
 /// document. A malicious server returning a `Note` or `Activity`
 /// object styled as an Actor is rejected at decode time.
-fn is_actor_class_type(type_str: &str) -> bool {
+pub(crate) fn is_actor_class_type(type_str: &str) -> bool {
     matches!(
         type_str,
         "Person" | "Service" | "Application" | "Organization" | "Group"
@@ -617,17 +617,29 @@ pub enum FetchActorError {
 /// Surfaces every [`FetchActorError`] variant. Inner `reqwest` errors
 /// land as [`FetchActorError::Transport`].
 pub async fn fetch_actor(actor_url: &url::Url) -> Result<Actor, FetchActorError> {
+    let client = pinned_no_redirect_client(actor_url, ACTOR_FETCH_TIMEOUT).await?;
+    fetch_actor_at_url(&client, actor_url, ACTOR_FETCH_TIMEOUT).await
+}
+
+/// SSRF-hardened client for a single target: private-IP pre-flight
+/// (SEC-3), DNS resolve + pin (V-2 fold), no redirects, per-call
+/// timeout. Shared by the strict actor fetch and the tolerant lookup
+/// fetch ([`crate::lookup::fetch_remote_actor`]).
+pub(crate) async fn pinned_no_redirect_client(
+    target: &url::Url,
+    timeout: Duration,
+) -> Result<reqwest::Client, FetchActorError> {
     // SEC-3 pre-flight on the URL itself.
-    if let Some(host) = actor_url.host() {
+    if let Some(host) = target.host() {
         if let Some(reason) = crate::ssrf::private_ip_reason(&host) {
             return Err(FetchActorError::PrivateInstance { host: reason });
         }
     }
     // V-2 fold: resolve hostname + pin addresses on the client.
-    let host_for_pin = actor_url
+    let host_for_pin = target
         .host_str()
         .ok_or_else(|| FetchActorError::Transport("URL has no host".into()))?;
-    let port = actor_url.port_or_known_default().unwrap_or(443);
+    let port = target.port_or_known_default().unwrap_or(443);
     let pinned = crate::ssrf::resolve_and_pin_host(host_for_pin, port)
         .await
         .map_err(|e| match e {
@@ -636,13 +648,12 @@ pub async fn fetch_actor(actor_url: &url::Url) -> Result<Actor, FetchActorError>
             }
             crate::ssrf::SsrfError::Resolve(msg) => FetchActorError::Transport(msg),
         })?;
-    let client = reqwest::Client::builder()
+    reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(ACTOR_FETCH_TIMEOUT)
+        .timeout(timeout)
         .resolve_to_addrs(host_for_pin, &pinned)
         .build()
-        .map_err(|e| FetchActorError::Transport(format!("client builder: {e}")))?;
-    fetch_actor_at_url(&client, actor_url, ACTOR_FETCH_TIMEOUT).await
+        .map_err(|e| FetchActorError::Transport(format!("client builder: {e}")))
 }
 
 /// Internal: HTTP fetch + body cap + post-flight + parse. Factored
@@ -654,6 +665,18 @@ async fn fetch_actor_at_url(
     actor_url: &url::Url,
     timeout: Duration,
 ) -> Result<Actor, FetchActorError> {
+    let value = fetch_json_ld_at_url(http, actor_url, timeout).await?;
+    Actor::from_json_ld(&value).map_err(FetchActorError::Parse)
+}
+
+/// Internal: HTTPS GET + post-flight host check + body cap + JSON
+/// parse, without any actor decode. The strict and tolerant decoders
+/// both sit on top of this.
+pub(crate) async fn fetch_json_ld_at_url(
+    http: &reqwest::Client,
+    actor_url: &url::Url,
+    timeout: Duration,
+) -> Result<Value, FetchActorError> {
     let mut resp = http
         .get(actor_url.as_str())
         .header("Accept", "application/activity+json")
@@ -712,9 +735,7 @@ async fn fetch_actor_at_url(
         body.extend_from_slice(&chunk);
     }
 
-    let value: Value =
-        serde_json::from_slice(&body).map_err(|e| FetchActorError::JsonParse(e.to_string()))?;
-    Actor::from_json_ld(&value).map_err(FetchActorError::Parse)
+    serde_json::from_slice(&body).map_err(|e| FetchActorError::JsonParse(e.to_string()))
 }
 
 #[cfg(test)]
