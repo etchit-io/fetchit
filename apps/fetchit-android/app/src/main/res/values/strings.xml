@@ -133,4 +133,27 @@
     <string name="archive_summary">application/zip · %1$d entries</string>
     <string name="archive_save_all">save archive…</string>
     <string name="archive_extract_failed">couldn\'t extract %1$s</string>
+
+    <!-- Chat: conversation list + onboarding -->
+    <string name="chat_connecting">connecting…</string>
+    <string name="chat_connection_lost">connection lost</string>
+    <string name="chat_empty_hint">scan a friend\'s code, or share yours</string>
+    <string name="chat_share_my_code">share my code</string>
+    <string name="chat_scan_a_code">scan a code</string>
+    <string name="chat_add_contact">add contact</string>
+    <string name="chat_add_contact_title">add a contact</string>
+    <string name="chat_add_contact_import">import</string>
+    <string name="chat_paste_pair_uri_hint">paste x0x://pair/… here</string>
+    <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
+    <string name="chat_connect_failed_generic">couldn\'t connect to relay</string>
+    <string name="chat_not_connected">not connected yet</string>
+    <string name="chat_uri_copied">copied</string>
+    <string name="chat_pair_qr_desc">your chat pairing QR code</string>
+    <string name="chat_feed_title">fediverse</string>
+    <string name="chat_feed_subtitle">bridged public posts</string>
+
+    <!-- Chat: add-contact name prompt -->
+    <string name="chat_contact_name_title">name this contact</string>
+    <string name="chat_contact_name_save">save</string>
+    <string name="chat_contact_added">added %1$s</string>
 </resources>

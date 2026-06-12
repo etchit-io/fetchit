@@ -79,6 +79,16 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.swipeRefresh.isEnabled = browse
         binding.swipeRefresh.visibility = if (browse) View.VISIBLE else View.GONE
         binding.chatContainer.visibility = if (browse) View.GONE else View.VISIBLE
+        // Settings sheet intrudes into the chat container — hide in chat, restore in browse.
+        val sheetBehavior = com.google.android.material.bottomsheet.BottomSheetBehavior
+            .from(binding.settingsSheet)
+        if (browse) {
+            binding.settingsSheet.visibility = View.VISIBLE
+            sheetBehavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
+        } else {
+            sheetBehavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
+            binding.settingsSheet.visibility = View.GONE
+        }
         if (!browse) {
             // Chat mode always needs back enabled so the gesture returns to browse.
             backCallback.isEnabled = true
@@ -233,6 +243,12 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             handleBookmarkImport(importPayload)
             return@registerForActivityResult
         }
+        // x0x://pair/ URIs go to the chat pairing flow BEFORE the autonomi check.
+        if (io.etchit.fetchit.chat.ChatUris.isPairUri(raw)) {
+            setMode(Mode.CHAT)
+            chatModeView.importFromUri(raw)
+            return@registerForActivityResult
+        }
         val parsed = parseAutonomiUrl(raw)
         if (parsed == null) {
             Snackbar.make(
@@ -258,7 +274,18 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
         settingsSheet = SettingsSheet(binding, this).also { it.bind() }
-        chatModeView = ChatModeView(binding.chatContainer)
+        chatModeView = ChatModeView(
+            context = this,
+            container = binding.chatContainer,
+            controller = fetchitApp().chatController,
+            lifecycleScope = lifecycleScope,
+            lifecycleOwner = this,
+            onLaunchScanner = ::onScanClicked,
+            onOpenAutonomi = { addr ->
+                setMode(Mode.BROWSE)
+                loadAddress(addr)
+            },
+        )
 
         binding.fetchButton.setOnTapListener { onFetchClicked() }
         binding.bookmarkButton.setOnClickListener {

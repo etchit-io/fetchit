@@ -66,6 +66,9 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     /** Observable pump lifecycle; see [PumpState] for the contract. */
     val pumpState: StateFlow<PumpState> = _pumpState.asStateFlow()
 
+    /** Returns the cached gateway without connecting, or `null` if not yet connected. */
+    fun gateway(): ChatGateway? = gateway
+
     /**
      * Returns the active [ChatGateway], connecting to [DEFAULT_RELAY] on first
      * call. Subsequent calls are cheap (cached `@Volatile` fast path). The
