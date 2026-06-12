@@ -172,4 +172,7 @@
 
     <!-- Chat: settings section header -->
     <string name="settings_chat_title">chat</string>
+
+    <!-- Chat: label printed on the branded pair-code QR card. -->
+    <string name="chat_pair_card_label">fetch&gt;it chat</string>
 </resources>

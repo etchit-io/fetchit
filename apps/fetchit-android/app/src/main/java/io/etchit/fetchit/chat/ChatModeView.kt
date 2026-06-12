@@ -22,6 +22,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import io.etchit.fetchit.QrShare
 import io.etchit.fetchit.R
 import io.etchit.fetchit.SettingsStore
 import io.etchit.fetchit.fetchitApp
@@ -308,32 +309,12 @@ class ChatModeView(
             snackbar(reason)
             return
         }
-        // Render the pair URI as a plain QR bitmap (not the branded card —
-        // the card validator checks for 64-hex Autonomi addresses, which
-        // x0x:// URIs are not). Use ZXing directly via a simple approach.
-        val bitmap = runCatching { renderPairQr(uri) }.getOrNull()
+        val label = context.getString(R.string.chat_pair_card_label)
+        val bitmap = QrShare.renderCardForUri(uri, label)
         if (bitmap != null) {
             qrImage.setImageBitmap(bitmap)
             qrImage.visibility = View.VISIBLE
         }
-    }
-
-    private fun renderPairQr(uri: String): android.graphics.Bitmap? {
-        val size = 480
-        val hints = mapOf(
-            com.google.zxing.EncodeHintType.ERROR_CORRECTION to
-                com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M,
-            com.google.zxing.EncodeHintType.MARGIN to 2,
-        )
-        val matrix = com.google.zxing.qrcode.QRCodeWriter()
-            .encode(uri, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
-        val pixels = IntArray(size * size)
-        for (y in 0 until size) {
-            for (x in 0 until size) {
-                pixels[y * size + x] = if (matrix.get(x, y)) 0xFF0a0a0a.toInt() else 0xFFf5f2eb.toInt()
-            }
-        }
-        return android.graphics.Bitmap.createBitmap(pixels, size, size, android.graphics.Bitmap.Config.ARGB_8888)
     }
 
     private fun showAddContactDialog() {

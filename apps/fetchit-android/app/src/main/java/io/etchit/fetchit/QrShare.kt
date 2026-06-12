@@ -86,6 +86,25 @@ object QrShare {
         return renderCard("autonomi://$hex", hex, label?.ifBlank { null })
     }
 
+    /**
+     * Render-only variant for `x0x://pair/` URIs — produces the same
+     * branded card as [renderCardFor] but encodes a pair URI as the QR
+     * payload. The sub-line shows the abbreviated agent id extracted from
+     * the path segment (first 8 hex + "...") rather than an Autonomi address.
+     *
+     * The accepted content is intentionally narrow: only `x0x://pair/<64hex>`
+     * URIs are permitted. Arbitrary-content branded cards are not a product
+     * surface — an unconstrained variant would let any string appear to carry
+     * fetch>it's visual authority.
+     *
+     * Returns null if [uri] is not a well-formed `x0x://pair/` URI.
+     */
+    fun renderCardForUri(uri: String, label: String? = null): Bitmap? {
+        val agentId = io.etchit.fetchit.chat.ChatUris.pairUriAgentId(uri) ?: return null
+        val shortId = "${agentId.take(8)}..."
+        return renderCard(uri, shortId, label?.ifBlank { null })
+    }
+
     // ── colours (this card lives on white — dark text, copper accent) ──
     private val INK = 0xFF1A1A1A.toInt()      // near-black: QR modules + headings
     private val COPPER = 0xFFC9732B.toInt()   // brand copper
