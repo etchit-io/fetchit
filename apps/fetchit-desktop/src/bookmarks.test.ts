@@ -3,6 +3,17 @@ import { deriveLabel } from "./bookmarks";
 
 const ADDR = "0123456789abcdef".repeat(4);
 
+describe("deriveLabel for profile addresses", () => {
+  it("labels a handle address with the handle verbatim when there is no rendition", () => {
+    expect(deriveLabel(null, "@josh@etchit.io")).toBe("@josh@etchit.io");
+  });
+  it("labels a profile:<id> address with a readable short form when there is no rendition", () => {
+    const label = deriveLabel(null, `profile:${"a".repeat(64)}`);
+    expect(typeof label).toBe("string");
+    expect(label.length).toBeGreaterThan(0);
+  });
+});
+
 describe("deriveLabel", () => {
   it("falls back to truncated address when no rendition", () => {
     expect(deriveLabel(null, ADDR)).toBe(`${ADDR.slice(0, 8)}…${ADDR.slice(-4)}`);

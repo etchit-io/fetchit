@@ -26,10 +26,14 @@ export function removeBookmark(address: string): Promise<void> {
   return invoke("remove_bookmark", { address });
 }
 
-/// Best-effort human-friendly title for a bookmark — falls back to a short
-/// address slug when no title is present in the rendition.
+/// Best-effort human-friendly title for a bookmark — falls back to the
+/// address verbatim for handles and profile URIs, or a short hex slug for
+/// raw content addresses.
 export function deriveLabel(rendition: Rendition | null | undefined, address: string): string {
-  return deriveTitle(rendition) ?? `${address.slice(0, 8)}…${address.slice(-4)}`;
+  const title = deriveTitle(rendition);
+  if (title) return title;
+  if (address.startsWith("@") || address.startsWith("profile:")) return address;
+  return `${address.slice(0, 8)}…${address.slice(-4)}`;
 }
 
 /// Real title only — returns `null` when the rendition has no inherent

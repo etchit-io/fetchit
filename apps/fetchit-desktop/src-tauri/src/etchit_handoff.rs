@@ -14,11 +14,15 @@ pub struct HandoffProbe {
 /// True if any known etch/it binary name resolves via the injected
 /// path lookup. Pure so the probe is testable without a real PATH.
 fn etchit_installed(on_path: impl Fn(&str) -> bool) -> bool {
-    ["etchit", "etch-it", "etchit-desktop"].iter().any(|n| on_path(n))
+    ["etchit", "etch-it", "etchit-desktop"]
+        .iter()
+        .any(|n| on_path(n))
 }
 
 fn on_path(name: &str) -> bool {
-    let Ok(path) = std::env::var("PATH") else { return false };
+    let Ok(path) = std::env::var("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path).any(|dir| {
         let p = dir.join(name);
         p.is_file() || p.with_extension("exe").is_file()
@@ -30,7 +34,9 @@ fn on_path(name: &str) -> bool {
 #[tauri::command]
 #[must_use]
 pub fn etchit_handoff() -> HandoffProbe {
-    HandoffProbe { installed: etchit_installed(on_path) }
+    HandoffProbe {
+        installed: etchit_installed(on_path),
+    }
 }
 
 /// Open etch/it's profile editor via its registered URI scheme. Fixed
