@@ -6,7 +6,13 @@ import { mountTabStrip } from "./ui/tabStrip";
 import { mountAddressBar, type AddressBarApi } from "./ui/addressBar";
 import { bindKeyboard } from "./ui/keyboard";
 import { initMediaBase } from "./mediaUrl";
-import { parseAutonomiUrl } from "./address";
+import { parseAutonomiUrl, type AddressInput } from "./address";
+import { resolveProfile, type ProfileInput } from "./profile/open";
+import { renderProfilePage, type ProfilePageHandlers } from "./profile/page";
+import { openEtchitProfile } from "./profile/handoff";
+import { lookupHandle } from "./fediverse/api";
+import { fetchProfile, fetchAvatar, pairAccept } from "./chat/api";
+import { chatConfirm } from "./chat/confirmDialog";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
 import { mountDownloadProgress } from "./ui/downloadProgress";
@@ -235,8 +241,115 @@ export async function init(): Promise<void> {
   const store = new TabStore();
   mountDownloadProgress(store);
 
+  // fetch>it has no external-browser capability (see chat/conversation.ts):
+  // external links are copied to the clipboard behind a confirm rather than
+  // pretending to open. Shared by the profile page's website links and the
+  // "Get etch/it" call-to-action.
+  const confirmOpenExternal = (url: string): void => {
+    void chatConfirm({
+      title: "Copy link",
+      message:
+        "fetch>it doesn't open external sites, so this copies the link to "
+        + "your clipboard:\n" + url,
+      confirmLabel: "Copy link",
+    }).then((ok) => {
+      if (ok) void navigator.clipboard.writeText(url).catch(() => {});
+    });
+  };
+
+  // Profile (shell-route) page handlers. Closures so they capture the live
+  // `chat` panel api, `qrModal`, and `store` without threading accessors.
+  const profileHandlers: ProfilePageHandlers = {
+    onAutonomi: (uri) => {
+      const parsed = parseAutonomiUrl(uri);
+      if (parsed) submit(parsed.address, store, stageEl, parsed.query);
+    },
+    onMessage: (model) => {
+      if (model.shareUri) {
+        void pairAccept(model.shareUri)
+          .then((r) => chat?.openDm(r.agentIdHex))
+          .catch(() => {});
+      } else if (model.agentId) {
+        void chat?.openDm(model.agentId);
+      }
+    },
+    onInvite: (model) => {
+      // No public "invite agent to group" surface on the chat panel; the
+      // honest minimum is to ensure the contact exists (pairAccept the
+      // share URI) then land on them so the user can use chat's own group
+      // flow. Reuses real apis; invents nothing.
+      if (model.shareUri) {
+        void pairAccept(model.shareUri)
+          .then((r) => chat?.openDm(r.agentIdHex))
+          .catch(() => {});
+      } else if (model.agentId) {
+        void chat?.openDm(model.agentId);
+      }
+    },
+    onShare: (model) => {
+      if (model.agentId) qrModal.open(model.agentId, model.display);
+    },
+    onEditEtch: () => {
+      void openEtchitProfile().catch(() => {});
+    },
+    onGetEtch: () => confirmOpenExternal("https://etchit.io"),
+    confirmOpen: confirmOpenExternal,
+  };
+
+  // Resolve + render a profile (handle or agent-id) into a tab. Mirrors
+  // `submit`: dedupe on the canonical address, reuse an empty active tab or
+  // create one, then `startProfile` does the mascot + resolve + render.
+  const openProfile = (input: ProfileInput): void => {
+    const canonical =
+      input.kind === "handle" ? input.handle : `profile:${input.agentId}`;
+    const existing = store.findByAddress(canonical);
+    if (existing) {
+      store.activate(existing.id);
+      if (existing.status === "error") void startProfile(existing, input, canonical);
+      return;
+    }
+    const active = store.active();
+    const target =
+      active && active.status === "empty" ? active : store.createEmpty(buildStageRoot(stageEl));
+    void startProfile(target, input, canonical);
+  };
+
+  const startProfile = async (
+    tab: { id: string; root: HTMLElement },
+    input: ProfileInput,
+    canonical: string,
+  ): Promise<void> => {
+    findMascotIn(tab.root)?.dispose();
+    const mascot = mountMascot();
+    tab.root.replaceChildren(mascot.element);
+    store.startFetch(tab.id, canonical);
+    const model = await resolveProfile(input, { lookupHandle, fetchProfile });
+    findMascotIn(tab.root)?.dispose();
+    renderProfilePage(model, tab.root, profileHandlers, fetchAvatar);
+    // An error model marks the tab errored so a re-open re-resolves it
+    // (mirrors `submit`'s retry-on-error dedupe); any other state renders.
+    if (model.state === "error") {
+      store.setError(tab.id, model.error ?? "couldn't load this profile");
+    } else {
+      store.renderProfile(tab.id, model.handle ?? model.display);
+    }
+  };
+
+  const onProfileInput = (parsed: AddressInput): void => {
+    if (parsed.kind === "hex") {
+      submit(parsed.address, store, stageEl, parsed.query);
+      return;
+    }
+    const input: ProfileInput =
+      parsed.kind === "handle"
+        ? { kind: "handle", handle: parsed.handle }
+        : { kind: "agentId", agentId: parsed.agentId };
+    openProfile(input);
+  };
+
   const bar: AddressBarApi = mountAddressBar(input, button, {
     onSubmit: (addr, query) => submit(addr, store, stageEl, query),
+    onProfile: onProfileInput,
     onInvalid: (msg) => {
       statusEl.textContent = msg;
     },
@@ -308,7 +421,15 @@ export async function init(): Promise<void> {
     for (const t of store.list()) {
       t.root.classList.toggle("is-active", !!active && t.id === active.id);
     }
-    if (!bar.isFocused()) bar.setValue(active && active.address ? active.address + active.query : "");
+    // Profile (shell-route) tabs carry a friendly `display` (the handle or
+    // name) so the bar shows that instead of the raw `profile:<id>` address.
+    if (!bar.isFocused()) {
+      bar.setValue(
+        active && active.address
+          ? active.display ?? active.address + active.query
+          : "",
+      );
+    }
     statusEl.textContent = statusFor(active);
     button.disabled = active?.status === "loading";
     bookmarkBtn.disabled = !active?.address || active.status === "loading";

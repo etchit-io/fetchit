@@ -7,6 +7,7 @@ function setup(): {
   input: HTMLInputElement;
   button: HTMLButtonElement;
   onSubmit: ReturnType<typeof vi.fn>;
+  onProfile: ReturnType<typeof vi.fn>;
   onInvalid: ReturnType<typeof vi.fn>;
   api: AddressBarApi;
 } {
@@ -16,9 +17,10 @@ function setup(): {
   document.body.appendChild(input);
   document.body.appendChild(button);
   const onSubmit = vi.fn();
+  const onProfile = vi.fn();
   const onInvalid = vi.fn();
-  const api = mountAddressBar(input, button, { onSubmit, onInvalid });
-  return { input, button, onSubmit, onInvalid, api };
+  const api = mountAddressBar(input, button, { onSubmit, onProfile, onInvalid });
+  return { input, button, onSubmit, onProfile, onInvalid, api };
 }
 
 afterEach(() => {
@@ -60,7 +62,7 @@ describe("mountAddressBar submit paths", () => {
     button.click();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onInvalid).toHaveBeenCalledTimes(1);
-    expect(onInvalid).toHaveBeenCalledWith("address must be 64 hex characters");
+    expect(onInvalid).toHaveBeenCalledWith("enter a 64-hex address or an @handle@domain");
   });
 
   it("calls onInvalid for too-short hex input", () => {
@@ -68,7 +70,7 @@ describe("mountAddressBar submit paths", () => {
     input.value = HEX.slice(0, 63);
     button.click();
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(onInvalid).toHaveBeenCalledWith("address must be 64 hex characters");
+    expect(onInvalid).toHaveBeenCalledWith("enter a 64-hex address or an @handle@domain");
   });
 
   it("strips an autonomi:// prefix and canonicalises the input value", () => {
@@ -97,7 +99,7 @@ describe("mountAddressBar submit paths", () => {
     button.click();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onInvalid).toHaveBeenCalledTimes(2);
-    expect(onInvalid).toHaveBeenCalledWith("address must be 64 hex characters");
+    expect(onInvalid).toHaveBeenCalledWith("enter a 64-hex address or an @handle@domain");
   });
 });
 

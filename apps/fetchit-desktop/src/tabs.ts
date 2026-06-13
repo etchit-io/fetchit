@@ -9,6 +9,9 @@ export interface Tab {
   /** Query string from the address (`?…`), or `""`. Carried into SPAs. */
   query: string;
   shortLabel: string;
+  /** Friendly label shown in the address bar for non-hex tabs (e.g. a
+   * handle), or `null` to fall back to the raw `address`. */
+  display: string | null;
   status: TabStatus;
   error: string | null;
   rendition: Rendition | null;
@@ -51,6 +54,7 @@ export class TabStore {
       address: null,
       query: "",
       shortLabel: "new tab",
+      display: null,
       status: "empty",
       error: null,
       rendition: null,
@@ -82,6 +86,7 @@ export class TabStore {
     tab.status = "loading";
     tab.error = null;
     tab.rendition = null;
+    tab.display = null;
     this.notify();
   }
 
@@ -101,6 +106,17 @@ export class TabStore {
     if (rendition.kind === "etchitEnvelope" && rendition.title) {
       tab.shortLabel = trim(rendition.title, 22);
     }
+    this.notify();
+  }
+
+  /** Mark a profile (shell-route) tab rendered: no Rendition, carry a display label. */
+  renderProfile(id: string, display: string): void {
+    const tab = this.byId(id);
+    if (!tab) return;
+    tab.status = "rendered";
+    tab.rendition = null;
+    tab.display = display;
+    tab.shortLabel = trim(display, 22);
     this.notify();
   }
 
