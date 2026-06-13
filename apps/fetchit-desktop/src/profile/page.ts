@@ -137,15 +137,15 @@ function buildHandoff(h: ProfilePageHandlers): HTMLElement {
   card.className = "profile-page__handoff";
   card.append(
     line("profile-page__handoff-title", "Make this page yours"),
-    line("profile-page__handoff-chain", "etch/ writes  ->  Autonomi keeps  ->  fetch> shows"),
+    line("profile-page__handoff-chain", "Etch writes  ->  Autonomi keeps  ->  Fetch shows"),
     line("profile-page__handoff-body",
       "Your profile lives on Autonomi: permanent, post-quantum, yours. People who look you up land here."),
   );
   const row = document.createElement("div");
   row.className = "profile-page__actions";
   row.append(
-    btn("create-etch", "profile-page__act profile-page__act--primary", "Create my profile in etch/it", h.onEditEtch),
-    btn("get-etch", "profile-page__act", "Get etch/it", h.onGetEtch),
+    btn("create-etch", "profile-page__act profile-page__act--primary", "Create my profile in Etch", h.onEditEtch),
+    btn("get-etch", "profile-page__act", "Get Etch", h.onGetEtch),
   );
   card.appendChild(row);
   return card;
@@ -155,7 +155,7 @@ function buildActions(model: ProfilePageModel, h: ProfilePageHandlers): HTMLElem
   const row = document.createElement("div");
   row.className = "profile-page__actions";
   if (model.isSelf) {
-    row.appendChild(btn("edit-etch", "profile-page__act", "Edit in etch/it", h.onEditEtch));
+    row.appendChild(btn("edit-etch", "profile-page__act", "Edit in Etch", h.onEditEtch));
   } else if (model.verified && model.agentId) {
     row.appendChild(btn("message", "profile-page__act profile-page__act--primary", "Message", () => h.onMessage(model)));
     row.appendChild(btn("invite", "profile-page__act", "Invite to group", () => h.onInvite(model)));
