@@ -28,6 +28,7 @@ describe("openProfileCard", () => {
       onAutonomi: vi.fn(),
       onMessage: vi.fn(),
       confirmOpen: vi.fn(),
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()?.textContent).toContain("Alice"));
     expect(card()!.textContent).toContain("hi there");
@@ -42,6 +43,7 @@ describe("openProfileCard", () => {
       onAutonomi: vi.fn(),
       onMessage: vi.fn(),
       confirmOpen: vi.fn(),
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()?.textContent).toMatch(/hasn.t published/i));
   });
@@ -54,6 +56,7 @@ describe("openProfileCard", () => {
       onAutonomi: vi.fn(),
       onMessage: vi.fn(),
       confirmOpen: vi.fn(),
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()?.textContent).toContain("failed verification"));
   });
@@ -67,6 +70,7 @@ describe("openProfileCard", () => {
       onAutonomi,
       onMessage: vi.fn(),
       confirmOpen: vi.fn(),
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()).not.toBeNull());
     card()!.querySelector<HTMLElement>(".chat-profile__link")!.click();
@@ -83,6 +87,7 @@ describe("openProfileCard", () => {
       onAutonomi: vi.fn(),
       onMessage,
       confirmOpen: vi.fn(),
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()).not.toBeNull());
     // The second chip is the x0x link ("dm me").
@@ -100,6 +105,7 @@ describe("openProfileCard", () => {
       onAutonomi: vi.fn(),
       onMessage: vi.fn(),
       confirmOpen,
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()).not.toBeNull());
     card()!.querySelector<HTMLElement>(".chat-profile__website")!.click();
@@ -119,6 +125,7 @@ describe("openProfileCard", () => {
       onAutonomi: vi.fn(),
       onMessage: vi.fn(),
       confirmOpen: vi.fn(),
+      onOpenFullProfile: vi.fn(),
     });
     await vi.waitFor(() => expect(card()?.querySelector(".chat-profile__avatar img")).not.toBeNull());
     expect(fetchAvatar).toHaveBeenCalledWith("bb".repeat(32), "image/webp", 100);

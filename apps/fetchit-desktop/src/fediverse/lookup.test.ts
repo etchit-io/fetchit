@@ -49,7 +49,7 @@ beforeEach(() => {
   host = document.createElement("div");
   document.body.appendChild(host);
   opened = [];
-  mountLookup(host, { onOpenDm: (id) => opened.push(id) });
+  mountLookup(host, { onOpenDm: (id) => opened.push(id), onViewProfile: () => {} });
 });
 
 describe("mountLookup", () => {
@@ -197,5 +197,28 @@ describe("mountLookup", () => {
       expect(host.querySelector(".fediverse-lookup__error")).not.toBeNull();
     });
     expect(host.textContent).toContain("couldn't resolve");
+  });
+});
+
+import { renderActorCard } from "./lookup";
+
+describe("renderActorCard view profile", () => {
+  it("offers View profile and routes the handle", () => {
+    let seen: string | null = null;
+    const dto = {
+      kind: "verified" as const,
+      handle: "@josh@etchit.io",
+      actorUrl: "u",
+      agentIdHex: "a".repeat(64),
+      displayName: "Josh",
+      bio: "hi",
+      avatar: null,
+      shareUri: "fetchit://share/v3/x",
+      previousAgentIdHex: null,
+      verifyFailure: null,
+    };
+    const card = renderActorCard(dto, { onOpenDm: () => {}, onViewProfile: (h) => { seen = h; } });
+    (card.querySelector("[data-act=view-profile]") as HTMLElement).click();
+    expect(seen).toBe("@josh@etchit.io");
   });
 });

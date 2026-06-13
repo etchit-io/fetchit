@@ -17,6 +17,8 @@ export interface FediversePanelHandlers {
   onClose: () => void;
   /// Open the LIT Chat DM for a contact imported via the lookup card.
   onOpenDm: (agentIdHex: string) => void;
+  /// Open the full profile page for a fediverse handle.
+  onViewProfile: (handle: string) => void;
 }
 
 /// Imperative handle over a mounted fediverse pane.
@@ -74,7 +76,7 @@ export function mountFediversePanel(
   // M5.1 handle lookup: pinned between the header and the feed so
   // discovery is the pane's first affordance.
   const lookupHost = document.createElement("div");
-  mountLookup(lookupHost, { onOpenDm: handlers.onOpenDm });
+  mountLookup(lookupHost, { onOpenDm: handlers.onOpenDm, onViewProfile: handlers.onViewProfile });
 
   const body = document.createElement("div");
   body.className = "fediverse-panel__body";

@@ -34,6 +34,8 @@ import { mark } from "../ui/icons";
 export interface ChatPanelHandlers {
   onAutonomi: (addr: string) => void;
   onClose: () => void;
+  /// Navigate to the full profile page for a contact (panel closes first).
+  onOpenFullProfile: (agentId: string) => void;
   /// Fires whenever the unread-count rolls up — used by the header
   /// chat button to badge itself. Receives the total across all DMs.
   onUnreadChange?: (count: number) => void;
@@ -419,6 +421,10 @@ export function mountChatPanel(
       openJoinGroup(uri);
     },
     onAddContact: openAddContact,
+    onOpenFullProfile: (agentId) => {
+      close();
+      handlers.onOpenFullProfile(agentId);
+    },
     onSetTrust: (agentId, level) => {
       void (async () => {
         try {

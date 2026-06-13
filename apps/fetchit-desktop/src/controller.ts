@@ -163,6 +163,7 @@ export async function init(): Promise<void> {
         // Defer one tick so chat.isOpen() reports the new state first.
         setTimeout(() => renderChatBadge(lastUnread), 0);
       },
+      onOpenFullProfile: (agentId) => openProfile({ kind: "agentId", agentId }),
       onUnreadChange: (n) => {
         lastUnread = n;
         renderChatBadge(n);
@@ -186,6 +187,7 @@ export async function init(): Promise<void> {
         fediverse.close();
         void chat?.openDm(agentIdHex);
       },
+      onViewProfile: (handle) => openProfile({ kind: "handle", handle }),
     });
     void bindFediverseEvents(fediverse);
     fediverseBtn.addEventListener("click", () => fediverse.toggle());

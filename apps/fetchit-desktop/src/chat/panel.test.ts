@@ -51,6 +51,7 @@ describe("mountChatPanel — dock mode", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     expect(api.isDocked()).toBe(false);
     expect(host.classList.contains("chat-panel--docked")).toBe(false);
@@ -60,6 +61,7 @@ describe("mountChatPanel — dock mode", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     expect(api.isOpen()).toBe(false);
     await api.openDm("a".repeat(64));
@@ -70,6 +72,7 @@ describe("mountChatPanel — dock mode", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     api.setDocked(true);
     expect(api.isDocked()).toBe(true);
@@ -82,6 +85,7 @@ describe("mountChatPanel — dock mode", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     expect(api.isDocked()).toBe(true);
     expect(host.classList.contains("chat-panel--docked")).toBe(true);
@@ -91,6 +95,7 @@ describe("mountChatPanel — dock mode", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     api.setDocked(true);
     expect(document.body.classList.contains("chat-docked")).toBe(false);
@@ -112,6 +117,7 @@ describe("mountChatPanel — lifecycle cleanup", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     expect(conversationStopPolling).not.toHaveBeenCalled();
     expect(conversationDispose).not.toHaveBeenCalled();
@@ -129,6 +135,7 @@ describe("mountChatPanel — lifecycle cleanup", () => {
     const api = mountChatPanel(host, {
       onAutonomi: () => {},
       onClose: () => {},
+      onOpenFullProfile: () => {},
     });
     expect(mountConversationMock).toHaveBeenCalledTimes(1);
     // open()/close() do not gate on whether the daemon is reachable;

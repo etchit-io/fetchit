@@ -12,6 +12,8 @@ import { lookupHandle, type LookupResult } from "./api";
 export interface LookupHandlers {
   /// Open the LIT Chat DM for an imported contact.
   onOpenDm: (agentIdHex: string) => void;
+  /// Open the full profile page for a fediverse handle.
+  onViewProfile: (handle: string) => void;
 }
 
 const HANDLE_RE = /^@[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -104,6 +106,13 @@ export function renderActorCard(dto: LookupResult, handlers: LookupHandlers): HT
       ),
     );
   }
+  const view = document.createElement("button");
+  view.type = "button";
+  view.className = "actor-card__view-btn";
+  view.dataset.act = "view-profile";
+  view.textContent = "View profile";
+  view.addEventListener("click", () => handlers.onViewProfile(dto.handle));
+  card.append(view);
   return card;
 }
 

@@ -30,6 +30,8 @@ export interface ConversationHandlers {
   onSetTrust: (agentId: string, level: TrustLevel) => void;
   onRemoveContact: (agentId: string) => void;
   onLeaveGroup: (groupId: string) => void;
+  /// Navigate to the full profile page for the given agent (caller closes chat).
+  onOpenFullProfile: (agentId: string) => void;
   /// Resolves the user's current display name at send time, so a rename
   /// in the share-card dialog takes effect on the next outbound DM
   /// without re-mounting.
@@ -131,6 +133,7 @@ export function mountConversation(
           if (ok) void navigator.clipboard.writeText(url).catch(() => {});
         });
       },
+      onOpenFullProfile: handlers.onOpenFullProfile,
     });
   };
 
