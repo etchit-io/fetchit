@@ -4,6 +4,7 @@
 use crate::registry::{ActorRecord, RegistryRejection};
 use fetchit_fedi::registry::RegisterActorRequest;
 use rsa::pkcs8::DecodePublicKey;
+use std::collections::HashSet;
 
 /// Server config for the bridge role.
 #[derive(Clone, Debug)]
@@ -16,17 +17,35 @@ pub struct RegistryConfig {
     /// it, never on leftmost `X-Forwarded-For`. See [`crate::registry`]
     /// router source-key extraction.
     pub trusted_client_ip_header: String,
+    /// Lowercase wordlist of handles held back from self-serve FCFS
+    /// (dictionary words / surnames / brand names reserved for the
+    /// premium-handle surface + impersonation protection). Default empty
+    /// -> zero change for tests + community operators.
+    pub reserved_handles: HashSet<String>,
+    /// Handles whose length is `<=` this are reserved (e.g. `4` reserves
+    /// every 1-4 char handle). Default `0` -> no length-based reservation.
+    pub reserved_min_len: usize,
 }
 
 impl RegistryConfig {
     /// Config for `domain` with the default trusted client-IP header
-    /// (`x-real-ip`).
+    /// (`x-real-ip`) and NO reserved handles (fully-open self-serve).
     #[must_use]
     pub fn new(domain: impl Into<String>) -> Self {
         Self {
             domain: domain.into(),
             trusted_client_ip_header: "x-real-ip".to_string(),
+            reserved_handles: HashSet::new(),
+            reserved_min_len: 0,
         }
+    }
+
+    /// Whether `handle` is reserved from self-serve registration (by the
+    /// minimum-length rule OR the wordlist). The caller lowercase-validates
+    /// the handle first, so a direct set lookup matches.
+    #[must_use]
+    pub fn is_reserved(&self, handle: &str) -> bool {
+        handle.len() <= self.reserved_min_len || self.reserved_handles.contains(handle)
     }
 }
 
@@ -146,6 +165,24 @@ mod tests {
         ] {
             assert!(validate_registry_handle(bad).is_err(), "{bad}");
         }
+    }
+
+    // ---- Reserved-handle gate (premium-handle revenue seam) ----
+
+    #[test]
+    fn is_reserved_by_wordlist_or_min_len() {
+        let mut cfg = RegistryConfig::new("etchit.io");
+        assert!(!cfg.is_reserved("josh"), "default config reserves nothing");
+        cfg.reserved_handles = ["josh".to_string(), "admin".to_string()]
+            .into_iter()
+            .collect();
+        assert!(cfg.is_reserved("josh"));
+        assert!(cfg.is_reserved("admin"));
+        assert!(!cfg.is_reserved("randomuser"));
+        cfg.reserved_min_len = 3;
+        assert!(cfg.is_reserved("ab"), "len 2 <= 3");
+        assert!(cfg.is_reserved("xyz"), "len 3 <= 3");
+        assert!(!cfg.is_reserved("zzzz"), "len 4 > 3 and not in wordlist");
     }
 
     // ---- Task 5: canonical actor_url (SO-1) ----

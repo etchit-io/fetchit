@@ -16,6 +16,7 @@ use serde_json::json;
 use crate::forwarding::now_ms;
 use crate::inbox::InboxRateLimit;
 use crate::registry::actor_doc::actor_document;
+use crate::registry::verify::validate_registry_handle;
 use crate::registry::webfinger::{parse_acct_resource, webfinger_jrd};
 use crate::registry::{
     verify_registration, ActorRegistryStore, RegistryConfig, RegistryRejection, RegistryStoreError,
@@ -76,6 +77,19 @@ fn register_inner(state: &RegistryState, body: &[u8], now: u64) -> Outcome {
         Ok(r) => r,
         Err(e) => return rejection_outcome(&RegistryRejection::Body(e.to_string())),
     };
+    // Validate the handle first (422), then the reserved-handle gate (403,
+    // register-only: an already-held handle is updated, not re-acquired).
+    // The gate precedes verify so a squatter cannot burn crypto on a
+    // reserved handle.
+    if let Err(e) = validate_registry_handle(&req.handle) {
+        return rejection_outcome(&e);
+    }
+    if state.config.is_reserved(&req.handle) {
+        return Outcome {
+            status: 403,
+            body: "handle is reserved".into(),
+        };
+    }
     let record = match verify_registration(&state.config, &req, now) {
         Ok(r) => r,
         Err(e) => return rejection_outcome(&e),
@@ -335,6 +349,50 @@ mod tests {
     fn register_malformed_body_returns_422() {
         let st = state();
         assert_eq!(register_inner(&st, b"not json", 1).status, 422);
+    }
+
+    // ---- Reserved-handle gate (403) ----
+
+    #[test]
+    fn register_reserved_word_returns_403_before_verify() {
+        let mut config = RegistryConfig::new("etchit.io");
+        config.reserved_handles = ["josh".to_string()].into_iter().collect();
+        let st = RegistryState {
+            store: Arc::new(InMemoryActorStore::new()),
+            config,
+            rate_limit: Arc::new(InboxRateLimit::new(1000)),
+        };
+        let out = register_inner(&st, VALID.as_bytes(), 1);
+        assert_eq!(out.status, 403);
+        assert_eq!(out.body, "handle is reserved");
+    }
+
+    #[test]
+    fn register_short_handle_reserved_by_min_len_returns_403() {
+        let mut config = RegistryConfig::new("etchit.io");
+        config.reserved_min_len = 4; // "josh" is 4 chars
+        let st = RegistryState {
+            store: Arc::new(InMemoryActorStore::new()),
+            config,
+            rate_limit: Arc::new(InboxRateLimit::new(1000)),
+        };
+        assert_eq!(register_inner(&st, VALID.as_bytes(), 1).status, 403);
+    }
+
+    #[test]
+    fn register_invalid_handle_stays_422_not_403() {
+        // Uppercase is invalid -> 422 from handle-validate, BEFORE the
+        // reserved gate (which would otherwise 403 a <=8 char handle).
+        let mut config = RegistryConfig::new("etchit.io");
+        config.reserved_min_len = 8;
+        let st = RegistryState {
+            store: Arc::new(InMemoryActorStore::new()),
+            config,
+            rate_limit: Arc::new(InboxRateLimit::new(1000)),
+        };
+        let mut v: serde_json::Value = serde_json::from_str(VALID).unwrap();
+        v["handle"] = json!("Josh");
+        assert_eq!(register_inner(&st, v.to_string().as_bytes(), 1).status, 422);
     }
 
     // ---- Task 10: PUT /v1/actors/<handle> ----

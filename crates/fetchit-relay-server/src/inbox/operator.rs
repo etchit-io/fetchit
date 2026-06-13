@@ -30,7 +30,7 @@ use super::{
     InboxDenylistCheck, InboxRateLimit, InboxState, PendingDeliverySink, SessionBroadcastSink,
     WebFingerError, WebFingerLookup,
 };
-use crate::registry::{InMemoryActorStore, RegistryConfig, RegistryState};
+use crate::registry::{ActorRegistryStore, RegistryConfig, RegistryState, SqliteActorStore};
 use crate::server::Server;
 
 /// Default signed-denylist base URL — the live NY-Trust service. Matches
@@ -207,9 +207,43 @@ pub fn attach_if_enabled(server: Server) -> anyhow::Result<Server> {
     // flagged follow-on (M5.1 plan Task 13), swapped in behind the
     // `ActorRegistryStore` trait without touching the routes.
     let domain = std::env::var("FETCHIT_FEDI_DOMAIN").unwrap_or_else(|_| "etchit.io".to_owned());
+    let mut config = RegistryConfig::new(domain);
+    // Reserved-handle gate: hold premium / brand / short handles back from
+    // self-serve FCFS so day-one squatters cannot take the sellable
+    // inventory (revocation would break handle continuity). Both default
+    // empty/0, so an operator that sets neither env var keeps fully-open
+    // registration.
+    if let Ok(path) = std::env::var("FETCHIT_RESERVED_HANDLES_FILE") {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                config.reserved_handles = contents
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(str::to_owned)
+                    .collect();
+            }
+            Err(e) => tracing::warn!("reserved-handles file {path} unreadable: {e}"),
+        }
+    }
+    if let Ok(raw) = std::env::var("FETCHIT_RESERVED_MIN_LEN") {
+        if let Ok(n) = raw.parse::<usize>() {
+            config.reserved_min_len = n;
+        }
+    }
+    // Durable, in-relay SQLite ledger (Task 13). The DB file is the
+    // boot-load state; set `FETCHIT_REGISTRY_DB` to the systemd
+    // StateDirectory path in prod. A lost file reopens the handle
+    // land-grab, so the file's backup is the actual security control.
+    let db_path =
+        std::env::var("FETCHIT_REGISTRY_DB").unwrap_or_else(|_| "fetchit-registry.db".to_owned());
+    let store: Arc<dyn ActorRegistryStore> = Arc::new(
+        SqliteActorStore::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("registry store open {db_path}: {e}"))?,
+    );
     let registry = RegistryState {
-        store: Arc::new(InMemoryActorStore::new()),
-        config: RegistryConfig::new(domain),
+        store,
+        config,
         // Registration is infrequent; 30/min per source is generous.
         rate_limit: Arc::new(InboxRateLimit::new(30)),
     };
