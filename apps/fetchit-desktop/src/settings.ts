@@ -58,6 +58,9 @@ export interface SettingsHooks {
    *  modal's import mode, which encodes the list as a
    *  `fetchit://import?…` URL and renders a multi-bookmark QR. */
   onShareBookmarkList?: (bookmarks: Bookmark[]) => void;
+  /** Fired when the user clicks "View my profile". Controller closes
+   *  settings and opens the own-profile page (isSelf:true). */
+  onViewMyProfile?: () => void;
 }
 
 export interface IdlePolicy {
@@ -427,6 +430,9 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
 
   close.addEventListener("click", () => api.close());
 
+  const viewMyProfileBtn = root.querySelector<HTMLButtonElement>("[data-act=view-my-profile]");
+  viewMyProfileBtn?.addEventListener("click", () => hooks.onViewMyProfile?.());
+
   enabledBox.addEventListener("change", () => {
     applyPolicy(readPolicy({ enabledBox, modeSelect, maxMb }));
   });
@@ -684,6 +690,10 @@ function buildPage(): HTMLElement {
     </section>
     <section class="setting-group" id="group-advanced">
       <h2>Advanced</h2>
+      <div class="setting-row">
+        <span>Your profile</span>
+        <button type="button" class="setting-action setting-action-ghost" data-act="view-my-profile">View my profile</button>
+      </div>
       ${CUSTODY_PANEL_HTML}
       ${EXTENDED_CARD_HTML}
     </section>

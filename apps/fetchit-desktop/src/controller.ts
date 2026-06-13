@@ -11,7 +11,7 @@ import { resolveProfile, type ProfileInput } from "./profile/open";
 import { renderProfilePage, type ProfilePageHandlers } from "./profile/page";
 import { openEtchitProfile } from "./profile/handoff";
 import { lookupHandle } from "./fediverse/api";
-import { fetchProfile, fetchAvatar, pairAccept } from "./chat/api";
+import { fetchProfile, fetchAvatar, pairAccept, identity as chatIdentity } from "./chat/api";
 import { chatConfirm } from "./chat/confirmDialog";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
@@ -98,6 +98,12 @@ export async function init(): Promise<void> {
       } catch (err) {
         console.error("[fetchit] share bookmark list:", err);
       }
+    },
+    onViewMyProfile: () => {
+      settings.close();
+      void chatIdentity()
+        .then((id) => openProfile({ kind: "agentId", agentId: id.agent_id, isSelf: true }))
+        .catch((e) => { statusEl.textContent = errorMessage(e); });
     },
   });
   settingsBtn.addEventListener("click", () => void settings.toggle());

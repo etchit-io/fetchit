@@ -494,3 +494,19 @@ describe("cache max-MB input", () => {
     expect(last.policy.maxBytes).toBe(1024 * 1024);
   });
 });
+
+describe("settings view my profile", () => {
+  it("exposes a View my profile control", () => {
+    mountSettings(host, defaultHooks());
+    expect(host.querySelector("[data-act=view-my-profile]")).not.toBeNull();
+  });
+
+  it("calls onViewMyProfile when the control is clicked", () => {
+    const onViewMyProfile = vi.fn();
+    mountSettings(host, { ...defaultHooks(), onViewMyProfile });
+    const btn = host.querySelector<HTMLButtonElement>("[data-act=view-my-profile]");
+    expect(btn).not.toBeNull();
+    btn!.click();
+    expect(onViewMyProfile).toHaveBeenCalledTimes(1);
+  });
+});
