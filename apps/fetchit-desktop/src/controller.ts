@@ -295,7 +295,7 @@ export async function init(): Promise<void> {
       }
     },
     onShare: (model) => {
-      if (model.agentId) qrModal.open(model.agentId, model.display);
+      if (model.shareUri) qrModal.openImport(model.shareUri, model.display);
     },
     onEditEtch: () => {
       void openEtchitProfile().catch(() => {});

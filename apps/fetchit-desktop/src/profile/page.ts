@@ -160,7 +160,7 @@ function buildActions(model: ProfilePageModel, h: ProfilePageHandlers): HTMLElem
     row.appendChild(btn("message", "profile-page__act profile-page__act--primary", "Message", () => h.onMessage(model)));
     row.appendChild(btn("invite", "profile-page__act", "Invite to group", () => h.onInvite(model)));
   }
-  if (model.agentId) {
+  if (model.shareUri) {
     row.appendChild(btn("share", "profile-page__act", "Share", () => h.onShare(model)));
   }
   return row;

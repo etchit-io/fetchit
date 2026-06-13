@@ -26,7 +26,7 @@ export function removeBookmark(address: string): Promise<void> {
   return invoke("remove_bookmark", { address });
 }
 
-/// Best-effort human-friendly title for a bookmark — falls back to the
+/// Best-effort human-friendly title for a bookmark, falling back to the
 /// address verbatim for handles and profile URIs, or a short hex slug for
 /// raw content addresses.
 export function deriveLabel(rendition: Rendition | null | undefined, address: string): string {

@@ -97,3 +97,15 @@ it("contact empty page is neutral, no etch/it advertising", () => {
   expect(root.querySelector(".profile-page__handoff")).toBeNull();
   expect(root.querySelector(".profile-page__empty")?.textContent).toContain("hasn't published");
 });
+
+it("Share button present when shareUri is set", () => {
+  const root = document.createElement("div");
+  renderProfilePage(model({ shareUri: "fetchit://share/v3/aaa/bbb?relay=r" }), root, H, stubAvatar);
+  expect(root.querySelector("[data-act=share]")).not.toBeNull();
+});
+
+it("Share button absent when shareUri is null", () => {
+  const root = document.createElement("div");
+  renderProfilePage(model({ shareUri: null }), root, H, stubAvatar);
+  expect(root.querySelector("[data-act=share]")).toBeNull();
+});
