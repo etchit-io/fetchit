@@ -38,6 +38,10 @@ pub struct RegisterActorResponse {
 /// Typed failure surface so the UI can render per-cause copy.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
+    /// 403: the handle is operator-reserved (not registered; held back
+    /// from self-serve, e.g. for premium release). Reason text attached.
+    #[error("handle is reserved: {0}")]
+    Reserved(String),
     /// 409: the handle is registered (to this or another agent).
     #[error("handle already registered")]
     HandleTaken,
@@ -116,6 +120,10 @@ async fn decode_response(resp: reqwest::Response) -> Result<RegisterActorRespons
             .json()
             .await
             .map_err(|e| RegistryError::Transport(format!("response decode: {e}"))),
+        403 => {
+            let body = resp.text().await.unwrap_or_default();
+            Err(RegistryError::Reserved(body.chars().take(256).collect()))
+        }
         409 => Err(RegistryError::HandleTaken),
         422 => {
             let body = resp.text().await.unwrap_or_default();
@@ -209,7 +217,12 @@ mod tests {
 
     #[tokio::test]
     async fn status_codes_map_to_typed_errors() {
-        for (status, expect) in [(409_u16, "taken"), (429, "rate"), (500, "status")] {
+        for (status, expect) in [
+            (403_u16, "reserved"),
+            (409, "taken"),
+            (429, "rate"),
+            (500, "status"),
+        ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/actors"))
@@ -221,6 +234,9 @@ mod tests {
                 .await
                 .unwrap_err();
             match expect {
+                "reserved" => {
+                    assert!(matches!(err, RegistryError::Reserved(_)), "got {err:?}");
+                }
                 "taken" => assert!(matches!(err, RegistryError::HandleTaken), "got {err:?}"),
                 "rate" => assert!(matches!(err, RegistryError::RateLimited), "got {err:?}"),
                 _ => assert!(

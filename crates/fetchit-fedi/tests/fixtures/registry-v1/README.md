@@ -58,19 +58,24 @@ Body: `register-request.json` (shape) / `register-request-valid.json` (valid).
 The bridge MUST:
 
 1. Validate the handle: `[a-z0-9_-]`, 1..=64 chars (reject uppercase).
-2. Construct `actor_url` as above.
-3. Verify `attestation_v2` via `fetchit_fedi::attestation::verify_binding_v2`
+2. Reject operator-reserved handles with 403 (operator config: wordlist +
+   min-length rule, both default empty so community bridges see no change).
+   The gate runs after handle validation and before attestation verify, on
+   registration only; an update is not an acquisition.
+3. Construct `actor_url` as above.
+4. Verify `attestation_v2` via `fetchit_fedi::attestation::verify_binding_v2`
    with `(handle, actor_url, rsa_spki_der)`. The agent id is DERIVED from the
    attested ML-DSA pubkey, never read from a claim.
-4. Reject `version != 2` records (v1 records are re-minted client-side; there is
+5. Reject `version != 2` records (v1 records are re-minted client-side; there is
    no v1 registration path).
-5. First come, first served on the handle. Rate-limit per source.
+6. First come, first served on the handle. Rate-limit per source.
 
 Responses:
 
 | Status | Meaning | Body |
 | --- | --- | --- |
 | 201 | registered | `register-response.json` |
+| 403 | handle operator-reserved (premium / brand hold) | reason text |
 | 409 | handle taken | none required |
 | 422 | handle not lowercase, or attestation invalid | reason text, served back to the user |
 | 429 | rate limited | none required |
