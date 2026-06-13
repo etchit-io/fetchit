@@ -47,14 +47,18 @@ impl SqliteActorStore {
 
     fn from_conn(conn: Connection) -> Result<Self, RegistryStoreError> {
         conn.execute_batch(
+            // Data columns are nullable so an admin tombstone can NULL the
+            // PII (GDPR erasure) while the `handle` row stays to block
+            // re-registration. `tombstoned_at` NULL = active.
             "CREATE TABLE IF NOT EXISTS actors (
                 handle           TEXT PRIMARY KEY NOT NULL,
-                actor_url        TEXT NOT NULL,
-                agent_id_hex     TEXT NOT NULL,
-                rsa_spki_der     BLOB NOT NULL,
-                attestation_json TEXT NOT NULL,
-                hint_epoch_ms    INTEGER NOT NULL,
-                registered_at_ms INTEGER NOT NULL
+                actor_url        TEXT,
+                agent_id_hex     TEXT,
+                rsa_spki_der     BLOB,
+                attestation_json TEXT,
+                hint_epoch_ms    INTEGER,
+                registered_at_ms INTEGER,
+                tombstoned_at    INTEGER
             );",
         )
         .map_err(storage)?;
@@ -67,6 +71,44 @@ impl SqliteActorStore {
         self.conn
             .lock()
             .map_err(|_| RegistryStoreError::Storage("registry connection lock poisoned".into()))
+    }
+
+    /// Admin erasure (GDPR): tombstone `handle` -- NULL its PII columns
+    /// and stamp `tombstoned_at`. The row STAYS, so FCFS never reopens the
+    /// name (re-issuing an erased real name is the impersonation the
+    /// continuity promise forbids). Tombstoning an unregistered handle
+    /// pre-reserves it. Idempotent.
+    ///
+    /// # Errors
+    /// [`RegistryStoreError::Storage`] on a backend failure.
+    pub fn tombstone(&self, handle: &str, now_ms: u64) -> Result<(), RegistryStoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO actors (handle, tombstoned_at) VALUES (?1, ?2)
+             ON CONFLICT(handle) DO UPDATE SET
+                tombstoned_at = ?2, actor_url = NULL, agent_id_hex = NULL,
+                rsa_spki_der = NULL, attestation_json = NULL,
+                hint_epoch_ms = NULL, registered_at_ms = NULL",
+            rusqlite::params![handle, now_ms],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Admin re-release: drop the tombstone for `handle` so the name
+    /// reopens to FCFS. Only removes tombstones, never a live
+    /// registration. Idempotent.
+    ///
+    /// # Errors
+    /// [`RegistryStoreError::Storage`] on a backend failure.
+    pub fn release(&self, handle: &str) -> Result<(), RegistryStoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM actors WHERE handle = ?1 AND tombstoned_at IS NOT NULL",
+            rusqlite::params![handle],
+        )
+        .map_err(storage)?;
+        Ok(())
     }
 }
 
@@ -111,7 +153,8 @@ impl ActorRegistryStore for SqliteActorStore {
         let tx = conn.transaction().map_err(storage)?;
         let current: Option<(String, u64)> = tx
             .query_row(
-                "SELECT agent_id_hex, hint_epoch_ms FROM actors WHERE handle = ?1",
+                "SELECT agent_id_hex, hint_epoch_ms
+                   FROM actors WHERE handle = ?1 AND tombstoned_at IS NULL",
                 rusqlite::params![record.handle],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
             )
@@ -152,7 +195,7 @@ impl ActorRegistryStore for SqliteActorStore {
             .query_row(
                 "SELECT handle, actor_url, agent_id_hex, rsa_spki_der,
                         attestation_json, registered_at_ms
-                   FROM actors WHERE handle = ?1",
+                   FROM actors WHERE handle = ?1 AND tombstoned_at IS NULL",
                 rusqlite::params![handle],
                 |row| {
                     Ok((
@@ -268,5 +311,72 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tombstone_erases_pii_blocks_fcfs_and_serves_404() {
+        let store = mem();
+        store
+            .register(record_with("josh", "a".repeat(64), 10))
+            .unwrap();
+        store.tombstone("josh", 999).unwrap();
+        // Erased -> not served (404) ...
+        assert_eq!(store.get("josh"), None);
+        // ... the PII columns are actually NULL ...
+        {
+            let conn = store.conn.lock().unwrap();
+            let agent: Option<String> = conn
+                .query_row(
+                    "SELECT agent_id_hex FROM actors WHERE handle = 'josh'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(agent, None, "agent id erased");
+        }
+        // ... and the name never returns to FCFS.
+        assert_eq!(
+            store.register(record_with("josh", "b".repeat(64), 11)),
+            Err(RegistryStoreError::HandleTaken)
+        );
+    }
+
+    #[test]
+    fn tombstone_preblocks_an_unregistered_name() {
+        let store = mem();
+        store.tombstone("premium", 1).unwrap();
+        assert_eq!(
+            store.register(record_with("premium", "a".repeat(64), 10)),
+            Err(RegistryStoreError::HandleTaken)
+        );
+        assert_eq!(store.get("premium"), None);
+    }
+
+    #[test]
+    fn update_on_tombstoned_handle_is_unknown() {
+        let store = mem();
+        let agent = "a".repeat(64);
+        store
+            .register(record_with("josh", agent.clone(), 10))
+            .unwrap();
+        store.tombstone("josh", 999).unwrap();
+        assert_eq!(
+            store.update(record_with("josh", agent, 20)),
+            Err(RegistryStoreError::UnknownHandle)
+        );
+    }
+
+    #[test]
+    fn release_reopens_fcfs_to_a_new_agent() {
+        let store = mem();
+        store
+            .register(record_with("josh", "a".repeat(64), 10))
+            .unwrap();
+        store.tombstone("josh", 999).unwrap();
+        store.release("josh").unwrap();
+        store
+            .register(record_with("josh", "b".repeat(64), 5))
+            .unwrap();
+        assert_eq!(store.get("josh").unwrap().agent_id_hex, "b".repeat(64));
     }
 }
