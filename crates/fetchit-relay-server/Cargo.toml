@@ -31,6 +31,7 @@ default = []
 fediverse-inbox = [
     "dep:fetchit-fedi",
     "dep:rsa",
+    "dep:rusqlite",
     "dep:fetchit-trust-types",
     "dep:fetchit-trust-client",
     "fetchit-trust-client/reqwest",
@@ -53,6 +54,10 @@ fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust-types = { path = "../fetchit-trust-types", optional = true }
 fetchit-trust-client = { path = "../fetchit-trust-client", optional = true }
 rsa = { workspace = true, optional = true }
+# M5.1 Task 13: durable, in-relay actor-registry ledger. `bundled` compiles
+# SQLite from source (no system lib); gated under `fediverse-inbox` so the
+# default + community chat relays never pull it.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 futures-util.workspace = true
 hex.workspace = true
 postcard.workspace = true

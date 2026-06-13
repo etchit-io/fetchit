@@ -49,17 +49,24 @@ fn rejection_outcome(r: &RegistryRejection) -> Outcome {
     }
 }
 
-/// Map a store error to its outcome (409/404).
+/// Map a store error to its outcome (404 / 409 / 500).
 fn store_outcome(e: &RegistryStoreError) -> Outcome {
-    let status = match e {
-        RegistryStoreError::UnknownHandle => 404,
+    match e {
+        RegistryStoreError::UnknownHandle => Outcome {
+            status: 404,
+            body: e.to_string(),
+        },
         RegistryStoreError::HandleTaken
         | RegistryStoreError::AgentMismatch
-        | RegistryStoreError::StaleEpoch => 409,
-    };
-    Outcome {
-        status,
-        body: e.to_string(),
+        | RegistryStoreError::StaleEpoch => Outcome {
+            status: 409,
+            body: e.to_string(),
+        },
+        // Never leak SQL / IO internals to the caller; the detail is logged.
+        RegistryStoreError::Storage(_) => Outcome {
+            status: 500,
+            body: "internal error".into(),
+        },
     }
 }
 

@@ -15,6 +15,7 @@
 pub mod actor_doc;
 pub mod router;
 pub mod store;
+pub mod store_sqlite;
 pub mod verify;
 pub mod webfinger;
 
@@ -23,6 +24,7 @@ use thiserror::Error;
 
 pub use router::{registry_router, RegistryState};
 pub use store::InMemoryActorStore;
+pub use store_sqlite::SqliteActorStore;
 pub use verify::{verify_registration, RegistryConfig};
 
 /// A stored, verified registration. `agent_id_hex` is the continuity
@@ -62,6 +64,10 @@ pub enum RegistryStoreError {
     /// PUT whose `hint_epoch_ms` is not strictly greater than stored. 409.
     #[error("stale hint epoch")]
     StaleEpoch,
+    /// A durable-store backend error (I/O, lock poison, SQL). Maps to
+    /// HTTP 500; the detail is for logs, never served to the caller.
+    #[error("registry storage error: {0}")]
+    Storage(String),
 }
 
 /// Verification rejection — every variant maps to HTTP 422 with the
