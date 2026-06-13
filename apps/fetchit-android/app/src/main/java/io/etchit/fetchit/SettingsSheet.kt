@@ -33,6 +33,7 @@ class SettingsSheet(
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
         binding.refreshPeersButton.setOnClickListener { onRefreshClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
+        binding.aboutHeader.setOnClickListener { showAboutDialog(activity) }
         binding.settingsVersionText.text =
             activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
         bindThemePicker()

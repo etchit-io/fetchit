@@ -652,6 +652,28 @@
                 android:padding="8dp"
                 android:imeOptions="actionDone" />
 
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="16dp"
+                android:background="?attr/fetchitInk3" />
+
+            <TextView
+                android:id="@+id/aboutHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"
+                android:text="@string/about_settings_row"
+                android:textColor="?attr/fetchitCopper"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:background="?android:attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true" />
+
             <TextView
                 android:id="@+id/settingsVersionText"
                 android:layout_width="match_parent"

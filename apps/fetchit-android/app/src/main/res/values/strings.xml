@@ -122,6 +122,21 @@
     <!-- Footer of the Settings panel — version of the app the user is on. -->
     <string name="settings_version">fetch&gt;it &#xb7; v%1$s</string>
 
+    <!-- About / LIT Chat info screen (M1.2). Honest posture; not an AP-identity
+         surface (no fediverse handle shown or linked here). -->
+    <string name="about_settings_row">about LIT Chat</string>
+    <string name="about_title">About LIT Chat</string>
+    <string name="about_what_heading">what it is</string>
+    <string name="about_what_body">LIT Chat is post-quantum encrypted chat, part of etch/it, fetch&gt;it, and LIT.</string>
+    <string name="about_crypto_heading">encryption</string>
+    <string name="about_crypto_body">Message content is end-to-end encrypted with post-quantum cryptography (ML-KEM-768 and ML-DSA-65, via MLS). Metadata, such as who you talk to and when, is not private. No post-quantum claim applies to any fediverse bridge.</string>
+    <string name="about_preview_heading">technical preview</string>
+    <string name="about_preview_body">This is an early, internal build. Expect rough edges; it is not yet a public release.</string>
+    <string name="about_recovery_heading">recovery</string>
+    <string name="about_recovery_body">There is no account recovery. A new device is a new identity. Re-add your contacts by scanning their codes again.</string>
+    <string name="about_license_body">fetch&gt;it &#xb7; beta software. Licensed AGPL-3.0-only or commercial. Provided AS IS, with no warranty.</string>
+    <string name="about_license_link">view the AGPL-3.0 license</string>
+
     <!-- Mode switch glyphs -->
     <string name="mode_chat_glyph">✉</string>
     <string name="mode_browse_glyph">❯</string>
