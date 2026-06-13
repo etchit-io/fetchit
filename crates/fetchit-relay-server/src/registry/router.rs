@@ -613,4 +613,40 @@ mod tests {
             .unwrap();
         assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
     }
+
+    #[test]
+    fn tombstoned_row_is_ghost_free_across_webfinger_actordoc_and_put() {
+        // Alice's note: PIN the ghost-free claim, don't imply it. A
+        // tombstoned handle 404s on webfinger + actor-doc + PUT via the
+        // store's `tombstoned_at IS NULL` filter. Uses the real SQLite
+        // store (the in-memory store has no tombstone path).
+        use crate::registry::SqliteActorStore;
+        let store = Arc::new(SqliteActorStore::open(":memory:").unwrap());
+        let config = RegistryConfig::new("etchit.io");
+        let req: RegisterActorRequest = serde_json::from_str(VALID).unwrap();
+        store
+            .register(verify_registration(&config, &req, 1).unwrap())
+            .unwrap();
+        store.tombstone("josh", 999).unwrap();
+        let st = RegistryState {
+            store: store.clone(),
+            config,
+            rate_limit: Arc::new(InboxRateLimit::new(1000)),
+        };
+        assert_eq!(
+            webfinger_inner(&st, Some("resource=acct:josh@etchit.io")).status,
+            404,
+            "webfinger must not resurrect a tombstoned actor"
+        );
+        assert_eq!(
+            actor_doc_inner(&st, "josh").status,
+            404,
+            "actor-doc must not resurrect a tombstoned actor"
+        );
+        assert_eq!(
+            update_inner(&st, "josh", VALID.as_bytes(), 2).status,
+            404,
+            "PUT on a tombstoned handle is unknown, not an update"
+        );
+    }
 }
