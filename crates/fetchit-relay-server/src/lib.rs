@@ -19,6 +19,8 @@ pub mod profile;
 pub mod ratelimit;
 #[cfg(feature = "fediverse-inbox")]
 pub mod registry;
+#[cfg(feature = "fediverse-inbox")]
+pub mod registry_admin;
 pub mod server;
 pub mod session;
 pub mod signature;

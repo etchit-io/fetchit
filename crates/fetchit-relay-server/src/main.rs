@@ -12,6 +12,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Registry admin one-shots (only under --features fediverse-inbox):
+    // `registry <tombstone|release|get|list>` operates on the ledger DB
+    // and exits without starting the server.
+    #[cfg(feature = "fediverse-inbox")]
+    if fetchit_relay_server::registry_admin::run_if_admin()?.is_some() {
+        return Ok(());
+    }
+
     let config = ServerConfig::from_env()?;
     let server = Server::new(config);
     // M4 Stage 7: opt-in fediverse-inbox role. A no-op (route absent)

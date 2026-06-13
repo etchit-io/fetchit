@@ -113,6 +113,47 @@ impl SqliteActorStore {
         .map_err(storage)?;
         Ok(())
     }
+
+    /// Whether `handle` is currently HELD (tombstoned): present but
+    /// blocked from self-serve. Lets the admin tools distinguish "held"
+    /// from "absent" (`get` returns only the active record).
+    ///
+    /// # Errors
+    /// [`RegistryStoreError::Storage`] on a backend failure.
+    pub fn is_held(&self, handle: &str) -> Result<bool, RegistryStoreError> {
+        let conn = self.lock()?;
+        let held: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM actors WHERE handle = ?1 AND tombstoned_at IS NOT NULL",
+                rusqlite::params![handle],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(held.is_some())
+    }
+
+    /// Every handle in the ledger with its held flag, sorted by handle.
+    /// Backs the admin `list` command and a future admin GUI.
+    ///
+    /// # Errors
+    /// [`RegistryStoreError::Storage`] on a backend failure.
+    pub fn list_handles(&self) -> Result<Vec<(String, bool)>, RegistryStoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT handle, tombstoned_at IS NOT NULL FROM actors ORDER BY handle")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+            })
+            .map_err(storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(storage)?);
+        }
+        Ok(out)
+    }
 }
 
 impl ActorRegistryStore for SqliteActorStore {
@@ -381,5 +422,24 @@ mod tests {
             .register(record_with("josh", "b".repeat(64), 5))
             .unwrap();
         assert_eq!(store.get("josh").unwrap().agent_id_hex, "b".repeat(64));
+    }
+
+    #[test]
+    fn is_held_and_list_handles_report_status() {
+        let store = mem();
+        store
+            .register(record_with("alice", "a".repeat(64), 1))
+            .unwrap();
+        store
+            .register(record_with("bob", "b".repeat(64), 1))
+            .unwrap();
+        store.tombstone("bob", 5).unwrap();
+        assert!(!store.is_held("alice").unwrap());
+        assert!(store.is_held("bob").unwrap());
+        assert!(!store.is_held("nobody").unwrap());
+        assert_eq!(
+            store.list_handles().unwrap(),
+            vec![("alice".to_string(), false), ("bob".to_string(), true)]
+        );
     }
 }
