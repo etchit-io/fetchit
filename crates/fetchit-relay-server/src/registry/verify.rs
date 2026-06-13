@@ -52,7 +52,7 @@ impl RegistryConfig {
 /// Validate a handle against the SO-3 policy: `[a-z0-9_-]`, 1..=64,
 /// lowercase-only. Mirrors `fetchit-chat`'s private `validate_actor_handle`
 /// (restated here so the relay-server does not depend on fetchit-chat).
-/// Uppercase is rejected, never silently lowercased — the signature was
+/// Uppercase is rejected, never silently lowercased -- the signature was
 /// over the exact handle bytes.
 ///
 /// # Errors
@@ -104,6 +104,12 @@ pub fn verify_registration(
     now_ms: u64,
 ) -> Result<ActorRecord, RegistryRejection> {
     let actor_url = canonical_actor_url(cfg, &req.handle)?;
+
+    // F4: reject an epoch that would overflow SQLite's i64 INTEGER as a
+    // 422 here, rather than let it surface as a 500 from the store's ToSql.
+    if req.attestation_v2.hint_epoch_ms > i64::MAX as u64 {
+        return Err(RegistryRejection::Epoch);
+    }
 
     // SO-4: parse-validate the SPKI so the served publicKeyPem is a real
     // RSA key. verify_binding_v2 covers the SPKI bytes in the signed
@@ -261,6 +267,19 @@ mod tests {
         assert!(matches!(
             verify_registration(&cfg, &req, 1).unwrap_err(),
             RegistryRejection::Spki(_) | RegistryRejection::Attestation(_)
+        ));
+    }
+
+    #[test]
+    fn epoch_over_i64_max_is_rejected_as_422_not_500() {
+        // F4: a hint_epoch_ms that overflows SQLite's i64 is a 422 here,
+        // before it can reach the store and surface as a 500.
+        let cfg = RegistryConfig::new("etchit.io");
+        let mut req = valid_request();
+        req.attestation_v2.hint_epoch_ms = u64::MAX;
+        assert!(matches!(
+            verify_registration(&cfg, &req, 1).unwrap_err(),
+            RegistryRejection::Epoch
         ));
     }
 }

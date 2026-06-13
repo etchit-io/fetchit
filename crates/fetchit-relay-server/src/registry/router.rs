@@ -416,7 +416,7 @@ mod tests {
     }
 
     /// PUT 200 path: one keypair, two epochs (re-sign helper, no shared
-    /// committed fixture — confirmed with Alice). Register epoch 1000,
+    /// committed fixture -- confirmed with Alice). Register epoch 1000,
     /// update epoch 2000 (same agent, newer) -> 200; re-PUT epoch 1000
     /// (stale) -> 409.
     #[test]
@@ -648,5 +648,60 @@ mod tests {
             404,
             "PUT on a tombstoned handle is unknown, not an update"
         );
+    }
+
+    #[tokio::test]
+    async fn oversize_body_is_rejected_with_413() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let app = registry_router(state());
+        let big = vec![b'x'; 70 * 1024]; // over the 64 KB cap
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/actors")
+                    .body(Body::from(big))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_serve_rate_limits_without_x_real_ip_via_connect_info() {
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+        // Serve the real router with connect-info wired (the F1 fix). With
+        // no x-real-ip header the source key falls back to the live peer
+        // IP, so the 1-token bucket limits the 2nd request; pre-fix the
+        // peer was always None and every header-less request shared the
+        // "unknown" bucket. This exercises the serve path the oneshot
+        // tests skip. (Both requests share 127.0.0.1, so this asserts the
+        // path is live, not that distinct IPs get distinct buckets.)
+        let st = RegistryState {
+            store: Arc::new(InMemoryActorStore::new()),
+            config: RegistryConfig::new("etchit.io"),
+            rate_limit: Arc::new(InboxRateLimit::new(1)),
+        };
+        let app = registry_router(st);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/v1/actors");
+        let r1 = client.post(&url).body("{}").send().await.unwrap();
+        assert_ne!(r1.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let r2 = client.post(&url).body("{}").send().await.unwrap();
+        assert_eq!(r2.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     }
 }

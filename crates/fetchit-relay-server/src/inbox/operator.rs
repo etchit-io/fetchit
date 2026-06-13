@@ -214,16 +214,25 @@ pub fn attach_if_enabled(server: Server) -> anyhow::Result<Server> {
     // empty/0, so an operator that sets neither env var keeps fully-open
     // registration.
     if let Ok(path) = std::env::var("FETCHIT_RESERVED_HANDLES_FILE") {
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => {
-                config.reserved_handles = contents
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                    .map(str::to_owned)
-                    .collect();
+        // Cap the read so a misconfigured path (a giant file) cannot
+        // exhaust memory; a real reserved wordlist is well under this.
+        let oversize = std::fs::metadata(&path).is_ok_and(|m| m.len() > 16 * 1024 * 1024);
+        if oversize {
+            tracing::warn!("reserved-handles file {path} exceeds 16 MiB; ignored");
+        } else {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    config.reserved_handles = contents
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        // Handles are lowercase, so an uppercase entry
+                        // would be silently inert (Alice F5).
+                        .map(str::to_lowercase)
+                        .collect();
+                }
+                Err(e) => tracing::warn!("reserved-handles file {path} unreadable: {e}"),
             }
-            Err(e) => tracing::warn!("reserved-handles file {path} unreadable: {e}"),
         }
     }
     if let Ok(raw) = std::env::var("FETCHIT_RESERVED_MIN_LEN") {

@@ -6,11 +6,11 @@
 //! codes match `fetchit-fedi/tests/fixtures/registry-v1/README.md`.
 //!
 //! Module split (one concept per file):
-//! - [`verify`] — pure handle policy + canonical URL + `verify_binding_v2`.
-//! - [`store`] — `ActorRegistryStore` impls (FCFS + continuity + epoch).
-//! - [`webfinger`] — `acct:` resource parse + JRD.
-//! - [`actor_doc`] — `ActivityPub` actor JSON-LD with the embedded attestation.
-//! - [`router`] — axum routes + testable inner handlers.
+//! - [`verify`] -- pure handle policy + canonical URL + `verify_binding_v2`.
+//! - [`store`] -- `ActorRegistryStore` impls (FCFS + continuity + epoch).
+//! - [`webfinger`] -- `acct:` resource parse + JRD.
+//! - [`actor_doc`] -- `ActivityPub` actor JSON-LD with the embedded attestation.
+//! - [`router`] -- axum routes + testable inner handlers.
 
 pub mod actor_doc;
 pub mod router;
@@ -70,11 +70,11 @@ pub enum RegistryStoreError {
     Storage(String),
 }
 
-/// Verification rejection — every variant maps to HTTP 422 with the
+/// Verification rejection -- every variant maps to HTTP 422 with the
 /// `Display` text served back to the user.
 #[derive(Debug, Error)]
 pub enum RegistryRejection {
-    /// Handle failed `[a-z0-9_-]{1,64}` (incl. uppercase) — SO-3.
+    /// Handle failed `[a-z0-9_-]{1,64}` (incl. uppercase) -- SO-3.
     #[error("invalid handle: {0}")]
     Handle(String),
     /// `RegisterActorRequest` body did not parse.
@@ -94,6 +94,10 @@ pub enum RegistryRejection {
         /// Handle from the request body.
         body: String,
     },
+    /// `hint_epoch_ms` exceeds the storable `i64` range. Caught before the
+    /// store so it surfaces as 422, not a 500 from `ToSql` (Alice F4).
+    #[error("hint_epoch_ms exceeds the storable range")]
+    Epoch,
 }
 
 /// In-memory + future durable store of verified registrations. Sync

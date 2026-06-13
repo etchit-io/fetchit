@@ -303,7 +303,15 @@ impl Server {
                 }
             });
         }
-        axum::serve(listener, router).await?;
+        // `into_make_service_with_connect_info` populates `ConnectInfo<SocketAddr>`
+        // so the registry rate limiter's peer fallback is live when the
+        // CF-set `x-real-ip` header is absent (Alice F1); without it every
+        // header-less request collapses to one shared bucket.
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
 }
