@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { classify, buildForwardHeaders } from "../src/worker.js";
+import { classify, allowedMethods, buildForwardHeaders } from "../src/worker.js";
 
-describe("classify — the routing + security decision", () => {
+describe("classify -- the routing + security decision", () => {
   it("proxies a GET WebFinger request", () => {
     expect(classify("/.well-known/webfinger", "GET")).toBe("proxy");
   });
@@ -10,9 +10,9 @@ describe("classify — the routing + security decision", () => {
     expect(classify("/.well-known/webfinger", "POST")).toBe("method-not-allowed");
   });
 
-  it("proxies GET + POST on the actors collection", () => {
+  it("proxies GET on the actors collection but no longer POST (registration moved to /v1/actors)", () => {
     expect(classify("/actors", "GET")).toBe("proxy");
-    expect(classify("/actors", "POST")).toBe("proxy");
+    expect(classify("/actors", "POST")).toBe("method-not-allowed");
   });
 
   it("proxies GET on an actor doc + its collections", () => {
@@ -26,24 +26,57 @@ describe("classify — the routing + security decision", () => {
     expect(classify("/actors/josh", "PUT")).toBe("method-not-allowed");
   });
 
+  it("proxies POST on the /v1/actors registry collection", () => {
+    expect(classify("/v1/actors", "POST")).toBe("proxy");
+  });
+
+  it("rejects non-POST on /v1/actors", () => {
+    expect(classify("/v1/actors", "GET")).toBe("method-not-allowed");
+    expect(classify("/v1/actors", "PUT")).toBe("method-not-allowed");
+  });
+
+  it("proxies PUT on a /v1/actors/<handle> update", () => {
+    expect(classify("/v1/actors/josh", "PUT")).toBe("proxy");
+  });
+
+  it("rejects non-PUT on /v1/actors/<handle>", () => {
+    expect(classify("/v1/actors/josh", "POST")).toBe("method-not-allowed");
+    expect(classify("/v1/actors/josh", "GET")).toBe("method-not-allowed");
+  });
+
   it("does NOT proxy the marketing site or ops endpoints", () => {
     expect(classify("/", "GET")).toBeNull();
     expect(classify("/index.html", "GET")).toBeNull();
     expect(classify("/etch/", "GET")).toBeNull();
     expect(classify("/city", "GET")).toBeNull();
-    expect(classify("/health", "GET")).toBeNull(); // bridge ops — not frontable
+    expect(classify("/health", "GET")).toBeNull(); // bridge ops -- not frontable
     expect(classify("/metrics", "GET")).toBeNull();
   });
 
   it("does NOT proxy a path that merely starts with the prefix string", () => {
-    // exact-or-subpath match: /actorsfoo and /blog/actors are not actors
+    // exact-or-subpath match: /actorsfoo, /v1/actorsfoo, /blog/actors are not routes
     expect(classify("/actorsfoo", "GET")).toBeNull();
+    expect(classify("/v1/actorsfoo", "POST")).toBeNull();
     expect(classify("/blog/actors-explained", "GET")).toBeNull();
     expect(classify("/.well-known/webfinger-evil", "GET")).toBeNull();
   });
 });
 
-describe("buildForwardHeaders — the rate-limit source-IP lock (F2)", () => {
+describe("allowedMethods -- the 405 Allow header source", () => {
+  it("reports the single permitted method per route", () => {
+    expect(allowedMethods("/.well-known/webfinger")).toBe("GET");
+    expect(allowedMethods("/v1/actors")).toBe("POST");
+    expect(allowedMethods("/v1/actors/josh")).toBe("PUT");
+    expect(allowedMethods("/actors")).toBe("GET");
+    expect(allowedMethods("/actors/josh")).toBe("GET");
+  });
+
+  it("is empty for a non-fediverse path (never 405'd)", () => {
+    expect(allowedMethods("/index.html")).toBe("");
+  });
+});
+
+describe("buildForwardHeaders -- the rate-limit source-IP lock (F2)", () => {
   it("sets x-real-ip from CF-Connecting-IP, overwriting a client-supplied value", () => {
     const inbound = new Headers({
       "x-real-ip": "1.2.3.4",
