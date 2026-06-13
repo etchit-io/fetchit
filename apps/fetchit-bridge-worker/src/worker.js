@@ -49,6 +49,35 @@ export function classify(pathname, method) {
   return null;
 }
 
+/**
+ * Build the headers for the upstream request: drop `host` + hop-by-hop
+ * headers, then SET the origin's rate-limit source header (`x-real-ip`)
+ * from Cloudflare's authoritative `cfConnectingIp`. SET (not append)
+ * overwrites any client-supplied `x-real-ip`, and an absent
+ * `cfConnectingIp` deletes it, so a forged value can never reach the
+ * origin (Alice F2). The origin keys its registry rate limiter on this
+ * header and is reachable only via this Worker.
+ *
+ * @param {Headers} requestHeaders
+ * @param {string | null} cfConnectingIp
+ * @returns {Headers}
+ */
+export function buildForwardHeaders(requestHeaders, cfConnectingIp) {
+  const headers = new Headers();
+  for (const [k, v] of requestHeaders) {
+    const lower = k.toLowerCase();
+    if (lower !== "host" && !HOP_BY_HOP.has(lower)) {
+      headers.set(k, v);
+    }
+  }
+  if (cfConnectingIp) {
+    headers.set("x-real-ip", cfConnectingIp);
+  } else {
+    headers.delete("x-real-ip");
+  }
+  return headers;
+}
+
 export default {
   /**
    * @param {Request} request
@@ -76,13 +105,10 @@ export default {
     }
 
     const target = origin + url.pathname + url.search;
-    const headers = new Headers();
-    for (const [k, v] of request.headers) {
-      const lower = k.toLowerCase();
-      if (lower !== "host" && !HOP_BY_HOP.has(lower)) {
-        headers.set(k, v);
-      }
-    }
+    const headers = buildForwardHeaders(
+      request.headers,
+      request.headers.get("CF-Connecting-IP"),
+    );
 
     const init = { method: request.method, headers, redirect: "manual" };
     if (request.method !== "GET" && request.method !== "HEAD") {
