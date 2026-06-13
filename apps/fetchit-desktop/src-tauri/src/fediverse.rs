@@ -128,6 +128,11 @@ pub async fn fediverse_mint(
     handle: String,
 ) -> Result<MintOutcomeDto, String> {
     ensure_chat_enabled(&app_state)?;
+    // Handles are lowercase-canonical (SO-3): normalize user input once
+    // here so the attestation, actor URL, vault path, and the stored
+    // setting all agree. The crate's validate_actor_handle then rejects
+    // anything still non-lowercase.
+    let handle = handle.trim().to_lowercase();
     let (record, relay) = crate::chat::self_profile_record(&chat_state).await?;
     let client = chat_state.get().await?;
     let identity = client

@@ -69,7 +69,11 @@ pub async fn fediverse_lookup(
     handle: String,
 ) -> Result<LookupDto, String> {
     ensure_chat_enabled(&app_state)?;
-    let parsed = fetchit_fedi::parse_mention(handle.trim()).map_err(|e| e.to_string())?;
+    // Handles are lowercase-canonical (SO-3): lowercase the whole input
+    // before parsing so the WebFinger query, the canonical handle, and
+    // the continuity-ledger key all match the lowercase registration.
+    let parsed =
+        fetchit_fedi::parse_mention(&handle.trim().to_lowercase()).map_err(|e| e.to_string())?;
     let canonical = format!("@{}@{}", parsed.local, parsed.instance);
     let actor_url = fetchit_fedi::resolve_handle(&parsed)
         .await

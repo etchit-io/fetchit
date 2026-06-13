@@ -44,17 +44,31 @@ the discovery and introduction layer for the private chat graph.
 
 ## Relationship to M4 (do not re-spec in-flight work)
 
-M4 already owns, and Bob's approved `fetchit-bridge-server` foundation plan
-is already building:
+The fediverse bridge SERVER is **`fetchit-relay-server` built with
+`--features fediverse-inbox`** (there is no separate `fetchit-bridge-server`
+crate; that name was a drafting error). The `fediverse-inbox` Cargo feature
+IS the wyse37 isolation: the default relay build ships zero fediverse code or
+deps, and a community-relay operator opts into the bridge role with the
+feature, so the unauth internet-facing surface never shares a process with the
+load-bearing chat relays. All M5 server endpoints land in that feature-gated
+router, alongside the existing `POST /inbox`.
+
+Already SHIPPED on `chat` (the inbound half):
+
+- `POST /inbox` with the 5 pre-flight gates (body cap, per-instance rate limit,
+  HTTP-Signature verify, replay window, denylist) and a WebFinger CLIENT for
+  resolving inbound actor pubkeys.
+
+Bob's approved foundation plan, NOT yet merged (the serving half M5 needs):
 
 - WebFinger server for etchit.io (`/.well-known/webfinger`)
 - AP actor doc + collections hosting (followers / following / outbox)
 - Inbound Follow / Accept / Undo handling + outbox fan-out to follower
   inboxes with retry-backoff (Tier 3 organic)
 - Moderation tooling (instance blocklist, report queue, suspend-actor)
-- The wyse37 isolation decision: the unauth internet-facing inbox NEVER
-  shares a process with the load-bearing chat relays. M5 inherits this as
-  prod architecture; all M5 server endpoints land in `fetchit-bridge-server`.
+
+M5.1's D-lane builds that serving half (plus the registry endpoints below) in
+`fetchit-relay-server` under `fediverse-inbox`.
 
 M5 adds on top, and amends one standing decision:
 
@@ -82,7 +96,8 @@ Add an explicit `attestation_version: 2` field. v1 records (internal-only
 population, M1 status) are re-minted transparently on first M5-capable client
 run; the bridge rejects v1 registrations once M5 ships.
 
-**Self-serve registry endpoints** on `fetchit-bridge-server`:
+**Self-serve registry endpoints** on `fetchit-relay-server` (the
+`fediverse-inbox` feature):
 
 - `POST /v1/actors` - register: client submits the signed attestation v2.
   Bridge verifies the ML-DSA signature against the embedded agent id,

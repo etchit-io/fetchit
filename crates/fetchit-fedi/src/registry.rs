@@ -1,7 +1,8 @@
 //! Self-serve actor-registry client (M5.1, Component D).
 //!
-//! The JSON shapes here are a frozen wire contract shared with
-//! `fetchit-bridge-server`; tests pin them against
+//! The JSON shapes here are a frozen wire contract shared with the
+//! fediverse bridge server (`fetchit-relay-server` built with
+//! `--features fediverse-inbox`); tests pin them against
 //! `tests/fixtures/registry-v1/`. See the fixture README for the
 //! server-side verification obligations (attestation verify,
 //! first-come-first-served handles, same-agent-id continuity,
@@ -17,7 +18,8 @@ const REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Registration / update request body. One shape for both verbs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterActorRequest {
-    /// Local handle, client-validated `[A-Za-z0-9_-]{1,64}`.
+    /// Local handle, client-validated `[a-z0-9_-]{1,64}` (lowercase
+    /// canonical; the bridge rejects any uppercase byte with 422).
     pub handle: String,
     /// RSA `SubjectPublicKeyInfo` DER, base64 on the wire.
     #[serde(with = "b64")]
@@ -245,5 +247,111 @@ mod tests {
             matches!(err, RegistryError::AttestationRejected(ref r) if r == "bad attestation"),
             "got {err:?}"
         );
+    }
+
+    /// Real RSA-2048 `SubjectPublicKeyInfo` DER (base64) baked into the
+    /// valid-attestation fixture so the vector is SO-4-ready: a bridge
+    /// that parse-validates the SPKI at registration still accepts it.
+    const VALID_FIXTURE_SPKI_B64: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2JKTbZExlhDk7PvHi2pS9JgSVR/lUpONW/75Rfc23sI82tfXlqBrMrWOWBOZGrzUm1iQsEnsQlMBF4jZ7ZXCkGFle2mlmC269ObIPb+sIdPMSXbCU8zSNy5WUmFe1YOmydOp83aiDTmJAZJCHVawiXKd6mO3MHN+tU5tI6/x9nB5kKVXqcT+6BzHAvQrbvzqIG2HCPx09HEO79i3hsp29Vwal6h6D7TuD1lf3FQ0YWDuQnXSK59PoJ4Ck4SRTRdGSBIaSYTCmF0Kv31b1Ia86nn8Hi7nXsD6fTfh2OHKuio9g9Dt8TP2tyRdIZ/56sPepir5s03Jx3ug9kuAdhTcHwIDAQAB";
+
+    /// Canonical `actor_url` the bridge constructs from `(domain, handle)`
+    /// = `https://etchit.io/actors/josh`, rendered via `url::Url::as_str`.
+    /// This is the one byte-sensitive string fed to `verify_binding_v2`;
+    /// see the fixtures README's canonical-`actor_url` section.
+    fn fixture_actor_url() -> url::Url {
+        "https://etchit.io/actors/josh".parse().unwrap()
+    }
+
+    /// Build a cryptographically valid `RegisterActorRequest`: a fresh
+    /// ML-DSA-65 keypair signs `signing_input_v2` over the canonical
+    /// actor fields, so `verify_binding_v2` accepts it. Returns the
+    /// request plus the derived agent id hex.
+    fn build_valid_request() -> (RegisterActorRequest, String) {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+        let spki = STANDARD.decode(VALID_FIXTURE_SPKI_B64).unwrap();
+        let actor_url = fixture_actor_url();
+        let profile_addr = "a".repeat(64);
+        let relay_hint = "https://relay.example:8088/";
+        let epoch = 1_750_000_000_000u64;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let derived = hex::encode(fetchit_relay_proto::derive_agent_id(&pk_bytes));
+        let input = crate::attestation::signing_input_v2(
+            "josh",
+            &actor_url,
+            &derived,
+            &spki,
+            &profile_addr,
+            relay_hint,
+            epoch,
+        )
+        .unwrap();
+        let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let req = RegisterActorRequest {
+            handle: "josh".into(),
+            rsa_spki_der: spki,
+            attestation_v2: ActorAttestationV2 {
+                version: 2,
+                profile_addr,
+                relay_hint: relay_hint.into(),
+                hint_epoch_ms: epoch,
+                ml_dsa_pubkey: pk_bytes,
+                signature: sig,
+            },
+        };
+        (req, derived)
+    }
+
+    /// Regenerator for `register-request-valid.json`. Ignored by default
+    /// because each run mints a fresh keypair (nondeterministic bytes).
+    /// To refresh the committed fixture after a wire change, run
+    /// `cargo test -p fetchit-fedi emit_valid_registration_fixture -- --ignored --nocapture`
+    /// and overwrite the file with the printed JSON.
+    #[test]
+    #[ignore = "regenerator: prints the valid fixture JSON for manual capture"]
+    fn emit_valid_registration_fixture() {
+        let (req, _derived) = build_valid_request();
+        println!("{}", serde_json::to_string_pretty(&req).unwrap());
+    }
+
+    #[test]
+    fn build_valid_request_is_accepted_by_verify() {
+        let (req, derived) = build_valid_request();
+        let got = crate::attestation::verify_binding_v2(
+            &req.handle,
+            &fixture_actor_url(),
+            &req.rsa_spki_der,
+            &req.attestation_v2,
+        )
+        .expect("freshly built request must verify");
+        assert_eq!(got, derived);
+    }
+
+    /// Rot guard + the SO-2 green vector: the COMMITTED valid fixture
+    /// must verify under `verify_binding_v2` against the canonical
+    /// `actor_url`. If `signing_input_v2` or the wire shape ever drifts,
+    /// this fails loudly and the regenerator above refreshes it. Bob's
+    /// bridge endpoint test `include_str!`s the same file for its
+    /// register -> 201 success path.
+    #[test]
+    fn committed_valid_fixture_verifies() {
+        let req: RegisterActorRequest = serde_json::from_str(include_str!(
+            "../tests/fixtures/registry-v1/register-request-valid.json"
+        ))
+        .expect("valid fixture parses");
+        assert_eq!(req.handle, "josh");
+        let derived = crate::attestation::verify_binding_v2(
+            &req.handle,
+            &fixture_actor_url(),
+            &req.rsa_spki_der,
+            &req.attestation_v2,
+        )
+        .expect("committed valid fixture must verify against the canonical actor_url");
+        assert_eq!(derived.len(), 64);
+        assert!(derived
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     }
 }

@@ -4,7 +4,7 @@
 
 **Goal:** Attestation v2 (profile address + relay hint inside the signed actor binding), the registry wire contract, and the desktop handle-lookup-to-private-DM bootstrap, per `docs/superpowers/specs/2026-06-12-m5-discovery-design.md` (Components D and A, client lane).
 
-**Architecture:** fetchit-fedi gains the v2 attestation format, a tolerant remote-actor lookup type, and a registry HTTP client whose JSON fixtures are the cross-lane contract for `fetchit-bridge-server` (lane B, planned separately). fetchit-chat gains v2 mint/upgrade and a handle-continuity ledger. The desktop composes the resolution chain (WebFinger, actor doc, attestation verify, relay profile-index, Autonomi manifest) into one `fediverse_lookup` command, and the UI reuses the existing v3 pair-accept and group-invite flows verbatim: a verified lookup result carries a synthesized v3 share URI, so "Message privately" is `chat_pair_accept` on it.
+**Architecture:** fetchit-fedi gains the v2 attestation format, a tolerant remote-actor lookup type, and a registry HTTP client whose JSON fixtures are the cross-lane contract for the fediverse bridge server (`fetchit-relay-server` --features fediverse-inbox, lane B). fetchit-chat gains v2 mint/upgrade and a handle-continuity ledger. The desktop composes the resolution chain (WebFinger, actor doc, attestation verify, relay profile-index, Autonomi manifest) into one `fediverse_lookup` command, and the UI reuses the existing v3 pair-accept and group-invite flows verbatim: a verified lookup result carries a synthesized v3 share URI, so "Message privately" is `chat_pair_accept` on it.
 
 **Tech Stack:** Rust (saorsa-pqc ML-DSA-65, reqwest + wiremock, serde), Tauri 2 commands, vanilla TS + vitest (jsdom).
 
@@ -1025,7 +1025,7 @@ git -c user.name='josh-clsn' -c user.email='59794857+josh-clsn@users.noreply.git
 - Create: `crates/fetchit-fedi/tests/fixtures/registry-v1/README.md`
 - Modify: `crates/fetchit-fedi/src/lib.rs`, `crates/fetchit-fedi/src/attestation.rs` (b64 visibility)
 
-This module is the cross-lane handshake: the fixtures pin the JSON `fetchit-bridge-server` (lane B) must accept and return. Bob reviews these files before implementing the endpoints.
+This module is the cross-lane handshake: the fixtures pin the JSON the bridge server (fetchit-relay-server, fediverse-inbox feature, lane B) must accept and return. Bob reviews these files before implementing the endpoints.
 
 - [ ] **Step 1: Widen the b64 helper**
 
@@ -1063,7 +1063,7 @@ In attestation.rs change `mod b64` to `pub(crate) mod b64` and its two functions
 ```markdown
 # Registry wire contract v1 (M5.1, Component D)
 
-Client: crates/fetchit-fedi/src/registry.rs. Server: fetchit-bridge-server.
+Client: crates/fetchit-fedi/src/registry.rs. Server: fetchit-relay-server (--features fediverse-inbox).
 Spec: docs/superpowers/specs/2026-06-12-m5-discovery-design.md.
 
 ## POST /v1/actors (register)
@@ -1209,8 +1209,8 @@ Expected: compile FAIL
 ```rust
 //! Self-serve actor-registry client (M5.1, Component D).
 //!
-//! The JSON shapes here are a frozen wire contract shared with
-//! `fetchit-bridge-server`; tests pin them against
+//! The JSON shapes here are a frozen wire contract shared with the
+//! fediverse bridge server (fetchit-relay-server, fediverse-inbox); tests pin them against
 //! `tests/fixtures/registry-v1/`. See the fixture README for the
 //! server-side verification obligations.
 

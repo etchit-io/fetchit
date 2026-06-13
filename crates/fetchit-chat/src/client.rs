@@ -3313,9 +3313,13 @@ fn build_actor_url(domain: &str, handle: &str) -> Result<url::Url> {
 /// pre-claim guard.
 ///
 /// Rejects empty handles, handles longer than 64 chars, or any
-/// character outside `[A-Za-z0-9_-]`. The character allowlist forbids
-/// `.` and `/` so a malicious handle cannot traverse out of `fedi_dir`
-/// via [`crate::local_store::StoreLayout::actor_identity_path`].
+/// character outside `[a-z0-9_-]`. Handles are **lowercase**: uppercase
+/// is rejected (callers lowercase user input) so the signed attestation,
+/// the actor URL, the vault path, and the registry record all share one
+/// canonical form, matching the fediverse's case-insensitive acct
+/// local-parts. The allowlist also forbids `.` and `/` so a malicious
+/// handle cannot traverse out of `fedi_dir` via
+/// [`crate::local_store::StoreLayout::actor_identity_path`].
 fn validate_actor_handle(handle: &str) -> Result<()> {
     if handle.is_empty() {
         return Err(ChatError::Invalid("actor handle must be non-empty".into()));
@@ -3327,9 +3331,11 @@ fn validate_actor_handle(handle: &str) -> Result<()> {
         )));
     }
     for b in handle.bytes() {
-        if !matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-') {
+        if !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-') {
             return Err(ChatError::Invalid(format!(
-                "actor handle contains invalid char {:?}; allowed: [A-Za-z0-9_-]",
+                "actor handle contains invalid char {:?}; allowed: [a-z0-9_-] \
+                 (handles are lowercase; uppercase is rejected so the signed \
+                 attestation, actor URL, and registry record share one canonical form)",
                 b as char
             )));
         }
@@ -3789,12 +3795,22 @@ mod tests {
     #[test]
     fn validate_actor_handle_accepts_valid_handles() {
         assert!(validate_actor_handle("josh").is_ok());
-        assert!(validate_actor_handle("Alice_42").is_ok());
+        assert!(validate_actor_handle("alice_42").is_ok());
         assert!(validate_actor_handle("ab-c-d").is_ok());
         assert!(validate_actor_handle("x").is_ok());
         // Right at the 64-char cap.
         let max = "a".repeat(64);
         assert!(validate_actor_handle(&max).is_ok());
+    }
+
+    #[test]
+    fn validate_actor_handle_rejects_uppercase() {
+        // Handles are lowercase-only so the signed attestation, actor
+        // URL, and registry record share one canonical form (SO-3).
+        let err = validate_actor_handle("Alice_42").unwrap_err();
+        assert!(format!("{err}").contains("[a-z0-9_-]"));
+        assert!(validate_actor_handle("JOSH").is_err());
+        assert!(validate_actor_handle("Josh").is_err());
     }
 
     #[test]
