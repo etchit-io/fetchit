@@ -2861,6 +2861,7 @@ dependencies = [
  "fetchit-core",
  "fetchit-net",
  "fetchit-relay-proto",
+ "fetchit-trust-client",
  "hex",
  "log",
  "serde_json",

@@ -111,6 +111,21 @@ impl Drop for ChatClient {
     }
 }
 
+/// Compiled-in default M3 denylist endpoint (the NY-Trust service).
+/// Mirrors the desktop default; `FETCHIT_DENYLIST_URL` overrides it.
+const DEFAULT_DENYLIST_URL: &str = "https://trust.etchit.io/v1";
+
+/// Resolve the M3 denylist endpoint: a non-empty `FETCHIT_DENYLIST_URL`
+/// wins, else the compiled-in default. Mirrors the desktop resolver so
+/// Android chat gates against the same signed list.
+fn resolve_denylist_url() -> Option<String> {
+    std::env::var("FETCHIT_DENYLIST_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some(DEFAULT_DENYLIST_URL.to_string()))
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -134,7 +149,7 @@ impl ChatClient {
             reason: format!("relay_url: {e}"),
         })?;
 
-        let inner = Client::builder()
+        let mut inner = Client::builder()
             .daemonless(true)
             .relay_url(parsed_url)
             .data_dir(PathBuf::from(&data_dir))
@@ -142,6 +157,26 @@ impl ChatClient {
             .build()
             .await
             .map_err(ChatFfiError::from)?;
+
+        // M3: install the community denylist consumer so Android chat gates
+        // RelayUrl / AgentId like desktop. `install_m3_denylist` also routes
+        // BlockEvents into MultiHomeTransport when one is wired. Endpoint
+        // resolves from FETCHIT_DENYLIST_URL, else the NY-Trust default.
+        // Non-fatal: chat still runs if the install fails.
+        if let Some(denylist_url) = resolve_denylist_url() {
+            match fetchit_trust_client::ReqwestClient::new() {
+                Ok(http) => {
+                    let cache = PathBuf::from(&data_dir).join("denylist");
+                    let _ = std::fs::create_dir_all(&cache);
+                    let http: Arc<dyn fetchit_trust_client::HttpClient + Send + Sync + 'static> =
+                        Arc::new(http);
+                    if let Err(e) = inner.install_m3_denylist(denylist_url, Some(cache), http) {
+                        log::warn!("denylist install failed (non-fatal): {e}");
+                    }
+                }
+                Err(e) => log::warn!("denylist http client init failed (non-fatal): {e}"),
+            }
+        }
 
         let (tx, rx) = mpsc::unbounded_channel::<ChatEventFfi>();
 

@@ -24,6 +24,7 @@ fetchit-core = { path = "../fetchit-core" }
 fetchit-net = { path = "../fetchit-net" }
 fetchit-chat = { path = "../fetchit-chat" }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"] }
 # Exact-pinned: the uniffi runtime must match the uniffi-bindgen CLI version
 # (scripts/build-jni-libs.sh) — a mismatch fails the generated bindings'
 # API-checksum check at startup. Bump the runtime and the CLI together.
