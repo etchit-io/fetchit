@@ -7,6 +7,7 @@ mod chat;
 mod disk_cache;
 #[cfg(feature = "e2e")]
 mod e2e;
+mod etchit_handoff;
 mod fediverse;
 mod fediverse_lookup;
 mod linux_deep_link;
@@ -1144,6 +1145,8 @@ pub fn run() {
             fediverse::fediverse_mint,
             fediverse::fediverse_publish,
             fediverse_lookup::fediverse_lookup,
+            etchit_handoff::etchit_handoff,
+            etchit_handoff::etchit_open_profile,
         ])
         .on_window_event(|win, event| {
             // ClearMode::OnClose: wipe the on-disk cache when the user
