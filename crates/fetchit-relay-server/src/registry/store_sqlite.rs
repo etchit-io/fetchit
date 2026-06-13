@@ -74,10 +74,13 @@ impl SqliteActorStore {
     }
 
     /// Admin erasure (GDPR): tombstone `handle` -- NULL its PII columns
-    /// and stamp `tombstoned_at`. The row STAYS, so FCFS never reopens the
-    /// name (re-issuing an erased real name is the impersonation the
-    /// continuity promise forbids). Tombstoning an unregistered handle
-    /// pre-reserves it. Idempotent.
+    /// and stamp `tombstoned_at`. The row STAYS, so the name is HELD:
+    /// self-serve FCFS cannot reopen it; only a deliberate admin
+    /// [`Self::release`] or paid re-issue re-pools it (a silent re-issue
+    /// would be the impersonation the continuity promise forbids). The
+    /// lifecycle automation (erased re-pool interval, lapsed-premium
+    /// cycling) is M5.2 lease work; this is the primitive. Tombstoning an
+    /// unregistered handle pre-reserves it. Idempotent.
     ///
     /// # Errors
     /// [`RegistryStoreError::Storage`] on a backend failure.
