@@ -203,8 +203,11 @@ export async function leaveGroup(groupId: string): Promise<void> {
   await invoke("chat_group_leave", { groupId });
 }
 
-export async function fetchProfile(agentId: string): Promise<ProfileOutcome> {
-  return invoke<ProfileOutcome>("chat_fetch_profile", { agentId });
+export async function fetchProfile(
+  agentId: string,
+  relay?: string | null,
+): Promise<ProfileOutcome> {
+  return invoke<ProfileOutcome>("chat_fetch_profile", { agentId, relay: relay ?? null });
 }
 
 export async function fetchAvatar(

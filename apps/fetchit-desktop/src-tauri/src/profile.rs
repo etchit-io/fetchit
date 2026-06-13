@@ -222,6 +222,16 @@ pub(crate) const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 /// it further.
 const MAX_AVATAR_FETCH_BYTES: usize = 512 * 1024;
 
+/// Choose the relay to resolve a profile against: an explicit hint when
+/// present (parsed + validated), otherwise the configured relay. A
+/// malformed hint is an error, never a silent fallback.
+fn resolve_relay(configured: &url::Url, hint: Option<&str>) -> Result<url::Url, String> {
+    match hint {
+        None => Ok(configured.clone()),
+        Some(h) => url::Url::parse(h).map_err(|e| format!("bad relay hint: {e}")),
+    }
+}
+
 /// Resolve a contact's published profile: look up their profile-index
 /// record on the relay, fetch + verify the manifest off Autonomi, and
 /// return a render-ready DTO. A tombstone or relay 404 is the honest
@@ -235,13 +245,14 @@ pub async fn chat_fetch_profile(
     app_state: tauri::State<'_, crate::AppState>,
     state: tauri::State<'_, crate::chat::ChatState>,
     agent_id: String,
+    relay: Option<String>,
 ) -> Result<ProfileOutcome, String> {
     crate::chat::ensure_chat_enabled(&app_state)?;
     // Validate the id at the boundary before it reaches the relay URL
     // path. The record.agent_id == agent_id binding backstops correctness;
     // this rejects a malformed id early and is path-manipulation defense.
     fetchit_chat::identity::AgentId::parse(&agent_id).map_err(|e| e.to_string())?;
-    let relay = state.relay_url();
+    let relay = resolve_relay(&state.relay_url(), relay.as_deref())?;
     // Redirect-disabled client: a relay 302 must not carry the request
     // past the SSRF host guard inside the fetch.
     let http = fetchit_chat::relay_http::guarded_client();
@@ -387,5 +398,17 @@ mod tests {
         let mut bytes = vec![0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50];
         bytes.extend_from_slice(&[0u8; 100]);
         assert!(validate_avatar_to_data_url(&bytes, "image/webp", 10).is_err());
+    }
+
+    #[test]
+    fn resolve_relay_prefers_valid_hint_else_configured() {
+        let configured = url::Url::parse("https://relay.configured/").unwrap();
+        // No hint -> configured.
+        assert_eq!(resolve_relay(&configured, None).unwrap(), configured);
+        // Valid hint -> the hint.
+        let got = resolve_relay(&configured, Some("https://relay.hint:8088/")).unwrap();
+        assert_eq!(got.as_str(), "https://relay.hint:8088/");
+        // Garbage hint -> error, never silently falls back.
+        assert!(resolve_relay(&configured, Some("not a url")).is_err());
     }
 }
