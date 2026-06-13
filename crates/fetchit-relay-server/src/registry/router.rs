@@ -671,16 +671,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn real_serve_rate_limits_without_x_real_ip_via_connect_info() {
+    async fn real_serve_header_less_request_is_peer_keyed_not_unknown() {
         use std::net::SocketAddr;
         use tokio::net::TcpListener;
-        // Serve the real router with connect-info wired (the F1 fix). With
-        // no x-real-ip header the source key falls back to the live peer
-        // IP, so the 1-token bucket limits the 2nd request; pre-fix the
-        // peer was always None and every header-less request shared the
-        // "unknown" bucket. This exercises the serve path the oneshot
-        // tests skip. (Both requests share 127.0.0.1, so this asserts the
-        // path is live, not that distinct IPs get distinct buckets.)
+        // F1 DISCRIMINATING guard (Alice's note). Over loopback both
+        // requests share 127.0.0.1, so a plain "two header-less POSTs ->
+        // 2nd is 429" assertion passes whether the source key is the live
+        // peer IP (fixed) or the constant "unknown" (reverted) -- it does
+        // not actually guard the connect-info line. So instead: req1 with
+        // NO header (keyed on the live peer) + req2 with x-real-ip set to
+        // 127.0.0.1 (keyed on the trusted header). With the fix the peer
+        // key IS 127.0.0.1, so both land in the SAME 1-token bucket and
+        // req2 is 429. If the connect-info line were reverted, req1 would
+        // key on "unknown" and req2 on "127.0.0.1" -- different buckets,
+        // and req2 would pass. So this 429 proves connect-info is wired.
         let st = RegistryState {
             store: Arc::new(InMemoryActorStore::new()),
             config: RegistryConfig::new("etchit.io"),
@@ -699,9 +703,76 @@ mod tests {
         });
         let client = reqwest::Client::new();
         let url = format!("http://{addr}/v1/actors");
+        // req1: no x-real-ip -> source key falls back to the live peer
+        // (127.0.0.1 under the fix; "unknown" if connect-info reverted).
         let r1 = client.post(&url).body("{}").send().await.unwrap();
         assert_ne!(r1.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
-        let r2 = client.post(&url).body("{}").send().await.unwrap();
+        // req2: x-real-ip:127.0.0.1 -> keyed on the header. Shares req1's
+        // bucket ONLY because the fix made req1's peer key 127.0.0.1 too.
+        let r2 = client
+            .post(&url)
+            .header("x-real-ip", "127.0.0.1")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r2.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn registry_router_round_trips_over_the_sqlite_store() {
+        // F7 close-out (Alice's note): every other router test drives the
+        // in-memory store, and the F6 tombstone test calls the _inner fns
+        // directly -- so the router<->SqliteActorStore seam (the exact
+        // blind spot that hid F1) had zero coverage. Drive a real register
+        // + serve round trip through the axum router backed by a :memory:
+        // SqliteActorStore: the 201 writes through the router into SQLite,
+        // and the GETs read it back through the router.
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let st = RegistryState {
+            store: Arc::new(crate::registry::SqliteActorStore::open(":memory:").unwrap()),
+            config: RegistryConfig::new("etchit.io"),
+            rate_limit: Arc::new(InboxRateLimit::new(1000)),
+        };
+        let app = registry_router(st);
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/actors")
+                    .body(Body::from(VALID))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg.status(), StatusCode::CREATED);
+        // Actor doc served back out of SQLite, through the router.
+        let doc = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/actors/josh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status(), StatusCode::OK);
+        // WebFinger resolves the same handle over the SQLite store.
+        let wf = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/.well-known/webfinger?resource=acct:josh@etchit.io")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wf.status(), StatusCode::OK);
     }
 }
