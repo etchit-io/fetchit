@@ -321,6 +321,9 @@ export async function init(): Promise<void> {
       active && active.status === "empty" ? active : store.createEmpty(buildStageRoot(stageEl));
     void startProfile(target, input, canonical);
   };
+  // Wire the module-level slot so runFetch can reach openProfile without
+  // threading it through every call site.
+  onViewProfile = (agentId) => openProfile({ kind: "agentId", agentId });
 
   const startProfile = async (
     tab: { id: string; root: HTMLElement },
@@ -584,6 +587,10 @@ function startIn(
 // `statusFor`.
 let firstFetchSucceeded = false;
 
+// Wired once during init so module-scoped fetch functions can open the
+// profile page without needing openProfile threaded through every call site.
+let onViewProfile: ((agentId: string) => void) | undefined;
+
 async function runFetch(
   addr: string,
   id: string,
@@ -600,7 +607,7 @@ async function runFetch(
     // replaces the tab contents — otherwise blink/ear-flick timers
     // keep firing on a detached element.
     findMascotIn(root)?.dispose();
-    renderRendition(r, root, addr, query);
+    renderRendition(r, root, addr, query, onViewProfile);
     store.setRendered(id, r);
   } catch (e) {
     const msg = errorMessage(e);

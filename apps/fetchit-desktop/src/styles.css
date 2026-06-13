@@ -2178,3 +2178,5 @@ body:not([data-view="settings"]) #settings {
 .profile-page__handoff-chain { color: var(--gold); margin: 8px 0; }
 .profile-page__handoff-body { color: var(--ink-2); max-width: 420px; margin: 0 auto 16px; }
 .profile-page__handoff .profile-page__actions { justify-content: center; }
+.json-profile-banner { margin-bottom: 10px; color: var(--ash); }
+.json-profile-banner button { background: transparent; border: none; color: var(--copper); cursor: pointer; padding: 0; }

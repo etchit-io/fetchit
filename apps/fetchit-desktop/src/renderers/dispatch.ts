@@ -18,6 +18,7 @@ export function render(
   into: HTMLElement,
   address: string,
   query = "",
+  onViewProfile?: (agentId: string) => void,
 ): void {
   into.replaceChildren();
   const src = `autonomi://${address}`;
@@ -29,7 +30,7 @@ export function render(
       renderEtchitEnvelope(r, into);
       return;
     case "json":
-      renderJson(r, into);
+      renderJson(r, into, onViewProfile);
       return;
     case "tabular":
       renderTabular(r, into);
