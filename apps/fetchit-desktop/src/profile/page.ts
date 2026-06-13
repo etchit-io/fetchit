@@ -44,6 +44,11 @@ export function renderProfilePage(
     return;
   }
 
+  if (model.state === "none") {
+    root.appendChild(model.isSelf ? buildHandoff(h) : line("profile-page__empty", "This contact hasn't published a profile yet."));
+    return;
+  }
+
   const band = document.createElement("header");
   band.className = "profile-page__band";
 
@@ -125,6 +130,25 @@ export function renderProfilePage(
     }
     root.appendChild(row);
   }
+}
+
+function buildHandoff(h: ProfilePageHandlers): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "profile-page__handoff";
+  card.append(
+    line("profile-page__handoff-title", "Make this page yours"),
+    line("profile-page__handoff-chain", "etch/ writes  ->  Autonomi keeps  ->  fetch> shows"),
+    line("profile-page__handoff-body",
+      "Your profile lives on Autonomi: permanent, post-quantum, yours. People who look you up land here."),
+  );
+  const row = document.createElement("div");
+  row.className = "profile-page__actions";
+  row.append(
+    btn("create-etch", "profile-page__act profile-page__act--primary", "Create my profile in etch/it", h.onEditEtch),
+    btn("get-etch", "profile-page__act", "Get etch/it", h.onGetEtch),
+  );
+  card.appendChild(row);
+  return card;
 }
 
 function buildActions(model: ProfilePageModel, h: ProfilePageHandlers): HTMLElement {

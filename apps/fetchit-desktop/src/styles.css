@@ -2171,3 +2171,10 @@ body:not([data-view="settings"]) #settings {
 .profile-page__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .profile-page__chip { border: 1px solid var(--line); border-radius: var(--r-pill);
   padding: 4px 12px; background: transparent; color: var(--copper); cursor: pointer; }
+.profile-page__handoff, .profile-page__empty { text-align: center; padding: 40px 24px;
+  border: 1px solid var(--line); border-radius: var(--r-card); background: var(--bone-dim); }
+.profile-page__empty { color: var(--ash); }
+.profile-page__handoff-title { font-family: var(--font-display); font-size: 20px; color: var(--ink); }
+.profile-page__handoff-chain { color: var(--gold); margin: 8px 0; }
+.profile-page__handoff-body { color: var(--ink-2); max-width: 420px; margin: 0 auto 16px; }
+.profile-page__handoff .profile-page__actions { justify-content: center; }

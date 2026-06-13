@@ -78,3 +78,22 @@ it("gallery fires zero fetches on render", () => {
   renderProfilePage(model({ links: GALLERY }), root, H, async () => { calls++; return ""; });
   expect(calls).toBe(0); // no avatar in this model, no link prefetch
 });
+
+it("own empty page shows the trinity handoff, both actions", () => {
+  let edit = 0, get = 0;
+  const root = document.createElement("div");
+  renderProfilePage(model({ state: "none", verified: false, isSelf: true }), root,
+    { ...H, onEditEtch: () => edit++, onGetEtch: () => get++ }, stubAvatar);
+  expect(root.querySelector(".profile-page__handoff")).not.toBeNull();
+  (root.querySelector("[data-act=create-etch]") as HTMLElement).click();
+  (root.querySelector("[data-act=get-etch]") as HTMLElement).click();
+  expect(edit).toBe(1);
+  expect(get).toBe(1);
+});
+
+it("contact empty page is neutral, no etch/it advertising", () => {
+  const root = document.createElement("div");
+  renderProfilePage(model({ state: "none", verified: false, isSelf: false }), root, H, stubAvatar);
+  expect(root.querySelector(".profile-page__handoff")).toBeNull();
+  expect(root.querySelector(".profile-page__empty")?.textContent).toContain("hasn't published");
+});
