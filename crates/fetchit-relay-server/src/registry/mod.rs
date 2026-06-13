@@ -22,6 +22,7 @@ use fetchit_fedi::attestation::ActorAttestationV2;
 use thiserror::Error;
 
 pub use store::InMemoryActorStore;
+pub use verify::{verify_registration, RegistryConfig};
 
 /// A stored, verified registration. `agent_id_hex` is the continuity
 /// key (a handle never silently changes agent); the whole attestation
