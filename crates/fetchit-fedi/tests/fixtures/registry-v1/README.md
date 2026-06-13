@@ -94,8 +94,24 @@ Responses:
 | 200 | updated, body `register-response.json` |
 | 404 | unknown handle |
 | 409 | agent id mismatch or stale epoch |
-| 422 | handle not lowercase, or attestation invalid |
+| 422 | handle not lowercase, path handle differs from body handle, or attestation invalid |
 | 429 | rate limited |
+
+## Serving endpoints (read half)
+
+Registered records are served to the open fediverse:
+
+| Route | Status | Meaning |
+| --- | --- | --- |
+| GET /.well-known/webfinger?resource=acct:&lt;h&gt;@&lt;domain&gt; | 200 | JRD; `links[rel=self]` href is the canonical actor URL |
+| | 400 | malformed `resource` |
+| | 404 | unknown handle, or domain is not the bridge's |
+| GET /actors/&lt;handle&gt; | 200 | actor JSON-LD (`application/activity+json`) with `publicKeyPem` and the v2 attestation |
+| | 404 | unknown handle |
+
+The served actor document must round-trip through the client decoder:
+`fetchit_fedi::lookup::RemoteActor::from_json_ld` then `verify_attestation_v2`
+yields the registered agent id (the bridge pins this in a test).
 
 ## Optional: SPKI parse-validation (SO-4)
 
@@ -105,6 +121,7 @@ attest over garbage RSA and only fail later at HTTP-signature time
 fast. Non-blocking. `register-request-valid.json` carries a real RSA-2048 SPKI, so
 it stays green even with this check on.
 
-The directory serves the stored attestation inside the WebFinger record and the
-actor document (under `https://etchit.io/ns#mlDsaAttestation-v2`) so any client can
-verify the full chain offline.
+The directory serves the stored attestation inside the actor document (under
+`https://etchit.io/ns#mlDsaAttestation-v2`) so any client can verify the full chain
+offline. The WebFinger JRD stays a minimal pointer; it does not carry the
+attestation.
