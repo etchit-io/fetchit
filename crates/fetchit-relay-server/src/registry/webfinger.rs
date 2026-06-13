@@ -1,21 +1,20 @@
-//! Server-side WebFinger: parse `acct:<handle>@<domain>` and build the
+//! Server-side `WebFinger`: parse `acct:<handle>@<domain>` and build the
 //! JRD pointing at the canonical actor URL.
 
 use crate::registry::ActorRecord;
 use serde_json::{json, Value};
 
-/// Parse a WebFinger `resource` of the form `acct:<handle>@<domain>`.
-/// Returns `(handle, domain)`. Tolerates a leading `acct:` only.
-///
-/// # Errors
-/// `Err(())` on any shape violation (maps to HTTP 400).
-pub fn parse_acct_resource(resource: &str) -> Result<(String, String), ()> {
-    let rest = resource.strip_prefix("acct:").ok_or(())?;
-    let (handle, domain) = rest.split_once('@').ok_or(())?;
+/// Parse a `WebFinger` `resource` of the form `acct:<handle>@<domain>`.
+/// Returns `Some((handle, domain))`, or `None` on any shape violation
+/// (the caller maps `None` to HTTP 400).
+#[must_use]
+pub fn parse_acct_resource(resource: &str) -> Option<(String, String)> {
+    let rest = resource.strip_prefix("acct:")?;
+    let (handle, domain) = rest.split_once('@')?;
     if handle.is_empty() || domain.is_empty() || domain.contains('@') {
-        return Err(());
+        return None;
     }
-    Ok((handle.to_string(), domain.to_string()))
+    Some((handle.to_string(), domain.to_string()))
 }
 
 /// Build the JRD for a stored record.
@@ -56,7 +55,7 @@ mod tests {
             "",
             "acct:a@b@c",
         ] {
-            assert!(parse_acct_resource(bad).is_err(), "{bad}");
+            assert!(parse_acct_resource(bad).is_none(), "{bad}");
         }
     }
 

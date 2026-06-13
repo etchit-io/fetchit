@@ -10,6 +10,8 @@ use crate::metrics::Metrics;
 use crate::pair_record::{get_pair_record, post_pair_record, PairRecordIndex};
 use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
+#[cfg(feature = "fediverse-inbox")]
+use crate::registry::{registry_router, RegistryState};
 use crate::session::SessionRegistry;
 use crate::signature::{MlDsa65Verifier, SignatureVerifier};
 use crate::transit::TransitBuffer;
@@ -80,6 +82,11 @@ pub struct Server {
     /// structurally absent.
     #[cfg(feature = "fediverse-inbox")]
     inbox: Option<InboxState>,
+    /// Fully-configured registry + serving state when an operator opts
+    /// in. When `Some`, [`Server::router`] merges the registry router
+    /// (POST/PUT `/v1/actors`, `WebFinger` server, actor-doc GET).
+    #[cfg(feature = "fediverse-inbox")]
+    registry: Option<RegistryState>,
 }
 
 impl Server {
@@ -94,6 +101,8 @@ impl Server {
             inbox_metrics: None,
             #[cfg(feature = "fediverse-inbox")]
             inbox: None,
+            #[cfg(feature = "fediverse-inbox")]
+            registry: None,
         }
     }
 
@@ -148,6 +157,18 @@ impl Server {
         self
     }
 
+    /// Mount the M5.1 registry + serving endpoints (POST/PUT
+    /// `/v1/actors`, `GET /.well-known/webfinger`, `GET /actors/<h>`)
+    /// from `state`. The default relay build never calls this, so the
+    /// routes are structurally absent. Only available when the
+    /// `fediverse-inbox` feature is enabled.
+    #[cfg(feature = "fediverse-inbox")]
+    #[must_use]
+    pub fn with_registry(mut self, state: RegistryState) -> Self {
+        self.registry = Some(state);
+        self
+    }
+
     /// Assemble the axum router and shared state, consuming `self`.
     pub fn router(self) -> (Router, Arc<ServerState>) {
         let metrics = Arc::new(Metrics::new(
@@ -161,6 +182,8 @@ impl Server {
         // was provided.
         #[cfg(feature = "fediverse-inbox")]
         let inbox = self.inbox;
+        #[cfg(feature = "fediverse-inbox")]
+        let registry = self.registry;
         #[cfg(feature = "fediverse-inbox")]
         let inbox_metrics = inbox
             .as_ref()
@@ -211,6 +234,10 @@ impl Server {
         #[cfg(feature = "fediverse-inbox")]
         if let Some(inbox_state) = inbox {
             router = router.merge(inbox_router(inbox_state));
+        }
+        #[cfg(feature = "fediverse-inbox")]
+        if let Some(registry_state) = registry {
+            router = router.merge(registry_router(registry_state));
         }
         (router, state)
     }

@@ -1,4 +1,4 @@
-//! Build the ActivityPub actor document. The document carries the
+//! Build the `ActivityPub` actor document. The document carries the
 //! `publicKeyPem` and the v2 attestation under
 //! `PQ_ATTESTATION_V2_PROPERTY_URI` so any client verifies the full
 //! chain offline.
@@ -30,9 +30,19 @@ pub fn actor_document(record: &ActorRecord) -> Value {
     map.insert("id".to_string(), json!(record.actor_url));
     map.insert("type".to_string(), json!("Person"));
     map.insert("preferredUsername".to_string(), json!(record.handle));
+    // Point `inbox` at the bridge's shared inbox (a real served route),
+    // NOT `<actor_url>/inbox` which 404s (Alice F3). Discovery (M5.1)
+    // never dereferences this; remote Follow delivery (M5.2) will. The
+    // origin is derived from the actor_url, so no domain threading is
+    // needed. M5.2 finalizes the full federation inbox semantics.
+    let shared_inbox = record.actor_url.split("/actors/").next().map_or_else(
+        || format!("{}/inbox", record.actor_url),
+        |origin| format!("{origin}/inbox"),
+    );
+    map.insert("inbox".to_string(), json!(shared_inbox.clone()));
     map.insert(
-        "inbox".to_string(),
-        json!(format!("{}/inbox", record.actor_url)),
+        "endpoints".to_string(),
+        json!({ "sharedInbox": shared_inbox }),
     );
     map.insert(
         "publicKey".to_string(),
@@ -42,7 +52,10 @@ pub fn actor_document(record: &ActorRecord) -> Value {
             "publicKeyPem": pem,
         }),
     );
-    map.insert(PQ_ATTESTATION_V2_PROPERTY_URI.to_string(), attestation_value);
+    map.insert(
+        PQ_ATTESTATION_V2_PROPERTY_URI.to_string(),
+        attestation_value,
+    );
     Value::Object(map)
 }
 

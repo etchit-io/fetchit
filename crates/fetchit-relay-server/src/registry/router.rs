@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Path, RawQuery, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -123,7 +123,7 @@ fn webfinger_inner(state: &RegistryState, raw_query: Option<&str>) -> Outcome {
             body: "missing resource".into(),
         };
     };
-    let Ok((handle, domain)) = parse_acct_resource(&resource) else {
+    let Some((handle, domain)) = parse_acct_resource(&resource) else {
         return Outcome {
             status: 400,
             body: "malformed resource".into(),
@@ -185,7 +185,12 @@ fn source_key(headers: &HeaderMap, trusted_header: &str, peer: Option<IpAddr>) -
 fn registry_response(out: Outcome) -> Response {
     let status = StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if matches!(out.status, 200 | 201) {
-        (status, [(header::CONTENT_TYPE, "application/json")], out.body).into_response()
+        (
+            status,
+            [(header::CONTENT_TYPE, "application/json")],
+            out.body,
+        )
+            .into_response()
     } else {
         (status, out.body).into_response()
     }
@@ -238,21 +243,36 @@ async fn handle_update(
 }
 
 async fn handle_webfinger(State(state): State<RegistryState>, RawQuery(q): RawQuery) -> Response {
-    serving_response(webfinger_inner(&state, q.as_deref()), "application/jrd+json")
+    serving_response(
+        webfinger_inner(&state, q.as_deref()),
+        "application/jrd+json",
+    )
 }
 
-async fn handle_actor_doc(State(state): State<RegistryState>, Path(handle): Path<String>) -> Response {
-    serving_response(actor_doc_inner(&state, &handle), "application/activity+json")
+async fn handle_actor_doc(
+    State(state): State<RegistryState>,
+    Path(handle): Path<String>,
+) -> Response {
+    serving_response(
+        actor_doc_inner(&state, &handle),
+        "application/activity+json",
+    )
 }
+
+/// Tight request-body cap for the registry write routes (Alice F4). A
+/// registration is ~5 KB (ML-DSA-65 sig + RSA SPKI, base64); 64 KB is
+/// generous but far below axum's 2 MB default for an unauthenticated
+/// endpoint. Oversized bodies are rejected with 413 before the handler.
+const REGISTRY_MAX_BODY: usize = 64 * 1024;
 
 /// Build the registry + serving router (axum 0.7 `:handle` path params).
-#[must_use]
 pub fn registry_router(state: RegistryState) -> Router {
     Router::new()
         .route("/v1/actors", post(handle_register))
         .route("/v1/actors/:handle", put(handle_update))
         .route("/.well-known/webfinger", get(handle_webfinger))
         .route("/actors/:handle", get(handle_actor_doc))
+        .layer(DefaultBodyLimit::max(REGISTRY_MAX_BODY))
         .with_state(state)
 }
 
@@ -324,7 +344,10 @@ mod tests {
         let st = state();
         let mut v: serde_json::Value = serde_json::from_str(VALID).unwrap();
         v["handle"] = json!("alice");
-        assert_eq!(update_inner(&st, "josh", v.to_string().as_bytes(), 1).status, 422);
+        assert_eq!(
+            update_inner(&st, "josh", v.to_string().as_bytes(), 1).status,
+            422
+        );
     }
 
     /// PUT 200 path: one keypair, two epochs (re-sign helper, no shared
@@ -379,7 +402,9 @@ mod tests {
         register_inner(&st, VALID.as_bytes(), 1);
         let out = webfinger_inner(&st, Some("resource=acct:josh@etchit.io"));
         assert_eq!(out.status, 200);
-        assert!(out.body.contains(r#""href":"https://etchit.io/actors/josh""#));
+        assert!(out
+            .body
+            .contains(r#""href":"https://etchit.io/actors/josh""#));
     }
 
     #[test]

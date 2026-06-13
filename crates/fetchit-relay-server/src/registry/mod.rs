@@ -9,7 +9,7 @@
 //! - [`verify`] — pure handle policy + canonical URL + `verify_binding_v2`.
 //! - [`store`] — `ActorRegistryStore` impls (FCFS + continuity + epoch).
 //! - [`webfinger`] — `acct:` resource parse + JRD.
-//! - [`actor_doc`] — ActivityPub actor JSON-LD with the embedded attestation.
+//! - [`actor_doc`] — `ActivityPub` actor JSON-LD with the embedded attestation.
 //! - [`router`] — axum routes + testable inner handlers.
 
 pub mod actor_doc;
@@ -21,12 +21,13 @@ pub mod webfinger;
 use fetchit_fedi::attestation::ActorAttestationV2;
 use thiserror::Error;
 
+pub use router::{registry_router, RegistryState};
 pub use store::InMemoryActorStore;
 pub use verify::{verify_registration, RegistryConfig};
 
 /// A stored, verified registration. `agent_id_hex` is the continuity
 /// key (a handle never silently changes agent); the whole attestation
-/// is retained so the WebFinger record and actor document can serve it
+/// is retained so the `WebFinger` record and actor document can serve it
 /// verbatim for offline verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActorRecord {

@@ -27,9 +27,10 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use super::{
-    InboxDenylistCheck, InboxState, PendingDeliverySink, SessionBroadcastSink, WebFingerError,
-    WebFingerLookup,
+    InboxDenylistCheck, InboxRateLimit, InboxState, PendingDeliverySink, SessionBroadcastSink,
+    WebFingerError, WebFingerLookup,
 };
+use crate::registry::{InMemoryActorStore, RegistryConfig, RegistryState};
 use crate::server::Server;
 
 /// Default signed-denylist base URL — the live NY-Trust service. Matches
@@ -199,7 +200,22 @@ pub fn attach_if_enabled(server: Server) -> anyhow::Result<Server> {
 
     let state = InboxState::builder(denylist, webfinger, sink).build();
     tracing::info!("fediverse inbox enabled: POST /inbox mounted");
-    Ok(server.with_inbox(state))
+
+    // The same opt-in brings up the M5.1 registry + serving endpoints
+    // (POST/PUT /v1/actors, WebFinger server, actor-doc GET) on the same
+    // router. In-memory store for now; the durable backend is the
+    // flagged follow-on (M5.1 plan Task 13), swapped in behind the
+    // `ActorRegistryStore` trait without touching the routes.
+    let domain = std::env::var("FETCHIT_FEDI_DOMAIN").unwrap_or_else(|_| "etchit.io".to_owned());
+    let registry = RegistryState {
+        store: Arc::new(InMemoryActorStore::new()),
+        config: RegistryConfig::new(domain),
+        // Registration is infrequent; 30/min per source is generous.
+        rate_limit: Arc::new(InboxRateLimit::new(30)),
+    };
+    tracing::info!("fediverse registry enabled: /v1/actors + WebFinger + actor-doc mounted");
+
+    Ok(server.with_inbox(state).with_registry(registry))
 }
 
 #[cfg(test)]

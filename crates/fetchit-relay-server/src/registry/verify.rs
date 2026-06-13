@@ -3,6 +3,7 @@
 
 use crate::registry::{ActorRecord, RegistryRejection};
 use fetchit_fedi::registry::RegisterActorRequest;
+use rsa::pkcs8::DecodePublicKey;
 
 /// Server config for the bridge role.
 #[derive(Clone, Debug)]
@@ -88,7 +89,6 @@ pub fn verify_registration(
     // SO-4: parse-validate the SPKI so the served publicKeyPem is a real
     // RSA key. verify_binding_v2 covers the SPKI bytes in the signed
     // input but does not parse them as a key.
-    use rsa::pkcs8::DecodePublicKey;
     rsa::RsaPublicKey::from_public_key_der(&req.rsa_spki_der)
         .map_err(|e| RegistryRejection::Spki(e.to_string()))?;
 
@@ -134,7 +134,15 @@ mod tests {
     #[test]
     fn rejects_uppercase_empty_long_and_path_chars() {
         for bad in [
-            "JOSH", "Josh", "alice_42_U", "", &"a".repeat(65), "a.b", "a/b", "a b", "a@b",
+            "JOSH",
+            "Josh",
+            "alice_42_U",
+            "",
+            &"a".repeat(65),
+            "a.b",
+            "a/b",
+            "a b",
+            "a@b",
         ] {
             assert!(validate_registry_handle(bad).is_err(), "{bad}");
         }

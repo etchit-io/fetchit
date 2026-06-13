@@ -13,12 +13,12 @@ pub mod error;
 pub mod forwarding;
 #[cfg(feature = "fediverse-inbox")]
 pub mod inbox;
-#[cfg(feature = "fediverse-inbox")]
-pub mod registry;
 pub mod metrics;
 pub mod pair_record;
 pub mod profile;
 pub mod ratelimit;
+#[cfg(feature = "fediverse-inbox")]
+pub mod registry;
 pub mod server;
 pub mod session;
 pub mod signature;
