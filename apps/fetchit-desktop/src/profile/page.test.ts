@@ -49,3 +49,32 @@ it("escapes untrusted display fields (textContent, never innerHTML)", () => {
   renderProfilePage(model({ display: "<img src=x onerror=alert(1)>" }), root, H, stubAvatar);
   expect(root.querySelector("img")).toBeNull();
 });
+
+const GALLERY = [
+  { kind: "etchit", label: "showcase", addr: "d".repeat(64) },
+  { kind: "fetchit", label: "city", addr: "e".repeat(64) },
+  { kind: "website", label: "site", addr: "https://x.io" },
+];
+
+it("renders hex-kind links as gallery cards and opens them in the reader", () => {
+  const opened: string[] = [];
+  const root = document.createElement("div");
+  renderProfilePage(model({ links: GALLERY }), root, { ...H, onAutonomi: (u) => opened.push(u) }, stubAvatar);
+  const cards = root.querySelectorAll(".profile-page__etch");
+  expect(cards).toHaveLength(2); // website excluded from the grid
+  (cards[0] as HTMLElement).click();
+  expect(opened[0]).toBe(`autonomi://${"d".repeat(64)}`);
+});
+
+it("website + unknown link kinds render as chips, not gallery cards", () => {
+  const root = document.createElement("div");
+  renderProfilePage(model({ links: GALLERY }), root, H, stubAvatar);
+  expect(root.querySelectorAll(".profile-page__chip")).toHaveLength(1);
+});
+
+it("gallery fires zero fetches on render", () => {
+  let calls = 0;
+  const root = document.createElement("div");
+  renderProfilePage(model({ links: GALLERY }), root, H, async () => { calls++; return ""; });
+  expect(calls).toBe(0); // no avatar in this model, no link prefetch
+});

@@ -2161,3 +2161,13 @@ body:not([data-view="settings"]) #settings {
 .profile-page__website { margin-top: 8px; background: transparent; border: none;
   color: var(--copper); cursor: pointer; padding: 0; }
 .profile-page__error { padding: 40px; text-align: center; color: var(--ash); }
+.profile-page__label { margin: 20px 0 8px; font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--ash); }
+.profile-page__gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.profile-page__etch { text-align: left; border: 1px solid var(--line);
+  border-radius: var(--r-card); padding: 10px; background: var(--bone-dim); cursor: pointer; }
+.profile-page__etch-kind { font-size: 10px; letter-spacing: .06em; color: var(--gold); }
+.profile-page__etch-label { color: var(--ink); }
+.profile-page__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.profile-page__chip { border: 1px solid var(--line); border-radius: var(--r-pill);
+  padding: 4px 12px; background: transparent; color: var(--copper); cursor: pointer; }

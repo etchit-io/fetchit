@@ -90,6 +90,41 @@ export function renderProfilePage(
     const w = btn("website", "profile-page__website", model.website, () => h.confirmOpen(model.website as string));
     root.appendChild(w);
   }
+
+  const HEX_KINDS = new Set(["etchit", "fetchit", "image"]);
+  const gallery = model.links.filter((l) => HEX_KINDS.has(l.kind));
+  const chips = model.links.filter((l) => !HEX_KINDS.has(l.kind));
+
+  if (gallery.length > 0) {
+    root.appendChild(line("profile-page__label", "Etchings"));
+    const grid = document.createElement("div");
+    grid.className = "profile-page__gallery";
+    for (const l of gallery) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "profile-page__etch";
+      card.dataset.kind = l.kind;
+      card.append(line("profile-page__etch-kind", l.kind), line("profile-page__etch-label", l.label || l.kind));
+      card.addEventListener("click", () => h.onAutonomi(`autonomi://${l.addr}`));
+      grid.appendChild(card);
+    }
+    root.appendChild(grid);
+  }
+  if (chips.length > 0) {
+    const row = document.createElement("div");
+    row.className = "profile-page__chips";
+    for (const l of chips) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "profile-page__chip";
+      chip.textContent = l.label || l.kind;
+      chip.addEventListener("click", () => {
+        if (l.kind === "website") h.confirmOpen(l.addr);
+      });
+      row.appendChild(chip);
+    }
+    root.appendChild(row);
+  }
 }
 
 function buildActions(model: ProfilePageModel, h: ProfilePageHandlers): HTMLElement {
