@@ -1300,23 +1300,35 @@ pub fn actor_doc_inner(state: &RegistryState, handle: &str) -> Outcome {
 Add the axum handlers + routes. WebFinger uses `RawQuery`; actor-doc uses `Path`. Both serve `Content-Type: application/jrd+json` / `application/activity+json` respectively. Add rate-limit gating to `handle_register`/`handle_update` BEFORE parsing, keyed by the source-IP helper:
 
 ```rust
-/// Extract the rate-limit source key. Behind the trusted CF Worker +
-/// Caddy chain, the immediate proxy sets `X-Forwarded-For`; take its
-/// first hop. Falls back to the connection peer when absent. SECURITY:
-/// only the first XFF hop from the trusted proxy is honored; see the
-/// deploy note (the bridge MUST sit behind the trusted proxy).
-fn source_key(headers: &axum::http::HeaderMap, peer: Option<std::net::IpAddr>) -> String {
+/// Extract the rate-limit source key. SECURITY (Alice's flag-2 catch):
+/// leftmost `X-Forwarded-For` is CLIENT-SPOOFABLE when a proxy appends
+/// rather than overwrites, so we do NOT key on it. The bridge's sole
+/// ingress is Cloudflare + the CF Worker; the Worker forwards the
+/// authoritative client IP — `CF-Connecting-IP`, which Cloudflare sets
+/// and a client cannot forge — in a configured trusted header
+/// (`RegistryConfig::trusted_client_ip_header`, default `x-real-ip`).
+/// We key on THAT header only, falling back to the connection peer for
+/// non-CF / test paths. Origin reachability MUST be restricted to the
+/// Worker (Caddy/UFW) so the trusted header cannot be set by a direct
+/// caller. The CF Worker (`fetchit-bridge-worker`) gains a matching
+/// change to inject the header from `CF-Connecting-IP`.
+fn source_key(
+    headers: &axum::http::HeaderMap,
+    trusted_header: &str,
+    peer: Option<std::net::IpAddr>,
+) -> String {
     headers
-        .get("x-forwarded-for")
+        .get(trusted_header)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .or_else(|| peer.map(|p| p.to_string()))
         .unwrap_or_else(|| "unknown".to_string())
 }
 ```
 
-In `handle_register`/`handle_update`, before the inner call: `if !state.rate_limit.allow(&source_key(&headers, peer)) { return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response(); }` (add `headers: HeaderMap` and the connect-info peer to the handler signatures; wire `ConnectInfo<SocketAddr>` at serve time, or read XFF only for the first cut and add ConnectInfo in Task 12).
+In `handle_register`/`handle_update`, before the inner call: `if !state.rate_limit.allow(&source_key(&headers, &state.config.trusted_client_ip_header, peer)) { return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response(); }` (add `headers: HeaderMap` + `ConnectInfo<SocketAddr>` to the handler signatures and serve with `into_make_service_with_connect_info`). The exact trusted-header name + the sole-ingress assumption are confirmed with Alice/Josh during the plan review; `RegistryConfig` carries it so it is one config knob, not a literal.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -1445,4 +1457,4 @@ cargo test -p fetchit-fedi   # re-confirm the contract crate stays green
 
 - **Spec coverage:** POST/PUT registry (spec §Component D) = Tasks 9–10; WebFinger server + actor-doc hosting (spec §"Relationship to M4" serving half) = Tasks 7–8, 11–12; attestation-v2 verify as sole signature (pre-spec flag #2) = Task 6; hint-epoch monotonicity + same-agent (spec §trust model) = Task 3; handle policy SO-3 = Task 4; canonical URL SO-1 = Task 5; SO-4 SPKI = Task 6; rate limit (spec §security) = Task 11; durable directory storage (spec §storage statement) = Task 13. Search (Component C) and follow (Component B) are explicitly out of M5.1 (they are M5.3/M5.2).
 - **Type consistency:** `Outcome{status,body}` is the single inner-fn return; `RegistryRejection`→422, `RegistryStoreError`→409/404; `verify_registration` returns `ActorRecord`; handlers map `Outcome` to axum `Response`. `actor_url` is always the `as_str()` of the SO-1 URL.
-- **Open items to confirm during execution (flagged, non-blocking for Tasks 1–12):** (a) durable backend choice (Task 13); (b) rate-limit trusted-proxy source key (Task 11) — needs the deploy chain (CF Worker + Caddy) confirmed as the only ingress; (c) the PUT 200-path handler test needs an epoch2 green vector or a `cfg(test)` re-sign helper (Task 10 note) — coordinate the shared-fixtures choice with Alice; (d) exact `rsa` SPKI-parse API path + axum `Path` capture syntax against the pinned versions.
+- **Open items to confirm during execution (flagged, non-blocking for Tasks 1–12):** (a) durable backend choice (Task 13 — recommend SQLite/rusqlite); (b) rate-limit source key (Task 11) — per Alice's flag-2 catch, key on the CF-set `CF-Connecting-IP` forwarded by the Worker into a trusted header (`RegistryConfig::trusted_client_ip_header`, default `x-real-ip`), NOT leftmost XFF; needs the sole-ingress assumption + the CF Worker header-injection change + origin reachability lockdown confirmed with Alice/Josh; (c) the PUT 200-path handler test uses a `cfg(test)` re-sign helper, no shared committed fixture (confirmed by Alice); (d) exact `rsa` SPKI-parse API path + axum `Path` capture syntax against the pinned versions.
