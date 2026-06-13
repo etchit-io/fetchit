@@ -75,3 +75,29 @@ describe("parseAutonomiUrl", () => {
     expect(parseAutonomiUrl("not-an-address")).toBeNull();
   });
 });
+
+import { parseAddressInput } from "./address";
+
+describe("parseAddressInput", () => {
+  it("classifies a 64-hex address as hex", () => {
+    const r = parseAddressInput("a".repeat(64));
+    expect(r).toEqual({ kind: "hex", address: "a".repeat(64), query: "" });
+  });
+  it("classifies @name@domain as a lowercased handle", () => {
+    expect(parseAddressInput("  @Josh@etchit.io ")).toEqual({
+      kind: "handle",
+      handle: "@josh@etchit.io",
+    });
+  });
+  it("classifies profile:<64hex> as a profile agent id", () => {
+    expect(parseAddressInput(`profile:${"b".repeat(64)}`)).toEqual({
+      kind: "profile",
+      agentId: "b".repeat(64),
+    });
+  });
+  it("returns null for garbage", () => {
+    expect(parseAddressInput("not an address")).toBeNull();
+    expect(parseAddressInput("@no-domain")).toBeNull();
+    expect(parseAddressInput("profile:short")).toBeNull();
+  });
+});

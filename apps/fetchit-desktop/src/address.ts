@@ -34,3 +34,29 @@ export function parseAutonomiUrl(raw: string): AutonomiUrl | null {
 export function parseAutonomiInput(raw: string): string | null {
   return parseAutonomiUrl(raw)?.address ?? null;
 }
+
+/** A pasted/typed address resolved to one of the reader's input classes. */
+export type AddressInput =
+  | { kind: "hex"; address: string; query: string }
+  | { kind: "handle"; handle: string }
+  | { kind: "profile"; agentId: string };
+
+const HANDLE_INPUT = /^@[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const PROFILE_INPUT = /^profile:([0-9a-fA-F]{64})$/;
+
+/**
+ * Classify an address-bar input. Bare 64-hex is always an Autonomi
+ * content address (hex); an agent-id profile uses the explicit
+ * `profile:` prefix, so the two never collide. Handles are lowercased
+ * (the registry is lowercase-canonical).
+ */
+export function parseAddressInput(raw: string): AddressInput | null {
+  const t = raw.trim();
+  const prof = PROFILE_INPUT.exec(t);
+  if (prof) return { kind: "profile", agentId: prof[1].toLowerCase() };
+  const lower = t.toLowerCase();
+  if (HANDLE_INPUT.test(lower)) return { kind: "handle", handle: lower };
+  const hex = parseAutonomiUrl(t);
+  if (hex) return { kind: "hex", address: hex.address, query: hex.query };
+  return null;
+}
