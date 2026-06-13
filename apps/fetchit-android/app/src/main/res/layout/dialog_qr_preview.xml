@@ -95,6 +95,7 @@
             android:textColorHint="#8a8a8a"
             android:textSize="18sp"
             android:textStyle="italic"
+            android:fontFamily="@font/instrument_serif"
             android:gravity="center"
             android:maxLength="60"
             android:maxLines="2"

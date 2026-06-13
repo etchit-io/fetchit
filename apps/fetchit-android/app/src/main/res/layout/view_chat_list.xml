@@ -45,8 +45,9 @@
             android:layout_marginTop="16dp"
             android:text="@string/chat_empty_hint"
             android:textColor="?attr/fetchitAsh"
-            android:fontFamily="monospace"
-            android:textSize="13sp"
+            android:fontFamily="@font/instrument_serif"
+            android:textStyle="italic"
+            android:textSize="15sp"
             android:gravity="center" />
 
         <Button
