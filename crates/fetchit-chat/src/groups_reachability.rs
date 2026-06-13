@@ -15,13 +15,15 @@
 //! `private/m2.5-bridge-collapsed-spec.md`; the chat-peer is responsible
 //! for taking the resulting action.
 //!
-//! # Scaffolding status (C4)
+//! # State
 //!
-//! This file ships the typed surface + in-memory operations + the routing
-//! decision. Persistence under the conversation-registry at-rest key, and
-//! the wire-in points on the sender (C2) / receiver (C3) paths, land in
-//! follow-up commits once C2/C3 agree on the call shape. The contract
-//! exposed here is stable from C4 onward.
+//! This module owns the typed surface, the in-memory operations, and the
+//! pure routing decision ([`decide_route`]). It is wired into
+//! [`crate::Client`]: the dispatcher records direct-gossip activity into
+//! [`ReachabilityCache`], and the send path consults [`decide_route`]
+//! before wrapping a metadata event for the bridge. The reachability and
+//! consent state is held in memory for the session and is not persisted
+//! across restart.
 
 use crate::groups::GroupId;
 use crate::identity::AgentId;
@@ -63,15 +65,13 @@ pub struct LastSeenMs(pub u64);
 /// Window after which a `(group, member)` is considered `Unreachable` on
 /// the direct-gossip path.
 ///
-/// 60 s is the C4 placeholder. The spec leaves the exact value tunable;
-/// C5 integration tests against a running x0xd will calibrate it against
-/// the typical x0xd publish→subscribe round-trip on a healthy mesh.
+/// 60 s, tunable per the spec. Sized for the typical x0xd
+/// publish->subscribe round-trip on a healthy mesh.
 pub const STALE_AFTER_MS: u64 = 60_000;
 
 /// In-memory cache of last-seen direct-gossip activity per
-/// `(group, member)`. Designed to persist alongside
-/// `crate::conversation::ConversationRegistry` under the same at-rest key
-/// (C4 persistence wiring is a follow-up commit).
+/// `(group, member)`. Held in memory for the session and rebuilt from
+/// live gossip after restart; not persisted to disk.
 #[derive(Debug, Default)]
 pub struct ReachabilityCache {
     inner: HashMap<(GroupId, AgentId), LastSeenMs>,
@@ -129,9 +129,9 @@ impl ReachabilityCache {
     }
 }
 
-/// In-memory store of per-group bridge-consent state. Designed to persist
-/// alongside `crate::conversation::ConversationRegistry` under the same
-/// at-rest key (C4 persistence wiring is a follow-up commit).
+/// In-memory store of per-group bridge-consent state. Held in memory for
+/// the session; not persisted across restart, so consent resets to
+/// `NotAsked` on relaunch until the user re-confirms.
 #[derive(Debug, Default)]
 pub struct BridgeConsentStore {
     inner: HashMap<GroupId, GroupBridgeConsent>,
@@ -217,9 +217,9 @@ pub const SHADOW_WINDOW_MS: u64 = 30_000;
 /// (record runs, double-recording is harmless idempotent) rather than
 /// a silent false reachability record.
 ///
-/// C4 scaffolding contract: callers `mark` before `POST /publish` and
+/// Contract: callers `mark` before `POST /publish` and
 /// `is_recent_and_evict` from the SSE consumer hot path. Periodic
-/// `evict_older_than` is OK but optional — entries beyond
+/// `evict_older_than` is optional -- entries beyond
 /// `2 * SHADOW_WINDOW_MS` are dropped on lookup anyway.
 #[derive(Debug, Default)]
 pub struct BridgeInboundShadow {
