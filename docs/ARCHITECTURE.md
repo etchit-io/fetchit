@@ -39,8 +39,8 @@ wallet lives in the sibling etch>it). To onboard, read in order: `fetchit-core`,
 **Key entry points:** `fetchit_core::Address`, `fetchit_core::NetworkClient`,
 `fetchit_core::HandlerRegistry`, `fetchit_core::Rendition`.
 
-<!-- arch: id=overview glob=crates/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=overview glob=crates/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## fetchit-core (engine)
 
@@ -92,23 +92,28 @@ _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 ## fetchit-ffi (uniffi)
 
 The uniffi FFI surface that exposes `fetchit-core` + `fetchit-net` to
-Kotlin/Swift. Free functions export via `#[uniffi::export]`; a
-`#[uniffi::Object] Client` wraps `AutonomiClient` with async methods, and a
-`RenditionFFI` enum maps each `fetchit_core::Rendition` variant for
-host-language pattern-matching. This crate is **workspace-excluded** (its own
-`Cargo.lock`) because `uniffi-bindgen` walks transitive deps and fails its
-metadata lookup silently inside a multi-crate workspace; the reason is recorded
-in its `Cargo.toml`. The `.so` and the generated Kotlin bindings must be built
-together from the matching `uniffi-bindgen` version or the API-checksum check
-crashes the host app at launch.
+Kotlin/Swift, plus the daemonless chat surface the Android shell drives. Free
+functions export via `#[uniffi::export]`; a `#[uniffi::Object] Client` wraps
+`AutonomiClient` with async methods, and a `RenditionFFI` enum maps each
+`fetchit_core::Rendition` variant for host-language pattern-matching. A second
+`#[uniffi::Object] ChatClient` is the daemonless `fetchit-chat` surface
+(LocalSigner identity, no x0xd); it carries the DM outbox (`enqueue_dm`,
+`start_outbox`, `outbox_snapshot`, `retry_outbox`) and drains `ChatEventFfi`
+(incl. `Outbox` bubbles) through one `next_event` pump. This crate is
+**workspace-excluded** (its own `Cargo.lock`) because `uniffi-bindgen` walks
+transitive deps and fails its metadata lookup silently inside a multi-crate
+workspace; the reason is recorded in its `Cargo.toml`. The `.so` and the
+generated Kotlin bindings must be built together from the matching
+`uniffi-bindgen` version or the API-checksum check crashes the host app at
+launch.
 
 **Key entry points:** `fetchit_ffi::Client`,
 `fetchit_ffi::Client::fetch_and_render`, `fetchit_ffi::RenditionFFI`,
-`fetchit_ffi::setup_logger`.
+`fetchit_ffi::ChatClient`, `fetchit_ffi::setup_logger`.
 **Locked by:** uniffi pin: `PINS.md` + `scripts/check-pins.sh`.
 
-<!-- arch: id=fetchit-ffi glob=crates/fetchit-ffi/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-ffi glob=crates/fetchit-ffi/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## fetchit-cli
 
@@ -136,14 +141,18 @@ at the dispatcher (the denylist gate) before reaching any handler. Outbound DM c
 by reachability (LAN-direct when the peer shares the network, the
 always-available relay otherwise). Group MLS control-plane events do not use this
 Router: they ride x0xd gossip as primary with the relay only as a cross-NAT
-contingency (`crate::groups_reachability`).
+contingency (`crate::groups_reachability`). A durable, vault-persisted **DM
+outbox** (`crate::outbox`) owns resend: a presence-edge retry loop, a 24h
+timeout sweep, a boot/restart orphan reclaim, and a double-send guard, surfaced
+as `OutboxEvent`s so both shells render one shared delivery state.
 
-**Key entry points:** `fetchit_chat::Client`, `fetchit_chat::ClientBuilder`.
+**Key entry points:** `fetchit_chat::Client`, `fetchit_chat::ClientBuilder`,
+`fetchit_chat::Client::enqueue_dm`.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
 schema it gates on: `crates/fetchit-trust-types/**`.
 
-<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## fetchit-relay-proto
 
@@ -165,7 +174,9 @@ _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 
 The operator-run relay: it routes opaque envelopes between connected clients
 over WebSocket and buffers undelivered ones in RAM only, under a hard TTL (no
-user data on disk). Built with the `fediverse-inbox` feature it also hosts the
+user data on disk). WS upgrades authenticate with a bearer token presented in
+the `Authorization` header (case-insensitive scheme). Built with the
+`fediverse-inbox` feature it also hosts the
 M4 ActivityPub `/inbox`, which verifies the HTTP Signature, applies the denylist
 and per-actor rate limits, and fans valid posts into the relay as
 `EnvelopeKind::PublicPost`. The fediverse inbox is opt-in: an operator must
@@ -175,8 +186,8 @@ enable the feature.
 `fetchit_relay_server::ServerConfig`, `fetchit_relay_server::Metrics`.
 **Locked by:** wire types: `crates/fetchit-relay-proto/**`.
 
-<!-- arch: id=fetchit-relay-server glob=crates/fetchit-relay-server/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-relay-server glob=crates/fetchit-relay-server/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## fetchit-relay-client
 
@@ -191,8 +202,8 @@ and the etch>it side for envelope delivery.
 `fetchit_relay_client::ClientConfig`, `fetchit_relay_client::ConnState`.
 **Locked by:** wire types: `crates/fetchit-relay-proto/**`.
 
-<!-- arch: id=fetchit-relay-client glob=crates/fetchit-relay-client/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-relay-client glob=crates/fetchit-relay-client/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## fetchit-trust (+ -types / -client)
 
@@ -251,24 +262,27 @@ _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 
 ## Android shell
 
-A native Kotlin/Gradle single-activity app that is the read-only Autonomi
-content viewer, wrapping `fetchit-core` + `fetchit-net` through the uniffi JNI
-layer. `RenditionRenderer` dispatches the FFI rendition enum into per-type views
-(HTML, PDF, audio, video, images, archives, tabular, syntax-highlighted text). The
-load-bearing security invariant is in the HTML WebView: **DOM storage is
-disabled** (`domStorageEnabled = false`) because every fetched page shares one
-synthetic origin, so a shared `localStorage` would leak across SPAs; SPAs must
-treat DOM storage as optional. The generated uniffi bindings under
-`apps/fetchit-android/app/src/main/java/uniffi/` are regenerated, not
-hand-edited.
+A native Kotlin/Gradle single-activity app: the read-only Autonomi content
+viewer plus the LIT chat shell, wrapping `fetchit-core` + `fetchit-net` + the
+daemonless `fetchit-chat` `ChatClient` through the uniffi JNI layer.
+`RenditionRenderer` dispatches the FFI rendition enum into per-type views (HTML,
+PDF, audio, video, images, archives, tabular, syntax-highlighted text). The chat
+side (`chat/ChatController`, `chat/ChatModeView`) drains `ChatEventFfi` and
+projects the engine DM outbox into per-bubble send status
+(`ConversationStore.upsertOutbox`). The load-bearing security invariant is in the
+HTML WebView: **DOM storage is disabled** (`domStorageEnabled = false`) because
+every fetched page shares one synthetic origin, so a shared `localStorage` would
+leak across SPAs; SPAs must treat DOM storage as optional. The generated uniffi
+bindings under `apps/fetchit-android/app/src/main/java/uniffi/` are regenerated,
+not hand-edited.
 
 **Key entry points:**
 `apps/fetchit-android/app/src/main/java/io/etchit/fetchit/MainActivity.kt`,
 `apps/fetchit-android/app/src/main/java/io/etchit/fetchit/RenditionRenderer.kt`,
-`apps/fetchit-android/app/src/main/java/io/etchit/fetchit/HtmlView.kt`.
+`apps/fetchit-android/app/src/main/java/io/etchit/fetchit/chat/ChatController.kt`.
 
-<!-- arch: id=android glob=apps/fetchit-android/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=android glob=apps/fetchit-android/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## Desktop shell (Tauri 2)
 
@@ -288,8 +302,8 @@ enforced. It bundles a pinned x0xd via `build.rs`.
 **Locked by:** bundled x0xd + relay-region pins: `PINS.md` +
 `scripts/check-pins.sh`.
 
-<!-- arch: id=desktop glob=apps/fetchit-desktop/** verified=2eea972 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=desktop glob=apps/fetchit-desktop/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## Browser extension
 
@@ -302,8 +316,8 @@ Chrome and Firefox manifests are both kept valid.
 **Key entry points:** `apps/fetchit-web/manifest.json`,
 `apps/fetchit-web/src/background.js`, `apps/fetchit-web/src/addr.js`.
 
-<!-- arch: id=web glob=apps/fetchit-web/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=web glob=apps/fetchit-web/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## Fediverse edge worker (Cloudflare)
 
@@ -355,8 +369,8 @@ deps together protect historical messages from a silent format break. The lints
 ban (`unsafe_code` forbidden; unwrap/expect/panic warned) holds even in the
 workspace-excluded crates, which re-state it locally.
 
-<!-- arch: id=production-invariants glob=crates/** apps/** verified=2eea972 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=production-invariants glob=crates/** apps/** verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
 
 ## Pinned dependencies
 
@@ -374,5 +388,5 @@ drift.
 `.github/workflows/ci.yml`) asserts `Cargo.toml` / `Cargo.lock` against
 `PINS.md`.
 
-<!-- arch: id=pins glob=PINS.md Cargo.lock verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=pins glob=PINS.md Cargo.lock verified=f9b9e98 -->
+_Last verified: 2026-06-14 (`f9b9e98`) -- bob._

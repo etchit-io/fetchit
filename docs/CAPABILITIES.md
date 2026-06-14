@@ -40,18 +40,18 @@
 - Group **MLS control-plane** (Welcome/Commit/member changes) rides x0xd gossip as PRIMARY, relay only as a cross-NAT contingency -- `crates/fetchit-chat/src/transport/mod.rs` (does NOT use the `Router`).
 - Forward-compat envelopes: the relay routes opaquely by `to` (`SendFrame.envelope_bytes`) and peers round-trip unrecognized kinds (`EnvelopeKind::Unknown(u8)`) -- `crates/fetchit-relay-proto/src/envelope.rs`.
 
-<!-- arch: id=chat-transport glob=crates/fetchit-chat/src/transport crates/fetchit-chat/src/groups crates/fetchit-relay-proto/src/envelope.rs verified=2eea972 -->
+<!-- arch: id=chat-transport glob=crates/fetchit-chat/src/transport crates/fetchit-chat/src/groups crates/fetchit-relay-proto/src/envelope.rs verified=f9b9e98 -->
 
 ## Fediverse bridge (M4 / M5.1)
 
 - HTTP Signatures use **classical RSA-2048 + PKCS#1 v1.5 + SHA-256** (`rsa-v1_5-sha256`), NOT Ed25519 and NOT post-quantum -- `crates/fetchit-fedi/src/signature.rs`. The PQ binding is the ML-DSA-65 attestation in the Actor JSON-LD, not the per-POST signature. Crypto source of truth: `docs/honest-claims-crypto.md` §3.
 
-<!-- arch: id=fedi-sig glob=crates/fetchit-fedi/src/signature.rs docs/honest-claims-crypto.md verified=2eea972 -->
+<!-- arch: id=fedi-sig glob=crates/fetchit-fedi/src/signature.rs docs/honest-claims-crypto.md verified=f9b9e98 -->
 
 ## Shells
 
 - **Desktop** (Tauri 2): full reader plus the chat/relay/trust stack -- entry `apps/fetchit-desktop/src/controller.ts`, render dispatch `apps/fetchit-desktop/src/renderers/dispatch.ts`, backend `apps/fetchit-desktop/src-tauri/`.
-- **Android** (merged on `chat`): read-only Autonomi viewer ONLY -- FFI exports `Client::{connect,fetch,fetch_and_render}` + `detect` (`crates/fetchit-ffi/src/lib.rs`), renders via `RenditionRenderer.kt`. No chat stack on this branch.
-- **Android chat** `[branch: android-lit]` (worktree `fetchit-android-lit`): daemonless chat FFI (LocalSigner `ChatClient`), P0+P1+P1.1 built and gated, **not merged**; no DM catch-up yet. When it merges, DM catch-up parity with desktop becomes a live lane (task #42). [provenance: Bob; not verifiable from `chat`.]
+- **Android** (merged on `chat`): read-only Autonomi viewer PLUS the LIT chat shell. The reader FFI (`Client::{connect,fetch,fetch_and_render}` + `detect`) and the daemonless `ChatClient` chat surface both live in `crates/fetchit-ffi/src/lib.rs`; the reader renders via `RenditionRenderer.kt`, chat via `chat/ChatController` + `chat/ChatModeView`, with the engine DM outbox projected to per-bubble status (`ConversationStore.upsertOutbox`).
+- **DM catch-up parity:** desktop catches up on relay reconnect (transit replay); the Android chat shell shares the engine DM outbox (resend/retry) but full inbound DM catch-up parity is the remaining lane (task #42).
 
-<!-- arch: id=shells glob=crates/fetchit-ffi/src/lib.rs apps/fetchit-desktop/src/controller.ts apps/fetchit-desktop/src/renderers/dispatch.ts verified=2eea972 -->
+<!-- arch: id=shells glob=crates/fetchit-ffi/src/lib.rs apps/fetchit-desktop/src/controller.ts apps/fetchit-desktop/src/renderers/dispatch.ts apps/fetchit-android/app/src/main/java/io/etchit/fetchit/chat verified=f9b9e98 -->
