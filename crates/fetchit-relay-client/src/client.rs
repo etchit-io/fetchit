@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use url::Url;
@@ -805,7 +806,14 @@ async fn open_session(
 ) -> Result<OpenSession, ClientError> {
     let bearer = obtain_bearer(&config.base, signer, config.auth_timeout).await?;
     let ws_url = build_ws_url(&config.base, &bearer)?;
-    let req = ws_url.as_str().into_client_request()?;
+    let mut req = ws_url.as_str().into_client_request()?;
+    // #113: also present the bearer as an `Authorization` header so the
+    // token can leave the URL once relays read the header. The `?token=`
+    // query stays during the transition (the server still reads it); a
+    // follow-up drops the query once relays prefer the header.
+    let auth_value = HeaderValue::from_str(&format!("Bearer {bearer}"))
+        .map_err(|e| ClientError::AuthRejected(format!("bearer header: {e}")))?;
+    req.headers_mut().insert(AUTHORIZATION, auth_value);
     let (mut stream, _resp) = connect_async(req).await?;
 
     let hello = ClientFrame::Hello(Hello {
