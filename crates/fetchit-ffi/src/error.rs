@@ -1,5 +1,5 @@
 //! [`FetchitError`] — FFI-shaped error type that maps from
-//! [`fetchit_core::Error`] and presents a stable Kotlin/Swift surface.
+//! [`fetchit_core::Error`] and presents a stable Kotlin (Android) surface.
 
 use thiserror::Error;
 

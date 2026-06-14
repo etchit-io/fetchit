@@ -58,7 +58,7 @@ fallback last.
    pub fn default_registry() -> HandlerRegistry {
        let mut reg = HandlerRegistry::new();
        reg.register(EtchitEnvelopeHandler)
-           .register(PngHandler)
+           .register(ImageHandler)
            // ...
            .register(FooHandler)            // <- new line
            .register(BinaryHandler);

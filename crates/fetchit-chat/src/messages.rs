@@ -4,11 +4,11 @@
 //! recipient, builds a Welcome outbox on first contact + a Message
 //! outbox every send, and routes each `TransitEnvelope` through a
 //! [`Router`] of message transports. Inbound is handled separately by
-//! the desktop pump via [`conversation::dispatch_inbound`].
+//! the desktop pump via [`crate::conversation::dispatch_inbound`].
 //!
 //! Legacy plaintext-envelope decode helper [`decode_direct_message`]
-//! is preserved for transports that don't speak the v2 conversation
-//! wire format (and for the live-relay self-DM test).
+//! is preserved for the live-relay self-DM integration test only;
+//! no production transport uses it.
 
 use crate::card::{extended_card_from_uri, verify_card_extension};
 use crate::chat_crypto::{
@@ -44,8 +44,8 @@ use std::sync::Arc;
 use x0xd_client::{EncryptedFrame, SecureGroupsEndpoint};
 
 /// A direct message — inbound or outbound, after the JSON envelope
-/// has been unwrapped. Used only by transports that still speak the
-/// legacy plaintext-envelope wire format.
+/// has been unwrapped. Used only by `decode_direct_message` in the
+/// live-relay self-DM integration test.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirectMessage {
     /// Sender's agent id.
@@ -216,7 +216,7 @@ impl StoredContactCard {
     /// Resolve `recipient`'s advertised relay hints from their stored
     /// contact card on disk. Returns `None` when the contact is not
     /// imported, when the on-disk card is a legacy v1 card without
-    /// the `v2_rendezvous_hints` slot, or when the slot's payload
+    /// the `fetchit_rendezvous_hints` slot, or when the slot's payload
     /// fails decoder validation.
     ///
     /// Cheap: one filesystem stat + (when present) a single JSON
@@ -275,7 +275,7 @@ impl StoredContactCard {
     ///
     /// Updates `rendezvous_hints` and `last_hint_epoch_ms` only when
     /// `hint_epoch_ms` is strictly greater than the last recorded epoch.
-    /// The load-modify-save is serialised under [`CARD_UPDATE_LOCK`] so a
+    /// The load-modify-save is serialised under `CARD_UPDATE_LOCK` so a
     /// concurrent `import_pair_uri` write cannot race it to a lost update.
     ///
     /// Returns `true` when the card was updated and persisted, `false` when
@@ -323,7 +323,7 @@ impl StoredContactCard {
         Ok(true)
     }
 
-    /// Persist a freshly-imported contact card under [`CARD_UPDATE_LOCK`]
+    /// Persist a freshly-imported contact card under `CARD_UPDATE_LOCK`
     /// without regressing the monotonic relay-hint watermark. Any
     /// `last_hint_epoch_ms` already on disk (set by an in-band hint that
     /// arrived before this import) is preserved along with the relays it
@@ -1713,9 +1713,7 @@ pub enum PrivateGroupReceive {
 }
 
 /// Decode an [`InboundEnvelope`] (raw bytes from a transport) into a
-/// [`DirectMessage`]. Used by transports that don't speak the v2
-/// conversation wire format (e.g. the legacy x0xd direct path and the
-/// live-relay self-DM round-trip test).
+/// [`DirectMessage`]. Used by the live-relay self-DM round-trip test.
 ///
 /// # Errors
 /// Returns [`ChatError::Decode`] if the payload isn't valid JSON in

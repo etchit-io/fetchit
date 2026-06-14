@@ -156,7 +156,8 @@ pub enum Rendition {
         title: String,
         /// Decoded content body.
         content: String,
-        /// Optional language tag (`meta.lang`), if non-empty.
+        /// Language tag from `meta.lang` if non-empty, otherwise a
+        /// markdown heuristic may supply `"markdown"`.
         language: Option<String>,
     },
     /// Bytes the registry could not classify any more specifically.
@@ -272,6 +273,34 @@ mod tests {
         match r {
             Rendition::Blocked { reason } => assert_eq!(reason, "xor_name: 4d216f18"),
             other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    /// Doc-invariant tripwire: an exhaustive match over every
+    /// `Rendition` variant with NO `_` arm. Adding a variant breaks
+    /// compilation here -- that IS the tripwire. It lives in-crate
+    /// (rather than in `tests/doc_invariants.rs`) because `Rendition`
+    /// is `#[non_exhaustive]`: a downstream match would be forced to
+    /// add a `_` arm and a new variant would slip through silently.
+    /// Update this match AND the architecture reference when adding a
+    /// Rendition variant.
+    #[test]
+    fn rendition_variants_match_snapshot() {
+        fn _assert(r: &Rendition) {
+            match r {
+                Rendition::Text { .. }
+                | Rendition::Image { .. }
+                | Rendition::Audio { .. }
+                | Rendition::Video { .. }
+                | Rendition::Pdf { .. }
+                | Rendition::Json { .. }
+                | Rendition::Tabular { .. }
+                | Rendition::Archive { .. }
+                | Rendition::Html { .. }
+                | Rendition::EtchitEnvelope { .. }
+                | Rendition::OpaqueBinary { .. }
+                | Rendition::Blocked { .. } => {}
+            }
         }
     }
 }

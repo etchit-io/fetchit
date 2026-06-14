@@ -1,14 +1,15 @@
 //! HTTP Signature signer for outbound `ActivityPub` deliveries.
 //!
-//! Stage 2.1a — RFC 9421 primary path. Stage 2.1b adds the
-//! draft-cavage fallback plus a 24h per-instance capability cache.
+//! RFC 9421 primary path. The draft-cavage fallback lives in
+//! `signature_cavage.rs`; the 24h per-instance capability cache lives
+//! in `signature_cache.rs`.
 //!
 //! Algorithm: RSA-2048 + PKCS#1 v1.5 + SHA-256 (`rsa-v1_5-sha256`),
 //! Mastodon's de-facto standard. Deterministic signature, so the same
 //! `(key, body, date, created)` tuple always emits the same bytes —
 //! that's what makes golden-vector tests possible.
 //!
-//! Per plan decision [III], **no per-POST ML-DSA cosignature** — the
+//! Per plan decision `[III]`, **no per-POST ML-DSA cosignature** — the
 //! Actor JSON-LD ML-DSA attestation binding the RSA pubkey to the
 //! chat identity is the authoritative PQ binding. Strict-RSA on the
 //! per-POST surface keeps verifier code on the receiver side minimal.
@@ -303,7 +304,7 @@ impl SignatureVerifyError {
 /// `application/activity+json` POST against `public_key`.
 ///
 /// Reconstructs the canonical signing base byte-for-byte from the
-/// caller-supplied request components ([`build_signature_base`])
+/// caller-supplied request components (`build_signature_base`)
 /// and verifies the base64-decoded signature with
 /// `VerifyingKey<Sha256>`. Caller must derive `target_uri`/`host`
 /// the same way the signer did — see Mastodon's `host_from_url`

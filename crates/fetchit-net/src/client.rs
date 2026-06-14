@@ -97,12 +97,12 @@ impl AutonomiClient {
     /// production client filters loopback addresses out of its routing
     /// table, so it cannot peer with a devnet at all; this enables the
     /// node's `local` mode — the toggle `ant-cli` exposes as
-    /// `--allow-loopback`. Production callers use [`connect`]: real
+    /// `--allow-loopback`. Production callers use [`Self::connect`]: real
     /// bootstrap peers are never loopback.
     ///
     /// # Errors
     ///
-    /// As [`connect`].
+    /// As [`Self::connect`].
     pub async fn connect_local(peers: &[String]) -> CoreResult<Self> {
         Self::connect_with(peers, true).await
     }

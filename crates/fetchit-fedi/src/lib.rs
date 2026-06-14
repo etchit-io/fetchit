@@ -11,16 +11,17 @@
 //!
 //! `fetchit-fedi` does **not** implement
 //! [`fetchit_chat::Transport`](https://docs.rs/fetchit-chat). The plan's
-//! [C] decision makes `FediverseTransport::deliver` take a
+//! `[C]` decision makes `FediverseTransport::deliver` take a
 //! `&PublicPost`, not a `&Envelope`, so DMs cannot cross the bridge at
 //! compile time. The chat layer integrates by adding ONE new envelope
 //! kind (`PublicPost`) and ONE chat-layer surface that calls into this
 //! crate.
 //!
-//! ## Status
+//! ## Provided surface
 //!
-//! Stage 1.1 scaffolding: module shells only. Subsequent commits in the
-//! M4 stack fill in the surface per the build sequence in the plan.
+//! Attestation (v1 + v2), Actor JSON-LD encode/decode, registry client,
+//! RFC 9421 + draft-cavage HTTP Signatures, 24h capability cache, and
+//! outbound HTTPS delivery transport.
 
 pub mod activity;
 pub mod actor;

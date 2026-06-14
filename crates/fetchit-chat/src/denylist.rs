@@ -13,7 +13,7 @@
 //!
 //! - DM outbound: [`crate::messages::Endpoint::send`] returns
 //!   [`crate::ChatError::Denied`] when the recipient is blocked.
-//! - Inbound dispatcher: [`crate::Client::default_dispatch_one`]
+//! - Inbound dispatcher: `Client::default_dispatch_one`
 //!   silently drops envelopes whose sender is blocked, BEFORE any
 //!   decrypt path runs (preserves "no plaintext leak" semantics).
 //!

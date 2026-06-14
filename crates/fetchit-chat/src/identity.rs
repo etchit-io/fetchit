@@ -88,7 +88,7 @@ impl AgentCard {
     /// Decode a card from the user-facing share URI.
     ///
     /// Accepts both the legacy plain-JSON body and the v2 DEFLATE-tagged
-    /// body produced by [`crate::FetchitIdentity::extended_share_uri`].
+    /// body produced by `Endpoint::extended_share_uri`.
     pub fn from_share_uri(uri: &str) -> Result<Self> {
         let v = crate::card::extended_card_from_uri(uri)?;
         Ok(serde_json::from_value(v)?)

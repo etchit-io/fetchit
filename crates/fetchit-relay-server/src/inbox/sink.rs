@@ -1,7 +1,7 @@
 //! Production [`PendingDeliverySink`] — the inbox → public-feed bridge.
 //!
 //! Stage 3.3 / M4 #200. A gate-passed inbound `ActivityPub` activity
-//! is turned into a broadcast [`EnvelopeKind::PublicPost`] envelope and
+//! is turned into a broadcast `EnvelopeKind::PublicPost` envelope and
 //! fanned out to every connected chat session, so the chat-layer drains
 //! it like any other envelope. There is no single recipient — a
 //! `#Public` post is delivered to whoever is currently online.

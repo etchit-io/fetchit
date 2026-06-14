@@ -2171,12 +2171,24 @@ body:not([data-view="settings"]) #settings {
 .profile-page__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .profile-page__chip { border: 1px solid var(--line); border-radius: var(--r-pill);
   padding: 4px 12px; background: transparent; color: var(--copper); cursor: pointer; }
-.profile-page__handoff, .profile-page__empty { text-align: center; padding: 40px 24px;
-  border: 1px solid var(--line); border-radius: var(--r-card); background: var(--bone-dim); }
+/* Dark "go create" hero: pins the dark-canvas oxidation palette so the empty/handoff
+   panel stays dramatic in every theme (a populated profile remains a light document).
+   Hexes mirror the dark :root block. */
+.profile-page__handoff, .profile-page__empty {
+  --ink: #0a0a0a; --ink-2: #141414; --line: #222;
+  --bone: #f5f2eb; --bone-dim: #d6cfc0; --ash: #8a8a8a;
+  --copper: #c9732b; --gold: #d9a440;
+  text-align: center; padding: 48px 24px; min-height: 62vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: var(--r-card);
+  background: radial-gradient(ellipse at 50% 0%,
+    color-mix(in srgb, var(--copper) 10%, var(--ink-2)), var(--ink) 70%); }
 .profile-page__empty { color: var(--ash); }
-.profile-page__handoff-title { font-family: var(--font-display); font-size: 26px; color: var(--ink); }
-.profile-page__handoff-chain { color: var(--copper); font-weight: 600; margin: 8px 0; }
-.profile-page__handoff-body { color: var(--ink-2); max-width: 420px; margin: 0 auto 16px; }
+.profile-page__handoff-title { font-family: var(--font-display); font-size: 34px; color: var(--bone); margin-bottom: 6px; }
+.profile-page__handoff-chain { color: var(--gold); font-weight: 600; font-size: 15px; margin: 12px 0; }
+.profile-page__handoff-body { color: var(--bone-dim); max-width: 460px; margin: 0 auto 24px; line-height: 1.55; }
 .profile-page__handoff .profile-page__actions { justify-content: center; }
+.profile-page__handoff .profile-page__act { color: var(--bone); border-color: var(--ash); }
+.profile-page__handoff .profile-page__act--primary { border-color: transparent; }
 .json-profile-banner { margin-bottom: 10px; color: var(--ash); }
 .json-profile-banner button { background: transparent; border: none; color: var(--copper); cursor: pointer; padding: 0; }

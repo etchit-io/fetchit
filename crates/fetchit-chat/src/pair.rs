@@ -106,7 +106,7 @@ pub enum PairError {
     ForwardingVerify(String),
     /// The relay URL failed the SSRF host guard before any dial: its
     /// host is, or resolves to, private / non-routable IP space. Carries
-    /// the underlying [`crate::relay_http::RelayGuardError`] message.
+    /// the underlying `crate::relay_http::RelayGuardError` message.
     #[error("relay blocked: {0}")]
     RelayBlocked(String),
 }

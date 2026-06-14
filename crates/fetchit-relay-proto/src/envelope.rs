@@ -128,10 +128,11 @@ pub enum EnvelopeKind {
     /// with every other kind); the receiver's content handler is the
     /// one that parses the JSON-LD.
     ///
-    /// Reserved at Stage 5.1 of the M4 plan
-    /// (`docs/superpowers/plans/2026-06-07-m4-fediverse-impl-plan.md`);
-    /// chat-layer wire-up lands at Stage 5.2 / 5.3, inbox-side
-    /// out-stream wire-up at Stage 3.3b.
+    /// Wired end-to-end: the chat-layer send path is
+    /// `fetchit_chat::Client::publish_public_post`, the receive path
+    /// drains it into the public-feed handler, and a `fediverse-inbox`
+    /// relay emits inbound activities onto this kind via the inbox
+    /// `SessionBroadcastSink`.
     ///
     /// Appended at the end of the enum to keep existing variant
     /// indices stable for postcard wire-compat.
@@ -579,5 +580,28 @@ mod tests {
         assert_eq!(decoded.kind, EnvelopeKind::PublicPost);
         assert!(decoded.kem_ciphertext.is_empty());
         assert_eq!(decoded.ciphertext, env.ciphertext);
+    }
+
+    /// Tripwire: a new `EnvelopeKind` variant is a compile error here (no
+    /// `_` arm; `Unknown(_)` is the forward-compat variant, not a match
+    /// wildcard). In-crate so a future `#[non_exhaustive]` cannot force a
+    /// `_` arm and silently defeat it. Update this match AND
+    /// the architecture reference when adding a variant.
+    #[test]
+    fn envelope_kinds_locked() {
+        fn _assert(k: &EnvelopeKind) {
+            match k {
+                EnvelopeKind::Dm
+                | EnvelopeKind::GroupChat
+                | EnvelopeKind::AdminEvent
+                | EnvelopeKind::DeliveryReceipt
+                | EnvelopeKind::PrivateGroupChat
+                | EnvelopeKind::X0xdGroupMetadataEvent
+                | EnvelopeKind::Reserved6
+                | EnvelopeKind::Reserved7
+                | EnvelopeKind::PublicPost
+                | EnvelopeKind::Unknown(_) => {}
+            }
+        }
     }
 }

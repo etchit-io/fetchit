@@ -17,8 +17,8 @@ import uniffi.fetchit_ffi.setupLogger
  * [`Client`].
  *
  * Why the Client lives here, not in [`MainActivity`]: it's a heavy
- * resource (DHT bootstrap, QUIC connections), and other surfaces —
- * [`SettingsActivity`] for peer count, future Tauri/web embeds — need
+ * resource (DHT bootstrap, QUIC connections), and other surfaces --
+ * [`SettingsSheet`] for peer count, future Tauri/web embeds -- need
  * to share it. The Activity is just one consumer.
  *
  * `ant-core`'s internal `data_dir()` resolution calls `home_dir().unwrap()`

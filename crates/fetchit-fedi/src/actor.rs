@@ -1,9 +1,9 @@
 //! Actor identity + Mastodon-compatible JSON-LD representation.
 //!
-//! Per plan decision [III] and the cross-crate cut documented in
+//! Per plan decision `[III]` and the cross-crate cut documented in
 //! `docs/superpowers/plans/2026-06-07-m4-fediverse-impl-plan.md` Stage 1,
 //! [`ActorIdentity`] is **pure data**. The factory (RSA-2048 generation,
-//! ML-DSA-65 attestation signing, [`StoreLayout`] I/O) lives in
+//! ML-DSA-65 attestation signing, `StoreLayout` I/O) lives in
 //! `fetchit-chat::Client::mint_actor_identity` so the dep direction
 //! stays unidirectional (`chat → fedi`).
 //!
@@ -11,8 +11,8 @@
 //! shape — what a fetch>it actor URL serves on GET, and what other
 //! `ActivityPub` instances PEM-decode to verify outbound HTTP
 //! Signatures. `Actor::to_json_ld` renders the structure; the inverse
-//! (`Actor::from_json_ld`) lands with Stage 1.3-b's Mastodon-fixture
-//! round-trip tests.
+//! `Actor::from_json_ld` parses it, with Mastodon-fixture round-trip
+//! tests verifying both directions.
 
 use crate::attestation::MlDsaAttestation;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -171,8 +171,8 @@ impl Drop for ActorIdentity {
 /// Mastodon-compatible `application/activity+json` Actor shape.
 ///
 /// Construction goes through [`Self::from_identity`]; rendering goes
-/// through [`Self::to_json_ld`]. Stage 1.3-b adds `from_json_ld` for
-/// the symmetric decode side once the Mastodon fixture lands.
+/// through [`Self::to_json_ld`]; decoding from a fetched JSON-LD document
+/// goes through [`Self::from_json_ld`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Actor {
     /// Actor URL — also the JSON-LD `id`.

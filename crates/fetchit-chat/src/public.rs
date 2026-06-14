@@ -1,9 +1,9 @@
 //! C=Public chat-layer surface — denylist gating helpers for the
 //! Stage 5 fediverse publish path.
 //!
-//! Stage 5.1-chat exposes the gating primitives only;
-//! `Client::publish_public_post` lands in Stage 5.2 and consumes
-//! them. Splitting the gate from the publish-driver keeps the
+//! This module owns the denylist gating primitives;
+//! `Client::publish_public_post` consumes them. Splitting the gate
+//! from the publish-driver keeps the
 //! check synchronously testable against a stub
 //! [`DenylistCheck`] without standing up the full HTTPS-POST
 //! stack and lets the desktop UI confirmation modal
@@ -78,7 +78,7 @@ pub async fn check_publish_denylist(
 /// # Errors
 /// - [`ChatError::Invalid`] when the mention is malformed or
 ///   `WebFinger` resolution fails (DNS / HTTP / JRD parse). The
-///   inner [`WebFingerError`] message rides in the `String` payload.
+///   inner [`fetchit_fedi::WebFingerError`] message rides in the `String` payload.
 /// - [`ChatError::DeniedActor`] when the resolved actor URL is on
 ///   the community denylist.
 pub async fn check_mention_denylist(

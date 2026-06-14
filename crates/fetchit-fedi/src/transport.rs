@@ -7,7 +7,7 @@
 //!
 //! ## Boundary
 //!
-//! Per plan decision [C], [`FediverseTransport::deliver`] takes a
+//! Per plan decision `[C]`, [`FediverseTransport::deliver`] takes a
 //! `&[u8] body` for Stage 2.2 (`PublicPost` lands Stage 5; the chat
 //! layer will provide a wrapper that serializes a `&PublicPost` to
 //! the `Create{Note}` JSON-LD bytes this function takes).

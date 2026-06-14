@@ -7,11 +7,16 @@
 //! cross-NAT direct — and picks the best one per send. Each transport
 //! exposes its own inbound stream the desktop pumps into the UI.
 //!
-//! Transports never see plaintext content directly: the chat layer
-//! seals the body before handing it over, and the transport just
-//! routes opaque bytes. (v1 ships pre-encryption — the field nominally
-//! holds ciphertext but is actually plaintext; ML-KEM-768 sealing
-//! lands in the next milestone.)
+//! Scope: this Router carries chat message CONTENT. Group MLS
+//! control-plane events (Welcome / Commit / member changes) do NOT
+//! route here - they ride x0xd gossip as the primary path, with the
+//! relay only as a cross-NAT contingency (see
+//! [`crate::groups_reachability`]).
+//!
+//! Transports never see plaintext content: the chat layer seals the
+//! body (ML-KEM-768 + ML-DSA-65 via the x0xd MLS surface, shipped at
+//! M2) before handing it over, and the transport routes only opaque
+//! sealed bytes.
 
 use crate::card::RendezvousHintsV1;
 use crate::error::{ChatError, Result};

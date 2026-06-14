@@ -16,8 +16,8 @@ use crate::handler::{
 use crate::{Error, Result};
 
 /// Number of leading bytes passed to [`ContentHandler::can_handle`].
-/// Big enough for every magic-byte sniff used in 0.1.0; small enough
-/// that we never copy a full payload during detection.
+/// Big enough for every magic-byte sniff in the default handler set;
+/// small enough that we never copy a full payload during detection.
 const SNIFF_BYTES: usize = 4096;
 
 /// A set of registered [`ContentHandler`]s plus the dispatch logic
@@ -53,6 +53,17 @@ impl HandlerRegistry {
     #[must_use]
     pub fn len(&self) -> usize {
         self.handlers.len()
+    }
+
+    /// The [`ContentHandler::kind`] of every registered handler, in
+    /// registration order.
+    ///
+    /// Registration order is load-bearing (it breaks confidence ties),
+    /// so the doc-invariant tripwire test in
+    /// `tests/doc_invariants.rs` locks this sequence against a
+    /// checked-in snapshot. Used there, not on any hot path.
+    pub fn handler_kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.handlers.iter().map(|h| h.kind())
     }
 
     /// `true` if no handlers are registered.

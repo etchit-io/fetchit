@@ -272,11 +272,11 @@ impl<'a> Endpoint<'a> {
     /// Create a new "public room" — a group whose messages flow
     /// plaintext-over-gossip on x0xd's side (wire-level preset is
     /// `public_open`, surfaced to users as "public room"). The
-    /// `/groups/<id>/send` endpoint accepts plaintext directly. MLS
-    /// encryption (RFC 9420 `TreeKEM` + ML-KEM-768) is the M2
-    /// deliverable; it would require a client-side MLS state machine
-    /// in this crate AND a separate `/secure/encrypt` + `/publish`
-    /// flow, neither of which exists today.
+    /// `/groups/<id>/send` endpoint accepts plaintext directly. This is
+    /// the UNENCRYPTED variant; the PQ-encrypted path (MLS `TreeKEM` +
+    /// ML-KEM-768 via x0xd `/secure/encrypt`) shipped at M2 and lives in
+    /// [`Self::create_private`] + the private-group methods in
+    /// [`crate::messages`]. Use `create_private` for private groups.
     pub async fn create(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
         self.http
             .post_json(

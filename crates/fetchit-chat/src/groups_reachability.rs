@@ -15,18 +15,23 @@
 //! `private/m2.5-bridge-collapsed-spec.md`; the chat-peer is responsible
 //! for taking the resulting action.
 //!
-//! # Scaffolding status (C4)
+//! # State
 //!
-//! This file ships the typed surface + in-memory operations + the routing
-//! decision. Persistence under the conversation-registry at-rest key, and
-//! the wire-in points on the sender (C2) / receiver (C3) paths, land in
-//! follow-up commits once C2/C3 agree on the call shape. The contract
-//! exposed here is stable from C4 onward.
+//! This module owns the typed surface, the in-memory operations, and the
+//! pure routing decision ([`decide_route`]). It is wired into
+//! [`crate::Client`]: the dispatcher records direct-gossip activity into
+//! [`ReachabilityCache`], and the send path consults [`decide_route`]
+//! before wrapping a metadata event for the bridge. The reachability and
+//! consent state is held in memory for the session and is not persisted
+//! across restart.
 
+use crate::at_rest::{open_from_path, seal_to_path, MasterKey, ARGON_SALT_LEN};
 use crate::groups::GroupId;
 use crate::identity::AgentId;
+use crate::local_store::StoreLayout;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Reachability of a `(group, member)` pair on the direct-gossip path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,15 +68,13 @@ pub struct LastSeenMs(pub u64);
 /// Window after which a `(group, member)` is considered `Unreachable` on
 /// the direct-gossip path.
 ///
-/// 60 s is the C4 placeholder. The spec leaves the exact value tunable;
-/// C5 integration tests against a running x0xd will calibrate it against
-/// the typical x0xd publish→subscribe round-trip on a healthy mesh.
+/// 60 s, tunable per the spec. Sized for the typical x0xd
+/// publish->subscribe round-trip on a healthy mesh.
 pub const STALE_AFTER_MS: u64 = 60_000;
 
 /// In-memory cache of last-seen direct-gossip activity per
-/// `(group, member)`. Designed to persist alongside
-/// `crate::conversation::ConversationRegistry` under the same at-rest key
-/// (C4 persistence wiring is a follow-up commit).
+/// `(group, member)`. Held in memory for the session and rebuilt from
+/// live gossip after restart; not persisted to disk.
 #[derive(Debug, Default)]
 pub struct ReachabilityCache {
     inner: HashMap<(GroupId, AgentId), LastSeenMs>,
@@ -129,19 +132,86 @@ impl ReachabilityCache {
     }
 }
 
-/// In-memory store of per-group bridge-consent state. Designed to persist
-/// alongside `crate::conversation::ConversationRegistry` under the same
-/// at-rest key (C4 persistence wiring is a follow-up commit).
+/// Per-group consent state for the metadata bridge.
+///
+/// Held in memory for the session. When constructed via [`Self::load`]
+/// it also carries a [`ConsentPersist`] handle and re-seals the whole
+/// map to `bridge/consent.json.enc` on every mutation, so the user's
+/// per-group opt-in / opt-out decisions survive restart. Constructed via
+/// [`Self::new`] it stays purely in memory (tests and any caller without
+/// a master key).
 #[derive(Debug, Default)]
 pub struct BridgeConsentStore {
     inner: HashMap<GroupId, GroupBridgeConsent>,
+    persist: Option<ConsentPersist>,
+}
+
+/// Everything [`BridgeConsentStore`] needs to seal its map to disk,
+/// mirroring the conversation registry's persistence fields (`layout` +
+/// `master` + `kdf_id` + `argon_salt`). Cloned into the store by
+/// [`BridgeConsentStore::load`]; absent for in-memory stores.
+#[derive(Clone)]
+struct ConsentPersist {
+    layout: StoreLayout,
+    master: MasterKey,
+    kdf_id: u8,
+    argon_salt: Option<[u8; ARGON_SALT_LEN]>,
+}
+
+impl std::fmt::Debug for ConsentPersist {
+    // The master key never appears in Debug output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsentPersist")
+            .field("path", &self.layout.bridge_consent_path())
+            .field("master", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl BridgeConsentStore {
-    /// Empty store. Equivalent to `Default`.
+    /// Empty, in-memory-only store with no disk persistence. Equivalent
+    /// to `Default`. Used by tests and any caller without a master key.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load the persisted consent map from `bridge/consent.json.enc`,
+    /// returning a store that re-seals on every mutation.
+    ///
+    /// Fail-safe: a missing file, a wrong or rotated master key (AEAD
+    /// tag mismatch), a truncated or corrupt file, or an unparseable
+    /// [`GroupId`] all fall back to an empty map rather than erroring.
+    /// Empty == every group `NotAsked` == the pre-persistence reset
+    /// behavior, so a damaged file can never hard-fail client startup --
+    /// the worst case is one extra consent prompt.
+    #[must_use]
+    pub fn load(
+        layout: &StoreLayout,
+        master: &MasterKey,
+        kdf_id: u8,
+        argon_salt: Option<&[u8; ARGON_SALT_LEN]>,
+    ) -> Self {
+        let inner = Self::read_map(&layout.bridge_consent_path(), master).unwrap_or_default();
+        Self {
+            inner,
+            persist: Some(ConsentPersist {
+                layout: layout.clone(),
+                master: master.clone(),
+                kdf_id,
+                argon_salt: argon_salt.copied(),
+            }),
+        }
+    }
+
+    /// Best-effort read of the sealed map. `None` on any failure so
+    /// [`Self::load`] can fall back to empty (see its fail-safe note).
+    fn read_map(path: &Path, master: &MasterKey) -> Option<HashMap<GroupId, GroupBridgeConsent>> {
+        if !path.exists() {
+            return None;
+        }
+        let plain = open_from_path(path, master).ok()?;
+        serde_json::from_slice(&plain).ok()
     }
 
     /// Current consent state for `group`. Missing entries →
@@ -154,16 +224,52 @@ impl BridgeConsentStore {
             .unwrap_or(GroupBridgeConsent::NotAsked)
     }
 
-    /// Persist consent state for `group`. Called by the desktop UI after
-    /// the consent modal resolves, or by tests / migration paths.
+    /// Set consent state for `group`, then persist the map when a
+    /// persistence handle is installed (i.e. the store came from
+    /// [`Self::load`]). Called by the desktop UI after the consent modal
+    /// resolves, or by tests / migration paths.
     pub fn set(&mut self, group: GroupId, state: GroupBridgeConsent) {
         self.inner.insert(group, state);
+        self.flush();
     }
 
-    /// Forget consent for `group` — used when the group is left or
-    /// permanently deleted.
+    /// Forget consent for `group` -- used when the group is left or
+    /// permanently deleted -- and persist the removal so a left/deleted
+    /// group's consent does not linger on disk.
     pub fn forget(&mut self, group: &GroupId) {
         self.inner.remove(group);
+        self.flush();
+    }
+
+    /// Seal the whole map to disk when a persistence handle is set.
+    ///
+    /// Best-effort: a serialize or write failure is logged and
+    /// swallowed, never propagated -- the in-memory state is already
+    /// updated, and a failed persist degrades to the pre-persistence
+    /// behavior (re-prompt on next restart) rather than hard-failing a
+    /// consent toggle. `seal_to_path` writes atomically (temp + rename),
+    /// so a crash mid-write cannot leave a torn file. No-op for in-memory
+    /// stores (`persist` is `None`).
+    fn flush(&self) {
+        let Some(persist) = self.persist.as_ref() else {
+            return;
+        };
+        let bytes = match serde_json::to_vec(&self.inner) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("bridge-consent encode failed, not persisted: {e}");
+                return;
+            }
+        };
+        if let Err(e) = seal_to_path(
+            &persist.layout.bridge_consent_path(),
+            &bytes,
+            &persist.master,
+            persist.kdf_id,
+            persist.argon_salt.as_ref(),
+        ) {
+            log::warn!("bridge-consent persist failed: {e}");
+        }
     }
 }
 
@@ -217,9 +323,9 @@ pub const SHADOW_WINDOW_MS: u64 = 30_000;
 /// (record runs, double-recording is harmless idempotent) rather than
 /// a silent false reachability record.
 ///
-/// C4 scaffolding contract: callers `mark` before `POST /publish` and
+/// Contract: callers `mark` before `POST /publish` and
 /// `is_recent_and_evict` from the SSE consumer hot path. Periodic
-/// `evict_older_than` is OK but optional — entries beyond
+/// `evict_older_than` is optional -- entries beyond
 /// `2 * SHADOW_WINDOW_MS` are dropped on lookup anyway.
 #[derive(Debug, Default)]
 pub struct BridgeInboundShadow {
@@ -375,6 +481,8 @@ pub fn decide_route(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::chat_crypto::AEAD_KEY_LEN;
+    use tempfile::tempdir;
 
     fn g(s: &str) -> GroupId {
         GroupId::parse(s).unwrap()
@@ -524,6 +632,111 @@ mod tests {
         store.set(g("group1"), GroupBridgeConsent::ConsentedOptIn);
         store.forget(&g("group1"));
         assert_eq!(store.lookup(&g("group1")), GroupBridgeConsent::NotAsked);
+    }
+
+    // -- BridgeConsentStore persistence --------------------------------
+
+    fn test_master() -> MasterKey {
+        MasterKey::from_bytes_for_test([7u8; AEAD_KEY_LEN])
+    }
+
+    #[test]
+    fn consent_persists_across_reload() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = test_master();
+
+        let mut store = BridgeConsentStore::load(&layout, &master, 0, None);
+        store.set(g("group1"), GroupBridgeConsent::ConsentedOptIn);
+        store.set(g("group2"), GroupBridgeConsent::DeclinedOptOut);
+        drop(store);
+
+        let reloaded = BridgeConsentStore::load(&layout, &master, 0, None);
+        assert_eq!(
+            reloaded.lookup(&g("group1")),
+            GroupBridgeConsent::ConsentedOptIn,
+        );
+        assert_eq!(
+            reloaded.lookup(&g("group2")),
+            GroupBridgeConsent::DeclinedOptOut,
+        );
+        assert_eq!(reloaded.lookup(&g("group3")), GroupBridgeConsent::NotAsked);
+    }
+
+    #[test]
+    fn load_with_wrong_key_falls_back_to_empty() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let mut store = BridgeConsentStore::load(&layout, &test_master(), 0, None);
+        store.set(g("group1"), GroupBridgeConsent::ConsentedOptIn);
+        drop(store);
+
+        // A different master cannot open the sealed file; load must fall
+        // back to an empty (all-NotAsked) map, never error.
+        let wrong = MasterKey::from_bytes_for_test([9u8; AEAD_KEY_LEN]);
+        let reloaded = BridgeConsentStore::load(&layout, &wrong, 0, None);
+        assert_eq!(reloaded.lookup(&g("group1")), GroupBridgeConsent::NotAsked);
+    }
+
+    #[test]
+    fn load_corrupt_file_falls_back_to_empty() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        // Garbage where a sealed vault is expected.
+        std::fs::write(layout.bridge_consent_path(), b"not a vault file").unwrap();
+
+        let store = BridgeConsentStore::load(&layout, &test_master(), 0, None);
+        assert_eq!(store.lookup(&g("group1")), GroupBridgeConsent::NotAsked);
+    }
+
+    #[test]
+    fn forget_persists_removal() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = test_master();
+
+        let mut store = BridgeConsentStore::load(&layout, &master, 0, None);
+        store.set(g("group1"), GroupBridgeConsent::ConsentedOptIn);
+        store.forget(&g("group1"));
+        drop(store);
+
+        let reloaded = BridgeConsentStore::load(&layout, &master, 0, None);
+        assert_eq!(reloaded.lookup(&g("group1")), GroupBridgeConsent::NotAsked);
+    }
+
+    #[test]
+    fn new_store_never_touches_disk() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        // new() carries no persistence handle: mutations stay in memory
+        // and must not create the consent file.
+        let mut store = BridgeConsentStore::new();
+        store.set(g("group1"), GroupBridgeConsent::ConsentedOptIn);
+        assert_eq!(
+            store.lookup(&g("group1")),
+            GroupBridgeConsent::ConsentedOptIn,
+        );
+        assert!(!layout.bridge_consent_path().exists());
+    }
+
+    #[test]
+    fn set_leaves_no_tmp_siblings() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let mut store = BridgeConsentStore::load(&layout, &test_master(), 0, None);
+        store.set(g("group1"), GroupBridgeConsent::ConsentedOptIn);
+
+        // seal_to_path renames its tmp into place; no debris remains.
+        let leftovers: Vec<_> = std::fs::read_dir(&layout.bridge_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected tmp files: {leftovers:?}");
     }
 
     #[test]

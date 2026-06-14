@@ -251,7 +251,7 @@ pub fn message_aad(group_id: &[u8; 32], epoch: u32) -> Vec<u8> {
 
 /// Canonical bytes for signing/verifying a `TransitEnvelope`'s
 /// `sender_signature`. Postcard-encoded with the signature field zeroed
-/// (length-preserved as Vec<u8> of length 0) so signer and verifier
+/// (length-preserved as `Vec<u8>` of length 0) so signer and verifier
 /// agree on the exact byte sequence.
 ///
 /// # Errors

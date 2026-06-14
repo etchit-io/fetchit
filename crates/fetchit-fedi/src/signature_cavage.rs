@@ -292,7 +292,7 @@ fn quote_aware_split(s: &str, sep: char) -> Vec<&str> {
 ///
 /// Mirror of [`crate::signature::verify_signature_rfc9421`] for the
 /// cavage wire format. Reconstructs the canonical signing base
-/// byte-for-byte via [`build_cavage_base`] and verifies the
+/// byte-for-byte via `build_cavage_base` and verifies the
 /// base64-decoded signature with `VerifyingKey<Sha256>`.
 ///
 /// `request_target` is `<method-lowercase> <path[?query]>` — caller

@@ -428,7 +428,7 @@ pub async fn build_bridge_outbox<S: fetchit_relay_client::Signer + ?Sized>(
 /// `apply_named_group_metadata_event` path.
 ///
 /// Designed to be called from the inbound dispatch loop
-/// ([`crate::Client::default_dispatch_one`] and the chat-peer binary)
+/// (`Client::default_dispatch_one` and the chat-peer binary)
 /// for any `TransitEnvelope` with
 /// `kind == EnvelopeKind::X0xdGroupMetadataEvent`.
 ///

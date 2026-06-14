@@ -44,21 +44,24 @@ pub struct InboxState {
     pub rate_limit: Arc<InboxRateLimit>,
     /// Sliding-window replay cache.
     pub replay: Arc<ReplayWindow>,
-    /// Denylist consultation point (Stage 4 wires the real
-    /// `EntryKind::ActorUrl` consumer here).
+    /// Denylist consultation point. Production builds wire
+    /// [`super::operator::DenylistConsumerCheck`] (the `EntryKind::ActorUrl`
+    /// consumer); tests inject a stub.
     pub denylist: Arc<dyn InboxDenylistCheck>,
-    /// `WebFinger` pubkey resolver (Stage 6.1 wires the cached
-    /// HTTPS client here).
+    /// `WebFinger` pubkey resolver. Production builds wire
+    /// [`super::operator::FediverseWebFinger`] (TTL-cached); tests inject
+    /// a stub.
     pub webfinger: Arc<dyn WebFingerLookup>,
-    /// Sink for activities that pass every gate (Stage 3.3 wires the
-    /// `EnvelopeKind::PublicPost` out-stream here).
+    /// Sink for activities that pass every gate. Production builds wire
+    /// [`super::SessionBroadcastSink`] (the `EnvelopeKind::PublicPost`
+    /// out-stream); tests inject a stub.
     pub sink: Arc<dyn PendingDeliverySink>,
     /// Per-gate Prometheus counter family (Stage 3.2). Default is
     /// a fresh zero-valued [`InboxMetrics`]; production callers
     /// share an `Arc<InboxMetrics>` so the ops surface can scrape
     /// the same counter set the handler increments.
     pub metrics: Arc<InboxMetrics>,
-    /// Hard ceiling on inbound body size (gate 4).
+    /// Hard ceiling on inbound body size (gate 1).
     pub max_body_bytes: usize,
     /// Maximum ±skew for `Date` + `Signature-Input;created`.
     pub max_date_skew: Duration,
@@ -156,9 +159,10 @@ impl InboxStateBuilder {
     }
 }
 
-/// Activity that made it through every pre-flight gate — enqueued
-/// for the chat-layer to drain (Stage 3.3 turns this into an
-/// `EnvelopeKind::PublicPost` on the relay-WS out-stream).
+/// Activity that made it through every pre-flight gate -- enqueued
+/// for the chat-layer to drain. The production sink
+/// ([`super::SessionBroadcastSink`]) turns this into an
+/// `EnvelopeKind::PublicPost` on the relay-WS out-stream.
 #[derive(Clone, Debug)]
 pub struct PendingDelivery {
     /// Signing actor URL (from the verified `keyId`).
@@ -180,8 +184,8 @@ pub use super::PendingDeliverySink;
 ///
 /// Mounts at `/inbox` so callers can either use this router
 /// standalone (`axum::serve(listener, inbox_router(state))`) or
-/// `.merge()` it onto an existing relay-server router (Stage 3.3
-/// wires it onto `Server::router()`).
+/// `.merge()` it onto an existing relay-server router. Production
+/// wiring is `Server::with_inbox` (see `operator::setup_fediverse_inbox`).
 pub fn inbox_router(state: InboxState) -> Router {
     Router::new()
         .route("/inbox", post(handle_inbox))
@@ -231,13 +235,13 @@ async fn handle_inbox_inner(
 /// [`handle_inbox_inner`] which wraps it with `record_accept` /
 /// `record_drop` so the metrics integration stays in one place.
 async fn run_gates(state: InboxState, headers: HeaderMap, body: Bytes) -> Result<(), InboxError> {
-    // Gate 4: body size.
+    // Gate 1: body size.
     if body.len() > state.max_body_bytes {
         return Err(InboxError::payload_too_large());
     }
 
-    // Gate 2 prereqs: pull every required header, reconstruct
-    // target_uri / request_target.
+    // Gate 2: required headers + keyId (reconstruct target_uri /
+    // request_target).
     let ctx =
         extract_inbox_signature_context(&headers, "/inbox").map_err(|reason| match reason {
             DropReason::MissingHeader(_) | DropReason::MissingKeyId => {
@@ -246,11 +250,11 @@ async fn run_gates(state: InboxState, headers: HeaderMap, body: Bytes) -> Result
             _ => InboxError::unauthorized(reason),
         })?;
 
-    // Gate 2a: Date skew (RFC 9421 freshness window).
+    // Gate 3: freshness (Date + Signature-Input;created skew).
     check_date_skew(&ctx.date, SystemTime::now(), state.max_date_skew)
         .map_err(InboxError::bad_request)?;
 
-    // Gate 1: rate-limit by source-instance hostname (parsed from
+    // Gate 4: rate-limit by source-instance hostname (parsed from
     // keyId).
     let instance = parse_instance(&ctx.key_id)
         .ok_or_else(|| InboxError::bad_request(DropReason::MissingKeyId))?;
@@ -267,7 +271,7 @@ async fn run_gates(state: InboxState, headers: HeaderMap, body: Bytes) -> Result
         return Err(InboxError::forbidden(DropReason::Denylisted(actor_url)));
     }
 
-    // Gate 2b: HTTP Signature verification.
+    // Gate 6: HTTP Signature verification (WebFinger pubkey resolve + verify).
     let pubkey_pem = state
         .webfinger
         .resolve_pubkey_pem(&ctx.key_id)
@@ -296,7 +300,7 @@ async fn run_gates(state: InboxState, headers: HeaderMap, body: Bytes) -> Result
         }
     };
 
-    // Gate 3: replay window. Run AFTER signature verify so a forged
+    // Gate 7: replay window. After signature verify so a forged
     // (Digest, Date) pair from an unauthenticated attacker can't
     // poison the cache against a real future activity.
     let replay_key = (ctx.digest.clone(), date_to_unix(&ctx.date));
