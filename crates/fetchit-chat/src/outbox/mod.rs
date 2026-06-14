@@ -5,8 +5,8 @@
 //!
 //! - [`OutboxBubble`] + [`OutboxStatus`]: per-send state.
 //! - [`is_retryable`]: the pure retry-eligibility rule.
-//! - `store::OutboxStore`: vault-persisted bubble map (added in a later task).
-//! - `driver::OutboxDriver`: the presence-driven retry loop (later task).
+//! - `store::OutboxStore`: vault-persisted bubble map.
+//! - `driver::OutboxDriver`: the presence-driven retry loop.
 
 use crate::identity::AgentId;
 use serde::{Deserialize, Serialize};

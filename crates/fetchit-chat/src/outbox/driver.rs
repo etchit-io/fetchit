@@ -100,22 +100,29 @@ impl<T: OutboxTransport> OutboxDriver<T> {
                 let mut store = self.store.lock().await;
                 // The bubble may have been removed while in flight; only
                 // update if it is still present.
-                let updated = store.get(&claimed.id).cloned().map(|mut current| {
-                    match &result {
-                        Ok(receipt) => {
-                            if let Some(mid) = receipt.message_id.clone() {
-                                current.message_id = Some(mid);
+                let updated = match store.get(&claimed.id).cloned() {
+                    // A DeliveryReceipt may have landed during the send
+                    // await; Delivered is authoritative -- do not clobber
+                    // it on either arm (cross-review catch).
+                    Some(current) if current.status == OutboxStatus::Delivered => None,
+                    Some(mut current) => {
+                        match &result {
+                            Ok(receipt) => {
+                                if let Some(mid) = receipt.message_id.clone() {
+                                    current.message_id = Some(mid);
+                                }
+                                current.status = OutboxStatus::Sending;
+                                current.last_error = None;
                             }
-                            current.status = OutboxStatus::Sending;
-                            current.last_error = None;
+                            Err(e) => {
+                                current.status = OutboxStatus::Failed;
+                                current.last_error = Some(e.to_string());
+                            }
                         }
-                        Err(e) => {
-                            current.status = OutboxStatus::Failed;
-                            current.last_error = Some(e.to_string());
-                        }
+                        Some(current)
                     }
-                    current
-                });
+                    None => None,
+                };
                 if let Some(u) = &updated {
                     store.upsert(u.clone());
                 }
@@ -341,5 +348,56 @@ mod tests {
             OutboxStatus::Failed
         );
         assert_eq!(rx.try_recv().unwrap().bubble.id, "b1");
+    }
+
+    /// Simulates a DeliveryReceipt landing during the send await: its
+    /// `send` marks the bubble Delivered via the shared store before
+    /// returning Ok, racing the post-send status update.
+    struct DeliverDuringSend {
+        store: Arc<Mutex<OutboxStore>>,
+        message_id: String,
+    }
+    impl OutboxTransport for DeliverDuringSend {
+        fn connect(&self, _peer: AgentId) -> impl std::future::Future<Output = ()> + Send {
+            async {}
+        }
+        fn send(
+            &self,
+            _b: OutboxBubble,
+        ) -> impl std::future::Future<Output = Result<SendReceipt, ChatError>> + Send {
+            let store = self.store.clone();
+            let mid = self.message_id.clone();
+            async move {
+                store.lock().await.mark_delivered(&mid);
+                Ok(SendReceipt {
+                    accepted_at_ms: 1,
+                    message_id: Some(mid),
+                    transport_name: "test",
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delivered_during_inflight_send_is_not_clobbered() {
+        let store = Arc::new(Mutex::new(OutboxStore::new()));
+        store
+            .lock()
+            .await
+            .upsert(bubble("b1", OutboxStatus::Sending, Some("m1"), 0));
+        let (tx, _rx) = broadcast::channel(16);
+        let driver = OutboxDriver::new(
+            store.clone(),
+            tx,
+            DeliverDuringSend { store: store.clone(), message_id: "m1".into() },
+            0,
+        );
+        // Edge -> flush_peer claims the retryable bubble; the send marks it
+        // Delivered mid-flight; the post-send update must NOT clobber it.
+        driver.on_presence(&peer_a(), true).await;
+        assert_eq!(
+            store.lock().await.get("b1").unwrap().status,
+            OutboxStatus::Delivered
+        );
     }
 }
