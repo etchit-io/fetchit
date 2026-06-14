@@ -11,6 +11,7 @@
 use crate::identity::AgentId;
 use serde::{Deserialize, Serialize};
 
+pub mod driver;
 pub mod store;
 
 /// Delivery state of a single outbound DM bubble.
