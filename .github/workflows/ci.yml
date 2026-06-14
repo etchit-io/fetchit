@@ -304,6 +304,12 @@ jobs:
           else
             sh scripts/check-stale-phrases.sh "$base"
           fi
+      # Informational only (no --strict, plus `|| true`): surfaces sections of
+      # ARCHITECTURE.md whose globbed files changed since their `verified=`
+      # stamp, without failing CI yet. The milestone-close sweep consumes the
+      # warnings to target re-verification. Needs the full history fetched above.
+      - name: ARCHITECTURE.md stamps (informational)
+        run: sh scripts/check-arch-stamps.sh || true
       # rustdoc broken-intra-doc-link gate. Run with fetchit-relay-server's
       # `fediverse-inbox` feature so the inbox module docs (and server.rs
       # references to them) are covered and resolve. NOT --all-features: that
