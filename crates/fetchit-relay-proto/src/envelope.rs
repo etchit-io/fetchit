@@ -581,4 +581,27 @@ mod tests {
         assert!(decoded.kem_ciphertext.is_empty());
         assert_eq!(decoded.ciphertext, env.ciphertext);
     }
+
+    /// Tripwire: a new `EnvelopeKind` variant is a compile error here (no
+    /// `_` arm; `Unknown(_)` is the forward-compat variant, not a match
+    /// wildcard). In-crate so a future `#[non_exhaustive]` cannot force a
+    /// `_` arm and silently defeat it. Update this match AND
+    /// docs/ARCHITECTURE.md when adding a variant.
+    #[test]
+    fn envelope_kinds_locked() {
+        fn _assert(k: &EnvelopeKind) {
+            match k {
+                EnvelopeKind::Dm
+                | EnvelopeKind::GroupChat
+                | EnvelopeKind::AdminEvent
+                | EnvelopeKind::DeliveryReceipt
+                | EnvelopeKind::PrivateGroupChat
+                | EnvelopeKind::X0xdGroupMetadataEvent
+                | EnvelopeKind::Reserved6
+                | EnvelopeKind::Reserved7
+                | EnvelopeKind::PublicPost
+                | EnvelopeKind::Unknown(_) => {}
+            }
+        }
+    }
 }
