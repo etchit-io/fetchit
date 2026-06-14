@@ -1,7 +1,7 @@
 //! Tripwire tests: lock the public shapes that docs describe, so a
 //! change to the code forces a conscious doc update. If this fails,
 //! update BOTH the snapshot here AND the handler list in
-//! docs/ARCHITECTURE.md.
+//! the architecture reference.
 //!
 //! The matching `Rendition`-variant tripwire lives as an in-crate unit
 //! test in `src/handler.rs`, not here: `Rendition` is
@@ -20,7 +20,7 @@ use fetchit_core::handlers::default_registry;
 ///
 /// These are the `ContentHandler::kind()` values (MIME-style ids), not
 /// the friendly handler names. Update this snapshot AND
-/// docs/ARCHITECTURE.md when adding, removing, or reordering a handler.
+/// the architecture reference when adding, removing, or reordering a handler.
 #[test]
 fn handler_kinds_and_order_match_snapshot() {
     let expected = [
@@ -40,6 +40,6 @@ fn handler_kinds_and_order_match_snapshot() {
     assert_eq!(
         actual, expected,
         "handler set/order changed: update the snapshot in this test AND the \
-         handler list in docs/ARCHITECTURE.md"
+         handler list in the architecture reference"
     );
 }

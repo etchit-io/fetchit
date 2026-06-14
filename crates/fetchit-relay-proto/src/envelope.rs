@@ -586,7 +586,7 @@ mod tests {
     /// `_` arm; `Unknown(_)` is the forward-compat variant, not a match
     /// wildcard). In-crate so a future `#[non_exhaustive]` cannot force a
     /// `_` arm and silently defeat it. Update this match AND
-    /// docs/ARCHITECTURE.md when adding a variant.
+    /// the architecture reference when adding a variant.
     #[test]
     fn envelope_kinds_locked() {
         fn _assert(k: &EnvelopeKind) {

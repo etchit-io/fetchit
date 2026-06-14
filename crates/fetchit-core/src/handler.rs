@@ -282,7 +282,7 @@ mod tests {
     /// (rather than in `tests/doc_invariants.rs`) because `Rendition`
     /// is `#[non_exhaustive]`: a downstream match would be forced to
     /// add a `_` arm and a new variant would slip through silently.
-    /// Update this match AND docs/ARCHITECTURE.md when adding a
+    /// Update this match AND the architecture reference when adding a
     /// Rendition variant.
     #[test]
     fn rendition_variants_match_snapshot() {
