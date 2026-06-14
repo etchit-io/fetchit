@@ -127,6 +127,16 @@ impl OutboxStore {
         self.inflight.remove(id);
     }
 
+    /// Drop every in-flight claim. Called at driver (re)start: a freshly
+    /// started driver implies any prior driver is dead, so a lingering claim
+    /// is an orphan from a `flush_peer` aborted before `clear_inflight` ran.
+    /// The new driver has no legitimate in-flight send yet, so clearing all
+    /// claims is safe and lets the orphaned bubble re-send on the next
+    /// presence edge. Not persisted (the set never is).
+    pub fn clear_all_inflight(&mut self) {
+        self.inflight.clear();
+    }
+
     /// Flip every `Sending` bubble older than `timeout_ms` (relative to
     /// `now_ms`) to `Failed`. Returns the changed bubbles (for event
     /// emission); persists once if anything changed.
@@ -329,6 +339,19 @@ mod tests {
         assert!(!s.try_mark_inflight("b1"));
         s.clear_inflight("b1");
         assert!(s.try_mark_inflight("b1"));
+    }
+
+    #[test]
+    fn clear_all_inflight_releases_orphan_claims() {
+        let mut s = OutboxStore::new();
+        assert!(s.try_mark_inflight("b1"));
+        assert!(s.try_mark_inflight("b2"));
+        // Both claims are held; a re-claim is refused.
+        assert!(!s.try_mark_inflight("b1"));
+        s.clear_all_inflight();
+        // After a driver (re)start clears orphans, both are claimable again.
+        assert!(s.try_mark_inflight("b1"));
+        assert!(s.try_mark_inflight("b2"));
     }
 
     fn sending(id: &str, enqueued_at_ms: u64, message_id: Option<&str>) -> OutboxBubble {

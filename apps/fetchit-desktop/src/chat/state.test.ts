@@ -1,8 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatStore, convKey, quotedRef } from "./state";
+import type { OutboxBubbleDto } from "./types";
 
 const ME = "a".repeat(64);
 const PEER = "b".repeat(64);
+
+/// Build an outbox event in the engine's snake_case shape with sane
+/// defaults; override only the fields a test cares about.
+function outboxEvent(
+  over: Partial<OutboxBubbleDto> & Pick<OutboxBubbleDto, "id">,
+): OutboxBubbleDto {
+  return {
+    peer: PEER,
+    body: "hi",
+    status: "Sending",
+    message_id: null,
+    enqueued_at_ms: 1,
+    last_error: null,
+    ...over,
+  };
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -92,19 +109,21 @@ describe("ChatStore — DM bookkeeping", () => {
 describe("ChatStore — reply quoting", () => {
   const REF = { messageId: "p1", senderName: "Bob", preview: "the parent" };
 
-  it("enqueueOutbound stamps replyTo onto the optimistic bubble", () => {
+  it("staged replyTo lands on the projected outbound bubble", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
-    const id = s.enqueueOutbound(PEER, "a reply", REF);
+    s.stageOutboundMeta(PEER, { replyTo: REF });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "a reply" }));
     const conv = s.conversationsSorted()[0];
-    const b = conv.messages.find((m) => m.id === id)!;
+    const b = conv.messages.find((m) => m.id === "o1")!;
     expect(b.replyTo).toEqual(REF);
   });
 
   it("replyTo survives the localStorage round-trip", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
-    s.enqueueOutbound(PEER, "a reply", REF);
+    s.stageOutboundMeta(PEER, { replyTo: REF });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "a reply" }));
 
     const reloaded = new ChatStore();
     reloaded.setIdentity({ agent_id: ME, machine_id: "m" });
@@ -115,8 +134,9 @@ describe("ChatStore — reply quoting", () => {
   it("inbound reply reconstructs the quote from my own sent parent", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
-    const mine = s.enqueueOutbound(PEER, "the parent");
-    s.markSent(PEER, mine, "daemon-1");
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", body: "the parent", message_id: "daemon-1" }),
+    );
     s.recordDirectMessage({
       from: PEER,
       to: ME,
@@ -204,6 +224,158 @@ describe("ChatStore — reply quoting", () => {
   });
 });
 
+describe("ChatStore — outbox projection (applyOutboxEvent)", () => {
+  const REF = { messageId: "p", senderName: "Bob", preview: "p" };
+  const ATT = { mime: "image/png", width: 1, height: 1, bytes_b64: "AA==" };
+
+  it("creates an outbound bubble (mine) under the peer's DM", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "hello", enqueued_at_ms: 42 }));
+    const conv = s.conversationsSorted()[0];
+    expect(conv.key).toEqual({ kind: "dm", peer: PEER });
+    expect(conv.messages).toHaveLength(1);
+    expect(conv.messages[0]).toMatchObject({
+      id: "o1",
+      body: "hello",
+      mine: true,
+      from: ME,
+      status: "sending",
+      timestampMs: 42,
+    });
+  });
+
+  it("upserts by id: a later event updates the same bubble, no duplicate", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(outboxEvent({ id: "o1" }));
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", status: "Delivered", message_id: "m9" }),
+    );
+    const conv = s.conversationsSorted()[0];
+    expect(conv.messages).toHaveLength(1);
+    expect(conv.messages[0].status).toBe("delivered");
+    expect(conv.messages[0].messageId).toBe("m9");
+  });
+
+  it("maps Failed to failed and carries last_error into failureReason", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", status: "Failed", last_error: "peer unreachable" }),
+    );
+    const b = s.conversationsSorted()[0].messages[0];
+    expect(b.status).toBe("failed");
+    expect(b.failureReason).toBe("peer unreachable");
+  });
+
+  it("clears failureReason when a failed bubble re-enters sending (retry)", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Failed", last_error: "boom" }));
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Sending" }));
+    const b = s.conversationsSorted()[0].messages[0];
+    expect(b.status).toBe("sending");
+    expect(b.failureReason).toBeUndefined();
+  });
+
+  it("delivered-guard: a stale Sending event never downgrades a delivered bubble", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", status: "Delivered", message_id: "m9" }),
+    );
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Sending" }));
+    expect(s.conversationsSorted()[0].messages[0].status).toBe("delivered");
+  });
+
+  it("markDelivered flips the bubble matching the receipt's messageId", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", message_id: "m9" }));
+    s.markDelivered(PEER, "m9");
+    expect(s.conversationsSorted()[0].messages[0].status).toBe("delivered");
+  });
+
+  it("FIFO meta matches sends to echoes in order, per peer", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    // Two sends to the same peer: first plain, second with reply+attachment.
+    // Both stage (once per send) so the FIFO stays aligned with echo order.
+    s.stageOutboundMeta(PEER, {});
+    s.stageOutboundMeta(PEER, { replyTo: REF, attachment: ATT });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "plain" }));
+    s.applyOutboxEvent(outboxEvent({ id: "o2", body: "rich" }));
+    const msgs = s.conversationsSorted()[0].messages;
+    const o1 = msgs.find((m) => m.id === "o1")!;
+    const o2 = msgs.find((m) => m.id === "o2")!;
+    expect(o1.replyTo).toBeUndefined();
+    expect(o1.attachment).toBeUndefined();
+    expect(o2.replyTo).toEqual(REF);
+    expect(o2.attachment).toEqual(ATT);
+  });
+
+  it("preserves staged meta across a status update (engine bubble lacks it)", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.stageOutboundMeta(PEER, { attachment: ATT });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Sending" }));
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", status: "Delivered", message_id: "m9" }),
+    );
+    const b = s.conversationsSorted()[0].messages[0];
+    expect(b.status).toBe("delivered");
+    expect(b.attachment).toEqual(ATT);
+  });
+
+  it("clearOutboundMeta drops pending meta (broadcast-lag resync safety)", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.stageOutboundMeta(PEER, { attachment: ATT });
+    s.clearOutboundMeta();
+    s.applyOutboxEvent(outboxEvent({ id: "o1" }));
+    expect(s.conversationsSorted()[0].messages[0].attachment).toBeUndefined();
+  });
+
+  it("discardStagedMeta drops an orphan so it cannot mis-attach to the next send", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    // A send stages meta but fails before any echo (daemon down): discard it.
+    const orphan = s.stageOutboundMeta(PEER, { attachment: ATT });
+    s.discardStagedMeta(PEER, orphan);
+    // The next send's projected bubble must NOT inherit the discarded meta.
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "next" }));
+    expect(s.conversationsSorted()[0].messages[0].attachment).toBeUndefined();
+  });
+
+  it("discardStagedMeta is a no-op once the echo already consumed the entry", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const token = s.stageOutboundMeta(PEER, { replyTo: REF });
+    // Echo consumes the staged entry first...
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "x" }));
+    // ...then a late send-timeout handler discards by token: must not pull a
+    // different send's entry, and must not strip the already-attached reply.
+    s.discardStagedMeta(PEER, token);
+    s.stageOutboundMeta(PEER, { replyTo: REF });
+    s.applyOutboxEvent(outboxEvent({ id: "o2", body: "y" }));
+    const msgs = s.conversationsSorted()[0].messages;
+    expect(msgs.find((m) => m.id === "o1")!.replyTo).toEqual(REF);
+    expect(msgs.find((m) => m.id === "o2")!.replyTo).toEqual(REF);
+  });
+
+  it("a delivered bubble survives the localStorage round-trip as delivered", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", status: "Delivered", message_id: "m9" }),
+    );
+    const reloaded = new ChatStore();
+    reloaded.setIdentity({ agent_id: ME, machine_id: "m" });
+    expect(reloaded.conversationsSorted()[0].messages[0].status).toBe("delivered");
+  });
+});
+
 describe("ChatStore — presence", () => {
   it("marks an agent online on transition", () => {
     const s = new ChatStore();
@@ -262,8 +434,10 @@ describe("ChatStore — presence", () => {
     const oldSeconds = Math.floor((Date.now() - 10 * 60_000) / 1000);
     s.loadPresence([{ agent_id: PEER, last_seen: oldSeconds }]);
     expect(s.isOnline(PEER)).toBe(false);
-    const id = s.enqueueOutbound(PEER, "hi");
-    s.markSent(PEER, id, "msg-id-1");
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "hi" }));
+    s.applyOutboxEvent(
+      outboxEvent({ id: "o1", status: "Delivered", message_id: "msg-id-1" }),
+    );
     expect(s.isOnline(PEER)).toBe(false);
   });
 
@@ -303,24 +477,6 @@ describe("ChatStore — presence", () => {
     const fresh = Math.floor(Date.now() / 1000);
     s.mergePresenceSnapshot([{ agent_id: PEER, last_seen: fresh }]);
     expect(s.isOnline(PEER)).toBe(true);
-  });
-
-  it("resetFailedRetryCounters zeros the counter on failed bubbles only", () => {
-    const s = new ChatStore();
-    s.setIdentity({ agent_id: ME, machine_id: "m" });
-    const stuck = s.enqueueOutbound(PEER, "stuck");
-    s.markFailed(PEER, stuck, "first");
-    s.markFailed(PEER, stuck, "second");
-    s.markFailed(PEER, stuck, "third");
-    const deliveredId = s.enqueueOutbound(PEER, "ok");
-    s.markSent(PEER, deliveredId, "msg-id-ok");
-    s.markDelivered(PEER, "msg-id-ok");
-    expect(s.resetFailedRetryCounters()).toBe(1);
-    const failedBubble = s
-      .conversationsSorted()[0]
-      .messages.find((m) => m.id === stuck);
-    expect(failedBubble?.retryAttempts).toBe(0);
-    expect(failedBubble?.status).toBe("failed");
   });
 
   it("mergePresenceSnapshot does not regress a fresher SSE-set entry", () => {
@@ -507,11 +663,12 @@ describe("ChatStore — inline image attachments", () => {
     expect(s.conversationsSorted()[0].messages[0].attachment).toBeUndefined();
   });
 
-  it("stamps the attachment onto an optimistic outbound bubble and persists it", () => {
+  it("stages the attachment onto a projected outbound bubble and persists it", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
-    const id = s.enqueueOutbound(PEER, "", undefined, ATT);
-    const bubble = s.conversationsSorted()[0].messages.find((m) => m.id === id);
+    s.stageOutboundMeta(PEER, { attachment: ATT });
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "" }));
+    const bubble = s.conversationsSorted()[0].messages.find((m) => m.id === "o1");
     expect(bubble?.attachment).toEqual(ATT);
 
     // Survives a reload from localStorage (image bytes can't be refetched).

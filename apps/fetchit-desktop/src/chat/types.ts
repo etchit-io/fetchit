@@ -66,6 +66,25 @@ export interface DirectMessage {
   verified?: boolean | null;
 }
 
+/// One outbound-DM outbox change, emitted by the backend `chat:outbox`
+/// pump (one per `fetchit_chat::outbox::OutboxEvent`) and replayed by
+/// the `chat_outbox_snapshot` command on open. Serialized straight from
+/// the engine `OutboxBubble`, so the field names are snake_case and the
+/// status is the engine enum's variant name; `ChatStore.applyOutboxEvent`
+/// projects it onto the camelCase `ChatBubble`. The engine owns the
+/// send/retry/delivery lifecycle, so this is the desktop's only source
+/// of truth for outbound bubble *status* (the reply quote and attachment
+/// it cannot carry are supplied shell-side -- see `stageOutboundMeta`).
+export interface OutboxBubbleDto {
+  id: string;
+  peer: AgentId;
+  body: string;
+  status: "Sending" | "Delivered" | "Failed";
+  message_id?: string | null;
+  enqueued_at_ms: number;
+  last_error?: string | null;
+}
+
 export interface PresenceTransition {
   agent_id: AgentId;
   event: "online" | "offline" | string;

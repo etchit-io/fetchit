@@ -4,7 +4,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { maybeNotifyInboundDm } from "./notify";
 import type { ChatStore, DaemonStatus, NearbyPeer, PendingContact } from "./state";
-import type { ChatEvent } from "./types";
+import type { ChatEvent, OutboxBubbleDto } from "./types";
 
 /// Wire-shape of the daemon's `chat:receipt` Tauri event.
 interface ReceiptEvent {
@@ -296,6 +296,22 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       if (entry) store.addPendingContact(entry);
     },
   );
+  // Engine outbox projection: each `chat:outbox` is an upsert of one
+  // outbound bubble (the engine owns send/retry/delivery). `resync`
+  // carries a fresh snapshot after a broadcast lag.
+  const unsubOutbox = await listen<OutboxBubbleDto>("chat:outbox", (ev) => {
+    store.applyOutboxEvent(ev.payload);
+  });
+  const unsubOutboxResync = await listen<OutboxBubbleDto[]>(
+    "chat:outbox-resync",
+    (ev) => {
+      // A lag dropped live events, so the FIFO of staged reply/attachment
+      // metadata can no longer be trusted to align: clear it and re-apply
+      // the authoritative snapshot (persisted bubbles keep their metadata).
+      store.clearOutboundMeta();
+      for (const bubble of ev.payload ?? []) store.applyOutboxEvent(bubble);
+    },
+  );
   return () => {
     unsubEvent();
     unsubReceipt();
@@ -308,6 +324,8 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubRelayFailover();
     unsubDenylistUpdate();
     unsubContactReq();
+    unsubOutbox();
+    unsubOutboxResync();
   };
 }
 

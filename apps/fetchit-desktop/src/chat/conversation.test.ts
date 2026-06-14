@@ -153,7 +153,7 @@ describe("mountConversation — reply flow", () => {
     expect(chip.textContent).toContain("the original");
   });
 
-  it("sending with an active reply stamps replyTo onto the outbound bubble", async () => {
+  it("sending with an active reply stamps replyTo onto the projected bubble", async () => {
     handle = mountConversation(host, store, noopHandlers);
     store.setPanelVisible(true);
     seedInbound("the original", "m1");
@@ -165,6 +165,19 @@ describe("mountConversation — reply flow", () => {
     ta.dispatchEvent(new Event("input"));
     host.querySelector<HTMLButtonElement>(".chat-composer__send")!.click();
 
+    // onSend stages the reply metadata then enqueues via the backend; the
+    // engine echoes the bubble back over chat:outbox. Simulate that echo so
+    // the projection creates the outbound bubble and pops the staged reply.
+    store.applyOutboxEvent({
+      id: "o1",
+      peer: PEER,
+      body: "my answer",
+      status: "Sending",
+      message_id: null,
+      enqueued_at_ms: 1,
+      last_error: null,
+    });
+
     const conv = store.active()!;
     const sent = conv.messages.find((m) => m.body === "my answer")!;
     expect(sent.replyTo).toBeDefined();
@@ -172,8 +185,7 @@ describe("mountConversation — reply flow", () => {
     expect(sent.replyTo!.preview).toBe("the original");
     // The sent bubble renders its quote strip.
     expect(host.querySelector(".chat-quote")).not.toBeNull();
-    // The reply target travels to the backend send (async via the
-    // dmConnect warmup, so flush the microtask chain first).
+    // The reply target travels to the backend enqueue.
     await vi.waitFor(() =>
       expect(sendDmMock).toHaveBeenCalledWith(PEER, "my answer", "Tester", "m1", null),
     );

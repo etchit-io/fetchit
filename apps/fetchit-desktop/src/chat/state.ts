@@ -12,6 +12,7 @@ import type {
   Group,
   GroupMessage,
   OnlineAgent,
+  OutboxBubbleDto,
   PresenceTransition,
 } from "./types";
 import { loadDms, saveDms, type PersistedDm } from "./persistence";
@@ -158,7 +159,6 @@ export interface ChatBubble {
   mine: boolean;
   status?: BubbleStatus;
   failureReason?: string;
-  retryAttempts?: number;
   /// Set when this message is a reply quoting an earlier one.
   replyTo?: QuotedRef;
   /// Inline image attachment (spec 2.4), validated on the receive path
@@ -175,6 +175,15 @@ export interface ChatBubble {
   verified?: boolean;
 }
 
+/// Shell-only render metadata for an outbound bubble that the engine
+/// `OutboxBubble` cannot carry (it tracks delivery, not presentation):
+/// the reply quote and the inline attachment. Staged per send and
+/// matched to the engine's optimistic echo by `applyOutboxEvent` -- see
+/// [`ChatStore.stageOutboundMeta`].
+export interface OutboundMeta {
+  replyTo?: QuotedRef;
+  attachment?: Attachment;
+}
 
 type Listener = () => void;
 
@@ -224,6 +233,18 @@ export class ChatStore {
   /// boot — the set stays empty when nothing emits the event, so every
   /// `isDenylisted` query is `false` and the UI is unchanged.
   private denylistedAgents = new Set<AgentId>();
+  /// Per-peer FIFO of shell-only render metadata (reply quote +
+  /// attachment) for outbound DMs in flight. [`stageOutboundMeta`]
+  /// pushes one entry per send; [`applyOutboxEvent`] pops one when it
+  /// first projects each new engine bubble, so entries line up with the
+  /// engine's optimistic-echo order. The engine `OutboxBubble` cannot
+  /// carry presentation metadata, so the shell bridges it across the send.
+  /// Each entry carries a monotonic token so a send that fails BEFORE the
+  /// engine echoes (no chat:outbox event will ever pop it) can remove
+  /// exactly its own entry via [`discardStagedMeta`] -- without that, the
+  /// orphan would mis-attach to the next send to the same peer.
+  private outboundMeta = new Map<AgentId, Array<{ token: number; meta: OutboundMeta }>>();
+  private nextMetaToken = 0;
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -689,52 +710,96 @@ export class ChatStore {
     return this.conversations.get(this.activeKey) ?? null;
   }
 
-  /// Append an outbound bubble in "sending" state and return its id so
-  /// the caller can flip it through sent → delivered/failed as the send
-  /// resolves and the recipient's receipt arrives. `replyTo` carries
-  /// the quoted-parent snapshot when this message is a reply.
-  enqueueOutbound(
-    peer: AgentId,
-    body: string,
-    replyTo?: QuotedRef,
-    attachment?: Attachment,
-  ): string {
-    const me = this.myId() ?? "";
-    const ts = Date.now();
-    const id = `local-${ts}-${Math.random().toString(36).slice(2, 8)}`;
-    const conv = this.ensureDm(peer);
-    conv.messages.push({
-      id,
-      from: me,
-      body,
-      timestampMs: ts,
-      mine: true,
-      status: "sending",
-      retryAttempts: 0,
-      ...(replyTo ? { replyTo } : {}),
-      ...(attachment ? { attachment } : {}),
-    });
-    conv.lastActivityMs = ts;
-    this.persistDms();
-    this.emit();
-    return id;
+  /// Stage shell-only render metadata for the NEXT outbound DM to `peer`
+  /// (the reply quote and inline attachment the engine `OutboxBubble`
+  /// cannot carry). Call exactly once per send -- even with empty
+  /// metadata -- so the per-peer FIFO stays aligned with the
+  /// optimistic-echo order: [`applyOutboxEvent`] pops one entry when it
+  /// first projects each new bubble. Cleared wholesale by
+  /// [`clearOutboundMeta`] when the live stream lags and a fresh
+  /// snapshot is replayed instead.
+  stageOutboundMeta(peer: AgentId, meta: OutboundMeta): number {
+    const token = this.nextMetaToken++;
+    const q = this.outboundMeta.get(peer) ?? [];
+    q.push({ token, meta });
+    this.outboundMeta.set(peer, q);
+    return token;
   }
 
-  /// Bind the daemon-assigned `messageId` so an inbound DeliveryReceipt
-  /// can later promote the bubble to "delivered". Does NOT advance the
-  /// visible status — the bubble stays at "sending" until either a
-  /// receipt arrives or the 24h timeout expires.
+  /// Pop the oldest staged metadata for `peer`, or `undefined` when none
+  /// is staged (a snapshot-replayed bubble, or a send from a previous
+  /// session whose metadata now lives only in localStorage).
+  private takeOutboundMeta(peer: AgentId): OutboundMeta | undefined {
+    const q = this.outboundMeta.get(peer);
+    if (!q || q.length === 0) return undefined;
+    const entry = q.shift();
+    if (q.length === 0) this.outboundMeta.delete(peer);
+    return entry?.meta;
+  }
+
+  /// Remove a still-pending staged entry by its [`stageOutboundMeta`]
+  /// token. Call this when a send fails BEFORE the engine echoes it (no
+  /// chat:outbox event will ever pop the entry, so it would otherwise
+  /// mis-attach to the next send to the same peer). A no-op when the echo
+  /// already consumed the entry -- so it is safe to call unconditionally
+  /// from a send-error handler that cannot tell whether the echo fired.
+  discardStagedMeta(peer: AgentId, token: number): void {
+    const q = this.outboundMeta.get(peer);
+    if (!q) return;
+    const i = q.findIndex((e) => e.token === token);
+    if (i >= 0) q.splice(i, 1);
+    if (q.length === 0) this.outboundMeta.delete(peer);
+  }
+
+  /// Drop every pending staged metadata entry. Called when the outbox
+  /// broadcast lags and the backend replays a snapshot: the FIFO can no
+  /// longer be trusted to align with the replayed bubbles, so staged
+  /// metadata is discarded rather than risk attaching it to the wrong
+  /// bubble. Already-projected bubbles keep their metadata via
+  /// [`applyOutboxEvent`]'s preserve-on-update.
+  clearOutboundMeta(): void {
+    this.outboundMeta.clear();
+  }
+
+  /// Project one outbox change (the engine `OutboxBubble`, snake_case)
+  /// onto the conversation transcript. The engine owns the
+  /// send/retry/delivery lifecycle, so this is the ONLY writer of
+  /// outbound-bubble status.
   ///
-  /// A successful retry of a previously-failed bubble re-enters
-  /// "sending" so the user sees the in-flight clock again.
-  markSent(peer: AgentId, bubbleId: string, messageId: string | null): void {
-    const conv = this.conversations.get(`dm:${peer}`);
-    if (!conv) return;
-    const b = conv.messages.find((m) => m.id === bubbleId);
-    if (!b) return;
-    if (b.status === "failed") b.status = "sending";
-    b.failureReason = undefined;
-    if (messageId !== null) b.messageId = messageId;
+  /// Upsert by bubble id into `dm:${peer}`. A new bubble is created
+  /// outbound (`mine`) and stamped with any staged reply/attachment
+  /// metadata (popped FIFO). An existing bubble has its
+  /// status/messageId/error refreshed while its reply quote and
+  /// attachment are PRESERVED (the engine bubble does not carry them).
+  /// A delivered bubble is never downgraded -- mirrors the engine's own
+  /// Delivered-guard so an out-of-order replay cannot un-confirm a
+  /// delivery.
+  applyOutboxEvent(ev: OutboxBubbleDto): void {
+    const conv = this.ensureDm(ev.peer);
+    const status = outboxStatus(ev.status);
+    const existing = conv.messages.find((m) => m.id === ev.id);
+    if (existing) {
+      if (!(existing.status === "delivered" && status !== "delivered")) {
+        existing.status = status;
+      }
+      if (ev.message_id) existing.messageId = ev.message_id;
+      existing.failureReason = ev.last_error ?? undefined;
+    } else {
+      const meta = this.takeOutboundMeta(ev.peer);
+      conv.messages.push({
+        id: ev.id,
+        from: this.myId() ?? "",
+        body: ev.body,
+        timestampMs: ev.enqueued_at_ms,
+        mine: true,
+        status,
+        ...(ev.message_id ? { messageId: ev.message_id } : {}),
+        ...(ev.last_error ? { failureReason: ev.last_error } : {}),
+        ...(meta?.replyTo ? { replyTo: meta.replyTo } : {}),
+        ...(meta?.attachment ? { attachment: meta.attachment } : {}),
+      });
+    }
+    conv.lastActivityMs = Math.max(conv.lastActivityMs, ev.enqueued_at_ms);
     this.persistDms();
     this.emit();
   }
@@ -760,48 +825,6 @@ export class ChatStore {
   touchPresence(peer: AgentId): void {
     this.presence.set(peer, { state: "online", lastSeenMs: Date.now() });
     this.emit();
-  }
-
-  markFailed(peer: AgentId, bubbleId: string, reason: string): void {
-    const conv = this.conversations.get(`dm:${peer}`);
-    if (!conv) return;
-    const b = conv.messages.find((m) => m.id === bubbleId);
-    if (!b) return;
-    b.status = "failed";
-    b.failureReason = reason;
-    b.retryAttempts = (b.retryAttempts ?? 0) + 1;
-    this.persistDms();
-    this.emit();
-  }
-
-  markPending(peer: AgentId, bubbleId: string): void {
-    const conv = this.conversations.get(`dm:${peer}`);
-    if (!conv) return;
-    const b = conv.messages.find((m) => m.id === bubbleId);
-    if (!b) return;
-    b.status = "sending";
-    this.emit();
-  }
-
-  /// Reset retry counters on every failed bubble so the driver gives
-  /// them another full budget. Used by the manual "Retry" affordance
-  /// in the outbox banner.
-  resetFailedRetryCounters(): number {
-    let touched = 0;
-    for (const conv of this.conversations.values()) {
-      if (conv.key.kind !== "dm") continue;
-      for (const m of conv.messages) {
-        if (m.status === "failed" && (m.retryAttempts ?? 0) > 0) {
-          m.retryAttempts = 0;
-          touched += 1;
-        }
-      }
-    }
-    if (touched > 0) {
-      this.persistDms();
-      this.emit();
-    }
-    return touched;
   }
 
   /// Every bubble that hasn't been confirmed delivered, across all DM
@@ -862,6 +885,21 @@ export class ChatStore {
 
 export function convKey(k: ConversationKey): string {
   return k.kind === "dm" ? `dm:${k.peer}` : `g:${k.groupId}`;
+}
+
+/// Map the engine `OutboxStatus` variant name (as serialized by the
+/// engine `OutboxBubble`) onto the shell `BubbleStatus`. Anything
+/// unexpected falls back to "sending" so a not-yet-confirmed bubble
+/// shows the in-flight clock rather than a wrong terminal state.
+function outboxStatus(s: OutboxBubbleDto["status"]): BubbleStatus {
+  switch (s) {
+    case "Delivered":
+      return "delivered";
+    case "Failed":
+      return "failed";
+    default:
+      return "sending";
+  }
 }
 
 function contactSortKey(c: Contact): string {

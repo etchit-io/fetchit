@@ -143,10 +143,21 @@ impl<T: OutboxTransport> OutboxDriver<T> {
         self.emit(changed);
     }
 
-    /// Run the boot sweep (orphaned in-flight bubbles -> Failed), emitting
-    /// any changes. Call once at startup.
+    /// Startup reclaim, run once per driver (re)start: drop any orphaned
+    /// in-flight claims left by a prior driver aborted mid-flush, then flip
+    /// truly-orphaned `Sending` bubbles (no `message_id`, enqueued before this
+    /// process) to `Failed`. Emits any status changes.
+    ///
+    /// The claim-clear is what rescues an in-session rebuild orphan: its bubble
+    /// was enqueued after `process_start_ms`, so the `Sending`->`Failed` sweep
+    /// skips it, but its leaked claim would otherwise block `try_mark_inflight`
+    /// forever (un-retried until the 24h timeout).
     pub async fn boot_sweep(&self) {
-        let changed = self.store.lock().await.boot_sweep(self.process_start_ms);
+        let changed = {
+            let mut store = self.store.lock().await;
+            store.clear_all_inflight();
+            store.boot_sweep(self.process_start_ms)
+        };
         self.emit(changed);
     }
 
@@ -365,6 +376,34 @@ mod tests {
             OutboxStatus::Failed
         );
         assert_eq!(rx.try_recv().unwrap().bubble.id, "b1");
+    }
+
+    #[tokio::test]
+    async fn boot_sweep_reclaims_orphaned_inflight_for_resend() {
+        // A retryable bubble (Sending + acked message_id) whose in-flight claim
+        // leaked when a prior driver was aborted mid-flush. A fresh driver must
+        // clear the orphan claim at boot_sweep so the next presence edge
+        // re-sends it -- without the clear, try_mark_inflight stays false and
+        // the bubble is stuck until the 24h timeout.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", OutboxStatus::Sending, Some("relay-1"), 0));
+        assert!(store.try_mark_inflight("b1"), "simulate the leaked claim");
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (driver, _rx) = driver_with(
+            store,
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
+            100, // process_start_ms > enqueue, but boot_sweep skips an acked bubble
+        );
+        driver.boot_sweep().await;
+        driver.on_presence(&peer_a(), true).await; // offline->online edge
+        assert_eq!(
+            sent.lock().await.as_slice(),
+            &["b1".to_string()],
+            "reclaimed bubble re-sends after its orphan claim is cleared"
+        );
     }
 
     /// Simulates a `DeliveryReceipt` landing during the send await: its

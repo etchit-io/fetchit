@@ -199,29 +199,29 @@ export function mountConversation(
       if (!conv) return;
       if (conv.key.kind === "dm") {
         const peer = conv.key.peer;
-        const bubbleId = store.enqueueOutbound(
+        // Stage shell-only render metadata (the engine OutboxBubble can't
+        // carry the reply quote or attachment); stage once per send so the
+        // per-peer FIFO stays aligned with the optimistic-echo order.
+        const metaToken = store.stageOutboundMeta(peer, {
+          replyTo: replyTo ?? undefined,
+          attachment: attachment ?? undefined,
+        });
+        // enqueue_dm owns the bubble lifecycle end to end: optimistic echo
+        // (rendered via the chat:outbox projection), warm-connect, send,
+        // outcome recording, retry, and delivery. A rejection here means the
+        // send never reached the engine (e.g. the local daemon is down), so
+        // no bubble is ever echoed: drop the staged metadata we reserved or
+        // it would mis-attach to the next send, then surface the error.
+        void sendDm(
           peer,
           body,
-          replyTo ?? undefined,
-          attachment ?? undefined,
-        );
-        void (async () => {
-          try {
-            // Same warmup the driver does for retries — turns a 12s
-            // cold-link timeout into a sub-second raw_quic send.
-            await dmConnect(peer).catch(() => {});
-            const messageId = await sendDm(
-              peer,
-              body,
-              handlers.resolveSenderName(),
-              replyTo?.messageId,
-              attachment,
-            );
-            store.markSent(peer, bubbleId, messageId);
-          } catch (e) {
-            store.markFailed(peer, bubbleId, (e as Error).message);
-          }
-        })();
+          handlers.resolveSenderName(),
+          replyTo?.messageId,
+          attachment,
+        ).catch((e) => {
+          store.discardStagedMeta(peer, metaToken);
+          store.pushNotice("warn", `Couldn't send: ${friendlyError(e)}`);
+        });
       } else {
         const groupId = conv.key.groupId;
         // Fire the send, then refresh history so the user sees their
