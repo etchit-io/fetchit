@@ -151,7 +151,12 @@ class ChatModeView(
                 snackbar(context.getString(R.string.chat_connect_failed_generic))
                 return@launch
             }
-            runCatching { gw.importPairUri(uri.trim()) }.onFailure { e ->
+            // Lowercase before the FFI: the Rust importPairUri requires lowercase
+            // hex in the path. The precheck (ChatUris.pairUriAgentId) normalizes
+            // for validation, but the raw uri can still carry uppercase hex from a
+            // hand-typed or third-party QR; the relay hint is a URL so lowercasing
+            // the whole uri is safe.
+            runCatching { gw.importPairUri(uri.trim().lowercase()) }.onFailure { e ->
                 val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
                 snackbar(reason)
                 return@launch

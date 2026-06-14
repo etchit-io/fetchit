@@ -79,9 +79,15 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      * double-connect and leak the first client's pump.
      */
     suspend fun ensureGateway(): ChatGateway {
-        gateway?.let { return it }
+        gateway?.let { if (_pumpState.value == PumpState.RUNNING) return it }
         connectMutex.withLock {
-            gateway?.let { return it }
+            gateway?.let { if (_pumpState.value == PumpState.RUNNING) return it }
+            // A cached gateway whose pump has stopped (relay drop -> STOPPED_ERROR,
+            // or a prior clean stop) is dead for inbound -- there is no in-pump
+            // reconnect in v1, so reusing it would silently deliver nothing. Tear
+            // the dead one down and rebuild here, so nav-away+back recovers inbound
+            // after a relay drop instead of needing an app kill.
+            if (gateway != null) disconnect()
             val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
             val client = ChatClient.connect(
                 DEFAULT_RELAY,
