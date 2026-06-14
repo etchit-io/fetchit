@@ -186,6 +186,46 @@ impl OutboxStore {
         Some(updated)
     }
 
+    /// Apply the result of a send attempt to bubble `bubble_id`, returning
+    /// the updated bubble for the caller to broadcast (or `None` if the
+    /// bubble is gone or already `Delivered`). Shared by the initial send
+    /// (`Client::enqueue_dm`) and the retry driver so the status mapping +
+    /// the Delivered-guard live in ONE place.
+    ///
+    /// `error.is_some()` -> the send failed (`Failed` + `last_error`);
+    /// otherwise it succeeded (`Sending`, recording `message_id` when the
+    /// relay assigned one). A bubble already `Delivered` (a receipt landed
+    /// during the send await) is never clobbered -- on either arm.
+    pub fn record_send_outcome(
+        &mut self,
+        bubble_id: &str,
+        message_id: Option<String>,
+        error: Option<String>,
+    ) -> Option<OutboxBubble> {
+        let updated = {
+            let bubble = self.inner.get_mut(bubble_id)?;
+            if matches!(bubble.status, OutboxStatus::Delivered) {
+                return None;
+            }
+            match error {
+                Some(reason) => {
+                    bubble.status = OutboxStatus::Failed;
+                    bubble.last_error = Some(reason);
+                }
+                None => {
+                    if message_id.is_some() {
+                        bubble.message_id = message_id;
+                    }
+                    bubble.status = OutboxStatus::Sending;
+                    bubble.last_error = None;
+                }
+            }
+            bubble.clone()
+        };
+        self.flush();
+        Some(updated)
+    }
+
     /// Seal the whole map to disk when a persistence handle is set.
     /// Best-effort: a serialize or write failure is logged and swallowed.
     /// `seal_to_path` writes atomically (temp + rename). No-op for
@@ -259,7 +299,9 @@ mod tests {
         s.upsert(bubble("b1", "a"));
         drop(s);
         let wrong = MasterKey::from_bytes_for_test([9u8; AEAD_KEY_LEN]);
-        assert!(OutboxStore::load(&layout, &wrong, 0, None).snapshot().is_empty());
+        assert!(OutboxStore::load(&layout, &wrong, 0, None)
+            .snapshot()
+            .is_empty());
     }
 
     #[test]
@@ -349,5 +391,51 @@ mod tests {
         assert!(s.mark_delivered("m1").is_some());
         assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Delivered);
         assert!(s.mark_delivered("nope").is_none());
+    }
+
+    #[test]
+    fn record_send_outcome_ok_sets_sending_and_records_message_id() {
+        let mut s = OutboxStore::new();
+        s.upsert(sending("b1", 0, None));
+        let updated = s
+            .record_send_outcome("b1", Some("m1".into()), None)
+            .expect("bubble present");
+        assert_eq!(updated.status, OutboxStatus::Sending);
+        assert_eq!(updated.message_id.as_deref(), Some("m1"));
+        assert_eq!(updated.last_error, None);
+    }
+
+    #[test]
+    fn record_send_outcome_err_sets_failed_with_reason() {
+        let mut s = OutboxStore::new();
+        s.upsert(sending("b1", 0, None));
+        let updated = s
+            .record_send_outcome("b1", None, Some("boom".into()))
+            .expect("bubble present");
+        assert_eq!(updated.status, OutboxStatus::Failed);
+        assert_eq!(updated.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn record_send_outcome_never_clobbers_delivered() {
+        let mut s = OutboxStore::new();
+        let mut delivered = sending("b1", 0, Some("m1"));
+        delivered.status = OutboxStatus::Delivered;
+        s.upsert(delivered);
+        // A receipt won the race during the send await; neither the Ok nor
+        // the Err arm may overwrite Delivered.
+        assert!(s
+            .record_send_outcome("b1", Some("m1".into()), None)
+            .is_none());
+        assert!(s
+            .record_send_outcome("b1", None, Some("boom".into()))
+            .is_none());
+        assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Delivered);
+    }
+
+    #[test]
+    fn record_send_outcome_absent_bubble_is_none() {
+        let mut s = OutboxStore::new();
+        assert!(s.record_send_outcome("nope", None, None).is_none());
     }
 }

@@ -69,6 +69,17 @@ pub fn is_retryable(bubble: &OutboxBubble) -> bool {
         || (matches!(bubble.status, OutboxStatus::Sending) && bubble.message_id.is_some())
 }
 
+/// A fresh client-assigned bubble id: 128 bits of randomness, hex-encoded.
+/// Stable across retries and distinct from the relay's `message_id` (which
+/// is only known once the first send is ACKed). Mirrors
+/// `messages::random_message_id`.
+pub(crate) fn new_bubble_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

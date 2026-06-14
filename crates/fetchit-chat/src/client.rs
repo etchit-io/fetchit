@@ -293,6 +293,11 @@ pub struct PublicPostDelivery {
 /// public posts are live-only, history-pull is a post-launch concern.
 const PUBLIC_POST_CHANNEL_CAP: usize = 256;
 
+/// Capacity of the outbound-outbox event broadcast. A lagging shell
+/// re-syncs from `Client::outbox_snapshot` (same rationale as the
+/// public-post channel).
+const OUTBOX_CHANNEL_CAP: usize = 256;
+
 /// Optional chat-encryption state — present whenever the caller
 /// supplied a `data_dir` or `relay_url`, absent for the bare REST-only
 /// mode used by integration tests against `wiremock`.
@@ -315,6 +320,13 @@ struct ChatState {
     /// [`BridgeConsentStore::set`]; sender routing reads via
     /// [`BridgeConsentStore::lookup`].
     bridge_consent: Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeConsentStore>>,
+    /// Outbound-DM outbox: pending bubbles + retry state, vault-sealed.
+    /// Loaded in the prod ctor; the shell starts the retry loop via
+    /// [`Client::start_outbox_driver`]. See [`crate::outbox`].
+    outbox: Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>,
+    /// Broadcast of [`crate::outbox::OutboxEvent`] upserts (outbound-only)
+    /// for the shell to project; cap `OUTBOX_CHANNEL_CAP`.
+    outbox_tx: tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>,
     /// M2.5 bridge — recent bridge-inbound payload hashes. Marked by
     /// [`Client::dispatch_inbound_bridge`] before `POST /publish` so
     /// the SSE consumer can distinguish bridge-loopback from real
@@ -1491,6 +1503,101 @@ impl Client {
         self.chat.as_ref().map(|c| c.bridge_inbound_shadow.clone())
     }
 
+    /// Cloneable receiver for outbox change events. Each
+    /// [`crate::outbox::OutboxEvent`] is an upsert keyed by `bubble.id`; a
+    /// lagging consumer drops the oldest events (`OUTBOX_CHANNEL_CAP`).
+    /// `None` when the client has no chat state (REST-only mode). Mirrors
+    /// [`Client::subscribe_to_public_posts`].
+    #[must_use]
+    pub fn subscribe_outbox(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<crate::outbox::OutboxEvent>> {
+        self.chat.as_ref().map(|c| c.outbox_tx.subscribe())
+    }
+
+    /// Current outbox contents (all tracked DM bubbles), for a shell to
+    /// hydrate its UI on startup before subscribing to live events. Empty
+    /// when the client has no chat state.
+    pub async fn outbox_snapshot(&self) -> Vec<crate::outbox::OutboxBubble> {
+        match self.chat.as_ref() {
+            Some(chat) => chat.outbox.lock().await.snapshot(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Enqueue an outbound DM: persist a `Sending` bubble and broadcast it
+    /// immediately (optimistic echo), then warm-connect and send. The
+    /// bubble's terminal state is recorded via
+    /// [`crate::outbox::store::OutboxStore::record_send_outcome`] -- the
+    /// same path the retry driver uses, so an initial send and a resend
+    /// converge on identical status transitions (and the Delivered-guard).
+    /// Returns the client-assigned bubble id.
+    ///
+    /// `sender_name` is shell-supplied (the engine holds no canonical
+    /// display name); `reply_to_message_id` + `attachment` mirror
+    /// [`messages::Endpoint::send`].
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::Invalid`] when the client has no chat state -- a
+    /// misconfiguration, since `enqueue_dm` requires a data_dir/relay
+    /// client.
+    pub async fn enqueue_dm(
+        &self,
+        peer: &crate::identity::AgentId,
+        body: &str,
+        sender_name: &str,
+        reply_to_message_id: Option<&str>,
+        attachment: Option<&crate::attachment::Attachment>,
+    ) -> Result<String> {
+        let Some(chat) = self.chat.as_ref() else {
+            return Err(ChatError::Invalid(
+                "enqueue_dm requires chat state (no data_dir/relay configured)".into(),
+            ));
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let bubble = crate::outbox::OutboxBubble {
+            id: crate::outbox::new_bubble_id(),
+            peer: peer.clone(),
+            body: body.to_owned(),
+            status: crate::outbox::OutboxStatus::Sending,
+            message_id: None,
+            enqueued_at_ms: now_ms,
+            last_error: None,
+        };
+        // Optimistic echo: persist + broadcast BEFORE the send so the UI
+        // shows the bubble the instant the user hits enter (desktop parity).
+        {
+            let mut outbox = chat.outbox.lock().await;
+            outbox.upsert(bubble.clone());
+        }
+        let _ = chat.outbox_tx.send(crate::outbox::OutboxEvent {
+            bubble: bubble.clone(),
+        });
+        // Warm-connect (best-effort), then send.
+        let _ = self.messages().connect(peer).await;
+        let result = self
+            .messages()
+            .send(peer, body, sender_name, reply_to_message_id, attachment)
+            .await;
+        let (message_id, error) = match &result {
+            Ok(mid) => (mid.clone(), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let updated = {
+            let mut outbox = chat.outbox.lock().await;
+            outbox.record_send_outcome(&bubble.id, message_id, error)
+        };
+        if let Some(u) = updated {
+            let _ = chat
+                .outbox_tx
+                .send(crate::outbox::OutboxEvent { bubble: u });
+        }
+        Ok(bubble.id)
+    }
+
     /// Send an M2.5 bridge envelope — a signed x0xd
     /// `NamedGroupMetadataEvent` JSON body — to a single peer over the
     /// relay path, gated by the per-group consent + reachability rule
@@ -2343,6 +2450,11 @@ async fn build_with_chat(
         kdf_id,
         argon_salt.as_ref(),
     );
+    // Load the persisted outbound-DM outbox (or empty on first run /
+    // unreadable file), before `argon_salt` + `layout` are moved into the
+    // registry / ChatState below -- same ordering as the consent store.
+    let outbox_store =
+        crate::outbox::store::OutboxStore::load(&layout, &master, kdf_id, argon_salt.as_ref());
 
     let registry = Arc::new(ConversationRegistry::new(
         layout.clone(),
@@ -2506,6 +2618,8 @@ async fn build_with_chat(
                 crate::groups_reachability::ReachabilityCache::new(),
             )),
             bridge_consent: Arc::new(tokio::sync::Mutex::new(bridge_consent_store)),
+            outbox: Arc::new(tokio::sync::Mutex::new(outbox_store)),
+            outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -4063,6 +4177,10 @@ mod tests {
             bridge_consent: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeConsentStore::new(),
             )),
+            outbox: Arc::new(tokio::sync::Mutex::new(
+                crate::outbox::store::OutboxStore::new(),
+            )),
+            outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -4089,6 +4207,39 @@ mod tests {
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (client, dir)
+    }
+
+    #[tokio::test]
+    async fn enqueue_dm_optimistic_echo_then_failed_on_unreachable() {
+        let (client, _dir) = test_client_no_denylist();
+        let mut rx = client.subscribe_outbox().expect("chat state present");
+        let peer = crate::identity::AgentId("bb".repeat(32));
+
+        let id = client
+            .enqueue_dm(&peer, "hello", "alice", None, None)
+            .await
+            .expect("enqueue returns a bubble id");
+
+        // Optimistic echo: the Sending bubble is broadcast BEFORE the send
+        // is attempted (desktop parity -- the UI shows it immediately).
+        let first = rx.recv().await.expect("optimistic echo");
+        assert_eq!(first.bubble.id, id);
+        assert_eq!(first.bubble.status, crate::outbox::OutboxStatus::Sending);
+        assert_eq!(first.bubble.body, "hello");
+        assert_eq!(first.bubble.peer, peer);
+
+        // The empty Router reaches no peer, so the send fails and the
+        // bubble is recorded Failed via the shared record_send_outcome path.
+        let second = rx.recv().await.expect("outcome echo");
+        assert_eq!(second.bubble.id, id);
+        assert_eq!(second.bubble.status, crate::outbox::OutboxStatus::Failed);
+        assert!(second.bubble.last_error.is_some());
+
+        // Snapshot reflects the single terminal-state bubble.
+        let snap = client.outbox_snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, id);
+        assert_eq!(snap[0].status, crate::outbox::OutboxStatus::Failed);
     }
 
     /// D9 happy path: validation accepts a real-world relay list and
@@ -4351,6 +4502,10 @@ mod tests {
             bridge_consent: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeConsentStore::new(),
             )),
+            outbox: Arc::new(tokio::sync::Mutex::new(
+                crate::outbox::store::OutboxStore::new(),
+            )),
+            outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),

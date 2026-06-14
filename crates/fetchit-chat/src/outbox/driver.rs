@@ -12,7 +12,9 @@
 //! `Router` + `messages().connect()`.
 
 use super::store::OutboxStore;
-use super::{is_retryable, OutboxBubble, OutboxEvent, OutboxStatus};
+#[cfg(test)]
+use super::OutboxStatus;
+use super::{is_retryable, OutboxBubble, OutboxEvent};
 use crate::error::ChatError;
 use crate::identity::AgentId;
 use crate::transport::SendReceipt;
@@ -98,34 +100,17 @@ impl<T: OutboxTransport> OutboxDriver<T> {
             let result = self.transport.send(claimed.clone()).await;
             let emitted = {
                 let mut store = self.store.lock().await;
-                // The bubble may have been removed while in flight; only
-                // update if it is still present.
-                let updated = match store.get(&claimed.id).cloned() {
-                    // A DeliveryReceipt may have landed during the send
-                    // await; Delivered is authoritative -- do not clobber
-                    // it on either arm (cross-review catch).
-                    Some(current) if current.status == OutboxStatus::Delivered => None,
-                    Some(mut current) => {
-                        match &result {
-                            Ok(receipt) => {
-                                if let Some(mid) = receipt.message_id.clone() {
-                                    current.message_id = Some(mid);
-                                }
-                                current.status = OutboxStatus::Sending;
-                                current.last_error = None;
-                            }
-                            Err(e) => {
-                                current.status = OutboxStatus::Failed;
-                                current.last_error = Some(e.to_string());
-                            }
-                        }
-                        Some(current)
-                    }
-                    None => None,
+                // Status mapping + the Delivered-guard (a receipt may have
+                // landed during the send await; Delivered is authoritative
+                // and must not be clobbered) + the bubble-still-present
+                // check all live in one place -- OutboxStore::record_send_outcome
+                // -- shared with the initial send (Client::enqueue_dm) so the
+                // two paths cannot drift. clear_inflight stays unconditional.
+                let (message_id, error) = match &result {
+                    Ok(receipt) => (receipt.message_id.clone(), None),
+                    Err(e) => (None, Some(e.to_string())),
                 };
-                if let Some(u) = &updated {
-                    store.upsert(u.clone());
-                }
+                let updated = store.record_send_outcome(&claimed.id, message_id, error);
                 store.clear_inflight(&claimed.id);
                 updated
             };
@@ -150,7 +135,11 @@ impl<T: OutboxTransport> OutboxDriver<T> {
 
     /// Run the 24h timeout sweep against `now_ms`, emitting any changes.
     pub async fn sweep_timeouts(&self, now_ms: u64) {
-        let changed = self.store.lock().await.sweep_timeouts(now_ms, SEND_TIMEOUT_MS);
+        let changed = self
+            .store
+            .lock()
+            .await
+            .sweep_timeouts(now_ms, SEND_TIMEOUT_MS);
         self.emit(changed);
     }
 
@@ -196,7 +185,12 @@ mod tests {
         AgentId("aa".repeat(32))
     }
 
-    fn bubble(id: &str, status: OutboxStatus, message_id: Option<&str>, enqueued_at_ms: u64) -> OutboxBubble {
+    fn bubble(
+        id: &str,
+        status: OutboxStatus,
+        message_id: Option<&str>,
+        enqueued_at_ms: u64,
+    ) -> OutboxBubble {
         OutboxBubble {
             id: id.into(),
             peer: peer_a(),
@@ -256,7 +250,8 @@ mod tests {
         process_start_ms: u64,
     ) -> (OutboxDriver<T>, broadcast::Receiver<OutboxEvent>) {
         let (tx, rx) = broadcast::channel(16);
-        let driver = OutboxDriver::new(Arc::new(Mutex::new(store)), tx, transport, process_start_ms);
+        let driver =
+            OutboxDriver::new(Arc::new(Mutex::new(store)), tx, transport, process_start_ms);
         (driver, rx)
     }
 
@@ -268,7 +263,10 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
             store,
-            OkTransport { connected: connected.clone(), sent: sent.clone() },
+            OkTransport {
+                connected: connected.clone(),
+                sent: sent.clone(),
+            },
             0,
         );
         driver.on_presence(&peer_a(), true).await; // offline(default)->online edge
@@ -287,11 +285,17 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
             store,
-            OkTransport { connected: Arc::new(Mutex::new(Vec::new())), sent: sent.clone() },
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
             0,
         );
         driver.on_presence(&peer_a(), true).await;
-        assert!(sent.lock().await.is_empty(), "in-flight bubble must not double-send");
+        assert!(
+            sent.lock().await.is_empty(),
+            "in-flight bubble must not double-send"
+        );
     }
 
     #[tokio::test]
@@ -301,13 +305,19 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
             store,
-            OkTransport { connected: Arc::new(Mutex::new(Vec::new())), sent: sent.clone() },
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
             0,
         );
         driver.on_presence(&peer_a(), true).await; // edge -> flush
         sent.lock().await.clear();
         driver.on_presence(&peer_a(), true).await; // still online, no new edge
-        assert!(sent.lock().await.is_empty(), "no re-flush without an offline->online edge");
+        assert!(
+            sent.lock().await.is_empty(),
+            "no re-flush without an offline->online edge"
+        );
     }
 
     #[tokio::test]
@@ -389,7 +399,10 @@ mod tests {
         let driver = OutboxDriver::new(
             store.clone(),
             tx,
-            DeliverDuringSend { store: store.clone(), message_id: "m1".into() },
+            DeliverDuringSend {
+                store: store.clone(),
+                message_id: "m1".into(),
+            },
             0,
         );
         // Edge -> flush_peer claims the retryable bubble; the send marks it
