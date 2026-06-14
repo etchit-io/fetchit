@@ -169,6 +169,17 @@ class ChatControllerTest {
         assertTrue(msgs.first { it.outboxId == "ob-1" }.delivered)
     }
 
+    @Test
+    fun upsertOutboxNeverDowngradesDelivered() {
+        val convo = ConversationStore()
+        convo.upsertOutbox("a".repeat(64), "ob-1", "hi", 1L, "m1", delivered = true, failed = false, lastError = null)
+        // A late or reordered Sending for the same bubble must not un-deliver it.
+        convo.upsertOutbox("a".repeat(64), "ob-1", "hi", 1L, null, delivered = false, failed = false, lastError = null)
+        val msg = convo.messagesFor("a".repeat(64)).value.single()
+        assertTrue(msg.delivered)
+        assertEquals("m1", msg.messageId)
+    }
+
     private fun bubble(
         id: String,
         peer: String = "a".repeat(64),

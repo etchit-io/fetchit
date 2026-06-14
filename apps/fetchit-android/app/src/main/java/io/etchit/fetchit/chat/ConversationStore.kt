@@ -77,6 +77,12 @@ class ConversationStore {
         synchronized(lock) {
             val flow = flowFor(peerAgentIdHex)
             val list = flow.value
+            val idx = list.indexOfFirst { it.outboxId == outboxId }
+            // Defense-in-depth parity with desktop: never downgrade a bubble that
+            // already reached Delivered. The engine does not emit a post-Delivered
+            // downgrade today, but a reordered or duplicated event must not flip a
+            // delivered bubble back to Sending or Failed.
+            if (idx >= 0 && list[idx].delivered && !delivered) return
             val msg = ChatMessage(
                 outbound = true,
                 body = body,
@@ -87,7 +93,6 @@ class ConversationStore {
                 outboxId = outboxId,
                 lastError = lastError,
             )
-            val idx = list.indexOfFirst { it.outboxId == outboxId }
             flow.value = if (idx >= 0) {
                 list.toMutableList().also { it[idx] = msg }
             } else {
