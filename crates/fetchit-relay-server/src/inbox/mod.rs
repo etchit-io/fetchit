@@ -7,35 +7,37 @@
 //! `docs/superpowers/plans/2026-06-07-m4-fediverse-impl-plan.md`
 //! Stage 7.
 //!
-//! ## Stage 3.1b — scaffold + 5 pre-flight gates
+//! ## Pre-flight gates
 //!
-//! Per the M4 plan's Stage 3 hardening checklist:
+//! `run_gates` (in [`router`]) runs these in execution order, which is
+//! not the order they were specified: denylist runs before signature
+//! verify so a blocked actor doesn't burn RSA cycles, and replay runs
+//! after it so a forged `(Content-Digest, Date)` from an
+//! unauthenticated sender cannot poison the cache.
 //!
-//! 1. **Body size cap** — reject `Content-Length > 1 MB` with `413
-//!    Payload Too Large`. Mastodon's typical activity body is ~64 KB;
-//!    1 MB is generous but bounded.
-//! 2. **Rate-limit per source-instance** — token bucket keyed by
-//!    remote instance hostname (parsed out of the signing actor's
-//!    keyId URL). Mirrors [`crate::ratelimit::RateLimiter`] (R-002)
-//!    in shape.
-//! 3. **HTTP Signature verification** — using the RFC 9421 +
-//!    draft-cavage verifier helpers in
-//!    [`fetchit_fedi::signature::verify_signature_rfc9421`] /
-//!    [`fetchit_fedi::signature_cavage::verify_signature_cavage`].
-//!    `Date` skew and `Signature-Input;created` freshness checks live
-//!    here too.
-//! 4. **Replay window** — sliding 5-minute cache of `(Content-Digest,
-//!    Date)` pairs, ~100k LRU cap. Bounded memory, drops duplicates.
-//! 5. **Denylist** — `InboxDenylistCheck::is_blocked_actor` is the
-//!    Stage 4 `EntryKind::ActorUrl` consultation point.
+//! 1. **Body size cap** -- reject a body over
+//!    [`InboxState::max_body_bytes`] (default 1 MB) with `413`.
+//!    Mastodon's typical activity body is ~64 KB.
+//! 2. **Required headers + `keyId`** -- pull every signed header and
+//!    parse the signing actor's `keyId` URL (`400` if missing).
+//! 3. **Freshness** -- `Date` and `Signature-Input;created` within
+//!    [`InboxState::max_date_skew`] (default 5 min either side).
+//! 4. **Rate-limit per source-instance** -- token bucket keyed by the
+//!    instance hostname parsed from `keyId`.
+//! 5. **Denylist** -- [`InboxDenylistCheck::is_blocked_actor`] consults
+//!    the `etchit-io`-signed `EntryKind::ActorUrl` list.
+//! 6. **HTTP Signature verification** -- resolve the actor pubkey via
+//!    [`WebFingerLookup`], then verify with the RFC 9421 / draft-cavage
+//!    helpers in [`fetchit_fedi::signature`] /
+//!    [`fetchit_fedi::signature_cavage`].
+//! 7. **Replay window** -- sliding cache of `(Content-Digest, Date)`
+//!    pairs over the same window, ~100k LRU cap, drops duplicates.
 //!
 //! ## Metrics
 //!
-//! Each gate produces a [`DropReason`] variant on rejection. Stage 3.2
-//! wires `fedi_inbox_dropped_*_total{...}` Prometheus counters into
-//! `crate::metrics::Metrics` against these reasons — 3.1b stops
-//! before metric increments so the wire shape stays reviewable on
-//! its own.
+//! Each gate produces a [`DropReason`] on rejection; `handle_inbox_inner`
+//! records the `fedi_inbox_dropped_*_total` Prometheus counters into
+//! [`InboxMetrics`] against these reasons.
 
 pub mod metrics;
 pub mod operator;
@@ -83,9 +85,9 @@ pub enum DropReason {
     /// early-reject + dedicated counter slot catches misconfigured
     /// senders before the expensive math op.
     UnsupportedAlgorithm,
-    /// `is_blocked_actor` returned true. Carries the actor URL the
-    /// denylist matched so the counter can label by kind (Stage 4
-    /// `EntryKind::ActorUrl` consumer + secondary Mastodon-blocklist).
+    /// `is_blocked_actor` returned true -- the actor matched the
+    /// `etchit-io`-signed `EntryKind::ActorUrl` denylist. Carries the
+    /// matched actor URL.
     Denylisted(String),
     /// `WebFinger` lookup failed — actor not resolvable to a pubkey.
     /// Mapped onto `sig_fail{reason="webfinger"}` to keep the
@@ -200,10 +202,11 @@ impl InboxError {
 /// Local trait the inbox calls to determine whether a sending actor
 /// (parsed from the HTTP Signature `keyId`) is denylisted.
 ///
-/// Stage 4 lands the production impl that consults
-/// `fetchit_trust::EntryKind::ActorUrl` plus the
-/// `MastodonBlocklistConsumer`. The trait stays in this crate so
-/// the relay-server doesn't pull `fetchit-chat` into its dep tree.
+/// The production impl is [`operator::DenylistConsumerCheck`], which
+/// consults the `etchit-io`-signed `EntryKind::ActorUrl` denylist via
+/// `fetchit_trust_client::DenylistConsumer`. The trait stays in this
+/// crate so the relay-server doesn't pull `fetchit-chat` into its dep
+/// tree; tests inject a stub.
 #[async_trait::async_trait]
 pub trait InboxDenylistCheck: Send + Sync {
     /// `true` when `actor_url` is blocked (matched by either the
@@ -230,11 +233,11 @@ pub enum WebFingerError {
 /// Local trait the inbox calls to resolve an actor's RSA pubkey
 /// PEM from its `keyId` URL.
 ///
-/// Production impl lives in `fetchit-fedi` (Stage 6.1 `WebFinger`
-/// client + the TTL cache that Alice's M4 plan Stage 3 gate 5
-/// describes). The trait stays in this crate so the relay-server
-/// doesn't depend on a network-fetching client at compile time —
-/// tests inject a stub.
+/// The production impl is [`operator::FediverseWebFinger`], which
+/// caches resolved pubkey PEMs with a TTL; the actor-document fetch
+/// itself is `fetchit_fedi::fetch_actor`. The trait stays in this
+/// crate so the relay-server doesn't depend on a network-fetching
+/// client at compile time -- tests inject a stub.
 #[async_trait::async_trait]
 pub trait WebFingerLookup: Send + Sync {
     /// Resolve the actor's RSA public-key PEM by `keyId` URL.
@@ -252,9 +255,10 @@ pub trait WebFingerLookup: Send + Sync {
 
 /// Sink for activities that made it through every pre-flight gate.
 ///
-/// Stage 3.3 lands the production impl that turns the validated
-/// activity into an `EnvelopeKind::PublicPost` on the relay-WS
-/// out-stream so the chat-layer drains it like any other envelope.
+/// The production impl is [`SessionBroadcastSink`], which turns the
+/// validated activity into an `EnvelopeKind::PublicPost` on the
+/// relay-WS out-stream so the chat-layer drains it like any other
+/// envelope.
 #[async_trait::async_trait]
 pub trait PendingDeliverySink: Send + Sync {
     /// Enqueue a `delivery` for downstream chat-layer dispatch.

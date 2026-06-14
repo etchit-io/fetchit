@@ -2,7 +2,7 @@
 //!
 //! Stage 3.1b gate 3. Caches `(Content-Digest, Date)` pairs for the
 //! last [`REPLAY_WINDOW`] seconds (default 5 minutes per the M4
-//! plan). [`Self::record_and_check`] returns `false` if the same
+//! plan). [`ReplayWindow::record_and_check_now`] returns `false` if the same
 //! pair has already been recorded inside the window — i.e. a
 //! replay.
 //!
@@ -53,7 +53,7 @@ impl ReplayWindow {
     /// Record `(digest, date_unix)` if not already present in the
     /// window. Returns `true` if NEW (request allowed through), or
     /// `false` if it duplicates a prior entry within
-    /// [`Self::window`] (replay — drop the request).
+    /// `Self::window` (replay — drop the request).
     ///
     /// `now` is injected so unit tests can wind the clock without
     /// `tokio::time::pause()`. Production callers use

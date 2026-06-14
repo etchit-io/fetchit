@@ -1,5 +1,5 @@
 //! Typed wrappers over x0xd's MLS HTTP+SSE surface (TreeKEM-backed since
-//! x0xd v0.20.1). Consumed by the fetchit-chat groups module for the
+//! x0xd v0.20.0). Consumed by the fetchit-chat groups module for the
 //! encrypted group send/receive path; the daemon owns the MLS ratchet.
 
 use crate::error::X0xdError;

@@ -128,10 +128,11 @@ pub enum EnvelopeKind {
     /// with every other kind); the receiver's content handler is the
     /// one that parses the JSON-LD.
     ///
-    /// Reserved at Stage 5.1 of the M4 plan
-    /// (`docs/superpowers/plans/2026-06-07-m4-fediverse-impl-plan.md`);
-    /// chat-layer wire-up lands at Stage 5.2 / 5.3, inbox-side
-    /// out-stream wire-up at Stage 3.3b.
+    /// Wired end-to-end: the chat-layer send path is
+    /// `fetchit_chat::Client::publish_public_post`, the receive path
+    /// drains it into the public-feed handler, and a `fediverse-inbox`
+    /// relay emits inbound activities onto this kind via the inbox
+    /// `SessionBroadcastSink`.
     ///
     /// Appended at the end of the enum to keep existing variant
     /// indices stable for postcard wire-compat.

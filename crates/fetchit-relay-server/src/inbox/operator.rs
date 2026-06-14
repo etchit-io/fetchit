@@ -101,7 +101,7 @@ impl Default for FediverseWebFinger {
 }
 
 impl FediverseWebFinger {
-    /// New resolver with the default [`PUBKEY_CACHE_TTL`].
+    /// New resolver with the default `PUBKEY_CACHE_TTL`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -165,7 +165,7 @@ impl WebFingerLookup for FediverseWebFinger {
 /// unchanged otherwise, so a default community relay never serves
 /// `/inbox`.
 ///
-/// Reads `FETCHIT_DENYLIST_URL` (default [`DEFAULT_DENYLIST_URL`]) and
+/// Reads `FETCHIT_DENYLIST_URL` (default `DEFAULT_DENYLIST_URL`) and
 /// optional `FETCHIT_DENYLIST_CACHE` for the on-disk snapshot. The sink
 /// is wired to the server's OWN [`crate::session::SessionRegistry`] (via
 /// [`Server::sessions`]) so a broadcast `PublicPost` reaches live WS
@@ -203,9 +203,9 @@ pub fn attach_if_enabled(server: Server) -> anyhow::Result<Server> {
 
     // The same opt-in brings up the M5.1 registry + serving endpoints
     // (POST/PUT /v1/actors, WebFinger server, actor-doc GET) on the same
-    // router. In-memory store for now; the durable backend is the
-    // flagged follow-on (M5.1 plan Task 13), swapped in behind the
-    // `ActorRegistryStore` trait without touching the routes.
+    // router. The store is the durable `SqliteActorStore` (constructed
+    // below from `FETCHIT_REGISTRY_DB`), behind the `ActorRegistryStore`
+    // trait so an alternate backend swaps in without touching the routes.
     let domain = std::env::var("FETCHIT_FEDI_DOMAIN").unwrap_or_else(|_| "etchit.io".to_owned());
     let mut config = RegistryConfig::new(domain);
     // Reserved-handle gate: hold premium / brand / short handles back from

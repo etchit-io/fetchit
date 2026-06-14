@@ -37,7 +37,7 @@ pub struct WsQuery {
     pub token: String,
 }
 
-/// Axum handler: validate bearer, upgrade, hand off to [`handle_socket`].
+/// Axum handler: validate bearer, upgrade, hand off to `handle_socket`.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,

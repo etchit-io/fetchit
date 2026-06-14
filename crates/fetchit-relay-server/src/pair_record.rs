@@ -128,7 +128,7 @@ pub enum PairRecordHttpError {
     /// JSON parse failure. 400.
     Malformed(&'static str),
     /// Proto-level verify failure (signature / derivation / relay-url /
-    /// field format). Status derived per [`verify_status`].
+    /// field format). Status derived per `verify_status`.
     Verify(PairRecordError),
     /// Per-sender publish rate exceeded. 429.
     RateLimited,
