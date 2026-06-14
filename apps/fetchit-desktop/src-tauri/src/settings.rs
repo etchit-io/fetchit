@@ -78,6 +78,16 @@ fn default_relay_url() -> String {
     DEFAULT_RELAY_URL.to_owned()
 }
 
+/// One-time relay-URL migrations for the #114 TLS cutover. An install whose
+/// persisted `relay_url` still names a retired bare-IP origin is moved to the
+/// matching `https` host on load, so it follows the cutover instead of
+/// dropping when that origin's plaintext port is closed. Old to new pairs;
+/// historical, so the table does not track [`KNOWN_RELAYS`].
+const RELAY_URL_MIGRATIONS: &[(&str, &str)] = &[
+    ("http://67.207.94.66:8088", "https://nyc.relay.etchit.io"),
+    ("http://159.89.11.217:8088", "https://fra.relay.etchit.io"),
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -184,7 +194,22 @@ impl Settings {
         let Ok(text) = fs::read_to_string(path) else {
             return Self::default();
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        let mut settings: Self = serde_json::from_str(&text).unwrap_or_default();
+        settings.migrate_relay_url();
+        settings
+    }
+
+    /// Apply [`RELAY_URL_MIGRATIONS`] to the persisted `relay_url` so an
+    /// install on a retired bare-IP origin follows the #114 TLS cutover.
+    /// Idempotent: a url already on the https host, or any custom value, is
+    /// left unchanged.
+    fn migrate_relay_url(&mut self) {
+        for (old, new) in RELAY_URL_MIGRATIONS {
+            if self.relay_url == *old {
+                (*new).clone_into(&mut self.relay_url);
+                return;
+            }
+        }
     }
 
     /// Write the settings file atomically-ish: create the parent dir if it's
@@ -215,6 +240,42 @@ mod tests {
         let s = Settings::load(&p);
         assert!(!s.cache.enabled);
         assert_eq!(s.cache.mode, ClearMode::Persist);
+    }
+
+    #[test]
+    fn load_migrates_retired_bare_ip_relay_to_https() {
+        // An install persisted on the pre-#114 bare-IP origin must follow the
+        // TLS cutover on load, or it drops when D4 closes the plaintext port.
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        for (old, want) in [
+            ("http://67.207.94.66:8088", "https://nyc.relay.etchit.io"),
+            ("http://159.89.11.217:8088", "https://fra.relay.etchit.io"),
+        ] {
+            let s = Settings {
+                relay_url: old.into(),
+                ..Default::default()
+            };
+            s.save(&p).unwrap();
+            assert_eq!(Settings::load(&p).relay_url, want);
+        }
+    }
+
+    #[test]
+    fn load_leaves_custom_or_already_migrated_relay_untouched() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        for url in [
+            "https://nyc.relay.etchit.io",
+            "https://my.custom.relay:9000",
+        ] {
+            let s = Settings {
+                relay_url: url.into(),
+                ..Default::default()
+            };
+            s.save(&p).unwrap();
+            assert_eq!(Settings::load(&p).relay_url, url);
+        }
     }
 
     #[test]
