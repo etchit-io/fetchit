@@ -11,6 +11,7 @@ import type {
   Group,
   GroupMessage,
   OnlineAgent,
+  OutboxBubbleDto,
   ProfileOutcome,
   TrustLevel,
 } from "./types";
@@ -100,11 +101,13 @@ export async function removeContact(agentId: string): Promise<void> {
   await invoke("chat_remove_contact", { agentId });
 }
 
-/// Upper bound on one chat_send_dm round trip. The Rust side already
-/// bounds the WS write (5s) and the relay ack wait (10s); this catches
-/// the pathological cases those can't — a wedged invoke or a backend
-/// path that never resolves — so the bubble fails honestly instead of
-/// sitting in "sending" until the 24h sweep.
+/// Upper bound on one chat_send_dm round trip. `chat_send_dm` now routes
+/// through the engine outbox: the bubble is echoed over `chat:outbox` the
+/// instant it is enqueued and its status is owned by the projection, so
+/// this no longer governs the bubble itself. It only bounds the awaited
+/// promise (the engine bounds the WS write at 5s and the relay ack at
+/// 10s) so a wedged invoke surfaces an error notice instead of hanging
+/// the caller.
 export const SEND_DM_TIMEOUT_MS = 30_000;
 
 export async function sendDm(
@@ -136,6 +139,18 @@ export async function sendDm(
 
 export async function dmConnect(agentId: string): Promise<void> {
   await invoke("chat_dm_connect", { agentId });
+}
+
+/// Kick the engine outbox retry driver to re-send every retryable bubble
+/// now (the chat panel's "Retry" button). Fire-and-forget in the engine.
+export async function retryOutbox(): Promise<void> {
+  await invoke("chat_retry_outbox");
+}
+
+/// Snapshot the engine outbox, for hydrating outbound bubbles on open
+/// before subscribing to live `chat:outbox` events.
+export async function outboxSnapshot(): Promise<OutboxBubbleDto[]> {
+  return invoke<OutboxBubbleDto[]>("chat_outbox_snapshot");
 }
 
 export async function presenceOnline(): Promise<OnlineAgent[]> {

@@ -4,21 +4,20 @@
 // initial state from the daemon.
 
 import {
-  dmConnect,
   getDisplayName,
   health,
   identity,
   leaveGroup,
   listContacts,
   listGroups,
+  outboxSnapshot,
   presenceOnline,
   removeContact,
-  sendDm,
+  retryOutbox,
   setTrust,
   unwatchPresence,
   watchPresence,
 } from "./api";
-import { startOutboxDriver, type OutboxDriver } from "./outboxDriver";
 import { bindChatEvents } from "./events";
 import { classifyBootstrapError, renderChatUnavailableCard } from "./unavailableCard";
 import { mountSidebar } from "./sidebar";
@@ -160,8 +159,9 @@ export function mountChatPanel(
   outboxRetry.className = "chat-outbox-banner__retry";
   outboxRetry.textContent = "Retry";
   outboxRetry.addEventListener("click", () => {
-    store.resetFailedRetryCounters();
-    outboxDriver?.flushAll();
+    // The engine driver owns retry: kick it to re-send every retryable
+    // bubble now. Status updates flow back via the chat:outbox projection.
+    void retryOutbox().catch((e) => console.warn("[chat] retry failed:", e));
   });
   outboxBanner.appendChild(outboxLabel);
   outboxBanner.appendChild(outboxRetry);
@@ -499,7 +499,6 @@ export function mountChatPanel(
 
   let eventsBound = false;
   let stalenessTimer: ReturnType<typeof setInterval> | null = null;
-  let outboxDriver: OutboxDriver | null = null;
   /// Set when bootstrap (`open`) fails partway. Re-runs `open` after
   /// `BOOTSTRAP_RETRY_MS` so a daemon coming back online is picked
   /// up without forcing the user to re-toggle the panel.
@@ -569,12 +568,17 @@ export function mountChatPanel(
       if (!eventsBound) {
         eventsBound = true;
         await bindChatEvents(store);
-      }
-      if (!outboxDriver) {
-        outboxDriver = startOutboxDriver(store, {
-          sendDm: (peer, body) => sendDm(peer, body, resolveName()),
-          connect: dmConnect,
-        });
+        // Subscribe-first, then snapshot: bindChatEvents has registered the
+        // chat:outbox listener, so hydrating the outbox now cannot miss a
+        // live event in the gap (one arriving mid-hydration just upserts by
+        // id). The engine owns the retry loop -- there is no shell driver.
+        try {
+          for (const bubble of await outboxSnapshot()) {
+            store.applyOutboxEvent(bubble);
+          }
+        } catch (e) {
+          console.warn("[chat] outbox snapshot failed:", e);
+        }
       }
       startStalenessTick();
       // Bootstrap succeeded — cancel any retry that the previous

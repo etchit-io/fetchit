@@ -11,7 +11,7 @@
 use crate::settings::resolve_chat_enabled;
 use crate::state::AppState;
 use fetchit_chat::contacts::TrustLevel;
-use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
+use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::groups::{GroupId, GroupInvite};
 use fetchit_chat::identity::{AgentCard, AgentId};
 use fetchit_chat::messages::{DirectMessage, StoredContactCard};
@@ -152,6 +152,16 @@ pub struct ChatState {
     /// One-shot latch so the event pump is spawned at most once per
     /// process, whether at boot or via a runtime `set_chat_enabled`.
     pump_started: Arc<std::sync::atomic::AtomicBool>,
+    /// Task handle for the engine outbox retry driver, (re)started by
+    /// [`Self::get`] on each client build so it always tracks the live
+    /// client: a relay switch migrates slot 0 in place (the running
+    /// driver follows it), while a from-cold build or a post-invalidate
+    /// rebuild gets a fresh driver, aborting any prior one.
+    outbox_driver: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Supplies the sender display name at send/retry time. Reads the
+    /// persisted setting so the engine driver stamps the same name the
+    /// initial send used (the engine holds no canonical name).
+    name_provider: Arc<dyn Fn() -> String + Send + Sync>,
 }
 
 impl ChatState {
@@ -160,6 +170,9 @@ impl ChatState {
     /// for headless installs without a working keystore. `x0xd_base_url`
     /// pins the daemon URL when the supervisor manages the bundled x0xd;
     /// `None` falls through to `discover_local()` on the first `get()`.
+    /// `name_provider` is called at send/retry time for the sender display
+    /// name, so the engine outbox driver stamps the same name the initial
+    /// send used (the engine holds no canonical display name of its own).
     ///
     /// # Errors
     /// Returns the parse error if `relay_url` is not a valid URL.
@@ -169,6 +182,7 @@ impl ChatState {
         passphrase: Option<String>,
         lan_direct_enabled: bool,
         x0xd_base_url: Option<String>,
+        name_provider: Arc<dyn Fn() -> String + Send + Sync>,
     ) -> Result<Self, String> {
         // Go through the same validation path as `set_relay_url` so a
         // hand-edited `settings.json` with a loopback or reserved
@@ -184,6 +198,8 @@ impl ChatState {
             lan_direct_enabled: Arc::new(std::sync::atomic::AtomicBool::new(lan_direct_enabled)),
             x0xd_base_url,
             pump_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            outbox_driver: Arc::new(std::sync::Mutex::new(None)),
+            name_provider,
         })
     }
 
@@ -241,6 +257,17 @@ impl ChatState {
             }
         }
         *guard = Some(c.clone());
+        // (Re)start the outbox retry driver against the freshly built
+        // client so it always tracks the live one. A relay switch migrates
+        // slot 0 in place (the running driver follows it); this path covers
+        // the from-cold build and any post-invalidate rebuild, aborting a
+        // prior driver first so two never race the same outbox.
+        if let Ok(mut slot) = self.outbox_driver.lock() {
+            if let Some(prev) = slot.take() {
+                prev.abort();
+            }
+            *slot = c.start_outbox_driver(self.name_provider.clone());
+        }
         Ok(c)
     }
 
@@ -785,6 +812,11 @@ pub async fn chat_remove_contact(
         .map_err(|e| e.to_string())
 }
 
+/// Enqueue an outbound DM through the engine outbox: it persists an
+/// optimistic `Sending` bubble (broadcast as `chat:outbox`), warm-connects,
+/// sends, and records the outcome via the same path the retry driver uses.
+/// Returns the engine-assigned bubble id; the UI renders bubble status from
+/// the projected `chat:outbox` events, not from this return value.
 #[tauri::command]
 pub async fn chat_send_dm(
     app_state: tauri::State<'_, AppState>,
@@ -794,15 +826,14 @@ pub async fn chat_send_dm(
     sender_name: Option<String>,
     reply_to_message_id: Option<String>,
     attachment: Option<fetchit_chat::attachment::Attachment>,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     ensure_chat_enabled(&app_state)?;
     let id = AgentId::parse(to).map_err(|e| e.to_string())?;
     let name = sender_name.unwrap_or_else(|| "fetchit".to_string());
     state
         .get()
         .await?
-        .messages()
-        .send(
+        .enqueue_dm(
             &id,
             &body,
             &name,
@@ -828,6 +859,31 @@ pub async fn chat_dm_connect(
         .connect(&id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Kick the engine outbox retry driver to re-send every retryable bubble
+/// now -- the chat panel's "Retry" button. Fire-and-forget + coalescing
+/// in the engine; a no-op before the driver has started or with no chat.
+#[tauri::command]
+pub async fn chat_retry_outbox(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    state.get().await?.retry_outbox();
+    Ok(())
+}
+
+/// Current outbox contents, for the panel to hydrate its outbound bubbles
+/// on open before subscribing to live `chat:outbox` events. Serialized
+/// straight from the engine `OutboxBubble` (`snake_case` fields).
+#[tauri::command]
+pub async fn chat_outbox_snapshot(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<Vec<fetchit_chat::outbox::OutboxBubble>, String> {
+    ensure_chat_enabled(&app_state)?;
+    Ok(state.get().await?.outbox_snapshot().await)
 }
 
 #[tauri::command]
@@ -1121,11 +1177,16 @@ pub async fn chat_confirm_contact(
 /// Spawn the background event pumps:
 ///
 /// - **Relay inbound** — drains the relay transport's inbound channel
-///   and dispatches each delivery through `conversation::dispatch_inbound`.
+///   and dispatches each delivery through
+///   `conversation::dispatch_inbound_with_outbox` (wiring the outbox so
+///   receipts mark the durable bubble Delivered).
 /// - **x0xd presence SSE** — keeps presence + contact / group state
 ///   in sync; unchanged by the relay migration.
 /// - **x0xd unified SSE** — catch-all for events the relay isn't
 ///   responsible for (gossip, contacts, groups).
+/// - **Outbox** — drains the engine outbox broadcast and surfaces each
+///   change as `chat:outbox` (`chat:outbox-resync` with a fresh snapshot
+///   on broadcast lag).
 pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_x0xd_supervisor(state.clone());
     spawn_daemon_watcher(app.clone(), state.clone());
@@ -1139,6 +1200,7 @@ pub fn spawn_event_pump(app: AppHandle, state: ChatState) {
     spawn_denylist_events(app.clone(), state.clone());
     spawn_presence(app.clone(), state.clone());
     spawn_public_posts(app.clone(), state.clone());
+    spawn_outbox(app.clone(), state.clone());
     spawn_unified(app, state);
 }
 
@@ -1931,6 +1993,64 @@ fn spawn_relay_inbound(app: AppHandle, state: ChatState) {
     });
 }
 
+/// Drain the engine outbox broadcast and surface each change to the
+/// frontend as `chat:outbox`, serialized straight from the engine
+/// `OutboxBubble`. On (re)start it replays the current snapshot so a
+/// pump restart mid-session re-paints outbound bubbles; on broadcast lag
+/// it emits `chat:outbox-resync` with a fresh snapshot so the UI
+/// re-converges and drops any now-misaligned staged metadata.
+///
+/// The loop-local client clone is dropped right after subscribing: a
+/// `broadcast::Receiver` does not keep the sender alive, so once the
+/// cached client is replaced (a post-outage rebuild) the old sender drops
+/// and `recv` returns `Closed`, letting this pump re-subscribe to the new
+/// client. (A relay switch migrates slot 0 in place, so it does NOT
+/// replace the client -- the subscription rightly survives it.)
+fn spawn_outbox(app: AppHandle, state: ChatState) {
+    use tokio::sync::broadcast::error::RecvError;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok(client) = state.get().await else {
+                state.invalidate().await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            let Some(mut rx) = client.subscribe_outbox() else {
+                // REST-only client (no chat state): nothing to drain.
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            };
+            for bubble in client.outbox_snapshot().await {
+                let _ = app.emit("chat:outbox", &bubble);
+            }
+            // Release the clone so a client rebuild can close `rx`.
+            drop(client);
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let _ = app.emit("chat:outbox", &ev.bubble);
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        log_pump(&format!("[outbox] lagged {n}; resyncing"));
+                        // A lag (not a rebuild) means the same client is
+                        // still cached, so re-get + snapshot is consistent
+                        // with this subscription; a rebuild would Close instead.
+                        if let Ok(c) = state.get().await {
+                            let snapshot = c.outbox_snapshot().await;
+                            let _ = app.emit("chat:outbox-resync", &snapshot);
+                        }
+                    }
+                    Err(RecvError::Closed) => {
+                        log_pump("[outbox] channel closed; re-subscribing");
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_inbound(
     app: &AppHandle,
@@ -1940,7 +2060,23 @@ async fn handle_inbound(
     mut env: fetchit_chat::transport::InboundEnvelope,
 ) {
     if let Some(transit) = env.transit.take() {
-        match dispatch_inbound(transit, identity, registry).await {
+        // Pass the live outbox handles so an inbound DeliveryReceipt marks
+        // the matching outbound bubble Delivered in the durable store (not
+        // just the UI), stopping the retry driver from re-sending an
+        // already-delivered DM. Desktop drives its own inbound pump and so
+        // must wire this itself -- the engine's SSE dispatcher would do it,
+        // but this pump bypasses that dispatcher.
+        let outbox = client.outbox_arc();
+        let outbox_events = client.outbox_events();
+        match dispatch_inbound_with_outbox(
+            transit,
+            identity,
+            registry,
+            outbox.as_ref(),
+            outbox_events.as_ref(),
+        )
+        .await
+        {
             Ok(
                 InboundDispatch::Welcomed { conversation }
                 | InboundDispatch::Rekeyed { conversation },
@@ -2308,6 +2444,7 @@ mod tests {
             None,
             false,
             None,
+            std::sync::Arc::new(|| "test".to_string()),
         )
         .expect("valid relay url");
         state.adopt_live_relay("https://relay-b.example.com/");

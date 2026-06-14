@@ -873,6 +873,7 @@ fn build_chat_state(
     data_dir: std::path::PathBuf,
     lan_direct_enabled: bool,
     x0xd_base_url: Option<String>,
+    name_provider: Arc<dyn Fn() -> String + Send + Sync>,
 ) -> chat::ChatState {
     match chat::ChatState::new(
         relay_url,
@@ -880,6 +881,7 @@ fn build_chat_state(
         None,
         lan_direct_enabled,
         x0xd_base_url.clone(),
+        name_provider.clone(),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -892,6 +894,7 @@ fn build_chat_state(
                 None,
                 lan_direct_enabled,
                 x0xd_base_url,
+                name_provider,
             )
             .expect("default relay url is always valid")
         }
@@ -1041,11 +1044,25 @@ pub fn run() {
             // spawn_event_pump — is gated: it pulls x0xd, opens a WS
             // to the relay, and starts background tasks. Skip when
             // chat is off so the v1 release ships cold.
+            // Sender display name for the engine outbox driver: read the
+            // persisted setting at send/retry time so a resend stamps the
+            // same name the initial send used. Falls back to "fetchit" when
+            // unset, matching chat_send_dm's own default.
+            let name_settings = server_state.settings.clone();
+            let name_provider: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
+                name_settings
+                    .lock()
+                    .ok()
+                    .map(|s| s.display_name.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "fetchit".to_string())
+            });
             let chat_state = build_chat_state(
                 &relay_url,
                 app_data.join("chat"),
                 lan_direct_enabled,
                 x0xd_base_url.clone(),
+                name_provider,
             );
             app.manage(chat_state.clone());
             if chat_enabled_at_boot {
@@ -1126,6 +1143,8 @@ pub fn run() {
             chat::chat_remove_contact,
             chat::chat_send_dm,
             chat::chat_dm_connect,
+            chat::chat_retry_outbox,
+            chat::chat_outbox_snapshot,
             chat::chat_presence_online,
             chat::chat_groups_list,
             chat::chat_group_create,
