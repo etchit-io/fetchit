@@ -22,7 +22,7 @@ So the engine can own the whole retry loop. Persistence follows the at-rest seal
 
 1. **Scope: DM-only.** Matches the proven `outboxDriver` scope. Group messages have their own durability path (MLS catch-up on rejoin), so there is no group-resend gap, and group retry would add member fan-out + epoch complexity for an unproven need. The `OutboxBubble` recipient field is shaped so a future conversation/group key is an additive extension, not a rewrite.
 2. **Surfacing: snapshot-on-init + `OutboxEvent` stream.** Mirrors the codebase's own pattern (`presence.rs`: `online()` snapshot + `/presence/events` stream) and how the desktop store already consumes presence/inbound. Exact ChatStore reconciliation is Alice's model.
-3. **Warm-connect: expose `Client::connect_peer` now.** Zero-Android-orchestration is the reason for engine-owns-the-loop; a shell-supplied connect callback would leave Android wiring it. `connect_peer` is a small `Http POST /agents/connect` primitive (per-peer direct-path warm; distinct from the X0xdSigner session warmup at client.rs:2343). The driver still takes injectable deps for testability, wired to `Client` primitives in production.
+3. **Warm-connect: reuse the existing `Client::messages().connect(&AgentId)`.** (Cross-review correction, Alice @ 6afc862: it ALREADY EXISTS -- desktop `chat_dm_connect` calls it at src-tauri/chat.rs:828. Do NOT add a new `connect_peer` / `/agents/connect` primitive.) The driver's `connect` dep wires to `messages().connect()` in production; tests inject a no-op. Android wires nothing -- it gets the same `messages().connect()` for free.
 
 ## Architecture
 
@@ -38,6 +38,7 @@ Shells become thin: enqueue a send, start the task once at client init, render o
 ### `OutboxBubble`
 - `id: String` (client-assigned), `recipient` (newtype over `AgentId` now; the seam for a future conversation key), `body: String`, `status: OutboxStatus` (`Sending` | `Delivered` | `Failed`), `message_id: Option<String>` (from `SendReceipt`; `Some` = relay-ACKed), `enqueued_at_ms: u64`, `last_error: Option<String>`.
 - serde-serializable (vault persistence + FFI/event surfacing).
+- **No retry-cap field** (cross-review): desktop's `retryAttempts` is vestigial (written at state.ts:772, zeroed by Retry at 795, never read as a gate), so failed bubbles retry on every online edge, unbounded. The faithful lift keeps that; the Retry button maps to `flush_all()`. A bounded backoff/cap is a deferred, Josh-gated improvement (see out-of-scope).
 
 ### `OutboxStore`
 Bubble map + persistence, modeled on `fedi_vault.rs` / the sibling `BridgeConsentStore`:
@@ -50,7 +51,7 @@ Bubble map + persistence, modeled on `fedi_vault.rs` / the sibling `BridgeConsen
 Injectable deps (so it is unit-testable with scripted doubles):
 - `presence`: stream of `PresenceTransition` (prod: `Client::presence_events`).
 - `send`: `Fn(&OutboxBubble) -> Future<Result<SendReceipt>>` (prod: build envelope + `Router::send`).
-- `connect`: `Fn(&AgentId) -> Future<()>` (prod: `Client::connect_peer`).
+- `connect`: `Fn(&AgentId) -> Future<()>` (prod: the existing `Client::messages().connect(&AgentId)`; no new primitive).
 - a handle to the `OutboxStore` and the `OutboxEvent` sender.
 
 Behavior (port of `outboxDriver.ts`):
@@ -62,15 +63,17 @@ Behavior (port of `outboxDriver.ts`):
 - `flush_all()` for the manual Retry button (all online peers' retryables).
 
 ### Surfacing -- `OutboxEvent`
-- `Client::outbox_snapshot() -> Vec<OutboxBubble>` for initial render.
-- an `OutboxEvent` broadcast (bubble upsert) the shell subscribes to for live status changes.
+- `Client::outbox_snapshot() -> Vec<OutboxBubble>` for initial render; an `OutboxEvent` broadcast (bubble upsert) for live changes.
+- **Outbound-only** (cross-review 3c), keyed by client bubble id; coexists with the relay-inbound pump (chat.rs:1902), which still owns received messages.
+- **Ordering** (cross-review 3b): subscribe to `OutboxEvent` FIRST, then read the snapshot, then apply -- upsert-by-id is idempotent so overlap is harmless, and no event drops / no stale snapshot clobbers a newer event (mirrors the relay-inbound pump).
+- **Optimistic echo** (cross-review 3a): `enqueue_dm` emits the `Sending` `OutboxEvent` (or returns the bubble) BEFORE `Router::send`, so the local echo is instant rather than waiting on the enqueue->event->pump round-trip.
 
-### Warm-connect -- `Client::connect_peer`
-New `Client::connect_peer(&AgentId)` = `Http POST /agents/connect`. Self-contained driver; Android wires nothing.
+### Warm-connect
+Reuse the existing `Client::messages().connect(&AgentId)` (desktop `chat_dm_connect` uses it, chat.rs:828). The driver's `connect` dep wires to it; NO new x0xd primitive.
 
 ## Data flow
 
-1. UI send -> `Client::enqueue_dm(peer, body)` -> persist (`Sending`) -> attempt `Router::send` -> `SendReceipt` -> `Delivered` (or keep `Sending`-with-`message_id`) -> persist -> emit `OutboxEvent`.
+1. UI send -> `Client::enqueue_dm(peer, body)` -> persist (`Sending`) -> emit `Sending` `OutboxEvent` (optimistic echo, BEFORE the send) -> attempt `Router::send` -> `SendReceipt` -> `Delivered` (or keep `Sending`-with-`message_id`) -> persist -> emit updated `OutboxEvent`.
 2. Peer offline->online (`presence_events`) -> driver `flush_peer` -> re-send retryables.
 3. 60s timer -> 24h timeout sweep -> `Failed`.
 4. Restart -> `OutboxStore::load` -> boot sweep -> bubbles resume on the next online edge.
@@ -98,17 +101,17 @@ New `Client::connect_peer(&AgentId)` = `Http POST /agents/connect`. Self-contain
 
 ## Scope / out of scope
 
-- IN: DM resend/durability in the engine; desktop rewire; `connect_peer` primitive; FFI surface for the Android lane.
-- OUT: group-message retry (groups self-heal via MLS catch-up); the Android shell wiring (lands when `android-lit` merges; the engine API is shaped for zero orchestration); changing the relay's 15-min transit TTL (client-carried retention is the design).
+- IN: DM resend/durability in the engine; desktop rewire; the FFI surface for the Android lane (reusing the existing `messages().connect()`, no new connect primitive).
+- OUT: group-message retry (groups self-heal via MLS catch-up); a retry backoff/cap (desktop has none today -- new behavior, Josh-gated improvement, not part of the faithful lift); the Android shell wiring (lands when `android-lit` merges; the engine API is shaped for zero orchestration); changing the relay's 15-min transit TTL (client-carried retention is the design).
 
 ## File structure
 
 - Create: `crates/fetchit-chat/src/outbox/` (mod: `store.rs` + `driver.rs` + types + events) or a single `outbox.rs` if it stays small.
-- Modify: `local_store.rs` (`outbox_dir` + `outbox_path()`); `client.rs` (`enqueue_dm`, `connect_peer`, `outbox_snapshot`, `OutboxEvent` accessor, start the driver in the production ctor); `lib.rs` (module + re-exports). FFI crate (expose enqueue/snapshot/events/connect) -- separate, for the Android lane.
+- Modify: `local_store.rs` (`outbox_dir` + `outbox_path()`); `client.rs` (`enqueue_dm`, `outbox_snapshot`, `OutboxEvent` accessor, start the driver in the production ctor -- reusing the existing `messages().connect()` for warm-connect); `lib.rs` (module + re-exports). FFI crate (expose enqueue/snapshot/events) -- separate, for the Android lane.
 - Desktop (Alice): delete `outboxDriver.ts`; rewire the send cmd + ChatStore projection + Tauri event pump.
 
 ## Coordination
 
 - Branch `outbox-lift` off chat `37499c6`. Box-B gated; Alice FF-merges.
-- `outbox-lift` and `bridge-consent-persist` both touch `local_store.rs` (StoreLayout) and `client.rs` (Client ctor), so they are not FF-clean against each other. Land `bridge-consent-persist` first (it is ahead, already handed for FF), then rebase `outbox-lift` onto the new chat tip before its FF.
+- `outbox-lift` and `bridge-consent-persist` both touch `local_store.rs` (StoreLayout) and `client.rs` (Client ctor). RESOLVED: consent FF-merged to chat @ eb25897; `outbox-lift` rebased onto it (now 6afc862).
 - Bob drives; Alice cross-reviews (esp. the Q2 desktop surfacing + the transport/presence wiring she authored).
