@@ -132,8 +132,11 @@ signing, opens the relay WebSocket, and routes outbound DMs through a
 transport-agnostic stack with reachability-based ordering and fallback. The
 load-bearing invariants: every outbound envelope is **sealed** before it leaves
 the conversation layer, and inbound envelopes from blocked senders are dropped
-at the dispatcher (the denylist gate) before reaching any handler. The DM send
-order is raw QUIC, then gossip inbox, then peer-relay tertiary.
+at the dispatcher (the denylist gate) before reaching any handler. Outbound DM content rides the Router, which picks among its transports
+by reachability (LAN-direct when the peer shares the network, the
+always-available relay otherwise). Group MLS control-plane events do not use this
+Router: they ride x0xd gossip as primary with the relay only as a cross-NAT
+contingency (`crate::groups_reachability`).
 
 **Key entry points:** `fetchit_chat::Client`, `fetchit_chat::ClientBuilder`.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
@@ -251,7 +254,7 @@ _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 A native Kotlin/Gradle single-activity app that is the read-only Autonomi
 content viewer, wrapping `fetchit-core` + `fetchit-net` through the uniffi JNI
 layer. `RenditionRenderer` dispatches the FFI rendition enum into per-type views
-(HTML, PDF, audio, video, EPUB, archives, syntax-highlighted text). The
+(HTML, PDF, audio, video, images, archives, tabular, syntax-highlighted text). The
 load-bearing security invariant is in the HTML WebView: **DOM storage is
 disabled** (`domStorageEnabled = false`) because every fetched page shares one
 synthetic origin, so a shared `localStorage` would leak across SPAs; SPAs must
