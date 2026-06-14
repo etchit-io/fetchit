@@ -29,7 +29,7 @@ const MAX_RELAYS: usize = 4;
 /// Errors from [`emit_pair_uri`] and [`parse_pair_uri`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PairUriError {
-    /// URI exceeds [`MAX_URI_LEN`] bytes.
+    /// URI exceeds `MAX_URI_LEN` bytes.
     #[error("pair URI exceeds {MAX_URI_LEN} bytes")]
     TooLong,
 
@@ -41,12 +41,12 @@ pub enum PairUriError {
     #[error("pair URI must contain at least one relay")]
     NoRelays,
 
-    /// More than [`MAX_RELAYS`] `r` parameters.
+    /// More than `MAX_RELAYS` `r` parameters.
     #[error("pair URI must not contain more than {MAX_RELAYS} relays")]
     TooManyRelays,
 
     /// A relay URL failed validation (bad scheme, missing host, userinfo,
-    /// or exceeds [`MAX_RELAY_LEN`]).
+    /// or exceeds `MAX_RELAY_LEN`).
     #[error("invalid relay URL: {0}")]
     InvalidRelay(String),
 }

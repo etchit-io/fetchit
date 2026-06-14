@@ -4,7 +4,7 @@
 //! recipient, builds a Welcome outbox on first contact + a Message
 //! outbox every send, and routes each `TransitEnvelope` through a
 //! [`Router`] of message transports. Inbound is handled separately by
-//! the desktop pump via [`conversation::dispatch_inbound`].
+//! the desktop pump via [`crate::conversation::dispatch_inbound`].
 //!
 //! Legacy plaintext-envelope decode helper [`decode_direct_message`]
 //! is preserved for the live-relay self-DM integration test only;
@@ -275,7 +275,7 @@ impl StoredContactCard {
     ///
     /// Updates `rendezvous_hints` and `last_hint_epoch_ms` only when
     /// `hint_epoch_ms` is strictly greater than the last recorded epoch.
-    /// The load-modify-save is serialised under [`CARD_UPDATE_LOCK`] so a
+    /// The load-modify-save is serialised under `CARD_UPDATE_LOCK` so a
     /// concurrent `import_pair_uri` write cannot race it to a lost update.
     ///
     /// Returns `true` when the card was updated and persisted, `false` when
@@ -323,7 +323,7 @@ impl StoredContactCard {
         Ok(true)
     }
 
-    /// Persist a freshly-imported contact card under [`CARD_UPDATE_LOCK`]
+    /// Persist a freshly-imported contact card under `CARD_UPDATE_LOCK`
     /// without regressing the monotonic relay-hint watermark. Any
     /// `last_hint_epoch_ms` already on disk (set by an in-band hint that
     /// arrived before this import) is preserved along with the relays it

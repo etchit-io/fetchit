@@ -198,7 +198,7 @@ impl DenylistConsumer {
     ///
     /// # Errors
     /// Returns [`TrustError::Io`] on transport / status failures,
-    /// [`TrustError::Issuer`-class] errors when the payload doesn't
+    /// and `TrustError::Issuer`-class errors when the payload doesn't
     /// verify under the configured issuer key.
     pub async fn refresh(&self) -> Result<(), TrustError> {
         let response = self

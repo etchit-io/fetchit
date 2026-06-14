@@ -747,8 +747,8 @@ impl Client {
     /// Returns a fresh broadcast receiver each call, or `None` in
     /// REST-only mode (no chat state). The desktop shell drains this to
     /// emit the `chat:public-post` Tauri event; the renderer attributes
-    /// each post to [`PublicPostDelivery::verified_actor_url`] and treats
-    /// [`PublicPostDelivery::activity_json`] as untrusted content to
+    /// each post to `PublicPostDelivery::verified_actor_url` and treats
+    /// `PublicPostDelivery::activity_json` as untrusted content to
     /// sanitize. A lagging consumer drops the oldest posts
     /// (`PUBLIC_POST_CHANNEL_CAP`); public posts are live-only.
     #[must_use]
@@ -893,14 +893,14 @@ impl Client {
 
     /// T8b: spawn the background home-relay failover watcher.
     ///
-    /// Wires the three production seams into [`run_failover_watcher`]:
+    /// Wires the three production seams into `run_failover_watcher`:
     /// 1. **resubscribe** — re-fetch slot 0's live state stream from the
     ///    [`crate::transport::MultiHomeTransport`]. Called once at start
     ///    and again after every migration, so the watcher sticks to the
     ///    NEW slot 0 (whose `RelaySet` is fresh).
     /// 2. **`current_primary`** — snapshot the live (interior-mutable)
     ///    primary URL so the action knows which relay just died.
-    /// 3. **action** — [`Self::failover_to_next_relay`], which picks a
+    /// 3. **action** — `Self::failover_to_next_relay`, which picks a
     ///    candidate, swaps slot 0, updates state, republishes, prunes, and
     ///    fires the callback.
     ///
@@ -1057,7 +1057,7 @@ impl Client {
     /// T9: manually migrate the pinned primary (slot 0) to `new_url`.
     ///
     /// This is the user-driven region change, distinct from the automatic
-    /// [`Self::failover_to_next_relay`] in one crucial way: the OLD relay is
+    /// `Self::failover_to_next_relay` in one crucial way: the OLD relay is
     /// still ALIVE, so the T7 forwarding record posted at it can heal stale
     /// senders that still deposit per the old pair record. (Failover cannot
     /// do this -- you can neither POST nor FETCH a forwarding record at a
@@ -1308,7 +1308,7 @@ impl Client {
     /// fanned in by [`crate::transport::MultiHomeTransport`]: that
     /// transport doesn't expose `take_inbound` on the trait surface (its
     /// dispatch is callback-shaped), so `Client` stashes the channel
-    /// behind [`Self::multi_home_inbound`] at boot. Existing callers
+    /// behind `Self::multi_home_inbound` at boot. Existing callers
     /// still ask for `"relay"`; new ones can use the canonical name.
     #[must_use]
     pub fn take_transport_inbound(
@@ -1498,11 +1498,11 @@ impl Client {
     ///
     /// Routing flow:
     /// - If direct gossip can reach `recipient_agent_id_hex` for
-    ///   `group_id` (via [`ReachabilityCache::lookup`]), returns
+    ///   `group_id` (via [`crate::groups_reachability::ReachabilityCache::lookup`]), returns
     ///   `Ok(BridgeDecision::LetGossipCarry)` without sending — the
     ///   caller is expected to publish the event to local x0xd
     ///   (gossip will deliver it).
-    /// - Otherwise consults [`BridgeConsentStore::lookup`] for
+    /// - Otherwise consults [`crate::groups_reachability::BridgeConsentStore::lookup`] for
     ///   `group_id`:
     ///   * `ConsentedOptIn` → seal + send via relay; returns
     ///     `Ok(BridgeDecision::WrapAndSend)`.
@@ -1688,21 +1688,21 @@ impl Client {
         Ok(())
     }
 
-    /// Drain an inbound [`EnvelopeKind::PublicPost`] envelope: decode the
-    /// [`PublicPostPayload`] wrapper and surface it on the public-post
+    /// Drain an inbound [`fetchit_relay_proto::EnvelopeKind::PublicPost`] envelope: decode the
+    /// [`fetchit_relay_proto::PublicPostPayload`] wrapper and surface it on the public-post
     /// broadcast that [`Self::subscribe_to_public_posts`] hands out.
     ///
     /// `PublicPost` is the SOLE envelope kind exempt from the chat
     /// sig/KEM verify regime — its body is `application/activity+json`,
     /// not chat ciphertext, and its attribution
-    /// ([`PublicPostPayload::verified_actor_url`]) was verified by the
+    /// (`PublicPostPayload::verified_actor_url`) was verified by the
     /// relay at the inbox HTTP-Signature boundary (the client cannot
     /// verify HTTP signatures itself; see `crates/fetchit-chat/SECURITY.md`
     /// caveat 8). The exemption is structural: the envelope carries no
     /// signature/KEM/nonce and the all-zeros sentinel sender. Dispatch is
     /// driven by `kind` so a DM can never be smuggled through this path.
     ///
-    /// Returns the decoded [`PublicPostDelivery`] (also broadcast). A
+    /// Returns the decoded `PublicPostDelivery` (also broadcast). A
     /// send with no subscribers is intentionally not an error — public
     /// posts are live-only.
     ///
@@ -1739,8 +1739,8 @@ impl Client {
     /// Spawn the M2.5 SSE reachability recorder: a background task that
     /// consumes `/events`, watches for `NamedGroupMetadataEvent` gossip
     /// frames, and records direct-gossip reachability into
-    /// [`ReachabilityCache`] for `(group, sender)`. Events that match
-    /// a recent [`BridgeInboundShadow`] entry are skipped, and
+    /// [`crate::groups_reachability::ReachabilityCache`] for `(group, sender)`. Events that match
+    /// a recent [`crate::groups_reachability::BridgeInboundShadow`] entry are skipped, and
     /// self-published loopbacks (`from == local agent id`) are skipped
     /// — together that keeps `Reachable` honest under the
     /// symmetric-NAT bridge-loopback case the spec §5 routing rule
@@ -3163,7 +3163,7 @@ impl Client {
     /// nothing is blocked.
     ///
     /// Delivery is best-effort per recipient: an unreachable or
-    /// rejecting inbox is recorded in [`PublishReport::failed`] without
+    /// rejecting inbox is recorded in `PublishReport::failed` without
     /// aborting the rest. A top-level post with no mentions has no
     /// direct recipients (follower shared-inbox fan-out is a later
     /// stage) and returns an empty report.

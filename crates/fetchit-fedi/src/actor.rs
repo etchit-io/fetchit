@@ -1,9 +1,9 @@
 //! Actor identity + Mastodon-compatible JSON-LD representation.
 //!
-//! Per plan decision [III] and the cross-crate cut documented in
+//! Per plan decision `[III]` and the cross-crate cut documented in
 //! `docs/superpowers/plans/2026-06-07-m4-fediverse-impl-plan.md` Stage 1,
 //! [`ActorIdentity`] is **pure data**. The factory (RSA-2048 generation,
-//! ML-DSA-65 attestation signing, [`StoreLayout`] I/O) lives in
+//! ML-DSA-65 attestation signing, `StoreLayout` I/O) lives in
 //! `fetchit-chat::Client::mint_actor_identity` so the dep direction
 //! stays unidirectional (`chat → fedi`).
 //!

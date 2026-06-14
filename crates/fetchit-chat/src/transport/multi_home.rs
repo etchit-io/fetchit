@@ -55,7 +55,7 @@ const REPLACE_PRIMARY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration
 
 /// Concrete handle returned by [`RelayBuilder::build`]. Production
 /// wraps an `Arc<RelayTransport>` ([`RelayHandle::from_transport`]);
-/// tests use [`RelayHandle::mock`] which records sends in an internal
+/// tests use `RelayHandle::mock` which records sends in an internal
 /// buffer and exposes an `inbound_tx` channel for assertion-driven
 /// inbound delivery without standing up a real WebSocket.
 pub struct RelayHandle {
@@ -130,7 +130,7 @@ impl RelayHandle {
     /// Borrow the wrapped [`crate::relay_transport::RelayTransport`] for
     /// callers that need direct access to its presence-watch surface
     /// (e.g. `Client::watch_relay_presence`). Returns `None` for mock
-    /// handles built via [`Self::mock`].
+    /// handles built via `Self::mock`.
     #[must_use]
     pub fn relay_transport_arc(&self) -> Option<Arc<crate::relay_transport::RelayTransport>> {
         self.transport.clone()
@@ -140,7 +140,7 @@ impl RelayHandle {
     ///
     /// Production handles ([`Self::from_transport`]) delegate to the
     /// wrapped [`crate::relay_transport::RelayTransport`]; test mocks
-    /// ([`Self::mock`]) record the transit envelope in an internal
+    /// (`Self::mock`) record the transit envelope in an internal
     /// buffer and synthesize a placeholder [`SendReceipt`] so tests
     /// can assert routing without standing up a real WebSocket.
     ///
@@ -284,7 +284,7 @@ pub enum TransportError {
     /// A [`MultiHomeTransport::replace_primary`] swap built a session to
     /// the new relay but it did not reach
     /// [`fetchit_relay_client::ConnState::Connected`] within
-    /// [`REPLACE_PRIMARY_CONNECT_TIMEOUT`]. The new session was torn down
+    /// `REPLACE_PRIMARY_CONNECT_TIMEOUT`. The new session was torn down
     /// and the existing slot 0 left untouched, so the caller can retry or
     /// keep the old primary.
     #[error("relay swap did not go live: {url}")]
@@ -838,14 +838,14 @@ impl MultiHomeTransport {
     /// 1. Build the new handle and spawn its fan-in.
     /// 2. Verify inbound liveness: wait until the new relay reports
     ///    [`fetchit_relay_client::ConnState::Connected`], bounded by
-    ///    [`REPLACE_PRIMARY_CONNECT_TIMEOUT`]. On timeout, abort the new
+    ///    `REPLACE_PRIMARY_CONNECT_TIMEOUT`. On timeout, abort the new
     ///    fan-in, drain the new session via
     ///    [`crate::relay_transport::RelayTransport::shutdown`], and return
     ///    [`TransportError::SwapNotLive`] WITHOUT touching slot 0. (Mock
     ///    handles expose no transport and skip the wait; their tests
     ///    assert liveness behaviorally.)
     /// 3. Install the new slot under the write lock (guard dropped before
-    ///    any await) and point [`Self::primary_url`] at `new_url` so the
+    ///    any await) and point `Self::primary_url` at `new_url` so the
     ///    G1 denylist match keys off the live primary.
     /// 4. Tear the old slot down explicitly: abort its fan-in and drain
     ///    its session. The shared [`NonceDedup`] absorbs the brief window

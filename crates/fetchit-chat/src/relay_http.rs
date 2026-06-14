@@ -11,13 +11,13 @@
 //! [`fetchit_fedi::ssrf`] private-IP primitives rather than growing a
 //! parallel implementation.
 //!
-//! Every item here is consumed by the dial-site wiring: [`guard_relay_url`]
+//! Every item here is consumed by the dial-site wiring: `guard_relay_url`
 //! gates the relay HTTP dial boundaries (profile-index, pair-record and
 //! forwarding GET in [`crate::pair`], pair-record POST and per-relay
 //! forwarding POST in [`crate::pair_record`]), [`guarded_client`] builds
 //! the redirect-disabled client those dials run on — app shells resolving
 //! records outside this crate use it for the same reason — and
-//! [`read_body_capped`] bounds every relay response body those dials
+//! `read_body_capped` bounds every relay response body those dials
 //! buffer.
 
 use std::time::Duration;

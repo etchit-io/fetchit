@@ -16,7 +16,7 @@ use url::Url;
 pub struct RelayDescriptor {
     /// Base URL the client dials. Stored as a `&'static str` because
     /// `Url::parse` is not const; [`RelayDescriptor::url`] does the
-    /// runtime parse, [`assert_default_relays_parse`] in tests proves
+    /// runtime parse, `assert_default_relays_parse` in tests proves
     /// every baked-in entry is well-formed.
     pub base_url: &'static str,
     /// Region tag the relay advertises (matches `Region::from_str`).

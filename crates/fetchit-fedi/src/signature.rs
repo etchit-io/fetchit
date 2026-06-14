@@ -9,7 +9,7 @@
 //! `(key, body, date, created)` tuple always emits the same bytes —
 //! that's what makes golden-vector tests possible.
 //!
-//! Per plan decision [III], **no per-POST ML-DSA cosignature** — the
+//! Per plan decision `[III]`, **no per-POST ML-DSA cosignature** — the
 //! Actor JSON-LD ML-DSA attestation binding the RSA pubkey to the
 //! chat identity is the authoritative PQ binding. Strict-RSA on the
 //! per-POST surface keeps verifier code on the receiver side minimal.
@@ -304,7 +304,7 @@ impl SignatureVerifyError {
 /// `application/activity+json` POST against `public_key`.
 ///
 /// Reconstructs the canonical signing base byte-for-byte from the
-/// caller-supplied request components ([`build_signature_base`])
+/// caller-supplied request components (`build_signature_base`)
 /// and verifies the base64-decoded signature with
 /// `VerifyingKey<Sha256>`. Caller must derive `target_uri`/`host`
 /// the same way the signer did — see Mastodon's `host_from_url`

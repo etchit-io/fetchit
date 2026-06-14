@@ -63,7 +63,7 @@ pub enum DiscoveryError {
 #[derive(Debug, Error)]
 pub enum X0xdError {
     /// HTTP transport error. The message carries the full `source()`
-    /// chain via [`render_reqwest_chain`], because reqwest's own
+    /// chain via `render_reqwest_chain`, because reqwest's own
     /// Display stops at "error sending request for url (...)" and hides
     /// the transport cause — connection refused, DNS, a dropped tokio
     /// runtime — which is exactly what tells a dead daemon apart from a

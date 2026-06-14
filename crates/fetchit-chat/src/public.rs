@@ -78,7 +78,7 @@ pub async fn check_publish_denylist(
 /// # Errors
 /// - [`ChatError::Invalid`] when the mention is malformed or
 ///   `WebFinger` resolution fails (DNS / HTTP / JRD parse). The
-///   inner [`WebFingerError`] message rides in the `String` payload.
+///   inner [`fetchit_fedi::WebFingerError`] message rides in the `String` payload.
 /// - [`ChatError::DeniedActor`] when the resolved actor URL is on
 ///   the community denylist.
 pub async fn check_mention_denylist(

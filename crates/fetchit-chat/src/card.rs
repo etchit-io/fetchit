@@ -294,7 +294,7 @@ pub fn extended_card_to_uri(card_json: &serde_json::Value) -> Result<String, Cha
 }
 
 /// Decode an extended-card URI back into a JSON value. Accepts both
-/// the DEFLATE-tagged form ([`FORMAT_TAG_DEFLATE`]) and a plain JSON
+/// the DEFLATE-tagged form (`FORMAT_TAG_DEFLATE`) and a plain JSON
 /// body so legacy fixtures keep parsing.
 ///
 /// # Errors

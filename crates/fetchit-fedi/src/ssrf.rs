@@ -68,7 +68,7 @@ fn is_private_v4(v4: Ipv4Addr) -> bool {
 /// Twin of [`private_ip_reason`] for the post-`lookup_host` path —
 /// where `private_ip_reason` checks an IP literal embedded in a URL,
 /// this checks the IPs a DNS resolver actually returns for a hostname.
-/// Both twins share [`is_private_v4`] for the IPv4 classes, so only
+/// Both twins share `is_private_v4` for the IPv4 classes, so only
 /// the IPv6-specific prefixes are mirrored by hand.
 #[must_use]
 pub fn is_private_ip_addr(ip: IpAddr) -> Option<String> {

@@ -259,7 +259,7 @@ impl ConversationRegistry {
     }
 
     /// Run a closure against the cached `Conversation` for
-    /// `group_id_hex` while holding the [`Self::by_group_id`] mutex,
+    /// `group_id_hex` while holding the `by_group_id` mutex,
     /// then optionally persist the result to disk.
     ///
     /// This is the right entry point for any caller that does
@@ -438,7 +438,7 @@ impl ConversationRegistry {
 
     /// Atomically check `(sender, nonce)` against the conversation's
     /// replay window and record it if fresh. The whole read-modify-write
-    /// runs under [`Self::by_group_id`], so concurrent inbound pumps on
+    /// runs under `by_group_id`, so concurrent inbound pumps on
     /// the same group serialise rather than both observing an empty
     /// window before either persists — closing the relay/LAN dual-pump
     /// TOCTOU that the conversation-level

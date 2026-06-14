@@ -1,7 +1,7 @@
 //! ML-DSA-65 attestation binding a fetch>it Actor's RSA-2048 pubkey to
 //! its chat-identity ML-DSA key.
 //!
-//! Per plan decision [III], the per-POST ML-DSA cosignature was dropped
+//! Per plan decision `[III]`, the per-POST ML-DSA cosignature was dropped
 //! and the Actor JSON-LD attestation is the **authoritative PQ
 //! binding**. This module owns the canonical signing-input byte format
 //! that both the chat-side signer and any verifier (fetch>it node or
@@ -30,7 +30,7 @@ pub const DOMAIN_SEPARATOR: &[u8] = b"fetchit-fedi-actor-attestation-v1";
 /// In-memory the byte fields are raw `Vec<u8>`. When serialised (to
 /// the on-disk fedi vault or to the Actor JSON-LD `publicKey`
 /// extension), both fields are emitted as base64 strings via the
-/// [`b64`] serde-with helper — one canonical encoding everywhere the
+/// `b64` serde-with helper — one canonical encoding everywhere the
 /// attestation crosses a wire or a disk boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MlDsaAttestation {
@@ -95,7 +95,7 @@ pub const MAX_RELAY_HINT_LEN: usize = 256;
 /// Autonomi profile address and a relay hint, making the record a
 /// self-contained pointer for the v3 share-URI bootstrap.
 ///
-/// Wire shape: JSON with base64 byte fields (same [`b64`] helper as
+/// Wire shape: JSON with base64 byte fields (same `b64` helper as
 /// v1) plus an explicit integer `version` so consumers dispatch
 /// without sniffing fields.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
