@@ -1449,10 +1449,17 @@ impl Client {
                 .await;
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
         {
-            let _ = crate::conversation::dispatch_inbound(
+            // Pass the outbox handle so a DeliveryReceipt flips the matching
+            // outbound bubble to Delivered (engine-side, so this dispatcher
+            // gives Android the same Delivered path desktop gets).
+            let outbox = self.chat.as_ref().map(|c| &c.outbox);
+            let outbox_tx = self.chat.as_ref().map(|c| &c.outbox_tx);
+            let _ = crate::conversation::dispatch_inbound_with_outbox(
                 transit,
                 identity.as_ref(),
                 registry.as_ref(),
+                outbox,
+                outbox_tx,
             )
             .await;
         }
@@ -1540,7 +1547,7 @@ impl Client {
     /// # Errors
     ///
     /// [`ChatError::Invalid`] when the client has no chat state -- a
-    /// misconfiguration, since `enqueue_dm` requires a data_dir/relay
+    /// misconfiguration, since `enqueue_dm` requires a `data_dir`/relay
     /// client.
     pub async fn enqueue_dm(
         &self,
@@ -1955,6 +1962,90 @@ impl Client {
         }))
     }
 
+    /// Start the engine-owned outbox retry loop. Boot-sweeps orphaned
+    /// in-flight sends, then on each peer offline->online edge re-sends that
+    /// peer's retryable bubbles (warming the link first), and runs the 24h
+    /// timeout sweep hourly. Returns the task handle; `None` for a client
+    /// with no chat state. Dropping the handle does not stop the loop
+    /// (fire-and-forget, like the dispatcher); abort it to stop.
+    ///
+    /// `name_provider` supplies the sender display name at send time -- the
+    /// engine holds no canonical name (it lives in the shell's settings),
+    /// so desktop reads it from settings and Android wires its own. The SAME
+    /// source should feed [`Client::enqueue_dm`]'s `sender_name` so an
+    /// initial send and its later retries agree on the name.
+    pub fn start_outbox_driver(
+        &self,
+        name_provider: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let chat = self.chat.as_ref()?;
+        let process_start_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let driver = crate::outbox::driver::OutboxDriver::new(
+            chat.outbox.clone(),
+            chat.outbox_tx.clone(),
+            RealOutboxTransport {
+                client: self.clone(),
+                name_provider,
+            },
+            process_start_ms,
+        );
+        let client = self.clone();
+        Some(tokio::spawn(async move {
+            const MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+            driver.boot_sweep().await;
+            let mut backoff = MIN_BACKOFF;
+            let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+            sweep.tick().await; // consume the immediate first tick (boot_sweep already ran)
+            loop {
+                let mut stream = match client.events().await {
+                    Ok(s) => {
+                        // Reset backoff on a fresh subscribe so a later
+                        // failure restarts at the floor.
+                        backoff = MIN_BACKOFF;
+                        s
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "outbox driver: open /events failed: {e}; retrying in {backoff:?}",
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        continue;
+                    }
+                };
+                loop {
+                    tokio::select! {
+                        maybe_event = stream.next() => {
+                            match maybe_event {
+                                Some(Ok(Event::Presence(t))) => {
+                                    driver
+                                        .on_presence(&t.agent_id, t.event == "online")
+                                        .await;
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(e)) => {
+                                    log::warn!("outbox driver: stream error: {e}; reopening");
+                                    break;
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = sweep.tick() => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                            driver.sweep_timeouts(now).await;
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
     /// Open the unified SSE event stream from x0xd — presence,
     /// contacts, group state, gossip. Direct messages do not flow here
     /// in the relay-routed deployment; subscribe to the relay's
@@ -2360,6 +2451,58 @@ async fn enforce_m2_treekem_minimum(base_url: &str, token: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Production [`crate::outbox::driver::OutboxTransport`]: re-sends a bubble
+/// through the same `messages()` path as the initial send. Holds a cloned
+/// [`Client`] (cheap -- shares the inner Arcs, exactly like the dispatcher +
+/// SSE-recorder tasks) plus a shell-supplied display-name source read at
+/// send time (the engine has no canonical name; it lives in the shell's
+/// settings).
+struct RealOutboxTransport {
+    client: Client,
+    name_provider: Arc<dyn Fn() -> String + Send + Sync>,
+}
+
+impl crate::outbox::driver::OutboxTransport for RealOutboxTransport {
+    fn connect(
+        &self,
+        peer: crate::identity::AgentId,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let client = self.client.clone();
+        async move {
+            // Best-effort warm-connect; the send below reports the real error.
+            let _ = client.messages().connect(&peer).await;
+        }
+    }
+
+    fn send(
+        &self,
+        bubble: crate::outbox::OutboxBubble,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<crate::transport::SendReceipt, ChatError>,
+    > + Send {
+        let client = self.client.clone();
+        let sender_name = (self.name_provider)();
+        async move {
+            // RETRY fidelity: OutboxBubble stores body only, so a resend
+            // drops the original attachment + reply_to (faithful to desktop
+            // outboxDriver.ts; full-fidelity retry is a deferred Josh-gated
+            // improvement -- see the outbox-lift plan notes).
+            let message_id = client
+                .messages()
+                .send(&bubble.peer, &bubble.body, &sender_name, None, None)
+                .await?;
+            let accepted_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            Ok(crate::transport::SendReceipt {
+                accepted_at_ms,
+                message_id,
+                transport_name: "outbox-retry",
+            })
+        }
+    }
 }
 
 /// Wire chat state, signer, and transports against a reachable x0xd.

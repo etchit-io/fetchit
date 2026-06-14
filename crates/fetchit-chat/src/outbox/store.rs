@@ -171,7 +171,7 @@ impl OutboxStore {
     }
 
     /// Mark the bubble carrying `message_id` as `Delivered` (called from
-    /// the DeliveryReceipt inbound path). Returns the updated bubble, or
+    /// the `DeliveryReceipt` inbound path). Returns the updated bubble, or
     /// `None` when no bubble carries that id. Persists on a hit.
     pub fn mark_delivered(&mut self, message_id: &str) -> Option<OutboxBubble> {
         let updated = {
@@ -207,18 +207,15 @@ impl OutboxStore {
             if matches!(bubble.status, OutboxStatus::Delivered) {
                 return None;
             }
-            match error {
-                Some(reason) => {
-                    bubble.status = OutboxStatus::Failed;
-                    bubble.last_error = Some(reason);
+            if let Some(reason) = error {
+                bubble.status = OutboxStatus::Failed;
+                bubble.last_error = Some(reason);
+            } else {
+                if message_id.is_some() {
+                    bubble.message_id = message_id;
                 }
-                None => {
-                    if message_id.is_some() {
-                        bubble.message_id = message_id;
-                    }
-                    bubble.status = OutboxStatus::Sending;
-                    bubble.last_error = None;
-                }
+                bubble.status = OutboxStatus::Sending;
+                bubble.last_error = None;
             }
             bubble.clone()
         };

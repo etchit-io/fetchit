@@ -150,7 +150,7 @@ impl<T: OutboxTransport> OutboxDriver<T> {
         self.emit(changed);
     }
 
-    /// Mark the bubble carrying `message_id` Delivered (DeliveryReceipt
+    /// Mark the bubble carrying `message_id` Delivered (`DeliveryReceipt`
     /// inbound path), emitting the change.
     pub async fn mark_delivered(&self, message_id: &str) {
         let changed = self.store.lock().await.mark_delivered(message_id);
@@ -166,7 +166,7 @@ impl<T: OutboxTransport> OutboxDriver<T> {
             store
                 .snapshot()
                 .into_iter()
-                .filter(|b| is_retryable(b))
+                .filter(is_retryable)
                 .filter_map(|b| seen.insert(b.peer.clone()).then_some(b.peer))
                 .collect()
         };
@@ -177,7 +177,14 @@ impl<T: OutboxTransport> OutboxDriver<T> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    // Scripted transport doubles mirror the trait's explicit `impl Future
+    // + Send` shape rather than `async fn` for parity with OutboxTransport.
+    clippy::manual_async_fn
+)]
 mod tests {
     use super::*;
 
@@ -360,7 +367,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().bubble.id, "b1");
     }
 
-    /// Simulates a DeliveryReceipt landing during the send await: its
+    /// Simulates a `DeliveryReceipt` landing during the send await: its
     /// `send` marks the bubble Delivered via the shared store before
     /// returning Ok, racing the post-send status update.
     struct DeliverDuringSend {

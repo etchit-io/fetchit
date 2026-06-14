@@ -28,7 +28,7 @@ pub enum OutboxStatus {
 /// One outbound DM, tracked from enqueue through delivery.
 ///
 /// `message_id` carries the relay's dedupe-key hex once the initial send
-/// is ACKed (`Some`); a `Sending` bubble with `None` is still in flight
+/// is acked (`Some`); a `Sending` bubble with `None` is still in flight
 /// and must not be re-fired (double-send guard -- see [`is_retryable`]).
 /// DM-only today; a future conversation/group key would generalize `peer`
 /// additively.
@@ -42,7 +42,7 @@ pub struct OutboxBubble {
     pub body: String,
     /// Delivery state.
     pub status: OutboxStatus,
-    /// Relay dedupe-key hex, set once the first send is ACKed.
+    /// Relay dedupe-key hex, set once the first send is acked.
     pub message_id: Option<String>,
     /// Unix epoch ms when first enqueued.
     pub enqueued_at_ms: u64,
@@ -71,7 +71,7 @@ pub fn is_retryable(bubble: &OutboxBubble) -> bool {
 
 /// A fresh client-assigned bubble id: 128 bits of randomness, hex-encoded.
 /// Stable across retries and distinct from the relay's `message_id` (which
-/// is only known once the first send is ACKed). Mirrors
+/// is only known once the first send is acked). Mirrors
 /// `messages::random_message_id`.
 pub(crate) fn new_bubble_id() -> String {
     use rand::RngCore;
