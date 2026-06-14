@@ -1527,6 +1527,36 @@ impl Client {
         self.chat.as_ref().map(|c| c.outbox_tx.subscribe())
     }
 
+    /// Cloneable sender for the outbox broadcast channel that
+    /// [`Self::subscribe_outbox`] reads. A shell that drives its OWN
+    /// inbound pump -- desktop's Tauri-emitting pump, Android's
+    /// `chat_ffi` pump -- hands this (with [`Self::outbox_arc`]) to
+    /// [`crate::conversation::dispatch_inbound_with_outbox`] so an
+    /// inbound `DeliveryReceipt` marks the matching outbound bubble
+    /// Delivered engine-side. The engine's own SSE dispatcher already
+    /// wires this; a shell that takes the relay inbound itself bypasses
+    /// that dispatcher and so needs the handle. `None` in REST-only mode.
+    #[must_use]
+    pub fn outbox_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>> {
+        self.chat.as_ref().map(|c| c.outbox_tx.clone())
+    }
+
+    /// Cloneable handle to the vault-persisted outbox store, paired with
+    /// [`Self::outbox_events`] for the same own-inbound-pump shells. Lets
+    /// the shell thread the live store into
+    /// [`crate::conversation::dispatch_inbound_with_outbox`] so delivery
+    /// receipts are applied to the durable outbox (not just the UI),
+    /// which stops the retry driver from re-sending an already-delivered
+    /// DM on the next presence edge. `None` in REST-only mode.
+    #[must_use]
+    pub fn outbox_arc(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>> {
+        self.chat.as_ref().map(|c| c.outbox.clone())
+    }
+
     /// Current outbox contents (all tracked DM bubbles), for a shell to
     /// hydrate its UI on startup before subscribing to live events. Empty
     /// when the client has no chat state.
@@ -4430,6 +4460,41 @@ mod tests {
         let (client, _dir) = test_client_no_denylist();
         client.retry_outbox();
         client.retry_outbox();
+    }
+
+    #[tokio::test]
+    async fn outbox_accessors_expose_the_live_handles() {
+        // A shell driving its own inbound pump needs the SAME store + event
+        // sender the engine uses, so dispatch_inbound_with_outbox marks the
+        // durable outbox (not just the UI) Delivered.
+        let (client, _dir) = test_client_no_denylist();
+        let mut rx = client.subscribe_outbox().expect("chat state present");
+        let events = client.outbox_events().expect("chat state present");
+        let outbox = client.outbox_arc().expect("chat state present");
+
+        let bubble = crate::outbox::OutboxBubble {
+            id: "b1".into(),
+            peer: crate::identity::AgentId("cc".repeat(32)),
+            body: "hi".into(),
+            status: crate::outbox::OutboxStatus::Delivered,
+            message_id: Some("m1".into()),
+            enqueued_at_ms: 1,
+            last_error: None,
+        };
+
+        // The returned sender feeds the channel subscribe_outbox reads.
+        events
+            .send(crate::outbox::OutboxEvent {
+                bubble: bubble.clone(),
+            })
+            .expect("a receiver is subscribed");
+        let got = rx.recv().await.expect("event delivered");
+        assert_eq!(got.bubble.id, "b1");
+        assert_eq!(got.bubble.status, crate::outbox::OutboxStatus::Delivered);
+
+        // The returned Arc is the live, mutable store.
+        outbox.lock().await.upsert(bubble);
+        assert_eq!(outbox.lock().await.snapshot().len(), 1);
     }
 
     /// D9 happy path: validation accepts a real-world relay list and
