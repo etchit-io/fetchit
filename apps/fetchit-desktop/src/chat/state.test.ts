@@ -337,6 +337,33 @@ describe("ChatStore — outbox projection (applyOutboxEvent)", () => {
     expect(s.conversationsSorted()[0].messages[0].attachment).toBeUndefined();
   });
 
+  it("discardStagedMeta drops an orphan so it cannot mis-attach to the next send", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    // A send stages meta but fails before any echo (daemon down): discard it.
+    const orphan = s.stageOutboundMeta(PEER, { attachment: ATT });
+    s.discardStagedMeta(PEER, orphan);
+    // The next send's projected bubble must NOT inherit the discarded meta.
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "next" }));
+    expect(s.conversationsSorted()[0].messages[0].attachment).toBeUndefined();
+  });
+
+  it("discardStagedMeta is a no-op once the echo already consumed the entry", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    const token = s.stageOutboundMeta(PEER, { replyTo: REF });
+    // Echo consumes the staged entry first...
+    s.applyOutboxEvent(outboxEvent({ id: "o1", body: "x" }));
+    // ...then a late send-timeout handler discards by token: must not pull a
+    // different send's entry, and must not strip the already-attached reply.
+    s.discardStagedMeta(PEER, token);
+    s.stageOutboundMeta(PEER, { replyTo: REF });
+    s.applyOutboxEvent(outboxEvent({ id: "o2", body: "y" }));
+    const msgs = s.conversationsSorted()[0].messages;
+    expect(msgs.find((m) => m.id === "o1")!.replyTo).toEqual(REF);
+    expect(msgs.find((m) => m.id === "o2")!.replyTo).toEqual(REF);
+  });
+
   it("a delivered bubble survives the localStorage round-trip as delivered", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });

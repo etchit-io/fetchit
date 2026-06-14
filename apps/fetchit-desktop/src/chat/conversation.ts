@@ -202,14 +202,16 @@ export function mountConversation(
         // Stage shell-only render metadata (the engine OutboxBubble can't
         // carry the reply quote or attachment); stage once per send so the
         // per-peer FIFO stays aligned with the optimistic-echo order.
-        store.stageOutboundMeta(peer, {
+        const metaToken = store.stageOutboundMeta(peer, {
           replyTo: replyTo ?? undefined,
           attachment: attachment ?? undefined,
         });
         // enqueue_dm owns the bubble lifecycle end to end: optimistic echo
         // (rendered via the chat:outbox projection), warm-connect, send,
-        // outcome recording, retry, and delivery. Only a hard enqueue
-        // failure surfaces here, since no bubble is echoed in that case.
+        // outcome recording, retry, and delivery. A rejection here means the
+        // send never reached the engine (e.g. the local daemon is down), so
+        // no bubble is ever echoed: drop the staged metadata we reserved or
+        // it would mis-attach to the next send, then surface the error.
         void sendDm(
           peer,
           body,
@@ -217,6 +219,7 @@ export function mountConversation(
           replyTo?.messageId,
           attachment,
         ).catch((e) => {
+          store.discardStagedMeta(peer, metaToken);
           store.pushNotice("warn", `Couldn't send: ${friendlyError(e)}`);
         });
       } else {

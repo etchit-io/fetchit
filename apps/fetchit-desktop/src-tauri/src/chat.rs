@@ -2020,9 +2020,13 @@ fn spawn_outbox(app: AppHandle, state: ChatState) {
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             };
-            for bubble in client.outbox_snapshot().await {
-                let _ = app.emit("chat:outbox", &bubble);
-            }
+            // Replay the current outbox as a single resync so the frontend
+            // rebuilds outbound state and drops any now-misaligned staged
+            // metadata. Snapshot comes from the SAME client `rx` subscribes
+            // to, so the two are always consistent. Covers initial hydration
+            // and every re-subscribe below.
+            let snapshot = client.outbox_snapshot().await;
+            let _ = app.emit("chat:outbox-resync", &snapshot);
             // Release the clone so a client rebuild can close `rx`.
             drop(client);
             loop {
@@ -2031,14 +2035,13 @@ fn spawn_outbox(app: AppHandle, state: ChatState) {
                         let _ = app.emit("chat:outbox", &ev.bubble);
                     }
                     Err(RecvError::Lagged(n)) => {
-                        log_pump(&format!("[outbox] lagged {n}; resyncing"));
-                        // A lag (not a rebuild) means the same client is
-                        // still cached, so re-get + snapshot is consistent
-                        // with this subscription; a rebuild would Close instead.
-                        if let Ok(c) = state.get().await {
-                            let snapshot = c.outbox_snapshot().await;
-                            let _ = app.emit("chat:outbox-resync", &snapshot);
-                        }
+                        // Dropped events: re-subscribe from the top rather
+                        // than resync in place. The outer loop re-gets the
+                        // (possibly rebuilt) client so the fresh snapshot
+                        // always matches the new subscription -- never
+                        // snapshot a different client than `rx` belongs to.
+                        log_pump(&format!("[outbox] lagged {n}; re-subscribing"));
+                        break;
                     }
                     Err(RecvError::Closed) => {
                         log_pump("[outbox] channel closed; re-subscribing");

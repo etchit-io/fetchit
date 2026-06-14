@@ -239,7 +239,12 @@ export class ChatStore {
   /// first projects each new engine bubble, so entries line up with the
   /// engine's optimistic-echo order. The engine `OutboxBubble` cannot
   /// carry presentation metadata, so the shell bridges it across the send.
-  private outboundMeta = new Map<AgentId, OutboundMeta[]>();
+  /// Each entry carries a monotonic token so a send that fails BEFORE the
+  /// engine echoes (no chat:outbox event will ever pop it) can remove
+  /// exactly its own entry via [`discardStagedMeta`] -- without that, the
+  /// orphan would mis-attach to the next send to the same peer.
+  private outboundMeta = new Map<AgentId, Array<{ token: number; meta: OutboundMeta }>>();
+  private nextMetaToken = 0;
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -713,10 +718,12 @@ export class ChatStore {
   /// first projects each new bubble. Cleared wholesale by
   /// [`clearOutboundMeta`] when the live stream lags and a fresh
   /// snapshot is replayed instead.
-  stageOutboundMeta(peer: AgentId, meta: OutboundMeta): void {
+  stageOutboundMeta(peer: AgentId, meta: OutboundMeta): number {
+    const token = this.nextMetaToken++;
     const q = this.outboundMeta.get(peer) ?? [];
-    q.push(meta);
+    q.push({ token, meta });
     this.outboundMeta.set(peer, q);
+    return token;
   }
 
   /// Pop the oldest staged metadata for `peer`, or `undefined` when none
@@ -725,9 +732,23 @@ export class ChatStore {
   private takeOutboundMeta(peer: AgentId): OutboundMeta | undefined {
     const q = this.outboundMeta.get(peer);
     if (!q || q.length === 0) return undefined;
-    const meta = q.shift();
+    const entry = q.shift();
     if (q.length === 0) this.outboundMeta.delete(peer);
-    return meta;
+    return entry?.meta;
+  }
+
+  /// Remove a still-pending staged entry by its [`stageOutboundMeta`]
+  /// token. Call this when a send fails BEFORE the engine echoes it (no
+  /// chat:outbox event will ever pop the entry, so it would otherwise
+  /// mis-attach to the next send to the same peer). A no-op when the echo
+  /// already consumed the entry -- so it is safe to call unconditionally
+  /// from a send-error handler that cannot tell whether the echo fired.
+  discardStagedMeta(peer: AgentId, token: number): void {
+    const q = this.outboundMeta.get(peer);
+    if (!q) return;
+    const i = q.findIndex((e) => e.token === token);
+    if (i >= 0) q.splice(i, 1);
+    if (q.length === 0) this.outboundMeta.delete(peer);
   }
 
   /// Drop every pending staged metadata entry. Called when the outbox
