@@ -44,6 +44,11 @@ pub struct StoreLayout {
     /// only, chat unaffected" boundary is visibly enforced on disk
     /// too. See M4 plan decision 1.1.
     pub fedi_dir: PathBuf,
+    /// `<data_dir>/bridge/` — per-group metadata-bridge consent state
+    /// (`consent.json.enc`). Sibling of the chat dirs, mirroring
+    /// `fedi_dir`: the consent map is encrypted at rest under the chat
+    /// master key, same as conversations and the fedi actor identity.
+    pub bridge_dir: PathBuf,
 }
 
 impl StoreLayout {
@@ -57,12 +62,14 @@ impl StoreLayout {
         let conversations_dir = root.join("conversations");
         let user_manifests_dir = root.join("user_manifests");
         let fedi_dir = root.join("fedi");
+        let bridge_dir = root.join("bridge");
         for dir in [
             &root,
             &contacts_dir,
             &conversations_dir,
             &user_manifests_dir,
             &fedi_dir,
+            &bridge_dir,
         ] {
             fs::create_dir_all(dir)?;
             #[cfg(unix)]
@@ -79,6 +86,7 @@ impl StoreLayout {
             conversations_dir,
             user_manifests_dir,
             fedi_dir,
+            bridge_dir,
         })
     }
 
@@ -113,6 +121,16 @@ impl StoreLayout {
     #[must_use]
     pub fn fedi_resolutions_path(&self) -> PathBuf {
         self.fedi_dir.join("handle_resolutions.json")
+    }
+
+    /// Path of the per-group metadata-bridge consent vault
+    /// (`bridge/consent.json.enc`): a single file holding the whole
+    /// `GroupId -> GroupBridgeConsent` map, sealed at rest under the
+    /// chat master key. The `.json.enc` suffix marks it encrypted,
+    /// matching conversation and fedi-actor vaults.
+    #[must_use]
+    pub fn bridge_consent_path(&self) -> PathBuf {
+        self.bridge_dir.join("consent.json.enc")
     }
 }
 
@@ -200,6 +218,23 @@ mod tests {
         assert_eq!(layout.fedi_dir.parent(), Some(layout.root.as_path()));
         assert_eq!(layout.contacts_dir.parent(), Some(layout.root.as_path()));
         assert_ne!(layout.fedi_dir, layout.conversations_dir);
+    }
+
+    #[test]
+    fn bridge_consent_path_under_bridge_dir() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let p = layout.bridge_consent_path();
+        assert!(p.starts_with(&layout.bridge_dir));
+        assert!(p.to_string_lossy().ends_with("consent.json.enc"));
+    }
+
+    #[test]
+    fn bridge_dir_is_sibling_and_created() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        assert_eq!(layout.bridge_dir.parent(), Some(layout.root.as_path()));
+        assert!(layout.bridge_dir.exists());
     }
 
     #[cfg(unix)]

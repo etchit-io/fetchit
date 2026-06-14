@@ -2332,6 +2332,18 @@ async fn build_with_chat(
         argon_salt.as_ref(),
     )?);
 
+    // Load persisted per-group bridge-consent (or an empty map on first
+    // run / unreadable file) so the user's opt-in / opt-out decisions
+    // survive restart. Built before `argon_salt` and `layout` are moved
+    // into the registry / ChatState below; mirrors the registry's
+    // (layout, master, kdf_id, argon_salt) sealed-vault wiring.
+    let bridge_consent_store = crate::groups_reachability::BridgeConsentStore::load(
+        &layout,
+        &master,
+        kdf_id,
+        argon_salt.as_ref(),
+    );
+
     let registry = Arc::new(ConversationRegistry::new(
         layout.clone(),
         master.clone(),
@@ -2493,9 +2505,7 @@ async fn build_with_chat(
             reachability: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::ReachabilityCache::new(),
             )),
-            bridge_consent: Arc::new(tokio::sync::Mutex::new(
-                crate::groups_reachability::BridgeConsentStore::new(),
-            )),
+            bridge_consent: Arc::new(tokio::sync::Mutex::new(bridge_consent_store)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
