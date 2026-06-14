@@ -44,6 +44,69 @@ pub enum ChatEventFfi {
         /// rendering.
         activity_json: Vec<u8>,
     },
+    /// An outbox change for an outbound DM: optimistic echo, delivery, or
+    /// failure. Upsert keyed by `bubble.id`; drives the send-status UI.
+    Outbox {
+        /// The bubble's current state.
+        bubble: OutboxBubbleFfi,
+    },
+}
+
+/// Delivery state of an outbound DM bubble, mirrored from
+/// [`fetchit_chat::outbox::OutboxStatus`] for the uniffi surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum OutboxStatusFfi {
+    /// Send attempted, not yet confirmed delivered.
+    Sending,
+    /// Recipient acknowledged delivery.
+    Delivered,
+    /// The attempt errored or timed out; eligible for retry.
+    Failed,
+}
+
+impl From<fetchit_chat::outbox::OutboxStatus> for OutboxStatusFfi {
+    fn from(status: fetchit_chat::outbox::OutboxStatus) -> Self {
+        match status {
+            fetchit_chat::outbox::OutboxStatus::Sending => Self::Sending,
+            fetchit_chat::outbox::OutboxStatus::Delivered => Self::Delivered,
+            fetchit_chat::outbox::OutboxStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+/// One outbound DM bubble surfaced to the shell, mirrored from
+/// [`fetchit_chat::outbox::OutboxBubble`]. `peer` is rendered as lowercase
+/// 64-char hex so Kotlin never handles the raw `AgentId` newtype.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutboxBubbleFfi {
+    /// Client-assigned bubble id, stable across retries.
+    pub id: String,
+    /// Recipient agent id as lowercase 64-char hex.
+    pub peer_agent_id_hex: String,
+    /// Plaintext body.
+    pub body: String,
+    /// Delivery state.
+    pub status: OutboxStatusFfi,
+    /// Relay dedupe-key hex, set once the first send is acked.
+    pub message_id: Option<String>,
+    /// Unix epoch ms when first enqueued.
+    pub enqueued_at_ms: u64,
+    /// Last send error, populated when `status` is `Failed`.
+    pub last_error: Option<String>,
+}
+
+impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
+    fn from(bubble: fetchit_chat::outbox::OutboxBubble) -> Self {
+        Self {
+            id: bubble.id,
+            peer_agent_id_hex: bubble.peer.0,
+            body: bubble.body,
+            status: bubble.status.into(),
+            message_id: bubble.message_id,
+            enqueued_at_ms: bubble.enqueued_at_ms,
+            last_error: bubble.last_error,
+        }
+    }
 }
 
 /// Routing verdict for one inbound transit envelope, in evaluation
@@ -85,7 +148,7 @@ fn route_envelope(
 /// [`ChatClient::next_event`].
 ///
 /// Call [`ChatClient::disconnect`] when the app no longer needs live chat
-/// (background, account switch). [`Drop`] aborts both background tasks as a
+/// (background, account switch). [`Drop`] aborts all background tasks as a
 /// GC backstop, but `disconnect` is the deterministic path.
 #[derive(uniffi::Object)]
 pub struct ChatClient {
@@ -94,9 +157,16 @@ pub struct ChatClient {
     events: Mutex<mpsc::UnboundedReceiver<ChatEventFfi>>,
     pump_abort: tokio::task::AbortHandle,
     drain_abort: tokio::task::AbortHandle,
+    /// Drains the outbox broadcast into the unified event stream; started in
+    /// `connect`.
+    outbox_event_abort: tokio::task::AbortHandle,
+    /// The background outbox retry driver, started lazily by `start_outbox`
+    /// (so `Drop`/`disconnect` can abort it even though it begins after
+    /// construction). `None` until `start_outbox` runs.
+    outbox_driver_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
-/// GC backstop: abort both background tasks if the Kotlin side releases
+/// GC backstop: abort all background tasks if the Kotlin side releases
 /// the object without calling `disconnect` first. `disconnect` is the
 /// deterministic path; `Drop` is the safety net.
 ///
@@ -108,6 +178,12 @@ impl Drop for ChatClient {
     fn drop(&mut self) {
         self.pump_abort.abort();
         self.drain_abort.abort();
+        self.outbox_event_abort.abort();
+        if let Ok(slot) = self.outbox_driver_abort.lock() {
+            if let Some(handle) = slot.as_ref() {
+                handle.abort();
+            }
+        }
     }
 }
 
@@ -210,6 +286,30 @@ impl ChatClient {
             tokio::spawn(async {}).abort_handle()
         };
 
+        // Subscribe to outbox change events before returning so optimistic
+        // echoes + delivery/failure transitions surface through the SAME
+        // ChatEventFfi pump. Mirrors the public-post drain above.
+        let outbox_event_abort = if let Some(mut outbox_rx) = inner.subscribe_outbox() {
+            let outbox_tx = tx.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    match outbox_rx.recv().await {
+                        Ok(event) => {
+                            let _ = outbox_tx.send(ChatEventFfi::Outbox {
+                                bubble: event.bubble.into(),
+                            });
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            handle.abort_handle()
+        } else {
+            // No outbox broadcast (REST-only mode); park a no-op task.
+            tokio::spawn(async {}).abort_handle()
+        };
+
         let pump_abort = spawn_inbound_pump(inner.clone(), tx);
 
         Ok(Arc::new(Self {
@@ -218,6 +318,8 @@ impl ChatClient {
             events: Mutex::new(rx),
             pump_abort,
             drain_abort,
+            outbox_event_abort,
+            outbox_driver_abort: std::sync::Mutex::new(None),
         }))
     }
 
@@ -230,6 +332,12 @@ impl ChatClient {
     pub fn disconnect(&self) {
         self.pump_abort.abort();
         self.drain_abort.abort();
+        self.outbox_event_abort.abort();
+        if let Ok(slot) = self.outbox_driver_abort.lock() {
+            if let Some(handle) = slot.as_ref() {
+                handle.abort();
+            }
+        }
     }
 
     /// The local agent id as lowercase 64-character hex.
@@ -317,6 +425,81 @@ impl ChatClient {
     /// ```
     pub async fn next_event(&self) -> Option<ChatEventFfi> {
         self.events.lock().await.recv().await
+    }
+
+    /// Enqueue an outbound DM through the durable outbox: persist a
+    /// `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+    /// optimistic echo, then send. The terminal state (Delivered/Failed)
+    /// arrives as a later `Outbox` event keyed by the returned bubble id.
+    ///
+    /// Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
+    /// outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
+    /// auto-resends on reconnect. `send_dm` stays for fire-and-forget sends
+    /// with no durability.
+    ///
+    /// Attachments + reply-to are not yet carried over the FFI outbox; the
+    /// bubble is body-only. The engine supports both -- wiring them through
+    /// uniffi is a follow-up.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex
+    /// or the client has no chat state.
+    /// [`ChatFfiError::Network`] on transport or relay failure.
+    pub async fn enqueue_dm(
+        &self,
+        to_agent_id_hex: String,
+        body: String,
+        sender_name: String,
+    ) -> Result<String, ChatFfiError> {
+        let id = fetchit_chat::identity::AgentId::parse(to_agent_id_hex).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: e.to_string(),
+            }
+        })?;
+        self.inner
+            .enqueue_dm(&id, &body, &sender_name, None, None)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Snapshot of all tracked outbox bubbles, for hydrating the send-status
+    /// UI on startup before subscribing to live [`ChatEventFfi::Outbox`]
+    /// events. Empty when the client has no chat state.
+    pub async fn outbox_snapshot(&self) -> Vec<OutboxBubbleFfi> {
+        self.inner
+            .outbox_snapshot()
+            .await
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Start the background outbox retry driver: re-sends failed/unacked
+    /// bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
+    /// services [`ChatClient::retry_outbox`]. Call once after `connect`,
+    /// passing the user's display name (used for body-only resends, so it
+    /// should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
+    /// Calling again aborts the previous driver before starting a new one.
+    pub fn start_outbox(&self, display_name: String) {
+        if let Some(handle) = self
+            .inner
+            .start_outbox_driver(Arc::new(move || display_name.clone()))
+        {
+            if let Ok(mut slot) = self.outbox_driver_abort.lock() {
+                if let Some(previous) = slot.take() {
+                    previous.abort();
+                }
+                *slot = Some(handle.abort_handle());
+            }
+        }
+    }
+
+    /// Kick the outbox driver to re-send every retryable bubble now -- the
+    /// shell's "Retry" button. Fire-and-forget + coalescing; a no-op when
+    /// the driver has not been started ([`ChatClient::start_outbox`]).
+    pub fn retry_outbox(&self) {
+        self.inner.retry_outbox();
     }
 }
 
@@ -596,5 +779,46 @@ mod tests {
             uri.starts_with("x0x://pair/"),
             "pair URI must start with x0x://pair/, got: {uri:?}"
         );
+    }
+
+    #[test]
+    fn outbox_status_ffi_maps_all_variants() {
+        use fetchit_chat::outbox::OutboxStatus;
+        assert_eq!(
+            OutboxStatusFfi::from(OutboxStatus::Sending),
+            OutboxStatusFfi::Sending
+        );
+        assert_eq!(
+            OutboxStatusFfi::from(OutboxStatus::Delivered),
+            OutboxStatusFfi::Delivered
+        );
+        assert_eq!(
+            OutboxStatusFfi::from(OutboxStatus::Failed),
+            OutboxStatusFfi::Failed
+        );
+    }
+
+    #[test]
+    fn outbox_bubble_ffi_maps_fields_and_peer_hex() {
+        use fetchit_chat::identity::AgentId;
+        use fetchit_chat::outbox::{OutboxBubble, OutboxStatus};
+        let peer_hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let bubble = OutboxBubble {
+            id: "bid-1".into(),
+            peer: AgentId(peer_hex.into()),
+            body: "hello".into(),
+            status: OutboxStatus::Failed,
+            message_id: Some("mid-9".into()),
+            enqueued_at_ms: 1_700_000_000_000,
+            last_error: Some("boom".into()),
+        };
+        let ffi = OutboxBubbleFfi::from(bubble);
+        assert_eq!(ffi.id, "bid-1");
+        assert_eq!(ffi.peer_agent_id_hex, peer_hex);
+        assert_eq!(ffi.body, "hello");
+        assert_eq!(ffi.status, OutboxStatusFfi::Failed);
+        assert_eq!(ffi.message_id.as_deref(), Some("mid-9"));
+        assert_eq!(ffi.enqueued_at_ms, 1_700_000_000_000);
+        assert_eq!(ffi.last_error.as_deref(), Some("boom"));
     }
 }

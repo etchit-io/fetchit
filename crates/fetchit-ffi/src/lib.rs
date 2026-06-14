@@ -30,7 +30,7 @@ use fetchit_core::{Address, Hint, NetworkClient, RenderContext};
 use fetchit_net::{set_data_home as set_data_home_inner, AutonomiClient, DEFAULT_PEERS};
 
 pub use chat_error::ChatFfiError;
-pub use chat_ffi::{ChatClient, ChatEventFfi};
+pub use chat_ffi::{ChatClient, ChatEventFfi, OutboxBubbleFfi, OutboxStatusFfi};
 pub use error::FetchitError;
 pub use rendition_ffi::{ArchiveEntryFFI, RenditionFFI};
 

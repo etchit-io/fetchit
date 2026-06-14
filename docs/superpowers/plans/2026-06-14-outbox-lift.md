@@ -366,11 +366,17 @@ git commit -s -m "feat(outbox): wire enqueue_dm/snapshot/events + start the driv
 
 ---
 
-## Task 7: FFI surface (Android lane)
+## Task 7: FFI surface (Android lane) -- CROSS-BRANCH
 
-**Files:** Modify `crates/fetchit-ffi/src/lib.rs` (+ regenerate bindings per `scripts/build-jni-libs.sh` is NOT needed here -- just the Rust surface; binding regen happens when Android consumes it).
+**Reality correction (2026-06-14):** the Android chat surface is the daemonless `ChatClient` in `crates/fetchit-ffi/src/chat_ffi.rs` (branch `android-tokens-v2`), NOT the Autonomi-reader `Client` in `lib.rs`. The outbox engine is on `outbox-lift`. So T7 is done on a worktree that has BOTH: branch `t7-outbox-ffi` off `android-tokens-v2` with `outbox-lift` merged in (clean auto-merge; engine `cargo check` green). Binding regen (`.so` + `fetchit_ffi.kt`) IS part of T7 -- the `.so` embeds uniffi API checksums verified at launch, so it must be regenerated TOGETHER with the `.kt` via `scripts/build-jni-libs.sh` (NDK r27 at `~/Android/Sdk/ndk/27.0.12077973`; `export ANDROID_NDK_HOME` first).
 
-- [ ] Expose `enqueue_dm`, `outbox_snapshot`, and an outbox-event stream over the existing uniffi `Client` object, mirroring how other async Client methods are exported. Unit-test the FFI types' shape if the crate has such tests; otherwise rely on `cargo build` in `crates/fetchit-ffi` (its own Cargo.lock, workspace-excluded). Commit.
+**Files:** Modify `crates/fetchit-ffi/src/chat_ffi.rs` (+ `lib.rs` re-exports); regenerate the committed `fetchit_ffi.kt` + the gitignored `arm64-v8a` `.so`.
+
+- [ ] **Step 1 (TDD red):** add conversion tests in `chat_ffi.rs` for `OutboxStatus -> OutboxStatusFfi` (all variants) and `OutboxBubble -> OutboxBubbleFfi` (fields + peer hex). `cargo test --manifest-path crates/fetchit-ffi/Cargo.toml` -> FAIL (types absent).
+- [ ] **Step 2 (impl):** add `OutboxStatusFfi` (uniffi::Enum) + `OutboxBubbleFfi` (uniffi::Record) + `From` impls; add an `Outbox { bubble }` variant to `ChatEventFfi`; in `connect()` subscribe to `inner.subscribe_outbox()` and spawn a drain task feeding the unified `tx` (mirrors the public-post drain); add methods `enqueue_dm(to_hex, body, sender_name)`, `outbox_snapshot()`, `start_outbox(display_name)` (wraps `start_outbox_driver` with a name_provider closure; stores the abort handle), `retry_outbox()`; abort the new tasks in `disconnect()` + `Drop`. Re-export the new types from `lib.rs`.
+- [ ] **Step 2b (Delivered path -- CROSS-BOX DEP):** chat_ffi's `run_inbound_pump` uses the 3-arg `dispatch_inbound`, so on the daemonless path Android NEVER marks the outbox Delivered (verified: `take_transport_inbound` is take-once + chat_ffi owns the relay inbound + `spawn_default_dispatcher` has no daemonless caller, so `default_dispatch_one`/the 1462 dispatcher never runs for Android). Left unfixed, a delivered bubble stays `Sending`+message_id -> `is_retryable` true -> the driver RE-SENDS it (double-delivery). FIX: switch `run_inbound_pump` to `dispatch_inbound_with_outbox(transit, identity, registry, Some(&outbox_arc), Some(&outbox_events))` using Alice's additive `Client::outbox_arc()` + `Client::outbox_events()` accessors (on `outbox-lift-t8`; ABSENT on `outbox-lift` 1d60790). The COMPLETING commit, gated on those accessors landing + merged into the T7 worktree. Flagged to Alice 2026-06-14.
+- [ ] **Step 3 (green + gate):** rerun FFI tests -> PASS; `cargo fmt --all --check` + `cargo clippy --manifest-path crates/fetchit-ffi/Cargo.toml --all-targets -- -D warnings` -> clean.
+- [ ] **Step 4 (bindings):** `scripts/build-jni-libs.sh` -> regenerated `.so` + `fetchit_ffi.kt`; confirm the `.kt` carries the new ChatClient methods + types. Commit (`.so` gitignored; `.kt` committed). LIMITATION: attachments + reply_to are not carried over the FFI outbox yet (body-only bubble; the engine supports both -- a follow-up).
 
 ---
 
