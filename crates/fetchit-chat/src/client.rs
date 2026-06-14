@@ -327,6 +327,11 @@ struct ChatState {
     /// Broadcast of [`crate::outbox::OutboxEvent`] upserts (outbound-only)
     /// for the shell to project; cap `OUTBOX_CHANNEL_CAP`.
     outbox_tx: tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>,
+    /// Manual-retry kick for the outbox driver. `None` until
+    /// [`Client::start_outbox_driver`] publishes the sender; the driver
+    /// run-loop holds the receiver and flushes every retryable bubble on
+    /// each kick (the shell's Retry button -> [`Client::retry_outbox`]).
+    outbox_retry_tx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<()>>>>,
     /// M2.5 bridge — recent bridge-inbound payload hashes. Marked by
     /// [`Client::dispatch_inbound_bridge`] before `POST /publish` so
     /// the SSE consumer can distinguish bridge-loopback from real
@@ -1979,6 +1984,13 @@ impl Client {
         name_provider: Arc<dyn Fn() -> String + Send + Sync>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let chat = self.chat.as_ref()?;
+        // Manual-retry channel: cap 1 + try_send => coalescing (one pending
+        // kick suffices; extra Retry taps are dropped). Publish the sender so
+        // Client::retry_outbox can reach this spawned run-loop.
+        let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(1);
+        if let Ok(mut slot) = chat.outbox_retry_tx.lock() {
+            *slot = Some(retry_tx);
+        }
         let process_start_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
@@ -2040,10 +2052,33 @@ impl Client {
                                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
                             driver.sweep_timeouts(now).await;
                         }
+                        maybe_retry = retry_rx.recv() => {
+                            match maybe_retry {
+                                // Manual Retry: flush every peer's retryable
+                                // bubbles (= desktop outboxDriver.flushAll).
+                                Some(()) => driver.flush_all().await,
+                                // Sender dropped (client gone); reopen loop.
+                                None => break,
+                            }
+                        }
                     }
                 }
             }
         }))
+    }
+
+    /// Kick the outbox retry loop to re-send every retryable bubble now
+    /// (the shell's "Retry" button). Fire-and-forget + coalescing: a no-op
+    /// when a kick is already pending, when the driver has not been started,
+    /// or when there is no chat state. Mirrors desktop `outboxDriver.flushAll`.
+    pub fn retry_outbox(&self) {
+        if let Some(chat) = self.chat.as_ref() {
+            if let Ok(slot) = chat.outbox_retry_tx.lock() {
+                if let Some(tx) = slot.as_ref() {
+                    let _ = tx.try_send(());
+                }
+            }
+        }
     }
 
     /// Open the unified SSE event stream from x0xd — presence,
@@ -2763,6 +2798,7 @@ async fn build_with_chat(
             bridge_consent: Arc::new(tokio::sync::Mutex::new(bridge_consent_store)),
             outbox: Arc::new(tokio::sync::Mutex::new(outbox_store)),
             outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
+            outbox_retry_tx: Arc::new(std::sync::Mutex::new(None)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -4324,6 +4360,7 @@ mod tests {
                 crate::outbox::store::OutboxStore::new(),
             )),
             outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
+            outbox_retry_tx: Arc::new(std::sync::Mutex::new(None)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -4383,6 +4420,16 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].id, id);
         assert_eq!(snap[0].status, crate::outbox::OutboxStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn retry_outbox_is_safe_noop_before_driver_starts() {
+        // The retry sender is unpublished until start_outbox_driver runs, so
+        // retry_outbox must be a no-op (no panic, no block) -- the shell may
+        // wire a Retry button before the driver is up.
+        let (client, _dir) = test_client_no_denylist();
+        client.retry_outbox();
+        client.retry_outbox();
     }
 
     /// D9 happy path: validation accepts a real-world relay list and
@@ -4649,6 +4696,7 @@ mod tests {
                 crate::outbox::store::OutboxStore::new(),
             )),
             outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
+            outbox_retry_tx: Arc::new(std::sync::Mutex::new(None)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
