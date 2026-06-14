@@ -327,8 +327,9 @@ _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 
 CI enforces the safety bar and the doc gates on every push and PR. `ci.yml` runs
 `fmt`, `clippy` (with `-D warnings`), and `test` across Linux/macOS/Windows,
-plus a `pins` job, a `docs-gates` job (crate-list, doc-path, and stale-phrase
-checks), desktop and web-extension jobs, and an Android debug-APK build (FFI to
+plus a `pins` job, a `docs-gates` job (crate-list, doc-path, stale-phrase, and
+an informational ARCHITECTURE.md-stamp check), desktop and web-extension jobs,
+and an Android debug-APK build (FFI to
 cargo-ndk to uniffi-bindgen to gradle). `release.yml` triggers on `v*` tags and
 produces a signed APK. The workspace-excluded crates are clippy/fmt-checked via
 explicit manifest paths so they are not silently skipped.
@@ -337,10 +338,10 @@ explicit manifest paths so they are not silently skipped.
 `.github/workflows/release.yml`.
 **Locked by:** the gates these jobs run: `scripts/check-crate-list.sh`,
 `scripts/check-doc-paths.sh`, `scripts/check-stale-phrases.sh`,
-`scripts/check-pins.sh`.
+`scripts/check-pins.sh`, `scripts/check-arch-stamps.sh`.
 
-<!-- arch: id=ci glob=.github/workflows/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=ci glob=.github/workflows/** verified=7a05b8b -->
+_Last verified: 2026-06-14 (`7a05b8b`) -- alice._
 
 ## Production invariants
 
