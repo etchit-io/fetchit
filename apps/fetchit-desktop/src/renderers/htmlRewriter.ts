@@ -1,19 +1,33 @@
-// Transforms an HTML document for safe in-iframe rendering:
-//   1. injects a strict Content-Security-Policy meta that allows only the
-//      fetchit:// / autonomi:// schemes (plus inline scripts/styles, which
-//      the iframe sandbox already isolates) — no network egress;
-//   2. forces <base href> to autonomi://<addr>/ so relative URLs resolve
-//      through our protocol handler regardless of any base the document
-//      tried to set (and authors' canonical scheme is autonomi://);
-//   3. injects a click interceptor + back-link handler that posts up to
-//      the parent window so it stays in sync with iframe nav;
-//   4. rewrites <audio>/<video>/<source> autonomi:// srcs to the local
-//      media server URL and stashes them in data-fetchit-src so the WebView
-//      doesn't run the media resource-selection algorithm on element setup
-//      — src is hydrated on first user interaction with the element.
-// Non-media `autonomi://` references in other attributes are left alone:
-// the WebView accepts the scheme directly because we registered it in
-// lib.rs alongside fetchit://. Both resolve to the same handler.
+// Transforms an untrusted HTML document for safe in-iframe rendering.
+// rewriteHtml() applies these passes in order (see the function body for
+// the exact call sequence):
+//
+//   ORIGIN + CSP
+//   - setBase: pin <base href> to autonomi://<addr>/ so relative URLs
+//     resolve through our protocol handler, overriding any base the doc set.
+//   - stripIncomingCsp + injectCsp: drop any attacker-supplied CSP meta
+//     (its report-uri/report-to are additive and could phone home), then
+//     install our strict policy (only fetchit:// / autonomi://, no egress).
+//   STRIP LEAK / REDIRECT / TRACKING VECTORS
+//   - stripResourceHints: drop preconnect/dns-prefetch/prefetch/preload
+//     links (they open connections before CSP can block).
+//   - stripExternalStylesheets / stripMetaRefresh / stripAnchorPing: remove
+//     external stylesheet links, <meta http-equiv=refresh>, and <a ping>.
+//   NEUTER + REWRITE THE JS SURFACE
+//   - injectNeuterScript: neuter DOM-storage + dangerous JS APIs before any
+//     SPA script runs.
+//   - injectUrlRewriter: monkeypatch setters/setAttribute/fetch/XHR so
+//     autonomi:// (and bare 64-hex) refs built at runtime route to the
+//     local media server.
+//   - injectFetchitContext: expose window.fetchit.address / query.
+//   MEDIA + LINKS
+//   - rewriteMediaSrc / rewriteImageSrc: rewrite <audio>/<video>/<source>
+//     and <img>/<picture><source> autonomi:// srcs to the media server;
+//     injectMediaHydration defers media src to first interaction (no preload).
+//   - injectLinkInterceptor: post link clicks / back-nav up to the parent.
+//
+// Non-media autonomi:// refs in other attributes are left for the WebView,
+// which accepts the scheme directly (registered in lib.rs alongside fetchit://).
 
 const LINK_INTERCEPTOR = `
 (function () {

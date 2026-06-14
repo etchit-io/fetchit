@@ -1,6 +1,6 @@
 //! Signing helpers and logical-clock watermark store for pairing records.
 //!
-//! Two concerns live here:
+//! Three concerns live here:
 //!
 //! **(A) Record builders** — assemble and sign [`PairRecordV1`] and
 //! [`ForwardingRecordV1`] using the local chat [`FetchitIdentity`] and
@@ -10,6 +10,10 @@
 //! monotonically increasing millisecond timestamp even if the wall clock
 //! moves backward (battery reset, VM snapshot). The returned value is
 //! persisted immediately so the guarantee holds across process restarts.
+//!
+//! **(C) HTTP publish:** `post_pair_record` / `post_forwarding_record`
+//! publish signed records to a relay, handling the 409 clock-bump retry
+//! and the 412 non-fatal skip.
 
 use crate::chat_identity::FetchitIdentity;
 use crate::error::{ChatError, Result};
