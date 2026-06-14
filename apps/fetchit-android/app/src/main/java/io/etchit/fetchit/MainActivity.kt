@@ -19,6 +19,7 @@ import androidx.media3.common.util.UnstableApi
 import com.google.android.material.snackbar.Snackbar
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import io.etchit.fetchit.chat.ChatModeView
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,8 +68,55 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      */
     private val backStack = ArrayDeque<String>()
 
+    private enum class Mode { BROWSE, CHAT }
+    private var currentMode = Mode.BROWSE
+    private lateinit var chatModeView: ChatModeView
+
+    /**
+     * Switch between browse and chat modes.
+     *
+     * @param persist when true (the default for button-click switches) the
+     *   chosen mode is written to [SettingsStore] so the app wakes into it
+     *   next launch. Pass [persist] = false for deep-link entries — a
+     *   crafted `x0x://pair/` URI must not permanently overwrite the user's
+     *   chosen wake-up mode.
+     */
+    private fun setMode(mode: Mode, persist: Boolean = true) {
+        if (mode == currentMode) return
+        currentMode = mode
+        if (persist) SettingsStore(this).saveLastMode(if (mode == Mode.BROWSE) "browse" else "chat")
+        val browse = mode == Mode.BROWSE
+        binding.swipeRefresh.isEnabled = browse
+        binding.swipeRefresh.visibility = if (browse) View.VISIBLE else View.GONE
+        binding.chatContainer.visibility = if (browse) View.GONE else View.VISIBLE
+        // Settings sheet intrudes into the chat container — hide in chat, restore in browse.
+        val sheetBehavior = com.google.android.material.bottomsheet.BottomSheetBehavior
+            .from(binding.settingsSheet)
+        if (browse) {
+            binding.settingsSheet.visibility = View.VISIBLE
+            sheetBehavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
+        } else {
+            sheetBehavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
+            binding.settingsSheet.visibility = View.GONE
+        }
+        if (!browse) {
+            // Chat mode always needs back enabled so the gesture returns to browse.
+            backCallback.isEnabled = true
+            chatModeView.onShown()
+        } else {
+            // Restore browse back-stack logic: only enabled when there is history.
+            backCallback.isEnabled = backStack.size >= 2 || viewingArchiveEntry
+        }
+    }
+
     private val backCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
+            // Chat mode: let chat consume the back press first; if it
+            // doesn't (stack at root), flip back to browse.
+            if (currentMode == Mode.CHAT) {
+                if (!chatModeView.onBack()) setMode(Mode.BROWSE)
+                return
+            }
             // Inner-archive nav: viewing an entry preview, back returns
             // to the listing — no refetch, no address-stack change.
             val ctx = archiveContext
@@ -205,6 +253,14 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             handleBookmarkImport(importPayload)
             return@registerForActivityResult
         }
+        // x0x://pair/ URIs go to the chat pairing flow BEFORE the autonomi check.
+        // persist = false: scanning a pair QR must not permanently overwrite
+        // the user's chosen wake-up mode (same policy as the deep-link path).
+        if (io.etchit.fetchit.chat.ChatUris.isPairUri(raw)) {
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.importFromUri(raw)
+            return@registerForActivityResult
+        }
         val parsed = parseAutonomiUrl(raw)
         if (parsed == null) {
             Snackbar.make(
@@ -230,12 +286,26 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
         settingsSheet = SettingsSheet(binding, this).also { it.bind() }
+        chatModeView = ChatModeView(
+            context = this,
+            container = binding.chatContainer,
+            controller = fetchitApp().chatController,
+            lifecycleScope = lifecycleScope,
+            lifecycleOwner = this,
+            onLaunchScanner = ::onScanClicked,
+            onOpenAutonomi = { addr ->
+                setMode(Mode.BROWSE)
+                loadAddress(addr)
+            },
+        )
 
         binding.fetchButton.setOnTapListener { onFetchClicked() }
         binding.bookmarkButton.setOnClickListener {
             BookmarkSheet().show(supportFragmentManager, "bookmarks")
         }
         binding.scanButton.setOnClickListener { onScanClicked() }
+        binding.modeChatButton.setOnClickListener { setMode(Mode.CHAT) }
+        binding.modeBrowseButton.setOnClickListener { setMode(Mode.BROWSE) }
         binding.closeButton.setOnClickListener {
             archiveContext = null
             viewingArchiveEntry = false
@@ -274,6 +344,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         // inside a rendered SPA loads that address as a fresh fetch.
         binding.htmlView.setOnAutonomiNavigate { loadAddress(it) }
         binding.htmlView.setOnAutonomiBack(::navigateBack)
+
+        // Restore the last-used mode (browse or chat). Applied before
+        // handleViewIntent so a deep-link intent can override it.
+        // setMode early-returns on BROWSE (the initial state) so this
+        // only triggers a real switch when the persisted mode is "chat".
+        val lastMode = SettingsStore(this).lastMode()
+        if (lastMode == "chat") setMode(Mode.CHAT)
 
         // External entry: another app, a QR scanner, or a clicked link
         // routed an autonomi://<addr> intent at us — pick it up.
@@ -352,6 +429,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (uri.scheme == "fetchit" && uri.host == "import") {
             val parsed = parseBookmarkImportUrl(uri.toString()) ?: return
             handleBookmarkImport(parsed)
+            return
+        }
+        // `x0x://pair/<agent-id>?r=<relay>` deep links: switch to chat
+        // mode and hand the URI to ChatModeView which runs connect-first
+        // import (Task 4 guarantees this). persist = false so a crafted
+        // pair URI cannot permanently overwrite the user's wake-up mode.
+        if (uri.scheme == "x0x" && uri.host == "pair") {
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.importFromUri(uri.toString())
             return
         }
         if (uri.scheme != "autonomi") return
@@ -566,7 +652,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.bookmarkButton.visibility = chrome
         binding.kindText.visibility = chrome
         binding.closeButton.visibility = chrome
-        binding.settingsSheet.visibility = chrome
+        if (currentMode == Mode.BROWSE) binding.settingsSheet.visibility = chrome
 
         val insets = WindowCompat.getInsetsController(window, window.decorView)
         if (on) {
@@ -688,10 +774,24 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      * user can copy the address, copy the `autonomi://` URL, share the
      * branded PNG card, or fall back to plain-text share. Visible only
      * while content is rendered (see [`RenditionRenderer`]).
+     *
+     * Passes [openThreadFromBrowse] so the dialog can surface the
+     * "send in chat" action alongside the existing share affordances.
      */
     private fun onShareCurrentClicked() {
         val addr = lastFetchAddr ?: return
-        showQrPreviewDialog(this, addr)
+        showQrPreviewDialog(this, addr, onOpenThread = ::openThreadFromBrowse)
+    }
+
+    /**
+     * Switch to chat mode and open the thread for [agentIdHex].
+     * Used as the "open" callback from the browse-to-chat share bridge
+     * (mirrors how [onOpenAutonomi] crosses the boundary in the other
+     * direction).
+     */
+    private fun openThreadFromBrowse(agentIdHex: String) {
+        setMode(Mode.CHAT)
+        chatModeView.openThread(agentIdHex)
     }
 
     private companion object {

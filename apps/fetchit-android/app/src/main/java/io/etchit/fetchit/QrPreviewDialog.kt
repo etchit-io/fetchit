@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.Button
 import android.widget.EditText
@@ -19,6 +20,13 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.snackbar.Snackbar
+import io.etchit.fetchit.chat.displayNameOrDefault
+import kotlinx.coroutines.launch
+import uniffi.fetchit_ffi.ChatFfiException
 import java.io.File
 import java.io.FileOutputStream
 
@@ -27,8 +35,17 @@ import java.io.FileOutputStream
  * Same four actions everywhere across the suite (fetch>it + etch/it on
  * desktop and mobile): **Copy address**, **Copy autonomi://…**, **Save
  * image**, **Copy image**. Spec: `docs/QR-SHARE.md`.
+ *
+ * @param onOpenThread when non-null a "send in chat" button is shown; on
+ *   success the Snackbar's "open" action invokes this with the recipient's
+ *   agent-id hex so the caller can switch to chat mode and open the thread.
  */
-fun showQrPreviewDialog(context: Context, address: String, label: String? = null) {
+fun showQrPreviewDialog(
+    context: Context,
+    address: String,
+    label: String? = null,
+    onOpenThread: ((agentIdHex: String) -> Unit)? = null,
+) {
     if (!isValidAutonomiAddress(address)) return
 
     val view = LayoutInflater.from(context).inflate(R.layout.dialog_qr_preview, null, false)
@@ -39,6 +56,7 @@ fun showQrPreviewDialog(context: Context, address: String, label: String? = null
     val copyUrl = view.findViewById<Button>(R.id.qr_copy_url)
     val saveBtn = view.findViewById<Button>(R.id.qr_save_image)
     val copyImgBtn = view.findViewById<Button>(R.id.qr_copy_image)
+    val sendInChatBtn = view.findViewById<Button>(R.id.qr_send_in_chat)
     val closeBtn = view.findViewById<ImageButton>(R.id.qr_close)
 
     val payload = "autonomi://$address"
@@ -93,6 +111,77 @@ fun showQrPreviewDialog(context: Context, address: String, label: String? = null
         val bmp = currentExportBitmap() ?: previewBitmap
         val ok = bmp?.let { copyQrToClipboard(context, clipboard, address, it) } ?: false
         flashButton(copyImgBtn, if (ok) copied else failed)
+    }
+
+    if (onOpenThread != null) {
+        sendInChatBtn.visibility = View.VISIBLE
+        sendInChatBtn.setOnClickListener {
+            val app = context.fetchitApp()
+            val contacts = app.chatController.contacts.contacts.value
+            if (contacts.isEmpty()) {
+                Snackbar.make(
+                    view,
+                    context.getString(R.string.share_no_contacts),
+                    Snackbar.LENGTH_LONG,
+                ).show()
+                return@setOnClickListener
+            }
+            // Resolve an Activity-level anchor once so in-flight Snackbars survive
+            // dialog dismissal — Snackbar.make on a detached view crashes or
+            // swallows feedback if the user dismisses while ensureGateway/sendDm
+            // is still in progress.
+            val anchorView: View =
+                (context as? android.app.Activity)
+                    ?.findViewById(android.R.id.content) ?: view
+            val names = contacts.map { c ->
+                "${c.displayName} · ${c.agentIdHex.take(8)}…"
+            }.toTypedArray()
+            var picked = 0
+            MaterialAlertDialogBuilder(context)
+                .setTitle(context.getString(R.string.share_pick_contact_title))
+                .setSingleChoiceItems(names, 0) { _, which -> picked = which }
+                .setPositiveButton(context.getString(R.string.share_send_in_chat)) { _, _ ->
+                    val contact = contacts[picked]
+                    val lifecycleScope = (context as? LifecycleOwner)?.lifecycleScope ?: return@setPositiveButton
+                    lifecycleScope.launch {
+                        val controller = app.chatController
+                        val gw = runCatching { controller.ensureGateway() }.getOrElse { e ->
+                            val reason = (e as? ChatFfiException)?.let { ffi ->
+                                when (ffi) {
+                                    is ChatFfiException.Invalid -> ffi.reason
+                                    is ChatFfiException.Network -> ffi.reason
+                                }
+                            } ?: e.message.orEmpty()
+                            Snackbar.make(anchorView, reason, Snackbar.LENGTH_LONG).show()
+                            return@launch
+                        }
+                        val senderName = displayNameOrDefault(context, gw.agentIdHex())
+                        val body = "autonomi://$address"
+                        // Enqueue into the durable outbox; the optimistic bubble
+                        // and its Delivered/Failed state surface in the thread via
+                        // the outbox event projection, so no local append here.
+                        runCatching { gw.enqueueDm(contact.agentIdHex, body, senderName) }
+                            .onSuccess {
+                                Snackbar.make(anchorView, context.getString(R.string.share_sent_in_chat), Snackbar.LENGTH_LONG)
+                                    .setAction(context.getString(R.string.share_open_thread)) {
+                                        dialog.dismiss()
+                                        onOpenThread(contact.agentIdHex)
+                                    }
+                                    .show()
+                            }.onFailure { e ->
+                                val reason = (e as? ChatFfiException)?.let { ffi ->
+                                    when (ffi) {
+                                        is ChatFfiException.Invalid -> ffi.reason
+                                        is ChatFfiException.Network -> ffi.reason
+                                    }
+                                } ?: e.message.orEmpty()
+                                Snackbar.make(anchorView, reason, Snackbar.LENGTH_LONG).show()
+                            }
+                    }
+                }
+                .setNegativeButton(context.getString(R.string.action_close), null)
+                .show()
+        }
     }
 
     dialog.show()

@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- Contact list — hidden when there are no contacts -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/chatContactList"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:paddingBottom="72dp"
+        android:clipToPadding="false"
+        android:visibility="gone" />
+
+    <!-- Empty-state onboarding block — visible when contact list is empty -->
+    <LinearLayout
+        android:id="@+id/chatEmptyState"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="32dp">
+
+        <ImageView
+            android:id="@+id/chatPairQr"
+            android:layout_width="240dp"
+            android:layout_height="240dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="@string/chat_pair_qr_desc"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/chatConnectingText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/chat_connecting"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/chat_empty_hint"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="@font/instrument_serif"
+            android:textStyle="italic"
+            android:textSize="15sp"
+            android:gravity="center" />
+
+        <Button
+            android:id="@+id/sharePairButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/chat_share_my_code"
+            android:backgroundTint="?attr/fetchitCopper"
+            android:textColor="?attr/fetchitInk" />
+
+        <Button
+            android:id="@+id/scanPairButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/chat_scan_a_code"
+            android:backgroundTint="?attr/fetchitInk3"
+            android:textColor="?attr/fetchitCopper" />
+
+    </LinearLayout>
+
+    <!-- Connection-lost banner — shown when pump is in STOPPED_ERROR state -->
+    <TextView
+        android:id="@+id/chatConnectionLostBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:text="@string/chat_connection_lost"
+        android:textColor="?attr/fetchitBone"
+        android:fontFamily="monospace"
+        android:textSize="11sp"
+        android:gravity="center"
+        android:paddingVertical="6dp"
+        android:background="#FF3A3832"
+        android:visibility="gone" />
+
+    <!-- Add-contact FAB — always visible in list mode -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/addContactButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:text="@string/chat_add_contact"
+        android:backgroundTint="?attr/fetchitCopper"
+        android:textColor="?attr/fetchitInk" />
+
+</FrameLayout>

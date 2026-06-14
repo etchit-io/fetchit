@@ -55,6 +55,12 @@ const FAILOVER_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 /// matching KDF / salt pair.
 const IDENTITY_VAULT_FILE: &str = "identity.json.enc";
 
+/// Sentinel x0xd base URL for daemonless builds. Port 9 (discard) is
+/// never an x0xd, so any daemon-only endpoint that does get called in
+/// a daemonless client fails fast with an honest connection error
+/// instead of hanging on discovery.
+const DAEMONLESS_BASE_URL: &str = "http://127.0.0.1:9";
+
 /// Builder for [`Client`] with optional overrides.
 #[derive(Default)]
 pub struct ClientBuilder {
@@ -96,6 +102,17 @@ pub struct ClientBuilder {
     /// relay URL parses as `wss://`; otherwise leaves the slot
     /// empty and the v2 hints field is omitted from the card.
     advertised_relays: Option<Vec<String>>,
+    /// Build without any x0xd daemon: skip discovery, skip the `TreeKEM`
+    /// version probe, and sign with a local ML-DSA-65 keypair persisted
+    /// in the chat vault ([`crate::local_signer::LocalSignerVault`])
+    /// instead of `X0xdSigner`. Daemon-backed surfaces (M1/M2 groups,
+    /// presence, v2 card generation) fail with transport errors against
+    /// an unconnectable sentinel base URL. Meaningful only together
+    /// with `data_dir` (and usually `relay_url` + `passphrase`); the
+    /// Android shell is the primary consumer. Supplying an explicit
+    /// `base_url` together with `daemonless` re-enables the daemon
+    /// version probe against it (the P2 in-process-router shape).
+    daemonless: bool,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -117,6 +134,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("x0xd_port_file", &self.x0xd_port_file)
             .field("denylist", &self.denylist.as_ref().map(|_| "<consumer>"))
             .field("advertised_relays", &self.advertised_relays)
+            .field("daemonless", &self.daemonless)
             .finish()
     }
 }
@@ -239,17 +257,32 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable the daemonless profile. See the field doc for semantics.
+    #[must_use]
+    pub fn daemonless(mut self, enabled: bool) -> Self {
+        self.daemonless = enabled;
+        self
+    }
+
     /// Build the client. Falls back to [`discover_local`] for any
     /// x0xd connection field not explicitly set.
     ///
     /// # Errors
     /// Returns discovery, HTTP, relay-handshake, or vault failures.
     pub async fn build(self) -> Result<Client> {
-        let (base_url, token) = match (self.base_url, self.token) {
-            (Some(u), Some(t)) => (u, t),
-            (u, t) => {
-                let ep = discover_local().await?;
-                (u.unwrap_or(ep.base_url), t.unwrap_or(ep.token))
+        let (base_url, token) = if self.daemonless {
+            (
+                self.base_url
+                    .unwrap_or_else(|| DAEMONLESS_BASE_URL.to_owned()),
+                self.token.unwrap_or_default(),
+            )
+        } else {
+            match (self.base_url, self.token) {
+                (Some(u), Some(t)) => (u, t),
+                (u, t) => {
+                    let ep = discover_local().await?;
+                    (u.unwrap_or(ep.base_url), t.unwrap_or(ep.token))
+                }
             }
         };
         Client::from_parts(
@@ -263,6 +296,7 @@ impl ClientBuilder {
             self.x0xd_port_file,
             self.denylist,
             self.advertised_relays,
+            self.daemonless,
         )
         .await
     }
@@ -293,6 +327,11 @@ pub struct PublicPostDelivery {
 /// public posts are live-only, history-pull is a post-launch concern.
 const PUBLIC_POST_CHANNEL_CAP: usize = 256;
 
+/// Capacity of the outbound-outbox event broadcast. A lagging shell
+/// re-syncs from `Client::outbox_snapshot` (same rationale as the
+/// public-post channel).
+const OUTBOX_CHANNEL_CAP: usize = 256;
+
 /// Optional chat-encryption state — present whenever the caller
 /// supplied a `data_dir` or `relay_url`, absent for the bare REST-only
 /// mode used by integration tests against `wiremock`.
@@ -315,6 +354,18 @@ struct ChatState {
     /// [`BridgeConsentStore::set`]; sender routing reads via
     /// [`BridgeConsentStore::lookup`].
     bridge_consent: Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeConsentStore>>,
+    /// Outbound-DM outbox: pending bubbles + retry state, vault-sealed.
+    /// Loaded in the prod ctor; the shell starts the retry loop via
+    /// [`Client::start_outbox_driver`]. See [`crate::outbox`].
+    outbox: Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>,
+    /// Broadcast of [`crate::outbox::OutboxEvent`] upserts (outbound-only)
+    /// for the shell to project; cap `OUTBOX_CHANNEL_CAP`.
+    outbox_tx: tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>,
+    /// Manual-retry kick for the outbox driver. `None` until
+    /// [`Client::start_outbox_driver`] publishes the sender; the driver
+    /// run-loop holds the receiver and flushes every retryable bubble on
+    /// each kick (the shell's Retry button -> [`Client::retry_outbox`]).
+    outbox_retry_tx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<()>>>>,
     /// M2.5 bridge — recent bridge-inbound payload hashes. Marked by
     /// [`Client::dispatch_inbound_bridge`] before `POST /publish` so
     /// the SSE consumer can distinguish bridge-loopback from real
@@ -492,6 +543,7 @@ impl Client {
             None,
             None,
             None,
+            false,
         )
         .await
     }
@@ -514,6 +566,7 @@ impl Client {
         x0xd_port_file: Option<PathBuf>,
         denylist: Option<Arc<dyn crate::denylist::DenylistCheck>>,
         advertised_relays: Option<Vec<String>>,
+        daemonless: bool,
     ) -> Result<Self> {
         let http = Arc::new(match x0xd_port_file.as_ref() {
             Some(path) => Http::new_with_port_file(path.clone(), token.clone())?,
@@ -533,7 +586,9 @@ impl Client {
             multi_home,
             fediverse,
         ) = if needs_chat {
-            announce_identity_best_effort(&http).await;
+            if !daemonless {
+                announce_identity_best_effort(&http).await;
+            }
             build_with_chat(
                 &http,
                 &base_url,
@@ -544,6 +599,7 @@ impl Client {
                 enable_lan_direct,
                 contact_pubkey_lookup,
                 x0xd_port_file,
+                daemonless,
             )
             .await?
         } else {
@@ -626,6 +682,16 @@ impl Client {
     pub fn denylist_dropped_inbound_count(&self) -> u64 {
         self.denylist_dropped_inbound
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The local agent id (lowercase 64-hex), when chat state is wired.
+    /// Daemonless consumers (the Android FFI) read identity from here
+    /// instead of x0xd's `/agent`.
+    #[must_use]
+    pub fn local_agent_id_hex(&self) -> Option<String> {
+        self.chat
+            .as_ref()
+            .map(|c| c.identity.agent_id_hex().to_owned())
     }
 
     /// Shared handle to the outbound fediverse transport, when one was
@@ -1437,10 +1503,17 @@ impl Client {
                 .await;
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
         {
-            let _ = crate::conversation::dispatch_inbound(
+            // Pass the outbox handle so a DeliveryReceipt flips the matching
+            // outbound bubble to Delivered (engine-side, so this dispatcher
+            // gives Android the same Delivered path desktop gets).
+            let outbox = self.chat.as_ref().map(|c| &c.outbox);
+            let outbox_tx = self.chat.as_ref().map(|c| &c.outbox_tx);
+            let _ = crate::conversation::dispatch_inbound_with_outbox(
                 transit,
                 identity.as_ref(),
                 registry.as_ref(),
+                outbox,
+                outbox_tx,
             )
             .await;
         }
@@ -1489,6 +1562,131 @@ impl Client {
         &self,
     ) -> Option<Arc<tokio::sync::Mutex<crate::groups_reachability::BridgeInboundShadow>>> {
         self.chat.as_ref().map(|c| c.bridge_inbound_shadow.clone())
+    }
+
+    /// Cloneable receiver for outbox change events. Each
+    /// [`crate::outbox::OutboxEvent`] is an upsert keyed by `bubble.id`; a
+    /// lagging consumer drops the oldest events (`OUTBOX_CHANNEL_CAP`).
+    /// `None` when the client has no chat state (REST-only mode). Mirrors
+    /// [`Client::subscribe_to_public_posts`].
+    #[must_use]
+    pub fn subscribe_outbox(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<crate::outbox::OutboxEvent>> {
+        self.chat.as_ref().map(|c| c.outbox_tx.subscribe())
+    }
+
+    /// Cloneable sender for the outbox broadcast channel that
+    /// [`Self::subscribe_outbox`] reads. A shell that drives its OWN
+    /// inbound pump -- desktop's Tauri-emitting pump, Android's
+    /// `chat_ffi` pump -- hands this (with [`Self::outbox_arc`]) to
+    /// [`crate::conversation::dispatch_inbound_with_outbox`] so an
+    /// inbound `DeliveryReceipt` marks the matching outbound bubble
+    /// Delivered engine-side. The engine's own SSE dispatcher already
+    /// wires this; a shell that takes the relay inbound itself bypasses
+    /// that dispatcher and so needs the handle. `None` in REST-only mode.
+    #[must_use]
+    pub fn outbox_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>> {
+        self.chat.as_ref().map(|c| c.outbox_tx.clone())
+    }
+
+    /// Cloneable handle to the vault-persisted outbox store, paired with
+    /// [`Self::outbox_events`] for the same own-inbound-pump shells. Lets
+    /// the shell thread the live store into
+    /// [`crate::conversation::dispatch_inbound_with_outbox`] so delivery
+    /// receipts are applied to the durable outbox (not just the UI),
+    /// which stops the retry driver from re-sending an already-delivered
+    /// DM on the next presence edge. `None` in REST-only mode.
+    #[must_use]
+    pub fn outbox_arc(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>> {
+        self.chat.as_ref().map(|c| c.outbox.clone())
+    }
+
+    /// Current outbox contents (all tracked DM bubbles), for a shell to
+    /// hydrate its UI on startup before subscribing to live events. Empty
+    /// when the client has no chat state.
+    pub async fn outbox_snapshot(&self) -> Vec<crate::outbox::OutboxBubble> {
+        match self.chat.as_ref() {
+            Some(chat) => chat.outbox.lock().await.snapshot(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Enqueue an outbound DM: persist a `Sending` bubble and broadcast it
+    /// immediately (optimistic echo), then warm-connect and send. The
+    /// bubble's terminal state is recorded via
+    /// [`crate::outbox::store::OutboxStore::record_send_outcome`] -- the
+    /// same path the retry driver uses, so an initial send and a resend
+    /// converge on identical status transitions (and the Delivered-guard).
+    /// Returns the client-assigned bubble id.
+    ///
+    /// `sender_name` is shell-supplied (the engine holds no canonical
+    /// display name); `reply_to_message_id` + `attachment` mirror
+    /// [`messages::Endpoint::send`].
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::Invalid`] when the client has no chat state -- a
+    /// misconfiguration, since `enqueue_dm` requires a `data_dir`/relay
+    /// client.
+    pub async fn enqueue_dm(
+        &self,
+        peer: &crate::identity::AgentId,
+        body: &str,
+        sender_name: &str,
+        reply_to_message_id: Option<&str>,
+        attachment: Option<&crate::attachment::Attachment>,
+    ) -> Result<String> {
+        let Some(chat) = self.chat.as_ref() else {
+            return Err(ChatError::Invalid(
+                "enqueue_dm requires chat state (no data_dir/relay configured)".into(),
+            ));
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let bubble = crate::outbox::OutboxBubble {
+            id: crate::outbox::new_bubble_id(),
+            peer: peer.clone(),
+            body: body.to_owned(),
+            status: crate::outbox::OutboxStatus::Sending,
+            message_id: None,
+            enqueued_at_ms: now_ms,
+            last_error: None,
+        };
+        // Optimistic echo: persist + broadcast BEFORE the send so the UI
+        // shows the bubble the instant the user hits enter (desktop parity).
+        {
+            let mut outbox = chat.outbox.lock().await;
+            outbox.upsert(bubble.clone());
+        }
+        let _ = chat.outbox_tx.send(crate::outbox::OutboxEvent {
+            bubble: bubble.clone(),
+        });
+        // Warm-connect (best-effort), then send.
+        let _ = self.messages().connect(peer).await;
+        let result = self
+            .messages()
+            .send(peer, body, sender_name, reply_to_message_id, attachment)
+            .await;
+        let (message_id, error) = match &result {
+            Ok(mid) => (mid.clone(), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let updated = {
+            let mut outbox = chat.outbox.lock().await;
+            outbox.record_send_outcome(&bubble.id, message_id, error)
+        };
+        if let Some(u) = updated {
+            let _ = chat
+                .outbox_tx
+                .send(crate::outbox::OutboxEvent { bubble: u });
+        }
+        Ok(bubble.id)
     }
 
     /// Send an M2.5 bridge envelope — a signed x0xd
@@ -1846,6 +2044,120 @@ impl Client {
                 }
             }
         }))
+    }
+
+    /// Start the engine-owned outbox retry loop. Boot-sweeps orphaned
+    /// in-flight sends, then on each peer offline->online edge re-sends that
+    /// peer's retryable bubbles (warming the link first), and runs the 24h
+    /// timeout sweep hourly. Returns the task handle; `None` for a client
+    /// with no chat state. Dropping the handle does not stop the loop
+    /// (fire-and-forget, like the dispatcher); abort it to stop.
+    ///
+    /// `name_provider` supplies the sender display name at send time -- the
+    /// engine holds no canonical name (it lives in the shell's settings),
+    /// so desktop reads it from settings and Android wires its own. The SAME
+    /// source should feed [`Client::enqueue_dm`]'s `sender_name` so an
+    /// initial send and its later retries agree on the name.
+    pub fn start_outbox_driver(
+        &self,
+        name_provider: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let chat = self.chat.as_ref()?;
+        // Manual-retry channel: cap 1 + try_send => coalescing (one pending
+        // kick suffices; extra Retry taps are dropped). Publish the sender so
+        // Client::retry_outbox can reach this spawned run-loop.
+        let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(1);
+        if let Ok(mut slot) = chat.outbox_retry_tx.lock() {
+            *slot = Some(retry_tx);
+        }
+        let process_start_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let driver = crate::outbox::driver::OutboxDriver::new(
+            chat.outbox.clone(),
+            chat.outbox_tx.clone(),
+            RealOutboxTransport {
+                client: self.clone(),
+                name_provider,
+            },
+            process_start_ms,
+        );
+        let client = self.clone();
+        Some(tokio::spawn(async move {
+            const MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+            driver.boot_sweep().await;
+            let mut backoff = MIN_BACKOFF;
+            let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+            sweep.tick().await; // consume the immediate first tick (boot_sweep already ran)
+            loop {
+                let mut stream = match client.events().await {
+                    Ok(s) => {
+                        // Reset backoff on a fresh subscribe so a later
+                        // failure restarts at the floor.
+                        backoff = MIN_BACKOFF;
+                        s
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "outbox driver: open /events failed: {e}; retrying in {backoff:?}",
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        continue;
+                    }
+                };
+                loop {
+                    tokio::select! {
+                        maybe_event = stream.next() => {
+                            match maybe_event {
+                                Some(Ok(Event::Presence(t))) => {
+                                    driver
+                                        .on_presence(&t.agent_id, t.event == "online")
+                                        .await;
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(e)) => {
+                                    log::warn!("outbox driver: stream error: {e}; reopening");
+                                    break;
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = sweep.tick() => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                            driver.sweep_timeouts(now).await;
+                        }
+                        maybe_retry = retry_rx.recv() => {
+                            match maybe_retry {
+                                // Manual Retry: flush every peer's retryable
+                                // bubbles (= desktop outboxDriver.flushAll).
+                                Some(()) => driver.flush_all().await,
+                                // Sender dropped (client gone); reopen loop.
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
+    /// Kick the outbox retry loop to re-send every retryable bubble now
+    /// (the shell's "Retry" button). Fire-and-forget + coalescing: a no-op
+    /// when a kick is already pending, when the driver has not been started,
+    /// or when there is no chat state. Mirrors desktop `outboxDriver.flushAll`.
+    pub fn retry_outbox(&self) {
+        if let Some(chat) = self.chat.as_ref() {
+            if let Ok(slot) = chat.outbox_retry_tx.lock() {
+                if let Some(tx) = slot.as_ref() {
+                    let _ = tx.try_send(());
+                }
+            }
+        }
     }
 
     /// Open the unified SSE event stream from x0xd — presence,
@@ -2255,6 +2567,58 @@ async fn enforce_m2_treekem_minimum(base_url: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Production [`crate::outbox::driver::OutboxTransport`]: re-sends a bubble
+/// through the same `messages()` path as the initial send. Holds a cloned
+/// [`Client`] (cheap -- shares the inner Arcs, exactly like the dispatcher +
+/// SSE-recorder tasks) plus a shell-supplied display-name source read at
+/// send time (the engine has no canonical name; it lives in the shell's
+/// settings).
+struct RealOutboxTransport {
+    client: Client,
+    name_provider: Arc<dyn Fn() -> String + Send + Sync>,
+}
+
+impl crate::outbox::driver::OutboxTransport for RealOutboxTransport {
+    fn connect(
+        &self,
+        peer: crate::identity::AgentId,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let client = self.client.clone();
+        async move {
+            // Best-effort warm-connect; the send below reports the real error.
+            let _ = client.messages().connect(&peer).await;
+        }
+    }
+
+    fn send(
+        &self,
+        bubble: crate::outbox::OutboxBubble,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<crate::transport::SendReceipt, ChatError>,
+    > + Send {
+        let client = self.client.clone();
+        let sender_name = (self.name_provider)();
+        async move {
+            // RETRY fidelity: OutboxBubble stores body only, so a resend
+            // drops the original attachment + reply_to (faithful to desktop
+            // outboxDriver.ts; full-fidelity retry is a deferred Josh-gated
+            // improvement -- see the outbox-lift plan notes).
+            let message_id = client
+                .messages()
+                .send(&bubble.peer, &bubble.body, &sender_name, None, None)
+                .await?;
+            let accepted_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            Ok(crate::transport::SendReceipt {
+                accepted_at_ms,
+                message_id,
+                transport_name: "outbox-retry",
+            })
+        }
+    }
+}
+
 /// Wire chat state, signer, and transports against a reachable x0xd.
 ///
 /// Only runs in the chat-needing build path (`needs_chat` true in
@@ -2281,6 +2645,7 @@ async fn build_with_chat(
     enable_lan_direct: bool,
     contact_pubkey_lookup: Option<ContactPubkeyLookup>,
     x0xd_port_file: Option<PathBuf>,
+    daemonless: bool,
 ) -> Result<(
     Router,
     Option<ChatState>,
@@ -2301,17 +2666,14 @@ async fn build_with_chat(
     // `Client::publish_public_post` delivers through it.
     Option<Arc<FediverseTransport>>,
 )> {
-    // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any
-    // chat-side work so an outdated daemon never gets a chance to
-    // mis-handle a `private_secure` group.
-    enforce_m2_treekem_minimum(base_url, &token).await?;
-
-    // Resolve the local agent identity from x0xd. The chat identity
-    // vault is bound to this agent_id — rotating the x0xd identity
-    // forces a fresh KEM keypair.
-    let agent_identity: identity::AgentIdentity = http.get_json("/agent").await?;
-    let agent_id_hex = agent_identity.agent_id.0.clone();
-    let local_machine_id = derive_machine_id(&agent_identity.machine_id);
+    // Gate on x0xd >= 0.20.1 (PQ `TreeKEM` minimum) before any chat work.
+    // Daemonless skips the probe ONLY against the unconnectable sentinel:
+    // an explicitly supplied base_url in daemonless mode (the P2
+    // in-process-router shape) claims a live daemon, so the version
+    // protection must still hold.
+    if !daemonless || base_url != DAEMONLESS_BASE_URL {
+        enforce_m2_treekem_minimum(base_url, &token).await?;
+    }
 
     let data_dir = match data_dir {
         Some(p) => p,
@@ -2323,6 +2685,31 @@ async fn build_with_chat(
     let (master, kdf_id, argon_salt) =
         resolve_master_key(identity_vault_path.as_path(), passphrase.as_deref())?;
     let master = Arc::new(master);
+
+    // Resolve the local agent identity. Daemon path: x0xd `/agent` owns
+    // the agent id + machine id. Daemonless path: both come from the
+    // local signer vault — agent id is derived from the local ML-DSA-65
+    // public key, so pair records and relay handshakes verify the same
+    // way they do for an x0xd-backed agent.
+    let (agent_id_hex, local_machine_id, local_signer): (
+        String,
+        [u8; 32],
+        Option<Arc<dyn Signer>>,
+    ) = if daemonless {
+        let vault = crate::local_signer::LocalSignerVault::load_or_create(
+            &layout.root,
+            &master,
+            kdf_id,
+            argon_salt.as_ref(),
+        )?;
+        let agent_id_hex = hex::encode(vault.signer.agent_id());
+        let machine = derive_machine_id(&vault.machine_token);
+        (agent_id_hex, machine, Some(Arc::new(vault.signer)))
+    } else {
+        let agent_identity: identity::AgentIdentity = http.get_json("/agent").await?;
+        let machine = derive_machine_id(&agent_identity.machine_id);
+        (agent_identity.agent_id.0.clone(), machine, None)
+    };
 
     let identity = Arc::new(FetchitIdentity::load_or_create(
         &layout.root,
@@ -2343,6 +2730,11 @@ async fn build_with_chat(
         kdf_id,
         argon_salt.as_ref(),
     );
+    // Load the persisted outbound-DM outbox (or empty on first run /
+    // unreadable file), before `argon_salt` + `layout` are moved into the
+    // registry / ChatState below -- same ordering as the consent store.
+    let outbox_store =
+        crate::outbox::store::OutboxStore::load(&layout, &master, kdf_id, argon_salt.as_ref());
 
     let registry = Arc::new(ConversationRegistry::new(
         layout.clone(),
@@ -2355,6 +2747,8 @@ async fn build_with_chat(
     // transport: each `X0xdSigner` opens its own warmup round-trip and
     // every `sign` call hits `/agent/sign`, so cloning the Arc keeps a
     // single WebSocket-paired x0xd identity instead of doubling sessions.
+    // In the daemonless profile the signer is the local ML-DSA-65 vault
+    // key resolved above — no daemon round-trips at all.
     //
     // When the caller supplied a `port_file` path
     // ([`ClientBuilder::x0xd_port_file`]), the signer self-heals across
@@ -2362,19 +2756,22 @@ async fn build_with_chat(
     // re-read of `api.port` and a one-shot retry against the new URL,
     // so long-running consumers (chat-peer, desktop app) survive a
     // daemon restart without going through their own restart cycle.
-    let x0xd_signer = Arc::new(if let Some(path) = x0xd_port_file {
-        X0xdSigner::connect_with_port_file(path, token)
+    let signer: Arc<dyn Signer> = match local_signer {
+        Some(s) => s,
+        None => Arc::new(if let Some(path) = x0xd_port_file {
+            X0xdSigner::connect_with_port_file(path, token)
+                .await
+                .map_err(|e| ChatError::MessageTransport(format!("x0xd signer (port-file): {e}")))?
+        } else {
+            X0xdSigner::connect(
+                Url::parse(base_url)
+                    .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
+                token,
+            )
             .await
-            .map_err(|e| ChatError::MessageTransport(format!("x0xd signer (port-file): {e}")))?
-    } else {
-        X0xdSigner::connect(
-            Url::parse(base_url).map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?,
-            token,
-        )
-        .await
-        .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?
-    });
-    let signer: Arc<dyn Signer> = x0xd_signer.clone();
+            .map_err(|e| ChatError::MessageTransport(format!("x0xd signer: {e}")))?
+        }),
+    };
 
     let mut router = Router::new();
     let mut lan_handle: Option<Arc<LanDirectTransport>> = None;
@@ -2459,7 +2856,7 @@ async fn build_with_chat(
         };
 
         let builder: Arc<dyn crate::transport::RelayBuilder> =
-            Arc::new(crate::transport::RealRelayBuilder::new(x0xd_signer.clone()));
+            Arc::new(crate::transport::RealRelayBuilder::new(signer.clone()));
 
         let url_str = url.to_string();
         primary_relay_url_str = Some(url_str.clone());
@@ -2506,6 +2903,9 @@ async fn build_with_chat(
                 crate::groups_reachability::ReachabilityCache::new(),
             )),
             bridge_consent: Arc::new(tokio::sync::Mutex::new(bridge_consent_store)),
+            outbox: Arc::new(tokio::sync::Mutex::new(outbox_store)),
+            outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
+            outbox_retry_tx: Arc::new(std::sync::Mutex::new(None)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -3800,6 +4200,51 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn daemonless_build_is_offline_and_agent_id_persists() {
+        let dir = TempDir::new().unwrap();
+        let build = || async {
+            Client::builder()
+                .daemonless(true)
+                .data_dir(dir.path().to_path_buf())
+                .passphrase("test-pass".to_owned())
+                .build()
+                .await
+                .unwrap()
+        };
+        // No relay_url, no daemon, no network: must still build (needs_chat
+        // is true via data_dir) and expose a stable 64-hex agent id.
+        let c1 = build().await;
+        let id1 = c1.local_agent_id_hex().expect("chat state present");
+        assert_eq!(id1.len(), 64);
+        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+        drop(c1);
+        let c2 = build().await;
+        assert_eq!(c2.local_agent_id_hex().unwrap(), id1);
+    }
+
+    #[tokio::test]
+    async fn daemonless_with_explicit_base_url_still_probes_daemon_version() {
+        let dir = TempDir::new().unwrap();
+        // Port 1 refuses instantly; an explicit base_url in daemonless mode
+        // claims a daemon lives there, so the TreeKEM version probe must run
+        // and surface its transport failure instead of being bypassed.
+        let err = Client::builder()
+            .daemonless(true)
+            .base_url("http://127.0.0.1:1")
+            .token(String::new())
+            .data_dir(dir.path().to_path_buf())
+            .passphrase("test-pass".to_owned())
+            .build()
+            .await
+            .expect_err("probe against a dead explicit base_url must fail the build");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/version probe"),
+            "expected the version-probe error, got: {msg}"
+        );
+    }
+
     // ── M4 actor identity helpers ─────────────────────────────────
 
     #[test]
@@ -4063,6 +4508,11 @@ mod tests {
             bridge_consent: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeConsentStore::new(),
             )),
+            outbox: Arc::new(tokio::sync::Mutex::new(
+                crate::outbox::store::OutboxStore::new(),
+            )),
+            outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
+            outbox_retry_tx: Arc::new(std::sync::Mutex::new(None)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -4089,6 +4539,84 @@ mod tests {
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (client, dir)
+    }
+
+    #[tokio::test]
+    async fn enqueue_dm_optimistic_echo_then_failed_on_unreachable() {
+        let (client, _dir) = test_client_no_denylist();
+        let mut rx = client.subscribe_outbox().expect("chat state present");
+        let peer = crate::identity::AgentId("bb".repeat(32));
+
+        let id = client
+            .enqueue_dm(&peer, "hello", "alice", None, None)
+            .await
+            .expect("enqueue returns a bubble id");
+
+        // Optimistic echo: the Sending bubble is broadcast BEFORE the send
+        // is attempted (desktop parity -- the UI shows it immediately).
+        let first = rx.recv().await.expect("optimistic echo");
+        assert_eq!(first.bubble.id, id);
+        assert_eq!(first.bubble.status, crate::outbox::OutboxStatus::Sending);
+        assert_eq!(first.bubble.body, "hello");
+        assert_eq!(first.bubble.peer, peer);
+
+        // The empty Router reaches no peer, so the send fails and the
+        // bubble is recorded Failed via the shared record_send_outcome path.
+        let second = rx.recv().await.expect("outcome echo");
+        assert_eq!(second.bubble.id, id);
+        assert_eq!(second.bubble.status, crate::outbox::OutboxStatus::Failed);
+        assert!(second.bubble.last_error.is_some());
+
+        // Snapshot reflects the single terminal-state bubble.
+        let snap = client.outbox_snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, id);
+        assert_eq!(snap[0].status, crate::outbox::OutboxStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn retry_outbox_is_safe_noop_before_driver_starts() {
+        // The retry sender is unpublished until start_outbox_driver runs, so
+        // retry_outbox must be a no-op (no panic, no block) -- the shell may
+        // wire a Retry button before the driver is up.
+        let (client, _dir) = test_client_no_denylist();
+        client.retry_outbox();
+        client.retry_outbox();
+    }
+
+    #[tokio::test]
+    async fn outbox_accessors_expose_the_live_handles() {
+        // A shell driving its own inbound pump needs the SAME store + event
+        // sender the engine uses, so dispatch_inbound_with_outbox marks the
+        // durable outbox (not just the UI) Delivered.
+        let (client, _dir) = test_client_no_denylist();
+        let mut rx = client.subscribe_outbox().expect("chat state present");
+        let events = client.outbox_events().expect("chat state present");
+        let outbox = client.outbox_arc().expect("chat state present");
+
+        let bubble = crate::outbox::OutboxBubble {
+            id: "b1".into(),
+            peer: crate::identity::AgentId("cc".repeat(32)),
+            body: "hi".into(),
+            status: crate::outbox::OutboxStatus::Delivered,
+            message_id: Some("m1".into()),
+            enqueued_at_ms: 1,
+            last_error: None,
+        };
+
+        // The returned sender feeds the channel subscribe_outbox reads.
+        events
+            .send(crate::outbox::OutboxEvent {
+                bubble: bubble.clone(),
+            })
+            .expect("a receiver is subscribed");
+        let got = rx.recv().await.expect("event delivered");
+        assert_eq!(got.bubble.id, "b1");
+        assert_eq!(got.bubble.status, crate::outbox::OutboxStatus::Delivered);
+
+        // The returned Arc is the live, mutable store.
+        outbox.lock().await.upsert(bubble);
+        assert_eq!(outbox.lock().await.snapshot().len(), 1);
     }
 
     /// D9 happy path: validation accepts a real-world relay list and
@@ -4351,6 +4879,11 @@ mod tests {
             bridge_consent: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeConsentStore::new(),
             )),
+            outbox: Arc::new(tokio::sync::Mutex::new(
+                crate::outbox::store::OutboxStore::new(),
+            )),
+            outbox_tx: tokio::sync::broadcast::channel(OUTBOX_CHANNEL_CAP).0,
+            outbox_retry_tx: Arc::new(std::sync::Mutex::new(None)),
             bridge_inbound_shadow: Arc::new(tokio::sync::Mutex::new(
                 crate::groups_reachability::BridgeInboundShadow::new(),
             )),
@@ -4435,6 +4968,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .expect("REST-only client construction");

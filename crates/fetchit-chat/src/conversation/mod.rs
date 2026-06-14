@@ -6,7 +6,7 @@ mod outbound;
 mod registry;
 mod types;
 
-pub use inbound::{dispatch_inbound, InboundDispatch};
+pub use inbound::{dispatch_inbound, dispatch_inbound_with_outbox, InboundDispatch};
 pub use outbound::{
     build_message_outbox, build_receipt_outbox, build_welcome_outbox, OutboundEnvelope,
 };

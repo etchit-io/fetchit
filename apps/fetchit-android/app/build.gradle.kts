@@ -144,4 +144,8 @@ dependencies {
     // framework classes (org.json, SharedPreferences, …) on the JVM.
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // Real org.json for plain-JVM tests: android.jar's stub throws "not
+    // mocked", which silently nulled ChatController.decodePost under test.
+    testImplementation("org.json:json:20240303")
 }

@@ -739,6 +739,30 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -764,11 +788,33 @@ fun uniffi_fetchit_ffi_checksum_func_set_data_home(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_setup_logger(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_agent_id_hex(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_disconnect(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_next_event(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_outbox_snapshot(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_retry_outbox(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_send_dm(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_client_fetch(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_client_fetch_and_render(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_client_peer_count(
+): Short
+fun uniffi_fetchit_ffi_checksum_constructor_chatclient_connect(
 ): Short
 fun uniffi_fetchit_ffi_checksum_constructor_client_connect(
 ): Short
@@ -821,7 +867,33 @@ internal interface UniffiLib : Library {
     }
 
     // FFI functions
-    fun uniffi_fetchit_ffi_fn_clone_client(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_fetchit_ffi_fn_clone_chatclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_fetchit_ffi_fn_free_chatclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_fetchit_ffi_fn_constructor_chatclient_connect(`relayUrl`: RustBuffer.ByValue,`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_agent_id_hex(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_disconnect(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_import_pair_uri(`ptr`: Pointer,`uri`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_next_event(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_outbox_snapshot(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_pair_share_uri(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_retry_outbox(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_fetchit_ffi_fn_method_chatclient_send_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_start_outbox(`ptr`: Pointer,`displayName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_fetchit_ffi_fn_clone_client(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_fetchit_ffi_fn_free_client(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -969,7 +1041,7 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_fetchit_ffi_checksum_func_default_peers() != 15247.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_func_default_peers() != 4796.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_func_detect() != 20729.toShort()) {
@@ -984,6 +1056,36 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_func_setup_logger() != 59301.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_agent_id_hex() != 14920.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_disconnect() != 16284.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 2558.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri() != 9374.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_next_event() != 46042.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_outbox_snapshot() != 2590.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri() != 50989.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_retry_outbox() != 56685.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_dm() != 44912.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_client_fetch() != 41047.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -991,6 +1093,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_client_peer_count() != 60187.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_constructor_chatclient_connect() != 22917.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_constructor_client_connect() != 948.toShort()) {
@@ -1275,6 +1380,666 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
     override fun write(value: ByteArray, buf: ByteBuffer) {
         buf.putInt(value.size)
         buf.put(value)
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * Daemonless chat client for the Android shell.
+ *
+ * Connect with [`ChatClient::connect`], which builds a
+ * [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
+ * signer; relay WebSocket transport in-process). Inbound events — DMs,
+ * receipts, and bridged fediverse public posts — are drained via
+ * [`ChatClient::next_event`].
+ *
+ * Call [`ChatClient::disconnect`] when the app no longer needs live chat
+ * (background, account switch). [`Drop`] aborts all background tasks as a
+ * GC backstop, but `disconnect` is the deterministic path.
+ */
+public interface ChatClientInterface {
+    
+    /**
+     * The local agent id as lowercase 64-character hex.
+     *
+     * Returns an empty string when the client was built without chat state
+     * (should not happen on the daemonless path).
+     */
+    fun `agentIdHex`(): kotlin.String
+    
+    /**
+     * Stop the inbound pump and feed drains, releasing the relay
+     * connection. Idempotent; safe to call more than once. Android
+     * calls this when the app no longer needs live chat (background,
+     * account switch) instead of waiting for garbage collection to
+     * drop the object. After disconnect, `next_event` drains any
+     * already-queued events and then returns `None` forever.
+     */
+    fun `disconnect`()
+    
+    /**
+     * Enqueue an outbound DM through the durable outbox: persist a
+     * `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+     * optimistic echo, then send. The terminal state (Delivered/Failed)
+     * arrives as a later `Outbox` event keyed by the returned bubble id.
+     *
+     * Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
+     * outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
+     * auto-resends on reconnect. `send_dm` stays for fire-and-forget sends
+     * with no durability.
+     *
+     * Attachments + reply-to are not yet carried over the FFI outbox; the
+     * bubble is body-only. The engine supports both -- wiring them through
+     * uniffi is a follow-up.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex
+     * or the client has no chat state.
+     * [`ChatFfiError::Network`] on transport or relay failure.
+     */
+    suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): kotlin.String
+    
+    /**
+     * Import a contact from a `x0x://pair/<agent_id_hex>?r=<relay>...` URI.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] for a malformed URI or self-import.
+     * [`ChatFfiError::Network`] on relay fetch failure.
+     */
+    suspend fun `importPairUri`(`uri`: kotlin.String)
+    
+    /**
+     * Drain the next inbound event. Returns `None` when the pump has
+     * shut down (relay disconnected and all buffered events consumed).
+     *
+     * Callers should loop on this in a background coroutine:
+     * ```kotlin
+     * while (true) {
+     * val event = client.nextEvent() ?: break
+     * // dispatch event ...
+     * }
+     * ```
+     */
+    suspend fun `nextEvent`(): ChatEventFfi?
+    
+    /**
+     * Snapshot of all tracked outbox bubbles, for hydrating the send-status
+     * UI on startup before subscribing to live [`ChatEventFfi::Outbox`]
+     * events. Empty when the client has no chat state.
+     */
+    suspend fun `outboxSnapshot`(): List<OutboxBubbleFfi>
+    
+    /**
+     * Publish this agent's pair record to the relay, then return a
+     * `x0x://pair/<agent_id>?r=<relay>` URI the user can share.
+     *
+     * Pair record is published first so a peer resolving the URI never
+     * 404s on the relay.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Network`] on relay publish failure.
+     * [`ChatFfiError::Invalid`] when pair URI construction fails.
+     */
+    suspend fun `pairShareUri`(): kotlin.String
+    
+    /**
+     * Kick the outbox driver to re-send every retryable bubble now -- the
+     * shell's "Retry" button. Fire-and-forget + coalescing; a no-op when
+     * the driver has not been started ([`ChatClient::start_outbox`]).
+     */
+    fun `retryOutbox`()
+    
+    /**
+     * Send a direct message to `to_agent_id_hex`.
+     *
+     * Returns the message id on success (suitable for receipt correlation),
+     * or `None` when the transport succeeded but no id was minted.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex.
+     * [`ChatFfiError::Network`] on transport or relay failure.
+     */
+    suspend fun `sendDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): kotlin.String?
+    
+    /**
+     * Start the background outbox retry driver: re-sends failed/unacked
+     * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
+     * services [`ChatClient::retry_outbox`]. Call once after `connect`,
+     * passing the user's display name (used for body-only resends, so it
+     * should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
+     * Calling again aborts the previous driver before starting a new one.
+     */
+    fun `startOutbox`(`displayName`: kotlin.String)
+    
+    companion object
+}
+
+/**
+ * Daemonless chat client for the Android shell.
+ *
+ * Connect with [`ChatClient::connect`], which builds a
+ * [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
+ * signer; relay WebSocket transport in-process). Inbound events — DMs,
+ * receipts, and bridged fediverse public posts — are drained via
+ * [`ChatClient::next_event`].
+ *
+ * Call [`ChatClient::disconnect`] when the app no longer needs live chat
+ * (background, account switch). [`Drop`] aborts all background tasks as a
+ * GC backstop, but `disconnect` is the deterministic path.
+ */
+open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_free_chatclient(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_clone_chatclient(pointer!!, status)
+        }
+    }
+
+    
+    /**
+     * The local agent id as lowercase 64-character hex.
+     *
+     * Returns an empty string when the client was built without chat state
+     * (should not happen on the daemonless path).
+     */override fun `agentIdHex`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_agent_id_hex(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Stop the inbound pump and feed drains, releasing the relay
+     * connection. Idempotent; safe to call more than once. Android
+     * calls this when the app no longer needs live chat (background,
+     * account switch) instead of waiting for garbage collection to
+     * drop the object. After disconnect, `next_event` drains any
+     * already-queued events and then returns `None` forever.
+     */override fun `disconnect`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_disconnect(
+        it, _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Enqueue an outbound DM through the durable outbox: persist a
+     * `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+     * optimistic echo, then send. The terminal state (Delivered/Failed)
+     * arrives as a later `Outbox` event keyed by the returned bubble id.
+     *
+     * Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
+     * outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
+     * auto-resends on reconnect. `send_dm` stays for fire-and-forget sends
+     * with no durability.
+     *
+     * Attachments + reply-to are not yet carried over the FFI outbox; the
+     * bubble is body-only. The engine supports both -- wiring them through
+     * uniffi is a follow-up.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex
+     * or the client has no chat state.
+     * [`ChatFfiError::Network`] on transport or relay failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(
+                thisPtr,
+                FfiConverterString.lower(`toAgentIdHex`),FfiConverterString.lower(`body`),FfiConverterString.lower(`senderName`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Import a contact from a `x0x://pair/<agent_id_hex>?r=<relay>...` URI.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] for a malformed URI or self-import.
+     * [`ChatFfiError::Network`] on relay fetch failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `importPairUri`(`uri`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_import_pair_uri(
+                thisPtr,
+                FfiConverterString.lower(`uri`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Drain the next inbound event. Returns `None` when the pump has
+     * shut down (relay disconnected and all buffered events consumed).
+     *
+     * Callers should loop on this in a background coroutine:
+     * ```kotlin
+     * while (true) {
+     * val event = client.nextEvent() ?: break
+     * // dispatch event ...
+     * }
+     * ```
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `nextEvent`() : ChatEventFfi? {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_next_event(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeChatEventFfi.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Snapshot of all tracked outbox bubbles, for hydrating the send-status
+     * UI on startup before subscribing to live [`ChatEventFfi::Outbox`]
+     * events. Empty when the client has no chat state.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `outboxSnapshot`() : List<OutboxBubbleFfi> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_outbox_snapshot(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeOutboxBubbleFfi.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Publish this agent's pair record to the relay, then return a
+     * `x0x://pair/<agent_id>?r=<relay>` URI the user can share.
+     *
+     * Pair record is published first so a peer resolving the URI never
+     * 404s on the relay.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Network`] on relay publish failure.
+     * [`ChatFfiError::Invalid`] when pair URI construction fails.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pairShareUri`() : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_pair_share_uri(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Kick the outbox driver to re-send every retryable bubble now -- the
+     * shell's "Retry" button. Fire-and-forget + coalescing; a no-op when
+     * the driver has not been started ([`ChatClient::start_outbox`]).
+     */override fun `retryOutbox`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_retry_outbox(
+        it, _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Send a direct message to `to_agent_id_hex`.
+     *
+     * Returns the message id on success (suitable for receipt correlation),
+     * or `None` when the transport succeeded but no id was minted.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex.
+     * [`ChatFfiError::Network`] on transport or relay failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `sendDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String) : kotlin.String? {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_send_dm(
+                thisPtr,
+                FfiConverterString.lower(`toAgentIdHex`),FfiConverterString.lower(`body`),FfiConverterString.lower(`senderName`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Start the background outbox retry driver: re-sends failed/unacked
+     * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
+     * services [`ChatClient::retry_outbox`]. Call once after `connect`,
+     * passing the user's display name (used for body-only resends, so it
+     * should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
+     * Calling again aborts the previous driver before starting a new one.
+     */override fun `startOutbox`(`displayName`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_start_outbox(
+        it, FfiConverterString.lower(`displayName`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+    companion object {
+        
+    /**
+     * Connect to the relay and build a daemonless chat client.
+     *
+     * `relay_url` must be an HTTP or WebSocket URL of a running fetch>it
+     * relay (e.g. `http://67.207.94.66:8088`). `data_dir` is the
+     * on-device path for the identity vault and conversation store.
+     * `passphrase` derives the at-rest master key.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `relay_url` is malformed.
+     * [`ChatFfiError::Network`] on relay connect or vault bootstrap failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `connect`(`relayUrl`: kotlin.String, `dataDir`: kotlin.String, `passphrase`: kotlin.String) : ChatClient {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_constructor_chatclient_connect(FfiConverterString.lower(`relayUrl`),FfiConverterString.lower(`dataDir`),FfiConverterString.lower(`passphrase`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_pointer(future) },
+        // lift function
+        { FfiConverterTypeChatClient.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatClient: FfiConverter<ChatClient, Pointer> {
+
+    override fun lower(value: ChatClient): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): ChatClient {
+        return ChatClient(value)
+    }
+
+    override fun read(buf: ByteBuffer): ChatClient {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: ChatClient) = 8UL
+
+    override fun write(value: ChatClient, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
     }
 }
 
@@ -1668,6 +2433,344 @@ public object FfiConverterTypeArchiveEntryFFI: FfiConverterRustBuffer<ArchiveEnt
 
 
 
+/**
+ * One outbound DM bubble surfaced to the shell, mirrored from
+ * [`fetchit_chat::outbox::OutboxBubble`]. `peer` is rendered as lowercase
+ * 64-char hex so Kotlin never handles the raw `AgentId` newtype.
+ */
+data class OutboxBubbleFfi (
+    /**
+     * Client-assigned bubble id, stable across retries.
+     */
+    var `id`: kotlin.String, 
+    /**
+     * Recipient agent id as lowercase 64-char hex.
+     */
+    var `peerAgentIdHex`: kotlin.String, 
+    /**
+     * Plaintext body.
+     */
+    var `body`: kotlin.String, 
+    /**
+     * Delivery state.
+     */
+    var `status`: OutboxStatusFfi, 
+    /**
+     * Relay dedupe-key hex, set once the first send is acked.
+     */
+    var `messageId`: kotlin.String?, 
+    /**
+     * Unix epoch ms when first enqueued.
+     */
+    var `enqueuedAtMs`: kotlin.ULong, 
+    /**
+     * Last send error, populated when `status` is `Failed`.
+     */
+    var `lastError`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubbleFfi> {
+    override fun read(buf: ByteBuffer): OutboxBubbleFfi {
+        return OutboxBubbleFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeOutboxStatusFfi.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OutboxBubbleFfi) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`peerAgentIdHex`) +
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterTypeOutboxStatusFfi.allocationSize(value.`status`) +
+            FfiConverterOptionalString.allocationSize(value.`messageId`) +
+            FfiConverterULong.allocationSize(value.`enqueuedAtMs`) +
+            FfiConverterOptionalString.allocationSize(value.`lastError`)
+    )
+
+    override fun write(value: OutboxBubbleFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`peerAgentIdHex`, buf)
+            FfiConverterString.write(value.`body`, buf)
+            FfiConverterTypeOutboxStatusFfi.write(value.`status`, buf)
+            FfiConverterOptionalString.write(value.`messageId`, buf)
+            FfiConverterULong.write(value.`enqueuedAtMs`, buf)
+            FfiConverterOptionalString.write(value.`lastError`, buf)
+    }
+}
+
+
+
+/**
+ * An inbound chat event delivered by [`ChatClient::next_event`].
+ */
+sealed class ChatEventFfi {
+    
+    /**
+     * An inbound direct message.
+     */
+    data class Dm(
+        /**
+         * Hex-encoded sender agent id (64 lowercase hex chars).
+         */
+        val `fromAgentIdHex`: kotlin.String, 
+        /**
+         * Message body.
+         */
+        val `body`: kotlin.String, 
+        /**
+         * Optional dedupe id for the message; used to correlate receipts.
+         */
+        val `messageId`: kotlin.String?) : ChatEventFfi() {
+        companion object
+    }
+    
+    /**
+     * A delivery receipt for a previously sent message.
+     */
+    data class Receipt(
+        /**
+         * The message id that was received and confirmed decoded.
+         */
+        val `messageId`: kotlin.String) : ChatEventFfi() {
+        companion object
+    }
+    
+    /**
+     * A bridged fediverse public post. `activity_json` is raw
+     * `application/activity+json` bytes delivered verbatim from the relay.
+     * Attribution comes from `verified_actor_url` — the relay-verified,
+     * denylist-canonical signing actor. The `activity_json` body is
+     * UNTRUSTED fediverse content; the render surface MUST sanitize it
+     * before display.
+     */
+    data class PublicPost(
+        /**
+         * Relay-verified actor URL.
+         */
+        val `verifiedActorUrl`: kotlin.String, 
+        /**
+         * Raw Activity Streams JSON bytes. UNTRUSTED — sanitize before
+         * rendering.
+         */
+        val `activityJson`: kotlin.ByteArray) : ChatEventFfi() {
+        companion object
+    }
+    
+    /**
+     * An outbox change for an outbound DM: optimistic echo, delivery, or
+     * failure. Upsert keyed by `bubble.id`; drives the send-status UI.
+     */
+    data class Outbox(
+        /**
+         * The bubble's current state.
+         */
+        val `bubble`: OutboxBubbleFfi) : ChatEventFfi() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatEventFfi : FfiConverterRustBuffer<ChatEventFfi>{
+    override fun read(buf: ByteBuffer): ChatEventFfi {
+        return when(buf.getInt()) {
+            1 -> ChatEventFfi.Dm(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            2 -> ChatEventFfi.Receipt(
+                FfiConverterString.read(buf),
+                )
+            3 -> ChatEventFfi.PublicPost(
+                FfiConverterString.read(buf),
+                FfiConverterByteArray.read(buf),
+                )
+            4 -> ChatEventFfi.Outbox(
+                FfiConverterTypeOutboxBubbleFfi.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ChatEventFfi) = when(value) {
+        is ChatEventFfi.Dm -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`fromAgentIdHex`)
+                + FfiConverterString.allocationSize(value.`body`)
+                + FfiConverterOptionalString.allocationSize(value.`messageId`)
+            )
+        }
+        is ChatEventFfi.Receipt -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`messageId`)
+            )
+        }
+        is ChatEventFfi.PublicPost -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`verifiedActorUrl`)
+                + FfiConverterByteArray.allocationSize(value.`activityJson`)
+            )
+        }
+        is ChatEventFfi.Outbox -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeOutboxBubbleFfi.allocationSize(value.`bubble`)
+            )
+        }
+    }
+
+    override fun write(value: ChatEventFfi, buf: ByteBuffer) {
+        when(value) {
+            is ChatEventFfi.Dm -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`fromAgentIdHex`, buf)
+                FfiConverterString.write(value.`body`, buf)
+                FfiConverterOptionalString.write(value.`messageId`, buf)
+                Unit
+            }
+            is ChatEventFfi.Receipt -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`messageId`, buf)
+                Unit
+            }
+            is ChatEventFfi.PublicPost -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`verifiedActorUrl`, buf)
+                FfiConverterByteArray.write(value.`activityJson`, buf)
+                Unit
+            }
+            is ChatEventFfi.Outbox -> {
+                buf.putInt(4)
+                FfiConverterTypeOutboxBubbleFfi.write(value.`bubble`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+
+/**
+ * Errors surfaced to Kotlin/Swift by the chat FFI.
+ */
+sealed class ChatFfiException: kotlin.Exception() {
+    
+    /**
+     * Malformed input: bad URL, bad agent id, bad pair URI.
+     */
+    class Invalid(
+        
+        /**
+         * Human-readable cause.
+         */
+        val `reason`: kotlin.String
+        ) : ChatFfiException() {
+        override val message
+            get() = "reason=${ `reason` }"
+    }
+    
+    /**
+     * Relay or network failure (connect, publish, resolve, send).
+     */
+    class Network(
+        
+        /**
+         * Human-readable cause.
+         */
+        val `reason`: kotlin.String
+        ) : ChatFfiException() {
+        override val message
+            get() = "reason=${ `reason` }"
+    }
+    
+
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<ChatFfiException> {
+        override fun lift(error_buf: RustBuffer.ByValue): ChatFfiException = FfiConverterTypeChatFfiError.lift(error_buf)
+    }
+
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatFfiError : FfiConverterRustBuffer<ChatFfiException> {
+    override fun read(buf: ByteBuffer): ChatFfiException {
+        
+
+        return when(buf.getInt()) {
+            1 -> ChatFfiException.Invalid(
+                FfiConverterString.read(buf),
+                )
+            2 -> ChatFfiException.Network(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ChatFfiException): ULong {
+        return when(value) {
+            is ChatFfiException.Invalid -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is ChatFfiException.Network -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+        }
+    }
+
+    override fun write(value: ChatFfiException, buf: ByteBuffer) {
+        when(value) {
+            is ChatFfiException.Invalid -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is ChatFfiException.Network -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+
+}
+
+
+
 
 
 /**
@@ -1851,6 +2954,50 @@ public object FfiConverterTypeFetchitError : FfiConverterRustBuffer<FetchitExcep
     }
 
 }
+
+
+
+/**
+ * Delivery state of an outbound DM bubble, mirrored from
+ * [`fetchit_chat::outbox::OutboxStatus`] for the uniffi surface.
+ */
+
+enum class OutboxStatusFfi {
+    
+    /**
+     * Send attempted, not yet confirmed delivered.
+     */
+    SENDING,
+    /**
+     * Recipient acknowledged delivery.
+     */
+    DELIVERED,
+    /**
+     * The attempt errored or timed out; eligible for retry.
+     */
+    FAILED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOutboxStatusFfi: FfiConverterRustBuffer<OutboxStatusFfi> {
+    override fun read(buf: ByteBuffer) = try {
+        OutboxStatusFfi.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: OutboxStatusFfi) = 4UL
+
+    override fun write(value: OutboxStatusFfi, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -2299,6 +3446,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeChatEventFfi: FfiConverterRustBuffer<ChatEventFfi?> {
+    override fun read(buf: ByteBuffer): ChatEventFfi? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeChatEventFfi.read(buf)
+    }
+
+    override fun allocationSize(value: ChatEventFfi?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeChatEventFfi.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ChatEventFfi?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeChatEventFfi.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -2355,6 +3534,34 @@ public object FfiConverterSequenceTypeArchiveEntryFFI: FfiConverterRustBuffer<Li
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeOutboxBubbleFfi: FfiConverterRustBuffer<List<OutboxBubbleFfi>> {
+    override fun read(buf: ByteBuffer): List<OutboxBubbleFfi> {
+        val len = buf.getInt()
+        return List<OutboxBubbleFfi>(len) {
+            FfiConverterTypeOutboxBubbleFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<OutboxBubbleFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeOutboxBubbleFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<OutboxBubbleFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeOutboxBubbleFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<List<kotlin.String>>> {
     override fun read(buf: ByteBuffer): List<List<kotlin.String>> {
         val len = buf.getInt()
@@ -2388,7 +3595,7 @@ public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<Li
          * Bundled production bootstrap peers in `ip:port` shorthand.
          *
          * Pass these (or a user override) to [`Client::connect`]. Returning
-         * them through the FFI lets Kotlin/Swift surfaces show the defaults
+         * them through the FFI lets Kotlin surfaces show the defaults
          * in a Settings UI without duplicating the list.
          */ fun `defaultPeers`(): List<kotlin.String> {
             return FfiConverterSequenceString.lift(

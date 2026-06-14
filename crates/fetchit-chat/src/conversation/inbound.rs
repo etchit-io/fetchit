@@ -176,10 +176,31 @@ fn verify_sender(
 /// # Errors
 /// Hard errors (e.g. malformed envelope bytes). Soft errors (stale
 /// epoch, decap fail) are returned as `InboundDispatch` variants.
+/// 3-arg convenience entry: dispatch with no outbox wiring (a delivery
+/// receipt is still verified + persisted to conversation history, but no
+/// outbound bubble is flipped to Delivered). Kept for the test suite + the
+/// chat-peer binary; the production dispatcher calls
+/// [`dispatch_inbound_with_outbox`] so the sender's outbox reflects delivery.
 pub async fn dispatch_inbound(
     envelope: TransitEnvelope,
     identity: &FetchitIdentity,
     registry: &ConversationRegistry,
+) -> Result<InboundDispatch, ChatError> {
+    dispatch_inbound_with_outbox(envelope, identity, registry, None, None).await
+}
+
+/// Inbound dispatch with optional outbox wiring. When `outbox` +
+/// `outbox_events` are supplied and the envelope is a `DeliveryReceipt`, the
+/// matching outbound bubble (by `message_id`) is marked Delivered and an
+/// [`crate::outbox::OutboxEvent`] is broadcast -- engine-side so every shell
+/// (desktop + Android) inherits Delivered without threading receipts through
+/// the UI layer (see the outbox-lift design).
+pub async fn dispatch_inbound_with_outbox(
+    envelope: TransitEnvelope,
+    identity: &FetchitIdentity,
+    registry: &ConversationRegistry,
+    outbox: Option<&std::sync::Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>>,
+    outbox_events: Option<&tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>>,
 ) -> Result<InboundDispatch, ChatError> {
     let group_id_bytes = match &envelope.group_id {
         Some(g) => *g.as_bytes(),
@@ -191,7 +212,15 @@ pub async fn dispatch_inbound(
         EnvelopeKind::DeliveryReceipt => match verify_sender(&envelope, registry)? {
             VerifyOutcome::Drop(d) => Ok(d),
             VerifyOutcome::Ok => {
-                dispatch_receipt(envelope, registry, group_id_bytes, group_id_hex).await
+                dispatch_receipt(
+                    envelope,
+                    registry,
+                    group_id_bytes,
+                    group_id_hex,
+                    outbox,
+                    outbox_events,
+                )
+                .await
             }
         },
         _ => {
@@ -214,6 +243,8 @@ async fn dispatch_receipt(
     registry: &ConversationRegistry,
     group_id_bytes: [u8; 32],
     group_id_hex: String,
+    outbox: Option<&std::sync::Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>>,
+    outbox_events: Option<&tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>>,
 ) -> Result<InboundDispatch, ChatError> {
     let Some(conv) = registry.get(&group_id_hex).await? else {
         return Ok(InboundDispatch::StaleEpoch {
@@ -274,6 +305,19 @@ async fn dispatch_receipt(
             "[chat] receipt delivery-state persist failed for {}: {e}",
             payload.message_id
         );
+    }
+    // Outbox lift (T5d): flip the matching outbound bubble to Delivered so
+    // the SENDER's UI advances Sending -> Delivered, then broadcast it.
+    // Engine-side so every shell (incl. Android via the default dispatcher)
+    // inherits Delivered without threading receipts through the UI layer.
+    // Match by message_id only -- the globally-unique relay dedupe hex --
+    // exactly like desktop markDelivered. A LAN-direct send whose receipt
+    // never carries a message_id stays Sending until the 24h sweep, the
+    // same as desktop today.
+    if let (Some(outbox), Some(events)) = (outbox, outbox_events) {
+        if let Some(bubble) = outbox.lock().await.mark_delivered(&payload.message_id) {
+            let _ = events.send(crate::outbox::OutboxEvent { bubble });
+        }
     }
     Ok(InboundDispatch::Receipt {
         group_id_hex,
@@ -1862,6 +1906,95 @@ mod tests {
             }
             other => panic!("expected ReplayDetected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn receipt_marks_outbox_bubble_delivered_and_emits() {
+        // Outbox lift (T5d): a verified DeliveryReceipt flips the matching
+        // outbound bubble (by message_id) to Delivered and broadcasts the
+        // change -- engine-side, so every shell inherits it.
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
+
+        // Bob installs the conversation via the welcome.
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+        let welcome_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let _ = dispatch_inbound(welcome_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+
+        // Alice's side: install Bob's card + the conversation.
+        let tmp_a_store = tempdir().unwrap();
+        let layout_a = StoreLayout::ensure(tmp_a_store.path().join("store")).unwrap();
+        install_card(&layout_a, &aid_b, &bob_signer, bob_id.kem_public_key());
+        let (_, master_a2, salt_a2) = fixture_identity(tmp_a_store.path(), &aid_a);
+        let registry_a = ConversationRegistry::new(
+            layout_a,
+            Arc::new(master_a2),
+            kdf_id_argon2(),
+            Some(salt_a2),
+        );
+        registry_a.save(&conv).await.unwrap();
+
+        // Bob acks message "deadbeef"; seed Alice's outbox with the bubble
+        // that carries that relay message_id (still Sending).
+        let receipt_outbox = build_receipt_outbox(
+            &conv,
+            "deadbeef",
+            1_700_000_000_001,
+            &aid_a,
+            &bob_id,
+            [0u8; 32],
+            &bob_signer,
+        )
+        .await
+        .unwrap();
+        let outbox = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::outbox::store::OutboxStore::new(),
+        ));
+        outbox.lock().await.upsert(crate::outbox::OutboxBubble {
+            id: "bubble-1".into(),
+            peer: crate::identity::AgentId(aid_b.clone()),
+            body: "hi".into(),
+            status: crate::outbox::OutboxStatus::Sending,
+            message_id: Some("deadbeef".into()),
+            enqueued_at_ms: 1_700_000_000_000,
+            last_error: None,
+        });
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+
+        let dispatched = dispatch_inbound_with_outbox(
+            receipt_outbox[0].envelope.clone(),
+            &alice_id,
+            &registry_a,
+            Some(&outbox),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(dispatched, InboundDispatch::Receipt { .. }));
+
+        // The bubble flipped to Delivered, and the change was broadcast.
+        assert_eq!(
+            outbox.lock().await.get("bubble-1").unwrap().status,
+            crate::outbox::OutboxStatus::Delivered,
+        );
+        let evt = rx.try_recv().expect("outbox event emitted");
+        assert_eq!(evt.bubble.id, "bubble-1");
+        assert_eq!(evt.bubble.status, crate::outbox::OutboxStatus::Delivered);
     }
 
     /// Hand-roll a welcome envelope around a caller-supplied

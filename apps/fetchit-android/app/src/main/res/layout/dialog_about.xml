@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  About / LIT Chat info screen (M1.2). Honest-posture content mirroring the
+  desktop About checklist. Themed via ?attr/fetchit* (the dialog is built
+  with the user's current Theme.Fetchit.* style). Not an AP-identity surface.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?attr/fetchitInk"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:text="@string/about_title"
+            android:textColor="?attr/fetchitBone"
+            android:fontFamily="@font/instrument_serif"
+            android:textSize="26sp" />
+
+        <!-- What it is -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/about_what_heading"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:textAllCaps="true"
+            android:letterSpacing="0.1" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/about_what_body"
+            android:textColor="?attr/fetchitBoneDim"
+            android:textSize="14sp"
+            android:lineSpacingMultiplier="1.3" />
+
+        <!-- Encryption -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/about_crypto_heading"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:textAllCaps="true"
+            android:letterSpacing="0.1" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/about_crypto_body"
+            android:textColor="?attr/fetchitBoneDim"
+            android:textSize="14sp"
+            android:lineSpacingMultiplier="1.3" />
+
+        <!-- Technical preview -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/about_preview_heading"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:textAllCaps="true"
+            android:letterSpacing="0.1" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/about_preview_body"
+            android:textColor="?attr/fetchitBoneDim"
+            android:textSize="14sp"
+            android:lineSpacingMultiplier="1.3" />
+
+        <!-- Recovery -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/about_recovery_heading"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:textAllCaps="true"
+            android:letterSpacing="0.1" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/about_recovery_body"
+            android:textColor="?attr/fetchitBoneDim"
+            android:textSize="14sp"
+            android:lineSpacingMultiplier="1.3" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="22dp"
+            android:layout_marginBottom="14dp"
+            android:background="?attr/fetchitLine" />
+
+        <TextView
+            android:id="@+id/about_version"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="?attr/fetchitAsh"
+            android:textSize="12sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/about_license_body"
+            android:textColor="?attr/fetchitBoneDim"
+            android:textSize="13sp"
+            android:lineSpacingMultiplier="1.3" />
+
+        <TextView
+            android:id="@+id/about_license_link"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:paddingVertical="6dp"
+            android:text="@string/about_license_link"
+            android:textColor="?attr/fetchitCopper"
+            android:textSize="13sp"
+            android:background="?android:attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <Button
+            android:id="@+id/about_close"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginTop="20dp"
+            android:text="@string/action_close"
+            android:textColor="?attr/fetchitCopper"
+            android:backgroundTint="?attr/fetchitInk3" />
+
+    </LinearLayout>
+</ScrollView>

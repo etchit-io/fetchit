@@ -48,6 +48,15 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="fetchit" android:host="import" />
             </intent-filter>
+            <!-- x0x://pair/<agent-id>?r=<relay> deep links: scanning or
+                 tapping a peer's pair URI routes into the chat pairing
+                 flow without opening a browser. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="x0x" android:host="pair" />
+            </intent-filter>
         </activity>
 
         <!-- Portrait-locked QR scanner. Subclasses ZXing's bundled

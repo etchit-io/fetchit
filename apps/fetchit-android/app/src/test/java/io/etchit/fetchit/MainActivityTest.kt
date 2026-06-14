@@ -24,7 +24,12 @@ class MainActivityTest {
         // SettingsSheet.bind() reads SettingsStore.peers() during onCreate;
         // with no saved override that calls the FFI's defaultPeers(), which
         // has no native library off-device. A saved override skips the call.
-        SettingsStore(RuntimeEnvironment.getApplication()).savePeers(listOf(SEEDED_PEER))
+        val store = SettingsStore(RuntimeEnvironment.getApplication())
+        store.savePeers(listOf(SEEDED_PEER))
+        // Persist browse mode so lastMode() does not trigger setMode(CHAT)
+        // during onCreate — that would hide settingsSheet and break the
+        // visibility assertions in this class.
+        store.saveLastMode("browse")
     }
 
     private fun launch(): MainActivity =

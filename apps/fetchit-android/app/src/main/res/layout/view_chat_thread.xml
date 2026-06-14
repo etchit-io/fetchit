@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?attr/fetchitInk">
+
+    <!-- Header row: back glyph, peer display name, short id -->
+    <LinearLayout
+        android:id="@+id/threadHeader"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:gravity="center_vertical"
+        android:background="?attr/fetchitInk2">
+
+        <Button
+            android:id="@+id/threadBackButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:text="@string/thread_back_glyph"
+            android:textColor="?attr/fetchitCopper"
+            android:textSize="22sp"
+            android:backgroundTint="@android:color/transparent"
+            android:padding="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:insetLeft="0dp"
+            android:insetTop="0dp"
+            android:insetRight="0dp"
+            android:insetBottom="0dp"
+            android:contentDescription="@string/thread_back_desc" />
+
+        <TextView
+            android:id="@+id/threadPeerName"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:textColor="?attr/fetchitBone"
+            android:fontFamily="monospace"
+            android:textSize="15sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/threadPeerShortId"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+
+    <!-- Message list -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/messageList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:padding="8dp" />
+
+    <!-- Send row (hidden for feed screen) -->
+    <LinearLayout
+        android:id="@+id/threadSendRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:gravity="center_vertical"
+        android:background="?attr/fetchitInk2">
+
+        <EditText
+            android:id="@+id/messageInput"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="@string/thread_message_hint"
+            android:inputType="textMultiLine|textCapSentences"
+            android:maxLines="4"
+            android:textColor="?attr/fetchitBone"
+            android:textColorHint="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="14sp"
+            android:background="?attr/fetchitInk3"
+            android:padding="10dp" />
+
+        <Button
+            android:id="@+id/sendButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:text="@string/chat_send_glyph"
+            android:textColor="?attr/fetchitCopper"
+            android:textSize="20sp"
+            android:backgroundTint="@android:color/transparent"
+            android:padding="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:insetLeft="0dp"
+            android:insetTop="0dp"
+            android:insetRight="0dp"
+            android:insetBottom="0dp"
+            android:layout_marginStart="4dp"
+            android:contentDescription="@string/thread_send_desc" />
+
+    </LinearLayout>
+
+</LinearLayout>
