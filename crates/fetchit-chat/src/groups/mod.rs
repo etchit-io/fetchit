@@ -273,7 +273,7 @@ impl<'a> Endpoint<'a> {
     /// plaintext-over-gossip on x0xd's side (wire-level preset is
     /// `public_open`, surfaced to users as "public room"). The
     /// `/groups/<id>/send` endpoint accepts plaintext directly. This is
-    /// the UNENCRYPTED variant; the PQ-encrypted path (MLS TreeKEM +
+    /// the UNENCRYPTED variant; the PQ-encrypted path (MLS `TreeKEM` +
     /// ML-KEM-768 via x0xd `/secure/encrypt`) shipped at M2 and lives in
     /// [`Self::create_private`] + the private-group methods in
     /// [`crate::messages`]. Use `create_private` for private groups.
