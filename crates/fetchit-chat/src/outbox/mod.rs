@@ -11,6 +11,8 @@
 use crate::identity::AgentId;
 use serde::{Deserialize, Serialize};
 
+pub mod store;
+
 /// Delivery state of a single outbound DM bubble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboxStatus {
