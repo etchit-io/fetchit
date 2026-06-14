@@ -1,4 +1,4 @@
-# PINS.md — pinned dependency revisions
+# PINS.md -- pinned dependency revisions
 
 Lockstep across the etch>it / fetch>it / LIT trinity. Bumping any
 crate listed here without ALSO bumping the matching pin in etch>it
@@ -22,7 +22,7 @@ CI if `Cargo.lock` drifts from any rev or version listed below.
 
 | Crate     | Pin                                          | Why                                                                                 |
 |-----------|----------------------------------------------|-------------------------------------------------------------------------------------|
-| `uniffi`  | `= "0.29.5"` (with `tokio` + `build` features) | Kotlin/Swift binding stability — `uniffi-bindgen-cli` must match crate exactly.    |
+| `uniffi`  | `= "0.29.5"` (with `tokio` + `build` features) | Kotlin/Swift binding stability -- `uniffi-bindgen-cli` must match crate exactly.    |
 
 ## Out-of-tree pins (operational)
 
@@ -52,7 +52,7 @@ the etch>it side per the trinity-milestones contract.
 
 ## Why this exists
 
-A silent crate bump can land a wire-format change between releases —
+A silent crate bump can land a wire-format change between releases --
 historical messages don't decrypt, contact cards reject, group
 messages decode to gibberish. The Autonomi forum has been burned by
 exactly this kind of drift on other projects. Naming the pins and

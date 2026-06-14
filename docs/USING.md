@@ -1,6 +1,6 @@
 # Using fetch>it
 
-Single-page reference for **what fetch>it does, how to do each thing, and what its limits are**. Comprehensive on purpose — there's a lot of it now. Keep this open as a cheat sheet.
+Single-page reference for **what fetch>it does, how to do each thing, and what its limits are**. Comprehensive on purpose -- there's a lot of it now. Keep this open as a cheat sheet.
 
 For protocol depth (the `autonomi://` scheme, SPA-author constraints, the synthetic-origin trick) see [`AUTONOMI-WEB.md`](AUTONOMI-WEB.md).
 
@@ -8,7 +8,7 @@ For protocol depth (the `autonomi://` scheme, SPA-author constraints, the synthe
 
 ## What is fetch>it?
 
-A read-only viewer for content stored on the [Autonomi](https://autonomi.com) network. Paste a 64-hex address, see what's there. Text, images, audio, video, PDF, archives, code with syntax highlighting, JSON, CSV, markdown, HTML — anything.
+A read-only viewer for content stored on the [Autonomi](https://autonomi.com) network. Paste a 64-hex address, see what's there. Text, images, audio, video, PDF, archives, code with syntax highlighting, JSON, CSV, markdown, HTML -- anything.
 
 No wallet. No signing. No node to run. No DNS, no CDN, no traditional web servers. Just bytes from a content-addressed P2P network, rendered locally.
 
@@ -22,11 +22,11 @@ No wallet. No signing. No node to run. No DNS, no CDN, no traditional web server
    - bare hex: `c2b0285930b0a2c3df3928d0a4706b4e6d71e84ebeb4f7805c83ffbb63d0ab61`
    - prefixed: `autonomi://c2b0285930b0a2c3df3928d0a4706b4e6d71e84ebeb4f7805c83ffbb63d0ab61`
 4. **Tap the big copper button.** Or hit Go on the keyboard.
-5. **The first connection takes up to ~10 seconds.** fetch>it returns as soon as it sees a peer, or after a ~10s warmup window — whichever first; the DHT bootstrap then settles in the background. The dog inside the button runs while it warms up; subsequent fetches are warm.
+5. **The first connection takes up to ~10 seconds.** fetch>it returns as soon as it sees a peer, or after a ~10s warmup window -- whichever first; the DHT bootstrap then settles in the background. The dog inside the button runs while it warms up; subsequent fetches are warm.
 
 ---
 
-## Address bar — what it accepts
+## Address bar -- what it accepts
 
 | Format | Example | Behavior |
 |---|---|---|
@@ -37,24 +37,24 @@ No wallet. No signing. No node to run. No DNS, no CDN, no traditional web server
 
 **Validation:** exactly 64 hex characters (0–9, a–f, mixed case OK). Anything else → friendly Snackbar `address must be 64 hex characters`.
 
-**IME submit:** the keyboard's Go / Send key triggers fetch — no need to reach for the button.
+**IME submit:** the keyboard's Go / Send key triggers fetch -- no need to reach for the button.
 
 ---
 
 ## What renders natively
 
-Engine inspects the bytes by magic-byte / content heuristics, picks a handler, hands it to the Android side. **You don't need to declare anything** — fetch>it figures out what kind of content the bytes are.
+Engine inspects the bytes by magic-byte / content heuristics, picks a handler, hands it to the Android side. **You don't need to declare anything** -- fetch>it figures out what kind of content the bytes are.
 
 | Format | How fetch>it renders | Notes |
 |---|---|---|
 | **etch/it envelope** (`{"v":1,"meta":{...},"content":"..."}`) | Title shown, content rendered honoring `meta.lang` | If `lang` is empty and content looks like markdown, renders as markdown automatically |
 | **Plain text** (UTF-8) | Monospace, full-screen scrollable | Auto-detects code language and applies syntax highlighting (Rust, Python, JS/TS, Kotlin, Go, Bash, HTML, CSS, YAML, SQL, JSON) |
-| **Markdown** | Rendered with proper formatting (headings, lists, links, code blocks) via Markwon | Detection heuristic — files that look markdown-shaped (headings, fences, multiple markers) qualify |
-| **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch>it; the page can reach **only** the Autonomi network — no traditional-internet requests. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
-| **JSON** | Pretty-printed in monospace | Source-faithful — every key/value preserved as authored |
+| **Markdown** | Rendered with proper formatting (headings, lists, links, code blocks) via Markwon | Detection heuristic -- files that look markdown-shaped (headings, fences, multiple markers) qualify |
+| **HTML / SPA** (`<!DOCTYPE html>` / `<html` / `<?xml`) | Rendered in a sandboxed WebView with JavaScript on. Inside the page, `<img src="autonomi://addr">` etc. resolve through fetch>it; the page can reach **only** the Autonomi network -- no traditional-internet requests. | See [§ The autonomi:// scheme](#the-autonomi-url-scheme) below |
+| **JSON** | Pretty-printed in monospace | Source-faithful -- every key/value preserved as authored |
 | **CSV** | Column-padded monospace table | First row is headers; quoted fields with commas + doubled `""` escapes handled |
 | **Image** (PNG / JPEG / GIF / WEBP / BMP / HEIC) | Rendered fit-to-width, edge-to-edge | All decoded by Android's `BitmapFactory` |
-| **Audio** (MP3 / WAV / FLAC / OGG / M4A) | Media3 ExoPlayer, dead-centered with full controls — play / pause / seek / time labels / ±15s skip | In-memory playback (no temp files) |
+| **Audio** (MP3 / WAV / FLAC / OGG / M4A) | Media3 ExoPlayer, dead-centered with full controls -- play / pause / seek / time labels / ±15s skip | In-memory playback (no temp files) |
 | **Video** (MP4 / MOV / WebM / MKV / AVI / M4V) | Same Media3 PlayerView with video frame; auto-hide controls; fullscreen button | Tap fullscreen → chrome and system bars hide |
 | **PDF** | Inline, page-by-page, scrollable | Uses Android's built-in `PdfRenderer` |
 | **ZIP archive** | Entry list (paths + sizes) | Use Open with… to hand the archive to another app for extraction |
@@ -78,7 +78,7 @@ That's it. Two interactive elements at the top. The fetch button itself sits **d
 | Where | Gesture | What happens |
 |---|---|---|
 | Anywhere on the idle screen | **Pull down from top** | Clears the address input + dismisses any rendition; back to fresh state |
-| Anywhere with content showing | **Pull down** | Disabled — protected so you don't accidentally lose a 5MB video mid-view |
+| Anywhere with content showing | **Pull down** | Disabled -- protected so you don't accidentally lose a 5MB video mid-view |
 | Bottom edge | **Drag up the small handle** | Settings sheet expands. Drag down → collapses |
 | `★` button | **Tap** | Bookmark sheet opens |
 | `✕` button (top right when content is showing) | **Tap** | Dismiss content, fetch button reappears (back-stack preserved) |
@@ -93,9 +93,9 @@ That's it. Two interactive elements at the top. The fetch button itself sits **d
 
 Tap the **★** to open. The sheet shows:
 
-1. **Save current** button at the top — only when the input has a valid 64-hex address. Tap → modal asks for a label (empty rejected, default placeholder `name it…`)
-2. **export** — system file picker (Storage Access Framework). Save a JSON file anywhere — Downloads, Drive, etc.
-3. **import** — pick a JSON file. Imports get prepended; existing addresses with same hex are kept (your label wins).
+1. **Save current** button at the top -- only when the input has a valid 64-hex address. Tap → modal asks for a label (empty rejected, default placeholder `name it…`)
+2. **export** -- system file picker (Storage Access Framework). Save a JSON file anywhere -- Downloads, Drive, etc.
+3. **import** -- pick a JSON file. Imports get prepended; existing addresses with same hex are kept (your label wins).
 4. **List of bookmarks**, newest first. Shows label + truncated address.
 
 **Long-press a bookmark** for: **rename** / **share** (Android share-sheet with the address as text) / **delete**.
@@ -111,7 +111,7 @@ Tap the **★** to open. The sheet shows:
 }
 ```
 
-fetch>it keeps two things on the device: your **bookmarks** (saved addresses + labels, the JSON above) and a **local cache of fetched Autonomi bytes** (`filesDir/autonomi_cache/`, ~500 MB cap, evicted LRU by last access). The byte cache works exactly like a browser's HTTP cache — it's a private, on-device convenience so you don't re-download what you've already viewed, and it's what makes offline replay possible (content-addressed bytes are immutable, so a cached hit is always the right answer; no revalidation). fetch>it is a reader, not a host: it runs no server, serves nothing to anyone, and the cache only ever holds content *you* fetched, keyed by 64-hex address. Beyond those two stores: no browsing history, no view counts, no thumbnails, no analytics. Clearing the app's storage in Android settings empties the cache.
+fetch>it keeps two things on the device: your **bookmarks** (saved addresses + labels, the JSON above) and a **local cache of fetched Autonomi bytes** (`filesDir/autonomi_cache/`, ~500 MB cap, evicted LRU by last access). The byte cache works exactly like a browser's HTTP cache -- it's a private, on-device convenience so you don't re-download what you've already viewed, and it's what makes offline replay possible (content-addressed bytes are immutable, so a cached hit is always the right answer; no revalidation). fetch>it is a reader, not a host: it runs no server, serves nothing to anyone, and the cache only ever holds content *you* fetched, keyed by 64-hex address. Beyond those two stores: no browsing history, no view counts, no thumbnails, no analytics. Clearing the app's storage in Android settings empties the cache.
 
 ---
 
@@ -119,7 +119,7 @@ fetch>it keeps two things on the device: your **bookmarks** (saved addresses + l
 
 Drag the small handle at the bottom of the screen up.
 
-- **Network** section: `connected to N peers` — auto-updates every 15s. Goes red when count drops to 0 (honest dip indicator), ash when ≥ 1, green when healthy. No refresh button — it polls.
+- **Network** section: `connected to N peers` -- auto-updates every 15s. Goes red when count drops to 0 (honest dip indicator), ash when ≥ 1, green when healthy. No refresh button -- it polls.
 - **Bootstrap peers** section: collapsed by default. Tap the `BOOTSTRAP PEERS ▾` header to expand.
   - Editor pre-filled with current peer list (production defaults if you've never edited)
   - Format: one peer per line, `ip:port` shorthand or full `/ip4/.../udp/.../quic` multiaddr
@@ -147,10 +147,10 @@ fetch>it keeps the Autonomi connection warm while you're using it, and **drops i
 | Foreground, idle | warm (cheap) |
 | Foreground, fetching / playing | warm (active) |
 | Backgrounded < 60s | warm (grace period for quick app switches) |
-| Backgrounded ≥ 60s | **dropped** — QUIC + DHT silent until next fetch |
-| Process killed by OS | reaped — next launch reconnects |
+| Backgrounded ≥ 60s | **dropped** -- QUIC + DHT silent until next fetch |
+| Process killed by OS | reaped -- next launch reconnects |
 
-Settings also lets you save a new peer list — saving forces the connection to drop so the new list takes effect on the next fetch.
+Settings also lets you save a new peer list -- saving forces the connection to drop so the new list takes effect on the next fetch.
 
 ---
 
@@ -169,8 +169,8 @@ Use open with… or save below.
 
 Two buttons:
 
-- **open with…** — fires `Intent.ACTION_VIEW` with the bytes via FileProvider. System chooser shows whatever apps you have for that MIME. If nothing handles it, Snackbar `no app installed to open <mime>`.
-- **save…** — Storage Access Framework picker. Pick where (Downloads, Drive, anywhere). Filename suggested as `fetchit-<addr>.<ext>`.
+- **open with…** -- fires `Intent.ACTION_VIEW` with the bytes via FileProvider. System chooser shows whatever apps you have for that MIME. If nothing handles it, Snackbar `no app installed to open <mime>`.
+- **save…** -- Storage Access Framework picker. Pick where (Downloads, Drive, anywhere). Filename suggested as `fetchit-<addr>.<ext>`.
 
 The temp file used for Open with… lives in `cacheDir/open_with/`. Wiped on next binary fetch and reaped by Android under cache pressure. Saved files go wherever you picked and persist on their own.
 
@@ -188,7 +188,7 @@ Three ways to land on a fetch>it page via `autonomi://<addr>`:
 
 ### Inside a rendered SPA
 
-When fetch>it renders an HTML document, the page is loaded with `https://aut.local` as its base origin — a **synthetic, non-routable** origin. Any `autonomi://<64-hex>` URL in the document source is rewritten to `https://aut.local/<64-hex>` at load time. Every request to `aut.local` is intercepted inside the app: the 64-hex path is extracted, bytes are pulled from the connected fetch>it client over Autonomi, and handed back as if from a normal https response.
+When fetch>it renders an HTML document, the page is loaded with `https://aut.local` as its base origin -- a **synthetic, non-routable** origin. Any `autonomi://<64-hex>` URL in the document source is rewritten to `https://aut.local/<64-hex>` at load time. Every request to `aut.local` is intercepted inside the app: the 64-hex path is extracted, bytes are pulled from the connected fetch>it client over Autonomi, and handed back as if from a normal https response.
 
 No DNS query for `aut.local` ever leaves the device. No TLS handshake. No server.
 
@@ -216,19 +216,19 @@ const xhr = new XMLHttpRequest();
 xhr.open("GET", "autonomi://c2b0…");
 xhr.send();
 
-// And Streams, range requests, CORS — anything the Fetch spec
-// allows for https — because the engine sees https. (Service
+// And Streams, range requests, CORS -- anything the Fetch spec
+// allows for https -- because the engine sees https. (Service
 // Worker registration fails in the null-origin sandbox; see
 // "Honest limitations" below.)
 ```
 
-**One hard limit:** the page reaches *only* the Autonomi network. A `fetch()`, `<script src>`, `<img src>`, etc. pointing at a non-Autonomi host (a CDN, an API, anything) is blocked — fetch>it renders Autonomi content, not the traditional web. SPAs must be fully self-contained: inline assets, or upload each to its own Autonomi address.
+**One hard limit:** the page reaches *only* the Autonomi network. A `fetch()`, `<script src>`, `<img src>`, etc. pointing at a non-Autonomi host (a CDN, an API, anything) is blocked -- fetch>it renders Autonomi content, not the traditional web. SPAs must be fully self-contained: inline assets, or upload each to its own Autonomi address.
 
 **Two equivalent URL forms inside an SPA**:
-- `autonomi://<64-hex>` — rewritten to the synthetic form at document load. Use in static HTML and in JS string literals.
-- `https://aut.local/<64-hex>` — the canonical runtime form. Use when constructing URLs dynamically that aren't in your source HTML/JS string literals.
+- `autonomi://<64-hex>` -- rewritten to the synthetic form at document load. Use in static HTML and in JS string literals.
+- `https://aut.local/<64-hex>` -- the canonical runtime form. Use when constructing URLs dynamically that aren't in your source HTML/JS string literals.
 
-The host treats both as equivalent. End-user URLs (the address bar, bookmarks, share sheet, deep-link intents) always use the `autonomi://` form — that's the user-facing scheme.
+The host treats both as equivalent. End-user URLs (the address bar, bookmarks, share sheet, deep-link intents) always use the `autonomi://` form -- that's the user-facing scheme.
 
 **Display gotcha.** The rewriter is a global string match on `autonomi://<64-hex>`, so if you put a literal `autonomi://<addr>` into display text or copy (rather than into an attribute or JS string), it gets rewritten to `https://aut.local/<addr>` for display too. Two ways around it:
 
@@ -244,7 +244,7 @@ The host treats both as equivalent. End-user URLs (the address bar, bookmarks, s
   <span>autonomi://</span><span>c2b0…ab61</span>
   ```
 
-Abstract mentions of the scheme without a real address (`<code>autonomi://</code>` in a docs table) are left alone — the rewrite pattern is anchored to a 64-hex tail.
+Abstract mentions of the scheme without a real address (`<code>autonomi://</code>` in a docs table) are left alone -- the rewrite pattern is anchored to a 64-hex tail.
 
 For depth on what works inside the SPA sandbox + the protocol-level details, see [`AUTONOMI-WEB.md`](AUTONOMI-WEB.md).
 
@@ -253,8 +253,8 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 ## Sharing addresses
 
 - **From a bookmark**: long-press → share → Android share sheet (paste into Telegram, mail, whatever)
-- **From inside a page**: copy the `autonomi://addr` URL or just the bare hex — recipient pastes either form
-- **From the address bar**: select-all + copy — the input is selectable like any EditText
+- **From inside a page**: copy the `autonomi://addr` URL or just the bare hex -- recipient pastes either form
+- **From the address bar**: select-all + copy -- the input is selectable like any EditText
 
 ---
 
@@ -275,9 +275,9 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 ## Tips
 
-- **First fetch can take up to ~10s** — that's the initial DHT warmup. Repeat fetches in the same session are fast.
+- **First fetch can take up to ~10s** -- that's the initial DHT warmup. Repeat fetches in the same session are fast.
 - **Connection drops after 60s in the background** to save battery. Fine. Just expect one re-bootstrap when you come back.
-- **The peer count in settings is a real-time honesty signal.** If it dips to 0 (red), the network is being weird; that's an honest report, not a glitch — it usually self-recovers within a poll cycle.
+- **The peer count in settings is a real-time honesty signal.** If it dips to 0 (red), the network is being weird; that's an honest report, not a glitch -- it usually self-recovers within a poll cycle.
 - **For air-gapped use** (no traditional internet), as long as Autonomi peers are reachable somehow (LAN node, satellite link, whatever), fetch>it works. SPAs that inline everything also run fine.
 - **For QR codes / link sharing**: encode `autonomi://<addr>` directly. Anyone with fetch>it on Android can scan and land on the page.
 - **Always paste the bare hex when in doubt.** It always works. The `autonomi://` prefix is a convenience.
@@ -286,7 +286,7 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 
 ## Where to look next
 
-- **`AUTONOMI-WEB.md`** — the protocol depth: scheme spec, the synthetic-origin trick, SPA author constraints, trust model
-- **`HANDLER-AUTHORS.md`** — how to add a new content handler in `fetchit-core` (one file, one registration line, byte-fixture tests)
-- **`../README.md`** — five-second project description
+- **`AUTONOMI-WEB.md`** -- the protocol depth: scheme spec, the synthetic-origin trick, SPA author constraints, trust model
+- **`HANDLER-AUTHORS.md`** -- how to add a new content handler in `fetchit-core` (one file, one registration line, byte-fixture tests)
+- **`../README.md`** -- five-second project description
 

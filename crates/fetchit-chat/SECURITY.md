@@ -1,15 +1,15 @@
-# LIT Chat — security model
+# LIT Chat -- security model
 
 This document names the security caveats that ship with LIT Chat.
 It is load-bearing: the in-app "About Chat" screen, and any "is this
 secure?" question all resolve to the text below.
 
 If a claim in the announcement or the UI contradicts something here,
-the claim is wrong — fix the claim, not this document.
+the claim is wrong -- fix the claim, not this document.
 
 > **Scope.** This file covers the *chat* surface only. The reader
-> surface — iframe sandbox, host process, on-disk cache, neutered
-> web APIs — is documented in
+> surface -- iframe sandbox, host process, on-disk cache, neutered
+> web APIs -- is documented in
 > [`docs/SECURITY.md`](../../docs/SECURITY.md). If the two appear
 > to disagree, both are bugs; report the divergence via the channel
 > in [Reporting](#reporting-a-security-issue) below.
@@ -29,7 +29,7 @@ only, 15-min TTL). The relay is our own AGPL-3.0-only code
 The two compromises that v1 documented for M2 closure shipped on the
 `chat` branch on 2026-06-02:
 
-### 1. Relay sees envelope contents — CLOSED
+### 1. Relay sees envelope contents -- CLOSED
 
 Until M2, callers that didn't supply a prebuilt sealed
 `TransitEnvelope` triggered a fabricated v1 send path
@@ -48,12 +48,12 @@ operated relays at `67.207.94.66:8088` (NYC) and `159.89.11.217:8088`
 (Frankfurt) are disclosed-centralized defaults; the user-facing
 "Custom relay" setting lets any user point at their own.
 
-### 2. Groups are public rooms — CLOSED for private groups; public rooms remain as labeled opt-in
+### 2. Groups are public rooms -- CLOSED for private groups; public rooms remain as labeled opt-in
 
 Private groups now ship as PQ TreeKEM via x0xd v0.20.x's MLS surface
 (`preset=private_secure` + `discoverability=Hidden`), which the
 daemon backs with `saorsa-mls v0.3.x` (ML-KEM-768 + ML-DSA-65 +
-ChaCha20-Poly1305 + BLAKE3 — pure PQ, RFC-9420-subset wire format).
+ChaCha20-Poly1305 + BLAKE3 -- pure PQ, RFC-9420-subset wire format).
 The chat layer consumes `secure::create_private_secure`,
 `secure::encrypt`, `secure::decrypt` from `x0xd-client::secure`
 (commits `282aeb9..a1fe9f5`), and `messages::Endpoint::send_private_group`
@@ -87,7 +87,7 @@ narrowed correctly.
 **Honest-claim caveat we mirror from upstream:** the underlying
 `saorsa-mls` README still self-flags as upstream-prototype ("Do not
 use this crate to protect sensitive data in production systems"). We
-ship what upstream ships and harden in tandem — our copy mirrors
+ship what upstream ships and harden in tandem -- our copy mirrors
 that framing rather than overclaim "audited final crypto." We are
 also NOT IETF `draft-ietf-mls-pq-ciphersuites` wire-compatible;
 saorsa-mls is an RFC-9420 *subset* with PQ primitives substituted in,
@@ -129,12 +129,12 @@ now emits `verified: Some(false)`, and the chat UI surfaces an
 
 Where the value IS truthful:
 
-- `Some(true)` — the inbound message rode the `TransitEnvelope` path
+- `Some(true)` -- the inbound message rode the `TransitEnvelope` path
   through `conversation::dispatch_inbound`, which performs real
   ML-DSA-65 verification (`Plan-1 Task 12` landed this).
-- `Some(false)` — message lacks a per-message signature (legacy
+- `Some(false)` -- message lacks a per-message signature (legacy
   path) OR no sender card cached.
-- `None` — outbound bubble; verification doesn't apply.
+- `None` -- outbound bubble; verification doesn't apply.
 
 Session-level relay auth (the `auth_verify_ok_total` Prometheus
 counter) authenticates the **relay session**, not individual messages.
@@ -145,7 +145,7 @@ The two are not the same; this document treats them as separate.
 `LanDirectTransport` sends a 32-byte `agent_id` header in the clear on
 TCP connect so the listener can look up the expected static Noise key
 before the handshake runs. That preamble is **unauthenticated by
-design** — its only job is to route the listener to the right key.
+design** -- its only job is to route the listener to the right key.
 The security gate is the channel-binding signature inside Noise XX
 msg2/msg3 over `(lan_binding_bytes(agent_id, x25519_pub, created_at_ms)
 || handshake_hash)`, plus the requirement that the peer already be a
@@ -167,10 +167,10 @@ exports the vault encrypted under a user-supplied passphrase, plus
 an import flow on the receiving device. The KEM private key never
 leaves the vault format; restore re-establishes decap continuity.
 
-### 7. Crypto deps are pinned by git rev — drift breaks runtime
+### 7. Crypto deps are pinned by git rev -- drift breaks runtime
 
-The post-quantum cryptography stack — `saorsa-pqc`, `snow`,
-`ant-quic`, `x0xd`, `uniffi`, `self_encryption`, `xor_name` — is
+The post-quantum cryptography stack -- `saorsa-pqc`, `snow`,
+`ant-quic`, `x0xd`, `uniffi`, `self_encryption`, `xor_name` -- is
 pinned by git rev in `Cargo.toml` lockstep with the etch>it side.
 `PINS.md` at the workspace root records the canonical revs and
 `scripts/check-pins.sh` (wired into CI) fails the build if
@@ -186,7 +186,7 @@ historical messages.
 M4 bridges inbound `ActivityPub` public posts (`Create { Note }`) into
 the LIT Chat public feed. Each one rides an `EnvelopeKind::PublicPost`
 envelope whose attribution lives in a `PublicPostPayload`
-(`verified_actor_url`) carried out-of-band in the envelope body — **not**
+(`verified_actor_url`) carried out-of-band in the envelope body -- **not**
 the activity's self-asserted `actor` field, which is attacker-controlled.
 
 The trust chain: a `fediverse-inbox`-enabled relay verifies the sending
@@ -195,7 +195,7 @@ delivered the activity), then canonicalises the signing actor URL
 through the same `TargetIdentity::try_new(EntryKind::ActorUrl, ..)` path
 the denylist uses and stamps it as `verified_actor_url`. Clients do not
 fetch the instance's RSA key or see the raw HTTP Signature, so **they
-cannot verify fediverse authorship themselves** — they trust the bridge
+cannot verify fediverse authorship themselves** -- they trust the bridge
 relay as the fediverse-attribution authority. That makes the WSS
 client↔relay channel integrity load-bearing for this one claim. It is a
 real trust boundary, not a hole: the same trust you place in any
@@ -203,7 +203,7 @@ fediverse server's rendering of who posted what, relocated to the relay
 you already authenticate a session against.
 
 `PublicPost` is the **sole** exemption from the chat sig/KEM verify
-regime — its body is `application/activity+json`, not chat ciphertext,
+regime -- its body is `application/activity+json`, not chat ciphertext,
 and `sender_agent_id` is the all-zeros `FEDIVERSE_BRIDGE_SENDER`
 sentinel (which the relay's directed-send path refuses as a delivery
 target). `kind` drives the verify regime **and** the rendering
@@ -249,22 +249,22 @@ Signature gates in `crates/fetchit-relay-server/src/inbox/`.
 Every claim above maps to a source file or commit. Suggested reading
 order:
 
-- `crates/fetchit-chat/src/relay_transport.rs` — sealed-only send
+- `crates/fetchit-chat/src/relay_transport.rs` -- sealed-only send
   path (no fabricated fallback as of M2)
-- `crates/fetchit-chat/src/messages.rs` — `send_private_group` +
+- `crates/fetchit-chat/src/messages.rs` -- `send_private_group` +
   `receive_private_group_envelope` end-to-end shape;
   `decode_direct_message` for the legacy verified flag
-- `crates/fetchit-chat/src/groups.rs` — `create_private` /
+- `crates/fetchit-chat/src/groups.rs` -- `create_private` /
   `create` / `members` / `invite` HTTP wrappers
-- `crates/x0xd-client/src/secure.rs` — typed wrappers over x0xd's
+- `crates/x0xd-client/src/secure.rs` -- typed wrappers over x0xd's
   MLS surface
-- `crates/x0xd-client/src/version.rs` — the v0.20.1 minimum-version
+- `crates/x0xd-client/src/version.rs` -- the v0.20.1 minimum-version
   startup gate
-- `crates/fetchit-chat/src/lan_noise.rs` — Noise XX channel-binding
-- `crates/fetchit-chat/src/at_rest.rs` — FCV1 vault format
-- `crates/fetchit-chat/src/conversation/inbound.rs` — the verified
+- `crates/fetchit-chat/src/lan_noise.rs` -- Noise XX channel-binding
+- `crates/fetchit-chat/src/at_rest.rs` -- FCV1 vault format
+- `crates/fetchit-chat/src/conversation/inbound.rs` -- the verified
   ML-DSA-65 path on the encrypted DM side
-- `crates/fetchit-chat/src/conversation/registry.rs` — atomic
+- `crates/fetchit-chat/src/conversation/registry.rs` -- atomic
   mutate-in-place pattern that gates replay + history persistence
 
 ## Reporting a security issue

@@ -25,7 +25,7 @@ Pick whichever fits. You do not need both.
 - You want commercial support, indemnification, or warranty terms that
   the AGPL explicitly does not provide.
 
-If none of those apply — use the AGPL track. No fee, no signature, no
+If none of those apply -- use the AGPL track. No fee, no signature, no
 permission needed.
 
 ## How to get a commercial license
@@ -45,7 +45,7 @@ standard rate card yet.
 
 ## Authors and copyright
 
-Copyright in fetch>it belongs to the fetch>it project authors —
+Copyright in fetch>it belongs to the fetch>it project authors --
 currently a solo maintainer plus any future contributors who accept
 the Contributor License Agreement described in
 [`CONTRIBUTING.md`](CONTRIBUTING.md). The CLA preserves contributor

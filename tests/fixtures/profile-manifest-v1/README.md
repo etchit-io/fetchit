@@ -1,4 +1,4 @@
-# Profile Manifest v1 — test fixture
+# Profile Manifest v1 -- test fixture
 
 Reference fixture for `docs/profile-manifest-v1.md`. Both etch>it
 (publisher) and fetch>it (consumer) consume this in CI to confirm
@@ -51,7 +51,7 @@ generator is **idempotent**: it always rewrites the JCS
 `canonical.bin` (deterministic) but only writes `sig.bin` when
 missing, then verifies the on-disk sig against the live pubkey +
 canonical bytes. ML-DSA-65 is non-deterministic in saorsa-pqc,
-so a fresh `sign()` would never byte-match the committed value —
+so a fresh `sign()` would never byte-match the committed value --
 the verify-on-regen step instead catches drift: if you change the
 spec, JCS output, or signing input, the next run errors with
 "committed sig does NOT verify". Delete the affected `sig.bin`

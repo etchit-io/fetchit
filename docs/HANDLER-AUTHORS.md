@@ -18,7 +18,7 @@ pub trait ContentHandler: Send + Sync {
 | Method        | What it does                                                     | Cost budget                       |
 | ------------- | ---------------------------------------------------------------- | --------------------------------- |
 | `kind`        | Stable identifier, used in errors and telemetry.                 | constant                          |
-| `can_handle`  | Cheap byte-sniff over the leading slice (≤ 4 KB).                | nanoseconds — runs on every fetch |
+| `can_handle`  | Cheap byte-sniff over the leading slice (≤ 4 KB).                | nanoseconds -- runs on every fetch |
 | `render`      | Turn the full payload into a typed `Rendition`. May fail.        | proportional to input size        |
 
 ## Confidence levels
@@ -27,7 +27,7 @@ pub trait ContentHandler: Send + Sync {
 
 | Variant      | When                                                       |
 | ------------ | ---------------------------------------------------------- |
-| `Definite`   | Magic-byte match — no plausible false positives.           |
+| `Definite`   | Magic-byte match -- no plausible false positives.           |
 | `High`       | Strong structural match (e.g. valid JSON parses cleanly).  |
 | `Medium`     | Heuristic match (e.g. payload looks textual).              |
 | `Low`        | Last-resort fallback. Reserved for the binary handler.     |
@@ -46,7 +46,7 @@ fallback last.
 
 2. **Pick a `kind`.** Use the IANA MIME if one exists
    (`application/zip`, `audio/wav`); otherwise a `fetchit/` pseudo-MIME
-   (`fetchit/some-format-v1`). Stable across releases — it shows up in
+   (`fetchit/some-format-v1`). Stable across releases -- it shows up in
    error messages.
 
 3. **Add the module and register it.** In `handlers/mod.rs`:
@@ -92,7 +92,7 @@ If `Foo` decodes to something that fits an existing variant
 (`Text`, `Image`, `Audio`, `Video`, `Pdf`, `Json`, `Tabular`,
 `Archive`, `Html`, `EtchitEnvelope`, `OpaqueBinary`), use it. Adding a
 new variant is allowed but means a coordinated bump in every UI
-surface — propose the change on the issue tracker first.
+surface -- propose the change on the issue tracker first.
 
 ## Forbidden in handler code
 

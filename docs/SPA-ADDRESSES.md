@@ -29,7 +29,7 @@ python3 -c "import sys, subprocess; from blake3 import blake3; \
 ```
 
 The resulting hex should match the BLAKE3 column. If it does not, the
-source has drifted from the pinned upload — the SPA must be re-published
+source has drifted from the pinned upload -- the SPA must be re-published
 and the row updated.
 
 ## How to add a new template SPA

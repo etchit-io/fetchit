@@ -1,6 +1,6 @@
 # Security model
 
-> **Status — beta, no warranty.** fetch>it is beta software, dual-
+> **Status -- beta, no warranty.** fetch>it is beta software, dual-
 > licensed under [`AGPL-3.0-only`](../LICENSE) and a separate commercial
 > license (see [`COMMERCIAL.md`](../COMMERCIAL.md)). Both licenses
 > disclaim all warranties (AGPL sections 15 / 16): the software is
@@ -14,7 +14,7 @@
 > writing, but only the source is authoritative; defenses may have
 > gaps we haven't found yet, and the underlying browser engines we
 > rely on may have CVEs we don't know about. If you spot a divergence
-> between this doc and the code — or a gap in the defenses — please
+> between this doc and the code -- or a gap in the defenses -- please
 > report it (see [Reporting](#reporting)).
 
 This document describes fetchit's security posture: what threats it
@@ -29,8 +29,8 @@ do not file public issues for security-impacting bugs.**
 > **Scope of this document.** This file covers the *reader* surface:
 > the iframe sandbox, the host process, the on-disk cache, and the
 > LAN-direct chat handshake. The chat surface has additional
-> caveats — relay-path confidentiality, group encryption, per-message
-> signature verification, KEM-keypair backup — that are documented
+> caveats -- relay-path confidentiality, group encryption, per-message
+> signature verification, KEM-keypair backup -- that are documented
 > separately in
 > [`crates/fetchit-chat/SECURITY.md`](../crates/fetchit-chat/SECURITY.md).
 > If the two documents appear to disagree, both are bugs; please
@@ -68,7 +68,7 @@ fetch>it defends against:
 2. **Network egress to non-Autonomi endpoints**. The rendered content
    is sandboxed so it can't reach hosts other than the local Autonomi
    protocol handler. CDN beacons, tracker pixels, font CDNs, error-
-   reporting endpoints — blocked by the defenses listed below. (No
+   reporting endpoints -- blocked by the defenses listed below. (No
    security boundary is perfect; browser-engine bugs are out of scope.)
 3. **Local state exfiltration via web APIs**. APIs that surface device
    info (sensors, mediaDevices, geolocation, WebRTC ICE) are locked out
@@ -86,15 +86,15 @@ fetch>it explicitly does **not** defend against:
   WebView on Android). A kernel-level exploit in the renderer is outside
   the trust boundary; we mitigate by keeping the OS WebView current and
   shrinking the API surface the renderer exposes.
-- **Adversarial content authenticity**. Content is addressed by hash —
-  a hash IS its content — but *which* hashes the user trusts is a
+- **Adversarial content authenticity**. Content is addressed by hash --
+  a hash IS its content -- but *which* hashes the user trusts is a
   social/UX problem. The reader can't tell that "the official banking
   page" lives at one hash rather than another; users must verify
   addresses via channels they trust.
 - **Media-codec bugs in the OS** (Stagefright-class). The same as the
-  browser-engine point — kept current at the OS level.
+  browser-engine point -- kept current at the OS level.
 - **OS-level threats**. A keylogger on the host machine, a malicious
-  kernel module, or someone with physical access to the device — out of
+  kernel module, or someone with physical access to the device -- out of
   scope. fetch>it protects its own renderer; it doesn't substitute for
   OS hygiene.
 
@@ -128,7 +128,7 @@ fetch>it explicitly does **not** defend against:
 │ │   • fetchit-core: handler registry, parses bytes         │ │
 │ │   • Tauri 2 shell, custom URI scheme + media HTTP server │ │
 │ │ ┌─────────────────────────────────────────────────────┐  │ │
-│ │ │ Main WebView (our UI code only — trusted)           │  │ │
+│ │ │ Main WebView (our UI code only -- trusted)           │  │ │
 │ │ │   • address bar, tabs, settings panel               │  │ │
 │ │ │   • TS code we wrote                                │  │ │
 │ │ │ ┌─────────────────────────────────────────────────┐ │  │ │
@@ -156,7 +156,7 @@ sandboxed iframe** (the rendered-content surface).
 | --- | --- | --- |
 | `fetch` / `XMLHttpRequest` / `WebSocket` / `EventSource` / Beacon to external host | CSP `connect-src 'self' fetchit: autonomi: <mediaBase>` | `htmlRewriter.ts::buildCsp` |
 | `<script src="https://…">`, inline `eval` | CSP `script-src 'self' fetchit: autonomi: 'unsafe-inline' 'unsafe-eval'` (inline / eval allowed because SPAs need them; external script blocked) | `buildCsp` |
-| External stylesheets, fonts, images, media | CSP `style-src`, `font-src`, `img-src`, `media-src` — only `self`, `fetchit:`, `autonomi:`, `data:`, `blob:`, and the localhost media server | `buildCsp` |
+| External stylesheets, fonts, images, media | CSP `style-src`, `font-src`, `img-src`, `media-src` -- only `self`, `fetchit:`, `autonomi:`, `data:`, `blob:`, and the localhost media server | `buildCsp` |
 | `<iframe>`, `<object>`, `<embed>`, `<applet>` (nested browsing context) | CSP `frame-src 'none'`, `object-src 'none'` | `buildCsp` |
 | `<base href="https://attacker/">` redirecting relative URLs | CSP `base-uri 'self' fetchit: autonomi:` + injected `<base href="autonomi://<addr>/">` overriding any author base | `buildCsp` + `setBase` |
 | `<form action="https://attacker">` | CSP `form-action 'self' fetchit: autonomi:` | `buildCsp` |
@@ -182,7 +182,7 @@ sandboxed iframe** (the rendered-content surface).
 
 | Vector | Defense |
 | --- | --- |
-| Auto-updater phoning home | **Not configured** — no updater plugin enabled, no endpoint URL. The binary never calls home. |
+| Auto-updater phoning home | **Not configured** -- no updater plugin enabled, no endpoint URL. The binary never calls home. |
 | Telemetry / analytics | None. There is no telemetry code anywhere in the workspace. |
 | Disk install footprint | The on-disk byte cache is **off by default**. A fresh install leaves no fetched content on disk until the user opts in via Settings. When on, the user picks one of *Persist / Clear on close / Clear after idle*. |
 | Process listening on the LAN | The media HTTP server binds to `127.0.0.1` on an OS-chosen port. Not reachable from another host. |
@@ -206,14 +206,14 @@ sandboxed iframe** (the rendered-content surface).
   LRU-evicted to a user-set cap. Three clear modes: *Persist /
   Clear on close / Clear after idle*. A *Clear cache now* button is
   always available. With the cache on, the download streams straight
-  into the slot — which is also what drives the desktop progress bar;
+  into the slot -- which is also what drives the desktop progress bar;
   the default cache-off fetch stays in memory, behind a spinner.
 - **Settings file**: `<app-local-data>/settings.json`. Contains: cache
   policy + bookmarks. Nothing else. Human-readable, deletable.
 
 ---
 
-## What's authoritative — files to read
+## What's authoritative -- files to read
 
 If you're auditing fetch>it, the load-bearing security code lives in:
 
@@ -221,10 +221,10 @@ If you're auditing fetch>it, the load-bearing security code lives in:
 | --- | --- |
 | `apps/fetchit-desktop/src/renderers/htmlRewriter.ts` | CSP construction, all rewriter strip steps, the neuter script |
 | `apps/fetchit-desktop/src/renderers/html.ts` | Iframe sandbox attribute, the `SANDBOX` constant |
-| `apps/fetchit-desktop/src-tauri/src/protocol.rs` | `autonomi://` / `fetchit://` URI scheme handler — what gets served |
-| `apps/fetchit-desktop/src-tauri/src/server.rs` | The 127.0.0.1 media HTTP server — bind address, range handling |
+| `apps/fetchit-desktop/src-tauri/src/protocol.rs` | `autonomi://` / `fetchit://` URI scheme handler -- what gets served |
+| `apps/fetchit-desktop/src-tauri/src/server.rs` | The 127.0.0.1 media HTTP server -- bind address, range handling |
 | `apps/fetchit-desktop/src-tauri/tauri.conf.json` | App config, including the absence of an updater endpoint |
-| `apps/fetchit-desktop/src-tauri/capabilities/default.json` | Tauri capability surface — what the WebView's JS side can invoke |
+| `apps/fetchit-desktop/src-tauri/capabilities/default.json` | Tauri capability surface -- what the WebView's JS side can invoke |
 | `apps/fetchit-desktop/src-tauri/src/disk_cache.rs` | On-disk cache: file-mtime LRU, policy gating, clear |
 | `apps/fetchit-desktop/src-tauri/src/settings.rs` | Persistence format, defaults |
 | `crates/fetchit-chat/src/lan_direct_transport.rs` | LAN-direct transport: TCP dial, accept loop, handshake-binding verifier, reachability gate |
@@ -241,7 +241,7 @@ ML-DSA-65 signatures over `lan_binding_bytes || handshake_hash`
 on messages 2 and 3, verified against the peer's ML-DSA pubkey
 already on the local contact card (from share-URI import). A
 LAN-announced peer that isn't in the contact store fails
-reachability immediately — strangers on the LAN cannot be dialled,
+reachability immediately -- strangers on the LAN cannot be dialled,
 inbound dials from unknown agents fail the post-handshake
 signature verification and are dropped. Accept-loop is capped at
 32 concurrent handshakes process-wide. No NAT traversal, no WAN.
@@ -261,7 +261,7 @@ step and policy default is covered by a test.
    the Tauri WebView shows as internal). No `https://` requests to any
    external host.
 5. If you see a request to a host other than `127.0.0.1` while
-   rendering Autonomi content, that's a security bug — file a private
+   rendering Autonomi content, that's a security bug -- file a private
    report (below).
 
 ---

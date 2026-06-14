@@ -73,7 +73,7 @@ color-scheme: dark;
 
 ### Dim
 
-"Warm dusk" — canvas at L≈20%, a literal step between Dark (L≈4%)
+"Warm dusk" -- canvas at L≈20%, a literal step between Dark (L≈4%)
 and Light (L≈94%). Bone-on-ink ≈ 10.5 : 1 (AAA). Same copper-family
 hue as the rest of the palette so no accent retune required.
 
@@ -116,7 +116,7 @@ font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans
 ```
 
 System fonts only. No `<link rel="stylesheet">` to Google Fonts for
-chrome — Cantarell on GNOME, San Francisco on macOS, Segoe UI on
+chrome -- Cantarell on GNOME, San Francisco on macOS, Segoe UI on
 Windows. Both apps render with the host OS's UI font so they melt
 into the desktop they're running on.
 
@@ -146,13 +146,13 @@ moment does not use the serif.
 ## Typography scale
 
 One canonical scale, used by chrome in **both** apps. Px units, not
-rem — the body base is `14px/1.5` and that's load-bearing for every
+rem -- the body base is `14px/1.5` and that's load-bearing for every
 other size below it. Don't introduce in-between sizes.
 
 | Surface                                   | Size | Weight | Notes                                                  |
 |-------------------------------------------|-----:|-------:|--------------------------------------------------------|
-| Page heading (`h1` — "Settings", "Etch")  | 22px |   600  | `letter-spacing: -0.01em`                              |
-| Section heading (`h2` — "Appearance")     | 15px |   600  | Mixed case                                             |
+| Page heading (`h1` -- "Settings", "Etch")  | 22px |   600  | `letter-spacing: -0.01em`                              |
+| Section heading (`h2` -- "Appearance")     | 15px |   600  | Mixed case                                             |
 | Subsection label (chip / "ABOUT" tag)     | 11px |   600  | `text-transform: uppercase`, `letter-spacing: 0.08em`  |
 | Body paragraph (default)                  | 14px |   400  | Body base; `line-height: 1.5`                          |
 | Compact body (row text, descriptions)     | 13px |   400  | `line-height: 1.55` when block-level                   |
@@ -167,7 +167,7 @@ other size below it. Don't introduce in-between sizes.
 | Display tagline                           | 17px | 400 italic | serif                                              |
 
 Headings use `color: var(--bone)`. Descriptions/help use
-`color: var(--ash)`. No theme override needed — the tokens carry it.
+`color: var(--ash)`. No theme override needed -- the tokens carry it.
 
 When the design needs a size that's not in this list, add it to
 the table (in both repos) before using it. Drift here is what made
@@ -226,7 +226,7 @@ display moments.
 
 ## Adding a new themed surface
 
-1. Use the existing tokens — do not introduce hex literals in CSS rules.
+1. Use the existing tokens -- do not introduce hex literals in CSS rules.
 2. If a new role is genuinely needed (not already covered), add a
    token to **both** apps in the same change and bump this doc.
 3. Never check theme by reading hex values in JS. Use the CSS

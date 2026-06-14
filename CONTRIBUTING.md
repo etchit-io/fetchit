@@ -26,7 +26,7 @@ under the AGPL, *and* grant the project the right to also offer it
 under the commercial track. The CLA does not transfer ownership; it
 just lets the project maintain both license offerings consistently.
 
-If the CLA is a hard no for you, that's understandable — please open an
+If the CLA is a hard no for you, that's understandable. Please open an
 issue describing the change and a maintainer will pick it up.
 
 ## Quality bar
@@ -42,7 +42,7 @@ fetch>it ships open-source from commit one. That means:
   same change
 
 CI runs all of the above on every push and pull request. The full test
-matrix — every app, plus the network-test tiers — is documented in
+matrix (every app, plus the network-test tiers) is documented in
 [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Docs track code
