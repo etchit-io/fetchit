@@ -69,10 +69,13 @@ fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
-    let token = raw
-        .strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))?
-        .trim();
+    // Scheme is case-insensitive per RFC 7235 (auth-scheme). Split off the
+    // first token as the scheme, the remainder is the credential.
+    let (scheme, token) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
     (!token.is_empty()).then(|| token.to_owned())
 }
 
@@ -495,10 +498,13 @@ mod tests {
 
     #[test]
     fn bearer_scheme_is_case_insensitive() {
-        assert_eq!(
-            bearer_from_headers(&auth_headers("bearer abc123")).as_deref(),
-            Some("abc123"),
-        );
+        for scheme in ["bearer", "BEARER", "BeArEr"] {
+            assert_eq!(
+                bearer_from_headers(&auth_headers(&format!("{scheme} abc123"))).as_deref(),
+                Some("abc123"),
+                "scheme {scheme:?} should be accepted case-insensitively",
+            );
+        }
     }
 
     #[test]
