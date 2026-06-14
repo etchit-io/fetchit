@@ -36,6 +36,7 @@ pub mod lan_noise;
 pub mod lan_static;
 pub mod local_store;
 pub mod messages;
+pub mod outbox;
 pub mod pair;
 pub mod pair_record;
 pub mod pair_uri;
