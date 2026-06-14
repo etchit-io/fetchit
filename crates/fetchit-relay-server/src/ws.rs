@@ -5,7 +5,7 @@ use crate::server::ServerState;
 use crate::transit::Entry;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Moved, Ping,
@@ -30,23 +30,50 @@ const WS_OUTBOUND_CAPACITY: usize = 512;
 /// indefinitely.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Query string carrying the bearer token for the WS upgrade.
+/// Query string optionally carrying the bearer token for the WS upgrade.
+/// Legacy transport: newer clients send the token in the `Authorization:
+/// Bearer` header instead (#113), so the query field is optional.
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    /// Bearer token previously issued by `/v1/auth/verify`.
-    pub token: String,
+    /// Bearer token previously issued by `/v1/auth/verify`. `None` when the
+    /// client supplies it via the `Authorization` header instead.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// Axum handler: validate bearer, upgrade, hand off to `handle_socket`.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Query(query): Query<WsQuery>,
 ) -> impl IntoResponse {
-    let Some(auth) = state.auth.validate_bearer(&query.token) else {
+    // #113: prefer the bearer token from the `Authorization` header so it
+    // stays out of the URL (and out of any fronting proxy / CF access log);
+    // fall back to the legacy `?token=` query for backward-compat with
+    // older clients during the rollout. The header wins when both are sent.
+    let Some(token) = bearer_from_headers(&headers).or(query.token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(auth) = state.auth.validate_bearer(&token) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     ws.on_upgrade(move |socket| handle_socket(socket, auth, state))
+}
+
+/// Extract the bearer token from an `Authorization: Bearer <token>` header.
+/// Case-insensitive on the scheme; `None` when the header is absent,
+/// non-UTF-8, not a `Bearer` scheme, or carries an empty token.
+fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))?
+        .trim();
+    (!token.is_empty()).then(|| token.to_owned())
 }
 
 async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<ServerState>) {
@@ -441,13 +468,46 @@ mod tests {
     //! receiver + writer to prove the writer-exit arm fires promptly — a
     //! regression here would re-introduce ghosted sessions that linger until
     //! the client-side keepalive eventually triggers a reconnect.
-    use super::{await_hello_inner, replay_transit, LoopExit, HELLO_TIMEOUT, WS_OUTBOUND_CAPACITY};
+    use super::{
+        await_hello_inner, bearer_from_headers, replay_transit, LoopExit, HELLO_TIMEOUT,
+        WS_OUTBOUND_CAPACITY,
+    };
     use crate::transit::Entry;
     use axum::extract::ws::Message;
     use fetchit_relay_proto::{
         to_bytes, AgentId, ClientFrame, EnvelopeKind, Hello, MachineId, Pong, ServerFrame,
         TransitEnvelope, WIRE_VERSION,
     };
+
+    fn auth_headers(value: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn bearer_from_authorization_header() {
+        assert_eq!(
+            bearer_from_headers(&auth_headers("Bearer abc123")).as_deref(),
+            Some("abc123"),
+        );
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        assert_eq!(
+            bearer_from_headers(&auth_headers("bearer abc123")).as_deref(),
+            Some("abc123"),
+        );
+    }
+
+    #[test]
+    fn non_bearer_empty_or_absent_is_none() {
+        assert!(bearer_from_headers(&auth_headers("Basic abc123")).is_none());
+        assert!(bearer_from_headers(&auth_headers("Bearer ")).is_none());
+        assert!(bearer_from_headers(&auth_headers("Bearer   ")).is_none());
+        assert!(bearer_from_headers(&axum::http::HeaderMap::new()).is_none());
+    }
     use futures_util::stream::{self, StreamExt};
     use std::convert::Infallible;
     use std::time::{Duration, Instant};

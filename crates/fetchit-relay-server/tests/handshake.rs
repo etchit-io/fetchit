@@ -89,6 +89,21 @@ async fn connect_ws(
     ws
 }
 
+/// #113: connect supplying the bearer via the `Authorization` header
+/// instead of the `?token=` query, so the token never appears in the URL.
+async fn connect_ws_with_bearer_header(
+    addr: SocketAddr,
+    token: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let mut req = format!("ws://{addr}/v1/ws").into_client_request().unwrap();
+    req.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let (ws, _resp) = connect_async(req).await.unwrap();
+    ws
+}
+
 fn envelope_from(sender: AgentId, body: &[u8]) -> TransitEnvelope {
     TransitEnvelope {
         version: WIRE_VERSION,
@@ -154,6 +169,18 @@ async fn auth_handshake_yields_bearer_token() {
     let addr = start_test_server().await;
     let token = obtain_bearer(addr, b"alice-pubkey").await;
     assert!(!token.is_empty());
+}
+
+#[tokio::test]
+async fn ws_upgrade_authenticates_via_authorization_header() {
+    // #113: a bearer presented in the Authorization header (no ?token= in
+    // the URL) is accepted; the upgrade succeeds and the session reaches
+    // Ready. This is the real win -- the token leaves the URL.
+    let addr = start_test_server().await;
+    let token = obtain_bearer(addr, b"alice-pubkey").await;
+    let mut ws = connect_ws_with_bearer_header(addr, &token).await;
+    send_hello(&mut ws).await;
+    let _ready = expect_ready(&mut ws).await;
 }
 
 #[tokio::test]
