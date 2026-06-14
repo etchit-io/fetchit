@@ -58,6 +58,44 @@ class ConversationStore {
         }
     }
 
+    /**
+     * Insert or update the outbound message backed by outbox bubble [outboxId]
+     * in the thread for [peerAgentIdHex]. Keyed by [outboxId] so the optimistic
+     * `Sending` echo, the `Delivered` transition, and a `Failed` terminal all
+     * land on the same bubble instead of stacking duplicates.
+     */
+    fun upsertOutbox(
+        peerAgentIdHex: String,
+        outboxId: String,
+        body: String,
+        sentAtMs: Long,
+        messageId: String?,
+        delivered: Boolean,
+        failed: Boolean,
+        lastError: String?,
+    ) {
+        synchronized(lock) {
+            val flow = flowFor(peerAgentIdHex)
+            val list = flow.value
+            val msg = ChatMessage(
+                outbound = true,
+                body = body,
+                sentAtMs = sentAtMs,
+                messageId = messageId,
+                delivered = delivered,
+                failed = failed,
+                outboxId = outboxId,
+                lastError = lastError,
+            )
+            val idx = list.indexOfFirst { it.outboxId == outboxId }
+            flow.value = if (idx >= 0) {
+                list.toMutableList().also { it[idx] = msg }
+            } else {
+                list + msg
+            }
+        }
+    }
+
     /** Peers that have at least one message, in insertion order. */
     fun peersWithTraffic(): List<String> = synchronized(lock) { byPeer.keys.toList() }
 

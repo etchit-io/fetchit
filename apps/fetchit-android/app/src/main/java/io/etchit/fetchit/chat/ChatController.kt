@@ -13,6 +13,8 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.OutboxStatusFfi
 import java.io.File
 
 /**
@@ -99,7 +101,24 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                         if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
                 },
             )
+            // Subscribe-first: the pump above is already draining outbox events.
+            // Now start the retry driver and hydrate any bubbles that were
+            // enqueued (and vault-persisted) before this process subscribed.
+            startOutboxAndHydrate(gw)
             return gw
+        }
+    }
+
+    /**
+     * Start the engine outbox driver and project the current outbox snapshot
+     * into [conversations]. Called once per connect, after the event pump is
+     * live, so the snapshot can only duplicate live events -- and the upsert is
+     * keyed by bubble id, so duplicates collapse onto one bubble.
+     */
+    private suspend fun startOutboxAndHydrate(gw: ChatGateway) {
+        gw.startOutbox(displayNameOrDefault(appContext, gw.agentIdHex()))
+        for (bubble in gw.outboxSnapshot()) {
+            projectOutbox(conversations, bubble)
         }
     }
 
@@ -183,6 +202,7 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                     )
                     is ChatEventFfi.Receipt -> convo.markDelivered(ev.messageId)
                     is ChatEventFfi.PublicPost -> decodePost(ev, htmlStripper)?.let(feed::append)
+                    is ChatEventFfi.Outbox -> projectOutbox(convo, ev.bubble)
                 }
             }
             onStopped(false)
@@ -210,5 +230,23 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             val plain = htmlStripper(content)
             if (plain.isEmpty()) null else FeedPost(ev.verifiedActorUrl, plain, System.currentTimeMillis())
         }.getOrNull()
+
+        /**
+         * Project an FFI outbox [bubble] into [convo], upserting by bubble id.
+         * Maps the FFI status enum to the [ChatMessage] delivered/failed flags
+         * so [ConversationStore] stays free of any uniffi types.
+         */
+        fun projectOutbox(convo: ConversationStore, bubble: OutboxBubbleFfi) {
+            convo.upsertOutbox(
+                peerAgentIdHex = bubble.peerAgentIdHex,
+                outboxId = bubble.id,
+                body = bubble.body,
+                sentAtMs = bubble.enqueuedAtMs.toLong(),
+                messageId = bubble.messageId,
+                delivered = bubble.status == OutboxStatusFfi.DELIVERED,
+                failed = bubble.status == OutboxStatusFfi.FAILED,
+                lastError = bubble.lastError,
+            )
+        }
     }
 }

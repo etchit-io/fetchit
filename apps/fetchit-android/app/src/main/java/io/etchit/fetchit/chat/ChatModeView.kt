@@ -358,7 +358,7 @@ class ChatModeView(
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
         rv.layoutManager = lm
-        val adapter = MessageAdapter(onOpenAutonomi)
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = { retryOutbox() })
         rv.adapter = adapter
 
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
@@ -377,18 +377,10 @@ class ChatModeView(
                     return@launch
                 }
                 val senderName = displayNameOrDefault(gw)
-                val result = runCatching { gw.sendDm(peer, body, senderName) }
-                result.onSuccess { msgId ->
-                    controller.conversations.append(
-                        peer,
-                        ChatMessage(
-                            outbound = true,
-                            body = body,
-                            sentAtMs = System.currentTimeMillis(),
-                            messageId = msgId,
-                        ),
-                    )
-                }.onFailure { e ->
+                // Enqueue into the durable outbox: the optimistic Sending bubble
+                // and its Delivered/Failed transitions arrive as Outbox events
+                // through the pump, so there is no local append here.
+                runCatching { gw.enqueueDm(peer, body, senderName) }.onFailure { e ->
                     // Only restore text if this thread is still the active screen.
                     if (screenStack.lastOrNull() == Screen.Thread(peer)) {
                         messageInput.setText(body)
@@ -430,7 +422,7 @@ class ChatModeView(
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
         rv.layoutManager = lm
-        val adapter = MessageAdapter(onOpenAutonomi)
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
         rv.adapter = adapter
 
         feedCollectJob = lifecycleScope.launch {
@@ -529,6 +521,16 @@ class ChatModeView(
     private fun displayNameOrDefault(gw: ChatGateway): String =
         io.etchit.fetchit.chat.displayNameOrDefault(context, gw.agentIdHex())
 
+    /** Flush the outbox now, in response to a tap on a failed message bubble. */
+    private fun retryOutbox() {
+        val gw = controller.gateway() ?: run {
+            snackbar(context.getString(R.string.chat_not_connected))
+            return
+        }
+        gw.retryOutbox()
+        snackbar(context.getString(R.string.chat_retrying))
+    }
+
     // ── message adapter ───────────────────────────────────────────────
 
     private sealed class MessageRow {
@@ -539,9 +541,15 @@ class ChatModeView(
     private val msgDiff = object : DiffUtil.ItemCallback<MessageRow>() {
         override fun areItemsTheSame(old: MessageRow, new: MessageRow): Boolean =
             when {
-                old is MessageRow.Dm && new is MessageRow.Dm ->
-                    if (old.msg.messageId != null) old.msg.messageId == new.msg.messageId
-                    else old.msg.sentAtMs == new.msg.sentAtMs && old.msg.body == new.msg.body
+                old is MessageRow.Dm && new is MessageRow.Dm -> {
+                    val o = old.msg
+                    val n = new.msg
+                    when {
+                        o.outboxId != null || n.outboxId != null -> o.outboxId == n.outboxId
+                        o.messageId != null -> o.messageId == n.messageId
+                        else -> o.sentAtMs == n.sentAtMs && o.body == n.body
+                    }
+                }
                 old is MessageRow.Post && new is MessageRow.Post ->
                     old.post.actorUrl == new.post.actorUrl &&
                         old.post.body == new.post.body
@@ -554,6 +562,7 @@ class ChatModeView(
 
     private inner class MessageAdapter(
         private val onLinkTap: (String) -> Unit,
+        private val onRetry: () -> Unit,
     ) : ListAdapter<MessageRow, MessageAdapter.VH>(msgDiff) {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -584,11 +593,22 @@ class ChatModeView(
                     (itemView as? LinearLayout)?.gravity = android.view.Gravity.END
                     bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
                     bubble.text = msg.body
-                    val tick = if (msg.delivered) " ✓" else ""
-                    meta.text = "${timeFmt.format(Date(msg.sentAtMs))}$tick"
+                    // Send status: failed bubbles are tappable to retry the whole
+                    // outbox; delivered show a tick; in-flight show plain time.
+                    val status = when {
+                        msg.failed -> " " + context.getString(R.string.chat_msg_failed_retry)
+                        msg.delivered -> " ✓"
+                        else -> ""
+                    }
+                    meta.text = "${timeFmt.format(Date(msg.sentAtMs))}$status"
                     meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
                     (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                         android.view.Gravity.END
+                    if (msg.failed) {
+                        itemView.setOnClickListener { onRetry() }
+                    } else {
+                        itemView.setOnClickListener(null)
+                    }
                 } else {
                     bubble.setBackgroundResource(R.drawable.bg_bubble_in)
                     (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
@@ -625,6 +645,8 @@ class ChatModeView(
                         bubble.text = spannable
                         bubble.movementMethod = LinkMovementMethod.getInstance()
                     }
+                    // Clear any retry listener left by a recycled outbound bubble.
+                    itemView.setOnClickListener(null)
                 }
             }
 

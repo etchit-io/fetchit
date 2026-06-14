@@ -179,6 +179,8 @@
     <string name="thread_message_hint">message…</string>
     <string name="chat_send_glyph">➤</string>
     <string name="thread_send_failed">send failed: %1$s</string>
+    <string name="chat_msg_failed_retry">⚠ tap to retry</string>
+    <string name="chat_retrying">retrying…</string>
 
     <!-- Chat: display name setting -->
     <string name="chat_display_name">chat display name</string>

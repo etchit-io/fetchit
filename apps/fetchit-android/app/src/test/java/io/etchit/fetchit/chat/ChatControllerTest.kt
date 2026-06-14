@@ -6,6 +6,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.OutboxStatusFfi
 
 /** Regex-based HTML stripper used in place of [android.text.Html.fromHtml] so these tests run on the plain JVM. */
 private fun stripHtml(html: String): String =
@@ -13,13 +15,19 @@ private fun stripHtml(html: String): String =
 
 class FakeGateway : ChatGateway {
     val events = Channel<ChatEventFfi?>(capacity = 8)
-    val sent = mutableListOf<Triple<String, String, String>>()
+    val enqueued = mutableListOf<Triple<String, String, String>>()
+    var startedOutbox: String? = null
+    var retried = 0
+    var snapshot: List<OutboxBubbleFfi> = emptyList()
     override fun agentIdHex() = "f".repeat(64)
     override suspend fun pairShareUri() = "x0x://pair/${"f".repeat(64)}?r=relay"
     override suspend fun importPairUri(uri: String) {}
-    override suspend fun sendDm(to: String, body: String, senderName: String): String? {
-        sent += Triple(to, body, senderName); return "sent-1"
+    override suspend fun enqueueDm(to: String, body: String, senderName: String): String {
+        enqueued += Triple(to, body, senderName); return "outbox-${enqueued.size}"
     }
+    override fun startOutbox(displayName: String) { startedOutbox = displayName }
+    override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = snapshot
+    override fun retryOutbox() { retried++ }
     override suspend fun nextEvent(): ChatEventFfi? = events.receive()
     override fun disconnect() { events.trySend(null) }
 }
@@ -68,7 +76,10 @@ class ChatControllerTest {
             override fun agentIdHex() = "f".repeat(64)
             override suspend fun pairShareUri() = ""
             override suspend fun importPairUri(uri: String) {}
-            override suspend fun sendDm(to: String, body: String, senderName: String): String? = null
+            override suspend fun enqueueDm(to: String, body: String, senderName: String): String = ""
+            override fun startOutbox(displayName: String) {}
+            override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = emptyList()
+            override fun retryOutbox() {}
             override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
             override fun disconnect() {}
         }
@@ -103,4 +114,75 @@ class ChatControllerTest {
         pump.join()
         assertEquals(false, stopped)
     }
+
+    @Test
+    fun outboxSendingEventCreatesOutboundBubble() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.SENDING)))
+        gw.events.send(null)
+        pump.join()
+        val msg = convo.messagesFor("a".repeat(64)).value.single()
+        assertTrue(msg.outbound)
+        assertEquals("ob-1", msg.outboxId)
+        assertEquals(false, msg.delivered)
+        assertEquals(false, msg.failed)
+    }
+
+    @Test
+    fun outboxDeliveredUpsertsSameBubbleWithoutDuplicating() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.SENDING)))
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.DELIVERED, messageId = "m1")))
+        gw.events.send(null)
+        pump.join()
+        val msgs = convo.messagesFor("a".repeat(64)).value
+        assertEquals(1, msgs.size)
+        assertTrue(msgs.single().delivered)
+        assertEquals("m1", msgs.single().messageId)
+    }
+
+    @Test
+    fun outboxFailedEventMarksFailedWithError() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.FAILED, lastError = "no route")))
+        gw.events.send(null)
+        pump.join()
+        val msg = convo.messagesFor("a".repeat(64)).value.single()
+        assertTrue(msg.failed)
+        assertEquals("no route", msg.lastError)
+    }
+
+    @Test
+    fun upsertOutboxKeyedByIdSeparatesDistinctBubbles() {
+        val convo = ConversationStore()
+        convo.upsertOutbox("a".repeat(64), "ob-1", "one", 1L, null, delivered = false, failed = false, lastError = null)
+        convo.upsertOutbox("a".repeat(64), "ob-2", "two", 2L, null, delivered = false, failed = false, lastError = null)
+        convo.upsertOutbox("a".repeat(64), "ob-1", "one", 1L, "m1", delivered = true, failed = false, lastError = null)
+        val msgs = convo.messagesFor("a".repeat(64)).value
+        assertEquals(2, msgs.size)
+        assertTrue(msgs.first { it.outboxId == "ob-1" }.delivered)
+    }
+
+    private fun bubble(
+        id: String,
+        peer: String = "a".repeat(64),
+        body: String = "hi",
+        status: OutboxStatusFfi = OutboxStatusFfi.SENDING,
+        messageId: String? = null,
+        lastError: String? = null,
+    ) = OutboxBubbleFfi(
+        id = id,
+        peerAgentIdHex = peer,
+        body = body,
+        status = status,
+        messageId = messageId,
+        enqueuedAtMs = 1uL,
+        lastError = lastError,
+    )
 }

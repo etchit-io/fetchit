@@ -24,7 +24,6 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
-import io.etchit.fetchit.chat.ChatMessage
 import io.etchit.fetchit.chat.displayNameOrDefault
 import kotlinx.coroutines.launch
 import uniffi.fetchit_ffi.ChatFfiException
@@ -158,32 +157,26 @@ fun showQrPreviewDialog(
                         }
                         val senderName = displayNameOrDefault(context, gw.agentIdHex())
                         val body = "autonomi://$address"
-                        val result = runCatching { gw.sendDm(contact.agentIdHex, body, senderName) }
-                        result.onSuccess { msgId ->
-                            controller.conversations.append(
-                                contact.agentIdHex,
-                                ChatMessage(
-                                    outbound = true,
-                                    body = body,
-                                    sentAtMs = System.currentTimeMillis(),
-                                    messageId = msgId,
-                                ),
-                            )
-                            Snackbar.make(anchorView, context.getString(R.string.share_sent_in_chat), Snackbar.LENGTH_LONG)
-                                .setAction(context.getString(R.string.share_open_thread)) {
-                                    dialog.dismiss()
-                                    onOpenThread(contact.agentIdHex)
-                                }
-                                .show()
-                        }.onFailure { e ->
-                            val reason = (e as? ChatFfiException)?.let { ffi ->
-                                when (ffi) {
-                                    is ChatFfiException.Invalid -> ffi.reason
-                                    is ChatFfiException.Network -> ffi.reason
-                                }
-                            } ?: e.message.orEmpty()
-                            Snackbar.make(anchorView, reason, Snackbar.LENGTH_LONG).show()
-                        }
+                        // Enqueue into the durable outbox; the optimistic bubble
+                        // and its Delivered/Failed state surface in the thread via
+                        // the outbox event projection, so no local append here.
+                        runCatching { gw.enqueueDm(contact.agentIdHex, body, senderName) }
+                            .onSuccess {
+                                Snackbar.make(anchorView, context.getString(R.string.share_sent_in_chat), Snackbar.LENGTH_LONG)
+                                    .setAction(context.getString(R.string.share_open_thread)) {
+                                        dialog.dismiss()
+                                        onOpenThread(contact.agentIdHex)
+                                    }
+                                    .show()
+                            }.onFailure { e ->
+                                val reason = (e as? ChatFfiException)?.let { ffi ->
+                                    when (ffi) {
+                                        is ChatFfiException.Invalid -> ffi.reason
+                                        is ChatFfiException.Network -> ffi.reason
+                                    }
+                                } ?: e.message.orEmpty()
+                                Snackbar.make(anchorView, reason, Snackbar.LENGTH_LONG).show()
+                            }
                     }
                 }
                 .setNegativeButton(context.getString(R.string.action_close), null)
