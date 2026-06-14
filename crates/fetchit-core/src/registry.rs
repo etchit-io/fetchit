@@ -55,6 +55,17 @@ impl HandlerRegistry {
         self.handlers.len()
     }
 
+    /// The [`ContentHandler::kind`] of every registered handler, in
+    /// registration order.
+    ///
+    /// Registration order is load-bearing (it breaks confidence ties),
+    /// so the doc-invariant tripwire test in
+    /// `tests/doc_invariants.rs` locks this sequence against a
+    /// checked-in snapshot. Used there, not on any hot path.
+    pub fn handler_kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.handlers.iter().map(|h| h.kind())
+    }
+
     /// `true` if no handlers are registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
