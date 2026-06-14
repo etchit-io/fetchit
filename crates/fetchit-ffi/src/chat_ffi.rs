@@ -6,7 +6,7 @@
 //! fediverse public posts through a single [`ChatEventFfi`] stream.
 
 use crate::chat_error::ChatFfiError;
-use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
+use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::messages::is_private_group_envelope;
 use fetchit_chat::Client;
 use std::path::PathBuf;
@@ -550,6 +550,14 @@ async fn run_inbound_pump(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<fetchit_chat::transport::InboundEnvelope>,
     tx: mpsc::UnboundedSender<ChatEventFfi>,
 ) {
+    // Live handles into the durable outbox so an inbound DeliveryReceipt
+    // marks the matching bubble Delivered engine-side (not just the
+    // conversation UI). Android drives its own pump, so the engine SSE
+    // dispatcher never runs here; without this a delivered bubble stays
+    // is_retryable and the driver would re-send it. `None` in REST-only
+    // mode -- dispatch_inbound_with_outbox then behaves like the 3-arg form.
+    let outbox = client.outbox_arc();
+    let events = client.outbox_events();
     while let Some(mut env) = rx.recv().await {
         let transit = match env.transit.take() {
             Some(t) => t,
@@ -614,7 +622,15 @@ async fn run_inbound_pump(
             }
         };
 
-        match dispatch_inbound(transit, identity.as_ref(), registry.as_ref()).await {
+        match dispatch_inbound_with_outbox(
+            transit,
+            identity.as_ref(),
+            registry.as_ref(),
+            outbox.as_ref(),
+            events.as_ref(),
+        )
+        .await
+        {
             Ok(InboundDispatch::Message {
                 group_id_hex,
                 sender_agent_id_hex,
