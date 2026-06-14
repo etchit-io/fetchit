@@ -276,3 +276,39 @@ jobs:
           name: fetchit-debug-apk
           path: apps/fetchit-android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
+
+  # Doc-drift prevention (Phase 1): three shell guards + the rustdoc
+  # broken-intra-doc-link gate. The tripwire tests (handler order /
+  # Rendition + EnvelopeKind variants / crate list) run in the `test` job
+  # via `cargo test`; this job enforces the rest so stale docs cannot land.
+  docs-gates:
+    name: doc drift gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the stale-phrase linter can diff new doc-comments
+          # against the PR base (or the push parent).
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: crate list matches cargo metadata
+        run: sh scripts/check-crate-list.sh
+      - name: doc-comment paths resolve
+        run: sh scripts/check-doc-paths.sh
+      - name: no expiring markers in new doc-comments
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base ref (initial push); skipping stale-phrase diff"
+          else
+            sh scripts/check-stale-phrases.sh "$base"
+          fi
+      # rustdoc broken-intra-doc-link gate. Run with fetchit-relay-server's
+      # `fediverse-inbox` feature so the inbox module docs (and server.rs
+      # references to them) are covered and resolve. NOT --all-features: that
+      # pulls fetchit-net's devnet-tests (ant-node) for zero link-coverage gain.
+      - name: rustdoc has no broken intra-doc links
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps -F fetchit-relay-server/fediverse-inbox
