@@ -126,7 +126,7 @@ configured" and the bundle ships unsigned.
 
 ## Per-release process
 
-1. **Bump the version in all four files** (they must agree):
+1. **Bump the version in all three files** (they must agree):
 
    ```kotlin
    // apps/fetchit-android/app/build.gradle.kts

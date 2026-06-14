@@ -63,9 +63,9 @@ pub async fn boot_supervisor(cfg: SupervisorConfig) -> Result<SupervisorHandle, 
             let (_child, port) =
                 super::spawn::spawn_bundled(binary, &cfg.bundled_toml, cfg.port_range)
                     .map_err(|e| format!("spawn bundled x0xd: {e}"))?;
-            // _child intentionally dropped here; the OS reaps on app exit.
-            // Task D5 wires a JoinHandle + respawn loop + clean SIGTERM on
-            // app shutdown.
+            // _child intentionally dropped here; spawn_supervisor_task owns
+            // the JoinHandle and respawn loop. Explicit SIGTERM grace on
+            // shutdown is not yet wired -- the OS reaps the child on exit.
             port
         }
     };

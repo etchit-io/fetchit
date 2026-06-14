@@ -156,7 +156,8 @@ pub enum Rendition {
         title: String,
         /// Decoded content body.
         content: String,
-        /// Optional language tag (`meta.lang`), if non-empty.
+        /// Language tag from `meta.lang` if non-empty, otherwise a
+        /// markdown heuristic may supply `"markdown"`.
         language: Option<String>,
     },
     /// Bytes the registry could not classify any more specifically.

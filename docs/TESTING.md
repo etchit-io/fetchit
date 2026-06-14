@@ -20,7 +20,7 @@ Per-app, only if you touch that app:
 
 Optional, for the heavier test tiers:
 
-- **`tauri-driver`** (`cargo install tauri-driver`), **`WebKitWebDriver`**
+- **`tauri-driver`** (`cargo install tauri-driver --version 2.0.6 --locked`), **`WebKitWebDriver`**
   (apt package `webkit2gtk-driver`), and an **X server** (`xvfb` when
   headless) — the desktop end-to-end suite.
 - **`anvil`** (Foundry) and **`ant`** (the WithAutonomi CLI) — the
@@ -28,7 +28,7 @@ Optional, for the heavier test tiers:
 
 ## The Rust engine — from the repo root
 
-Covers `fetchit-core`, `fetchit-net`, and `fetchit-cli`:
+Covers all 12 workspace crates (`fetchit-core`, `fetchit-net`, `fetchit-cli`, `fetchit-chat`, `fetchit-fedi`, `fetchit-relay-proto`, `fetchit-relay-server`, `fetchit-relay-client`, `fetchit-trust`, `fetchit-trust-types`, `fetchit-trust-client`, `x0xd-client`):
 
 ```bash
 cargo fmt --all -- --check

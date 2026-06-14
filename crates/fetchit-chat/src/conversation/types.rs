@@ -130,11 +130,11 @@ pub struct Conversation {
     /// acceptable for the M0 deployment shape.
     #[serde(default)]
     pub seen_nonces: BTreeMap<String, VecDeque<[u8; 12]>>,
-    /// Local history cache for `MlsEncrypted` groups — x0xd's `/messages`
-    /// returns an error for those, so the client persists here. Cap
-    /// at 1000 entries (oldest evicted) per
-    /// `private/m2-decisions.md` Decision 2. `#[serde(default)]` for
-    /// backward compat with pre-M2 vault files.
+    /// Local history cache for DM and private-group conversations —
+    /// x0xd's `/messages` returns an error for MLS-encrypted groups,
+    /// so the client persists here. Cap at 1000 entries (oldest
+    /// evicted) per `private/m2-decisions.md` Decision 2.
+    /// `#[serde(default)]` for backward compat with pre-M2 vault files.
     #[serde(default)]
     pub history: VecDeque<HistoryEntry>,
 }
@@ -426,11 +426,13 @@ pub struct MessagePayload {
 ///
 /// The recipient of a `Message` envelope emits a `DeliveryReceipt` back to the
 /// original sender once the message has been decrypted. `message_id` echoes
-/// the relay's `dedupe_key` (hex-encoded) of the original message envelope so
-/// the sender can correlate the receipt to a specific outbound message.
+/// the logical message id minted by `random_message_id` (16 random bytes,
+/// hex-encoded), matching `HistoryEntry::message_id`, so the sender can
+/// correlate the receipt to a specific outbound message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryReceiptPayload {
-    /// Hex-encoded dedupe key of the original message envelope.
+    /// Hex-encoded logical message id (`HistoryEntry::message_id`) of the
+    /// original message envelope.
     pub message_id: String,
     /// Recipient-asserted decode timestamp, milliseconds since the Unix epoch.
     pub received_at_ms: u64,

@@ -3,7 +3,7 @@
 // fetch>it FFI — uniffi bindings over fetchit-core + fetchit-net.
 // Copyright (C) the fetch>it contributors.
 
-//! `fetchit-uniffi` — Kotlin/Swift surface for fetch>it.
+//! `fetchit-uniffi` — Kotlin (Android) surface for fetch>it.
 //!
 //! Mirrors etchit's FFI shape: proc-macro `setup_scaffolding!()`,
 //! `#[uniffi::export]` on free functions, `#[uniffi::Object]` on the
@@ -74,7 +74,7 @@ pub fn set_data_home(path: String) {
 /// Bundled production bootstrap peers in `ip:port` shorthand.
 ///
 /// Pass these (or a user override) to [`Client::connect`]. Returning
-/// them through the FFI lets Kotlin/Swift surfaces show the defaults
+/// them through the FFI lets Kotlin surfaces show the defaults
 /// in a Settings UI without duplicating the list.
 #[must_use]
 #[uniffi::export]

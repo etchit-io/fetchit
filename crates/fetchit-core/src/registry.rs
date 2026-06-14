@@ -16,8 +16,8 @@ use crate::handler::{
 use crate::{Error, Result};
 
 /// Number of leading bytes passed to [`ContentHandler::can_handle`].
-/// Big enough for every magic-byte sniff used in 0.1.0; small enough
-/// that we never copy a full payload during detection.
+/// Big enough for every magic-byte sniff in the default handler set;
+/// small enough that we never copy a full payload during detection.
 const SNIFF_BYTES: usize = 4096;
 
 /// A set of registered [`ContentHandler`]s plus the dispatch logic

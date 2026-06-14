@@ -34,7 +34,7 @@ issue describing the change and a maintainer will pick it up.
 fetch>it ships open-source from commit one. That means:
 
 - `cargo fmt --all` clean
-- `cargo clippy --all-targets -- -D warnings` clean
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
 - `cargo test --workspace` green
 - Every public item has rustdoc
 - `unwrap()` / `expect()` only in tests

@@ -86,11 +86,11 @@ asset orchestration, or anything beyond inline tags.
 
 ### The fix
 
-Inside fetch>it's `HtmlView`, every HTML document is loaded into the
-WebView with a synthetic origin: `https://aut.local`. Before the
+**On Android**, fetch>it's `HtmlView` loads every HTML document into
+the WebView with a synthetic origin: `https://aut.local`. Before the
 document reaches the browser engine, every `autonomi://<64-hex>`
-reference in the source is rewritten to `https://aut.local/<64-hex>`
-— a well-formed https URL the Fetch spec accepts.
+reference in the source is rewritten to `https://aut.local/<64-hex>`,
+a well-formed https URL the Fetch spec accepts.
 
 The engine sees standard https. Every request to that origin is
 caught by `WebViewClient.shouldInterceptRequest` inside the app, the
@@ -101,15 +101,22 @@ fetch>it client over the Autonomi P2P connection.
 made, no TLS handshake is performed, no server exists. The hostname
 is a costume the document wears so the browser cooperates.
 
+**On desktop**, the document is loaded via a `srcdoc` iframe (null
+origin). Resource URLs are rewritten to
+`http://127.0.0.1:<media-port>/<addr>` by the media-base server in
+`htmlRewriter.ts`; `aut.local` is not used on desktop.
+
 ### Implications for SPA authors
 
 The host treats both URL forms as equivalent inside the document:
 
 - `autonomi://<64-hex>` — rewritten to the synthetic form at document
   load. Use in static HTML and in JS string literals.
-- `https://aut.local/<64-hex>` — the canonical runtime form. Use when
-  constructing URLs dynamically in JS (computed at runtime, after the
-  rewriter has run).
+- `https://aut.local/<64-hex>` — the Android runtime form (after
+  rewriting). On desktop the equivalent is
+  `http://127.0.0.1:<media-port>/<64-hex>`, but prefer
+  `autonomi://<64-hex>` in authored content and let the rewriter
+  handle it on each platform.
 
 End-user URLs (the address bar, bookmarks, share sheet, deep-link
 intents) always use the `autonomi://` form — that's the user-facing
@@ -312,10 +319,12 @@ skip revalidation entirely and a bookmark never go stale.
    via `autonomi://<addr>` for assets. Each asset becomes its own
    address upload, but lives forever in fetch>it's disk cache after
    first use.
-3. **No relative paths to disk** (`./style.css`) — won't resolve. Use
-   `autonomi://<addr>` / `https://aut.local/<addr>` (the canonical
-   runtime form), or inline. Absolute `https://` references to real
-   hosts are **blocked** — fetch>it loads Autonomi content only.
+3. **No relative paths to disk** (`./style.css`) -- won't resolve. Use
+   `autonomi://<addr>` and let the platform rewriter handle it (on
+   Android it becomes `https://aut.local/<addr>`; on desktop it is
+   served via the local media-base server). Or inline assets. Absolute
+   `https://` references to real hosts are **blocked** -- fetch>it
+   loads Autonomi content only.
 4. **No `localStorage`, `sessionStorage`, `IndexedDB`, Service Workers** —
    DOM storage is off in the sandbox (null origin on desktop;
    `setDomStorageEnabled(false)` on Android). Both deliberate: no

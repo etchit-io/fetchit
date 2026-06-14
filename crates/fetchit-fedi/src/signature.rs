@@ -1,7 +1,8 @@
 //! HTTP Signature signer for outbound `ActivityPub` deliveries.
 //!
-//! Stage 2.1a — RFC 9421 primary path. Stage 2.1b adds the
-//! draft-cavage fallback plus a 24h per-instance capability cache.
+//! RFC 9421 primary path. The draft-cavage fallback lives in
+//! `signature_cavage.rs`; the 24h per-instance capability cache lives
+//! in `signature_cache.rs`.
 //!
 //! Algorithm: RSA-2048 + PKCS#1 v1.5 + SHA-256 (`rsa-v1_5-sha256`),
 //! Mastodon's de-facto standard. Deterministic signature, so the same

@@ -7,10 +7,11 @@ network. Paste a 64-hex address, see what is there — text, image, audio,
 video, PDF, archive, code with syntax highlighting, JSON, CSV, full HTML
 SPAs — without installing a wallet, signing a message, or running a node.
 
-fetch>it ships as a small Rust engine (`fetchit-core`), a CLI (`fetchit
-get <addr>`), a uniffi FFI surface (`fetchit-ffi`), and two GUI shells
-over the engine — a native Android app and a Tauri 2 desktop app. A thin
-browser extension routes `autonomi://` links into the desktop app.
+fetch>it ships as a Rust engine (`fetchit-core`), a CLI, a uniffi FFI
+surface (`fetchit-ffi`), chat/relay/fediverse/trust crates, and two
+GUI shells over the engine: a native Android app and a Tauri 2 desktop
+app. A thin browser extension routes `autonomi://` links into the
+desktop app.
 
 For end-user instructions — every gesture, address-bar format, supported
 content type, the `autonomi://` URL scheme, and honest limitations — see
@@ -40,11 +41,21 @@ fetchit/
 │   ├── fetchit-core/                # handler trait, registry, decoders
 │   ├── fetchit-net/                 # Autonomi-backed NetworkClient
 │   ├── fetchit-cli/                 # `fetchit get <addr>` binary
+│   ├── fetchit-chat/                # chat protocol layer
+│   ├── fetchit-fedi/                # fediverse bridge protocol
+│   ├── fetchit-relay-proto/         # relay wire protocol
+│   ├── fetchit-relay-server/        # relay server
+│   ├── fetchit-relay-client/        # relay client
+│   ├── fetchit-trust/               # trust service core
+│   ├── fetchit-trust-types/         # trust type definitions
+│   ├── fetchit-trust-client/        # trust service client
+│   ├── x0xd-client/                 # x0xd discovery + signer
 │   └── fetchit-ffi/                 # uniffi 0.29 bindings (workspace-excluded)
 ├── apps/
 │   ├── fetchit-android/             # Material3 shell, sandboxed WebView, Media3
 │   ├── fetchit-desktop/             # Tauri 2 shell — TS/Vite frontend, Rust backend
-│   └── fetchit-web/                 # browser extension — routes autonomi:// links
+│   ├── fetchit-web/                 # browser extension — routes autonomi:// links
+│   └── fetchit-bridge-worker/       # fediverse bridge Cloudflare Worker
 ├── docs/
 │   ├── USING.md                     # end-user guide (Android)
 │   ├── AUTONOMI-WEB.md              # autonomi:// scheme + SPA platform
