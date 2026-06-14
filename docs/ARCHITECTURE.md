@@ -288,7 +288,7 @@ enforced. It bundles a pinned x0xd via `build.rs`.
 **Locked by:** bundled x0xd + relay-region pins: `PINS.md` +
 `scripts/check-pins.sh`.
 
-<!-- arch: id=desktop glob=apps/fetchit-desktop/** verified=c9bf634 -->
+<!-- arch: id=desktop glob=apps/fetchit-desktop/** verified=2eea972 -->
 _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 
 ## Browser extension
@@ -355,7 +355,7 @@ deps together protect historical messages from a silent format break. The lints
 ban (`unsafe_code` forbidden; unwrap/expect/panic warned) holds even in the
 workspace-excluded crates, which re-state it locally.
 
-<!-- arch: id=production-invariants glob=crates/** apps/** verified=c9bf634 -->
+<!-- arch: id=production-invariants glob=crates/** apps/** verified=2eea972 -->
 _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 
 ## Pinned dependencies

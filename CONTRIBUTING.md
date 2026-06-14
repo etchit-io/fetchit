@@ -64,6 +64,22 @@ separate artifact. When you change or add behavior:
   them. Dated specs and plans under `docs/superpowers/` are point-in-time
   records, not a description of the current system.
 
+## Know what's already built
+
+Before proposing to build something, confirm it isn't already there. We have lost
+time scoping work for features that already shipped.
+
+- Check first: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) (a code-anchored
+  index of shipped capabilities) or `scripts/whats-built.sh <keyword>`.
+- Before calling anything missing or a gap, verify against the code and cite the
+  `file:symbol` you checked. Memory, a doc, or a generated summary is not enough
+  on its own.
+- A capability may live on an unmerged branch, so run `git branch -a` before
+  concluding it's absent; your checkout only shows the current branch.
+- When you add a capability, record it in
+  [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) in the same change (anchored, and
+  stamped so `scripts/check-arch-stamps.sh` keeps it honest).
+
 ## Adding a content handler
 
 See [`docs/HANDLER-AUTHORS.md`](docs/HANDLER-AUTHORS.md). One file,
