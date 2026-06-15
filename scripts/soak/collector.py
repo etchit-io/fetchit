@@ -24,6 +24,7 @@ lines (the leading-ISO-timestamp parser handles that automatically).
 Usage:
   collector.py --once   peer-*.log              # one-shot report over static logs
   collector.py --follow --interval 60 peer-*.log   # live tail, summary every 60s
+  collector.py --follow --prometheus soak.prom peer-*.log  # + node_exporter gauges
   collector.py --selftest                       # parser/metric self-check, no files
 """
 
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import re
 import sys
 import time
@@ -120,6 +122,35 @@ class Stats:
                          + (" ..." if len(stuck) > 10 else ""))
         return "\n".join(lines)
 
+    def metrics(self, now: float, stuck_after: float) -> dict[str, float]:
+        """Scalar gauges for the Prometheus textfile exporter -- delivery rate as
+        a 0..1 ratio, TTD percentiles in seconds. Mirrors report()'s numbers."""
+        sent = len(self.sent)
+        delivered = sum(1 for i in self.sent if i in self.delivered)
+        ttds = sorted(
+            self.delivered[i] - self.sent[i]
+            for i in self.sent
+            if i in self.delivered and self.delivered[i] >= self.sent[i]
+        )
+        stuck = sum(
+            1 for i, ts in self.sent.items()
+            if i not in self.delivered and (now - ts) > stuck_after
+        )
+        return {
+            "soak_sent_total": sent,
+            "soak_delivered_total": delivered,
+            "soak_delivery_rate": (delivered / sent) if sent else 0.0,
+            "soak_stuck": stuck,
+            "soak_sent_no_id": self.sent_no_id,
+            "soak_orphan_receipts": sum(1 for i in self.delivered if i not in self.sent),
+            "soak_inbound_msgs": sum(self.inbound_ids.values()),
+            "soak_inbound_unique": len(self.inbound_ids),
+            "soak_dup_delivered": sum(1 for c in self.inbound_ids.values() if c > 1),
+            "soak_ttd_p50_seconds": _pct(ttds, 50),
+            "soak_ttd_p95_seconds": _pct(ttds, 95),
+            "soak_ttd_max_seconds": ttds[-1] if ttds else 0.0,
+        }
+
 
 def _line_time(line: str, fallback: float) -> float:
     m = TS_RE.match(line)
@@ -141,6 +172,26 @@ def _pct(sorted_vals: list[float], p: float) -> float:
     return sorted_vals[k]
 
 
+def write_prometheus(metrics: dict[str, float], path: str, now: float) -> None:
+    """Atomically write node_exporter textfile-collector gauges (tmp + rename, so
+    a concurrent node_exporter scrape never reads a half-written file)."""
+    lines: list[str] = []
+    for name, value in metrics.items():
+        # Prometheus convention: cumulative *_total are counters (so rate() and
+        # restart-reset detection work); point-in-time values are gauges.
+        mtype = "counter" if name.endswith("_total") else "gauge"
+        lines.append(f"# TYPE {name} {mtype}")
+        lines.append(f"{name} {value}")
+    lines.append("# TYPE soak_collector_updated_timestamp_seconds gauge")
+    lines.append(f"soak_collector_updated_timestamp_seconds {now:.0f}")
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def run_once(paths: list[str], stuck_after: float) -> Stats:
     st = Stats()
     now = time.time()
@@ -154,7 +205,8 @@ def run_once(paths: list[str], stuck_after: float) -> Stats:
     return st
 
 
-def run_follow(paths: list[str], stuck_after: float, interval: float) -> None:
+def run_follow(paths: list[str], stuck_after: float, interval: float,
+               prometheus: str | None = None) -> None:
     files = {p: open(p, encoding="utf-8", errors="replace") for p in paths}
     for f in files.values():
         f.seek(0, 2)  # tail: start at EOF
@@ -166,9 +218,12 @@ def run_follow(paths: list[str], stuck_after: float, interval: float) -> None:
                 for line in f:
                     st.observe(line.rstrip("\n"), time.time())
             if time.time() - last >= interval:
-                print(f"[{time.strftime('%H:%M:%S')}] " + st.report(time.time(), stuck_after),
+                now = time.time()
+                print(f"[{time.strftime('%H:%M:%S')}] " + st.report(now, stuck_after),
                       flush=True)
-                last = time.time()
+                if prometheus:
+                    write_prometheus(st.metrics(now, stuck_after), prometheus, now)
+                last = now
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("\n=== final ===\n" + st.report(time.time(), stuck_after))
@@ -206,6 +261,23 @@ def _selftest() -> int:
         "ttd present": "TTD p50=1.50s" in rep,
         "iso-ts parsed": _line_time("2026-06-15T00:00:05Z x", 0.0) > 0,
     }
+    m = st.metrics(now=t0 + 600, stuck_after=300)
+    checks["m delivery_rate=0.5"] = abs(m["soak_delivery_rate"] - 0.5) < 1e-9
+    checks["m dup_delivered=1"] = m["soak_dup_delivered"] == 1
+    checks["m inbound_msgs=3"] = m["soak_inbound_msgs"] == 3
+    checks["m ttd_p50=1.5"] = abs(m["soak_ttd_p50_seconds"] - 1.5) < 1e-9
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "soak.prom")
+        write_prometheus(m, p, t0)
+        with open(p, encoding="utf-8") as f:
+            body = f.read()
+    checks["prometheus textfile"] = (
+        "soak_sent_total 2" in body
+        and "# TYPE soak_sent_total counter" in body
+        and "# TYPE soak_delivery_rate gauge" in body
+        and "soak_collector_updated_timestamp_seconds" in body
+    )
     ok = all(checks.values())
     for name, passed in checks.items():
         print(f"  {'ok ' if passed else 'FAIL'} {name}")
@@ -223,6 +295,9 @@ def main() -> int:
     ap.add_argument("--stuck-after", type=float, default=300.0,
                     help="a send with no receipt older than this is 'stuck' (s)")
     ap.add_argument("--selftest", action="store_true", help="run parser/metric self-check")
+    ap.add_argument("--prometheus", default=None, metavar="FILE",
+                    help="also write node_exporter textfile gauges (prefix soak_) to "
+                         "FILE; works with --once and --follow")
     args = ap.parse_args()
 
     if args.selftest:
@@ -235,9 +310,13 @@ def main() -> int:
         ap.error("no log files given (or --selftest)")
 
     if args.follow:
-        run_follow(paths, args.stuck_after, args.interval)
+        run_follow(paths, args.stuck_after, args.interval, args.prometheus)
         return 0
-    print(run_once(paths, args.stuck_after).report(time.time(), args.stuck_after))
+    st = run_once(paths, args.stuck_after)
+    now = time.time()
+    if args.prometheus:
+        write_prometheus(st.metrics(now, args.stuck_after), args.prometheus, now)
+    print(st.report(now, args.stuck_after))
     return 0
 
 
