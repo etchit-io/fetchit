@@ -149,10 +149,14 @@ class ChatController(private val appContext: Context, private val scope: Corouti
 
         /**
          * Default relay URL: the Cloudflare-fronted TLS endpoint (#114 cutover).
-         * Bare-IP `:8088` is being locked to CF-only, so clients must use this.
-         * Region override is wired via the settings sheet in a later task.
+         * Use the `https://` scheme, NOT `wss://`: the relay client dial-upgrades
+         * https->wss for the WebSocket, while pair-record / v2-card publishing POSTs
+         * to this URL over HTTP -- a `wss://` value makes those POSTs fail (the HTTP
+         * client rejects the wss scheme, which breaks card exchange). Empirically
+         * confirmed on the soak fleet. Bare-IP `:8088` is CF-locked; clients must
+         * use this. Region override is wired via the settings sheet in a later task.
          */
-        const val DEFAULT_RELAY = "wss://nyc-relay.etchit.io"
+        const val DEFAULT_RELAY = "https://nyc-relay.etchit.io"
 
         /**
          * Drain [gw].[ChatGateway.nextEvent] in a loop, routing each event into
