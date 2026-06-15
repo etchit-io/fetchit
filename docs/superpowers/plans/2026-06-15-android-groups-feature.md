@@ -217,6 +217,16 @@ private-group send."
 
 **Context:** `connect()` builds `Client::builder().daemonless(true).relay_url().data_dir().passphrase().build()`. The daemonless profile points x0xd at sentinel `127.0.0.1:9`. To serve groups, embed x0xd in-process and set `.base_url()/.token()` (the engine's "P2 in-process-router" shape; `daemonless(true)` keeps the local-vault signer -- no DM change). Recipe verified in the `android-lit-workstream` memory + engine test `daemonless_with_explicit_base_url_still_probes_daemon_version` (client.rs:4293).
 
+**VERIFIED serve() API (x0x-fork `mobile-serve-entrypoint`, read 2026-06-15) + load-bearing flags:**
+- `x0x::daemon::serve(config: DaemonConfig, exec_policy: x0x::exec::ExecPolicy, disable_peer_cache: bool) -> anyhow::Result<ServerHandle>` (daemon.rs:1560). Map the `anyhow::Error` via `format!("{e}")`. Use paths: `use x0x::daemon::{serve, DaemonConfig, DaemonUpdateConfig, ServerHandle}; use x0x::exec::ExecPolicy;` (ExecPolicy is under `x0x::exec`, NOT `x0x::daemon`).
+- `DaemonConfig` has `api_address: SocketAddr` (HTTP, default 127.0.0.1:12700) AND a SEPARATE `bind_address: SocketAddr` (QUIC gossip, default `[::]:5483`). It has a real `impl Default`, so `DaemonConfig { .., ..Default::default() }` compiles. Set BOTH sockets to ephemeral (port 0) so the embed never clashes with a fixed port on the device.
+- FLAG (Play policy / no self-modifying binary): `ExecPolicy::Disabled` gates only remote `x0x-exec`-over-gossip, NOT self-update. Self-update lives in `DaemonConfig.update` (`DaemonUpdateConfig`, daemon.rs:273-309, all flags default ON) -- you MUST also set `update.enabled = false` (and confirm `gossip_updates`/`stop_on_upgrade`) or the embedded x0xd listens for release manifests + tries to update itself on a user's phone.
+- FLAG: `ExecPolicy::Disabled` is a 3-field struct variant `{ path: PathBuf, reason: String, loaded_at_unix_ms: u64 }` -- NO `disabled()` constructor; build it inline.
+- FLAG (teardown): `ServerHandle::shutdown(&self)` is SYNC + non-consuming -- use it in `disconnect()`/`Drop`. `join(self)` is async + CONSUMES the handle (cannot be called from a uniffi `&self` method); do not use it. `local_addr() -> SocketAddr`, `api_token() -> &str` (copy to owned before the handle moves).
+- BLOCKER-RISK (verify in Step 0): the embedded `Agent`'s key storage (`machine.key`/`agent.key`) may default to `~/.x0x/` (home dir), NOT `DaemonConfig.data_dir`. Android has no writable home dir, so HOST tests pass (the host HAS `~/.x0x`) while the device fails. Trace where `serve()` -> `Agent` persists keys; if it does not honor `data_dir`, that is a real Android blocker -- find the Agent-builder knob or flag it to the controller before proceeding.
+
+- [ ] **Step 0: Verify the embedded Agent key-storage path (BLOCKER risk).** Trace `x0x::daemon::serve()` -> the `Agent` build in `x0x-fork/src/daemon.rs` to find where `machine.key`/`agent.key` are persisted. Confirm `DaemonConfig.data_dir` governs it. If the `Agent` hardcodes `~/.x0x/` (home dir), STOP and report BLOCKED -- it fails on Android (no writable home), and host tests would falsely pass. Resolve (find the path knob or flag a fork change) before implementing the embed.
+
 - [ ] **Step 1: Add the x0x dep.** In `crates/fetchit-ffi/Cargo.toml` `[dependencies]`, add `x0x = { path = "../../../x0x-fork" }` (verify the relative path from the worktree: `fetchit-android-groups/crates/fetchit-ffi` -> `../../../x0x-fork` resolves to `/home/josh/Desktop/etchit-fetchit/x0x-fork`). The fork branch must be `mobile-serve-entrypoint` (tip `1716442`, has `serve()` + `ServerHandle::api_token()`). Run `cargo metadata -p fetchit-ffi >/dev/null` to confirm it resolves (heavy -- pulls ant-quic + saorsa-gossip; DISK WATCH).
 
 - [ ] **Step 2: Hold the ServerHandle (failing test).** Add a field `_x0xd: x0x::daemon::ServerHandle,` to `ChatClient`. Write a test that `connect()` against a temp data_dir brings serve() up and the engine version-probe succeeds (or, if a full connect needs a relay, a narrower test: `serve_inprocess()` helper returns a handle whose `local_addr()` is loopback and `api_token()` is non-empty).
@@ -228,24 +238,37 @@ private-group send."
 ```rust
 // Embed x0xd in-process for group TreeKEM (/secure/*). daemonless(true)
 // keeps the local ML-DSA-65 vault signer -- base_url only redirects the
-// x0xd HTTP surface (the engine's P2 in-process-router shape). exec_policy
-// is DISABLED: x0xd self-upgrade/exec must never run on Android (Play).
+// x0xd HTTP surface (the engine's P2 in-process-router shape).
 let x0xd_data = PathBuf::from(&data_dir).join("x0xd");
 let cfg = x0x::daemon::DaemonConfig {
-    api_address: "127.0.0.1:0".parse().map_err(|e| ChatFfiError::Invalid { reason: format!("api_address: {e}") })?,
+    // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
+    api_address: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+    // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
+    // fixed-port clash with any other x0xd on the device.
+    bind_address: (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
     data_dir: x0xd_data,
+    // Play policy: no self-modifying binary. ExecPolicy gates only remote
+    // x0x-exec; self-update lives here and defaults ON.
+    update: x0x::daemon::DaemonUpdateConfig { enabled: false, ..Default::default() },
     ..Default::default()
 };
-let handle = x0x::daemon::serve(cfg, x0x::daemon::ExecPolicy::Disabled, false)
+// ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
+// under x0x::exec (NOT x0x::daemon). Gates remote x0x-exec-over-gossip.
+let exec_policy = x0x::exec::ExecPolicy::Disabled {
+    path: std::path::PathBuf::new(),
+    reason: "embedded_mobile".to_owned(),
+    loaded_at_unix_ms: 0,
+};
+let handle = x0x::daemon::serve(cfg, exec_policy, false)
     .await
     .map_err(|e| ChatFfiError::Network { reason: format!("x0xd serve: {e}") })?;
 let x0xd_base = format!("http://{}", handle.local_addr());
 let x0xd_token = handle.api_token().to_owned();
 ```
 
-Then add to the builder chain: `.base_url(Url::parse(&x0xd_base).map_err(...)?)` and `.token(x0xd_token)`. Store `handle` in the struct (`_x0xd: handle`). (Implementer: verify the exact `DaemonConfig` field names + `ExecPolicy` enum variant name in `x0x-fork/src/daemon.rs` -- the memory says `serve(config, exec_policy, disable_peer_cache)`; confirm `ExecPolicy::Disabled` is the real variant. Verify `.base_url()`/`.token()` are the real `ClientBuilder` methods -- per Alice's client.rs trace they are. Ensure serve() is awaited BEFORE `.build()` since build-time `enforce_m2_treekem_minimum` probes base_url.)
+Then add to the builder chain: `.base_url(Url::parse(&x0xd_base).map_err(|e| ChatFfiError::Invalid { reason: format!("base_url: {e}") })?)` and `.token(x0xd_token)`. Store `handle` in the struct as `x0xd: ServerHandle` (NOT underscore-prefixed -- `disconnect()`/`Drop` call `self.x0xd.shutdown()`). serve() MUST be awaited BEFORE `.build()` (build-time `enforce_m2_treekem_minimum` probes base_url). (Implementer: confirm `DaemonUpdateConfig`'s field names -- the Explore cited `enabled`/`stop_on_upgrade`/`gossip_updates` at daemon.rs:273-309 -- and whether `gossip_updates`/`stop_on_upgrade` also need disabling for full Play-safety. Verify `.base_url()`/`.token()` are the real `ClientBuilder` methods -- per Alice's client.rs trace they are.)
 
-- [ ] **Step 5: Drop on disconnect/Drop.** In `disconnect()` and the `Drop` impl, call `handle.shutdown()` (or store an abort/shutdown handle) so the in-process x0xd stops with the client. (Verify the `ServerHandle` shutdown API; mirror the existing `pump_abort`/`drain_abort` teardown.)
+- [ ] **Step 5: Stop x0xd on disconnect/Drop.** `ServerHandle::shutdown(&self)` is SYNC + non-consuming (verified) -- call `self.x0xd.shutdown()` in `disconnect()` and the `Drop` impl, alongside the existing `pump_abort`/`drain_abort` teardown. Do NOT use `join(self)` (async + consumes the handle -- it cannot be called from a uniffi `&self` method).
 
 - [ ] **Step 6: Run, watch pass.** Run: `cargo test -p fetchit-ffi inprocess`. Expected: PASS.
 
