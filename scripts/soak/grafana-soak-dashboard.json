@@ -87,6 +87,52 @@
         { "refId": "B", "expr": "soak_sent_total", "legendFormat": "sent", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 20, "type": "row", "title": "Groups (private MLS) -- same-LAN PROVEN; cross-NAT Welcome blocked upstream",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }, "collapsed": false, "panels": []
+    },
+    {
+      "id": 21, "type": "stat", "title": "Group join converged",
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_group_join_converged", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 22, "type": "stat", "title": "Group delivered+decrypted",
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_group_delivered_total", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 23, "type": "stat", "title": "Group decrypt fails",
+      "gridPos": { "h": 4, "w": 5, "x": 10, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_group_decrypt_fail_total", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 24, "type": "stat", "title": "x0xd peers (group fleet)",
+      "gridPos": { "h": 4, "w": 9, "x": 15, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_group_x0xd_peers", "legendFormat": "{{box}}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 4 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } }
+    },
+    {
+      "id": 25, "type": "timeseries", "title": "Group sent vs delivered (cumulative)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "soak_group_sent_total", "legendFormat": "group sent", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "B", "expr": "soak_group_delivered_total", "legendFormat": "group delivered+decrypted", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] }
     }
   ]
 }

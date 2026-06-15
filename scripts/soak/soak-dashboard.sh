@@ -26,6 +26,8 @@ while true; do
     scp $SSH_OPTS -P "$p" "$t:soak/$n.log" "$LOGS/$n.log" >/dev/null 2>&1 || true
   done
   python3 "$COLLECTOR" --once --prometheus "$PROM" "$LOGS"/*.log >/dev/null 2>&1 || true
+  # Append group-soak metrics (soak_group_*) -- best-effort, never blocks the DM feed.
+  bash "$HERE/group-status.sh" >> "$PROM" 2>/dev/null || true
   if [ "$SHIP" = "1" ] && [ -s "$PROM" ]; then
     # Plain scp over the textfile (deploy chowned it to the login user) -> no
     # recurring sudo on the prod host. Not a tmp+rename: the textfile dir is
