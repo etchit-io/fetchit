@@ -62,12 +62,12 @@ pub const KNOWN_RELAYS: &[KnownRelay] = &[
     KnownRelay {
         tag: "nyc",
         label: "NYC (US East)",
-        url: "https://nyc.relay.etchit.io",
+        url: "https://nyc-relay.etchit.io",
     },
     KnownRelay {
         tag: "fra",
         label: "Frankfurt (EU)",
-        url: "https://fra.relay.etchit.io",
+        url: "https://fra-relay.etchit.io",
     },
 ];
 
@@ -84,8 +84,8 @@ fn default_relay_url() -> String {
 /// dropping when that origin's plaintext port is closed. Old to new pairs;
 /// historical, so the table does not track [`KNOWN_RELAYS`].
 const RELAY_URL_MIGRATIONS: &[(&str, &str)] = &[
-    ("http://67.207.94.66:8088", "https://nyc.relay.etchit.io"),
-    ("http://159.89.11.217:8088", "https://fra.relay.etchit.io"),
+    ("http://67.207.94.66:8088", "https://nyc-relay.etchit.io"),
+    ("http://159.89.11.217:8088", "https://fra-relay.etchit.io"),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,8 +249,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = dir.path().join("settings.json");
         for (old, want) in [
-            ("http://67.207.94.66:8088", "https://nyc.relay.etchit.io"),
-            ("http://159.89.11.217:8088", "https://fra.relay.etchit.io"),
+            ("http://67.207.94.66:8088", "https://nyc-relay.etchit.io"),
+            ("http://159.89.11.217:8088", "https://fra-relay.etchit.io"),
         ] {
             let s = Settings {
                 relay_url: old.into(),
@@ -266,7 +266,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = dir.path().join("settings.json");
         for url in [
-            "https://nyc.relay.etchit.io",
+            "https://nyc-relay.etchit.io",
             "https://my.custom.relay:9000",
         ] {
             let s = Settings {
