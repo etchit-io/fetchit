@@ -100,6 +100,19 @@ impl GroupId {
     }
 }
 
+/// Wire-level confidentiality of a group, mirroring x0xd's
+/// `policy.confidentiality`. `Private` is the PQ MLS/TreeKEM path
+/// (`send_private_group`); `Public` is the `SignedPublic` plaintext path
+/// (`groups().send`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum GroupKind {
+    /// PQ-encrypted MLS group (`preset=private_secure`, confidentiality
+    /// `MlsEncrypted`).
+    Private,
+    /// Plaintext `SignedPublic` room (`preset=public_open`).
+    Public,
+}
+
 /// A group as seen from the local agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Group {
@@ -114,6 +127,13 @@ pub struct Group {
     /// Whether your agent created this group.
     #[serde(default)]
     pub is_owner: bool,
+    /// Confidentiality kind. Known locally at create time
+    /// (`create` -> `Public`, `create_private` -> `Private`); `None`
+    /// when deserialized from x0xd's list/join responses, which omit it.
+    /// `messages().send_to_group` resolves a `None` kind on demand via
+    /// `GET /groups/<id>`.
+    #[serde(default)]
+    pub kind: Option<GroupKind>,
 }
 
 /// A message inside a group.
@@ -278,7 +298,8 @@ impl<'a> Endpoint<'a> {
     /// [`Self::create_private`] + the private-group methods in
     /// [`crate::messages`]. Use `create_private` for private groups.
     pub async fn create(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
-        self.http
+        let mut group: Group = self
+            .http
             .post_json(
                 "/groups",
                 &CreateRequest {
@@ -287,7 +308,13 @@ impl<'a> Endpoint<'a> {
                     preset: "public_open",
                 },
             )
-            .await
+            .await?;
+        // x0xd's create response omits `policy`, so the deserialized
+        // kind is None. The preset is `public_open` here, so the kind is
+        // known locally -- stamp it so callers (and the send-router's
+        // warm cache) skip the GET /groups/<id> round-trip.
+        group.kind = Some(GroupKind::Public);
+        Ok(group)
     }
 
     /// Create a private MLS group with PQ `TreeKEM` activation. Backed
@@ -299,7 +326,8 @@ impl<'a> Endpoint<'a> {
     /// # Errors
     /// Returns whatever the underlying HTTP layer surfaces.
     pub async fn create_private(&self, name: &str, display_name: Option<&str>) -> Result<Group> {
-        self.http
+        let mut group: Group = self
+            .http
             .post_json(
                 "/groups",
                 &CreatePrivateRequest {
@@ -309,7 +337,13 @@ impl<'a> Endpoint<'a> {
                     discoverability: "Hidden",
                 },
             )
-            .await
+            .await?;
+        // The preset is `private_secure` here, so the kind is known
+        // locally even though x0xd's create response omits `policy`.
+        // Stamp it so the send-router routes through send_private_group
+        // without a cold GET /groups/<id> lookup.
+        group.kind = Some(GroupKind::Private);
+        Ok(group)
     }
 
     /// Generate a fresh invite link for a group.
@@ -842,5 +876,30 @@ mod tests {
             matches!(err, ChatError::Daemon { status: 404, .. }),
             "expected Daemon(404), got {err:?}",
         );
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn group_defaults_kind_none_and_serdes() {
+        let g = Group {
+            group_id: GroupId::parse(&"a".repeat(64)).unwrap(),
+            name: None,
+            member_count: 0,
+            is_owner: false,
+            kind: Some(GroupKind::Private),
+        };
+        let json = serde_json::to_string(&g).unwrap();
+        let back: Group = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, Some(GroupKind::Private));
+        // x0xd /groups list omits kind -> deserializes to None.
+        let gid = "a".repeat(64);
+        let listed_json = format!(r#"{{"group_id":"{gid}","member_count":0,"is_owner":false}}"#);
+        let listed: Group = serde_json::from_str(&listed_json).unwrap();
+        assert_eq!(listed.kind, None);
     }
 }

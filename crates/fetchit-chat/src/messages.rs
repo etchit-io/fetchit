@@ -41,7 +41,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use x0xd_client::{EncryptedFrame, SecureGroupsEndpoint};
+use x0xd_client::{Confidentiality, EncryptedFrame, SecureGroupsEndpoint};
 
 /// A direct message — inbound or outbound, after the JSON envelope
 /// has been unwrapped. Used only by `decode_direct_message` in the
@@ -558,6 +558,17 @@ pub struct Endpoint<'a> {
     /// `Endpoint` exactly like `primary_relay_url`, so every `messages()`
     /// call this session shares one map.
     neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Warm `GroupId -> kind` cache backing [`Self::send_to_group`]'s
+    /// routing. Populated by [`Self::note_group_kind`] (from the
+    /// create/join paths) and, on a cold miss, by `send_to_group`'s one
+    /// `GET /groups/<id>` resolve. `std::sync::Mutex` (not async): the
+    /// critical section is a `HashMap` get/insert with no `.await` held
+    /// -- every guard is taken inside a scoped block dropped before the
+    /// next await, mirroring [`Self::neg_resolve_cache`]. `Arc`-shared
+    /// out of `Client` so every `messages()` call this session reads one
+    /// map. Never persisted: kind is cheap to re-resolve and immutable
+    /// per group, so a cold restart just re-GETs once per group.
+    group_kinds: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::groups::GroupKind>>>,
 }
 
 /// Upper bound on [`Endpoint::neg_resolve_cache`] entries. Past this the
@@ -606,6 +617,9 @@ impl<'a> Endpoint<'a> {
             Arc::new(tokio::sync::RwLock::new(None)),
             // Fresh empty negative cache per test endpoint.
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // Fresh empty kind cache per test endpoint. Tests warm it
+            // explicitly via note_group_kind where they need a hot path.
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         )
     }
 
@@ -629,6 +643,9 @@ impl<'a> Endpoint<'a> {
         neg_resolve_cache: Arc<
             std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
         >,
+        group_kinds: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, crate::groups::GroupKind>>,
+        >,
     ) -> Self {
         Self {
             http,
@@ -642,6 +659,7 @@ impl<'a> Endpoint<'a> {
             denylist,
             primary_relay_url,
             neg_resolve_cache,
+            group_kinds,
         }
     }
 
@@ -1264,6 +1282,92 @@ impl<'a> Endpoint<'a> {
             }
         }
         Ok((resolved, skipped))
+    }
+
+    /// Warm the [`Self::group_kinds`] cache for `group_id`. Called from
+    /// the create/join paths (which know the kind locally) so the first
+    /// [`Self::send_to_group`] skips the cold `GET /groups/<id>` lookup.
+    ///
+    /// Idempotent and cheap: a `HashMap` insert under a scoped
+    /// `std::sync::Mutex` guard (no `.await` held). Re-noting a group
+    /// just overwrites with the same kind.
+    pub fn note_group_kind(&self, group_id: &str, kind: crate::groups::GroupKind) {
+        let mut map = self
+            .group_kinds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.insert(group_id.to_owned(), kind);
+    }
+
+    /// Send `body` to a group, routing by kind: private groups fan out
+    /// via [`Self::send_private_group`] (`TreeKEM` over `/secure/encrypt`);
+    /// public rooms post plaintext via
+    /// [`crate::groups::Endpoint::send`] (`/groups/<id>/send`,
+    /// `SignedPublic`). Kind is resolved from the warm
+    /// [`Self::group_kinds`] cache (populated by create/join via
+    /// [`Self::note_group_kind`]) or, on a cold miss, one
+    /// `GET /groups/<id>` against x0xd whose result is then cached.
+    ///
+    /// Both shells call this -- it is the single place the
+    /// MLS-vs-`SignedPublic` routing decision lives, fixing the bug
+    /// where a private-group send took the `SignedPublic` path and x0xd
+    /// returned 400.
+    ///
+    /// The public branch maps x0xd's returned message id to `None` so
+    /// the return shape matches [`Self::send_private_group`] (callers
+    /// treat the `Option<String>` uniformly regardless of kind).
+    ///
+    /// # Errors
+    /// * The underlying send error from the routed path
+    ///   ([`Self::send_private_group`] or [`crate::groups::Endpoint::send`]).
+    /// * [`ChatError::Denied`] if a roster member is denylisted (private
+    ///   path).
+    /// * The x0xd HTTP error surfaced as [`ChatError`] on a cold kind
+    ///   lookup (`GET /groups/<id>` non-2xx or a body without `policy`).
+    /// * [`ChatError::Invalid`] if `group_id` is not a valid group id.
+    pub async fn send_to_group(
+        &self,
+        group_id: &str,
+        body: &str,
+        sender_name: &str,
+    ) -> Result<Option<String>> {
+        // Read the warm cache under a scoped guard -- the std::sync::Mutex
+        // guard MUST be dropped before the cold-lookup `.await` below.
+        let cached = {
+            let map = self
+                .group_kinds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.get(group_id).copied()
+        };
+        let kind = if let Some(k) = cached {
+            k
+        } else {
+            // Cold miss: one authoritative GET /groups/<id>. No lock is
+            // held across this await.
+            let conf = self
+                .secure_groups()?
+                .get_group_confidentiality(group_id)
+                .await?;
+            let k = match conf {
+                Confidentiality::MlsEncrypted => crate::groups::GroupKind::Private,
+                Confidentiality::SignedPublic => crate::groups::GroupKind::Public,
+            };
+            self.note_group_kind(group_id, k);
+            k
+        };
+        match kind {
+            crate::groups::GroupKind::Private => {
+                self.send_private_group(group_id, body, sender_name).await
+            }
+            crate::groups::GroupKind::Public => {
+                let gid = ChatGroupId::parse(group_id)?;
+                crate::groups::Endpoint::new(self.http)
+                    .send(&gid, body)
+                    .await
+                    .map(|_| None)
+            }
+        }
     }
 
     /// Process an inbound private-group [`TransitEnvelope`]: verify the
@@ -2178,6 +2282,7 @@ pub fn decode_direct_message(inbound: InboundEnvelope) -> Result<DirectMessage> 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::groups::GroupKind;
     use crate::transport::{Reachability, SendReceipt, Transport};
     use async_trait::async_trait;
     use fetchit_relay_client::MlDsaSigner;
@@ -2194,6 +2299,12 @@ mod tests {
     /// Fresh empty negative-resolve cache cell for the
     /// `Endpoint::new_with_denylist` test call sites. Test-only.
     fn neg_cache() -> Arc<StdMutex<std::collections::HashMap<String, std::time::Instant>>> {
+        Arc::new(StdMutex::new(std::collections::HashMap::new()))
+    }
+
+    /// Fresh empty `GroupId -> kind` cache cell for the
+    /// `Endpoint::new_with_denylist` test call sites. Test-only.
+    fn group_kinds_cache() -> Arc<StdMutex<std::collections::HashMap<String, GroupKind>>> {
         Arc::new(StdMutex::new(std::collections::HashMap::new()))
     }
 
@@ -2891,6 +3002,7 @@ mod tests {
             Some(&denylist),
             primary_cell(None),
             neg_cache(),
+            group_kinds_cache(),
         );
 
         let err = endpoint
@@ -4604,6 +4716,7 @@ mod tests {
             None,
             primary_cell(Some(primary)),
             neg_cache(),
+            group_kinds_cache(),
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -4661,6 +4774,7 @@ mod tests {
             None,
             primary_cell(Some(primary)),
             neg_cache(),
+            group_kinds_cache(),
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -5959,6 +6073,7 @@ mod tests {
             None,
             primary_cell(Some(&server.uri())),
             neg_cache(),
+            group_kinds_cache(),
         );
 
         let self_id = AgentId(rig.agent_hex().to_owned());
@@ -6028,6 +6143,7 @@ mod tests {
             None,
             primary_cell(Some(&server.uri())),
             neg_cache(),
+            group_kinds_cache(),
         );
 
         let env1 = craft_inbound_envelope(&sender_signer, &sender_aid, b"one", 1).await;
@@ -6085,6 +6201,172 @@ mod tests {
         assert!(
             matches!(err, ChatError::Invalid(ref m) if m.contains("no card for envelope sender")),
             "expected unchanged no-card error, got {err:?}",
+        );
+    }
+
+    // ───────────────────────── send_to_group router ────────────────────
+
+    /// Count how many captured requests hit a path that ends with
+    /// `suffix`. Used to assert the router took the private vs public
+    /// branch and that a cold kind lookup happens at most once.
+    async fn count_requests_ending(server: &MockServer, suffix: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with(suffix))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn send_to_group_cached_private_routes_through_secure_encrypt() {
+        // A warm `Private` kind must drive the TreeKEM path
+        // (`/secure/encrypt`), NOT the SignedPublic `/groups/<id>/send`
+        // path -- the exact bug this method fixes (private send hitting
+        // SignedPublic -> x0xd 400).
+        let server = MockServer::start().await;
+        let signer_concrete = Arc::new(MlDsaSigner::generate().unwrap());
+        let signer_arc: Arc<dyn Signer> = signer_concrete.clone();
+        let (identity, _tmp) = fixture_identity(&signer_concrete);
+        let identity = Arc::new(identity);
+        let peer_hex = "b".repeat(64);
+        mount_encrypt_and_two_member_roster(&server, identity.agent_id_hex(), &peer_hex).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&identity),
+            None,
+            Some(&signer_arc),
+            None,
+            [0u8; 32],
+            None,
+        );
+        endpoint.note_group_kind(TEST_GROUP_HEX, GroupKind::Private);
+
+        endpoint
+            .send_to_group(TEST_GROUP_HEX, "hello group", "Alice")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            count_requests_ending(&server, "/secure/encrypt").await,
+            1,
+            "cached-private send must hit /secure/encrypt exactly once",
+        );
+        assert_eq!(
+            count_requests_ending(&server, "/send").await,
+            0,
+            "cached-private send must NOT hit the SignedPublic /send path",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_group_cached_public_routes_through_groups_send() {
+        // A warm `Public` kind must post plaintext via
+        // `/groups/<id>/send` and never touch `/secure/encrypt`.
+        let server = MockServer::start().await;
+        let send_path = format!("/groups/{TEST_GROUP_HEX}/send");
+        Mock::given(method("POST"))
+            .and(path(&send_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "message_id": "pub-msg-1",
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        // The public path needs neither identity, signer, nor a transport
+        // (groups().send is a plain HTTP POST with no router check).
+        let router = Router::new();
+        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32], None);
+        endpoint.note_group_kind(TEST_GROUP_HEX, GroupKind::Public);
+
+        let msg_id = endpoint
+            .send_to_group(TEST_GROUP_HEX, "hi room", "Alice")
+            .await
+            .unwrap();
+        // groups().send returns the daemon message id; send_to_group maps
+        // it to None to match send_private_group's shape.
+        assert_eq!(msg_id, None);
+
+        assert_eq!(
+            count_requests_ending(&server, "/send").await,
+            1,
+            "cached-public send must hit /groups/<id>/send exactly once",
+        );
+        assert_eq!(
+            count_requests_ending(&server, "/secure/encrypt").await,
+            0,
+            "cached-public send must NOT hit the TreeKEM encrypt path",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_group_cold_cache_does_one_get_then_caches() {
+        // No warm kind: the first send must resolve via one
+        // `GET /groups/<id>` and the second must reuse the cached kind
+        // (no second GET). Uses a public group so the harness needs no
+        // identity/signer.
+        let server = MockServer::start().await;
+        let group_path = format!("/groups/{TEST_GROUP_HEX}");
+        let send_path = format!("/groups/{TEST_GROUP_HEX}/send");
+        Mock::given(method("GET"))
+            .and(path(&group_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "policy": { "confidentiality": "signed_public" },
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(&send_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "message_id": "pub-msg-1",
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = Endpoint::new(&http, &router, None, None, None, None, [0u8; 32], None);
+
+        endpoint
+            .send_to_group(TEST_GROUP_HEX, "first", "Alice")
+            .await
+            .unwrap();
+        endpoint
+            .send_to_group(TEST_GROUP_HEX, "second", "Alice")
+            .await
+            .unwrap();
+
+        // Exactly one detail GET across both sends -- the second is served
+        // from the warm cache.
+        let detail_gets = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.method == wiremock::http::Method::GET
+                    && r.url.path() == format!("/groups/{TEST_GROUP_HEX}")
+            })
+            .count();
+        assert_eq!(
+            detail_gets, 1,
+            "cold lookup must GET /groups/<id> exactly once across two sends",
+        );
+        assert_eq!(
+            count_requests_ending(&server, "/send").await,
+            2,
+            "both cold-then-warm sends must reach the public /send path",
         );
     }
 }

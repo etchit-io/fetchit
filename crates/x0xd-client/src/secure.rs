@@ -129,6 +129,39 @@ struct CreatedGroupResponse {
     chat_topic: Option<String>,
 }
 
+/// Group confidentiality as reported by x0xd `GET /groups/<id>`
+/// (`policy.confidentiality`).
+///
+/// The wire spelling is `snake_case`: upstream's `GroupConfidentiality`
+/// carries `#[serde(rename_all = "snake_case")]`, and the daemon
+/// serializes `policy` verbatim, so the bytes on the wire are
+/// `"mls_encrypted"` / `"signed_public"` (NOT the `CamelCase` variant
+/// names). The `#[serde(rename_all = "snake_case")]` here mirrors that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidentiality {
+    /// PQ MLS/TreeKEM-encrypted.
+    MlsEncrypted,
+    /// Plaintext `SignedPublic`.
+    SignedPublic,
+}
+
+/// `GET /groups/<id>` detail body, narrowed to the only field the
+/// cold-cache kind lookup needs. `policy` is `#[serde(default)]` so a
+/// list-shaped response (which omits it) deserializes to `None` rather
+/// than erroring, and the caller surfaces the missing-policy case.
+#[derive(Debug, Clone, Deserialize)]
+struct GroupMetaResponse {
+    #[serde(default)]
+    policy: Option<GroupPolicyMeta>,
+}
+
+/// The `policy` sub-object, narrowed to the confidentiality axis.
+#[derive(Debug, Clone, Deserialize)]
+struct GroupPolicyMeta {
+    confidentiality: Confidentiality,
+}
+
 /// Endpoint wrapper around the x0xd `/groups` + `/secure/*` surface.
 /// Owns its own HTTP client + bearer auth — same pattern as
 /// [`crate::X0xdSigner`]. Construct via [`SecureGroupsEndpoint::new`].
@@ -453,6 +486,47 @@ impl SecureGroupsEndpoint {
             })));
         }
         Ok(())
+    }
+
+    /// Fetch a group's confidentiality kind from x0xd `GET /groups/<id>`.
+    ///
+    /// This is the authoritative kind source for cold-cache routing in
+    /// `fetchit_chat::messages::Endpoint::send_to_group`: given only a
+    /// `group_id`, the caller can't tell a private MLS group (route via
+    /// `/secure/encrypt`) from a public `SignedPublic` room (route via
+    /// `/groups/<id>/send`). `GET /groups/<id>` returns the full group
+    /// detail whose `policy.confidentiality` axis answers it.
+    ///
+    /// # Errors
+    /// Returns [`X0xdError::Invalid`] when `group_id` is not the 64-hex
+    /// shape (rejected locally, before any HTTP). Returns
+    /// [`X0xdError::Http`] / [`X0xdError::Url`] on transport / URL-join
+    /// failure, and [`X0xdError::Rejected`] when x0xd returns non-2xx or
+    /// a body without a `policy` object (e.g. a list-shaped response).
+    pub async fn get_group_confidentiality(
+        &self,
+        group_id: &str,
+    ) -> Result<Confidentiality, X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
+        let path = format!("groups/{group_id}");
+        let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .get(url)
+            .bearer_auth(&self.api_token)
+            .send()
+            .await?;
+        if !raw.status().is_success() {
+            let status = raw.status();
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd GET /groups/{group_id} returned {status}: {body}"
+            )));
+        }
+        let resp: GroupMetaResponse = raw.json().await?;
+        resp.policy
+            .map(|p| p.confidentiality)
+            .ok_or_else(|| X0xdError::Rejected("group meta response missing policy".into()))
     }
 }
 
@@ -1044,6 +1118,102 @@ mod tests {
                 assert!(msg.contains("rate limited"));
             }
             other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_group_confidentiality_parses_mls_encrypted() {
+        // x0xd `GET /groups/<id>` returns the full group detail with a
+        // nested `policy` object. The `confidentiality` axis serializes
+        // snake_case (GroupConfidentiality has `#[serde(rename_all =
+        // "snake_case")]` upstream), so the wire value is the bare string
+        // `"mls_encrypted"`, NOT `"MlsEncrypted"`. This test pins the
+        // snake_case contract so a future rename trips it.
+        let server = MockServer::start().await;
+        let group_path = format!("/groups/{TEST_GROUP_HEX}");
+        Mock::given(method("GET"))
+            .and(path(&group_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "group_id": TEST_GROUP_HEX,
+                "policy": { "confidentiality": "mls_encrypted" },
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let conf = endpoint
+            .get_group_confidentiality(TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        assert_eq!(conf, Confidentiality::MlsEncrypted);
+    }
+
+    #[tokio::test]
+    async fn get_group_confidentiality_parses_signed_public() {
+        let server = MockServer::start().await;
+        let group_path = format!("/groups/{TEST_GROUP_HEX}");
+        Mock::given(method("GET"))
+            .and(path(&group_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "policy": { "confidentiality": "signed_public" },
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let conf = endpoint
+            .get_group_confidentiality(TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        assert_eq!(conf, Confidentiality::SignedPublic);
+    }
+
+    #[tokio::test]
+    async fn get_group_confidentiality_rejects_missing_policy() {
+        // A response without `policy` is a schema violation -> Rejected,
+        // matching the "response missing <field>" pattern used by the
+        // encrypt/decrypt paths.
+        let server = MockServer::start().await;
+        let group_path = format!("/groups/{TEST_GROUP_HEX}");
+        Mock::given(method("GET"))
+            .and(path(&group_path))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .get_group_confidentiality(TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        match err {
+            X0xdError::Rejected(msg) => {
+                assert!(msg.contains("policy"), "expected policy context: {msg}");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_group_confidentiality_rejects_wrong_length_group_id() {
+        // Path-traversal / malformed id must reject locally before HTTP,
+        // same as encrypt/decrypt.
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .get_group_confidentiality("short")
+            .await
+            .unwrap_err();
+        match err {
+            X0xdError::Invalid(msg) => {
+                assert!(msg.contains("64 hex chars"), "got: {msg}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
         }
     }
 }

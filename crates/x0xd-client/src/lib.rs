@@ -30,6 +30,6 @@ pub use discovery::{
 };
 pub use error::{DiscoveryError, X0xdError};
 pub use identity::IdentityEndpoint;
-pub use secure::{CreatedGroup, EncryptedFrame, SecureGroupsEndpoint};
+pub use secure::{Confidentiality, CreatedGroup, EncryptedFrame, SecureGroupsEndpoint};
 pub use signer::{Signer, X0xdSigner};
 pub use version::X0xdVersion;

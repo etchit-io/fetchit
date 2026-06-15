@@ -512,6 +512,17 @@ pub struct Client {
     /// in `Endpoint`; never persisted. `std::sync::Mutex` (not async): the
     /// critical section is a `HashMap` get/insert, no `.await` held.
     neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Session-lived `GroupId -> kind` cache shared into every
+    /// [`messages::Endpoint`] (cloned in [`Self::messages`], exactly like
+    /// [`Self::neg_resolve_cache`]) so [`messages::Endpoint::send_to_group`]
+    /// routes private-vs-public without a `GET /groups/<id>` per send.
+    /// Warmed on the create/join paths via
+    /// [`messages::Endpoint::note_group_kind`] and, on a cold miss, by the
+    /// router's one-shot kind lookup. `std::sync::Mutex` (not async): the
+    /// critical section is a `HashMap` get/insert, no `.await` held.
+    /// Never persisted -- kind is immutable per group and cheap to
+    /// re-resolve after a restart.
+    group_kinds: Arc<std::sync::Mutex<std::collections::HashMap<String, groups::GroupKind>>>,
     /// T8b / T9: optional callback the home-relay failover watcher (and
     /// [`Self::migrate_primary`]) fires after attempting to migrate slot 0.
     /// The argument is a typed [`RelayFailoverEvent`] (see
@@ -664,6 +675,7 @@ impl Client {
             multi_home_inbound,
             primary_relay_url,
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            group_kinds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home,
             fediverse,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1338,6 +1350,7 @@ impl Client {
             self.denylist.as_ref(),
             Arc::clone(&self.primary_relay_url),
             Arc::clone(&self.neg_resolve_cache),
+            Arc::clone(&self.group_kinds),
         )
     }
 
@@ -4601,6 +4614,7 @@ mod tests {
             multi_home_inbound: None,
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            group_kinds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home: None,
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
@@ -4973,6 +4987,7 @@ mod tests {
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            group_kinds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home: None,
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
