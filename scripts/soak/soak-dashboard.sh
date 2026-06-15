@@ -12,7 +12,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "${FLEET_ENV:-$HERE/fleet.env}"
-COLLECTOR="${COLLECTOR:-/tmp/soak/collector.py}"   # Alice's --prometheus build (9034321) until it lands on chat
+COLLECTOR="${COLLECTOR:-$HERE/collector.py}"   # repo collector carries --prometheus (landed on chat @ 606bb56)
 WORK="${WORK:-/tmp/soak}"; LOGS="$WORK/logs"; PROM="$WORK/soak.prom"
 INTERVAL="${INTERVAL:-60}"
 SHIP="${SHIP:-0}"
@@ -27,8 +27,12 @@ while true; do
   done
   python3 "$COLLECTOR" --once --prometheus "$PROM" "$LOGS"/*.log >/dev/null 2>&1 || true
   if [ "$SHIP" = "1" ] && [ -s "$PROM" ]; then
-    # Plain scp over the textfile (deploy-dashboard-wyse14.sh chowned it to the
-    # login user), so the ongoing feed needs no recurring sudo on the prod host.
+    # Plain scp over the textfile (deploy chowned it to the login user) -> no
+    # recurring sudo on the prod host. Not a tmp+rename: the textfile dir is
+    # prometheus-owned (no dir-write), so a scrape landing mid-write sees a torn
+    # file -- node_exporter sets node_textfile_scrape_error for that one scrape
+    # and self-heals next cycle. Acceptable at 60s cadence; true atomicity would
+    # need granting dir-write on the prometheus textfile dir (another prod change).
     scp $SSH_OPTS -P "$W14_PORT" "$PROM" "$W14:$W14_TEXTFILE" >/dev/null 2>&1 || true
   fi
   sleep "$INTERVAL"
