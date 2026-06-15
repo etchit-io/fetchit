@@ -652,8 +652,10 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
     }
 
     match (args.outbox_file.as_deref(), args.cursor_file.as_deref()) {
-        (None, None) => run_group_chat_loop(client, &gid, group_hex, None).await,
-        (Some(o), Some(c)) => run_group_chat_loop(client, &gid, group_hex, Some((o, c))).await,
+        (None, None) => run_group_chat_loop(client, &gid, group_hex, display_name, None).await,
+        (Some(o), Some(c)) => {
+            run_group_chat_loop(client, &gid, group_hex, display_name, Some((o, c))).await
+        }
         (None, Some(_)) | (Some(_), None) => {
             anyhow::bail!("--outbox-file and --cursor-file must both be set or both omitted")
         }
@@ -671,6 +673,7 @@ async fn run_group_chat_loop(
     client: &Client,
     gid: &GroupId,
     group_hex: &str,
+    display_name: &str,
     outbox: Option<(&std::path::Path, &std::path::Path)>,
 ) -> Result<()> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -741,8 +744,15 @@ async fn run_group_chat_loop(
                 any_progress = true;
                 continue;
             }
-            let groups = client.groups();
-            let send_result = send_with_retry("group send", || groups.send(gid, &line)).await;
+            // Private MLS groups send through messages().send_private_group
+            // (encrypt-then-fanout per roster member); groups().send is the
+            // SignedPublic path and x0xd rejects it for a private group with
+            // "group is not SignedPublic". members() (a read) stays on groups().
+            let messages = client.messages();
+            let send_result = send_with_retry("group send", || {
+                messages.send_private_group(group_hex, &line, display_name)
+            })
+            .await;
             match send_result {
                 Ok(id) => {
                     let member_count = client.groups().members(gid).await.map_or(0, |m| m.len());
