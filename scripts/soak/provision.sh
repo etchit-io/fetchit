@@ -61,7 +61,7 @@ launch() {
     # setsid + pipe through tsprepend.py: each log line gets a leading ISO ts so
     # collector.py computes true send->receipt TTD; setsid makes the peer its own
     # process group (survives ssh disconnect, killable via `kill -- -PGID`).
-    sp "$t" "$p" "cd ~/soak; [[ -f $n.outbox ]] || : > $n.outbox; [[ -f $n.cursor ]] || printf '0' > $n.cursor; FETCHIT_PASSPHRASE=$pw setsid bash -c './fetchit-chat-peer --daemonless --data-dir ~/soak/$n --display-name $n --relay $RELAY chat --peer $pa --outbox-file ~/soak/$n.outbox --cursor-file ~/soak/$n.cursor 2>&1 | python3 -u ~/soak/tsprepend.py >> ~/soak/$n.log' </dev/null >/dev/null 2>&1 & echo \$! >~/soak/$n.pid"
+    sp "$t" "$p" "cd ~/soak; [[ -f $n.outbox ]] || : > $n.outbox; [[ -f $n.cursor ]] || printf '0' > $n.cursor; FETCHIT_PASSPHRASE=$pw setsid bash -c 'while true; do ./fetchit-chat-peer --daemonless --data-dir ~/soak/$n --display-name $n --relay $RELAY chat --peer $pa --outbox-file ~/soak/$n.outbox --cursor-file ~/soak/$n.cursor 2>&1 | python3 -u ~/soak/tsprepend.py >> ~/soak/$n.log; echo restart >> ~/soak/$n.supervisor.log; sleep 2; done' </dev/null >/dev/null 2>&1 & echo \$! >~/soak/$n.pid"
     echo "[launch] $n -> $partner(${pa:0:12}) pid=$(sp "$t" "$p" "cat ~/soak/$n.pid 2>/dev/null")"
   done
 }

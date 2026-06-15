@@ -26,7 +26,7 @@ launch_one() {
   set -- $r; local n=$1 t=$2 p=$3 partner=$4 pw="soak-$1-pass"
   local pa; pa=$(sed -n 1p "$IDDIR/$partner.id" 2>/dev/null)
   [ -z "$pa" ] && { echo "no partner agent for $n"; return 1; }
-  ssh $SSH_OPTS -p "$p" "$t" "cd ~/soak; FETCHIT_PASSPHRASE=$pw setsid bash -c './fetchit-chat-peer --daemonless --data-dir ~/soak/$n --display-name $n --relay $RELAY chat --peer $pa --outbox-file ~/soak/$n.outbox --cursor-file ~/soak/$n.cursor 2>&1 | python3 -u ~/soak/tsprepend.py >> ~/soak/$n.log' </dev/null >/dev/null 2>&1 & echo \$! >~/soak/$n.pid; echo \"relaunched $n pgid=\$(cat ~/soak/$n.pid) cursor=\$(cat ~/soak/$n.cursor)\""
+  ssh $SSH_OPTS -p "$p" "$t" "cd ~/soak; FETCHIT_PASSPHRASE=$pw setsid bash -c 'while true; do ./fetchit-chat-peer --daemonless --data-dir ~/soak/$n --display-name $n --relay $RELAY chat --peer $pa --outbox-file ~/soak/$n.outbox --cursor-file ~/soak/$n.cursor 2>&1 | python3 -u ~/soak/tsprepend.py >> ~/soak/$n.log; echo restart >> ~/soak/$n.supervisor.log; sleep 2; done' </dev/null >/dev/null 2>&1 & echo \$! >~/soak/$n.pid; echo \"relaunched $n pgid=\$(cat ~/soak/$n.pid) cursor=\$(cat ~/soak/$n.cursor)\""
 }
 
 restart() {
