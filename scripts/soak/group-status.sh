@@ -4,10 +4,12 @@
 # group soak: owner wyse21 (g21e.log) -> joiner wyse28 (g28e.log) on group G4,
 # plus x0xd mesh health on the 3 group boxes (api-port 9701, --name soak-grp).
 #
-# Same-LAN group chat is PROVEN working (join + send + decrypt) once members'
-# v2 cards are pre-exchanged; cross-NAT join is BLOCKED upstream (x0xd 0.23.1
-# Welcome-blob fetch fails: hole-punch coordinator errors + relay timeout).
-# Override the owner/joiner log + box list via env for a different run.
+# Group chat is PROVEN working (join + send + decrypt) once members' v2 cards
+# are pre-exchanged. Cross-NAT join converges on x0xd 0.23.1 (verified fresh
+# wyse21 .50 <-> wyse43 .54, 2026-06-15) -- the upstream send_replace fix
+# (saorsa-labs/x0x#101, closed 2026-06-10) ships in 0.23.1 via PR #102; an
+# earlier single-run Welcome-fetch timeout was a transient hole-punch failure,
+# NOT a block. Override the owner/joiner log + box list via env for a run.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
@@ -45,3 +47,16 @@ for row in "${GRP_BOXES[@]}"; do
   echo "soak_group_x0xd_up{box=\"$n\"} $up"
   echo "soak_group_x0xd_peers{box=\"$n\"} ${peers:-0}"
 done
+
+# Launch test matrix: per-lane status for the dashboard overview row.
+#   1 = LIVE/passing, 0 = PENDING/not-built, -1 = BLOCKED (upstream).
+# dm_outbox + groups_lan use their real metrics in the panels; this manifest
+# covers the not-yet-live lanes -- flip a value (0->1, or -1->...) as each lane
+# comes online or unblocks.
+echo "# TYPE soak_test_status gauge"
+echo 'soak_test_status{lane="groups_crossnat"} 1'
+echo 'soak_test_status{lane="groups_autoimport"} 0'
+echo 'soak_test_status{lane="fedi_exerciser"} 0'
+echo 'soak_test_status{lane="wire_v2v3_skew"} 0'
+echo 'soak_test_status{lane="denylist_e2e"} 0'
+echo 'soak_test_status{lane="inbound_gate"} 0'

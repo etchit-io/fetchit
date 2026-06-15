@@ -133,6 +133,74 @@
         { "refId": "B", "expr": "soak_group_delivered_total", "legendFormat": "group delivered+decrypted", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 30, "type": "row", "title": "Launch Test Matrix -- lane status (green=live, yellow=pending, red=blocked)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }, "collapsed": false, "panels": []
+    },
+    {
+      "id": 31, "type": "stat", "title": "DM outbox (wss)",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_delivery_rate * 100", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 99 }, { "color": "green", "value": 99.9 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 32, "type": "stat", "title": "Groups same-LAN",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_group_join_converged", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "LIVE", "color": "green", "index": 1 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 33, "type": "stat", "title": "Groups cross-NAT",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_test_status{lane=\"groups_crossnat\"}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "-1": { "text": "BLOCKED (upstream)", "color": "red", "index": 0 }, "0": { "text": "PENDING", "color": "yellow", "index": 1 }, "1": { "text": "LIVE", "color": "green", "index": 2 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 34, "type": "stat", "title": "Group auto-import",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_test_status{lane=\"groups_autoimport\"}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "-1": { "text": "BLOCKED", "color": "red", "index": 0 }, "0": { "text": "PENDING", "color": "yellow", "index": 1 }, "1": { "text": "LIVE", "color": "green", "index": 2 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 35, "type": "stat", "title": "Fedi exerciser",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_test_status{lane=\"fedi_exerciser\"}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "-1": { "text": "BLOCKED", "color": "red", "index": 0 }, "0": { "text": "PENDING", "color": "yellow", "index": 1 }, "1": { "text": "LIVE", "color": "green", "index": 2 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 36, "type": "stat", "title": "Wire v2<->v3 skew",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_test_status{lane=\"wire_v2v3_skew\"}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "-1": { "text": "BLOCKED", "color": "red", "index": 0 }, "0": { "text": "PENDING", "color": "yellow", "index": 1 }, "1": { "text": "LIVE", "color": "green", "index": 2 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 37, "type": "stat", "title": "Denylist e2e",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_test_status{lane=\"denylist_e2e\"}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "-1": { "text": "BLOCKED", "color": "red", "index": 0 }, "0": { "text": "PENDING", "color": "yellow", "index": 1 }, "1": { "text": "LIVE", "color": "green", "index": 2 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 38, "type": "stat", "title": "Inbound-gate enforce",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "soak_test_status{lane=\"inbound_gate\"}", "datasource": { "type": "prometheus", "uid": "prometheus" } } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "-1": { "text": "BLOCKED", "color": "red", "index": 0 }, "0": { "text": "PENDING", "color": "yellow", "index": 1 }, "1": { "text": "LIVE", "color": "green", "index": 2 } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
     }
   ]
 }
