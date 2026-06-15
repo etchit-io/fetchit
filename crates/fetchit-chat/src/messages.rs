@@ -355,6 +355,12 @@ impl StoredContactCard {
     ///    DM-pairing wrote -- the property group decrypt depends on, since
     ///    [`Endpoint::receive_private_group_envelope`] hard-requires
     ///    `agent_public_key_b64` to verify the sender.
+    /// 3. **Display name.** If the incoming card's `display_name` is
+    ///    empty but the on-disk card already carries one, the on-disk
+    ///    value is kept. A pair-record-resolved card carries no name
+    ///    ([`card_from_pair_record`] sets it empty), so without this
+    ///    floor a group join's member-card prefetch would wipe the name
+    ///    a prior DM pairing saved.
     ///
     /// # Errors
     /// IO or JSON parse/serialization failures.
@@ -385,6 +391,12 @@ impl StoredContactCard {
             }
             if self.kem_public_key_b64.is_empty() && !existing.kem_public_key_b64.is_empty() {
                 self.kem_public_key_b64 = existing.kem_public_key_b64;
+            }
+            // Never let a nameless incoming card (e.g. one built from a
+            // pair-record, where `card_from_pair_record` sets display_name
+            // empty) wipe a name a prior DM pairing saved.
+            if self.display_name.is_empty() && !existing.display_name.is_empty() {
+                self.display_name = existing.display_name;
             }
         }
         self.save(layout)
@@ -481,6 +493,22 @@ async fn resolve_and_persist_member_card(
     }
 }
 
+/// Does this member need a pair-record resolve before a group decrypt can
+/// verify their envelope? `true` when no card is on disk, or the card
+/// carries no ML-DSA pubkey (the field
+/// [`Endpoint::receive_private_group_envelope`] hard-requires). Shared by
+/// the prefetch (skip-known) and on-receive (lazy-fetch) paths so both
+/// agree on what "already resolved" means.
+///
+/// # Errors
+/// Forwards IO / JSON-parse failures from [`StoredContactCard::load`].
+fn card_needs_resolve(layout: &StoreLayout, agent_id_hex: &str) -> Result<bool> {
+    Ok(match StoredContactCard::load(layout, agent_id_hex)? {
+        None => true,
+        Some(c) => c.agent_public_key_b64.as_deref().unwrap_or("").is_empty(),
+    })
+}
+
 /// Endpoint wrapper. Build via [`crate::Client::messages`].
 pub struct Endpoint<'a> {
     http: &'a Http,
@@ -507,7 +535,27 @@ pub struct Endpoint<'a> {
     /// 0, and the send path reads this LIVE at dispatch time so its
     /// fallback hint points at the NEW primary rather than the dead one.
     primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Bounded, session-lived negative cache of sender agent ids whose
+    /// on-receive pair-record resolve already failed (relay 404 /
+    /// unreachable) this run. [`Self::receive_private_group_envelope`]
+    /// consults it BEFORE the lazy fetch so a stream of envelopes from one
+    /// unknown / spoofed sender triggers at most one relay GET per session
+    /// rather than one GET per envelope (H1 amplification). Capped (see
+    /// [`NEG_CACHE_CAP`]); ids past the cap simply aren't cached, so memory
+    /// is strictly bounded. Clock-free and never persisted -- a disk-backed
+    /// marker would just move the amplification to disk writes.
+    ///
+    /// `Arc<Mutex<HashSet>>` owned by `Client` and cloned into each
+    /// `Endpoint` exactly like `primary_relay_url`, so every `messages()`
+    /// call this session shares one set.
+    neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
+
+/// Upper bound on [`Endpoint::neg_resolve_cache`] entries. Past this the
+/// set stops growing (further unknown senders just aren't cached and
+/// re-fetch once more), keeping the session memory cost fixed regardless of
+/// how many distinct unknown senders an attacker cycles through.
+const NEG_CACHE_CAP: usize = 4096;
 
 impl<'a> Endpoint<'a> {
     /// Pre-M3 8-arg constructor, retained for the existing test suite
@@ -539,6 +587,8 @@ impl<'a> Endpoint<'a> {
             // Empty primary cell: the test-facing path leaves the
             // fallback hint unset (send paths pass `None` through).
             Arc::new(tokio::sync::RwLock::new(None)),
+            // Fresh empty negative cache per test endpoint.
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         )
     }
 
@@ -559,6 +609,7 @@ impl<'a> Endpoint<'a> {
         members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
         denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
         primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
+        neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     ) -> Self {
         Self {
             http,
@@ -571,6 +622,7 @@ impl<'a> Endpoint<'a> {
             members_singleflight,
             denylist,
             primary_relay_url,
+            neg_resolve_cache,
         }
     }
 
@@ -1119,12 +1171,21 @@ impl<'a> Endpoint<'a> {
     /// the post-join roster from `groups().members(group_id)` (which is
     /// the base member set -- the same roster `send_private_group`'s
     /// fanout addresses) and the joiner's own id. For every member except
-    /// self, the member's pair-record is resolved from the configured
-    /// relay and a full [`StoredContactCard`] is persisted (merge, so a
-    /// pre-existing fuller card is never downgraded). A member who never
-    /// published a pair-record (relay 404) is skipped with no error: that
-    /// sender falls back to the on-receive lazy-fetch /
-    /// [`Self::receive_private_group_envelope`] no-card path.
+    /// self whose on-disk card does NOT already carry the ML-DSA pubkey
+    /// decrypt needs, the member's pair-record is resolved from the
+    /// configured relay and a full [`StoredContactCard`] is persisted
+    /// (merge, so a pre-existing fuller card is never downgraded). A
+    /// member who never published a pair-record (relay 404) is skipped
+    /// with no error: that sender falls back to the on-receive lazy-fetch
+    /// / [`Self::receive_private_group_envelope`] no-card path.
+    ///
+    /// A member whose card is already complete (non-empty
+    /// `agent_public_key_b64`) is skipped WITHOUT a relay GET -- the same
+    /// "needs resolve" gate the receive path uses. This avoids re-fetching
+    /// known members (wasteful), and it is why joining a group no longer
+    /// re-imports a named contact's nameless pair-record card (the H2
+    /// display-name-wipe trigger) and shrinks the receive-path fetch
+    /// surface.
     ///
     /// No-op when no relay URL is configured (REST-only / unit-test
     /// mode); every member is then reported skipped. Daemonless-compatible
@@ -1167,6 +1228,14 @@ impl<'a> Endpoint<'a> {
         let mut skipped = 0usize;
         for member in members {
             if member.0.eq_ignore_ascii_case(&self_id.0) {
+                continue;
+            }
+            // Skip members already on disk with the ML-DSA key decrypt
+            // needs: re-fetching them is wasteful and would re-import a
+            // nameless pair-record card over a named contact (H2). Same
+            // "needs resolve" gate the receive path uses.
+            if !card_needs_resolve(layout, &member.0)? {
+                skipped += 1;
                 continue;
             }
             if resolve_and_persist_member_card(&relay, &http, layout, &member.0).await? {
@@ -1251,21 +1320,55 @@ impl<'a> Endpoint<'a> {
         // relay URL (REST-only / unit-test mode) or a relay 404 / fetch
         // failure is a no-op: the existing no-card / no-pubkey errors then
         // fire exactly as before.
-        let card_needs_resolve = match StoredContactCard::load(layout, &sender_agent_id_hex)? {
-            None => true,
-            Some(c) => c.agent_public_key_b64.as_deref().unwrap_or("").is_empty(),
-        };
-        if card_needs_resolve {
-            if let Some(relay_str) = self.primary_relay_url.read().await.clone() {
-                if let Ok(relay) = url::Url::parse(&relay_str) {
-                    let http = crate::relay_http::guarded_client();
-                    let _ = resolve_and_persist_member_card(
-                        &relay,
-                        &http,
-                        layout,
-                        &sender_agent_id_hex,
-                    )
-                    .await?;
+        //
+        // H1 amplification guard: an unknown / spoofed sender_agent_id
+        // whose resolve 404s leaves no card on disk, so card_needs_resolve
+        // would stay true and EVERY later envelope from that id would
+        // re-fetch (1 relay GET per envelope, attacker-amplifiable). A
+        // bounded, session-lived negative cache records ids whose resolve
+        // already failed this run so each unknown sender triggers at most
+        // one GET per session.
+        if card_needs_resolve(layout, &sender_agent_id_hex)? {
+            let already_failed = self
+                .neg_resolve_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&sender_agent_id_hex);
+            if !already_failed {
+                if let Some(relay_str) = self.primary_relay_url.read().await.clone() {
+                    if let Ok(relay) = url::Url::parse(&relay_str) {
+                        let http = crate::relay_http::guarded_client();
+                        // Best-effort: a transient LOCAL disk-write error
+                        // here is non-fatal -- dropping the `?` lets it fall
+                        // through to the existing no-card error below rather
+                        // than aborting the receive before verify/decrypt
+                        // with a surprise persistence message. The Ok(bool)
+                        // distinguishes resolved (true) from failed/404
+                        // (false); only the latter feeds the negative cache.
+                        let resolved = resolve_and_persist_member_card(
+                            &relay,
+                            &http,
+                            layout,
+                            &sender_agent_id_hex,
+                        )
+                        .await;
+                        if matches!(resolved, Ok(false)) {
+                            // Record the failed id so a repeat from the same
+                            // sender skips the fetch. A resolve that returned
+                            // Ok(true) need not be cached -- the card now
+                            // exists and the gate closes naturally next time.
+                            // Capped insert: past NEG_CACHE_CAP the id is not
+                            // stored (it just re-fetches once more), so the
+                            // set's memory is strictly bounded.
+                            let mut cache = self
+                                .neg_resolve_cache
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if cache.len() < NEG_CACHE_CAP {
+                                cache.insert(sender_agent_id_hex.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2038,6 +2141,12 @@ mod tests {
         Arc::new(tokio::sync::RwLock::new(url.map(str::to_owned)))
     }
 
+    /// Fresh empty negative-resolve cache cell for the
+    /// `Endpoint::new_with_denylist` test call sites. Test-only.
+    fn neg_cache() -> Arc<StdMutex<std::collections::HashSet<String>>> {
+        Arc::new(StdMutex::new(std::collections::HashSet::new()))
+    }
+
     /// Capturing transport: stores the most recent `TransitEnvelope` it
     /// was asked to send, then returns a synthetic receipt. Used by the
     /// `send_private_group` test to assert envelope shape without a
@@ -2731,6 +2840,7 @@ mod tests {
             None,
             Some(&denylist),
             primary_cell(None),
+            neg_cache(),
         );
 
         let err = endpoint
@@ -4443,6 +4553,7 @@ mod tests {
             None,
             None,
             primary_cell(Some(primary)),
+            neg_cache(),
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -4499,6 +4610,7 @@ mod tests {
             None,
             None,
             primary_cell(Some(primary)),
+            neg_cache(),
         );
         endpoint
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
@@ -5541,6 +5653,10 @@ mod tests {
             after.agent_public_key_b64, full.agent_public_key_b64,
             "incoming None must not wipe the on-disk ML-DSA key",
         );
+        assert_eq!(
+            after.display_name, "Peer",
+            "empty incoming display_name must not wipe the on-disk name (H2)",
+        );
     }
 
     #[test]
@@ -5740,6 +5856,151 @@ mod tests {
             .unwrap();
         assert_eq!(resolved, 0);
         assert_eq!(skipped, 2, "self excluded, both others skipped (no relay)");
+    }
+
+    #[tokio::test]
+    async fn prefetch_group_member_cards_skips_member_with_existing_ml_dsa_key() {
+        // H2 fix (skip-known): a member already on disk with the ML-DSA key
+        // is counted as skipped and NEVER triggers a relay pair-record GET.
+        // wiremock's expect(0) on the pair-record path asserts no fetch
+        // fired; expect(1) on the unknown member proves the loop still
+        // resolves the others.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+
+        // Member 1: already has a full card (a prior DM pairing). Its
+        // pair-record GET must NOT be issued.
+        let known_signer = MlDsaSigner::generate().unwrap();
+        let known_hex = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &known_signer.public_key(),
+        ));
+        install_card_for(&rig, &known_signer, &known_hex);
+
+        // Member 2: no card on disk. Its pair-record GET should fire once
+        // and 404 (graceful skip), proving the loop still attempts the
+        // members that genuinely need resolving.
+        let unknown_hex = "1".repeat(64);
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/pair-record/{known_hex}")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/pair-record/{unknown_hex}")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            None,
+            primary_cell(Some(&server.uri())),
+            neg_cache(),
+        );
+
+        let self_id = AgentId(rig.agent_hex().to_owned());
+        let members = vec![
+            self_id.clone(),
+            AgentId(known_hex.clone()),
+            AgentId(unknown_hex.clone()),
+        ];
+        let (resolved, skipped) = endpoint
+            .prefetch_group_member_cards(&members, &self_id)
+            .await
+            .unwrap();
+        // Known member skipped (no fetch), unknown member 404 -> skip too;
+        // nothing resolved because the only resolvable one 404'd.
+        assert_eq!(resolved, 0, "the 404 member does not resolve");
+        assert_eq!(
+            skipped, 2,
+            "self excluded; known-card member + 404 member both skipped",
+        );
+        // The known member's name must be intact (never re-imported).
+        let known_card = StoredContactCard::load(&rig.layout, &known_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            known_card.display_name, "Peer",
+            "skip-known must leave the existing named card untouched",
+        );
+        // expect(0)/expect(1) verified on server drop.
+    }
+
+    #[tokio::test]
+    async fn receive_relay_404_folds_to_no_card_and_neg_cache_suppresses_refetch() {
+        // M2 + H1: with a relay CONFIGURED, an unknown sender's pair-record
+        // GET 404s; the receive must still fold to the existing
+        // "no card for envelope sender" error (a 404 is NOT a transport
+        // error). A SECOND envelope from the same unknown sender must hit
+        // the same no-card error WITHOUT a second relay GET -- the bounded
+        // negative cache suppresses the repeat (wiremock expect(1)).
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+
+        // The only pair-record mount: 404 for the unknown sender, asserted
+        // to be hit exactly once across BOTH receives.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/pair-record/{sender_aid}")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            None,
+            primary_cell(Some(&server.uri())),
+            neg_cache(),
+        );
+
+        let env1 = craft_inbound_envelope(&sender_signer, &sender_aid, b"one", 1).await;
+        let err1 = endpoint
+            .receive_private_group_envelope(&env1, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err1, ChatError::Invalid(ref m) if m.contains("no card for envelope sender")),
+            "a relay 404 must fold to the no-card path, got {err1:?}",
+        );
+
+        let env2 = craft_inbound_envelope(&sender_signer, &sender_aid, b"two", 2).await;
+        let err2 = endpoint
+            .receive_private_group_envelope(&env2, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err2, ChatError::Invalid(ref m) if m.contains("no card for envelope sender")),
+            "second envelope from same unknown sender must also be no-card, got {err2:?}",
+        );
+        // wiremock expect(1) verified on `server` drop: the negative cache
+        // suppressed the second sender's pair-record GET.
     }
 
     #[tokio::test]
