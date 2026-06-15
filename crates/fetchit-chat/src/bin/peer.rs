@@ -913,6 +913,29 @@ async fn run_join(
                     "[peer] joined group {} (membership convergence confirmed)",
                     group.group_id.as_str(),
                 );
+                // Pre-resolve base-member sender keys so their first
+                // group message decrypts without a prior DM pairing. The
+                // converged /members roster is the base-member source
+                // (x0xd invites carry no member-key block). 404 / absent
+                // members are skipped; they fall to the on-receive
+                // lazy-fetch path.
+                match client.groups().members(&group.group_id).await {
+                    Ok(members) => {
+                        let self_hex = client.local_agent_id_hex().unwrap_or_default();
+                        let self_id = AgentId(self_hex);
+                        match client
+                            .messages()
+                            .prefetch_group_member_cards(&members, &self_id)
+                            .await
+                        {
+                            Ok((resolved, skipped)) => eprintln!(
+                                "[peer] base-member key prefetch: {resolved} resolved, {skipped} skipped",
+                            ),
+                            Err(e) => eprintln!("[peer] base-member key prefetch failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("[peer] roster fetch for key prefetch failed: {e}"),
+                }
                 eprintln!(
                     "[peer] entering echo loop for group {}",
                     group.group_id.as_str()

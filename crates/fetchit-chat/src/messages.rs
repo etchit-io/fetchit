@@ -337,12 +337,24 @@ impl StoredContactCard {
     }
 
     /// Persist a freshly-imported contact card under `CARD_UPDATE_LOCK`
-    /// without regressing the monotonic relay-hint watermark. Any
-    /// `last_hint_epoch_ms` already on disk (set by an in-band hint that
-    /// arrived before this import) is preserved along with the relays it
-    /// refers to, so a re-import cannot reset the downgrade guard to zero
-    /// and re-admit a stale hint. Identity fields (keys, display name)
-    /// from `self` are always written.
+    /// without regressing the monotonic relay-hint watermark or losing
+    /// identity keys already on disk.
+    ///
+    /// Two merges run against any existing on-disk card:
+    ///
+    /// 1. **Relay-hint watermark.** Any `last_hint_epoch_ms` already on
+    ///    disk (set by an in-band hint that arrived before this import)
+    ///    is preserved along with the relays it refers to, so a re-import
+    ///    cannot reset the downgrade guard to zero and re-admit a stale
+    ///    hint.
+    /// 2. **Identity keys (downgrade-proof).** If the incoming card's
+    ///    `agent_public_key_b64` (ML-DSA) or `kem_public_key_b64` is
+    ///    absent/empty but the on-disk card already carries it, the
+    ///    on-disk value is kept. A partial card resolved from a relay
+    ///    pair-record can therefore never destroy the full card a prior
+    ///    DM-pairing wrote -- the property group decrypt depends on, since
+    ///    [`Endpoint::receive_private_group_envelope`] hard-requires
+    ///    `agent_public_key_b64` to verify the sender.
     ///
     /// # Errors
     /// IO or JSON parse/serialization failures.
@@ -355,6 +367,24 @@ impl StoredContactCard {
             if existing.last_hint_epoch_ms.is_some() {
                 self.last_hint_epoch_ms = existing.last_hint_epoch_ms;
                 self.rendezvous_hints = existing.rendezvous_hints;
+            }
+            // Never let an incoming partial card clobber identity keys the
+            // on-disk card already holds. `None`/empty incoming, present
+            // on-disk -> keep on-disk.
+            if self
+                .agent_public_key_b64
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+                && existing
+                    .agent_public_key_b64
+                    .as_deref()
+                    .is_some_and(|k| !k.is_empty())
+            {
+                self.agent_public_key_b64 = existing.agent_public_key_b64;
+            }
+            if self.kem_public_key_b64.is_empty() && !existing.kem_public_key_b64.is_empty() {
+                self.kem_public_key_b64 = existing.kem_public_key_b64;
             }
         }
         self.save(layout)
@@ -375,6 +405,79 @@ impl StoredContactCard {
         let card: Self = serde_json::from_slice(&bytes)
             .map_err(|e| ChatError::Invalid(format!("stored card parse: {e}")))?;
         Ok(Some(card))
+    }
+}
+
+/// Build a full [`StoredContactCard`] from a relay
+/// [`PairRecordV1`](fetchit_relay_proto::pair_record::PairRecordV1).
+///
+/// Carries the record's ML-DSA pubkey (the field group decrypt verifies
+/// against), KEM pubkey, and advertised relays (as rendezvous hints,
+/// stamped with the record's `issued_at_ms` watermark). Mirrors the
+/// pair-URI import mapping in `Client::import_pair_uri` so a card
+/// resolved by agent id is byte-shaped identically to a directly-paired
+/// one. Pure: no IO, no network -- the network GET is the caller's job.
+#[must_use]
+fn card_from_pair_record(
+    record: &fetchit_relay_proto::pair_record::PairRecordV1,
+) -> StoredContactCard {
+    let rendezvous_hints =
+        (!record.advertised_relays.is_empty()).then(|| crate::card::RendezvousHintsV1 {
+            relays: record.advertised_relays.clone(),
+        });
+    StoredContactCard {
+        agent_id_hex: record.agent_id_hex.clone(),
+        display_name: String::new(),
+        kem_public_key_b64: record.kem_pubkey_b64.clone(),
+        agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
+        rendezvous_hints,
+        last_hint_epoch_ms: Some(record.issued_at_ms),
+    }
+}
+
+/// Resolve a peer's sender keys from a relay pair-record and persist a
+/// full contact card, so a later group decrypt can verify their envelope
+/// signature without a prior DM pairing.
+///
+/// Flow: `GET {relay}/v1/pair-record/{agent_id_hex}` (verified +
+/// agent-id-cross-checked by
+/// [`crate::pair::fetch_pair_record_by_id`]) -> [`card_from_pair_record`]
+/// -> [`StoredContactCard::save_imported`] (which MERGES: a relay record
+/// can refresh a missing key but never downgrade a fuller on-disk card).
+///
+/// Daemonless-compatible: a plain relay HTTP GET, no x0xd round-trip.
+///
+/// Returns:
+/// * `Ok(true)`  -- the card was resolved and persisted.
+/// * `Ok(false)` -- the member has not published a pair-record (relay
+///   404) or the relay was unreachable / returned a bad body. This is a
+///   graceful skip: that sender simply falls back to the existing
+///   no-card path, it is NOT an error.
+///
+/// # Errors
+/// Only a real local failure: [`StoredContactCard::save_imported`] IO /
+/// serialization. Relay-side failures are folded into `Ok(false)`.
+async fn resolve_and_persist_member_card(
+    relay: &url::Url,
+    http: &reqwest::Client,
+    layout: &StoreLayout,
+    agent_id_hex: &str,
+) -> Result<bool> {
+    match crate::pair::fetch_pair_record_by_id(relay, agent_id_hex, http).await {
+        Ok(record) => {
+            card_from_pair_record(&record).save_imported(layout)?;
+            Ok(true)
+        }
+        Err(e) => {
+            // 404 (member never published) and transport/decode failures
+            // are non-fatal: the sender just keeps the existing no-card
+            // behaviour. Log and skip.
+            log::debug!(
+                "[chat] pair-record resolve skipped for {}: {e}",
+                &agent_id_hex[..8.min(agent_id_hex.len())]
+            );
+            Ok(false)
+        }
     }
 }
 
@@ -1008,6 +1111,73 @@ impl<'a> Endpoint<'a> {
         Ok(last_receipt_id.or_else(|| Some(random_message_id())))
     }
 
+    /// Pre-resolve and persist sender keys for a group's base members so
+    /// their first message decrypts even though the joiner never
+    /// DM-paired with them.
+    ///
+    /// Call this right after a successful `groups().join(...)`, passing
+    /// the post-join roster from `groups().members(group_id)` (which is
+    /// the base member set -- the same roster `send_private_group`'s
+    /// fanout addresses) and the joiner's own id. For every member except
+    /// self, the member's pair-record is resolved from the configured
+    /// relay and a full [`StoredContactCard`] is persisted (merge, so a
+    /// pre-existing fuller card is never downgraded). A member who never
+    /// published a pair-record (relay 404) is skipped with no error: that
+    /// sender falls back to the on-receive lazy-fetch /
+    /// [`Self::receive_private_group_envelope`] no-card path.
+    ///
+    /// No-op when no relay URL is configured (REST-only / unit-test
+    /// mode); every member is then reported skipped. Daemonless-compatible
+    /// -- the resolves are relay HTTP GETs, no x0xd round-trip.
+    ///
+    /// Note on the data source: x0xd group invites are opaque
+    /// (`x0x://invite/<base64>`, the daemon's own encoding) and carry no
+    /// fetch>it member-key block, so the converged `/members` roster is
+    /// the base-member source rather than any invite-embedded field.
+    ///
+    /// Returns `(resolved, skipped)` counts (self excluded from both).
+    ///
+    /// # Errors
+    /// Only a real local persistence failure from
+    /// [`StoredContactCard::save_imported`]. Relay 404 / unreachable per
+    /// member is folded into the skipped count, not surfaced.
+    pub async fn prefetch_group_member_cards(
+        &self,
+        members: &[AgentId],
+        self_id: &AgentId,
+    ) -> Result<(usize, usize)> {
+        let layout = self
+            .layout
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        let Some(relay_str) = self.primary_relay_url.read().await.clone() else {
+            // No relay configured: nothing resolvable, every non-self
+            // member is a skip.
+            let skipped = members
+                .iter()
+                .filter(|m| !m.0.eq_ignore_ascii_case(&self_id.0))
+                .count();
+            return Ok((0, skipped));
+        };
+        let relay = url::Url::parse(&relay_str)
+            .map_err(|e| ChatError::Invalid(format!("primary relay URL: {e}")))?;
+        let http = crate::relay_http::guarded_client();
+
+        let mut resolved = 0usize;
+        let mut skipped = 0usize;
+        for member in members {
+            if member.0.eq_ignore_ascii_case(&self_id.0) {
+                continue;
+            }
+            if resolve_and_persist_member_card(&relay, &http, layout, &member.0).await? {
+                resolved += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        Ok((resolved, skipped))
+    }
+
     /// Process an inbound private-group [`TransitEnvelope`]: verify the
     /// sender's ML-DSA-65 signature against the cached card pubkey,
     /// dedup against the conversation's seen-nonces window, decode the
@@ -1071,6 +1241,35 @@ impl<'a> Endpoint<'a> {
         // confirm it carries a v2 ML-DSA pubkey, verify the envelope
         // signature over `SIGN_DOMAIN_ENVELOPE || canonical_envelope_bytes`.
         let sender_agent_id_hex = hex::encode(env.sender_agent_id.as_bytes());
+
+        // Lazy sender-key resolution (covers dynamic / post-join members
+        // the joiner never DM-paired with). When no card is on disk, or
+        // the card lacks the ML-DSA pubkey decrypt needs, resolve the
+        // sender's pair-record from the configured relay ONCE and persist
+        // a full card before the load below. `save_imported` MERGES, so
+        // this can only fill a gap, never downgrade a card. A missing
+        // relay URL (REST-only / unit-test mode) or a relay 404 / fetch
+        // failure is a no-op: the existing no-card / no-pubkey errors then
+        // fire exactly as before.
+        let card_needs_resolve = match StoredContactCard::load(layout, &sender_agent_id_hex)? {
+            None => true,
+            Some(c) => c.agent_public_key_b64.as_deref().unwrap_or("").is_empty(),
+        };
+        if card_needs_resolve {
+            if let Some(relay_str) = self.primary_relay_url.read().await.clone() {
+                if let Ok(relay) = url::Url::parse(&relay_str) {
+                    let http = crate::relay_http::guarded_client();
+                    let _ = resolve_and_persist_member_card(
+                        &relay,
+                        &http,
+                        layout,
+                        &sender_agent_id_hex,
+                    )
+                    .await?;
+                }
+            }
+        }
+
         let stored_card =
             StoredContactCard::load(layout, &sender_agent_id_hex)?.ok_or_else(|| {
                 ChatError::Invalid(format!(
@@ -5275,5 +5474,306 @@ mod tests {
             Err(ChatError::AllRelaysUnreachable { .. }) => {}
             other => panic!("expected AllRelaysUnreachable for legacy contact, got {other:?}"),
         }
+    }
+
+    // ---- group sender-key resolution -------------------------------------
+
+    /// Build a verified [`PairRecordV1`] for `signer` so the resolve
+    /// path's `verify_pair_record` cross-check passes. Mirrors the
+    /// signing layout in `fetchit-relay-proto`'s own round-trip test.
+    async fn signed_pair_record(
+        signer: &MlDsaSigner,
+        kem_pubkey_b64: &str,
+        relays: Vec<String>,
+        ts: u64,
+    ) -> fetchit_relay_proto::pair_record::PairRecordV1 {
+        use fetchit_relay_proto::derive_agent_id;
+        let pk = signer.public_key();
+        let agent_hex = hex::encode(derive_agent_id(&pk));
+        let kem = B64.decode(kem_pubkey_b64).unwrap();
+        let input = fetchit_relay_proto::pair_record::pair_signing_input(
+            &agent_hex, &pk, &kem, &relays, ts,
+        )
+        .unwrap();
+        let sig = signer.sign(&input).await.unwrap();
+        fetchit_relay_proto::pair_record::PairRecordV1 {
+            agent_id_hex: agent_hex,
+            ml_dsa_pubkey_b64: B64.encode(&pk),
+            kem_pubkey_b64: kem_pubkey_b64.to_owned(),
+            advertised_relays: relays,
+            issued_at_ms: ts,
+            sig_b64: B64.encode(&sig),
+        }
+    }
+
+    #[test]
+    fn save_imported_merge_keeps_existing_ml_dsa_key_when_incoming_is_none() {
+        // The key regression: a partial card resolved from a relay (no
+        // ML-DSA key) must NOT clobber the full card a prior DM pairing
+        // wrote -- group decrypt depends on that key surviving.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid = "a".repeat(64);
+
+        let full = StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: "Peer".to_owned(),
+            kem_public_key_b64: B64.encode(vec![1u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        full.clone().save(&layout).unwrap();
+
+        // Incoming partial card: ML-DSA None, but a (different) KEM key.
+        let partial = StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: B64.encode(vec![9u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        partial.save_imported(&layout).unwrap();
+
+        let after = StoredContactCard::load(&layout, &aid).unwrap().unwrap();
+        assert_eq!(
+            after.agent_public_key_b64, full.agent_public_key_b64,
+            "incoming None must not wipe the on-disk ML-DSA key",
+        );
+    }
+
+    #[test]
+    fn save_imported_merge_keeps_existing_kem_key_when_incoming_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid = "b".repeat(64);
+
+        let full = StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: "Peer".to_owned(),
+            kem_public_key_b64: B64.encode(vec![3u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(vec![4u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        full.clone().save(&layout).unwrap();
+
+        let partial = StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: String::new(),
+            agent_public_key_b64: Some(B64.encode(vec![5u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        };
+        partial.save_imported(&layout).unwrap();
+
+        let after = StoredContactCard::load(&layout, &aid).unwrap().unwrap();
+        assert_eq!(
+            after.kem_public_key_b64, full.kem_public_key_b64,
+            "empty incoming KEM must not wipe the on-disk KEM key",
+        );
+    }
+
+    #[test]
+    fn save_imported_full_card_overwrites_when_incoming_has_keys() {
+        // The merge is a floor, not a freeze: a fuller incoming card with
+        // its OWN keys still writes them (it only declines to downgrade).
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid = "c".repeat(64);
+
+        StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: "Old".to_owned(),
+            kem_public_key_b64: B64.encode(vec![1u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        }
+        .save(&layout)
+        .unwrap();
+
+        let new_ml = B64.encode(vec![7u8; 1952]);
+        StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: "New".to_owned(),
+            kem_public_key_b64: B64.encode(vec![8u8; 1184]),
+            agent_public_key_b64: Some(new_ml.clone()),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        }
+        .save_imported(&layout)
+        .unwrap();
+
+        let after = StoredContactCard::load(&layout, &aid).unwrap().unwrap();
+        assert_eq!(after.agent_public_key_b64.as_deref(), Some(new_ml.as_str()));
+        assert_eq!(after.display_name, "New");
+    }
+
+    #[test]
+    fn card_from_pair_record_maps_ml_dsa_kem_relays_and_watermark() {
+        let record = fetchit_relay_proto::pair_record::PairRecordV1 {
+            agent_id_hex: "d".repeat(64),
+            ml_dsa_pubkey_b64: "ML".to_owned(),
+            kem_pubkey_b64: "KEM".to_owned(),
+            advertised_relays: vec!["wss://r1".to_owned(), "wss://r2".to_owned()],
+            issued_at_ms: 4242,
+            sig_b64: "sig".to_owned(),
+        };
+        let card = card_from_pair_record(&record);
+        assert_eq!(card.agent_id_hex, record.agent_id_hex);
+        assert_eq!(card.agent_public_key_b64.as_deref(), Some("ML"));
+        assert_eq!(card.kem_public_key_b64, "KEM");
+        assert_eq!(card.last_hint_epoch_ms, Some(4242));
+        assert_eq!(
+            card.rendezvous_hints.map(|h| h.relays),
+            Some(vec!["wss://r1".to_owned(), "wss://r2".to_owned()]),
+        );
+    }
+
+    #[test]
+    fn card_from_pair_record_no_relays_yields_no_hints() {
+        let record = fetchit_relay_proto::pair_record::PairRecordV1 {
+            agent_id_hex: "e".repeat(64),
+            ml_dsa_pubkey_b64: "ML".to_owned(),
+            kem_pubkey_b64: "KEM".to_owned(),
+            advertised_relays: Vec::new(),
+            issued_at_ms: 1,
+            sig_b64: "sig".to_owned(),
+        };
+        assert!(card_from_pair_record(&record).rendezvous_hints.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_and_persist_skips_gracefully_when_relay_unreachable() {
+        // No server bound at this port -> fetch fails -> Ok(false), no
+        // card written, no error. This is the 404 / unpublished-member
+        // skip semantics exercised via an unreachable endpoint (which
+        // fetch_pair_record_by_id folds into the same Err -> skip).
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let http = crate::relay_http::guarded_client();
+        // Loopback high port with nothing listening; guard_relay_url
+        // rejects loopback under the strict default, which is itself an
+        // Err the resolve folds to Ok(false) -- either way: skip.
+        let relay = url::Url::parse("http://127.0.0.1:9/").unwrap();
+        let aid = "f".repeat(64);
+
+        let resolved = resolve_and_persist_member_card(&relay, &http, &layout, &aid)
+            .await
+            .unwrap();
+        assert!(
+            !resolved,
+            "unreachable/blocked relay must be a graceful skip"
+        );
+        assert!(
+            StoredContactCard::load(&layout, &aid).unwrap().is_none(),
+            "no card should be written on a skip",
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_pair_record_round_trips_into_a_full_card() {
+        // End-to-end of the deterministic seam (no network): a verified
+        // pair-record -> card_from_pair_record -> save_imported produces
+        // a card carrying the sender's real ML-DSA key, which is exactly
+        // what receive_private_group_envelope verifies against.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let signer = MlDsaSigner::generate().unwrap();
+        let kem_b64 = B64.encode(vec![6u8; 1184]);
+        let record = signed_pair_record(
+            &signer,
+            &kem_b64,
+            vec!["https://relay.example".to_owned()],
+            7,
+        )
+        .await;
+        // Sanity: the record we built actually verifies.
+        fetchit_relay_proto::pair_record::verify_pair_record(&record).unwrap();
+
+        card_from_pair_record(&record)
+            .save_imported(&layout)
+            .unwrap();
+
+        let card = StoredContactCard::load(&layout, &record.agent_id_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            card.agent_public_key_b64.as_deref(),
+            Some(B64.encode(signer.public_key()).as_str()),
+            "persisted card must carry the sender's ML-DSA key for decrypt verify",
+        );
+        assert_eq!(card.kem_public_key_b64, kem_b64);
+    }
+
+    #[tokio::test]
+    async fn prefetch_group_member_cards_no_relay_skips_all_non_self() {
+        // Test-ctor Endpoint has primary_relay_url = None: every non-self
+        // member is reported skipped, self is excluded, no error.
+        let server = MockServer::start().await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+        );
+        let self_id = AgentId(rig.agent_hex().to_owned());
+        let members = vec![
+            self_id.clone(),
+            AgentId("1".repeat(64)),
+            AgentId("2".repeat(64)),
+        ];
+        let (resolved, skipped) = endpoint
+            .prefetch_group_member_cards(&members, &self_id)
+            .await
+            .unwrap();
+        assert_eq!(resolved, 0);
+        assert_eq!(skipped, 2, "self excluded, both others skipped (no relay)");
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_lazy_fetch_noop_without_relay_keeps_no_card_error() {
+        // Regression lock: with no relay configured (test ctor), the
+        // on-receive lazy-fetch is a no-op and the existing 'no card'
+        // error fires unchanged -- never a panic, never a swallow.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 1).await;
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+        );
+        let err = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("no card for envelope sender")),
+            "expected unchanged no-card error, got {err:?}",
+        );
     }
 }
