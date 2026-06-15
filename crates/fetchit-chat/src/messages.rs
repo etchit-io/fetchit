@@ -278,6 +278,11 @@ impl StoredContactCard {
     /// The load-modify-save is serialised under `CARD_UPDATE_LOCK` so a
     /// concurrent `import_pair_uri` write cannot race it to a lost update.
     ///
+    /// Each relay is run through [`migrate_known_bare_ip_relay`] before
+    /// persisting, so a card paired against a fetch>it bare-IP relay heals
+    /// to that relay's TLS hostname form -- the bare-IP endpoints are being
+    /// locked to Cloudflare-only and no longer accept a direct wss dial.
+    ///
     /// Returns `true` when the card was updated and persisted, `false` when
     /// the hint was stale or the card is not on disk.
     ///
@@ -303,6 +308,14 @@ impl StoredContactCard {
         {
             return Ok(false);
         }
+
+        // Heal a known bare-IP relay hint to its TLS hostname form before
+        // persisting (see migrate_known_bare_ip_relay). Consumes the input
+        // list so the by-value `relays` argument is moved, not borrowed.
+        let relays: Vec<String> = relays
+            .into_iter()
+            .map(|r| migrate_known_bare_ip_relay(&r))
+            .collect();
 
         let _guard = CARD_UPDATE_LOCK
             .lock()
@@ -485,8 +498,19 @@ impl<'a> Endpoint<'a> {
         let card_hints = StoredContactCard::resolve_recipient_hints(layout, recipient_agent_id_hex)
             .ok()
             .flatten();
-        if card_hints.is_some() {
-            return card_hints;
+        if let Some(mut hints) = card_hints {
+            // Heal a stale bare-IP hint to its TLS hostname form at dial time,
+            // so a card paired before the #114 cutover (whose bare-IP endpoint
+            // is now Cloudflare-locked and undialable over wss) still routes.
+            // The persistent heal lands on the next apply_relay_hint refresh;
+            // this covers an outbound-first send before any refresh arrives.
+            for relay in &mut hints.relays {
+                let migrated = migrate_known_bare_ip_relay(relay);
+                if &migrated != relay {
+                    *relay = migrated;
+                }
+            }
+            return Some(hints);
         }
         // Legacy v1 card OR no card at all: synthesize a hint
         // pointing at the local primary so MultiHomeTransport routes
@@ -1476,6 +1500,51 @@ fn hint_to_https_url(hint: &str) -> Result<url::Url> {
         }
     }
     Ok(url)
+}
+
+/// Known fetch>it relays whose bare-IP `:8088` endpoint is being locked to
+/// Cloudflare-only, paired with the TLS hostname clients must dial instead.
+///
+/// Matched by `host:port` (scheme-agnostic), so both the `http://` form a
+/// pre-cutover card stored and a `ws(s)://` variant resolve. The right-hand
+/// value is the full canonical replacement URL (TLS form; the deposit path
+/// upgrades `https` to `wss` at dial). Mirrors the desktop
+/// `RELAY_URL_MIGRATIONS` table so a peer card and the local primary heal to
+/// the same hosts. Frozen, historical: a fixed retirement map, not a live
+/// directory of current relays.
+const BARE_IP_RELAY_MIGRATIONS: &[(&str, &str)] = &[
+    ("67.207.94.66:8088", "https://nyc-relay.etchit.io"),
+    ("159.89.11.217:8088", "https://fra-relay.etchit.io"),
+];
+
+/// Heal a known fetch>it bare-IP relay URL to its TLS hostname form.
+///
+/// A card paired before the #114 TLS cutover stores the relay as a bare-IP
+/// `:8088` URL. Those endpoints are being locked to Cloudflare-only, so a
+/// bare-IP hint can no longer be dialed directly over wss; this rewrites it
+/// to the hostname in [`BARE_IP_RELAY_MIGRATIONS`]. The match is on
+/// `host:port`, so the stored scheme does not matter.
+///
+/// Anything not in the table (a custom or self-hosted relay) passes through
+/// unchanged, and the hostname targets are not themselves table keys, so the
+/// rewrite is idempotent.
+fn migrate_known_bare_ip_relay(relay: &str) -> String {
+    let Ok(url) = relay.parse::<url::Url>() else {
+        return relay.to_owned();
+    };
+    let Some(host) = url.host_str() else {
+        return relay.to_owned();
+    };
+    let host_port = match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_owned(),
+    };
+    for (bare, hostname_url) in BARE_IP_RELAY_MIGRATIONS {
+        if host_port == *bare {
+            return (*hostname_url).to_owned();
+        }
+    }
+    relay.to_owned()
 }
 
 fn random_message_id() -> String {
@@ -3982,6 +4051,52 @@ mod tests {
         assert_eq!(got.relays, hints.relays);
     }
 
+    #[tokio::test]
+    async fn resolve_hints_for_migrates_bare_ip_hint_at_dial_time() {
+        // A card paired on the bare-IP relay, never refreshed. The dial-time
+        // resolver must hand back the TLS hostname form so an outbound-first
+        // send over wss reaches the Cloudflare-fronted endpoint instead of
+        // dialing the (now CF-locked) bare IP.
+        use crate::local_store::StoreLayout;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid_hex = "2".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: aid_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["http://159.89.11.217:8088".to_owned()],
+            }),
+            last_hint_epoch_ms: None,
+        };
+        card.save(&layout).unwrap();
+
+        let router = Router::new();
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            None,
+            None,
+            None,
+            Some(&layout),
+            [0u8; 32],
+            None,
+        );
+
+        let got = endpoint
+            .resolve_hints_for(&aid_hex)
+            .await
+            .expect("stored card resolves to Some");
+        assert_eq!(
+            got.relays,
+            vec!["https://fra-relay.etchit.io".to_owned()],
+            "bare-IP card hint must resolve to the TLS hostname at dial time"
+        );
+    }
+
     /// Legacy v1 card has no hints slot — resolver returns None.
     /// The send-path fallback then synthesizes the local primary URL
     /// before calling `MultiHomeTransport`.
@@ -4319,6 +4434,85 @@ mod tests {
             Some(&vec!["wss://new.example.com".to_owned()]),
         );
         assert_eq!(loaded.last_hint_epoch_ms, Some(1_000));
+    }
+
+    #[test]
+    fn migrate_known_bare_ip_relay_maps_both_relays_any_scheme() {
+        // http:// form (the shape pre-cutover cards stored) heals to the TLS
+        // hostname; the ws:// variant of the same host:port heals identically.
+        assert_eq!(
+            migrate_known_bare_ip_relay("http://67.207.94.66:8088"),
+            "https://nyc-relay.etchit.io"
+        );
+        assert_eq!(
+            migrate_known_bare_ip_relay("ws://67.207.94.66:8088/v1/ws"),
+            "https://nyc-relay.etchit.io"
+        );
+        assert_eq!(
+            migrate_known_bare_ip_relay("http://159.89.11.217:8088"),
+            "https://fra-relay.etchit.io"
+        );
+    }
+
+    #[test]
+    fn migrate_known_bare_ip_relay_leaves_others_untouched_and_is_idempotent() {
+        // Unknown host (custom/self-hosted relay): unchanged.
+        assert_eq!(
+            migrate_known_bare_ip_relay("http://192.168.1.5:8088"),
+            "http://192.168.1.5:8088"
+        );
+        // Same IP, different port: not the migrated endpoint, so unchanged.
+        assert_eq!(
+            migrate_known_bare_ip_relay("http://67.207.94.66:9999"),
+            "http://67.207.94.66:9999"
+        );
+        // The hostname target is not a table key: re-running is a no-op.
+        assert_eq!(
+            migrate_known_bare_ip_relay("https://nyc-relay.etchit.io"),
+            "https://nyc-relay.etchit.io"
+        );
+        // Non-URL input passes through.
+        assert_eq!(migrate_known_bare_ip_relay("not a url"), "not a url");
+    }
+
+    #[test]
+    fn apply_relay_hint_migrates_bare_ip_to_hostname_on_refresh() {
+        // A card paired on the NYC bare-IP relay: a fresh in-band hint that
+        // still carries the bare IP must be persisted in the TLS hostname
+        // form so the next dial reaches the Cloudflare-fronted endpoint.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let agent_hex = "c".repeat(64);
+        let card = StoredContactCard {
+            agent_id_hex: agent_hex.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["http://67.207.94.66:8088".to_owned()],
+            }),
+            last_hint_epoch_ms: Some(1_000),
+        };
+        card.save(&layout).unwrap();
+
+        let updated = StoredContactCard::apply_relay_hint(
+            &layout,
+            &agent_hex,
+            vec!["http://67.207.94.66:8088".to_owned()],
+            2_000,
+        )
+        .unwrap();
+        assert!(updated, "newer epoch must update the card");
+
+        let loaded = StoredContactCard::load(&layout, &agent_hex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.rendezvous_hints.as_ref().map(|h| &h.relays),
+            Some(&vec!["https://nyc-relay.etchit.io".to_owned()]),
+            "bare-IP hint must be persisted as the TLS hostname form"
+        );
+        assert_eq!(loaded.last_hint_epoch_ms, Some(2_000));
     }
 
     #[test]

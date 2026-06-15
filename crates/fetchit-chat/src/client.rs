@@ -2073,6 +2073,14 @@ impl Client {
         let process_start_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        // No-send-before-registered: gate flushes on the primary relay
+        // reaching ConnState::Connected. On a wss client a flush fired before
+        // registration surfaces AllRelaysUnreachable and crash-loops; the gate
+        // holds the flush until the relay is ready. REST/LAN-only clients have
+        // no relay state and the gate is permanently ready.
+        let ready_gate = Arc::new(RelayReadyGate {
+            relay_state: self.relay_connection_state(),
+        });
         let driver = crate::outbox::driver::OutboxDriver::new(
             chat.outbox.clone(),
             chat.outbox_tx.clone(),
@@ -2081,7 +2089,8 @@ impl Client {
                 name_provider,
             },
             process_start_ms,
-        );
+        )
+        .with_ready_gate(ready_gate);
         let client = self.clone();
         Some(tokio::spawn(async move {
             const MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
@@ -2616,6 +2625,45 @@ impl crate::outbox::driver::OutboxTransport for RealOutboxTransport {
                 transport_name: "outbox-retry",
             })
         }
+    }
+}
+
+/// Production [`crate::outbox::driver::ReadyGate`]: holds off an outbox
+/// flush until the primary relay is registered.
+///
+/// Backed by the relay supervisor's `ConnState` watch (slot 0 in the
+/// multi-home set). `relay_state = None` means no relay transport is wired
+/// (REST-only / LAN-only deployments), where there is nothing to wait for,
+/// so the gate is permanently ready. Otherwise [`Self::wait_ready`] resolves
+/// once the primary reaches [`fetchit_relay_client::ConnState::Connected`].
+struct RelayReadyGate {
+    relay_state: Option<tokio::sync::watch::Receiver<fetchit_relay_client::ConnState>>,
+}
+
+impl crate::outbox::driver::ReadyGate for RelayReadyGate {
+    fn wait_ready(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(rx) = self.relay_state.as_ref() else {
+                // No relay transport => nothing to register; always ready.
+                return;
+            };
+            let mut rx = rx.clone();
+            loop {
+                if matches!(
+                    *rx.borrow(),
+                    fetchit_relay_client::ConnState::Connected { .. }
+                ) {
+                    return;
+                }
+                // Not yet connected. Wait for the next state change. If the
+                // sender is gone (supervisor shut down) we will not block a
+                // flush forever -- proceed and let the send report the real
+                // transport error rather than hang.
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
     }
 }
 

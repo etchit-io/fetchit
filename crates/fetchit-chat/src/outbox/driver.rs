@@ -41,6 +41,26 @@ pub trait OutboxTransport: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<SendReceipt, ChatError>> + Send;
 }
 
+/// No-send-before-registered gate.
+///
+/// A flush must not fire a send until the relay connection the transport
+/// routes through is established and registered. Without this, a presence
+/// edge that lands before the relay supervisor reaches
+/// [`fetchit_relay_client::ConnState::Connected`] drives a send into a relay
+/// set whose every entry is still unreachable, which surfaces as
+/// [`ChatError::AllRelaysUnreachable`] -- harmless retry-noise on a bare-IP
+/// connection, but a fatal exit on a wss one.
+///
+/// Object-safe (boxed `async` via [`std::pin::Pin`]) so the driver can hold
+/// `dyn ReadyGate` while production wires it to the relay client's
+/// `ConnState` watch and tests supply a scripted double.
+pub trait ReadyGate: Send + Sync + 'static {
+    /// Resolve once the routing relay is registered and ready for a send.
+    /// Implementations may return immediately when already ready, or await
+    /// the transition; the driver awaits this before every flush.
+    fn wait_ready(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+}
+
 /// Background retry driver. Owns the outbox state + the retry policy; the
 /// shell only starts it and renders the [`OutboxEvent`] stream.
 pub struct OutboxDriver<T: OutboxTransport> {
@@ -49,6 +69,10 @@ pub struct OutboxDriver<T: OutboxTransport> {
     transport: T,
     last_online: Mutex<HashMap<AgentId, bool>>,
     process_start_ms: u64,
+    /// Optional no-send-before-registered gate. When set, every flush awaits
+    /// it before sending; `None` (the default) means "always ready", which
+    /// keeps relay-less / scripted-transport tests unchanged.
+    ready_gate: Option<Arc<dyn ReadyGate>>,
 }
 
 impl<T: OutboxTransport> OutboxDriver<T> {
@@ -67,7 +91,18 @@ impl<T: OutboxTransport> OutboxDriver<T> {
             transport,
             last_online: Mutex::new(HashMap::new()),
             process_start_ms,
+            ready_gate: None,
         }
+    }
+
+    /// Attach a [`ReadyGate`] so flushes wait for the routing relay to be
+    /// registered before sending. Production wires this to the relay
+    /// client's `ConnState` watch; without it the driver assumes the
+    /// transport is always ready (the relay-less test default).
+    #[must_use]
+    pub fn with_ready_gate(mut self, gate: Arc<dyn ReadyGate>) -> Self {
+        self.ready_gate = Some(gate);
+        self
     }
 
     /// Broadcast an upsert for each changed bubble. A lagging receiver
@@ -81,6 +116,15 @@ impl<T: OutboxTransport> OutboxDriver<T> {
     /// Re-send every retryable bubble for `peer` not already in flight,
     /// warming the link first.
     pub async fn flush_peer(&self, peer: &AgentId) {
+        // No-send-before-registered: wait for the routing relay to be ready
+        // before claiming anything. A presence edge can arrive before the
+        // relay supervisor reaches Connected; sending then yields
+        // AllRelaysUnreachable (a fatal exit on a wss connection). Gating
+        // here -- the single chokepoint on_presence / flush_all funnel
+        // through -- covers every flush path. No gate set => always ready.
+        if let Some(gate) = self.ready_gate.as_ref() {
+            gate.wait_ready().await;
+        }
         // Claim the eligible bubbles under the lock, then release it for
         // the awaits below.
         let claims: Vec<OutboxBubble> = {
@@ -271,6 +315,110 @@ mod tests {
         let driver =
             OutboxDriver::new(Arc::new(Mutex::new(store)), tx, transport, process_start_ms);
         (driver, rx)
+    }
+
+    /// Scripted [`ReadyGate`]: resolves `wait_ready` only after `ready` flips
+    /// true. Until then the await parks on the notifier, modelling a relay
+    /// that has not yet reached Connected.
+    struct ScriptedGate {
+        ready: Arc<std::sync::atomic::AtomicBool>,
+        notify: Arc<tokio::sync::Notify>,
+    }
+    impl ScriptedGate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            })
+        }
+        fn mark_ready(&self) {
+            self.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+    }
+    impl ReadyGate for ScriptedGate {
+        fn wait_ready(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                loop {
+                    if self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    self.notify.notified().await;
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_waits_for_ready_gate_then_sends() {
+        // A presence edge fires while the gate is pending: no send happens
+        // until the gate flips ready. Models the wss race -- a flush before
+        // the relay registers must not drive an AllRelaysUnreachable send.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let gate = ScriptedGate::new();
+        let (tx, _rx) = broadcast::channel(16);
+        let driver = OutboxDriver::new(
+            Arc::new(Mutex::new(store)),
+            tx,
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
+            0,
+        )
+        .with_ready_gate(gate.clone());
+
+        // Spawn the flush; it must park on the gate, not send.
+        let flush = {
+            let driver = Arc::new(driver);
+            let d = driver.clone();
+            let h = tokio::spawn(async move { d.on_presence(&peer_a(), true).await });
+            // Yield generously: the gate is not ready, so nothing should send.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                sent.lock().await.is_empty(),
+                "no send may occur while the ready gate is pending"
+            );
+            (driver, h)
+        };
+
+        // Flip the gate: the parked flush wakes and sends.
+        gate.mark_ready();
+        flush.1.await.unwrap();
+        assert_eq!(
+            sent.lock().await.as_slice(),
+            &["b1".to_string()],
+            "send proceeds once the relay is ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_gate_already_ready_sends_immediately() {
+        // Gate ready before the edge: behaves exactly like the no-gate path.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let gate = ScriptedGate::new();
+        gate.mark_ready();
+        let (tx, _rx) = broadcast::channel(16);
+        let driver = OutboxDriver::new(
+            Arc::new(Mutex::new(store)),
+            tx,
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
+            0,
+        )
+        .with_ready_gate(gate);
+        driver.on_presence(&peer_a(), true).await;
+        assert_eq!(sent.lock().await.as_slice(), &["b1".to_string()]);
     }
 
     #[tokio::test]

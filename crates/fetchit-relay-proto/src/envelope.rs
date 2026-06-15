@@ -589,7 +589,7 @@ mod tests {
     /// the architecture reference when adding a variant.
     #[test]
     fn envelope_kinds_locked() {
-        fn _assert(k: &EnvelopeKind) {
+        fn _assert(k: EnvelopeKind) {
             match k {
                 EnvelopeKind::Dm
                 | EnvelopeKind::GroupChat

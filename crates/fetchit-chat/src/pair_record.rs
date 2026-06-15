@@ -31,11 +31,55 @@ use std::time::Duration;
 
 // ── (A) Record builders ───────────────────────────────────────────────────────
 
+/// Normalize a relay URL to the http/https form the pair-record and
+/// forwarding-record signing inputs require.
+///
+/// Advertised relays and v2 rendezvous hints carry the `wss://` (or `ws://`)
+/// transport form peers dial directly. The signed pair-record / forwarding-record
+/// `relays` field is, by contract, the relay's HTTP endpoint (peers upgrade to
+/// `wss://` at connect via [`fetchit_relay_client`]'s WS-URL builder), and
+/// [`pair_signing_input`] / [`forwarding_signing_input`] reject any non-http/https
+/// scheme. So a wss-default client (whose primary relay is `wss://…`) would fail
+/// to publish unless the list is mapped to its HTTP form right here, at the
+/// signing boundary.
+///
+/// The mapping is `wss → https` and `ws → http`; http/https inputs (and any other
+/// scheme, which the signing input rejects downstream regardless) pass through
+/// unchanged, so calling this on an already-http/https list is a no-op. Only the
+/// scheme is touched: host, port, and path are preserved.
+fn relays_to_http_for_signing(relays: &[String]) -> Vec<String> {
+    relays
+        .iter()
+        .map(|relay| {
+            let Ok(mut url) = relay.parse::<url::Url>() else {
+                return relay.clone();
+            };
+            let mapped = match url.scheme() {
+                "wss" => "https",
+                "ws" => "http",
+                // http/https (and anything else, which the signing input
+                // rejects) pass through untouched.
+                _ => return relay.clone(),
+            };
+            if url.set_scheme(mapped).is_err() {
+                return relay.clone();
+            }
+            url.to_string()
+        })
+        .collect()
+}
+
 /// Build and sign a [`PairRecordV1`] from the local identity and signer.
 ///
 /// The `agent_id_hex`, ML-DSA-65 pubkey (via `signer.public_key()`), and
 /// ML-KEM-768 pubkey (via `identity.kem_public_key()`) are read from the
 /// canonical sources so they can never drift from the rest of the crate.
+///
+/// `advertised_relays` may arrive in `wss://` / `ws://` transport form (the
+/// shape advertised to peers); it is normalized to the http/https form the
+/// signing input requires via [`relays_to_http_for_signing`] before signing.
+/// The returned record's `advertised_relays` carries that normalized form,
+/// matching the bytes actually signed.
 ///
 /// # Errors
 ///
@@ -51,6 +95,8 @@ pub async fn build_signed_pair_record(
     let ml_dsa_pubkey = signer.public_key();
     let kem_pubkey = identity.kem_public_key();
     ensure_identity_binds_signer(&agent_id_hex, &ml_dsa_pubkey)?;
+
+    let advertised_relays = relays_to_http_for_signing(&advertised_relays);
 
     let input = pair_signing_input(
         &agent_id_hex,
@@ -78,6 +124,11 @@ pub async fn build_signed_pair_record(
 
 /// Build and sign a [`ForwardingRecordV1`] from the local identity and signer.
 ///
+/// `moved_to_relays` may arrive in `wss://` / `ws://` transport form; it is
+/// normalized to the http/https form the signing input requires via
+/// [`relays_to_http_for_signing`] before signing, and the returned record
+/// carries that normalized form.
+///
 /// # Errors
 ///
 /// [`ChatError::Invalid`] if [`forwarding_signing_input`] rejects any field
@@ -91,6 +142,8 @@ pub async fn build_signed_forwarding_record(
     let agent_id_hex = identity.agent_id_hex().to_owned();
     let ml_dsa_pubkey = signer.public_key();
     ensure_identity_binds_signer(&agent_id_hex, &ml_dsa_pubkey)?;
+
+    let moved_to_relays = relays_to_http_for_signing(&moved_to_relays);
 
     let input = forwarding_signing_input(&agent_id_hex, &moved_to_relays, issued_at_ms)
         .map_err(|e| ChatError::Invalid(format!("forwarding_signing_input: {e}")))?;
@@ -557,6 +610,106 @@ mod tests {
         assert_eq!(record.agent_id_hex, agent_hex);
         fetchit_relay_proto::pair_record::verify_forwarding_record(&record, &pubkey)
             .expect("built forwarding record must verify");
+    }
+
+    // ── (A) wss/ws relay normalization at the signing boundary ────────────────
+
+    #[test]
+    fn relays_to_http_for_signing_maps_wss_and_ws() {
+        let got = relays_to_http_for_signing(&[
+            "wss://nyc-relay.etchit.io/v1/ws".to_owned(),
+            "ws://10.0.0.1:8088/v1/ws".to_owned(),
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "https://nyc-relay.etchit.io/v1/ws".to_owned(),
+                "http://10.0.0.1:8088/v1/ws".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn relays_to_http_for_signing_is_idempotent_on_http_https() {
+        let input = vec![
+            "https://relay.example.com".to_owned(),
+            "http://67.207.94.66:8088".to_owned(),
+        ];
+        // http/https pass through unchanged, and a second pass is a no-op.
+        let once = relays_to_http_for_signing(&input);
+        assert_eq!(once, input);
+        assert_eq!(relays_to_http_for_signing(&once), input);
+    }
+
+    #[tokio::test]
+    async fn build_signed_pair_record_normalizes_wss_to_https() {
+        let dir = tempdir().unwrap();
+        let signer = make_signer();
+        let agent_hex = agent_hex_for(&signer);
+        let identity = make_identity(dir.path(), &agent_hex);
+
+        // A wss-default client feeds a wss:// relay list. It must sign with
+        // the https form (pair_signing_input rejects wss) and the record
+        // must verify -- i.e. the signed bytes match the normalized relays.
+        let record = build_signed_pair_record(
+            &identity,
+            &signer,
+            vec!["wss://nyc-relay.etchit.io/v1/ws".to_owned()],
+            1_000_000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            record.advertised_relays,
+            vec!["https://nyc-relay.etchit.io/v1/ws".to_owned()],
+            "wss must be normalized to https in the signed record"
+        );
+        fetchit_relay_proto::pair_record::verify_pair_record(&record)
+            .expect("normalized record must verify");
+    }
+
+    #[tokio::test]
+    async fn build_signed_forwarding_record_normalizes_ws_to_http() {
+        let dir = tempdir().unwrap();
+        let signer = make_signer();
+        let agent_hex = agent_hex_for(&signer);
+        let identity = make_identity(dir.path(), &agent_hex);
+        let pubkey = signer.public_key();
+
+        let record = build_signed_forwarding_record(
+            &identity,
+            &signer,
+            vec!["ws://relay.example.com:8088/v1/ws".to_owned()],
+            2_000_000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            record.moved_to_relays,
+            vec!["http://relay.example.com:8088/v1/ws".to_owned()],
+            "ws must be normalized to http in the signed forwarding record"
+        );
+        fetchit_relay_proto::pair_record::verify_forwarding_record(&record, &pubkey)
+            .expect("normalized record must verify");
+    }
+
+    #[tokio::test]
+    async fn build_signed_pair_record_leaves_https_untouched() {
+        let dir = tempdir().unwrap();
+        let signer = make_signer();
+        let agent_hex = agent_hex_for(&signer);
+        let identity = make_identity(dir.path(), &agent_hex);
+
+        // An already-http/https list (the legacy bare-IP form) must round-trip
+        // byte-for-byte: normalization is idempotent here.
+        let record = build_signed_pair_record(&identity, &signer, relays(), 3_000_000)
+            .await
+            .unwrap();
+        assert_eq!(record.advertised_relays, relays());
+        fetchit_relay_proto::pair_record::verify_pair_record(&record)
+            .expect("https record must verify");
     }
 
     #[tokio::test]
