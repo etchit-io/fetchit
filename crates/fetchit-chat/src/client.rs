@@ -497,14 +497,21 @@ pub struct Client {
     /// await-friendly at the async read sites.
     primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Session-lived negative cache of sender agent ids whose on-receive
-    /// group-sender pair-record resolve already failed (relay 404 /
+    /// group-sender pair-record resolve recently failed (relay 404 /
     /// unreachable). Cloned into every [`messages::Endpoint`] so
     /// [`messages::Endpoint::receive_private_group_envelope`] fetches a
-    /// given unknown sender's pair-record at most once per session instead
-    /// of once per delivered envelope (H1 relay-GET amplification). Bounded
+    /// given unknown sender's pair-record at most once per TTL window
+    /// instead of once per delivered envelope (H1 relay-GET amplification).
+    ///
+    /// Entries map sender-id -> insertion `Instant` and EXPIRE after
+    /// [`messages::NEG_CACHE_TTL`]: pair-records are RAM-only and per-relay,
+    /// so a relay restart drops them and peers re-POST on reconnect -- a 404
+    /// is therefore transient, and a session-permanent suppression would
+    /// silently wedge a now-resolvable sender ("messages won't decrypt")
+    /// until app restart. A short TTL self-heals by re-validating. Bounded
     /// in `Endpoint`; never persisted. `std::sync::Mutex` (not async): the
-    /// critical section is a `HashSet` contains/insert, no `.await` held.
-    neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// critical section is a `HashMap` get/insert, no `.await` held.
+    neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// T8b / T9: optional callback the home-relay failover watcher (and
     /// [`Self::migrate_primary`]) fires after attempting to migrate slot 0.
     /// The argument is a typed [`RelayFailoverEvent`] (see
@@ -656,7 +663,7 @@ impl Client {
             advertised_relays: Arc::new(tokio::sync::RwLock::new(initial_relays)),
             multi_home_inbound,
             primary_relay_url,
-            neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home,
             fediverse,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
@@ -4593,7 +4600,7 @@ mod tests {
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: None,
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
-            neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home: None,
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
@@ -4965,7 +4972,7 @@ mod tests {
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
-            neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home: None,
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),

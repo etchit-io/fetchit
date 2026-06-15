@@ -535,27 +535,44 @@ pub struct Endpoint<'a> {
     /// 0, and the send path reads this LIVE at dispatch time so its
     /// fallback hint points at the NEW primary rather than the dead one.
     primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
-    /// Bounded, session-lived negative cache of sender agent ids whose
-    /// on-receive pair-record resolve already failed (relay 404 /
-    /// unreachable) this run. [`Self::receive_private_group_envelope`]
-    /// consults it BEFORE the lazy fetch so a stream of envelopes from one
-    /// unknown / spoofed sender triggers at most one relay GET per session
-    /// rather than one GET per envelope (H1 amplification). Capped (see
+    /// Bounded, TTL-expiring negative cache of sender agent ids whose
+    /// on-receive pair-record resolve recently failed (relay 404 /
+    /// unreachable). [`Self::receive_private_group_envelope`] consults it
+    /// BEFORE the lazy fetch so a stream of envelopes from one unknown /
+    /// spoofed sender triggers at most one relay GET per TTL window rather
+    /// than one GET per envelope (H1 amplification). Capped (see
     /// [`NEG_CACHE_CAP`]); ids past the cap simply aren't cached, so memory
-    /// is strictly bounded. Clock-free and never persisted -- a disk-backed
-    /// marker would just move the amplification to disk writes.
+    /// is strictly bounded. Never persisted -- a disk-backed marker would
+    /// just move the amplification to disk writes.
     ///
-    /// `Arc<Mutex<HashSet>>` owned by `Client` and cloned into each
+    /// Entries map sender-id -> insertion [`std::time::Instant`] and EXPIRE
+    /// after [`NEG_CACHE_TTL`]. WHY a TTL rather than a permanent marker:
+    /// relay pair-records are RAM-only and per-relay, so a relay restart or
+    /// blip drops every record and peers re-POST theirs on reconnect. A 404
+    /// is therefore transient -- it can become a 200 once the relay is back
+    /// -- and a session-permanent suppression would silently wedge a
+    /// now-resolvable sender (a "messages won't decrypt" bug) until app
+    /// restart. Expiring entries are re-validated, so the cache self-heals.
+    ///
+    /// `Arc<Mutex<HashMap>>` owned by `Client` and cloned into each
     /// `Endpoint` exactly like `primary_relay_url`, so every `messages()`
-    /// call this session shares one set.
-    neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// call this session shares one map.
+    neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 /// Upper bound on [`Endpoint::neg_resolve_cache`] entries. Past this the
-/// set stops growing (further unknown senders just aren't cached and
+/// map stops growing (further unknown senders just aren't cached and
 /// re-fetch once more), keeping the session memory cost fixed regardless of
 /// how many distinct unknown senders an attacker cycles through.
 const NEG_CACHE_CAP: usize = 4096;
+
+/// How long a negative-cache entry suppresses a re-fetch before it expires
+/// and the next envelope from that sender re-validates against the relay.
+/// Short because relay pair-records are RAM-only and per-relay: a 404 only
+/// means "not on this relay right now" and can flip to a 200 after a relay
+/// restart, so the cache must self-heal rather than wedge a sender for the
+/// whole session.
+const NEG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl<'a> Endpoint<'a> {
     /// Pre-M3 8-arg constructor, retained for the existing test suite
@@ -588,7 +605,7 @@ impl<'a> Endpoint<'a> {
             // fallback hint unset (send paths pass `None` through).
             Arc::new(tokio::sync::RwLock::new(None)),
             // Fresh empty negative cache per test endpoint.
-            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         )
     }
 
@@ -609,7 +626,9 @@ impl<'a> Endpoint<'a> {
         members_singleflight: Option<&'a Arc<crate::members_singleflight::MembersSingleflight>>,
         denylist: Option<&'a Arc<dyn crate::denylist::DenylistCheck>>,
         primary_relay_url: Arc<tokio::sync::RwLock<Option<String>>>,
-        neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        neg_resolve_cache: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+        >,
     ) -> Self {
         Self {
             http,
@@ -1311,75 +1330,106 @@ impl<'a> Endpoint<'a> {
         // signature over `SIGN_DOMAIN_ENVELOPE || canonical_envelope_bytes`.
         let sender_agent_id_hex = hex::encode(env.sender_agent_id.as_bytes());
 
+        // Load the sender's stored card ONCE for this receive. Both the
+        // lazy-resolve gate below and the verify/decrypt path consume this
+        // single load + JSON parse rather than the two loads the prefetch
+        // helper `card_needs_resolve` would do (it stays on the non-hot
+        // prefetch path). A successful resolve below REPLACES this with a
+        // fresh load (the persist wrote the gap-filled card to disk).
+        let mut card = StoredContactCard::load(layout, &sender_agent_id_hex)?;
+
         // Lazy sender-key resolution (covers dynamic / post-join members
         // the joiner never DM-paired with). When no card is on disk, or
         // the card lacks the ML-DSA pubkey decrypt needs, resolve the
         // sender's pair-record from the configured relay ONCE and persist
-        // a full card before the load below. `save_imported` MERGES, so
-        // this can only fill a gap, never downgrade a card. A missing
-        // relay URL (REST-only / unit-test mode) or a relay 404 / fetch
-        // failure is a no-op: the existing no-card / no-pubkey errors then
-        // fire exactly as before.
+        // a full card. `save_imported` MERGES, so this can only fill a gap,
+        // never downgrade a card. A missing relay URL (REST-only /
+        // unit-test mode) or a relay 404 / fetch failure is a no-op: the
+        // existing no-card / no-pubkey errors then fire exactly as before.
         //
         // H1 amplification guard: an unknown / spoofed sender_agent_id
-        // whose resolve 404s leaves no card on disk, so card_needs_resolve
+        // whose resolve 404s leaves no card on disk, so `needs_resolve`
         // would stay true and EVERY later envelope from that id would
         // re-fetch (1 relay GET per envelope, attacker-amplifiable). A
-        // bounded, session-lived negative cache records ids whose resolve
-        // already failed this run so each unknown sender triggers at most
-        // one GET per session.
-        if card_needs_resolve(layout, &sender_agent_id_hex)? {
-            let already_failed = self
-                .neg_resolve_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&sender_agent_id_hex);
-            if !already_failed {
+        // bounded, TTL-expiring negative cache records ids whose resolve
+        // recently failed so each unknown sender triggers at most one GET
+        // per TTL window. The TTL (not a permanent marker) self-heals when
+        // a relay restart -- which drops its RAM-only pair-records and lets
+        // peers re-POST -- turns a 404 into a 200; see `neg_resolve_cache`.
+        let needs_resolve = card
+            .as_ref()
+            .is_none_or(|c| c.agent_public_key_b64.as_deref().unwrap_or("").is_empty());
+        if needs_resolve {
+            // Skip the fetch only on a FRESH negative-cache entry. Scope the
+            // std::sync::Mutex guard to this statement -- it must NOT be held
+            // across the `.await`s below.
+            let fresh = {
+                let map = self
+                    .neg_resolve_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                map.get(&sender_agent_id_hex)
+                    .is_some_and(|t| t.elapsed() < NEG_CACHE_TTL)
+            };
+            if !fresh {
                 if let Some(relay_str) = self.primary_relay_url.read().await.clone() {
                     if let Ok(relay) = url::Url::parse(&relay_str) {
                         let http = crate::relay_http::guarded_client();
-                        // Best-effort: a transient LOCAL disk-write error
-                        // here is non-fatal -- dropping the `?` lets it fall
-                        // through to the existing no-card error below rather
-                        // than aborting the receive before verify/decrypt
-                        // with a surprise persistence message. The Ok(bool)
-                        // distinguishes resolved (true) from failed/404
-                        // (false); only the latter feeds the negative cache.
-                        let resolved = resolve_and_persist_member_card(
+                        // Best-effort match (no `?` on the resolve): a
+                        // transient LOCAL disk-write error is non-fatal and
+                        // falls through to the existing no-card error below
+                        // rather than aborting the receive before
+                        // verify/decrypt with a surprise persistence message.
+                        // The `.await` happens HERE, before any cache lock.
+                        match resolve_and_persist_member_card(
                             &relay,
                             &http,
                             layout,
                             &sender_agent_id_hex,
                         )
-                        .await;
-                        if matches!(resolved, Ok(false)) {
-                            // Record the failed id so a repeat from the same
-                            // sender skips the fetch. A resolve that returned
-                            // Ok(true) need not be cached -- the card now
-                            // exists and the gate closes naturally next time.
-                            // Capped insert: past NEG_CACHE_CAP the id is not
-                            // stored (it just re-fetches once more), so the
-                            // set's memory is strictly bounded.
-                            let mut cache = self
-                                .neg_resolve_cache
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if cache.len() < NEG_CACHE_CAP {
-                                cache.insert(sender_agent_id_hex.clone());
+                        .await
+                        {
+                            // Resolved + persisted: reload the now-present
+                            // card from disk. No cache entry -- the gap is
+                            // filled and the gate closes naturally next time.
+                            Ok(true) => {
+                                card = StoredContactCard::load(layout, &sender_agent_id_hex)?;
                             }
+                            // Relay 404 / unreachable / skip: record the id
+                            // with a fresh timestamp so a repeat within the
+                            // TTL skips the fetch. Evict expired entries first
+                            // (bounds memory + clears stale before the cap
+                            // check); past NEG_CACHE_CAP the id is not stored
+                            // (it just re-fetches once more). Guard scoped to
+                            // this block; the `.await` already happened above.
+                            Ok(false) => {
+                                let mut map = self
+                                    .neg_resolve_cache
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                map.retain(|_, t| t.elapsed() < NEG_CACHE_TTL);
+                                if map.len() < NEG_CACHE_CAP {
+                                    map.insert(
+                                        sender_agent_id_hex.clone(),
+                                        std::time::Instant::now(),
+                                    );
+                                }
+                            }
+                            // Local IO error: best-effort, fall through to the
+                            // no-card error. Not a 404, so do not cache it.
+                            Err(_) => {}
                         }
                     }
                 }
             }
         }
 
-        let stored_card =
-            StoredContactCard::load(layout, &sender_agent_id_hex)?.ok_or_else(|| {
-                ChatError::Invalid(format!(
-                    "no card for envelope sender {}",
-                    &sender_agent_id_hex[..8.min(sender_agent_id_hex.len())]
-                ))
-            })?;
+        let stored_card = card.ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "no card for envelope sender {}",
+                &sender_agent_id_hex[..8.min(sender_agent_id_hex.len())]
+            ))
+        })?;
         let agent_pk_b64 = stored_card.agent_public_key_b64.as_deref().ok_or_else(|| {
             ChatError::Invalid(format!(
                 "card for {} has no ML-DSA pubkey",
@@ -2143,8 +2193,8 @@ mod tests {
 
     /// Fresh empty negative-resolve cache cell for the
     /// `Endpoint::new_with_denylist` test call sites. Test-only.
-    fn neg_cache() -> Arc<StdMutex<std::collections::HashSet<String>>> {
-        Arc::new(StdMutex::new(std::collections::HashSet::new()))
+    fn neg_cache() -> Arc<StdMutex<std::collections::HashMap<String, std::time::Instant>>> {
+        Arc::new(StdMutex::new(std::collections::HashMap::new()))
     }
 
     /// Capturing transport: stores the most recent `TransitEnvelope` it
