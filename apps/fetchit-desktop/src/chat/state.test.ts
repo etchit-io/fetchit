@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatStore, convKey, quotedRef } from "./state";
-import type { OutboxBubbleDto } from "./types";
+import type { GroupMessage, OutboxBubbleDto } from "./types";
 
 const ME = "a".repeat(64);
 const PEER = "b".repeat(64);
@@ -221,6 +221,79 @@ describe("ChatStore — reply quoting", () => {
     expect(long.messageId).toBe("local-2");
     expect(long.preview.length).toBeLessThanOrEqual(120);
     expect(long.preview.endsWith("…")).toBe(true);
+  });
+});
+
+describe("ChatStore — group messages (appendGroupMessage)", () => {
+  const GID = "c".repeat(64);
+
+  function groupMsg(over: Partial<GroupMessage> & Pick<GroupMessage, "message_id">): GroupMessage {
+    return {
+      group_id: GID,
+      from: PEER,
+      body: "group hi",
+      timestamp_ms: 1,
+      ...over,
+    };
+  }
+
+  it("appends an inbound message to its group conversation", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.appendGroupMessage(groupMsg({ message_id: "gm1" }));
+    const conv = s.conversationsSorted()[0];
+    expect(conv.key).toEqual({ kind: "group", groupId: GID });
+    expect(conv.messages).toHaveLength(1);
+    expect(conv.messages[0].id).toBe("gm1");
+    expect(conv.messages[0].body).toBe("group hi");
+    expect(conv.messages[0].mine).toBe(false);
+  });
+
+  it("is idempotent on message_id — a double-deliver yields one bubble", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.appendGroupMessage(groupMsg({ message_id: "gm1" }));
+    s.appendGroupMessage(groupMsg({ message_id: "gm1" }));
+    expect(s.conversationsSorted()[0].messages).toHaveLength(1);
+  });
+
+  it("increments unread for an inbound message on an inactive group", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.setPanelVisible(true);
+    s.appendGroupMessage(groupMsg({ message_id: "gm1" }));
+    s.appendGroupMessage(groupMsg({ message_id: "gm2", timestamp_ms: 2 }));
+    expect(s.conversationsSorted()[0].unread).toBe(2);
+  });
+
+  it("does not increment unread for the active+visible group", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.setPanelVisible(true);
+    s.setActive({ kind: "group", groupId: GID });
+    s.appendGroupMessage(groupMsg({ message_id: "gm1" }));
+    expect(s.conversationsSorted()[0].unread).toBe(0);
+  });
+
+  it("does not increment unread for my own message", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.appendGroupMessage(groupMsg({ message_id: "gm1", from: ME }));
+    const conv = s.conversationsSorted()[0];
+    expect(conv.messages[0].mine).toBe(true);
+    expect(conv.unread).toBe(0);
+  });
+
+  it("carries an inline attachment onto the bubble", () => {
+    const s = new ChatStore();
+    s.setIdentity({ agent_id: ME, machine_id: "m" });
+    s.appendGroupMessage(
+      groupMsg({
+        message_id: "gm1",
+        attachment: { mime: "image/png", width: 1, height: 1, bytes_b64: "AA==" },
+      }),
+    );
+    expect(s.conversationsSorted()[0].messages[0].attachment?.mime).toBe("image/png");
   });
 });
 

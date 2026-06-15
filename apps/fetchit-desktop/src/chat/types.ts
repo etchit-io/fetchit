@@ -107,14 +107,31 @@ export interface Group {
   is_owner?: boolean;
 }
 
+/// One private-group message. Two producers share this shape:
+/// the daemon history poll (`chat_group_messages` -> `groupHistory`,
+/// which always sets `kind` via the Rust `default_kind`) and the live
+/// inbound decrypt pump (`chat:group-message`, which omits `kind` and
+/// carries `sender_name` / `attachment` from the decoded `HistoryEntry`).
+/// Both optional-only fields are absent on the path that doesn't set them.
 export interface GroupMessage {
   group_id: GroupIdStr;
   from: AgentId;
   body: string;
   timestamp_ms: number;
-  kind: string;
   message_id: string;
+  /// Daemon-history message class (`chat`, `system`, …). Present only on
+  /// the history-poll path; the live `chat:group-message` event omits it.
+  kind?: string;
+  /// Sender display name at send time. Carried by the live decrypt path.
+  sender_name?: string | null;
+  /// Inline image attachment, validated by `fetchit-chat` before it
+  /// reaches the UI. Carried by the live decrypt path.
+  attachment?: Attachment | null;
 }
+
+/// The `chat:group-message` Tauri event payload is a `GroupMessage` whose
+/// `kind` is absent (the live decrypt path doesn't set a message class).
+export type GroupMessageEvent = GroupMessage;
 
 export interface ProfileAvatarMeta {
   addr: string;

@@ -557,6 +557,36 @@ export class ChatStore {
     this.emit();
   }
 
+  /// Append one live inbound private-group message (the `chat:group-message`
+  /// event) to its conversation. Mirrors [`recordDirectMessage`] for the
+  /// group surface: dedup by `message_id` (the relay pump can double-deliver
+  /// the same envelope across a reconnect), unread bookkeeping with the same
+  /// visible-and-active "seen" gate. Group transcripts are rebuilt from the
+  /// daemon on open and so are not persisted here (matching
+  /// [`recordGroupHistory`]).
+  appendGroupMessage(msg: GroupMessage): void {
+    const conv = this.ensureGroup(msg.group_id);
+    const mine = msg.from === this.myId();
+    const bubble: ChatBubble = {
+      id: msg.message_id,
+      from: msg.from,
+      body: msg.body,
+      timestampMs: msg.timestamp_ms,
+      mine,
+      ...(msg.attachment ? { attachment: msg.attachment } : {}),
+    };
+    if (bubble.id && conv.messages.some((m) => m.id === bubble.id)) {
+      return;
+    }
+    conv.messages.push(bubble);
+    conv.lastActivityMs = msg.timestamp_ms;
+    const seen = this.panelVisible && this.activeKey === convKey(conv.key);
+    if (!mine && !seen) {
+      conv.unread += 1;
+    }
+    this.emit();
+  }
+
   recordDirectMessage(dm: DirectMessage): void {
     const me = this.myId();
     const peer = dm.from === me ? (dm.to ?? "") : dm.from;

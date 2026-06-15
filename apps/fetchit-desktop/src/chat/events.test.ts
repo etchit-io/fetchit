@@ -219,6 +219,12 @@ describe("warnEventToCopy", () => {
     expect(warnEventToCopy({ kind: "aead_open_failed" })).toContain("authentication");
   });
 
+  it("translates private_group_decrypt_failed into an out-of-date-key line", () => {
+    expect(
+      warnEventToCopy({ kind: "private_group_decrypt_failed", group_id: "g", error: "boom" }),
+    ).toContain("out of date");
+  });
+
   it("falls back to a generic 'something went wrong' for unknown kinds", () => {
     expect(warnEventToCopy({ kind: "novel_failure_mode" })).toContain("novel_failure_mode");
   });

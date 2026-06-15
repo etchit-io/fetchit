@@ -4,7 +4,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { maybeNotifyInboundDm } from "./notify";
 import type { ChatStore, DaemonStatus, NearbyPeer, PendingContact } from "./state";
-import type { ChatEvent, OutboxBubbleDto } from "./types";
+import type { ChatEvent, GroupMessage, OutboxBubbleDto } from "./types";
 
 /// Wire-shape of the daemon's `chat:receipt` Tauri event.
 interface ReceiptEvent {
@@ -73,6 +73,9 @@ interface WarnEvent {
   group_id?: string;
   epoch?: number;
   sender?: string;
+  /// Raw engine error string, carried by `private_group_decrypt_failed`.
+  /// Logged but not shown to the user.
+  error?: string;
 }
 
 /// Translate a `chat:warn` payload into user-visible copy. Kept
@@ -86,6 +89,8 @@ export function warnEventToCopy(ev: WarnEvent): string {
       return "Couldn't unlock a message — the sender may need to rekey.";
     case "aead_open_failed":
       return "A message failed authentication and was dropped.";
+    case "private_group_decrypt_failed":
+      return "Couldn't decrypt a group message; the group key may be out of date.";
     case "Dropped":
       return "A message was dropped.";
     default:
@@ -296,6 +301,17 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
       if (entry) store.addPendingContact(entry);
     },
   );
+  // Live inbound private-group message, decrypted backend-side and
+  // emitted one-per-envelope. The store dedups by message_id so a
+  // relay-pump reconnect that re-delivers the same envelope yields one
+  // bubble. Distinct from `chat:event` (a dedicated event, not a
+  // ChatEvent variant), so it is wired here, not in applyChatEvent.
+  const unsubGroupMsg = await listen<GroupMessage>(
+    "chat:group-message",
+    (ev) => {
+      store.appendGroupMessage(ev.payload);
+    },
+  );
   // Engine outbox projection: each `chat:outbox` is an upsert of one
   // outbound bubble (the engine owns send/retry/delivery). `resync`
   // carries a fresh snapshot after a broadcast lag.
@@ -324,6 +340,7 @@ export async function bindChatEvents(store: ChatStore): Promise<UnlistenFn> {
     unsubRelayFailover();
     unsubDenylistUpdate();
     unsubContactReq();
+    unsubGroupMsg();
     unsubOutbox();
     unsubOutboxResync();
   };

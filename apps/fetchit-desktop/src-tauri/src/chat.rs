@@ -14,7 +14,7 @@ use fetchit_chat::contacts::TrustLevel;
 use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::groups::{GroupId, GroupInvite};
 use fetchit_chat::identity::{AgentCard, AgentId};
-use fetchit_chat::messages::{DirectMessage, StoredContactCard};
+use fetchit_chat::messages::{DirectMessage, PrivateGroupReceive, StoredContactCard};
 use fetchit_chat::{Client, Event};
 use fetchit_relay_proto::AgentId as RelayAgentId;
 use serde::Serialize;
@@ -2063,6 +2063,70 @@ async fn handle_inbound(
     mut env: fetchit_chat::transport::InboundEnvelope,
 ) {
     if let Some(transit) = env.transit.take() {
+        // Private-group (MLS) envelopes decrypt through a different engine
+        // path than DM/receipt/welcome, so branch BEFORE the move into
+        // `dispatch_inbound_with_outbox` (which only handles those). Mirrors
+        // the engine's own `Client::default_dispatch_one` group arm (the
+        // Android path) and `peer.rs::decode_private_group`: self-source
+        // filter, group_id extraction, then `receive_private_group_envelope`.
+        // No DeliveryReceipt is sent for group messages -- the engine's group
+        // path sends none, matching both references. Exercised end-to-end
+        // only against a live x0xd `/secure/decrypt`, so there is no
+        // src-tauri unit test here; the decrypt + dedup + persist logic is
+        // covered by `crates/fetchit-chat/src/messages.rs`'s
+        // `receive_private_group_envelope` tests plus manual/integration runs.
+        if fetchit_chat::messages::is_private_group_envelope(&transit) {
+            // The engine fn does NOT self-filter; our own relayed sends can
+            // echo back (same-machine loops especially). Drop self-as-sender
+            // before the decrypt path so we never persist phantom history.
+            let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+            if sender_hex == identity.agent_id_hex() {
+                return;
+            }
+            let group_id_hex = transit
+                .group_id
+                .as_ref()
+                .map(|g| hex::encode(g.as_bytes()))
+                .unwrap_or_default();
+            if group_id_hex.is_empty() {
+                log_pump("[relay] private-group envelope without group_id");
+                return;
+            }
+            match client
+                .messages()
+                .receive_private_group_envelope(&transit, &group_id_hex)
+                .await
+            {
+                Ok(PrivateGroupReceive::Persisted(entry)) => {
+                    let _ = app.emit(
+                        "chat:group-message",
+                        serde_json::json!({
+                            "group_id": group_id_hex,
+                            "from": entry.sender_agent_id_hex,
+                            "sender_name": entry.sender_name,
+                            "body": entry.body,
+                            "timestamp_ms": entry.ts_ms,
+                            "message_id": entry.message_id,
+                            "attachment": entry.attachment,
+                        }),
+                    );
+                }
+                // Replayed envelope (already in the per-sender sliding
+                // window). No state change; surface nothing.
+                Ok(PrivateGroupReceive::Replay) => {}
+                Err(e) => {
+                    let _ = app.emit(
+                        "chat:warn",
+                        serde_json::json!({
+                            "kind": "private_group_decrypt_failed",
+                            "group_id": group_id_hex,
+                            "error": e.to_string(),
+                        }),
+                    );
+                }
+            }
+            return;
+        }
         // Pass the live outbox handles so an inbound DeliveryReceipt marks
         // the matching outbound bubble Delivered in the durable store (not
         // just the UI), stopping the retry driver from re-sending an
