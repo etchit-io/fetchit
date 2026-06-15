@@ -45,7 +45,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
-use fetchit_chat::groups::GroupInvite;
+use fetchit_chat::groups::{GroupId, GroupInvite};
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::{
     decode_direct_message, is_private_group_envelope, PrivateGroupReceive,
@@ -273,6 +273,59 @@ enum Mode {
         #[arg(long)]
         to: String,
     },
+    /// Create a private MLS group (PQ `TreeKEM`), mint a fresh invite
+    /// link for it, and print both to stdout on labeled lines:
+    /// `group_id=<id>` then `invite=<x0x://invite/...>`. Used by the
+    /// soak fleet's owner side to stand up a group whose invite link is
+    /// then handed to the joiner peers' `group-chat --invite-file`.
+    /// x0xd-backed (DAEMON mode): private groups are daemon-gated, so
+    /// this mode is unavailable under `--daemonless`.
+    GroupCreate {
+        /// Human-readable group name passed to `create_private`.
+        #[arg(long)]
+        name: String,
+    },
+    /// Join (optionally) and then run a persistent group send/receive
+    /// loop against `--group`. Mirrors `Chat`'s atomic-cursor outbox
+    /// rig, but the send path fans out through
+    /// `Client::groups().send(...)` instead of a DM. When
+    /// `--invite-file` is set the peer joins via that invite link
+    /// before entering the loop; when `--outbox-file` + `--cursor-file`
+    /// are set the loop drains outbound lines from disk (resuming from
+    /// the cursor) the same way `Chat` does, otherwise it just runs the
+    /// inbound pump. x0xd-backed (DAEMON mode): groups are daemon-gated,
+    /// so this mode is unavailable under `--daemonless`.
+    GroupChat(GroupChatArgs),
+}
+
+/// Parsed `group-chat` arguments. A standalone [`clap::Args`] group so
+/// the `Mode::GroupChat` variant stays a one-line tuple and the `main`
+/// dispatch arm stays short.
+#[derive(clap::Args, Debug)]
+struct GroupChatArgs {
+    /// Group id to send into. Validated by [`GroupId::parse`] before
+    /// any send so a malformed id can't reach the x0xd path.
+    #[arg(long)]
+    group: String,
+
+    /// Optional path to a UTF-8 file holding the full
+    /// `x0x://invite/<base64>` link on a single line. When set, the
+    /// peer joins the group via this invite before entering the loop
+    /// (the joiner side of the soak group).
+    #[arg(long)]
+    invite_file: Option<PathBuf>,
+
+    /// Path to a UTF-8 outbox file. When set, outbound group lines are
+    /// read from this file (resuming from `--cursor-file`) instead of
+    /// stdin staying idle. Pair with `--cursor-file`.
+    #[arg(long)]
+    outbox_file: Option<PathBuf>,
+
+    /// Persisted byte-offset cursor into `--outbox-file`. Atomically
+    /// rewritten after each acked send so a restart resumes without
+    /// re-sending acked lines. Required when `--outbox-file` is set.
+    #[arg(long)]
+    cursor_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -375,6 +428,8 @@ async fn main() -> Result<()> {
         Mode::PairShare => run_pair_share(&client, cli.relay.as_str()).await,
         Mode::PairImport { uri } => run_pair_import(&client, &uri).await,
         Mode::PairMigrate { to } => run_pair_migrate(&client, &to).await,
+        Mode::GroupCreate { name } => run_group_create(&client, &cli.display_name, &name).await,
+        Mode::GroupChat(args) => run_group_chat(&client, &cli.display_name, &args).await,
     }
 }
 
@@ -531,6 +586,188 @@ async fn run_pair_migrate(client: &Client, to: &str) -> Result<()> {
     eprintln!("[peer] pair migrate done");
     println!("{to}");
     Ok(())
+}
+
+/// Create a private MLS group, mint an invite link for it, and emit both
+/// on labeled stdout lines (`group_id=…` then `invite=…`) so the soak
+/// fleet's owner side can capture them and hand the invite to joiner
+/// peers. Diagnostics go to stderr; only the two labeled lines reach
+/// stdout so a calling script can grep them deterministically.
+async fn run_group_create(client: &Client, display_name: &str, name: &str) -> Result<()> {
+    let g = client
+        .groups()
+        .create_private(name, Some(display_name))
+        .await
+        .context("create_private group")?;
+    let inv = client
+        .groups()
+        .invite(&g.group_id)
+        .await
+        .context("mint group invite")?;
+    println!("group_id={}", g.group_id.as_str());
+    println!("invite={}", inv.0);
+    eprintln!("[peer] group created group_id={}", g.group_id.as_str());
+    Ok(())
+}
+
+/// Persistent group send/receive loop. When `invite_file` is set the
+/// peer joins the group via that invite link first. The loop then
+/// mirrors [`run_chat_outbox`]'s atomic-cursor rig -- a spawned inbound
+/// reader (routing private-group envelopes through
+/// [`decode_private_group`]) plus the SSE reachability recorder -- but
+/// the SEND path fans out through `Client::groups().send(...)` instead
+/// of a DM. Like `Chat`, `--outbox-file` and `--cursor-file` must be
+/// supplied together; with neither, only the inbound pump runs.
+async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArgs) -> Result<()> {
+    let group_hex = args.group.as_str();
+    let gid = GroupId::parse(group_hex).context("invalid group id")?;
+
+    if let Some(invite_path) = args.invite_file.as_deref() {
+        // Read the single-line x0x://invite/<base64> link as written by
+        // the owner-side `group-create` driver (trimmed so a trailing
+        // newline from `echo` doesn't break the daemon's parser).
+        let raw = std::fs::read_to_string(invite_path)
+            .with_context(|| format!("read invite file at {}", invite_path.display()))?;
+        let invite = GroupInvite(raw.trim().to_owned());
+        if !invite.0.starts_with("x0x://invite/") {
+            anyhow::bail!(
+                "invite file does not start with x0x://invite/ (got {} bytes)",
+                invite.0.len()
+            );
+        }
+        eprintln!(
+            "[peer] joining group via invite ({} bytes from {})",
+            invite.0.len(),
+            invite_path.display(),
+        );
+        let group = client
+            .groups()
+            .join(&invite, Some(display_name))
+            .await
+            .context("Client::groups().join(invite)")?;
+        eprintln!(
+            "[peer] joined group {} (membership convergence confirmed)",
+            group.group_id.as_str(),
+        );
+    }
+
+    match (args.outbox_file.as_deref(), args.cursor_file.as_deref()) {
+        (None, None) => run_group_chat_loop(client, &gid, group_hex, None).await,
+        (Some(o), Some(c)) => run_group_chat_loop(client, &gid, group_hex, Some((o, c))).await,
+        (None, Some(_)) | (Some(_), None) => {
+            anyhow::bail!("--outbox-file and --cursor-file must both be set or both omitted")
+        }
+    }
+}
+
+/// Inner group loop shared by the stdin-idle and outbox-driven forms of
+/// `run_group_chat`. Spawns the same inbound reader + SSE recorder as
+/// [`run_chat_outbox`]; when `outbox` is `Some((outbox_file,
+/// cursor_file))` it drains outbound lines from disk through
+/// `Client::groups().send(...)`, advancing the cursor atomically on each
+/// ack, exactly like the DM rig. When `outbox` is `None` it just runs
+/// the inbound pump until the relay channel closes.
+async fn run_group_chat_loop(
+    client: &Client,
+    gid: &GroupId,
+    group_hex: &str,
+    outbox: Option<(&std::path::Path, &std::path::Path)>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let mut inbound = client
+        .take_transport_inbound("relay")
+        .context("relay inbound already taken")?;
+
+    let client_clone = client.clone();
+    let reader_handle = tokio::spawn(async move {
+        while let Some(env) = inbound.recv().await {
+            if let Some(dm) = decode_inbound(&client_clone, env).await {
+                println!("[{}] {}", short(&dm.from.0), dm.body);
+            }
+        }
+    });
+
+    match client.spawn_sse_reachability_recorder() {
+        Ok(_handle) => eprintln!("[peer] sse reachability recorder started"),
+        Err(e) => eprintln!("[peer] sse reachability recorder not started: {e}"),
+    }
+
+    let Some((outbox_file, cursor_file)) = outbox else {
+        // Inbound-only: no outbox, so just keep the reader alive until
+        // the relay channel closes (or the binary is signalled).
+        eprintln!("[peer] group inbound-only mode -- no outbox configured");
+        let _ = reader_handle.await;
+        eprintln!("[peer] inbound channel closed; exiting");
+        return Ok(());
+    };
+
+    if let Some(parent) = cursor_file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create cursor parent {}", parent.display()))?;
+    }
+    if !outbox_file.exists() {
+        std::fs::write(outbox_file, b"")
+            .with_context(|| format!("create outbox {}", outbox_file.display()))?;
+    }
+
+    let mut pos: u64 = read_cursor(cursor_file).unwrap_or(0);
+    eprintln!(
+        "[peer] group={} outbox={} cursor={}@{}",
+        short(group_hex),
+        outbox_file.display(),
+        cursor_file.display(),
+        pos,
+    );
+
+    loop {
+        let f = std::fs::File::open(outbox_file)
+            .with_context(|| format!("open outbox {}", outbox_file.display()))?;
+        let file_len = f.metadata()?.len();
+        if pos > file_len {
+            eprintln!("[peer] outbox truncated (cursor {pos} > size {file_len}); resetting cursor");
+            pos = 0;
+            write_cursor_atomic(cursor_file, pos)?;
+        }
+        let mut buf_reader = BufReader::new(f);
+        buf_reader.seek(SeekFrom::Start(pos))?;
+        let mut any_progress = false;
+        for line_result in buf_reader.lines() {
+            let line = line_result.context("read outbox line")?;
+            let line_bytes = line.len() as u64 + 1; // +1 for newline
+            if line.is_empty() {
+                pos = pos.saturating_add(line_bytes);
+                write_cursor_atomic(cursor_file, pos)?;
+                any_progress = true;
+                continue;
+            }
+            let groups = client.groups();
+            let send_result = send_with_retry("group send", || groups.send(gid, &line)).await;
+            match send_result {
+                Ok(id) => {
+                    let member_count = client.groups().members(gid).await.map_or(0, |m| m.len());
+                    let id_or_none = id.as_deref().unwrap_or("none");
+                    eprintln!(
+                        "[peer] group-sent id={id_or_none} group={} members={member_count}",
+                        short(group_hex),
+                    );
+                    pos = pos.saturating_add(line_bytes);
+                    write_cursor_atomic(cursor_file, pos)?;
+                    any_progress = true;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[peer] group-outbox send permanent fail: {e}; exiting 2 for systemd restart",
+                    );
+                    drop(reader_handle);
+                    std::process::exit(2);
+                }
+            }
+        }
+        if !any_progress {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 /// One step in the join sequence. Surfaced as a typed plan so the
@@ -731,10 +968,12 @@ async fn decode_private_group(
     // `receive_private_group_envelope` would also fail if our
     // card-cache didn't carry our own card — but short-circuiting
     // here is cheaper and clearer.
-    if let Some(identity) = client.identity_arc() {
-        if hex::encode(transit.sender_agent_id.as_bytes()) == identity.agent_id_hex() {
-            return None;
-        }
+    let self_hex = client
+        .identity_arc()
+        .map(|identity| identity.agent_id_hex().to_owned())
+        .unwrap_or_default();
+    if !self_hex.is_empty() && hex::encode(transit.sender_agent_id.as_bytes()) == self_hex {
+        return None;
     }
     let group_id_hex = transit
         .group_id
@@ -751,6 +990,24 @@ async fn decode_private_group(
         .await
     {
         Ok(PrivateGroupReceive::Persisted(entry)) => {
+            // Soak-collector receive anchor. Metadata only (message id +
+            // group/receiver/sender prefixes) -- never the body; see the
+            // SECURITY.md note on the body_len line below. `message_id`
+            // is a bare `String` here (HistoryEntry, not the
+            // `Option`-shaped DM payload), so an empty id folds to
+            // "none" to match the inbound-msg line's reporting shape.
+            let msg_id = if entry.message_id.is_empty() {
+                "none"
+            } else {
+                entry.message_id.as_str()
+            };
+            eprintln!(
+                "[peer] group-inbound id={} group={} rcvr={} sender={}",
+                msg_id,
+                short(&group_id_hex),
+                short(&self_hex),
+                short(&entry.sender_agent_id_hex),
+            );
             // Logs metadata only — sender + group prefixes + payload
             // size. Printing the plaintext body would land in stderr
             // which the systemd unit pipes to journalctl AND the
@@ -765,6 +1022,16 @@ async fn decode_private_group(
                 short(&group_id_hex),
                 entry.body.len()
             );
+            // The M2 echo is opt-out: a group soak peer sets
+            // FETCHIT_PEER_ECHO=0 so the group does not self-amplify --
+            // every non-author member echoing every message (including
+            // other echoes) grows multiplicatively and drowns the
+            // coverage metric. Echo-off returns None so the reader does
+            // not print the body either; the metadata anchors above are
+            // all the soak collector needs. Default keeps M2 behavior.
+            if std::env::var("FETCHIT_PEER_ECHO").as_deref() == Ok("0") {
+                return None;
+            }
             // M2 live-test echo handler. Bounces the body back into
             // the same group so the test asserter sees an inbound
             // from us. Self-source filter at the top of this fn drops
@@ -790,6 +1057,15 @@ async fn decode_private_group(
             None
         }
         Err(e) => {
+            // Soak-collector decrypt-fail anchor. Metadata only -- group
+            // prefix + sender prefix; the plaintext never existed at this
+            // layer (decrypt failed) so there is nothing sensitive to
+            // leak beyond the routing ids the relay already sees.
+            eprintln!(
+                "[peer] group-decrypt-fail group={} sender={}",
+                short(&group_id_hex),
+                short(&hex::encode(transit.sender_agent_id.as_bytes())),
+            );
             eprintln!("[peer] private-group decrypt error: {e}");
             None
         }
@@ -1446,5 +1722,62 @@ mod tests {
         // The x0xd path resolves identity from the daemon, so a
         // passphrase stays optional (keychain fallback) there.
         assert!(require_daemonless_passphrase(false, None).is_ok());
+    }
+
+    // ── group-create / group-chat arg parsing ─────────────────────────
+
+    #[test]
+    fn group_create_parses_name() {
+        // group-create takes a single --name; the handler then drives
+        // create_private + invite and prints the two labeled lines.
+        let cli = Cli::parse_from(["fetchit-chat-peer", "group-create", "--name", "soak-grp"]);
+        match cli.mode {
+            Mode::GroupCreate { name } => assert_eq!(name, "soak-grp"),
+            other => panic!("expected GroupCreate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_chat_parses_group_only() {
+        // The minimal form: --group with no invite/outbox/cursor. Used
+        // when the data-dir has already joined the group and stdin (no
+        // outbox) is irrelevant -- the loop still runs the inbound pump.
+        let cli = Cli::parse_from(["fetchit-chat-peer", "group-chat", "--group", "soak-grp"]);
+        match cli.mode {
+            Mode::GroupChat(args) => {
+                assert_eq!(args.group, "soak-grp");
+                assert_eq!(args.invite_file, None);
+                assert_eq!(args.outbox_file, None);
+                assert_eq!(args.cursor_file, None);
+            }
+            other => panic!("expected GroupChat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_chat_parses_full_outbox_form() {
+        // The persistent soak form: join via --invite-file, then drive
+        // the atomic-cursor outbox the same way Chat does.
+        let cli = Cli::parse_from([
+            "fetchit-chat-peer",
+            "group-chat",
+            "--group",
+            "soak-grp",
+            "--invite-file",
+            "/tmp/invite.txt",
+            "--outbox-file",
+            "/tmp/outbox.txt",
+            "--cursor-file",
+            "/tmp/cursor",
+        ]);
+        match cli.mode {
+            Mode::GroupChat(args) => {
+                assert_eq!(args.group, "soak-grp");
+                assert_eq!(args.invite_file, Some(PathBuf::from("/tmp/invite.txt")));
+                assert_eq!(args.outbox_file, Some(PathBuf::from("/tmp/outbox.txt")));
+                assert_eq!(args.cursor_file, Some(PathBuf::from("/tmp/cursor")));
+            }
+            other => panic!("expected GroupChat, got {other:?}"),
+        }
     }
 }
