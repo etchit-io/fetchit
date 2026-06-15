@@ -25,6 +25,7 @@ deploy() {
     n=$(col "$row" 1); t=$(col "$row" 2); p=$(col "$row" 3)
     sp "$t" "$p" 'mkdir -p ~/soak'
     scp $SSH_OPTS -P "$p" "$BIN" "$t:soak/fetchit-chat-peer" >/dev/null
+    scp $SSH_OPTS -P "$p" "$HERE/tsprepend.py" "$t:soak/tsprepend.py" >/dev/null
     echo "[deploy] $n $(sp "$t" "$p" 'chmod +x ~/soak/fetchit-chat-peer; ~/soak/fetchit-chat-peer --version')"
   done
 }
@@ -57,7 +58,10 @@ launch() {
     n=$(col "$row" 1); t=$(col "$row" 2); p=$(col "$row" 3); partner=$(col "$row" 4); pw=$(pass_for "$n")
     pa=$(sed -n 1p "$IDDIR/$partner.id" 2>/dev/null)
     [[ -z "$pa" ]] && { echo "[launch] $n: partner $partner agent_id unknown"; continue; }
-    sp "$t" "$p" "cd ~/soak; [[ -f $n.outbox ]] || : > $n.outbox; [[ -f $n.cursor ]] || printf '0' > $n.cursor; FETCHIT_PASSPHRASE=$pw nohup ./fetchit-chat-peer --daemonless --data-dir ~/soak/$n --display-name $n --relay $RELAY chat --peer $pa --outbox-file ~/soak/$n.outbox --cursor-file ~/soak/$n.cursor </dev/null >~/soak/$n.run.out 2>>~/soak/$n.log & echo \$! >~/soak/$n.pid"
+    # setsid + pipe through tsprepend.py: each log line gets a leading ISO ts so
+    # collector.py computes true send->receipt TTD; setsid makes the peer its own
+    # process group (survives ssh disconnect, killable via `kill -- -PGID`).
+    sp "$t" "$p" "cd ~/soak; [[ -f $n.outbox ]] || : > $n.outbox; [[ -f $n.cursor ]] || printf '0' > $n.cursor; FETCHIT_PASSPHRASE=$pw setsid bash -c './fetchit-chat-peer --daemonless --data-dir ~/soak/$n --display-name $n --relay $RELAY chat --peer $pa --outbox-file ~/soak/$n.outbox --cursor-file ~/soak/$n.cursor 2>&1 | python3 -u ~/soak/tsprepend.py >> ~/soak/$n.log' </dev/null >/dev/null 2>&1 & echo \$! >~/soak/$n.pid"
     echo "[launch] $n -> $partner(${pa:0:12}) pid=$(sp "$t" "$p" "cat ~/soak/$n.pid 2>/dev/null")"
   done
 }
@@ -81,7 +85,7 @@ status() {
 stop() {
   for row in "${FLEET[@]}"; do
     n=$(col "$row" 1); t=$(col "$row" 2); p=$(col "$row" 3)
-    sp "$t" "$p" "kill \$(cat ~/soak/$n.pid 2>/dev/null) 2>/dev/null; rm -f ~/soak/$n.pid; echo '[stop] $n'"
+    sp "$t" "$p" "P=\$(cat ~/soak/$n.pid 2>/dev/null); [ -n \"\$P\" ] && { kill -- -\$P 2>/dev/null; kill \$P 2>/dev/null; }; rm -f ~/soak/$n.pid; echo '[stop] $n'"
   done
 }
 
