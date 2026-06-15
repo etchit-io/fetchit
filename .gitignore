@@ -15,6 +15,9 @@ apps/fetchit-android/local.properties
 # release-signing config (the .template version is committed)
 apps/fetchit-android/app/keystore.properties
 
+# ── Soak fleet (infra IPs/ports stay local; provision.sh logic is committed) ──
+scripts/soak/fleet.env
+
 # ── Local-only working drafts ────────────────────────────
 # Anchored — must NOT match `apps/*/src/private/` if that dir is
 # ever introduced as source code (mirrors the etch/it gitignore fix).
