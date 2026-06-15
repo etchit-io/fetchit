@@ -1029,7 +1029,7 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
         })
         .await;
         match send_result {
-            Ok(id) => eprintln!("[peer] sent — id={id:?}"),
+            Ok(id) => eprintln!("[peer] sent -- id={id:?}"),
             Err(e) => eprintln!("[peer] send error: {e}"),
         }
     }
@@ -1135,7 +1135,7 @@ async fn run_chat_outbox(
             .await;
             match send_result {
                 Ok(id) => {
-                    eprintln!("[peer] sent — id={id:?}");
+                    eprintln!("[peer] sent -- id={id:?}");
                     pos = pos.saturating_add(line_bytes);
                     write_cursor_atomic(cursor_file, pos)?;
                     any_progress = true;
