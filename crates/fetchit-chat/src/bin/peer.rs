@@ -1,7 +1,11 @@
 //! `fetchit-chat-peer` — headless chat peer for testing.
 //!
-//! Drives `fetchit_chat::Client` against a local x0xd + a relay, with
-//! no GUI. Nine modes:
+//! Drives `fetchit_chat::Client` against a relay, with no GUI. By
+//! default it signs through a local x0xd; pass `--daemonless` to sign
+//! with a local ML-DSA-65 vault key instead and run with no daemon at
+//! all -- each `--data-dir` is then a distinct identity, which is how
+//! the cross-device soak fleet packs many peers onto one host. Nine
+//! modes:
 //!
 //! - `echo` — auto-echo every inbound DM back to its sender. Useful
 //!   for confirming relay round-trips from a different machine without
@@ -85,6 +89,19 @@ struct Cli {
     /// the binary against a stale URL for the rest of the session.
     #[arg(long)]
     x0xd_port_file: Option<PathBuf>,
+
+    /// Run **daemonless**: no x0xd. Sign with a local ML-DSA-65 keypair
+    /// persisted in the data-dir vault instead of an `X0xdSigner`, skip
+    /// x0xd discovery + the `TreeKEM` version probe, and derive this peer's
+    /// agent id from that local key. Each `--data-dir` is therefore its
+    /// own stable identity -- the model the cross-device soak fleet uses
+    /// to pack many peers onto one host without a matching swarm of x0xd
+    /// daemons. Requires a vault passphrase (`FETCHIT_PASSPHRASE` /
+    /// `--passphrase-file`); the `--x0xd-*` flags are ignored. DM
+    /// send/receive over the relay work; daemon-backed surfaces (group
+    /// join, v2-card mint, SSE reachability) do not.
+    #[arg(long)]
+    daemonless: bool,
 
     /// Relay base URL (e.g. `http://67.207.94.66:8088`).
     #[arg(
@@ -263,29 +280,43 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let token = resolve_token(&cli)?;
     let passphrase = resolve_passphrase(&cli)?;
+    require_daemonless_passphrase(cli.daemonless, passphrase.as_deref())?;
     // The fedi vault unseals with the same passphrase as the at-rest
     // vault; keep a copy since the builder consumes the original.
     let vault_passphrase = passphrase.clone();
 
     let mut builder = Client::builder()
-        .base_url(&cli.x0xd_base)
-        .token(&token)
         .relay_url(cli.relay.clone())
         .data_dir(cli.data_dir.clone());
+    if cli.daemonless {
+        // No x0xd: sign with the local ML-DSA-65 vault key and skip
+        // discovery + the version probe. The agent id below is derived
+        // from that same vault, so each --data-dir is a distinct peer.
+        eprintln!("[peer] daemonless -- local vault signer, no x0xd");
+        builder = builder.daemonless(true);
+    } else {
+        builder = builder.base_url(&cli.x0xd_base).token(&token);
+        if let Some(port_file) = cli.x0xd_port_file.clone() {
+            eprintln!(
+                "[peer] x0xd signer self-heal enabled via {}",
+                port_file.display()
+            );
+            builder = builder.x0xd_port_file(port_file);
+        }
+    }
     if let Some(p) = passphrase {
         builder = builder.passphrase(p);
     }
-    if let Some(port_file) = cli.x0xd_port_file.clone() {
-        eprintln!(
-            "[peer] x0xd signer self-heal enabled via {}",
-            port_file.display()
-        );
-        builder = builder.x0xd_port_file(port_file);
-    }
     let client = builder.build().await.context("build Client")?;
 
-    let me = client.identity().me().await.context("read /agent")?;
-    eprintln!("[peer] agent_id: {}", me.agent_id);
+    // Read the agent id from local chat state rather than x0xd `/agent`:
+    // it is populated in both the daemon and daemonless paths, so this
+    // one accessor covers both (the daemonless sentinel base URL has no
+    // live `/agent` to GET).
+    let agent_id_hex = client
+        .local_agent_id_hex()
+        .context("client has no local identity (need --data-dir or --relay)")?;
+    eprintln!("[peer] agent_id: {agent_id_hex}");
     eprintln!("[peer] display: {}", cli.display_name);
     eprintln!("[peer] relay: {}", cli.relay);
 
@@ -330,10 +361,9 @@ async fn main() -> Result<()> {
             out,
             post_url,
         } => {
-            let live_agent = me.agent_id.to_string();
             run_mint_actor(
                 &client,
-                &live_agent,
+                &agent_id_hex,
                 &handle,
                 &domain,
                 &out,
@@ -466,8 +496,10 @@ async fn run_pair_share(client: &Client, relay_str: &str) -> Result<()> {
         .publish_pair_record()
         .await
         .context("publish pair record")?;
-    let me = client.identity().me().await.context("read /agent")?;
-    let uri = fetchit_chat::pair_uri::emit_pair_uri(&me.agent_id.0, &[relay_str.to_owned()])
+    let agent_id_hex = client
+        .local_agent_id_hex()
+        .context("client has no local identity")?;
+    let uri = fetchit_chat::pair_uri::emit_pair_uri(&agent_id_hex, &[relay_str.to_owned()])
         .map_err(|e| anyhow::anyhow!("emit pair uri: {e}"))?;
     println!("{uri}");
     Ok(())
@@ -646,6 +678,12 @@ async fn run_join(
 }
 
 fn resolve_token(cli: &Cli) -> Result<String> {
+    // Daemonless peers have no x0xd, hence no API token to read. Return
+    // an empty token without touching the (often absent) token file so a
+    // headless soak peer doesn't fail on a missing api-token path.
+    if cli.daemonless {
+        return Ok(String::new());
+    }
     if let Some(t) = cli.x0xd_token.as_deref() {
         return Ok(t.trim().to_owned());
     }
@@ -661,6 +699,20 @@ fn resolve_passphrase(cli: &Cli) -> Result<Option<String>> {
         return Ok(Some(raw.trim().to_owned()));
     }
     Ok(cli.passphrase_env.clone().map(|s| s.trim().to_owned()))
+}
+
+/// Daemonless peers seal their identity vault with the Argon2id
+/// passphrase. A headless soak host has no OS keychain, so without a
+/// passphrase the engine's master-key resolution falls back to the
+/// keychain source and fails opaquely. Reject the missing passphrase
+/// here with an actionable message instead.
+fn require_daemonless_passphrase(daemonless: bool, passphrase: Option<&str>) -> Result<()> {
+    if daemonless && passphrase.is_none_or(str::is_empty) {
+        anyhow::bail!(
+            "daemonless mode requires a vault passphrase; set FETCHIT_PASSPHRASE or --passphrase-file"
+        );
+    }
+    Ok(())
 }
 
 /// Decode + dispatch a private-secure-group envelope. Returns Some
@@ -1139,6 +1191,7 @@ fn short(id_hex: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::cell::Cell;
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1319,5 +1372,73 @@ mod tests {
             "{line}"
         );
         assert!(line.contains("@'/tmp/hello.json'"), "{line}");
+    }
+
+    // ── daemonless connection profile ─────────────────────────────────
+
+    #[test]
+    fn resolve_token_daemonless_returns_empty_without_reading_file() {
+        // A daemonless peer has no x0xd and therefore no API token. The
+        // default token path points at /root/... which is absent on a
+        // dev/CI box; daemonless must NOT try to read it (that errors).
+        let cli = Cli::parse_from([
+            "fetchit-chat-peer",
+            "--daemonless",
+            "--x0xd-token-path",
+            "/nonexistent/definitely/not/here",
+            "echo",
+        ]);
+        assert_eq!(resolve_token(&cli).unwrap(), "");
+    }
+
+    #[test]
+    fn resolve_token_uses_inline_token_trimmed() {
+        let cli = Cli::parse_from([
+            "fetchit-chat-peer",
+            "--x0xd-token",
+            "  inline-secret  ",
+            "echo",
+        ]);
+        assert_eq!(resolve_token(&cli).unwrap(), "inline-secret");
+    }
+
+    #[test]
+    fn resolve_token_daemon_reads_token_path_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tok = tmp.path().join("api-token");
+        std::fs::write(&tok, "file-token\n").unwrap();
+        let cli = Cli::parse_from([
+            "fetchit-chat-peer",
+            "--x0xd-token-path",
+            tok.to_str().unwrap(),
+            "echo",
+        ]);
+        assert_eq!(resolve_token(&cli).unwrap(), "file-token");
+    }
+
+    #[test]
+    fn daemonless_without_passphrase_is_rejected() {
+        // No OS keychain on a headless soak host -> a missing passphrase
+        // can't be recovered; fail fast with an actionable message.
+        let err = require_daemonless_passphrase(true, None).unwrap_err();
+        assert!(err.to_string().contains("passphrase"), "{err}");
+    }
+
+    #[test]
+    fn daemonless_with_empty_passphrase_is_rejected() {
+        let err = require_daemonless_passphrase(true, Some("")).unwrap_err();
+        assert!(err.to_string().contains("passphrase"), "{err}");
+    }
+
+    #[test]
+    fn daemonless_with_passphrase_is_accepted() {
+        assert!(require_daemonless_passphrase(true, Some("hunter2")).is_ok());
+    }
+
+    #[test]
+    fn daemon_mode_does_not_require_passphrase() {
+        // The x0xd path resolves identity from the daemon, so a
+        // passphrase stays optional (keychain fallback) there.
+        assert!(require_daemonless_passphrase(false, None).is_ok());
     }
 }
