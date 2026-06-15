@@ -12,7 +12,7 @@ delivery rate under churn, MLS epoch wedges, relay failover, long-idle WS.
 | --- | --- | --- |
 | `fetchit-chat-peer --daemonless` | Bob (engine) | headless peer; one stable identity per `--data-dir`; sends each line of its `--outbox-file` to its `--peer`, advancing `--cursor-file` atomically |
 | `driver.py` | Alice | appends sequence-tagged lines across local outbox files at a jittered rate (the send load) |
-| `collector.py` | Alice | parses peer logs -> delivery rate, TTD, stuck-Sending, inbound (the verdict) |
+| `collector.py` | Alice | parses peer logs -> delivery rate, TTD, stuck-Sending, inbound + dup-delivery (the verdict) |
 | `sampler.sh` | Alice | per-peer vault size (du) + RSS over time -> CSV (the leak/growth check) |
 | provisioning + churn | Bob | data-dirs, the `--peer` topology, pre-seeded contact cards, net-drop / restart / relay-failover injection |
 
@@ -57,9 +57,12 @@ Run it for days. `collector.py --selftest` checks the parser without a fleet.
 
 ## Open items
 
-- **Dupe detection**: the `[peer] inbound:` line carries no message id today, so
-  the collector counts inbound vs sent in aggregate rather than de-duping by id.
-  If Bob adds `id=` to the inbound line, the collector can flag exact dupes.
+- **Dupe detection** (live): the peer emits a post-decrypt
+  `[peer] inbound-msg id=<hex> sender=<short>` anchor (one per received message
+  that carries an id), so the collector de-dupes inbound by id -- any id received
+  more than once is a double-delivery (the retry path resent an already-delivered
+  DM), reported as `dup_delivered` and cross-checked against the sender
+  `sent -- id=` lines.
 - **Precise TTD**: raw peer lines are unstamped, so `--follow` measures TTD from
   observation time. Run peers under journald (`-o short-iso`) or pipe through
   `ts` for exact send->receipt latency (the collector auto-uses a leading ISO

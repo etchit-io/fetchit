@@ -3,13 +3,16 @@
 
 Consumes the per-peer stderr logs from a daemonless soak fleet
 (`fetchit-chat-peer --daemonless ... `) and reports delivery health:
-delivery rate, time-to-delivery (TTD), stuck-Sending, and inbound count.
+delivery rate, time-to-delivery (TTD), stuck-Sending, inbound count, and
+duplicate deliveries (an id received more than once = the retry path resent).
 
 Log contract (from fetchit-chat-peer, see crates/fetchit-chat/src/bin/peer.rs):
   send    : [peer] sent -- id=Some("<hex>")      (Option-debug wrapped)
   send    : [peer] sent -- id=None               (no relay id assigned)
   receipt : [peer] got receipt for message_id=<hex>   (bare hex, on the SENDER's log)
-  inbound : [peer] inbound: kind=... sender=...
+  inbound : [peer] inbound: kind=... sender=...        (every received msg, pre-decrypt)
+  inbound-msg: [peer] inbound-msg id=<hex> sender=<short>  (post-decrypt; one per
+            received msg that carries an id -- used to dedupe double-deliveries)
   identity: [peer] agent_id: <64hex>             (first boot, stderr)
 
 A send and its delivery receipt both land on the SENDER's log, so a send is
@@ -37,6 +40,7 @@ SENT_RE = re.compile(r"\[peer\] sent -- id=Some\(\"([0-9a-fA-F]+)\"\)")
 SENT_NONE_RE = re.compile(r"\[peer\] sent -- id=None")
 RECEIPT_RE = re.compile(r"\[peer\] got receipt for message_id=([0-9a-fA-F]+)")
 INBOUND_RE = re.compile(r"\[peer\] inbound:")
+INBOUND_MSG_RE = re.compile(r"\[peer\] inbound-msg id=([0-9a-fA-F]+) sender=(\S+)")
 AGENT_RE = re.compile(r"\[peer\] agent_id: ([0-9a-fA-F]{64})")
 # Optional leading ISO-8601 timestamp (journald `-o short-iso` / `ts`):
 # "2026-06-15T01:02:03+00:00 [peer] ...". Used when present, else arrival time.
@@ -49,6 +53,7 @@ class Stats:
     delivered: dict[str, float] = field(default_factory=dict)  # id -> t_receipt
     sent_no_id: int = 0
     inbound: int = 0
+    inbound_ids: dict[str, int] = field(default_factory=dict)  # received id -> times seen
 
     def observe(self, line: str, now: float) -> None:
         """Fold one log line into the running tallies. `now` is the fallback
@@ -64,6 +69,11 @@ class Stats:
         m = RECEIPT_RE.search(line)
         if m:
             self.delivered.setdefault(m.group(1).lower(), t)
+            return
+        m = INBOUND_MSG_RE.search(line)
+        if m:
+            rid = m.group(1).lower()
+            self.inbound_ids[rid] = self.inbound_ids.get(rid, 0) + 1
             return
         if INBOUND_RE.search(line):
             self.inbound += 1
@@ -83,11 +93,22 @@ class Stats:
         ]
         # Receipts for ids we never saw a send for (log gap / cross-host).
         orphan_receipts = sum(1 for i in self.delivered if i not in self.sent)
+        # Inbound dedupe: an id received more than once is a double-delivery (the
+        # retry path resent an already-delivered DM). Cross-check vs the sends.
+        inbound_total = sum(self.inbound_ids.values())
+        dup_ids = sorted(i for i, c in self.inbound_ids.items() if c > 1)
+        dup_from_sent = sum(1 for i in dup_ids if i in self.sent)
         lines = [
             f"sent={sent} delivered={delivered} rate={rate:.1f}% "
             f"stuck={len(stuck)} inbound={self.inbound} "
             f"sent_no_id={self.sent_no_id} orphan_receipts={orphan_receipts}",
+            f"inbound_msgs={inbound_total} inbound_unique={len(self.inbound_ids)} "
+            f"dup_delivered={len(dup_ids)} sent-confirmed={dup_from_sent}",
         ]
+        if dup_ids:
+            lines.append("  DUP-DELIVERED ids (received >1x): "
+                         + " ".join(d[:12] for d in dup_ids[:10])
+                         + (" ..." if len(dup_ids) > 10 else ""))
         if ttds:
             lines.append(
                 f"  TTD p50={_pct(ttds, 50):.2f}s p95={_pct(ttds, 95):.2f}s "
@@ -165,6 +186,9 @@ def _selftest() -> int:
     st.observe('[peer] sent -- id=None', t0)                  # no-id send
     st.observe('[peer] got receipt for message_id=abcd01', t0 + 1.5)  # delivers the first
     st.observe('[peer] inbound: kind=dm sender=ff', t0)
+    st.observe('[peer] inbound-msg id=AbCd01 sender=ff00', t0)        # received (id we sent)
+    st.observe('[peer] inbound-msg id=AbCd01 sender=ff00', t0 + 0.1)  # DUP delivery (>1x)
+    st.observe('[peer] inbound-msg id=99ff sender=ee11', t0)          # received, never sent
     st.observe('2026-06-15T00:00:05Z [peer] got receipt for message_id=cafe', t0)  # orphan
     rep = st.report(now=t0 + 600, stuck_after=300)
     checks = {
@@ -175,6 +199,10 @@ def _selftest() -> int:
         "inbound=1": "inbound=1" in rep,
         "sent_no_id=1": "sent_no_id=1" in rep,
         "orphan_receipts=1": "orphan_receipts=1" in rep,
+        "inbound_msgs=3": "inbound_msgs=3" in rep,
+        "inbound_unique=2": "inbound_unique=2" in rep,
+        "dup_delivered=1": "dup_delivered=1" in rep,
+        "dup sent-confirmed=1": "sent-confirmed=1" in rep,
         "ttd present": "TTD p50=1.50s" in rep,
         "iso-ts parsed": _line_time("2026-06-15T00:00:05Z x", 0.0) > 0,
     }
