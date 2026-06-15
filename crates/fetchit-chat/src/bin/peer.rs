@@ -855,6 +855,12 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
                     return None;
                 };
                 if let Some(message_id) = payload.message_id.as_deref() {
+                    // Receive-side anchor for the soak collector (bare hex id,
+                    // metadata only -- never the body; see the sent/receipt lines).
+                    eprintln!(
+                        "[peer] inbound-msg id={message_id} sender={}",
+                        short(&sender_agent_id_hex)
+                    );
                     let received_at_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
