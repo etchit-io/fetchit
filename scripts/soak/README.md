@@ -14,7 +14,7 @@ delivery rate under churn, MLS epoch wedges, relay failover, long-idle WS.
 | `driver.py` | Alice | appends sequence-tagged lines across local outbox files at a jittered rate (the send load) |
 | `collector.py` | Alice | parses peer logs -> delivery rate, TTD, stuck-Sending, inbound + dup-delivery (the verdict) |
 | `sampler.sh` | Alice | per-peer vault size (du) + RSS over time -> CSV (the leak/growth check) |
-| provisioning + churn | Bob | data-dirs, the `--peer` topology, pre-seeded contact cards, net-drop / restart / relay-failover injection |
+| provisioning + churn | Bob | data-dirs, the `--peer` topology, daemonless pair-share/import card exchange, net-drop / restart / relay-failover injection |
 
 ## Peer invocation (Bob's contract)
 
@@ -31,14 +31,16 @@ FETCHIT_PASSPHRASE=PASS fetchit-chat-peer --daemonless \
   `[peer] agent_id: <64hex>` to stderr -- capture it to learn each peer's
   address (feeds the `--peer` topology + contact pre-seeding).
 - Pure receivers can use the `echo` subcommand instead of `chat` + the files.
-- Card exchange daemonless is not live-verified yet, so provisioning pre-seeds
-  each peer's contact card into the vault (Bob).
+- Contact discovery is daemonless via pair-share / pair-import (a vault-signed
+  pointer published to and resolved from the relay); the daemon-only `card` mint
+  is not needed, so no contact pre-seed is required.
 
 ## Run
 
 1. **Provision** (Bob): create data-dirs, decide the `--peer` topology (mix
-   same-LAN / cross-NAT / cross-region pairs), pre-seed contact cards, start
-   the peers with stderr -> `peer-N.log`, collect the `agent_id`s.
+   same-LAN / cross-NAT / cross-region pairs), exchange contact cards via
+   pair-share / pair-import, start the peers with stderr -> `peer-N.log`,
+   collect the `agent_id`s.
 2. **Drive** (per host): `driver.py --rate 30 /opt/soak/peer-*.outbox`
 3. **Collect** (central, over aggregated logs):
    `collector.py --follow --interval 60 /agg/peer-*.log`
