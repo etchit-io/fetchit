@@ -48,8 +48,11 @@ describe("fetch and render", () => {
     const frame = $("#stage .tab-content .rendered-html iframe");
     await expect(frame).toBeExisting();
     await browser.switchFrame(frame);
-    await expect($("#q")).toHaveText("search=?k=v", { containing: true });
-    await browser.switchFrame(null);
+    try {
+      await expect($("#q")).toHaveText("search=?k=v", { containing: true });
+    } finally {
+      await browser.switchFrame(null);
+    }
   });
 
   it("shows the error state when the fetch has no content", async () => {

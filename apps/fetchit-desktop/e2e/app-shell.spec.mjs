@@ -22,7 +22,9 @@ describe("app shell", () => {
     await $("#go").click();
 
     // mountAddressBar → onInvalid → the message lands in #status.
-    await expect($("#status")).toHaveText("address must be 64 hex characters");
+    await expect($("#status")).toHaveText(
+      "enter a 64-hex address or an @handle@domain",
+    );
     // Invalid input opens no tab and shows no fetch spinner.
     await expect($("#tabs")).toHaveAttribute("data-empty", "true");
     await expect($(".tab-spinner")).not.toBeExisting();

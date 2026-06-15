@@ -608,7 +608,19 @@ function injectFetchitContext(
 
   const queryShim = safeQuery
     ? `
-  try { history.replaceState(history.state, "", q); } catch (_) {}
+  // Apply the query as an ABSOLUTE same-document URL. A bare relative
+  // "?k=v" resolves against the injected <base href="autonomi://<addr>/">,
+  // making it cross-origin from the null-origin srcdoc iframe -- WebKit
+  // then throws SecurityError and the query never lands (empirically the
+  // failure mode on WebKitGTK). Anchoring to the current document URL
+  // (about:srcdoc) keeps it same-document, so location.search updates for
+  // real. This is the mechanism that actually works: location.search is
+  // [Unforgeable] on WebKit, so the defineProperty backstops below cannot
+  // fake it there -- they remain only as a cross-engine fallback, skipped
+  // once this replaceState has set the real value.
+  try {
+    history.replaceState(history.state, "", location.href.split("#")[0].split("?")[0] + q);
+  } catch (_) {}
   // Backstop 1 — shim the prototype getter (works in Chromium).
   if (location.search !== q) {
     try {
