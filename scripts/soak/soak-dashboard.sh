@@ -27,8 +27,9 @@ while true; do
   done
   python3 "$COLLECTOR" --once --prometheus "$PROM" "$LOGS"/*.log >/dev/null 2>&1 || true
   if [ "$SHIP" = "1" ] && [ -s "$PROM" ]; then
-    scp $SSH_OPTS -P "$W14_PORT" "$PROM" "$W14:soak.prom.tmp" >/dev/null 2>&1 \
-      && ssh $SSH_OPTS -p "$W14_PORT" "$W14" "sudo mv ~/soak.prom.tmp $W14_TEXTFILE" >/dev/null 2>&1 || true
+    # Plain scp over the textfile (deploy-dashboard-wyse14.sh chowned it to the
+    # login user), so the ongoing feed needs no recurring sudo on the prod host.
+    scp $SSH_OPTS -P "$W14_PORT" "$PROM" "$W14:$W14_TEXTFILE" >/dev/null 2>&1 || true
   fi
   sleep "$INTERVAL"
 done
