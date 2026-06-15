@@ -288,7 +288,7 @@ enum Mode {
     /// Join (optionally) and then run a persistent group send/receive
     /// loop against `--group`. Mirrors `Chat`'s atomic-cursor outbox
     /// rig, but the send path fans out through
-    /// `Client::groups().send(...)` instead of a DM. When
+    /// `Client::messages().send_private_group(...)` instead of a DM. When
     /// `--invite-file` is set the peer joins via that invite link
     /// before entering the loop; when `--outbox-file` + `--cursor-file`
     /// are set the loop drains outbound lines from disk (resuming from
@@ -615,7 +615,7 @@ async fn run_group_create(client: &Client, display_name: &str, name: &str) -> Re
 /// mirrors [`run_chat_outbox`]'s atomic-cursor rig -- a spawned inbound
 /// reader (routing private-group envelopes through
 /// [`decode_private_group`]) plus the SSE reachability recorder -- but
-/// the SEND path fans out through `Client::groups().send(...)` instead
+/// the SEND path fans out through `Client::messages().send_private_group(...)` instead
 /// of a DM. Like `Chat`, `--outbox-file` and `--cursor-file` must be
 /// supplied together; with neither, only the inbound pump runs.
 async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArgs) -> Result<()> {
@@ -666,7 +666,7 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
 /// `run_group_chat`. Spawns the same inbound reader + SSE recorder as
 /// [`run_chat_outbox`]; when `outbox` is `Some((outbox_file,
 /// cursor_file))` it drains outbound lines from disk through
-/// `Client::groups().send(...)`, advancing the cursor atomically on each
+/// `Client::messages().send_private_group(...)`, advancing the cursor atomically on each
 /// ack, exactly like the DM rig. When `outbox` is `None` it just runs
 /// the inbound pump until the relay channel closes.
 async fn run_group_chat_loop(
@@ -723,6 +723,13 @@ async fn run_group_chat_loop(
         pos,
     );
 
+    // Snapshot the roster size ONCE for the per-send log field. members()
+    // is an x0xd read; calling it after every send (at soak volume) is a
+    // round-trip per message for a cosmetic field nothing parses. A late
+    // joiner is not reflected here -- fine for a log hint (group-status
+    // counts group-sent lines, not this).
+    let member_count = client.groups().members(gid).await.map_or(0, |m| m.len());
+
     loop {
         let f = std::fs::File::open(outbox_file)
             .with_context(|| format!("open outbox {}", outbox_file.display()))?;
@@ -755,7 +762,6 @@ async fn run_group_chat_loop(
             .await;
             match send_result {
                 Ok(id) => {
-                    let member_count = client.groups().members(gid).await.map_or(0, |m| m.len());
                     let id_or_none = id.as_deref().unwrap_or("none");
                     eprintln!(
                         "[peer] group-sent id={id_or_none} group={} members={member_count}",
