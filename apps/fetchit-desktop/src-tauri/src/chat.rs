@@ -993,14 +993,21 @@ pub async fn chat_group_send(
     state: tauri::State<'_, ChatState>,
     group_id: String,
     body: String,
+    sender_name: Option<String>,
 ) -> Result<Option<String>, String> {
     ensure_chat_enabled(&app_state)?;
-    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    // Route by group kind in the engine: a private MLS group fans out via
+    // send_private_group (TreeKEM); groups().send is the SignedPublic path
+    // that x0xd 400s for a private group. send_to_group picks the path from
+    // the kind cache (or one cold GET /groups/<id>), so the shell stays dumb.
+    // sender_name mirrors the DM path (threaded from the frontend); it is
+    // currently vestigial in the group send path but kept for symmetry.
+    let name = sender_name.unwrap_or_else(|| "fetchit".to_string());
     state
         .get()
         .await?
-        .groups()
-        .send(&gid, &body)
+        .messages()
+        .send_to_group(&group_id, &body, &name)
         .await
         .map_err(|e| e.to_string())
 }

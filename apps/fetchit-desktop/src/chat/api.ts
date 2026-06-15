@@ -206,8 +206,13 @@ export async function joinGroup(
 export async function sendGroupMessage(
   groupId: string,
   body: string,
+  senderName?: string,
 ): Promise<string | null> {
-  return invoke<string | null>("chat_group_send", { groupId, body });
+  return invoke<string | null>("chat_group_send", {
+    groupId,
+    body,
+    senderName: senderName ?? null,
+  });
 }
 
 export async function groupHistory(groupId: string): Promise<GroupMessage[]> {

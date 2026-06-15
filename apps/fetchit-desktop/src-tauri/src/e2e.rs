@@ -60,7 +60,9 @@ s('p-relock',typeof window.RTCPeerConnection=='undefined'?'blocked':'LEAK')
 try{var c=parent.document.cookie;s('p-parent','LEAK')}catch(e){s('p-parent','blocked')}
 // No allow-popups -> window.open is denied.
 try{var w=window.open('https://example.com');if(w){s('p-popup','LEAK');w.close()}else{s('p-popup','blocked')}}catch(e){s('p-popup','blocked')}
-// Egress to a non-allowlisted origin is denied by CSP connect-src.
+// Egress to a non-allowlisted origin: 'blocked' = the fetch REJECTED (a CSP
+// connect-src denial OR a network failure -- both satisfy the no-egress
+// property the spec asserts; distinguishing the two is unnecessary).
 fetch('https://example.com/sbx').then(function(){s('p-fetch','LEAK')}).catch(function(){s('p-fetch','blocked')})
 </script></body>"#
         }

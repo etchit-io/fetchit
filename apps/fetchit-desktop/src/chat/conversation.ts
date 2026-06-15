@@ -226,7 +226,7 @@ export function mountConversation(
         const groupId = conv.key.groupId;
         // Fire the send, then refresh history so the user sees their
         // own bubble appear without waiting for the next poll tick.
-        void sendGroupMessage(groupId, body)
+        void sendGroupMessage(groupId, body, handlers.resolveSenderName())
           .then(() => refreshGroupHistory(groupId))
           .catch((e) => {
             console.warn("[chat] group send failed:", e);
