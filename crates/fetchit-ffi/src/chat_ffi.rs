@@ -1,4 +1,4 @@
-//! [`ChatClient`] — daemonless chat surface exposed to the Android shell.
+//! [`ChatClient`] -- daemonless chat surface exposed to the Android shell.
 //!
 //! Wraps [`fetchit_chat::Client`] (built with the `daemonless` profile) and
 //! exposes connect, agent identity, pointer-URI pairing, DM send, and an
@@ -36,14 +36,14 @@ pub enum ChatEventFfi {
     },
     /// A bridged fediverse public post. `activity_json` is raw
     /// `application/activity+json` bytes delivered verbatim from the relay.
-    /// Attribution comes from `verified_actor_url` — the relay-verified,
+    /// Attribution comes from `verified_actor_url` -- the relay-verified,
     /// denylist-canonical signing actor. The `activity_json` body is
     /// UNTRUSTED fediverse content; the render surface MUST sanitize it
     /// before display.
     PublicPost {
         /// Relay-verified actor URL.
         verified_actor_url: String,
-        /// Raw Activity Streams JSON bytes. UNTRUSTED — sanitize before
+        /// Raw Activity Streams JSON bytes. UNTRUSTED -- sanitize before
         /// rendering.
         activity_json: Vec<u8>,
     },
@@ -192,8 +192,8 @@ fn project_group_receive(
 /// Connect with [`ChatClient::connect`], which builds a
 /// [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
 /// signer; relay WebSocket transport in-process) and embeds an x0xd on a
-/// loopback port for the group `/secure/*` TreeKEM surface. Inbound events —
-/// DMs, receipts, and bridged fediverse public posts — are drained via
+/// loopback port for the group `/secure/*` TreeKEM surface. Inbound events --
+/// DMs, receipts, and bridged fediverse public posts -- are drained via
 /// [`ChatClient::next_event`].
 ///
 /// Call [`ChatClient::disconnect`] when the app no longer needs live chat
@@ -798,7 +798,7 @@ impl ChatClient {
 ///     [`ChatEventFfi::Dm`].
 ///   - `Receipt` outcomes produce a [`ChatEventFfi::Receipt`].
 ///   - Other outcomes (Welcomed, Rekeyed, stale epoch, etc.) are silently
-///     ignored — the conversation store is updated as a side-effect.
+///     ignored -- the conversation store is updated as a side-effect.
 ///
 /// A malformed or unrecognised envelope never panics the pump; errors are
 /// logged at `warn` level.
@@ -970,7 +970,7 @@ async fn run_inbound_pump(
             }
             Ok(_other) => {
                 // Welcomed, Rekeyed, WelcomeIgnored, stale epoch, KEM/AEAD
-                // failures — conversation state may be updated as a side-
+                // failures -- conversation state may be updated as a side-
                 // effect; no FFI event needed.
             }
             Err(e) => {

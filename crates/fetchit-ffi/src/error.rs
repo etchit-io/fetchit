@@ -1,17 +1,17 @@
-//! [`FetchitError`] — FFI-shaped error type that maps from
+//! [`FetchitError`] -- FFI-shaped error type that maps from
 //! [`fetchit_core::Error`] and presents a stable Kotlin (Android) surface.
 
 use thiserror::Error;
 
 /// Top-level error visible across the FFI boundary.
 ///
-/// Variants are coarse on purpose — Kotlin callers map these to UI
+/// Variants are coarse on purpose -- Kotlin callers map these to UI
 /// messages rather than inspecting nested causes. The `Internal`
 /// variant absorbs anything we have not yet given a dedicated mapping
 /// for, so adding new variants in `fetchit-core` does not break the
 /// FFI contract.
 ///
-/// Field name `reason` (not `message`) is deliberate — uniffi's
+/// Field name `reason` (not `message`) is deliberate -- uniffi's
 /// generated Kotlin bindings produce `class Variant(val message: String) :
 /// Exception()` which collides with `kotlin.Throwable.message`.
 #[derive(Debug, Error, uniffi::Error)]
