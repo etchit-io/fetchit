@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 import java.io.File
@@ -58,6 +59,15 @@ class ChatController(private val appContext: Context, private val scope: Corouti
 
     /** In-memory bridged fediverse posts. */
     val feed = FeedStore()
+
+    private val _groups = MutableStateFlow<List<GroupFfi>>(emptyList())
+
+    /**
+     * Groups this agent belongs to, loaded on connect (mirrors desktop
+     * `loadGroups`). The list screen renders these as conversation rows; their
+     * threads live in [conversations] under [ConversationStore.convKeyGroup].
+     */
+    val groups: StateFlow<List<GroupFfi>> = _groups.asStateFlow()
 
     @Volatile private var gateway: ChatGateway? = null
     private var pump: Job? = null
@@ -111,8 +121,35 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             // Now start the retry driver and hydrate any bubbles that were
             // enqueued (and vault-persisted) before this process subscribed.
             startOutboxAndHydrate(gw)
+            // Seed the group list so the conversation screen can show existing
+            // groups (and their threads) immediately after connect.
+            loadGroups(gw)
             return gw
         }
+    }
+
+    /**
+     * Load the agent's groups into [groups] and ensure each has a conversation
+     * flow in [conversations] (keyed by [ConversationStore.convKeyGroup]) so the
+     * list screen can render a row -- with title `name ?: groupId.take(8)` --
+     * before any group message arrives. Mirrors desktop `loadGroups`. Failures
+     * are swallowed: a group-list error must not break DM connect.
+     */
+    private suspend fun loadGroups(gw: ChatGateway) {
+        val loaded = try {
+            gw.listGroups()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("fetchit.chat", "listGroups failed on connect", e)
+            return
+        }
+        for (g in loaded) {
+            // Touch the flow so a freshly-loaded group surfaces as an (empty)
+            // conversation the list screen can render.
+            conversations.messagesFor(ConversationStore.convKeyGroup(g.groupId))
+        }
+        _groups.value = loaded
     }
 
     /**
@@ -206,12 +243,24 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                 } ?: break
                 when (ev) {
                     is ChatEventFfi.Dm -> convo.append(
-                        ev.fromAgentIdHex,
+                        ConversationStore.convKeyDm(ev.fromAgentIdHex),
                         ChatMessage(
                             outbound = false,
                             body = ev.body,
                             sentAtMs = System.currentTimeMillis(),
                             messageId = ev.messageId,
+                        ),
+                    )
+                    is ChatEventFfi.GroupMessage -> convo.append(
+                        ConversationStore.convKeyGroup(ev.groupId),
+                        ChatMessage(
+                            outbound = false,
+                            body = ev.body,
+                            sentAtMs = System.currentTimeMillis(),
+                            messageId = ev.messageId,
+                            // Group bubbles attribute the sender; the UI shows a
+                            // label off this (DMs leave it null).
+                            senderAgentIdHex = ev.fromAgentIdHex,
                         ),
                     )
                     is ChatEventFfi.Receipt -> convo.markDelivered(ev.messageId)

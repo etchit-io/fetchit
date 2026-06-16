@@ -5,7 +5,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * In-memory store of 1:1 message threads, keyed by peer agent-id hex.
+ * In-memory store of message threads, keyed by an opaque conversation key.
+ *
+ * DM threads key on the bare peer agent-id hex ([convKeyDm]); group threads
+ * key on a `g:`-prefixed group id ([convKeyGroup]) so a group whose id equals
+ * a peer's hex never collides with that peer's DM thread.
  *
  * Thread-safe: all mutations hold [lock] so concurrent coroutine writers
  * (event pump + send path) never interleave partial updates.
@@ -17,22 +21,23 @@ import kotlinx.coroutines.flow.asStateFlow
 class ConversationStore {
 
     private val lock = Any()
-    private val byPeer = mutableMapOf<String, MutableStateFlow<List<ChatMessage>>>()
+    private val byKey = mutableMapOf<String, MutableStateFlow<List<ChatMessage>>>()
 
     /**
-     * Observable message list for [peerAgentIdHex]. Creates an empty flow
-     * on first access so callers can subscribe before any message arrives.
+     * Observable message list for conversation [key] (a [convKeyDm] or
+     * [convKeyGroup] value). Creates an empty flow on first access so callers
+     * can subscribe before any message arrives.
      */
-    fun messagesFor(peerAgentIdHex: String): StateFlow<List<ChatMessage>> =
-        synchronized(lock) { flowFor(peerAgentIdHex) }.asStateFlow()
+    fun messagesFor(key: String): StateFlow<List<ChatMessage>> =
+        synchronized(lock) { flowFor(key) }.asStateFlow()
 
     /**
-     * Append [msg] to the thread for [peerAgentIdHex].
+     * Append [msg] to the thread for conversation [key].
      * Safe to call from any coroutine.
      */
-    fun append(peerAgentIdHex: String, msg: ChatMessage) {
+    fun append(key: String, msg: ChatMessage) {
         synchronized(lock) {
-            val flow = flowFor(peerAgentIdHex)
+            val flow = flowFor(key)
             flow.value = flow.value + msg
         }
     }
@@ -47,7 +52,7 @@ class ConversationStore {
      */
     fun markDelivered(messageId: String) {
         synchronized(lock) {
-            for (flow in byPeer.values) {
+            for (flow in byKey.values) {
                 val list = flow.value
                 val idx = list.indexOfFirst { it.outbound && it.messageId == messageId }
                 if (idx >= 0) {
@@ -101,12 +106,29 @@ class ConversationStore {
         }
     }
 
-    /** Peers that have at least one message, in insertion order. */
-    fun peersWithTraffic(): List<String> = synchronized(lock) { byPeer.keys.toList() }
+    /**
+     * Conversation keys that have at least one message, in insertion order.
+     * Group keys carry the `g:` prefix ([convKeyGroup]); DM keys are bare hex.
+     */
+    fun peersWithTraffic(): List<String> = synchronized(lock) { byKey.keys.toList() }
 
     // Must be called inside synchronized(lock).
-    private fun flowFor(peerAgentIdHex: String): MutableStateFlow<List<ChatMessage>> =
-        byPeer.getOrPut(peerAgentIdHex) { MutableStateFlow(emptyList()) }
+    private fun flowFor(key: String): MutableStateFlow<List<ChatMessage>> =
+        byKey.getOrPut(key) { MutableStateFlow(emptyList()) }
+
+    companion object {
+        /**
+         * Conversation key for a group thread: a `g:` prefix over the 64-hex
+         * group id, so a group never collides with a DM keyed by the same hex.
+         */
+        fun convKeyGroup(groupId: String): String = "g:$groupId"
+
+        /**
+         * Conversation key for a DM thread: the bare peer agent-id hex, kept
+         * unprefixed for back-compat with existing DM call sites.
+         */
+        fun convKeyDm(agentIdHex: String): String = agentIdHex
+    }
 }
 
 /**

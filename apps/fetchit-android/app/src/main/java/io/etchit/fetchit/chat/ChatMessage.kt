@@ -18,6 +18,12 @@ data class ChatMessage(
     val outboxId: String? = null,
     /** Last send error from the outbox bubble, populated when [failed] is true. */
     val lastError: String? = null,
+    /**
+     * 64-hex agent id of an inbound group message's sender, for sender
+     * attribution in group threads. Null for DMs (the peer is the thread) and
+     * for outbound messages. The UI renders a sender label when non-null.
+     */
+    val senderAgentIdHex: String? = null,
 )
 
 /** One bridged fediverse post, already reduced to plain text. */

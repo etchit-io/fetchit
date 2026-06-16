@@ -2,6 +2,7 @@ package io.etchit.fetchit.chat
 
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
@@ -38,6 +39,29 @@ interface ChatGateway {
     fun retryOutbox()
 
     /**
+     * Create a group. [private] true mints a PQ MLS/TreeKEM group (the UI
+     * default); false mints a plaintext public room. Returns the created
+     * [GroupFfi] with `isPrivate` already stamped from the chosen preset.
+     */
+    suspend fun createGroup(name: String, displayName: String?, private: Boolean): GroupFfi
+
+    /** Join a group from an `x0x://invite/...` link, presenting [displayName]. */
+    suspend fun joinGroup(invite: String, displayName: String?): GroupFfi
+
+    /**
+     * Send [body] to [groupId], routed private/public by the engine's
+     * kind-aware `send_to_group`. Returns the message id, or `null` when the
+     * transport succeeded but no id was minted.
+     */
+    suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String?
+
+    /** Groups this agent belongs to. */
+    suspend fun listGroups(): List<GroupFfi>
+
+    /** Fresh `x0x://invite/...` link for [groupId]. */
+    suspend fun groupInvite(groupId: String): String
+
+    /**
      * Block until the next [ChatEventFfi] arrives from the relay, or return
      * `null` when the client has been disconnected and the event queue is
      * drained.
@@ -58,6 +82,14 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override fun startOutbox(displayName: String) = inner.startOutbox(displayName)
     override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = inner.outboxSnapshot()
     override fun retryOutbox() = inner.retryOutbox()
+    override suspend fun createGroup(name: String, displayName: String?, private: Boolean): GroupFfi =
+        inner.createGroup(name, displayName, private)
+    override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
+        inner.joinGroup(invite, displayName)
+    override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? =
+        inner.sendGroupMessage(groupId, body, senderName)
+    override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
+    override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
     override suspend fun nextEvent(): ChatEventFfi? = inner.nextEvent()
     override fun disconnect() = inner.disconnect()
 }
