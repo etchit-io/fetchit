@@ -103,11 +103,11 @@ struct Cli {
     #[arg(long)]
     daemonless: bool,
 
-    /// Relay base URL (e.g. `http://67.207.94.66:8088`).
+    /// Relay base URL (e.g. `https://nyc-relay.etchit.io`).
     #[arg(
         long,
         env = "FETCHIT_RELAY_URL",
-        default_value = "http://67.207.94.66:8088"
+        default_value = "https://nyc-relay.etchit.io"
     )]
     relay: Url,
 
@@ -269,7 +269,7 @@ enum Mode {
     /// without touching client state.
     PairMigrate {
         /// The new primary relay base URL to migrate to
-        /// (e.g. `http://67.207.94.66:8088`).
+        /// (e.g. `https://nyc-relay.etchit.io`).
         #[arg(long)]
         to: String,
     },
