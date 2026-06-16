@@ -225,7 +225,7 @@ private-group send."
 - FLAG (teardown): `ServerHandle::shutdown(&self)` is SYNC + non-consuming -- use it in `disconnect()`/`Drop`. `join(self)` is async + CONSUMES the handle (cannot be called from a uniffi `&self` method); do not use it. `local_addr() -> SocketAddr`, `api_token() -> &str` (copy to owned before the handle moves).
 - BLOCKER-RISK (verify in Step 0): the embedded `Agent`'s key storage (`machine.key`/`agent.key`) may default to `~/.x0x/` (home dir), NOT `DaemonConfig.data_dir`. Android has no writable home dir, so HOST tests pass (the host HAS `~/.x0x`) while the device fails. Trace where `serve()` -> `Agent` persists keys; if it does not honor `data_dir`, that is a real Android blocker -- find the Agent-builder knob or flag it to the controller before proceeding.
 
-- [ ] **Step 0: Verify the embedded Agent key-storage path (BLOCKER risk).** Trace `x0x::daemon::serve()` -> the `Agent` build in `x0x-fork/src/daemon.rs` to find where `machine.key`/`agent.key` are persisted. Confirm `DaemonConfig.data_dir` governs it. If the `Agent` hardcodes `~/.x0x/` (home dir), STOP and report BLOCKED -- it fails on Android (no writable home), and host tests would falsely pass. Resolve (find the path knob or flag a fork change) before implementing the embed.
+- [ ] **Step 0: RESOLVED -- the key-storage blocker is fixed on the fork.** Earlier discovery confirmed `serve()` wrote `machine.key`/`agent.key`/`agent.cert` to `~/.x0x/` (home) NOT `data_dir` when `instance_name=None` -- unwritable on Android (host tests falsely passed). FIXED: x0x-fork `mobile-serve-entrypoint` commit `71ff5af` adds an opt-in `DaemonConfig.identity_dir: Option<PathBuf>` that `serve()` roots the identity keys under when `Some` (default `None` preserves the stock `~/.x0x[-<name>]/` behavior exactly -- zero blast radius; 2 no-regression tests pin it). The embed config below sets `identity_dir: Some(x0xd_data.join("identity"))`. Nothing to verify here now; proceed to Step 1.
 
 - [ ] **Step 1: Add the x0x dep.** In `crates/fetchit-ffi/Cargo.toml` `[dependencies]`, add `x0x = { path = "../../../x0x-fork" }` (verify the relative path from the worktree: `fetchit-android-groups/crates/fetchit-ffi` -> `../../../x0x-fork` resolves to `/home/josh/Desktop/etchit-fetchit/x0x-fork`). The fork branch must be `mobile-serve-entrypoint` (tip `1716442`, has `serve()` + `ServerHandle::api_token()`). Run `cargo metadata -p fetchit-ffi >/dev/null` to confirm it resolves (heavy -- pulls ant-quic + saorsa-gossip; DISK WATCH).
 
@@ -240,6 +240,10 @@ private-group send."
 // keeps the local ML-DSA-65 vault signer -- base_url only redirects the
 // x0xd HTTP surface (the engine's P2 in-process-router shape).
 let x0xd_data = PathBuf::from(&data_dir).join("x0xd");
+// Root the agent identity keys under app storage via the fork's opt-in
+// identity_dir override (x0x-fork 71ff5af). Without it, serve() writes
+// machine.key/agent.key to ~/.x0x/, which is unwritable on Android.
+let x0xd_identity = x0xd_data.join("identity");
 let cfg = x0x::daemon::DaemonConfig {
     // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
     api_address: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
@@ -247,6 +251,8 @@ let cfg = x0x::daemon::DaemonConfig {
     // fixed-port clash with any other x0xd on the device.
     bind_address: (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
     data_dir: x0xd_data,
+    // Android has no writable home -- root the identity keys under app storage.
+    identity_dir: Some(x0xd_identity),
     // Play policy: no self-modifying binary. ExecPolicy gates only remote
     // x0x-exec; self-update lives here and defaults ON.
     update: x0x::daemon::DaemonUpdateConfig { enabled: false, ..Default::default() },
