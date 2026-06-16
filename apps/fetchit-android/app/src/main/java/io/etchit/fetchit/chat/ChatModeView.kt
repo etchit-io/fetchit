@@ -10,10 +10,12 @@ import android.text.style.ClickableSpan
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.lifecycle.LifecycleOwner
 import androidx.recyclerview.widget.DiffUtil
@@ -28,8 +30,10 @@ import io.etchit.fetchit.R
 import io.etchit.fetchit.fetchitApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import uniffi.fetchit_ffi.ChatFfiException
+import uniffi.fetchit_ffi.GroupFfi
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -71,6 +75,7 @@ class ChatModeView(
     private sealed class Screen {
         data object List : Screen()
         data class Thread(val peer: String) : Screen()
+        data class GroupThread(val groupId: String) : Screen()
         data object Feed : Screen()
     }
 
@@ -82,6 +87,9 @@ class ChatModeView(
     // Cached thread view — re-bound per peer rather than re-inflated.
     private var threadView: View? = null
 
+    // Cached group-thread view — re-bound per group, mirrors threadView.
+    private var groupThreadView: View? = null
+
     // Cached feed view.
     private var feedView: View? = null
 
@@ -91,7 +99,7 @@ class ChatModeView(
     // Job for the feed post-flow collector; cancelled on screen switch.
     private var feedCollectJob: Job? = null
 
-    // Jobs for the two list-screen flow collectors (contacts + pump state).
+    // Jobs for the list-screen flow collectors (contacts+groups + pump state).
     // Launched exactly once behind the listView==null guard; stored here so
     // any future re-inflation path must cancel them first.
     private var listContactsJob: Job? = null
@@ -176,6 +184,11 @@ class ChatModeView(
         showScreen(Screen.Thread(agentIdHex), pushToStack = true)
     }
 
+    /** Open the group thread for [groupId]. */
+    fun openGroupThread(groupId: String) {
+        showScreen(Screen.GroupThread(groupId), pushToStack = true)
+    }
+
     private fun showScreen(screen: Screen, pushToStack: Boolean) {
         if (pushToStack) {
             if (screenStack.lastOrNull() != screen) screenStack.addLast(screen)
@@ -216,6 +229,19 @@ class ChatModeView(
                 slot.removeAllViews()
                 bindThreadScreen(screen.peer)
             }
+            is Screen.GroupThread -> {
+                // Same teardown as a DM thread: a group thread reuses the
+                // thread view + the threadCollect/send jobs, so the previous
+                // screen's collector and in-flight send must be cancelled first.
+                feedCollectJob?.cancel()
+                feedCollectJob = null
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
+                slot.removeAllViews()
+                bindGroupThreadScreen(screen.groupId)
+            }
             is Screen.Feed -> {
                 // Cancel any running thread collector and in-flight send.
                 threadCollectJob?.cancel()
@@ -247,25 +273,31 @@ class ChatModeView(
         val shareBtn = view.findViewById<View>(R.id.sharePairButton)
         val scanBtn = view.findViewById<View>(R.id.scanPairButton)
 
-        // Adapter: pinned fediverse row at position 0, then contacts.
+        // Adapter: pinned fediverse row at position 0, then groups + contacts.
         val adapter = ContactListAdapter(
             onFeedTap = { showScreen(Screen.Feed, pushToStack = true) },
             onContactTap = { contact -> openThread(contact.agentIdHex) },
+            onGroupTap = { group -> openGroupThread(group.groupId) },
         )
         rv.layoutManager = LinearLayoutManager(context)
         rv.adapter = adapter
 
-        // Observe contacts + last messages to drive list visibility.
+        // Observe contacts + groups together: either populates the list, so
+        // visibility tracks (contacts OR groups). The empty-state onboarding
+        // only shows when there is neither a contact nor a group to render.
         listContactsJob = lifecycleScope.launch {
-            controller.contacts.contacts.collect { contacts ->
-                val hasContacts = contacts.isNotEmpty()
-                rv.visibility = if (hasContacts) View.VISIBLE else View.GONE
-                emptyState.visibility = if (hasContacts) View.GONE else View.VISIBLE
-                addBtn.visibility = if (hasContacts) View.VISIBLE else View.GONE
-                if (hasContacts) {
-                    adapter.submitContactList(contacts)
+            controller.contacts.contacts
+                .combine(controller.groups) { contacts, groups -> contacts to groups }
+                .collect { (contacts, groups) ->
+                    val hasRows = contacts.isNotEmpty() || groups.isNotEmpty()
+                    rv.visibility = if (hasRows) View.VISIBLE else View.GONE
+                    emptyState.visibility = if (hasRows) View.GONE else View.VISIBLE
+                    // The FAB is a list-level affordance (it offers group
+                    // create/join, reachable with zero contacts), so it stays
+                    // visible whenever the list view is shown.
+                    addBtn.visibility = View.VISIBLE
+                    adapter.submit(groups, contacts)
                 }
-            }
         }
 
         // Observe pump state to show connection-lost banner.
@@ -301,8 +333,31 @@ class ChatModeView(
         // Scan a code button: delegate to MainActivity's scanner.
         scanBtn.setOnClickListener { onLaunchScanner() }
 
-        // Add contact FAB: paste dialog.
-        addBtn.setOnClickListener { showAddContactDialog() }
+        // FAB: a popup with the three list-level actions -- add a contact,
+        // start a new group, or join one from an invite link.
+        addBtn.setOnClickListener { anchor -> showListActionsMenu(anchor) }
+    }
+
+    /**
+     * Popup menu off the list FAB: add a DM contact, create a new group, or
+     * join a group from a pasted invite. Each entry opens its own dialog,
+     * mirroring [showAddContactDialog].
+     */
+    private fun showListActionsMenu(anchor: View) {
+        PopupMenu(context, anchor).apply {
+            menu.add(context.getString(R.string.chat_add_contact))
+            menu.add(context.getString(R.string.chat_new_group))
+            menu.add(context.getString(R.string.chat_join_group))
+            setOnMenuItemClickListener { item ->
+                when (item.title) {
+                    context.getString(R.string.chat_add_contact) -> showAddContactDialog()
+                    context.getString(R.string.chat_new_group) -> showNewGroupDialog()
+                    context.getString(R.string.chat_join_group) -> showJoinGroupDialog()
+                }
+                true
+            }
+            show()
+        }
     }
 
     private suspend fun onShareMyCodeClicked(qrImage: ImageView) {
@@ -341,6 +396,139 @@ class ChatModeView(
             }
             .setNegativeButton(context.getString(R.string.action_close), null)
             .show()
+    }
+
+    // ── group create / join ────────────────────────────────────────────
+
+    /**
+     * Dialog to create a group: a name input + a private/public toggle that
+     * defaults to private (PQ MLS). On create, opens the new group's thread
+     * and offers to share its invite via the existing clipboard path. Mirrors
+     * [showAddContactDialog].
+     */
+    private fun showNewGroupDialog() {
+        val nameInput = EditText(context).apply {
+            hint = context.getString(R.string.chat_new_group_name_hint)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        // Default private: groups are PQ MLS unless the user opts into a public
+        // room. Checked == private, matching the engine's create_private path.
+        val privateToggle = CheckBox(context).apply {
+            text = context.getString(R.string.chat_new_group_private_label)
+            isChecked = true
+        }
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(nameInput)
+            addView(privateToggle)
+        }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_new_group_title))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.chat_new_group_create)) { _, _ ->
+                val name = nameInput.text.toString().trim()
+                if (name.isEmpty()) {
+                    snackbar(context.getString(R.string.chat_new_group_name_hint))
+                    return@setPositiveButton
+                }
+                createGroupThen(name, private = privateToggle.isChecked)
+            }
+            .setNegativeButton(context.getString(R.string.action_close), null)
+            .show()
+    }
+
+    /**
+     * Dialog to join a group from a pasted `x0x://invite/…` link. Validates
+     * the prefix client-side ([ChatUris.isInviteUri]) before handing the raw
+     * uri to the engine. Mirrors [showAddContactDialog].
+     */
+    private fun showJoinGroupDialog() {
+        val editText = EditText(context).apply {
+            hint = context.getString(R.string.chat_join_group_hint)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(editText)
+        }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_join_group_title))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.chat_join_group_join)) { _, _ ->
+                val raw = editText.text.toString().trim()
+                if (!ChatUris.isInviteUri(raw)) {
+                    snackbar(context.getString(R.string.chat_invalid_invite_uri))
+                    return@setPositiveButton
+                }
+                joinGroupThen(raw)
+            }
+            .setNegativeButton(context.getString(R.string.action_close), null)
+            .show()
+    }
+
+    /**
+     * Connect, create the group under the local display name, refresh the
+     * group list, open its thread, and offer to share the fresh invite.
+     */
+    private fun createGroupThen(name: String, private: Boolean) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return@launch
+            val senderName = displayNameOrDefault(gw)
+            val group = runCatching { gw.createGroup(name, senderName, private) }.getOrElse { e ->
+                val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
+                snackbar(context.getString(R.string.chat_group_create_failed, reason))
+                return@launch
+            }
+            controller.refreshGroups()
+            snackbar(context.getString(R.string.chat_group_created, groupTitle(group, group.groupId)))
+            openGroupThread(group.groupId)
+            offerShareInvite(group.groupId)
+        }
+    }
+
+    /**
+     * Connect, join via the invite uri under the local display name, refresh
+     * the group list, and open the joined group's thread.
+     */
+    private fun joinGroupThen(inviteUri: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return@launch
+            val senderName = displayNameOrDefault(gw)
+            val group = runCatching { gw.joinGroup(inviteUri, senderName) }.getOrElse { e ->
+                val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
+                snackbar(context.getString(R.string.chat_group_join_failed, reason))
+                return@launch
+            }
+            controller.refreshGroups()
+            snackbar(context.getString(R.string.chat_group_joined, groupTitle(group, group.groupId)))
+            openGroupThread(group.groupId)
+        }
+    }
+
+    /**
+     * Offer to share a fresh invite for [groupId]: mint one via the gateway
+     * and copy it to the clipboard, the existing share path for chat URIs
+     * (the same clipboard route the pair-QR long-press uses). A QR card is
+     * not produced -- [QrShare] cards are scoped to `autonomi://` /
+     * `x0x://pair/` payloads, and an invite blob is neither.
+     */
+    private fun offerShareInvite(groupId: String) {
+        val gw = controller.gateway() ?: return
+        lifecycleScope.launch {
+            val invite = runCatching { gw.groupInvite(groupId) }.getOrNull() ?: return@launch
+            copyToClipboard(invite)
+            Snackbar.make(container, context.getString(R.string.chat_group_share_invite), Snackbar.LENGTH_LONG)
+                .setAction(context.getString(R.string.chat_group_invite_copied)) {
+                    copyToClipboard(invite)
+                }
+                .show()
+        }
     }
 
     // ── thread screen ──────────────────────────────────────────────────
@@ -403,6 +591,98 @@ class ChatModeView(
                 val rows = msgs.map { MessageRow.Dm(it) }
                 adapter.submitList(rows)
                 // Scroll only when new messages arrive, not on receipt-tick rebinds.
+                if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+            }
+        }
+    }
+
+    // ── group thread screen ────────────────────────────────────────────
+
+    /**
+     * Bind the group thread for [groupId]. Mirrors [bindThreadScreen] but:
+     * the title resolves from the loaded [GroupFfi] via [groupTitle] (a short
+     * id fallback); send goes DIRECT through `sendGroupMessage` (no outbox for
+     * groups in v1, matching desktop); and messages are read from the group
+     * conversation key ([ConversationStore.convKeyGroup]). The [MessageAdapter]
+     * is reused unchanged -- inbound group bubbles carry a sender label off
+     * [ChatMessage.senderAgentIdHex].
+     */
+    private fun bindGroupThreadScreen(groupId: String) {
+        val view = groupThreadView ?: LayoutInflater.from(context)
+            .inflate(R.layout.view_chat_thread, slot, false)
+            .also { groupThreadView = it }
+
+        slot.addView(view)
+
+        val group = controller.groups.value.find { it.groupId == groupId }
+        val title = groupTitle(group, groupId)
+        // A leading lock glyph signals a PQ-encrypted (private) group; public
+        // rooms and unresolved-kind groups show the bare title.
+        val titleText = if (group?.isPrivate == true) {
+            "${context.getString(R.string.chat_group_lock_glyph)} $title"
+        } else {
+            title
+        }
+
+        view.findViewById<TextView>(R.id.threadPeerName).text = titleText
+        view.findViewById<TextView>(R.id.threadPeerShortId).text = "${groupId.take(8)}…"
+        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+
+        val rv = view.findViewById<RecyclerView>(R.id.messageList)
+        val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
+        rv.layoutManager = lm
+        // Group bubbles are peer-agnostic; retry is a DM-outbox affordance and
+        // never fires for the direct group-send path, so it is a no-op here.
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
+        rv.adapter = adapter
+
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        view.findViewById<View>(R.id.sendButton).setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.text.clear()
+            sendJob?.cancel()
+            sendJob = lifecycleScope.launch {
+                val gw = controller.gateway() ?: run {
+                    if (screenStack.lastOrNull() == Screen.GroupThread(groupId)) {
+                        messageInput.setText(body)
+                    }
+                    snackbar(context.getString(R.string.chat_not_connected))
+                    return@launch
+                }
+                val senderName = displayNameOrDefault(gw)
+                // Direct send (no outbox for groups in v1): append the outbound
+                // bubble locally so the sender sees it, mirroring desktop -- the
+                // group receive path filters self-source, so there is no echo.
+                runCatching { gw.sendGroupMessage(groupId, body, senderName) }
+                    .onSuccess { messageId ->
+                        controller.conversations.append(
+                            ConversationStore.convKeyGroup(groupId),
+                            ChatMessage(
+                                outbound = true,
+                                body = body,
+                                sentAtMs = System.currentTimeMillis(),
+                                messageId = messageId,
+                            ),
+                        )
+                    }
+                    .onFailure { e ->
+                        if (screenStack.lastOrNull() == Screen.GroupThread(groupId)) {
+                            messageInput.setText(body)
+                        }
+                        val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
+                        snackbar(context.getString(R.string.thread_send_failed, reason))
+                    }
+            }
+        }
+
+        // Collect messages for this group; job cancelled on screen switch.
+        threadCollectJob = lifecycleScope.launch {
+            controller.conversations.messagesFor(ConversationStore.convKeyGroup(groupId)).collect { msgs ->
+                val prevSize = adapter.itemCount
+                val rows = msgs.map { MessageRow.Dm(it) }
+                adapter.submitList(rows)
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
         }
@@ -526,6 +806,17 @@ class ChatModeView(
     private fun displayNameOrDefault(gw: ChatGateway): String =
         io.etchit.fetchit.chat.displayNameOrDefault(context, gw.agentIdHex())
 
+    /**
+     * Label for an inbound group message's sender [agentIdHex]: a known
+     * contact's display name when one exists, otherwise a short `agent-<6hex>`
+     * form (mirrors the [displayNameOrDefault] fallback shape). The send-time
+     * sender_name is not threaded onto [ChatMessage]; resolving locally keeps
+     * the label consistent with how the same agent shows elsewhere.
+     */
+    private fun groupSenderLabel(agentIdHex: String): String =
+        controller.contacts.contacts.value.find { it.agentIdHex == agentIdHex }?.displayName
+            ?: "agent-${agentIdHex.take(6)}"
+
     /** Flush the outbox now, in response to a tap on a failed message bubble. */
     private fun retryOutbox() {
         val gw = controller.gateway() ?: run {
@@ -621,7 +912,10 @@ class ChatModeView(
                     meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                     (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                         android.view.Gravity.START
-                    meta.text = timeFmt.format(Date(msg.sentAtMs))
+                    val time = timeFmt.format(Date(msg.sentAtMs))
+                    // Group messages attribute their sender; a DM (null sender)
+                    // shows the bare time, since the peer IS the thread.
+                    meta.text = msg.senderAgentIdHex?.let { "${groupSenderLabel(it)} · $time" } ?: time
                     // Linkify autonomi:// addresses in inbound text.
                     val addresses = ChatUris.autonomiAddresses(msg.body)
                     if (addresses.isEmpty()) {
@@ -675,60 +969,76 @@ class ChatModeView(
 
     /**
      * Row model for the contact list adapter.
-     * Position 0 is always the pinned fediverse channel.
+     * Position 0 is always the pinned fediverse channel; group rows render
+     * above contacts.
      */
     private sealed class Row {
         data object Fediverse : Row()
+        data class Group(val group: GroupFfi, val preview: String) : Row()
         data class Contact(val contact: ChatContact, val preview: String) : Row()
     }
 
     private inner class ContactListAdapter(
         private val onFeedTap: () -> Unit,
         private val onContactTap: (ChatContact) -> Unit,
+        private val onGroupTap: (GroupFfi) -> Unit,
     ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         private val TYPE_FEED = 0
         private val TYPE_CONTACT = 1
+        private val TYPE_GROUP = 2
 
         private val rows = mutableListOf<Row>(Row.Fediverse)
 
-        fun submitContactList(contacts: kotlin.collections.List<ChatContact>) {
+        /**
+         * Rebuild the list: pinned fediverse row, then [groups], then
+         * [contacts]. Each row's preview is the last message body on that
+         * conversation key (group keys are `g:`-prefixed; DM keys are bare).
+         */
+        fun submit(
+            groups: kotlin.collections.List<GroupFfi>,
+            contacts: kotlin.collections.List<ChatContact>,
+        ) {
             rows.clear()
             rows.add(Row.Fediverse)
+            groups.forEach { g ->
+                val preview = controller.conversations
+                    .messagesFor(ConversationStore.convKeyGroup(g.groupId)).value
+                    .lastOrNull()?.body.orEmpty()
+                rows.add(Row.Group(g, preview))
+            }
             contacts.forEach { c ->
                 val preview = controller.conversations
-                    .messagesFor(c.agentIdHex).value
+                    .messagesFor(ConversationStore.convKeyDm(c.agentIdHex)).value
                     .lastOrNull()?.body.orEmpty()
                 rows.add(Row.Contact(c, preview))
             }
             notifyDataSetChanged()
         }
 
-        override fun getItemViewType(position: Int) =
-            if (rows[position] is Row.Fediverse) TYPE_FEED else TYPE_CONTACT
+        override fun getItemViewType(position: Int) = when (rows[position]) {
+            is Row.Fediverse -> TYPE_FEED
+            is Row.Group -> TYPE_GROUP
+            is Row.Contact -> TYPE_CONTACT
+        }
 
         override fun getItemCount() = rows.size
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
-            return if (viewType == TYPE_FEED) {
-                val v = LayoutInflater.from(parent.context)
-                    .inflate(R.layout.item_chat_contact, parent, false)
-                FeedViewHolder(v)
-            } else {
-                val v = LayoutInflater.from(parent.context)
-                    .inflate(R.layout.item_chat_contact, parent, false)
-                ContactViewHolder(v)
+            val v = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_chat_contact, parent, false)
+            return when (viewType) {
+                TYPE_FEED -> FeedViewHolder(v)
+                TYPE_GROUP -> GroupViewHolder(v)
+                else -> ContactViewHolder(v)
             }
         }
 
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             when (val row = rows[position]) {
-                is Row.Fediverse -> {
-                    (holder as FeedViewHolder).bind(onFeedTap)
-                }
-                is Row.Contact -> {
-                    (holder as ContactViewHolder).bind(row.contact, row.preview, onContactTap)
-                }
+                is Row.Fediverse -> (holder as FeedViewHolder).bind(onFeedTap)
+                is Row.Group -> (holder as GroupViewHolder).bind(row.group, row.preview, onGroupTap)
+                is Row.Contact -> (holder as ContactViewHolder).bind(row.contact, row.preview, onContactTap)
             }
         }
     }
@@ -760,6 +1070,26 @@ class ChatModeView(
             name.text = contact.displayName
             preview.text = lastPreview
             itemView.setOnClickListener { onTap(contact) }
+        }
+    }
+
+    private inner class GroupViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
+        private val name: TextView = itemView.findViewById(R.id.contactName)
+        private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+
+        fun bind(
+            group: GroupFfi,
+            lastPreview: String,
+            onTap: (GroupFfi) -> Unit,
+        ) {
+            // A lock glyph marks private (PQ) groups; public / unknown-kind
+            // groups show a generic group glyph in the id slot.
+            shortId.text =
+                if (group.isPrivate == true) context.getString(R.string.chat_group_lock_glyph) else "#"
+            name.text = groupTitle(group, group.groupId)
+            preview.text = lastPreview
+            itemView.setOnClickListener { onTap(group) }
         }
     }
 }

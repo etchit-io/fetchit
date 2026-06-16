@@ -52,4 +52,24 @@ object ChatUris {
      * Convenience wrapper over [pairUriAgentId].
      */
     fun isPairUri(uri: String): Boolean = pairUriAgentId(uri) != null
+
+    /**
+     * Return `true` if [uri] is a `x0x://invite/<blob>` group-invite link
+     * with a non-empty body.
+     *
+     * Unlike a pair URI, the invite body is an opaque MLS Welcome blob -- not
+     * a fixed 64-hex shape -- so only the scheme + path prefix is validated
+     * (case-insensitively) and the body is required to be non-blank. The
+     * engine rejects a structurally-invalid blob on join; this is just the
+     * client-side gate so an obvious paste-mistake fails fast in the dialog.
+     */
+    fun isInviteUri(uri: String): Boolean {
+        val trimmed = uri.trim()
+        // Lowercase only for the prefix check: the base64 body is
+        // case-sensitive and must reach the engine untouched.
+        val prefix = "x0x://invite/"
+        if (trimmed.length <= prefix.length) return false
+        if (!trimmed.take(prefix.length).lowercase().startsWith(prefix)) return false
+        return trimmed.substring(prefix.length).isNotBlank()
+    }
 }

@@ -129,6 +129,17 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     }
 
     /**
+     * Re-read the group list from the engine after a create/join so a freshly
+     * minted or joined group surfaces in [groups] (and the list screen) without
+     * a reconnect. No-op when not connected; failures are swallowed exactly as
+     * on the connect path. Safe to call from the UI scope.
+     */
+    suspend fun refreshGroups() {
+        val gw = gateway ?: return
+        loadGroups(gw)
+    }
+
+    /**
      * Load the agent's groups into [groups] and ensure each has a conversation
      * flow in [conversations] (keyed by [ConversationStore.convKeyGroup]) so the
      * list screen can render a row -- with title `name ?: groupId.take(8)` --
