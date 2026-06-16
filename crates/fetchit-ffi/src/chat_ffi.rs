@@ -192,7 +192,7 @@ fn project_group_receive(
 /// Connect with [`ChatClient::connect`], which builds a
 /// [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
 /// signer; relay WebSocket transport in-process) and embeds an x0xd on a
-/// loopback port for the group `/secure/*` TreeKEM surface. Inbound events --
+/// loopback port for the group `/secure` TreeKEM surface. Inbound events --
 /// DMs, receipts, and bridged fediverse public posts -- are drained via
 /// [`ChatClient::next_event`].
 ///
@@ -204,7 +204,7 @@ fn project_group_receive(
 pub struct ChatClient {
     inner: Client,
     relay_url: String,
-    /// The in-process x0xd serving the group `/secure/*` TreeKEM surface.
+    /// The in-process x0xd serving the group `/secure` TreeKEM surface.
     /// `connect` points the daemonless engine's `base_url`/`token` at this
     /// handle's loopback address. `disconnect`/`Drop` call its sync
     /// `shutdown()`. Held (not underscore-prefixed) because the teardown
@@ -261,7 +261,7 @@ fn resolve_denylist_url() -> Option<String> {
         .or_else(|| Some(DEFAULT_DENYLIST_URL.to_string()))
 }
 
-/// Bring x0xd up in-process for the group `/secure/*` TreeKEM surface and
+/// Bring x0xd up in-process for the group `/secure` TreeKEM surface and
 /// return its [`ServerHandle`].
 ///
 /// `connect` points the daemonless engine's `base_url`/`token` at the
@@ -348,7 +348,7 @@ impl ChatClient {
             reason: format!("relay_url: {e}"),
         })?;
 
-        // Embed x0xd in-process for group TreeKEM (/secure/*) BEFORE building
+        // Embed x0xd in-process for group TreeKEM (/secure) BEFORE building
         // the engine: `build()` runs a version probe against `base_url`, so
         // x0xd must already be listening. `daemonless(true)` keeps the local
         // ML-DSA-65 vault signer -- base_url/token only redirect the x0xd HTTP

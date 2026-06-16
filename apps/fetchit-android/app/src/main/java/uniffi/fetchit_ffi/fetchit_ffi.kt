@@ -1556,7 +1556,7 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
  * Connect with [`ChatClient::connect`], which builds a
  * [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
  * signer; relay WebSocket transport in-process) and embeds an x0xd on a
- * loopback port for the group `/secure/*` TreeKEM surface. Inbound events --
+ * loopback port for the group `/secure` TreeKEM surface. Inbound events --
  * DMs, receipts, and bridged fediverse public posts -- are drained via
  * [`ChatClient::next_event`].
  *
@@ -1759,7 +1759,7 @@ public interface ChatClientInterface {
  * Connect with [`ChatClient::connect`], which builds a
  * [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
  * signer; relay WebSocket transport in-process) and embeds an x0xd on a
- * loopback port for the group `/secure/*` TreeKEM surface. Inbound events --
+ * loopback port for the group `/secure` TreeKEM surface. Inbound events --
  * DMs, receipts, and bridged fediverse public posts -- are drained via
  * [`ChatClient::next_event`].
  *
