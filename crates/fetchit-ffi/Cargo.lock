@@ -3111,6 +3111,7 @@ dependencies = [
  "fetchit-trust-client",
  "hex",
  "log",
+ "rustls",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

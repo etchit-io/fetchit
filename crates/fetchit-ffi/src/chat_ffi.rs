@@ -204,6 +204,12 @@ fn project_group_receive(
 pub struct ChatClient {
     inner: Client,
     relay_url: String,
+    /// uniffi's tokio runtime handle, captured in connect (which runs on that
+    /// runtime). Sync methods that spawn engine tasks (start_outbox /
+    /// retry_outbox) enter() it first: they run on the Kotlin caller thread,
+    /// which has no ambient tokio runtime, so the engine's internal spawn would
+    /// otherwise panic with "no reactor running".
+    rt_handle: tokio::runtime::Handle,
     /// The in-process x0xd serving the group `/secure` TreeKEM surface.
     /// `connect` points the daemonless engine's `base_url`/`token` at this
     /// handle's loopback address. `disconnect`/`Drop` call its sync
@@ -344,6 +350,18 @@ impl ChatClient {
         data_dir: String,
         passphrase: String,
     ) -> Result<Arc<Self>, ChatFfiError> {
+        // rustls 0.23 cannot auto-determine its process CryptoProvider when both
+        // aws-lc-rs and ring are in the dependency graph (the in-process x0x
+        // embed pulls both), so the first TLS use panics. Install aws-lc-rs
+        // explicitly -- it backs ant-quic's PQC and the relay TLS. Idempotent: a
+        // later call (reconnect) returns Err once a provider is set; we ignore it.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Capture uniffi's tokio runtime handle here (connect runs on it) so the
+        // sync start_outbox / retry_outbox methods can enter() it before the
+        // engine spawns the driver off the Kotlin caller thread.
+        let rt_handle = tokio::runtime::Handle::current();
+
         let parsed_url = Url::parse(&relay_url).map_err(|e| ChatFfiError::Invalid {
             reason: format!("relay_url: {e}"),
         })?;
@@ -451,6 +469,7 @@ impl ChatClient {
         Ok(Arc::new(Self {
             inner,
             relay_url,
+            rt_handle,
             x0xd,
             events: Mutex::new(rx),
             pump_abort,
@@ -762,6 +781,9 @@ impl ChatClient {
     /// should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
     /// Calling again aborts the previous driver before starting a new one.
     pub fn start_outbox(&self, display_name: String) {
+        // Sync FFI method called off the Kotlin thread; enter uniffi's runtime
+        // so start_outbox_driver's internal tokio::spawn has a reactor.
+        let _rt = self.rt_handle.enter();
         if let Some(handle) = self
             .inner
             .start_outbox_driver(Arc::new(move || display_name.clone()))
@@ -779,6 +801,8 @@ impl ChatClient {
     /// shell's "Retry" button. Fire-and-forget + coalescing; a no-op when
     /// the driver has not been started ([`ChatClient::start_outbox`]).
     pub fn retry_outbox(&self) {
+        // Defensive: same runtime-context guard as start_outbox.
+        let _rt = self.rt_handle.enter();
         self.inner.retry_outbox();
     }
 }

@@ -31,6 +31,10 @@ fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"
 # DaemonConfig.identity_dir override serve() needs when there is no writable
 # home. Heavy: pulls the full ant-quic + saorsa-gossip native stack.
 x0x = { path = "../../../x0x-fork" }
+# rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring
+# are in the dependency graph (the x0x embed above pulls both). This direct dep
+# makes rustls::crypto::aws_lc_rs reachable so connect() installs it explicitly.
+rustls = "0.23.40"
 # Exact-pinned: the uniffi runtime must match the uniffi-bindgen CLI version
 # (scripts/build-jni-libs.sh) — a mismatch fails the generated bindings'
 # API-checksum check at startup. Bump the runtime and the CLI together.
