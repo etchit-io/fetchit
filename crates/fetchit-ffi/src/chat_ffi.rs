@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use url::Url;
+use x0x::daemon::{serve, DaemonConfig, DaemonUpdateConfig, ServerHandle};
+use x0x::exec::ExecPolicy;
 
 /// An inbound chat event delivered by [`ChatClient::next_event`].
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -143,17 +145,25 @@ fn route_envelope(
 ///
 /// Connect with [`ChatClient::connect`], which builds a
 /// [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
-/// signer; relay WebSocket transport in-process). Inbound events — DMs,
-/// receipts, and bridged fediverse public posts — are drained via
+/// signer; relay WebSocket transport in-process) and embeds an x0xd on a
+/// loopback port for the group `/secure/*` TreeKEM surface. Inbound events —
+/// DMs, receipts, and bridged fediverse public posts — are drained via
 /// [`ChatClient::next_event`].
 ///
 /// Call [`ChatClient::disconnect`] when the app no longer needs live chat
-/// (background, account switch). [`Drop`] aborts all background tasks as a
-/// GC backstop, but `disconnect` is the deterministic path.
+/// (background, account switch): it aborts the background tasks and shuts the
+/// embedded x0xd down. [`Drop`] does the same as a GC backstop, but
+/// `disconnect` is the deterministic path.
 #[derive(uniffi::Object)]
 pub struct ChatClient {
     inner: Client,
     relay_url: String,
+    /// The in-process x0xd serving the group `/secure/*` TreeKEM surface.
+    /// `connect` points the daemonless engine's `base_url`/`token` at this
+    /// handle's loopback address. `disconnect`/`Drop` call its sync
+    /// `shutdown()`. Held (not underscore-prefixed) because the teardown
+    /// paths read it.
+    x0xd: ServerHandle,
     events: Mutex<mpsc::UnboundedReceiver<ChatEventFfi>>,
     pump_abort: tokio::task::AbortHandle,
     drain_abort: tokio::task::AbortHandle,
@@ -184,6 +194,9 @@ impl Drop for ChatClient {
                 handle.abort();
             }
         }
+        // Trigger the embedded x0xd's graceful shutdown. Sync + non-consuming;
+        // the spawned serve future ends on the next poll.
+        self.x0xd.shutdown();
     }
 }
 
@@ -202,6 +215,69 @@ fn resolve_denylist_url() -> Option<String> {
         .or_else(|| Some(DEFAULT_DENYLIST_URL.to_string()))
 }
 
+/// Bring x0xd up in-process for the group `/secure/*` TreeKEM surface and
+/// return its [`ServerHandle`].
+///
+/// `connect` points the daemonless engine's `base_url`/`token` at the
+/// returned handle's loopback address so private-group encrypt/decrypt has a
+/// local x0xd without a separate daemon process. The DM path is unchanged --
+/// `daemonless(true)` keeps the local ML-DSA-65 vault signer; only the x0xd
+/// HTTP surface is redirected (the engine's P2 in-process-router shape).
+///
+/// Hardening, all load-bearing on a phone:
+/// - Both sockets bind ephemeral (API on loopback, gossip on the unspecified
+///   address) so the embed never clashes with a fixed port already in use on
+///   the device.
+/// - Self-update is fully disabled. `update.enabled = false` is the master
+///   gate -- every update task in `serve()` (gossip manifest listener, GitHub
+///   fallback poll, startup check, manifest re-broadcast) is spawned only when
+///   it is true, so the dominated sub-flags (`gossip_updates`,
+///   `fallback_check_interval_minutes`, `stop_on_upgrade`) need no separate
+///   handling. No self-modifying binary, as Play policy requires.
+/// - Remote `x0x-exec`-over-gossip is disabled via [`ExecPolicy::Disabled`].
+/// - The agent identity keys (`machine.key`/`agent.key`/`agent.cert`) are
+///   rooted under `<data_dir>/identity` via the fork's opt-in
+///   `DaemonConfig.identity_dir`. Without it `serve()` writes them to `~/.x0x`,
+///   which is unwritable on Android.
+///
+/// `disable_peer_cache` is left at the daemon default (`false`).
+///
+/// # Errors
+///
+/// [`ChatFfiError::Network`] when `serve()` fails to bind or start.
+async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, ChatFfiError> {
+    let cfg = DaemonConfig {
+        // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
+        api_address: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
+        // fixed-port clash with any other x0xd on the device.
+        bind_address: (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+        data_dir: x0xd_data.to_path_buf(),
+        // Android has no writable home -- root the identity keys under app
+        // storage via the fork's opt-in override (x0x-fork 71ff5af).
+        identity_dir: Some(x0xd_data.join("identity")),
+        // Play policy: no self-modifying binary. `enabled = false` dominates
+        // every update task; the other update fields are inert under it.
+        update: DaemonUpdateConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
+    // under x0x::exec. Gates remote x0x-exec-over-gossip only.
+    let exec_policy = ExecPolicy::Disabled {
+        path: PathBuf::new(),
+        reason: "embedded_mobile".to_owned(),
+        loaded_at_unix_ms: 0,
+    };
+    serve(cfg, exec_policy, false)
+        .await
+        .map_err(|e| ChatFfiError::Network {
+            reason: format!("x0xd serve: {e}"),
+        })
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -214,7 +290,8 @@ impl ChatClient {
     /// # Errors
     ///
     /// [`ChatFfiError::Invalid`] when `relay_url` is malformed.
-    /// [`ChatFfiError::Network`] on relay connect or vault bootstrap failure.
+    /// [`ChatFfiError::Network`] when the in-process x0xd fails to start, or
+    /// on relay connect or vault bootstrap failure.
     #[uniffi::constructor]
     pub async fn connect(
         relay_url: String,
@@ -225,11 +302,24 @@ impl ChatClient {
             reason: format!("relay_url: {e}"),
         })?;
 
+        // Embed x0xd in-process for group TreeKEM (/secure/*) BEFORE building
+        // the engine: `build()` runs a version probe against `base_url`, so
+        // x0xd must already be listening. `daemonless(true)` keeps the local
+        // ML-DSA-65 vault signer -- base_url/token only redirect the x0xd HTTP
+        // surface (the engine's P2 in-process-router shape), so the DM path is
+        // unchanged.
+        let x0xd_data = PathBuf::from(&data_dir).join("x0xd");
+        let x0xd = serve_inprocess(&x0xd_data).await?;
+        let x0xd_base = format!("http://{}", x0xd.local_addr());
+        let x0xd_token = x0xd.api_token().to_owned();
+
         let mut inner = Client::builder()
             .daemonless(true)
             .relay_url(parsed_url)
             .data_dir(PathBuf::from(&data_dir))
             .passphrase(passphrase)
+            .base_url(x0xd_base)
+            .token(x0xd_token)
             .build()
             .await
             .map_err(ChatFfiError::from)?;
@@ -315,6 +405,7 @@ impl ChatClient {
         Ok(Arc::new(Self {
             inner,
             relay_url,
+            x0xd,
             events: Mutex::new(rx),
             pump_abort,
             drain_abort,
@@ -338,6 +429,10 @@ impl ChatClient {
                 handle.abort();
             }
         }
+        // Stop the embedded x0xd alongside the background-task teardown.
+        // Sync + non-consuming, so it is safe from this `&self` method
+        // (the consuming async `join()` would not be).
+        self.x0xd.shutdown();
     }
 
     /// The local agent id as lowercase 64-character hex.
@@ -795,6 +890,50 @@ mod tests {
             uri.starts_with("x0x://pair/"),
             "pair URI must start with x0x://pair/, got: {uri:?}"
         );
+    }
+
+    /// The in-process x0xd embed comes up on loopback with a non-empty API
+    /// token, and -- the load-bearing Android invariant -- roots its identity
+    /// keys (machine.key/agent.key) under the configured `identity_dir`, NOT
+    /// `~/.x0x`. The stock `serve()` wrote those keys to the home dir, which
+    /// is unwritable on Android; the fork's opt-in `DaemonConfig.identity_dir`
+    /// (set by `serve_inprocess`) fixes that. Proving the keys land under
+    /// app storage is what makes the embed device-viable.
+    #[tokio::test]
+    async fn inprocess_serve_binds_loopback_and_roots_identity_under_data_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let x0xd_data = dir.path().join("x0xd");
+        let handle = serve_inprocess(&x0xd_data)
+            .await
+            .expect("in-process serve should come up");
+
+        let addr = handle.local_addr();
+        assert!(
+            addr.ip().is_loopback(),
+            "API must bind loopback, got: {addr}"
+        );
+        assert!(
+            addr.port() != 0,
+            "OS-assigned port must be concrete, got: {addr}"
+        );
+        assert!(
+            !handle.api_token().is_empty(),
+            "api_token must be non-empty for the engine bearer auth"
+        );
+
+        // The identity keys must be under our configured dir, never ~/.x0x.
+        let identity_dir = x0xd_data.join("identity");
+        assert!(
+            identity_dir.join("machine.key").exists(),
+            "machine.key must be rooted under the configured identity_dir, \
+             not the home dir (Android has no writable home)"
+        );
+        assert!(
+            identity_dir.join("agent.key").exists(),
+            "agent.key must be rooted under the configured identity_dir"
+        );
+
+        handle.shutdown();
     }
 
     #[test]

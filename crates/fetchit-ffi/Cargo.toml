@@ -25,6 +25,12 @@ fetchit-net = { path = "../fetchit-net" }
 fetchit-chat = { path = "../fetchit-chat" }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"] }
+# Embedded x0xd: connect() runs x0x::daemon::serve() in-process on a loopback
+# port so groups get a /secure/* TreeKEM surface on Android without a separate
+# daemon. josh-clsn/x0x fork (mobile-serve-entrypoint) -- adds the opt-in
+# DaemonConfig.identity_dir override serve() needs when there is no writable
+# home. Heavy: pulls the full ant-quic + saorsa-gossip native stack.
+x0x = { path = "../../../x0x-fork" }
 # Exact-pinned: the uniffi runtime must match the uniffi-bindgen CLI version
 # (scripts/build-jni-libs.sh) — a mismatch fails the generated bindings'
 # API-checksum check at startup. Bump the runtime and the CLI together.
