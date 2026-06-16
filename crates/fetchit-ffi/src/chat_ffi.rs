@@ -6,6 +6,7 @@
 //! fediverse public posts through a single [`ChatEventFfi`] stream.
 
 use crate::chat_error::ChatFfiError;
+use crate::group_ffi::GroupFfi;
 use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::messages::is_private_group_envelope;
 use fetchit_chat::Client;
@@ -506,6 +507,145 @@ impl ChatClient {
             .send(&id, &body, &sender_name, None, None)
             .await
             .map_err(ChatFfiError::from)
+    }
+
+    /// Create a group. `private=true` is the PQ MLS/`TreeKEM` path
+    /// (the default the UI offers); `false` is a plaintext public room.
+    ///
+    /// Returns the created [`GroupFfi`] with `is_private` already stamped
+    /// from the chosen preset (the engine's create paths warm the kind
+    /// locally, so the first send skips the cold `GET /groups/<id>`).
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn create_group(
+        &self,
+        name: String,
+        display_name: Option<String>,
+        private: bool,
+    ) -> Result<GroupFfi, ChatFfiError> {
+        let group = if private {
+            self.inner
+                .groups()
+                .create_private(&name, display_name.as_deref())
+                .await
+        } else {
+            self.inner
+                .groups()
+                .create(&name, display_name.as_deref())
+                .await
+        }
+        .map_err(ChatFfiError::from)?;
+        Ok(GroupFfi::from(group))
+    }
+
+    /// Join a group from an `x0x://invite/...` link.
+    ///
+    /// After the join converges, best-effort warms every other member's
+    /// ML-DSA card so the first inbound private-group frame decrypts
+    /// without a lazy mid-receive fetch. A prefetch failure is swallowed:
+    /// the join itself already succeeded, and the receive path re-resolves
+    /// any still-missing card on demand.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    /// [`ChatFfiError::Invalid`] for a malformed invite or self-join.
+    pub async fn join_group(
+        &self,
+        invite: String,
+        display_name: Option<String>,
+    ) -> Result<GroupFfi, ChatFfiError> {
+        // GroupInvite is a transparent newtype over the raw URI String.
+        let inv = fetchit_chat::groups::GroupInvite(invite);
+        let group = self
+            .inner
+            .groups()
+            .join(&inv, display_name.as_deref())
+            .await
+            .map_err(ChatFfiError::from)?;
+
+        // Best-effort: warm member cards so the first inbound private-group
+        // frame decrypts without a lazy fetch. Non-fatal -- the join already
+        // landed; the receive path re-resolves a missing card on demand.
+        // FetchitIdentity exposes the self id as hex only, so parse it back
+        // into the AgentId prefetch expects.
+        if let Ok(members) = self.inner.groups().members(&group.group_id).await {
+            if let Some(identity) = self.inner.identity_arc() {
+                if let Ok(me) = fetchit_chat::identity::AgentId::parse(identity.agent_id_hex()) {
+                    let _ = self
+                        .inner
+                        .messages()
+                        .prefetch_group_member_cards(&members, &me)
+                        .await;
+                }
+            }
+        }
+        Ok(GroupFfi::from(group))
+    }
+
+    /// Send a message to a group, routing private/public via the engine's
+    /// kind-aware `send_to_group` (private fans out over `TreeKEM`; public
+    /// posts plaintext). Returns the message id on success, or `None` when
+    /// the transport succeeded but no id was minted.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on transport, x0xd, or relay failure.
+    pub async fn send_group_message(
+        &self,
+        group_id: String,
+        body: String,
+        sender_name: String,
+    ) -> Result<Option<String>, ChatFfiError> {
+        self.inner
+            .messages()
+            .send_to_group(&group_id, &body, &sender_name)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// List the groups this agent belongs to.
+    ///
+    /// Groups from x0xd's list omit their confidentiality, so the returned
+    /// `is_private` is `None` until a send resolves the kind; the create
+    /// paths above return it stamped.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn list_groups(&self) -> Result<Vec<GroupFfi>, ChatFfiError> {
+        let groups = self
+            .inner
+            .groups()
+            .list()
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(groups.into_iter().map(GroupFfi::from).collect())
+    }
+
+    /// Mint a fresh `x0x://invite/...` link for a group, suitable for the
+    /// QR / share path.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn group_invite(&self, group_id: String) -> Result<String, ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        let invite = self
+            .inner
+            .groups()
+            .invite(&gid)
+            .await
+            .map_err(ChatFfiError::from)?;
+        // GroupInvite is a transparent newtype; `.0` is the raw x0x:// URI.
+        Ok(invite.0)
     }
 
     /// Drain the next inbound event. Returns `None` when the pump has

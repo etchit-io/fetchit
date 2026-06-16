@@ -18,6 +18,7 @@
 mod chat_error;
 mod chat_ffi;
 mod error;
+mod group_ffi;
 mod rendition_ffi;
 
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ use fetchit_net::{set_data_home as set_data_home_inner, AutonomiClient, DEFAULT_
 pub use chat_error::ChatFfiError;
 pub use chat_ffi::{ChatClient, ChatEventFfi, OutboxBubbleFfi, OutboxStatusFfi};
 pub use error::FetchitError;
+pub use group_ffi::GroupFfi;
 pub use rendition_ffi::{ArchiveEntryFFI, RenditionFFI};
 
 uniffi::setup_scaffolding!();
