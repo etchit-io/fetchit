@@ -53,6 +53,23 @@ pub enum ChatEventFfi {
         /// The bubble's current state.
         bubble: OutboxBubbleFfi,
     },
+    /// An inbound private-group message, decrypted via the in-process x0xd
+    /// `/secure/decrypt` surface. Surfaced only for fresh
+    /// [`fetchit_chat::messages::PrivateGroupReceive::Persisted`] frames;
+    /// replays are dropped. Carries no delivery receipt -- the engine's
+    /// group path sends none (mirrors `peer.rs` + the desktop seam).
+    GroupMessage {
+        /// 64-hex group id the message belongs to.
+        group_id: String,
+        /// 64-hex sender agent id (ML-DSA verified by the decrypt path).
+        from_agent_id_hex: String,
+        /// Sender display name at send time, if any.
+        sender_name: Option<String>,
+        /// Plaintext body.
+        body: String,
+        /// Dedupe / message id for receipt correlation.
+        message_id: Option<String>,
+    },
 }
 
 /// Delivery state of an outbound DM bubble, mirrored from
@@ -140,6 +157,34 @@ fn route_envelope(
         return EnvelopeRoute::PublicPost;
     }
     EnvelopeRoute::Dispatch
+}
+
+/// Project a private-group decrypt outcome into the FFI event stream.
+///
+/// A fresh [`PrivateGroupReceive::Persisted`] entry becomes a
+/// [`ChatEventFfi::GroupMessage`] with the [`fetchit_chat::conversation::HistoryEntry`]
+/// fields mapped straight through (`sender_agent_id_hex` -> `from_agent_id_hex`,
+/// the `String` `message_id` wrapped in `Some`); a
+/// [`PrivateGroupReceive::Replay`] surfaces nothing, matching the engine's
+/// "caller MUST NOT surface anything" replay contract. Pure so the projection
+/// is unit-tested without a live x0xd; the inbound pump calls it on the same
+/// path it ships.
+fn project_group_receive(
+    group_id: String,
+    outcome: fetchit_chat::messages::PrivateGroupReceive,
+) -> Option<ChatEventFfi> {
+    match outcome {
+        fetchit_chat::messages::PrivateGroupReceive::Persisted(entry) => {
+            Some(ChatEventFfi::GroupMessage {
+                group_id,
+                from_agent_id_hex: entry.sender_agent_id_hex,
+                sender_name: entry.sender_name,
+                body: entry.body,
+                message_id: Some(entry.message_id),
+            })
+        }
+        fetchit_chat::messages::PrivateGroupReceive::Replay => None,
+    }
 }
 
 /// Daemonless chat client for the Android shell.
@@ -833,11 +878,36 @@ async fn run_inbound_pump(
             continue;
         }
 
-        // M2 private-group path (PQ-TreeKEM frames from x0xd /secure/encrypt).
-        // The daemonless profile has no x0xd, so these frames can't be decrypted
-        // here. Log and skip.
+        // M2 private-group receive: decrypt via the in-process x0xd
+        // /secure/decrypt and surface a GroupMessage. Mirrors the desktop
+        // handle_inbound seam and peer.rs decode_private_group: empty-group_id
+        // guard, then receive_private_group_envelope -> Persisted = surface /
+        // Replay = drop / Err = warn-never-crash. No DeliveryReceipt for group
+        // messages -- the engine's group path sends none. Self-source is
+        // already dropped above by route_envelope (EnvelopeRoute::SelfSource),
+        // so no re-filter is needed here.
         if is_private_group_envelope(&transit) {
-            log::warn!("[chat_ffi] private-group envelope received on daemonless client; skipping");
+            let group_id_hex = transit
+                .group_id
+                .as_ref()
+                .map(|g| hex::encode(g.as_bytes()))
+                .unwrap_or_default();
+            if group_id_hex.is_empty() {
+                log::warn!("[chat_ffi] private-group envelope without group_id; dropping");
+                continue;
+            }
+            match client
+                .messages()
+                .receive_private_group_envelope(&transit, &group_id_hex)
+                .await
+            {
+                Ok(outcome) => {
+                    if let Some(event) = project_group_receive(group_id_hex, outcome) {
+                        let _ = tx.send(event);
+                    }
+                }
+                Err(e) => log::warn!("[chat_ffi] private_group_decrypt_failed: {e}"),
+            }
             continue;
         }
 
@@ -1074,6 +1144,50 @@ mod tests {
         );
 
         handle.shutdown();
+    }
+
+    #[test]
+    fn project_group_receive_persisted_maps_to_group_message() {
+        use fetchit_chat::conversation::HistoryEntry;
+        use fetchit_chat::messages::PrivateGroupReceive;
+        let group_id = "f".repeat(64);
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: Some("alice".to_owned()),
+            body: "hello group".to_owned(),
+            ts_ms: 1_700_000_000_000,
+            message_id: "mid-7".to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+        };
+        let projected =
+            project_group_receive(group_id.clone(), PrivateGroupReceive::Persisted(entry));
+        match projected {
+            Some(ChatEventFfi::GroupMessage {
+                group_id: gid,
+                from_agent_id_hex,
+                sender_name,
+                body,
+                message_id,
+            }) => {
+                assert_eq!(gid, group_id);
+                assert_eq!(from_agent_id_hex, REAL_HEX);
+                assert_eq!(sender_name.as_deref(), Some("alice"));
+                assert_eq!(body, "hello group");
+                assert_eq!(message_id.as_deref(), Some("mid-7"));
+            }
+            other => panic!("expected GroupMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_group_receive_replay_maps_to_none() {
+        use fetchit_chat::messages::PrivateGroupReceive;
+        let projected = project_group_receive("f".repeat(64), PrivateGroupReceive::Replay);
+        assert!(
+            projected.is_none(),
+            "a Replay must surface nothing, got: {projected:?}"
+        );
     }
 
     #[test]
