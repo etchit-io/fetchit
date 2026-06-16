@@ -21,14 +21,6 @@
         android:gravity="center"
         android:padding="32dp">
 
-        <ImageView
-            android:id="@+id/chatPairQr"
-            android:layout_width="240dp"
-            android:layout_height="240dp"
-            android:scaleType="fitCenter"
-            android:contentDescription="@string/chat_pair_qr_desc"
-            android:visibility="gone" />
-
         <TextView
             android:id="@+id/chatConnectingText"
             android:layout_width="wrap_content"

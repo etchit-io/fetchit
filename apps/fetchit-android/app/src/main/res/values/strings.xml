@@ -163,6 +163,7 @@
     <string name="chat_connect_failed_generic">couldn\'t connect to relay</string>
     <string name="chat_not_connected">not connected yet</string>
     <string name="chat_uri_copied">copied</string>
+    <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
     <string name="chat_feed_title">fediverse</string>
     <string name="chat_feed_subtitle">bridged public posts</string>

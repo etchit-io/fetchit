@@ -266,8 +266,6 @@ class ChatModeView(
 
         val rv = view.findViewById<RecyclerView>(R.id.chatContactList)
         val emptyState = view.findViewById<View>(R.id.chatEmptyState)
-        val qrImage = view.findViewById<ImageView>(R.id.chatPairQr)
-        val connectingText = view.findViewById<TextView>(R.id.chatConnectingText)
         val lostBanner = view.findViewById<TextView>(R.id.chatConnectionLostBanner)
         val addBtn = view.findViewById<View>(R.id.addContactButton)
         val shareBtn = view.findViewById<View>(R.id.sharePairButton)
@@ -308,26 +306,9 @@ class ChatModeView(
             }
         }
 
-        // Share my code button.
+        // Share my code button: opens the dismissible pair-QR modal.
         shareBtn.setOnClickListener {
-            lifecycleScope.launch { onShareMyCodeClicked(qrImage) }
-        }
-        qrImage.setOnLongClickListener {
-            val gw = controller.gateway()
-            if (gw == null) {
-                snackbar(context.getString(R.string.chat_not_connected))
-                return@setOnLongClickListener true
-            }
-            lifecycleScope.launch {
-                runCatching { gw.pairShareUri() }.onSuccess { uri ->
-                    copyToClipboard(uri)
-                    snackbar(context.getString(R.string.chat_uri_copied))
-                }.onFailure { e ->
-                    val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-                    snackbar(reason)
-                }
-            }
-            true
+            lifecycleScope.launch { onShareMyCodeClicked() }
         }
 
         // Scan a code button: delegate to MainActivity's scanner.
@@ -360,19 +341,42 @@ class ChatModeView(
         }
     }
 
-    private suspend fun onShareMyCodeClicked(qrImage: ImageView) {
+    private suspend fun onShareMyCodeClicked() {
         val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return
         val uri = runCatching { gw.pairShareUri() }.getOrElse { e ->
             val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
             snackbar(reason)
             return
         }
+        showPairQrDialog(uri)
+    }
+
+    /**
+     * Show the local pairing code in a dismissible modal: the branded QR card,
+     * a copy-link action, and close. Replaces the older inline-on-the-list QR,
+     * which had no dismiss control, persisted across navigation, and let a
+     * system back from the list fall through to browse instead of closing the
+     * code. Android back now dismisses the dialog, not chat.
+     */
+    private fun showPairQrDialog(uri: String) {
         val label = context.getString(R.string.chat_pair_card_label)
         val bitmap = QrShare.renderCardForUri(uri, label)
-        if (bitmap != null) {
-            qrImage.setImageBitmap(bitmap)
-            qrImage.visibility = View.VISIBLE
+        val image = ImageView(context).apply {
+            adjustViewBounds = true
+            bitmap?.let { setImageBitmap(it) }
+            contentDescription = context.getString(R.string.chat_pair_qr_desc)
+            val pad = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
         }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_share_my_code))
+            .setView(image)
+            .setPositiveButton(context.getString(R.string.chat_pair_copy_link)) { _, _ ->
+                copyToClipboard(uri)
+                snackbar(context.getString(R.string.chat_uri_copied))
+            }
+            .setNegativeButton(context.getString(R.string.action_close), null)
+            .show()
     }
 
     private fun showAddContactDialog() {
