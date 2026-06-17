@@ -99,6 +99,16 @@ pub struct X0xdGroupMetadataEventWrapper {
     /// Base64-encoded JSON event bytes (signed by the originating
     /// agent's ML-DSA-65 key).
     pub payload_b64: String,
+    /// ML-KEM-768 public key of the joiner, present ONLY on the
+    /// cross-NAT group-join bridge (a joiner-authored `MemberJoined`
+    /// bridged to the owner). The owner seals its roster/commit reply to
+    /// this key — the native event carries the joiner's `agent_id` but
+    /// not its relay, so a pair-record lookup has no relay to target;
+    /// carrying the key inline is self-contained. `None` for every other
+    /// bridged metadata event (member-removed/role/policy/delete), which
+    /// need no reply. The joiner's ML-DSA signature on the inner event is
+    /// the authority; this field is a reply-routing hint, not a credential.
+    pub joiner_kem_pubkey: Option<Vec<u8>>,
 }
 
 impl X0xdGroupMetadataEventWrapper {
@@ -384,8 +394,43 @@ pub async fn build_bridge_outbox<S: fetchit_relay_client::Signer + ?Sized>(
     local_machine_id: &[u8; 32],
     signer: &S,
 ) -> Result<OutboundEnvelope> {
-    let wrapper = X0xdGroupMetadataEventWrapper { topic, payload_b64 };
-    let parts = seal_bridge_wrapper(recipient_kem_pub, &wrapper)?;
+    let wrapper = X0xdGroupMetadataEventWrapper {
+        topic,
+        payload_b64,
+        joiner_kem_pubkey: None,
+    };
+    seal_and_sign_bridge_wrapper(
+        recipient_agent_id,
+        recipient_kem_pub,
+        &wrapper,
+        local_agent_id,
+        local_machine_id,
+        signer,
+    )
+    .await
+}
+
+/// Seal + ML-DSA-65 sign a pre-built [`X0xdGroupMetadataEventWrapper`]
+/// into an `EnvelopeKind::X0xdGroupMetadataEvent` [`OutboundEnvelope`] for
+/// one recipient. Shared core of [`build_bridge_outbox`] (which sets
+/// `joiner_kem_pubkey = None`) and the cross-NAT group-join emit, which
+/// sets it to the joiner's ML-KEM-768 key so the owner can seal its
+/// roster/commit reply to a joiner whose relay is not in the native
+/// event.
+///
+/// # Errors
+/// - [`ChatError::Invalid`] when `recipient_kem_pub` length is wrong,
+///   AEAD seal fails, or postcard encoding fails.
+/// - Forwarded signer errors when ML-DSA-65 signing the envelope.
+pub async fn seal_and_sign_bridge_wrapper<S: fetchit_relay_client::Signer + ?Sized>(
+    recipient_agent_id: &[u8; 32],
+    recipient_kem_pub: &[u8],
+    wrapper: &X0xdGroupMetadataEventWrapper,
+    local_agent_id: &[u8; 32],
+    local_machine_id: &[u8; 32],
+    signer: &S,
+) -> Result<OutboundEnvelope> {
+    let parts = seal_bridge_wrapper(recipient_kem_pub, wrapper)?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -627,6 +672,7 @@ mod tests {
         let w = X0xdGroupMetadataEventWrapper {
             topic: "x0x.named_group/abc123/metadata".into(),
             payload_b64: "eyJldmVudCI6Im1lbWJlcl9qb2luZWQifQ==".into(),
+            joiner_kem_pubkey: None,
         };
         let bytes = w.to_postcard().unwrap();
         let back = X0xdGroupMetadataEventWrapper::from_postcard(&bytes).unwrap();
@@ -740,6 +786,7 @@ mod tests {
         let original = X0xdGroupMetadataEventWrapper {
             topic: "x0x.named_group/group-abc/metadata".into(),
             payload_b64: "eyJldmVudCI6Im1lbWJlcl9qb2luZWQifQ==".into(),
+            joiner_kem_pubkey: Some(vec![0xABu8; 8]),
         };
         let parts = seal_bridge_wrapper(&pk, &original).unwrap();
         assert_eq!(parts.nonce.len(), AEAD_NONCE_LEN);
@@ -757,6 +804,7 @@ mod tests {
         let wrapper = X0xdGroupMetadataEventWrapper {
             topic: "t".into(),
             payload_b64: "x".into(),
+            joiner_kem_pubkey: None,
         };
         let err = seal_bridge_wrapper(&[0u8; 64], &wrapper).unwrap_err();
         assert!(
@@ -772,6 +820,7 @@ mod tests {
         let wrapper = X0xdGroupMetadataEventWrapper {
             topic: "t".into(),
             payload_b64: "x".into(),
+            joiner_kem_pubkey: None,
         };
         let parts = seal_bridge_wrapper(&pk_a, &wrapper).unwrap();
         // sk_b is NOT the matching secret for pk_a — decap should
@@ -796,6 +845,7 @@ mod tests {
         let wrapper = X0xdGroupMetadataEventWrapper {
             topic: "t".into(),
             payload_b64: "x".into(),
+            joiner_kem_pubkey: None,
         };
         let parts = seal_bridge_wrapper(&pk, &wrapper).unwrap();
         let mut bad_ct = parts.ciphertext.clone();
