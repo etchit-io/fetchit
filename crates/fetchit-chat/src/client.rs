@@ -1982,6 +1982,19 @@ impl Client {
             .ok_or_else(|| {
             ChatError::Invalid("join reply: member_joined has no member_agent_id".into())
         })?;
+        // Defense in depth (mirrors the joiner-emit member==self check): in
+        // Plan A the joiner bridges its OWN member_joined, so the bridge
+        // sender is always the member for a legitimate join. Refusing
+        // sender != member avoids routing a MemberAdded reply to a
+        // non-member and denies a third-party-relay DoS amplification. The
+        // native x0xd signature + the HPKE-sealed Welcome already make a
+        // secret leak impossible; this just declines the wasted reply.
+        if !hex::encode(joiner_agent).eq_ignore_ascii_case(&joiner_hex) {
+            return Err(ChatError::Invalid(format!(
+                "join reply: bridge sender {} != member {joiner_hex}; refusing reply",
+                hex::encode(joiner_agent),
+            )));
+        }
         // Poll the LOCAL x0xd for the self-contained inline-welcome event.
         let result = self
             .fetch_inline_join_result(group_id.as_str(), &joiner_hex)
