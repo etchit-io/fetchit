@@ -1910,11 +1910,163 @@ impl Client {
                 );
             }
         }
+        // Engine A: a cross-NAT JOIN bridge carries the joiner's ML-KEM
+        // key as a reply hint. Re-inject so x0xd applies the native
+        // member_joined (it enforces the joiner signature + single-use
+        // invite_secret), then reply with the authoritative inline-welcome
+        // MemberAdded so the NAT'd joiner converges.
+        if wrapper.joiner_kem_pubkey.is_some() {
+            // Admission gate. v1 auto-admits every valid-invite bearer
+            // (x0xd is the cryptographic backstop); a denylist /
+            // manual-accept policy refuses the re-inject here instead.
+            secure
+                .publish(&wrapper.topic, &wrapper.payload_b64)
+                .await
+                .map_err(ChatError::from)?;
+            // The owner reply polls the local x0xd for the staged
+            // join-result (up to seconds) and the inbound dispatch pump is
+            // serial, so run it off-thread to avoid head-of-line blocking.
+            let me = self.clone();
+            let joiner_agent = *transit.sender_agent_id.as_bytes();
+            tokio::spawn(async move {
+                if let Err(e) = me.reply_to_bridged_join(wrapper, joiner_agent).await {
+                    log::warn!("group-join owner reply failed: {e}");
+                }
+            });
+            return Ok(());
+        }
+
         secure
             .publish(&wrapper.topic, &wrapper.payload_b64)
             .await
             .map_err(ChatError::from)?;
         Ok(())
+    }
+
+    /// Owner-side engine-A reply: after re-injecting a bridged
+    /// `member_joined`, poll the local x0xd for the staged authoritative
+    /// `MemberAdded` (with the `TreeKEM` Welcome inlined by the
+    /// `join-result` endpoint), then bridge it back to the NAT'd joiner
+    /// sealed to the `joiner_kem_pubkey` hint. The joiner's stock x0xd
+    /// applies it via its inline-welcome path and converges -- no
+    /// network Welcome-blob pull, which a dual-NAT path can't complete.
+    ///
+    /// Runs on a spawned task; errors are logged, not propagated.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] in REST-only mode, on a non-metadata
+    ///   topic, a missing `member_agent_id`, or a malformed reply.
+    /// - [`ChatError::ShareCardMissing`] / transport errors from the
+    ///   sealed bridge back to the joiner.
+    async fn reply_to_bridged_join(
+        &self,
+        wrapper: crate::groups::bridge::X0xdGroupMetadataEventWrapper,
+        joiner_agent: [u8; 32],
+    ) -> Result<()> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let joiner_kem = wrapper
+            .joiner_kem_pubkey
+            .as_deref()
+            .ok_or_else(|| ChatError::Invalid("join reply: wrapper missing joiner kem".into()))?;
+        let group_id = crate::groups_reachability::group_id_from_metadata_topic(&wrapper.topic)
+            .ok_or_else(|| {
+                ChatError::Invalid(format!("join reply: non-metadata topic {}", wrapper.topic))
+            })?;
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(wrapper.payload_b64.as_bytes())
+            .map_err(|e| ChatError::Invalid(format!("join reply: payload b64: {e}")))?;
+        let joiner_hex = crate::groups::join_bridge::member_agent_id_from_member_joined(&payload)
+            .ok_or_else(|| {
+            ChatError::Invalid("join reply: member_joined has no member_agent_id".into())
+        })?;
+        // Poll the LOCAL x0xd for the self-contained inline-welcome event.
+        let result = self
+            .fetch_inline_join_result(group_id.as_str(), &joiner_hex)
+            .await?;
+        let event = result
+            .get("event")
+            .ok_or_else(|| ChatError::Invalid("join reply: GET response missing event".into()))?;
+        let event_bytes = serde_json::to_vec(event)
+            .map_err(|e| ChatError::Invalid(format!("join reply: event encode: {e}")))?;
+        // Seal the inline-welcome MemberAdded to the joiner kem (R3) and
+        // bridge it back on the same metadata topic; the reply needs no
+        // further kem hint.
+        let reply = crate::groups::bridge::X0xdGroupMetadataEventWrapper {
+            topic: wrapper.topic.clone(),
+            payload_b64: base64::engine::general_purpose::STANDARD.encode(&event_bytes),
+            joiner_kem_pubkey: None,
+        };
+        let conv = crate::groups::bridge::seal_and_sign_bridge_wrapper(
+            &joiner_agent,
+            joiner_kem,
+            &reply,
+            &chat.signer.agent_id(),
+            &chat.local_machine_id,
+            chat.signer.as_ref(),
+        )
+        .await?;
+        let recipient = crate::identity::AgentId(hex::encode(joiner_agent));
+        let transport_out = crate::transport::OutboundEnvelope {
+            kind: crate::transport::OutboundKind::Dm,
+            from_machine_id: Some(chat.local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms: conv.envelope.timestamp_ms,
+            transit: Some(conv.envelope),
+        };
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
+        let hints =
+            crate::messages::StoredContactCard::resolve_recipient_hints(&chat.layout, &joiner_hex)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    primary_snapshot
+                        .as_deref()
+                        .map(|url| crate::card::RendezvousHintsV1 {
+                            relays: vec![url.to_owned()],
+                        })
+                });
+        self.router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
+        Ok(())
+    }
+
+    /// Poll the local x0xd `GET /groups/<id>/join-result/<member>` until
+    /// the staged inline-welcome `MemberAdded` is available, backing off
+    /// across the apply window. A `404` means "not staged yet" (the apply
+    /// after re-inject is async); any other error propagates.
+    async fn fetch_inline_join_result(
+        &self,
+        group_id: &str,
+        joiner_hex: &str,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/groups/{group_id}/join-result/{joiner_hex}");
+        let delays = [
+            Duration::from_millis(150),
+            Duration::from_millis(250),
+            Duration::from_millis(400),
+            Duration::from_millis(600),
+            Duration::from_millis(900),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ];
+        for delay in delays {
+            match self.http.get_json::<serde_json::Value>(&path).await {
+                Ok(v) => return Ok(v),
+                Err(ChatError::Daemon { status: 404, .. }) => {
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(ChatError::Invalid(
+            "join reply: inline join-result not staged within the poll window".into(),
+        ))
     }
 
     /// Cross-NAT private-group join (engine A). Lets a NAT'd joiner

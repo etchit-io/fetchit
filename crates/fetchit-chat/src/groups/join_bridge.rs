@@ -48,6 +48,19 @@ pub fn inviter_agent_id_from_member_joined(payload: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Extract the joined member (the joiner) agent-id hex from a captured
+/// `member_joined` payload. The owner-side reply
+/// (`Client::reply_to_bridged_join`) addresses the local x0xd
+/// `join-result` lookup and the bridged-back `MemberAdded` to this
+/// member.
+#[must_use]
+pub fn member_agent_id_from_member_joined(payload: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    v.get("member_agent_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 /// Consume `stream` until this agent's own `member_joined` for
 /// `target_group` arrives (per [`is_self_member_joined_for_group`]),
 /// returning the captured event to bridge. One-shot: returns the FIRST
@@ -200,6 +213,15 @@ mod tests {
             inviter_agent_id_from_member_joined(&member_joined("me", "owner-99")).as_deref(),
             Some("owner-99"),
         );
+    }
+
+    #[test]
+    fn extracts_member_agent_id() {
+        assert_eq!(
+            member_agent_id_from_member_joined(&member_joined("joiner-7", "owner-1")).as_deref(),
+            Some("joiner-7"),
+        );
+        assert_eq!(member_agent_id_from_member_joined(b"not json"), None);
     }
 
     #[test]
