@@ -35,6 +35,32 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/check-pins.sh
 
+  # License-compliance gate. Runs cargo-deny against all three
+  # distributed-binary dependency graphs -- the root workspace and the two
+  # workspace-excluded units (src-tauri, fetchit-ffi), each carrying its own
+  # Cargo.lock -- against the single root deny.toml. Every crate that links
+  # into a shipped binary must carry a cleared license; a new copyleft
+  # dependency fails here instead of slipping in. The Autonomi stack pulls two
+  # GPL-3.0 crates (self_encryption, which has a linking exception, and evmlib,
+  # which does not) -- both pinned by name in deny.toml, so a third copyleft
+  # crate is rejected. cargo-deny only reads metadata, so no build/cache step.
+  licenses:
+    name: licenses (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo-deny check licenses (all three lockfiles)
+        run: |
+          for m in Cargo.toml apps/fetchit-desktop/src-tauri/Cargo.toml crates/fetchit-ffi/Cargo.toml; do
+            echo "::group::cargo-deny licenses :: $m"
+            cargo deny --manifest-path "$m" check licenses --config deny.toml
+            echo "::endgroup::"
+          done
+
   clippy:
     name: clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
