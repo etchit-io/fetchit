@@ -403,8 +403,26 @@ impl<'a> Endpoint<'a> {
         timeout: Duration,
         poll_interval: Duration,
     ) -> Result<Group> {
-        let group: Group = self
-            .http
+        let group = self.join_post(invite, display_name).await?;
+        self.wait_membership(&group.group_id, self_id, timeout, poll_interval)
+            .await?;
+        Ok(group)
+    }
+
+    /// Bare `POST /groups/join` with no membership wait. The cross-NAT
+    /// join flow ([`crate::Client::join_group_bridged`]) interleaves a
+    /// metadata-event bridge between the POST and the membership poll, so
+    /// it drives the two halves separately rather than through
+    /// [`Self::join_with_membership_wait`].
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces for `/groups/join`.
+    pub async fn join_post(
+        &self,
+        invite: &GroupInvite,
+        display_name: Option<&str>,
+    ) -> Result<Group> {
+        self.http
             .post_json(
                 "/groups/join",
                 &JoinRequest {
@@ -412,17 +430,32 @@ impl<'a> Endpoint<'a> {
                     display_name,
                 },
             )
-            .await?;
-        let group_id = group.group_id.clone();
+            .await
+    }
+
+    /// Poll `GET /groups/<id>/members` until `self_id` is `active`. The
+    /// wait half of [`Self::join_with_membership_wait`], exposed so the
+    /// bridged-join flow can run it *after* emitting its join bridge.
+    ///
+    /// # Errors
+    /// [`ChatError::JoinerNotConverged`] when `self_id` never becomes
+    /// active within `timeout`; otherwise whatever `GET /members`
+    /// surfaces.
+    pub async fn wait_membership(
+        &self,
+        group_id: &GroupId,
+        self_id: &AgentId,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<()> {
         membership::wait_for_active_membership(
-            &group_id,
+            group_id,
             self_id,
             timeout,
             poll_interval,
-            || async { self.members(&group_id).await },
+            || async { self.members(group_id).await },
         )
-        .await?;
-        Ok(group)
+        .await
     }
 
     /// Register an agent as a member of a group from the creator's
