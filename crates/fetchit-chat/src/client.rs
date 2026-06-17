@@ -1917,6 +1917,110 @@ impl Client {
         Ok(())
     }
 
+    /// Cross-NAT private-group join (engine A). Lets a NAT'd joiner
+    /// converge into a group whose owner is also NAT'd, where the x0xd
+    /// metadata-gossip join anchor never reaches the joiner directly:
+    ///
+    /// 1. subscribe to `/events` **before** the POST (x0xd publishes the
+    ///    self `member_joined` near-immediately; a live SSE subscription
+    ///    does not replay events from before it opened),
+    /// 2. `POST /groups/join` -- x0xd mints the joiner `TreeKEM`
+    ///    `KeyPackage`, signs, and publishes the joiner-authored
+    ///    `member_joined`,
+    /// 3. capture that native (joiner-signed) event off the stream,
+    /// 4. bridge it sealed to the owner via
+    ///    [`crate::groups::join_bridge::emit_self_join_bridge`] (with the
+    ///    joiner's ML-KEM key as the reply hint) so the owner re-injects
+    ///    it through [`Self::dispatch_inbound_bridge`] and x0xd applies
+    ///    the authoritative add,
+    /// 5. wait for local membership to converge -- the owner's post-apply
+    ///    commit rides the same bridge back, sealed to the hint.
+    ///
+    /// This is the bridged counterpart to
+    /// [`crate::groups::Endpoint::join`]; callers on a warm direct-gossip
+    /// path can still use the plain join.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] in REST-only mode (no chat state), or when
+    ///   the captured event carries no `inviter_agent_id`.
+    /// - [`ChatError::ShareCardMissing`] when the owner's contact card
+    ///   (its KEM key) is not on disk -- the joiner must import it first.
+    /// - Propagates join / capture / seal / transport / membership errors.
+    pub async fn join_group_bridged(
+        &self,
+        invite: &groups::GroupInvite,
+        display_name: Option<&str>,
+    ) -> Result<groups::Group> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let self_hex = chat.identity.agent_id_hex().to_owned();
+        let self_id = crate::identity::AgentId(self_hex.clone());
+        let local_agent_id = chat.signer.agent_id();
+
+        // 1. Subscribe before the POST so the self member_joined can't
+        //    race us off the live stream.
+        let mut stream = self.events().await?;
+
+        // 2. Bare POST: x0xd mints + signs + publishes the joiner event.
+        let group = self.groups().join_post(invite, display_name).await?;
+
+        // 3. Capture the native joiner-signed member_joined.
+        let captured = crate::groups::join_bridge::capture_self_member_joined(
+            &mut stream,
+            &group.group_id,
+            &self_hex,
+            crate::groups::join_bridge::SELF_JOIN_CAPTURE_TIMEOUT,
+        )
+        .await?;
+
+        // 4. Resolve the owner (the event's inviter) + bridge sealed to it.
+        let owner_hex =
+            crate::groups::join_bridge::inviter_agent_id_from_member_joined(&captured.payload)
+                .ok_or_else(|| {
+                    ChatError::Invalid(
+                        "join-bridge: captured member_joined has no inviter_agent_id".into(),
+                    )
+                })?;
+        let owner_kem = crate::groups::bridge::recipient_kem_key(&chat.layout, &owner_hex)?;
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
+        let hints =
+            crate::messages::StoredContactCard::resolve_recipient_hints(&chat.layout, &owner_hex)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    primary_snapshot
+                        .as_deref()
+                        .map(|url| crate::card::RendezvousHintsV1 {
+                            relays: vec![url.to_owned()],
+                        })
+                });
+        crate::groups::join_bridge::emit_self_join_bridge(
+            &captured,
+            &owner_hex,
+            &owner_kem,
+            chat.identity.kem_public_key(),
+            &local_agent_id,
+            &chat.local_machine_id,
+            chat.signer.as_ref(),
+            &self.router,
+            hints.as_ref(),
+        )
+        .await?;
+
+        // 5. Wait for the bridged-back owner commit to flip us active.
+        self.groups()
+            .wait_membership(
+                &group.group_id,
+                &self_id,
+                crate::groups::membership::membership_wait_timeout(),
+                crate::groups::membership::MEMBERSHIP_POLL_INTERVAL,
+            )
+            .await?;
+        Ok(group)
+    }
+
     /// Drain an inbound [`fetchit_relay_proto::EnvelopeKind::PublicPost`] envelope: decode the
     /// [`fetchit_relay_proto::PublicPostPayload`] wrapper and surface it on the public-post
     /// broadcast that [`Self::subscribe_to_public_posts`] hands out.

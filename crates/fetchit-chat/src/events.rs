@@ -80,6 +80,25 @@ where
     }
 }
 
+impl<S> Stream for EventStream<S>
+where
+    S: Stream<Item = Result<Event>>,
+{
+    type Item = Result<Event>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // `inner: Pin<Box<S>>` makes `EventStream<S>` unconditionally
+        // `Unpin`, so projecting the inner stream out of the outer pin is
+        // safe. Exposing `Stream` (alongside the inherent `next`) lets the
+        // engine-A join-bridge capture drive `/events` through the same
+        // generic `Stream` bound its unit tests use.
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
 pub(crate) async fn open_stream(
     http: &Http,
     path: &str,
