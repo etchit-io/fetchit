@@ -335,7 +335,7 @@ impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
     ///
     /// `relay_url` must be an HTTP or WebSocket URL of a running fetch>it
-    /// relay (e.g. `http://67.207.94.66:8088`). `data_dir` is the
+    /// relay (e.g. `https://nyc-relay.etchit.io`). `data_dir` is the
     /// on-device path for the identity vault and conversation store.
     /// `passphrase` derives the at-rest master key.
     ///
@@ -1078,7 +1078,7 @@ mod tests {
     async fn connect_against_prod_relay_round_trips_identity() {
         let dir = tempfile::TempDir::new().unwrap();
         let client = ChatClient::connect(
-            "http://67.207.94.66:8088".into(),
+            "https://nyc-relay.etchit.io".into(),
             dir.path().to_str().unwrap().to_owned(),
             "test-passphrase-ffi-smoke".into(),
         )
@@ -1109,7 +1109,7 @@ mod tests {
     async fn pair_share_uri_publishes_and_returns_x0x_uri() {
         let dir = tempfile::TempDir::new().unwrap();
         let client = ChatClient::connect(
-            "http://67.207.94.66:8088".into(),
+            "https://nyc-relay.etchit.io".into(),
             dir.path().to_str().unwrap().to_owned(),
             "test-passphrase-ffi-pair-smoke".into(),
         )
