@@ -36,6 +36,7 @@ pub mod bridge_member_removed;
 pub mod bridge_member_role_updated;
 pub mod bridge_policy_updated;
 pub mod dispatch;
+pub mod join_bridge;
 pub mod membership;
 
 use std::time::Duration;
