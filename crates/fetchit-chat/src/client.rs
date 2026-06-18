@@ -2145,8 +2145,22 @@ impl Client {
                         "join-bridge: captured member_joined has no inviter_agent_id".into(),
                     )
                 })?;
-        let owner_kem = crate::groups::bridge::recipient_kem_key(&chat.layout, &owner_hex)?;
         let primary_snapshot = self.primary_relay_url.read().await.clone();
+        // The owner is the invite signer; a cold invite (group address with
+        // no prior contact exchange) carries no local card, so resolve the
+        // owner KEM from its relay pair-record when no card is imported --
+        // the joiner needs it to seal the bridged member_joined.
+        let relay = primary_snapshot
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok());
+        let http = crate::relay_http::guarded_client();
+        let owner_kem = crate::groups::bridge::resolve_owner_kem_with_fallback(
+            &chat.layout,
+            relay.as_ref(),
+            &http,
+            &owner_hex,
+        )
+        .await?;
         let hints =
             crate::messages::StoredContactCard::resolve_recipient_hints(&chat.layout, &owner_hex)
                 .ok()

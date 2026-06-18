@@ -469,7 +469,7 @@ fn card_from_pair_record(
 /// # Errors
 /// Only a real local failure: [`StoredContactCard::save_imported`] IO /
 /// serialization. Relay-side failures are folded into `Ok(false)`.
-async fn resolve_and_persist_member_card(
+pub(crate) async fn resolve_and_persist_member_card(
     relay: &url::Url,
     http: &reqwest::Client,
     layout: &StoreLayout,

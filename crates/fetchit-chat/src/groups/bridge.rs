@@ -268,6 +268,57 @@ pub fn recipient_kem_key(layout: &StoreLayout, agent_id_hex: &str) -> Result<Vec
         .map_err(|e| ChatError::Invalid(format!("share-card KEM pubkey b64 decode: {e}")))
 }
 
+/// Resolve a recipient's ML-KEM-768 public key, falling back to a relay
+/// pair-record lookup when no contact card is imported locally.
+///
+/// [`recipient_kem_key`] needs a [`StoredContactCard`] on disk. A cold
+/// invite -- the joiner was handed a group address with no prior contact
+/// exchange -- has none, so the direct lookup fails with
+/// [`ChatError::ShareCardMissing`]. This widens that path: on a missing
+/// card, and given a relay, it resolves the recipient's published
+/// pair-record (the same [`crate::messages::resolve_and_persist_member_card`]
+/// the group-decrypt path uses), persists the imported card, and retries
+/// the lookup. With no relay, or no pair-record served, the original
+/// [`ChatError::ShareCardMissing`] stands -- so a present card costs no
+/// network round-trip and the fallback only widens the failing case.
+///
+/// # Errors
+/// - [`ChatError::ShareCardMissing`] when no local card exists and none
+///   can be resolved (no relay, or the recipient published no pair-record).
+/// - Forwarded errors from [`recipient_kem_key`] (e.g. a malformed card)
+///   and from [`crate::messages::resolve_and_persist_member_card`] (a
+///   local persist failure).
+pub(crate) async fn resolve_owner_kem_with_fallback(
+    layout: &StoreLayout,
+    relay: Option<&url::Url>,
+    http: &reqwest::Client,
+    agent_id_hex: &str,
+) -> Result<Vec<u8>> {
+    match recipient_kem_key(layout, agent_id_hex) {
+        Err(ChatError::ShareCardMissing { .. }) => {
+            if let Some(relay) = relay {
+                if crate::messages::resolve_and_persist_member_card(
+                    relay,
+                    http,
+                    layout,
+                    agent_id_hex,
+                )
+                .await?
+                {
+                    return recipient_kem_key(layout, agent_id_hex);
+                }
+            }
+            Err(ChatError::ShareCardMissing {
+                agent_id_short: agent_id_hex
+                    .get(..agent_id_hex.len().min(12))
+                    .unwrap_or(agent_id_hex)
+                    .to_owned(),
+            })
+        }
+        other => other,
+    }
+}
+
 /// AAD bytes used when sealing / unsealing a bridge envelope's
 /// ciphertext. Domain-separated from the welcome / message paths so a
 /// sealed bridge wrapper cannot be replayed against either of those
@@ -778,6 +829,48 @@ mod tests {
         card.save(&layout).unwrap();
         let got = recipient_kem_key(&layout, &aid_hex).unwrap();
         assert_eq!(got, raw);
+    }
+
+    #[tokio::test]
+    async fn resolve_owner_kem_fallback_returns_card_without_relay_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid_hex = "0".repeat(64);
+        let raw = vec![0xaau8; 1184];
+        StoredContactCard {
+            agent_id_hex: aid_hex.clone(),
+            display_name: "Owner".into(),
+            kem_public_key_b64: B64.encode(&raw),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+        }
+        .save(&layout)
+        .unwrap();
+        // A present card short-circuits: even with relay None (no fetch
+        // possible) the lookup succeeds.
+        let http = reqwest::Client::new();
+        let got = resolve_owner_kem_with_fallback(&layout, None, &http, &aid_hex)
+            .await
+            .unwrap();
+        assert_eq!(got, raw);
+    }
+
+    #[tokio::test]
+    async fn resolve_owner_kem_fallback_missing_card_no_relay_is_share_card_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let http = reqwest::Client::new();
+        // No card, no relay to resolve one: the typed miss stands.
+        let err = resolve_owner_kem_with_fallback(&layout, None, &http, "deadbeefcafebabe1234")
+            .await
+            .unwrap_err();
+        match err {
+            ChatError::ShareCardMissing { agent_id_short } => {
+                assert_eq!(agent_id_short, "deadbeefcafe");
+            }
+            other => panic!("expected ShareCardMissing, got {other:?}"),
+        }
     }
 
     #[test]
