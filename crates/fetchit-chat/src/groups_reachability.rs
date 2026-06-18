@@ -477,60 +477,6 @@ pub fn decide_route(
     }
 }
 
-/// Decide whether an inbound SSE gossip event is THIS agent's own
-/// `member_joined` for `target_group` -- the joiner-authored,
-/// joiner-signed event x0xd publishes on the group metadata topic right
-/// after a `POST /groups/join`. Engine A (cross-NAT group join) captures
-/// exactly this event off the stream and bridges it VERBATIM
-/// (byte-identical, so x0xd's joiner-signature + single-use invite-secret
-/// validation pass when the owner re-injects it) to a NAT'd owner.
-///
-/// This is the inverse of [`classify_sse_event`], which SKIPS
-/// self-authored events as reachability loopbacks: here we want exactly
-/// the self-authored one, and only `member_joined` (not member-removed
-/// etc.), only on `target_group`'s metadata topic.
-///
-/// Pure: matches the topic's group id, requires `from` to be self, and
-/// peeks the JSON payload for `event == "member_joined"` whose
-/// `member_agent_id` is self. The caller bridges `(topic, payload)` when
-/// this returns `true`.
-#[must_use]
-pub fn is_self_member_joined_for_group(
-    topic: &str,
-    payload: &[u8],
-    from: Option<&AgentId>,
-    local_agent_hex: &str,
-    target_group: &GroupId,
-) -> bool {
-    let Some(from) = from else {
-        return false;
-    };
-    // Self-authored only -- the inverse of classify_sse_event's loopback skip.
-    if !from.0.eq_ignore_ascii_case(local_agent_hex) {
-        return false;
-    }
-    // On the target group's metadata topic.
-    match group_id_from_metadata_topic(topic) {
-        Some(g) if g.as_str() == target_group.as_str() => {}
-        _ => return false,
-    }
-    // A member_joined event (peek the JSON discriminator).
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
-        return false;
-    };
-    if v.get("event").and_then(serde_json::Value::as_str) != Some("member_joined") {
-        return false;
-    }
-    // Defense-in-depth: the event must be about US (member == self), not
-    // some other member_joined we happened to relay. The bridge carries
-    // member_agent_id verbatim and the owner trusts it (x0xd's joiner-sig
-    // + single-use invite-secret validation is the backstop, but this is
-    // cheap and keeps a self-emit from ever carrying another agent's add).
-    v.get("member_agent_id")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|m| m.eq_ignore_ascii_case(local_agent_hex))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -544,78 +490,6 @@ mod tests {
 
     fn a(s: &str) -> AgentId {
         AgentId(s.to_string())
-    }
-
-    fn member_joined_payload() -> Vec<u8> {
-        br#"{"event":"member_joined","member_agent_id":"me","signature_b64":"x"}"#.to_vec()
-    }
-
-    #[test]
-    fn captures_self_member_joined_for_target_group() {
-        assert!(is_self_member_joined_for_group(
-            "x0x.named_group/g-abc/metadata",
-            &member_joined_payload(),
-            Some(&a("me")),
-            "me",
-            &g("g-abc"),
-        ));
-    }
-
-    #[test]
-    fn join_capture_rejects_non_self_author() {
-        assert!(!is_self_member_joined_for_group(
-            "x0x.named_group/g-abc/metadata",
-            &member_joined_payload(),
-            Some(&a("someone-else")),
-            "me",
-            &g("g-abc"),
-        ));
-    }
-
-    #[test]
-    fn join_capture_rejects_wrong_group() {
-        assert!(!is_self_member_joined_for_group(
-            "x0x.named_group/g-other/metadata",
-            &member_joined_payload(),
-            Some(&a("me")),
-            "me",
-            &g("g-abc"),
-        ));
-    }
-
-    #[test]
-    fn join_capture_rejects_non_member_joined_event() {
-        assert!(!is_self_member_joined_for_group(
-            "x0x.named_group/g-abc/metadata",
-            br#"{"event":"member_removed","member_agent_id":"aa"}"#,
-            Some(&a("me")),
-            "me",
-            &g("g-abc"),
-        ));
-    }
-
-    #[test]
-    fn join_capture_rejects_unparseable_payload() {
-        assert!(!is_self_member_joined_for_group(
-            "x0x.named_group/g-abc/metadata",
-            b"not json",
-            Some(&a("me")),
-            "me",
-            &g("g-abc"),
-        ));
-    }
-
-    #[test]
-    fn join_capture_rejects_member_joined_for_other_member() {
-        // Self-authored member_joined on the target group, but the event
-        // is about a DIFFERENT member -- must not self-emit it (Q2).
-        assert!(!is_self_member_joined_for_group(
-            "x0x.named_group/g-abc/metadata",
-            br#"{"event":"member_joined","member_agent_id":"other"}"#,
-            Some(&a("me")),
-            "me",
-            &g("g-abc"),
-        ));
     }
 
     #[test]

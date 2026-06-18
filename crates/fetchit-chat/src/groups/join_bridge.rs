@@ -1,34 +1,26 @@
-//! Engine A joiner-emit core: capture THIS agent's own native
-//! `member_joined` off the SSE stream after a `POST /groups/join`, so the
-//! Client can bridge it (verbatim, byte-identical) to a NAT'd owner.
+//! Engine A joiner-emit: bridge THIS agent's own native `member_joined`
+//! (handed back inline by the patched x0xd's `POST /groups/join` response)
+//! to a NAT'd owner, sealed via the M2.5 bridge.
 //!
 //! The owner's x0xd verifies the event's signature against the joiner key
 //! and consumes the single-use invite secret on apply, so the bridged
 //! event MUST be x0xd's native joiner-signed bytes (not a reconstruction).
-//! This module is the pure/testable half (capture + owner extraction);
-//! the runtime seal + `Router::send` orchestration lives on `Client`.
-
-use std::time::Duration;
+//! This module is the pure/testable half (the seal+send emit + owner /
+//! member extraction); the join POST + `Router::send` orchestration lives
+//! on `Client::join_group_bridged`.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use futures_util::{Stream, StreamExt};
 
 use crate::card::RendezvousHintsV1;
 use crate::error::{ChatError, Result};
-use crate::events::Event;
 use crate::groups::bridge::{seal_and_sign_bridge_wrapper, X0xdGroupMetadataEventWrapper};
-use crate::groups::GroupId;
-use crate::groups_reachability::is_self_member_joined_for_group;
 use crate::identity::AgentId;
 use crate::transport::{OutboundEnvelope, OutboundKind, Router};
 
-/// Wall-clock to wait for x0xd to publish the joiner's own `member_joined`
-/// after `POST /groups/join` before giving up the bridge. The event fires
-/// almost immediately; the window only covers daemon/gossip scheduling.
-pub const SELF_JOIN_CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// The captured native event to bridge.
+/// The native event to bridge -- the joiner's own signed `member_joined`,
+/// handed back inline by `POST /groups/join` (see
+/// [`crate::groups::Endpoint::join_post`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedSelfJoin {
     /// x0xd metadata topic the event was published on (-> wrapper topic).
@@ -59,59 +51,6 @@ pub fn member_agent_id_from_member_joined(payload: &[u8]) -> Option<String> {
     v.get("member_agent_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-}
-
-/// Consume `stream` until this agent's own `member_joined` for
-/// `target_group` arrives (per [`is_self_member_joined_for_group`]),
-/// returning the captured event to bridge. One-shot: returns the FIRST
-/// match -- x0xd replays the event 2-3x but we bridge once. Bounded by
-/// `timeout` so a join that never publishes can't hang the caller.
-///
-/// # Errors
-/// - [`ChatError::Invalid`] on timeout, or if the stream ends before a
-///   self `member_joined` is seen.
-/// - The stream's own error, propagated.
-pub async fn capture_self_member_joined<S>(
-    stream: &mut S,
-    target_group: &GroupId,
-    local_agent_hex: &str,
-    timeout: Duration,
-) -> Result<CapturedSelfJoin>
-where
-    S: Stream<Item = Result<Event>> + Unpin,
-{
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            () = &mut deadline => {
-                return Err(ChatError::Invalid(format!(
-                    "join-bridge: no self member_joined for group {} within {}s",
-                    target_group.as_str(),
-                    timeout.as_secs(),
-                )));
-            }
-            next = stream.next() => {
-                let Some(item) = next else {
-                    return Err(ChatError::Invalid(
-                        "join-bridge: event stream ended before self member_joined".to_owned(),
-                    ));
-                };
-                let Event::GossipMessage { topic, payload, from } = item? else {
-                    continue;
-                };
-                if is_self_member_joined_for_group(
-                    &topic,
-                    &payload,
-                    from.as_ref(),
-                    local_agent_hex,
-                    target_group,
-                ) {
-                    return Ok(CapturedSelfJoin { topic, payload });
-                }
-            }
-        }
-    }
 }
 
 /// Seal + ML-DSA-65 sign the captured native `member_joined` and send it
@@ -192,14 +131,6 @@ fn agent_hex_to_bytes(agent_hex: &str) -> Result<[u8; 32]> {
 mod tests {
     use super::*;
 
-    fn gossip(topic: &str, payload: &[u8], from: &str) -> Event {
-        Event::GossipMessage {
-            topic: topic.to_owned(),
-            payload: payload.to_vec(),
-            from: Some(AgentId(from.to_owned())),
-        }
-    }
-
     fn member_joined(member: &str, inviter: &str) -> Vec<u8> {
         format!(
             r#"{{"event":"member_joined","member_agent_id":"{member}","inviter_agent_id":"{inviter}"}}"#
@@ -231,52 +162,6 @@ mod tests {
             None,
         );
         assert_eq!(inviter_agent_id_from_member_joined(b"not json"), None);
-    }
-
-    #[tokio::test]
-    async fn captures_the_first_self_member_joined() {
-        let mj = member_joined("me", "owner-1");
-        let mut stream = futures_util::stream::iter(vec![
-            // unrelated DM-shaped gossip: skipped (wrong topic)
-            Ok(gossip("x0x.dm/whatever", b"{}", "me")),
-            // someone else's member_joined: skipped (not self)
-            Ok(gossip(
-                "x0x.named_group/g1/metadata",
-                &member_joined("other", "owner-1"),
-                "other",
-            )),
-            // ours:
-            Ok(gossip("x0x.named_group/g1/metadata", &mj, "me")),
-        ]);
-        let got = capture_self_member_joined(
-            &mut stream,
-            &GroupId::parse("g1").unwrap(),
-            "me",
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
-        assert_eq!(got.topic, "x0x.named_group/g1/metadata");
-        assert_eq!(got.payload, mj);
-    }
-
-    #[tokio::test]
-    async fn times_out_when_no_self_event() {
-        let mut stream = futures_util::stream::iter(vec![Ok(gossip(
-            "x0x.named_group/g1/metadata",
-            &member_joined("other", "owner-1"),
-            "other",
-        ))]);
-        // Stream ends with no self event -> error (stream-ended branch).
-        let err = capture_self_member_joined(
-            &mut stream,
-            &GroupId::parse("g1").unwrap(),
-            "me",
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ChatError::Invalid(_)));
     }
 
     /// Capturing transport that records every `(recipient, envelope)` so
