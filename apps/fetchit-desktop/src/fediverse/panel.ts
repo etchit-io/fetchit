@@ -19,6 +19,8 @@ export interface FediversePanelHandlers {
   onOpenDm: (agentIdHex: string) => void;
   /// Open the full profile page for a fediverse handle.
   onViewProfile: (handle: string) => void;
+  /// Open an `autonomi://<addr>` referenced in a feed post in the reader.
+  onAutonomi: (url: string) => void;
 }
 
 /// Imperative handle over a mounted fediverse pane.
@@ -82,7 +84,11 @@ export function mountFediversePanel(
   body.className = "fediverse-panel__body";
   // Reply-publicly on a card targets the compose surface at the
   // relay-verified actor; public reply is the only reply option here.
-  const feed = mountFeed(body, (verifiedActorUrl) => compose.setReplyTo(verifiedActorUrl));
+  const feed = mountFeed(
+    body,
+    (verifiedActorUrl) => compose.setReplyTo(verifiedActorUrl),
+    handlers.onAutonomi,
+  );
 
   host.append(header, lookupHost, body, composeHost);
 

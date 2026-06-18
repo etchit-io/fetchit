@@ -97,4 +97,40 @@ describe("renderFeedPost", () => {
     const el = renderFeedPost(create("x"));
     expect(el.querySelector(".feed-post__reply")).toBeNull();
   });
+
+  it("surfaces an autonomi:// address in the post text as a preview that opens in the reader", () => {
+    const onAutonomi = vi.fn();
+    const addr = "a".repeat(64);
+    const el = renderFeedPost(create(`look at this autonomi://${addr} neat`), undefined, onAutonomi);
+    const card = el.querySelector(".chat-preview");
+    expect(card).not.toBeNull();
+    expect(card?.querySelector(".chat-preview__addr")?.getAttribute("title")).toBe(`autonomi://${addr}`);
+    // "Open" hands the full url to the reader-open callback.
+    el.querySelector<HTMLButtonElement>(".chat-preview__btn--ghost")!.click();
+    expect(onAutonomi).toHaveBeenCalledWith(`autonomi://${addr}`);
+    // The body itself stays inert text, never a live anchor.
+    expect(el.querySelector(".feed-post__body")?.textContent).toContain(`autonomi://${addr}`);
+    expect(el.querySelector(".feed-post__body a")).toBeNull();
+  });
+
+  it("dedupes repeated addresses into a single preview card", () => {
+    const addr = "c".repeat(64);
+    const el = renderFeedPost(
+      create(`autonomi://${addr} and again autonomi://${addr}`),
+      undefined,
+      vi.fn(),
+    );
+    expect(el.querySelectorAll(".chat-preview")).toHaveLength(1);
+  });
+
+  it("renders no preview card when the body has no autonomi address", () => {
+    const el = renderFeedPost(create("just text, no links here"), undefined, vi.fn());
+    expect(el.querySelector(".chat-preview")).toBeNull();
+  });
+
+  it("renders no preview card without an onAutonomi callback even if an address is present", () => {
+    const addr = "b".repeat(64);
+    const el = renderFeedPost(create(`autonomi://${addr}`));
+    expect(el.querySelector(".chat-preview")).toBeNull();
+  });
 });

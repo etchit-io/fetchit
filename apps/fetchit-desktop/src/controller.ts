@@ -194,6 +194,16 @@ export async function init(): Promise<void> {
         void chat?.openDm(agentIdHex);
       },
       onViewProfile: (handle) => openProfile({ kind: "handle", handle }),
+      onAutonomi: (uri) => {
+        // Announcement-consumption loop: an autonomi:// address named in a
+        // feed post opens in the reader. Close the pane so the reader is
+        // visible, mirroring the chat-bubble open.
+        const parsed = parseAutonomiUrl(uri);
+        if (parsed) {
+          fediverse.close();
+          submit(parsed.address, store, stageEl, parsed.query);
+        }
+      },
     });
     void bindFediverseEvents(fediverse);
     fediverseBtn.addEventListener("click", () => fediverse.toggle());

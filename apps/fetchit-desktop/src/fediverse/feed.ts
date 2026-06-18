@@ -41,6 +41,7 @@ function feedKey(d: PublicPostDelivery): string {
 export function mountFeed(
   host: HTMLElement,
   onReply?: (verifiedActorUrl: string) => void,
+  onAutonomi?: (url: string) => void,
 ): FeedHandle {
   host.replaceChildren();
   host.className = "feed";
@@ -60,7 +61,7 @@ export function mountFeed(
     const key = feedKey(delivery);
     if (seen.has(key)) return;
     seen.add(key);
-    const card = renderFeedPost(delivery, onReply);
+    const card = renderFeedPost(delivery, onReply, onAutonomi);
     card.dataset.key = key;
     list.prepend(card);
     empty.hidden = true;

@@ -6,6 +6,8 @@
 // actor. Honesty chrome marks it observably public and non-PQ; there is
 // no positive "verified" badge on content.
 
+import { extractAutonomiAddresses, mountAutonomiPreview } from "../chat/bubblePreview";
+
 /// A bridged fediverse post handed to the render surface. Mirrors the
 /// Rust `PublicPostDelivery` (fetchit-chat client.rs); `activityJson` is
 /// the raw `application/activity+json` body, untrusted.
@@ -55,6 +57,7 @@ function displayActor(url: string): string {
 export function renderFeedPost(
   delivery: PublicPostDelivery,
   onReply?: (verifiedActorUrl: string) => void,
+  onAutonomi?: (url: string) => void,
 ): HTMLElement {
   const root = document.createElement("article");
   root.className = "feed-post";
@@ -81,13 +84,24 @@ export function renderFeedPost(
   } catch {
     note = null;
   }
+  let bodyText = "";
   if (note && typeof note.content === "string") {
-    const text = inertText(note.content);
-    body.textContent = text === "" ? "(empty post)" : text;
+    bodyText = inertText(note.content);
+    body.textContent = bodyText === "" ? "(empty post)" : bodyText;
   } else {
     body.textContent = "Post content unavailable.";
   }
   root.appendChild(body);
+
+  // Announcement-consumption loop: any autonomi:// address visible in the
+  // post text gets a lazy preview that opens in the reader. The body stays
+  // inert text; the preview helper (shared with chat bubbles) fetches
+  // nothing until the user clicks.
+  if (onAutonomi) {
+    for (const addr of extractAutonomiAddresses(bodyText)) {
+      mountAutonomiPreview(root, addr, { onOpen: onAutonomi });
+    }
+  }
 
   // Published timestamp, when present. Rendered verbatim as a machine
   // dateTime; humanizing is a render-time concern for the feed.
