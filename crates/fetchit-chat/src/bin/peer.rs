@@ -315,6 +315,15 @@ struct GroupChatArgs {
     #[arg(long)]
     invite_file: Option<PathBuf>,
 
+    /// Drive the join through the engine-A cross-NAT bridge
+    /// ([`Client::join_group_bridged`]) instead of the direct
+    /// `groups().join`. The joiner bridges its native `member_joined` to a
+    /// NAT'd owner over the relay and converges on the bridged-back inline
+    /// welcome -- the gossip-independent path the cross-NAT ship-gate
+    /// exercises with gossip disabled. Requires `--invite-file`.
+    #[arg(long)]
+    engine_a: bool,
+
     /// Path to a UTF-8 outbox file. When set, outbound group lines are
     /// read from this file (resuming from `--cursor-file`) instead of
     /// stdin staying idle. Pair with `--cursor-file`.
@@ -640,11 +649,19 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
             invite.0.len(),
             invite_path.display(),
         );
-        let group = client
-            .groups()
-            .join(&invite, Some(display_name))
-            .await
-            .context("Client::groups().join(invite)")?;
+        let group = if args.engine_a {
+            eprintln!("[peer] joining via engine-A cross-NAT bridge (join_group_bridged)");
+            client
+                .join_group_bridged(&invite, Some(display_name))
+                .await
+                .context("Client::join_group_bridged(invite)")?
+        } else {
+            client
+                .groups()
+                .join(&invite, Some(display_name))
+                .await
+                .context("Client::groups().join(invite)")?
+        };
         eprintln!(
             "[peer] joined group {} (membership convergence confirmed)",
             group.group_id.as_str(),
