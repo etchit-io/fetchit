@@ -1918,9 +1918,24 @@ impl Client {
         if wrapper.joiner_kem_pubkey.is_some() {
             // Admission gate. v1 auto-admits every valid-invite bearer
             // (x0xd is the cryptographic backstop); a denylist /
-            // manual-accept policy refuses the re-inject here instead.
+            // manual-accept policy refuses the apply here instead.
+            //
+            // The metadata gossip mesh is off (v1 + dual-NAT), so a plain
+            // `/publish` would reach no local apply path -- the owner must
+            // apply the joiner's `member_joined` DIRECTLY. x0xd re-runs full
+            // membership authority on it (ML-DSA sig + single-use
+            // `invite_secret` + inviter-gate), so this is a local-delivery
+            // shortcut, never a validation bypass.
+            let group_id = crate::groups_reachability::group_id_from_metadata_topic(&wrapper.topic)
+                .ok_or_else(|| {
+                    ChatError::Invalid(format!(
+                        "join-bridge: cannot derive group_id from topic {}",
+                        wrapper.topic
+                    ))
+                })?;
+            let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
             secure
-                .publish(&wrapper.topic, &wrapper.payload_b64)
+                .apply_metadata_event(group_id.as_str(), &wrapper.payload_b64, &sender_hex)
                 .await
                 .map_err(ChatError::from)?;
             // The owner reply polls the local x0xd for the staged

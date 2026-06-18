@@ -243,6 +243,18 @@ struct PublishResponse {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct ApplyMetadataEventRequest<'a> {
+    event_b64: &'a str,
+    sender_agent_id: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ApplyMetadataEventResponse {
+    #[serde(default)]
+    applied: bool,
+}
+
 impl SecureGroupsEndpoint {
     /// Build a new endpoint against an x0xd daemon at `base_url`,
     /// authenticated with `api_token`.
@@ -528,6 +540,56 @@ impl SecureGroupsEndpoint {
             .map(|p| p.confidentiality)
             .ok_or_else(|| X0xdError::Rejected("group meta response missing policy".into()))
     }
+
+    /// Apply a signed `NamedGroupMetadataEvent` to local MLS state via
+    /// x0xd `POST /groups/<id>/apply-metadata-event`, with NO gossip
+    /// publish. Engine A's cross-NAT group-join re-injects the joiner's
+    /// bridged `member_joined` this way: with the metadata gossip mesh off
+    /// (v1 + dual-NAT) a plain `publish` reaches no local apply path, so
+    /// the owner must apply directly. The daemon re-runs full membership
+    /// authority on the event (ML-DSA signature + single-use
+    /// `invite_secret` + inviter-gate), so this is a local-delivery
+    /// shortcut, never a validation bypass. `sender_agent_id` must be the
+    /// event author (the joiner). Returns whether the daemon applied it
+    /// (`false` on an idempotent / already-member `409`).
+    ///
+    /// # Errors
+    /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (rejected
+    /// locally before any HTTP — path-traversal guard). [`X0xdError::Http`]
+    /// / [`X0xdError::Url`] on transport / URL-join failure, and
+    /// [`X0xdError::Rejected`] when x0xd returns a status other than
+    /// `200` / `409`.
+    pub async fn apply_metadata_event(
+        &self,
+        group_id: &str,
+        event_b64: &str,
+        sender_agent_id: &str,
+    ) -> Result<bool, X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
+        let path = format!("groups/{group_id}/apply-metadata-event");
+        let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .post(url)
+            .bearer_auth(&self.api_token)
+            .json(&ApplyMetadataEventRequest {
+                event_b64,
+                sender_agent_id,
+            })
+            .send()
+            .await?;
+        // 200 = applied, 409 = a valid no-op (idempotent / already a
+        // member); both carry `{applied}`. Anything else is a real failure.
+        let code = raw.status().as_u16();
+        if code != 200 && code != 409 {
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd POST /groups/{group_id}/apply-metadata-event returned {code}: {body}"
+            )));
+        }
+        let resp: ApplyMetadataEventResponse = raw.json().await?;
+        Ok(resp.applied)
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +603,66 @@ mod tests {
     /// returns. Doubles as a stable URL-path component for the
     /// wiremock matchers below.
     const TEST_GROUP_HEX: &str = "4d216f18809c131d001294c38a90e91d36c765882c6e18ad320e64f55df9492e";
+
+    #[tokio::test]
+    async fn apply_metadata_event_returns_true_on_200_applied() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/groups/{TEST_GROUP_HEX}/apply-metadata-event"
+            )))
+            .and(body_partial_json(
+                serde_json::json!({ "event_b64": "ZXZlbnQ", "sender_agent_id": "aa" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "applied": true })),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let applied = endpoint
+            .apply_metadata_event(TEST_GROUP_HEX, "ZXZlbnQ", "aa")
+            .await
+            .unwrap();
+        assert!(applied);
+    }
+
+    #[tokio::test]
+    async fn apply_metadata_event_returns_false_on_409_noop() {
+        let server = MockServer::start().await;
+        // 409 (idempotent / already a member) is a valid no-op, NOT an error.
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/groups/{TEST_GROUP_HEX}/apply-metadata-event"
+            )))
+            .respond_with(
+                ResponseTemplate::new(409).set_body_json(serde_json::json!({ "applied": false })),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let applied = endpoint
+            .apply_metadata_event(TEST_GROUP_HEX, "ZXZlbnQ", "aa")
+            .await
+            .unwrap();
+        assert!(!applied);
+    }
+
+    #[tokio::test]
+    async fn apply_metadata_event_rejects_bad_group_id_before_http() {
+        // A malformed group_id must never reach HTTP (path-traversal guard);
+        // mount nothing so any call would surface as a different error shape.
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .apply_metadata_event("not-hex", "ZXZlbnQ", "aa")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, X0xdError::Invalid(_)));
+    }
 
     #[tokio::test]
     async fn encrypt_rejects_empty_group_id_before_http() {
