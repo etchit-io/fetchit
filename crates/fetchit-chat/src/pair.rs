@@ -875,6 +875,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_owner_kem_with_fallback_resolves_from_relay_pair_record() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Cold-invite path: the owner published a signed pair-record but the
+        // joiner has NO local contact card. The fallback must fetch + verify
+        // + persist that record, then retry the KEM lookup against it.
+        let server = MockServer::start().await;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let record = mk_signed_pair_record(
+            &dsa,
+            &sk,
+            &pk.to_bytes(),
+            &["https://relay.example.com"],
+            3_000,
+        );
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/pair-record/{}", record.agent_id_hex)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::local_store::StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+
+        let kem = crate::groups::bridge::resolve_owner_kem_with_fallback(
+            &layout,
+            Some(&relay),
+            &http,
+            &record.agent_id_hex,
+        )
+        .await
+        .expect("fallback resolves the owner KEM from the relay pair-record");
+        // The signed record carries a 1184-byte ML-KEM-768 pubkey; it round-trips
+        // record -> imported card -> recipient_kem_key verbatim.
+        assert_eq!(kem, vec![0u8; 1184]);
+    }
+
+    #[tokio::test]
     async fn fetch_pair_record_by_id_rejects_tampered_signature() {
         use base64::engine::general_purpose::STANDARD as B64STD;
         use wiremock::matchers::method;
