@@ -2086,19 +2086,18 @@ impl Client {
     /// converge into a group whose owner is also NAT'd, where the x0xd
     /// metadata-gossip join anchor never reaches the joiner directly:
     ///
-    /// 1. subscribe to `/events` **before** the POST (x0xd publishes the
-    ///    self `member_joined` near-immediately; a live SSE subscription
-    ///    does not replay events from before it opened),
-    /// 2. `POST /groups/join` -- x0xd mints the joiner `TreeKEM`
-    ///    `KeyPackage`, signs, and publishes the joiner-authored
-    ///    `member_joined`,
-    /// 3. capture that native (joiner-signed) event off the stream,
-    /// 4. bridge it sealed to the owner via
+    /// 1. `POST /groups/join` -- the patched x0xd mints the joiner
+    ///    `TreeKEM` `KeyPackage`, signs the joiner-authored
+    ///    `member_joined`, and returns it INLINE in the response. This is
+    ///    mesh-independent on purpose: capturing the event off the gossip
+    ///    SSE starves whenever the joiner's gossip mesh has not formed,
+    ///    which is the exact cold/NAT case engine A targets.
+    /// 2. bridge that native (joiner-signed) event sealed to the owner via
     ///    [`crate::groups::join_bridge::emit_self_join_bridge`] (with the
     ///    joiner's ML-KEM key as the reply hint) so the owner re-injects
     ///    it through [`Self::dispatch_inbound_bridge`] and x0xd applies
     ///    the authoritative add,
-    /// 5. wait for local membership to converge -- the owner's post-apply
+    /// 3. wait for local membership to converge -- the owner's post-apply
     ///    commit rides the same bridge back, sealed to the hint.
     ///
     /// This is the bridged counterpart to
@@ -2106,11 +2105,12 @@ impl Client {
     /// path can still use the plain join.
     ///
     /// # Errors
-    /// - [`ChatError::Invalid`] in REST-only mode (no chat state), or when
-    ///   the captured event carries no `inviter_agent_id`.
+    /// - [`ChatError::Invalid`] in REST-only mode (no chat state), when the
+    ///   join response carries no inline `member_joined` (unpatched daemon
+    ///   or sign failure), or when the event carries no `inviter_agent_id`.
     /// - [`ChatError::ShareCardMissing`] when the owner's contact card
     ///   (its KEM key) is not on disk -- the joiner must import it first.
-    /// - Propagates join / capture / seal / transport / membership errors.
+    /// - Propagates join / seal / transport / membership errors.
     pub async fn join_group_bridged(
         &self,
         invite: &groups::GroupInvite,
@@ -2120,27 +2120,24 @@ impl Client {
             .chat
             .as_ref()
             .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
-        let self_hex = chat.identity.agent_id_hex().to_owned();
-        let self_id = crate::identity::AgentId(self_hex.clone());
+        let self_id = crate::identity::AgentId(chat.identity.agent_id_hex().to_owned());
         let local_agent_id = chat.signer.agent_id();
 
-        // 1. Subscribe before the POST so the self member_joined can't
-        //    race us off the live stream.
-        let mut stream = self.events().await?;
+        // 1. POST /groups/join: the patched x0xd mints + signs the
+        //    joiner's member_joined and returns it inline. This is
+        //    mesh-independent on purpose -- capturing it off the gossip
+        //    SSE starves whenever the joiner's gossip mesh has not formed
+        //    (the exact cold/NAT case engine A targets).
+        let (group, self_join) = self.groups().join_post(invite, display_name).await?;
+        let captured = self_join.ok_or_else(|| {
+            ChatError::Invalid(
+                "join-bridge: x0xd join response carried no member_joined \
+                 (event sign failed, or daemon lacks the inline-member_joined patch)"
+                    .into(),
+            )
+        })?;
 
-        // 2. Bare POST: x0xd mints + signs + publishes the joiner event.
-        let group = self.groups().join_post(invite, display_name).await?;
-
-        // 3. Capture the native joiner-signed member_joined.
-        let captured = crate::groups::join_bridge::capture_self_member_joined(
-            &mut stream,
-            &group.group_id,
-            &self_hex,
-            crate::groups::join_bridge::SELF_JOIN_CAPTURE_TIMEOUT,
-        )
-        .await?;
-
-        // 4. Resolve the owner (the event's inviter) + bridge sealed to it.
+        // 2. Resolve the owner (the event's inviter) + bridge sealed to it.
         let owner_hex =
             crate::groups::join_bridge::inviter_agent_id_from_member_joined(&captured.payload)
                 .ok_or_else(|| {

@@ -41,6 +41,9 @@ pub mod membership;
 
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+
 use crate::error::{ChatError, Result};
 use crate::http::Http;
 use crate::identity::{AgentId, AgentIdentity};
@@ -218,6 +221,29 @@ struct InviteResponse {
     // not bare `invite`. Earlier shape would have failed decode
     // silently with "transport: error decoding response body".
     invite_link: String,
+}
+
+/// `POST /groups/join` response. The `Group` fields are flattened in;
+/// `member_joined` is the patched x0xd's synchronous hand-off of the
+/// joiner's own freshly-minted, signed `member_joined` event so the
+/// cross-NAT bridge does not have to capture it off the (unreliable)
+/// gossip SSE. Absent/null when the daemon failed to sign the event.
+#[derive(Deserialize)]
+struct JoinResponse {
+    #[serde(flatten)]
+    group: Group,
+    #[serde(default)]
+    member_joined: Option<SelfJoinEvent>,
+}
+
+/// The joiner's own minted `member_joined`, carried inline in the join
+/// response. `event_b64` is base64 of the exact gossip-payload bytes
+/// (`serde_json::to_vec(event)`), so it decodes byte-identical to what a
+/// gossip capture would have yielded.
+#[derive(Deserialize)]
+struct SelfJoinEvent {
+    topic: String,
+    event_b64: String,
 }
 
 #[derive(Serialize)]
@@ -403,26 +429,33 @@ impl<'a> Endpoint<'a> {
         timeout: Duration,
         poll_interval: Duration,
     ) -> Result<Group> {
-        let group = self.join_post(invite, display_name).await?;
+        let (group, _) = self.join_post(invite, display_name).await?;
         self.wait_membership(&group.group_id, self_id, timeout, poll_interval)
             .await?;
         Ok(group)
     }
 
-    /// Bare `POST /groups/join` with no membership wait. The cross-NAT
-    /// join flow ([`crate::Client::join_group_bridged`]) interleaves a
-    /// metadata-event bridge between the POST and the membership poll, so
-    /// it drives the two halves separately rather than through
-    /// [`Self::join_with_membership_wait`].
+    /// Bare `POST /groups/join` with no membership wait, returning the
+    /// joined [`Group`] plus the joiner's own freshly-minted, signed
+    /// `member_joined` event when the patched daemon hands it back inline
+    /// ([`SelfJoinEvent`]). The cross-NAT join
+    /// ([`crate::Client::join_group_bridged`]) bridges that event to the
+    /// owner instead of capturing it off the gossip SSE — which is
+    /// unreliable when the joiner's gossip mesh has not formed. The
+    /// `member_joined` is `None` against an unpatched daemon or when the
+    /// daemon failed to sign the event.
     ///
     /// # Errors
-    /// Whatever the underlying HTTP layer surfaces for `/groups/join`.
+    /// - Whatever the underlying HTTP layer surfaces for `/groups/join`.
+    /// - [`ChatError::Invalid`] when the inline `event_b64` is not valid
+    ///   base64.
     pub async fn join_post(
         &self,
         invite: &GroupInvite,
         display_name: Option<&str>,
-    ) -> Result<Group> {
-        self.http
+    ) -> Result<(Group, Option<crate::groups::join_bridge::CapturedSelfJoin>)> {
+        let resp: JoinResponse = self
+            .http
             .post_json(
                 "/groups/join",
                 &JoinRequest {
@@ -430,7 +463,23 @@ impl<'a> Endpoint<'a> {
                     display_name,
                 },
             )
-            .await
+            .await?;
+        let self_join = resp
+            .member_joined
+            .map(|m| {
+                B64.decode(m.event_b64.as_bytes())
+                    .map(|payload| crate::groups::join_bridge::CapturedSelfJoin {
+                        topic: m.topic,
+                        payload,
+                    })
+                    .map_err(|e| {
+                        ChatError::Invalid(format!(
+                            "join_post: member_joined event_b64 decode: {e}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        Ok((resp.group, self_join))
     }
 
     /// Poll `GET /groups/<id>/members` until `self_id` is `active`. The
