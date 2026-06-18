@@ -53,6 +53,20 @@ pub fn member_agent_id_from_member_joined(payload: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Extract the group id (x0xd's `mls_group_id`, the full 64-hex
+/// addressing id) from a captured `member_joined` payload. The owner-side
+/// apply (`Client::dispatch_inbound_bridge`) uses it as the
+/// `/groups/<id>/apply-metadata-event` path id: the bridge topic carries
+/// only the first 16 hex of the group id, so the full id must come from
+/// the event body.
+#[must_use]
+pub fn group_id_from_member_joined(payload: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    v.get("group_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 /// Seal + ML-DSA-65 sign the captured native `member_joined` and send it
 /// to the group owner over the relay-routed transport, with the joiner's
 /// own ML-KEM-768 public key attached as `joiner_kem_pubkey`.
@@ -153,6 +167,20 @@ mod tests {
             Some("joiner-7"),
         );
         assert_eq!(member_agent_id_from_member_joined(b"not json"), None);
+    }
+
+    #[test]
+    fn extracts_group_id() {
+        let p = br#"{"event":"member_joined","group_id":"d385b4f452153c05aa","member_agent_id":"m","inviter_agent_id":"o"}"#;
+        assert_eq!(
+            group_id_from_member_joined(p).as_deref(),
+            Some("d385b4f452153c05aa"),
+        );
+        assert_eq!(group_id_from_member_joined(b"not json"), None);
+        assert_eq!(
+            group_id_from_member_joined(br#"{"event":"member_joined"}"#),
+            None,
+        );
     }
 
     #[test]

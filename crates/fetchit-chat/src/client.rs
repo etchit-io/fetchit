@@ -1926,16 +1926,21 @@ impl Client {
             // membership authority on it (ML-DSA sig + single-use
             // `invite_secret` + inviter-gate), so this is a local-delivery
             // shortcut, never a validation bypass.
-            let group_id = crate::groups_reachability::group_id_from_metadata_topic(&wrapper.topic)
+            // The bridge topic carries only the first 16 hex of the group
+            // id; the full id the apply path needs comes from the event
+            // body itself (x0xd's member_joined `group_id`).
+            let event_bytes = base64::engine::general_purpose::STANDARD
+                .decode(wrapper.payload_b64.as_bytes())
+                .map_err(|e| ChatError::Invalid(format!("join-bridge: payload b64: {e}")))?;
+            let group_id = crate::groups::join_bridge::group_id_from_member_joined(&event_bytes)
                 .ok_or_else(|| {
-                    ChatError::Invalid(format!(
-                        "join-bridge: cannot derive group_id from topic {}",
-                        wrapper.topic
-                    ))
+                    ChatError::Invalid(
+                        "join-bridge: captured member_joined has no group_id".to_owned(),
+                    )
                 })?;
             let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
             secure
-                .apply_metadata_event(group_id.as_str(), &wrapper.payload_b64, &sender_hex)
+                .apply_metadata_event(&group_id, &wrapper.payload_b64, &sender_hex)
                 .await
                 .map_err(ChatError::from)?;
             // The owner reply polls the local x0xd for the staged
@@ -1986,13 +1991,15 @@ impl Client {
             .joiner_kem_pubkey
             .as_deref()
             .ok_or_else(|| ChatError::Invalid("join reply: wrapper missing joiner kem".into()))?;
-        let group_id = crate::groups_reachability::group_id_from_metadata_topic(&wrapper.topic)
-            .ok_or_else(|| {
-                ChatError::Invalid(format!("join reply: non-metadata topic {}", wrapper.topic))
-            })?;
         let payload = base64::engine::general_purpose::STANDARD
             .decode(wrapper.payload_b64.as_bytes())
             .map_err(|e| ChatError::Invalid(format!("join reply: payload b64: {e}")))?;
+        // The bridge topic carries only the first 16 hex of the group id;
+        // take the full id from the event body (matches the apply path).
+        let group_id = crate::groups::join_bridge::group_id_from_member_joined(&payload)
+            .ok_or_else(|| {
+                ChatError::Invalid("join reply: member_joined has no group_id".to_owned())
+            })?;
         let joiner_hex = crate::groups::join_bridge::member_agent_id_from_member_joined(&payload)
             .ok_or_else(|| {
             ChatError::Invalid("join reply: member_joined has no member_agent_id".into())
