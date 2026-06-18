@@ -406,6 +406,7 @@ struct GroupChatArgs {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // one arm per subcommand; splitting scatters the dispatch
 async fn main() -> Result<()> {
     // rustls 0.23 cannot auto-determine its process CryptoProvider when both
     // aws-lc-rs and ring are in the dependency graph (the x0xd embed pulls
@@ -1214,6 +1215,7 @@ fn plan_join_steps(owner_card_uri_file: Option<&std::path::Path>) -> Vec<JoinSte
     steps
 }
 
+#[allow(clippy::too_many_lines)] // linear join sequence; the bridged and native paths read better inline
 async fn run_join(
     client: &Client,
     display_name: &str,
@@ -1301,11 +1303,24 @@ async fn run_join(
                 // Welcome-blob fetch from the inviter's daemon flakes
                 // (transient relay/gossip drop), x0xd now retries with
                 // backoff before failing closed.
-                let group = client
-                    .groups()
-                    .join(&invite, Some(display_name))
-                    .await
-                    .context("Client::groups().join(invite)")?;
+                let group = if std::env::var_os("FETCHIT_BRIDGED_JOIN").is_some() {
+                    // Engine-A activation for the headless cross-NAT
+                    // harness: route through Client::join_group_bridged
+                    // (the relay-bridged join) instead of the plain gossip
+                    // join, which times out across NAT. Unset keeps the
+                    // m2_live plain-join behaviour.
+                    eprintln!("[peer] engine-A bridged join (join_group_bridged)");
+                    client
+                        .join_group_bridged(&invite, Some(display_name))
+                        .await
+                        .context("Client::join_group_bridged(invite)")?
+                } else {
+                    client
+                        .groups()
+                        .join(&invite, Some(display_name))
+                        .await
+                        .context("Client::groups().join(invite)")?
+                };
                 eprintln!(
                     "[peer] joined group {} (membership convergence confirmed)",
                     group.group_id.as_str(),
