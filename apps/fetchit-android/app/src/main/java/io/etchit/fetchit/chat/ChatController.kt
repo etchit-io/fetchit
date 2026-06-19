@@ -1,15 +1,19 @@
 package io.etchit.fetchit.chat
 
 import android.content.Context
+import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
@@ -124,6 +128,11 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             // Seed the group list so the conversation screen can show existing
             // groups (and their threads) immediately after connect.
             loadGroups(gw)
+            // Surface the connect-time pair-record publish outcome. On Android
+            // its failure is otherwise invisible (fetchit_chat log records do not
+            // reach logcat), so a relay/TLS failure would look like a phantom
+            // "connected". Best-effort + off the connect path; never blocks.
+            surfacePairPublishOutcome(gw)
             return gw
         }
     }
@@ -173,6 +182,43 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         gw.startOutbox(displayNameOrDefault(appContext, gw.agentIdHex()))
         for (bubble in gw.outboxSnapshot()) {
             projectOutbox(conversations, bubble)
+        }
+    }
+
+    /**
+     * Poll the FFI-captured pair-record publish outcome shortly after connect
+     * and surface a non-`ok` result. The publish runs async on connect (relay
+     * HTTPS); on Android its `Err`/panic is otherwise silent -- the Rust `log`
+     * facade does not bridge to logcat. Logs via `android.util.Log` (which DOES
+     * reach logcat) and toasts a failure so a relay/TLS problem is visible
+     * instead of a phantom connection. Best-effort; swallows its own errors.
+     */
+    private fun surfacePairPublishOutcome(gw: ChatGateway) {
+        scope.launch {
+            var outcome: String? = null
+            var attempts = 0
+            while (outcome == null && attempts < 10) {
+                delay(1000)
+                outcome = try {
+                    gw.pairPublishOutcome()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    "error: ${e.message}"
+                }
+                attempts++
+            }
+            val result = outcome ?: "pending (no result after 10s)"
+            android.util.Log.w("fetchit.chat", "pair-record publish outcome: $result")
+            if (result != "ok") {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        appContext,
+                        "Relay publish: $result",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
         }
     }
 

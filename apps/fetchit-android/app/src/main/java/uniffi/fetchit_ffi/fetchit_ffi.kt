@@ -773,6 +773,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -817,6 +819,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_list_groups(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_next_event(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_outbox_snapshot(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_publish_outcome(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri(
 ): Short
@@ -913,6 +917,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_next_event(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_outbox_snapshot(`ptr`: Pointer,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_pair_publish_outcome(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_pair_share_uri(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_retry_outbox(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1114,6 +1120,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_outbox_snapshot() != 2590.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_pair_publish_outcome() != 5942.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri() != 50989.toShort()) {
@@ -1702,6 +1711,14 @@ public interface ChatClientInterface {
     suspend fun `outboxSnapshot`(): List<OutboxBubbleFfi>
     
     /**
+     * Outcome of the connect-time pair-record publish, for surfacing relay
+     * reachability to the shell (and diagnosing on-device publish failures
+     * that never reach logcat). `None` while the publish is still in flight;
+     * then `"ok"`, `"error: <reason>"`, or `"panic: <reason>"`.
+     */
+    fun `pairPublishOutcome`(): kotlin.String?
+    
+    /**
      * Publish this agent's pair record to the relay, then return a
      * `x0x://pair/<agent_id>?r=<relay>` URI the user can share.
      *
@@ -2161,6 +2178,24 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         UniffiNullRustCallStatusErrorHandler,
     )
     }
+
+    
+    /**
+     * Outcome of the connect-time pair-record publish, for surfacing relay
+     * reachability to the shell (and diagnosing on-device publish failures
+     * that never reach logcat). `None` while the publish is still in flight;
+     * then `"ok"`, `"error: <reason>"`, or `"panic: <reason>"`.
+     */override fun `pairPublishOutcome`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_pair_publish_outcome(
+        it, _status)
+}
+    }
+    )
+    }
+    
 
     
     /**

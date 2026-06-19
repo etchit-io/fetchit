@@ -226,6 +226,12 @@ pub struct ChatClient {
     /// (so `Drop`/`disconnect` can abort it even though it begins after
     /// construction). `None` until `start_outbox` runs.
     outbox_driver_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    /// Outcome of the connect-time pair-record publish, captured so the shell
+    /// can surface relay reachability (and the exact failure) instead of a
+    /// silent error. `None` until the publish resolves, then `"ok"`,
+    /// `"error: <reason>"`, or `"panic: <reason>"`. Read via
+    /// [`ChatClient::pair_publish_outcome`].
+    last_publish_outcome: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// GC backstop: abort all background tasks if the Kotlin side releases
@@ -292,7 +298,8 @@ fn resolve_denylist_url() -> Option<String> {
 ///   `DaemonConfig.identity_dir`. Without it `serve()` writes them to `~/.x0x`,
 ///   which is unwritable on Android.
 ///
-/// `disable_peer_cache` is left at the daemon default (`false`).
+/// `disable_peer_cache` is forced `true` at the `serve()` call below -- the
+/// peer cache (not the bootstrap list) is what rejoins the public gossip net.
 ///
 /// # Errors
 ///
@@ -314,12 +321,13 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
             enabled: false,
             ..Default::default()
         },
-        // gossip-OFF for v1: clear the hardcoded bootstrap (the
-        // --no-hard-coded-bootstrap equivalent -- daemon.rs sets
-        // config.bootstrap_peers = Vec::new()). The gossip runtime still starts
-        // (the relay / DM-inbox path needs it) but connects to 0 peers = silent:
-        // no version-skew churn against the live x0x net, which is pointless here
-        // (chat + the engine-A group bridge are relay-carried).
+        // gossip-OFF (1 of 2): clear the hardcoded bootstrap seeds (== all the
+        // --no-hard-coded-bootstrap flag does). NECESSARY but NOT sufficient --
+        // the peer cache also rejoins the public net; it is disabled at the
+        // serve() call below (2 of 2). With both, the gossip runtime still starts
+        // (the relay / DM-inbox path needs it) but holds 0 public peers: no
+        // version-skew churn against the live x0x net, pointless here (chat + the
+        // engine-A group bridge are relay-carried).
         bootstrap_peers: Vec::new(),
         ..Default::default()
     };
@@ -330,7 +338,12 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
         reason: "embedded_mobile".to_owned(),
         loaded_at_unix_ms: 0,
     };
-    serve(cfg, exec_policy, false)
+    // 3rd arg = disable_peer_cache; MUST be true for gossip-off. Empty bootstrap
+    // alone is not enough -- with the cache on, the embedded x0xd reconnects to
+    // cached public coordinators from a prior run (seen on-device: "Connected to
+    // cached peer ... :5483"). Cache off + empty bootstrap = gossip runtime up
+    // (relay / DM-inbox) at 0 public peers.
+    serve(cfg, exec_policy, true)
         .await
         .map_err(|e| ChatFfiError::Network {
             reason: format!("x0xd serve: {e}"),
@@ -473,18 +486,40 @@ impl ChatClient {
 
         let pump_abort = spawn_inbound_pump(inner.clone(), tx);
 
-        // Best-effort pair-record publish at connect. A joiner hits
-        // ChatError::ShareCardMissing when this daemonless client HOSTS a group:
-        // the shared from_parts publish (client.rs:687, gated on a primary relay
-        // this build does not set) did not make it discoverable, so publish
-        // explicitly here -- now that the relay + the in-process x0xd are up --
-        // so a joiner's resolve_owner_kem_with_fallback finds the owner KEM via
-        // the relay pair-record. Mirrors the CLI connect publish; non-fatal.
+        // Capture the connect-time pair-record publish outcome for the FFI
+        // surface. The shared from_parts publish (client.rs:687) already runs on
+        // this build (the daemonless builder sets a primary relay, so its chat +
+        // primary gate passes), so this does NOT add discoverability -- it makes
+        // the outcome OBSERVABLE: fetchit_chat log records do not reach android
+        // logcat, and a rustls CryptoProvider panic would unwind the publish
+        // future before its `Err` ever logs. Run it under a JoinHandle and record
+        // Ok / Err / panic into a slot the shell reads via pair_publish_outcome().
+        // Non-fatal; never blocks connect.
+        let last_publish_outcome: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
         {
             let publish_client = inner.clone();
+            let outcome_slot = Arc::clone(&last_publish_outcome);
             tokio::spawn(async move {
-                if let Err(e) = publish_client.publish_pair_record().await {
-                    log::warn!("[chat_ffi] pair-record publish at connect failed: {e}");
+                let handle =
+                    tokio::spawn(async move { publish_client.publish_pair_record().await });
+                let outcome = match handle.await {
+                    Ok(Ok(())) => "ok".to_owned(),
+                    Ok(Err(e)) => format!("error: {e}"),
+                    Err(join_err) if join_err.is_panic() => {
+                        let payload = join_err.into_panic();
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_owned())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "non-string panic payload".to_owned());
+                        format!("panic: {msg}")
+                    }
+                    Err(join_err) => format!("join-error: {join_err}"),
+                };
+                log::warn!("[chat_ffi] pair-record publish outcome: {outcome}");
+                if let Ok(mut slot) = outcome_slot.lock() {
+                    *slot = Some(outcome);
                 }
             });
         }
@@ -499,6 +534,7 @@ impl ChatClient {
             drain_abort,
             outbox_event_abort,
             outbox_driver_abort: std::sync::Mutex::new(None),
+            last_publish_outcome,
         }))
     }
 
@@ -529,6 +565,17 @@ impl ChatClient {
     /// (should not happen on the daemonless path).
     pub fn agent_id_hex(&self) -> String {
         self.inner.local_agent_id_hex().unwrap_or_default()
+    }
+
+    /// Outcome of the connect-time pair-record publish, for surfacing relay
+    /// reachability to the shell (and diagnosing on-device publish failures
+    /// that never reach logcat). `None` while the publish is still in flight;
+    /// then `"ok"`, `"error: <reason>"`, or `"panic: <reason>"`.
+    pub fn pair_publish_outcome(&self) -> Option<String> {
+        self.last_publish_outcome
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     /// Publish this agent's pair record to the relay, then return a

@@ -29,6 +29,7 @@ class FakeGateway : ChatGateway {
     var groups: List<GroupFfi> = emptyList()
 
     override fun agentIdHex() = "f".repeat(64)
+    override fun pairPublishOutcome(): String? = "ok"
     override suspend fun pairShareUri() = "x0x://pair/${"f".repeat(64)}?r=relay"
     override suspend fun importPairUri(uri: String) {}
     override suspend fun enqueueDm(to: String, body: String, senderName: String): String {
@@ -147,6 +148,7 @@ class ChatControllerTest {
     fun pumpReportsErrorStop() = runTest {
         val throwingGateway = object : ChatGateway {
             override fun agentIdHex() = "f".repeat(64)
+            override fun pairPublishOutcome(): String? = "ok"
             override suspend fun pairShareUri() = ""
             override suspend fun importPairUri(uri: String) {}
             override suspend fun enqueueDm(to: String, body: String, senderName: String): String = ""

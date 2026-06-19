@@ -10,6 +10,13 @@ interface ChatGateway {
     /** Hex-encoded local agent identity (64 lowercase hex chars). */
     fun agentIdHex(): String
 
+    /**
+     * Outcome of the connect-time pair-record publish, for surfacing relay
+     * reachability. `null` while still in flight; then `"ok"`,
+     * `"error: <reason>"`, or `"panic: <reason>"`.
+     */
+    fun pairPublishOutcome(): String?
+
     /** Returns a `x0x://pair/…` URI encoding this agent's pairing offer. */
     suspend fun pairShareUri(): String
 
@@ -75,6 +82,7 @@ interface ChatGateway {
 /** Production adapter that delegates every call directly to the uniffi [ChatClient]. */
 class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override fun agentIdHex(): String = inner.agentIdHex()
+    override fun pairPublishOutcome(): String? = inner.pairPublishOutcome()
     override suspend fun pairShareUri(): String = inner.pairShareUri()
     override suspend fun importPairUri(uri: String) = inner.importPairUri(uri)
     override suspend fun enqueueDm(to: String, body: String, senderName: String): String =
