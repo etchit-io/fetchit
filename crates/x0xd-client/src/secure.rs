@@ -256,14 +256,15 @@ struct ApplyMetadataEventResponse {
 }
 
 #[derive(Serialize)]
-struct StageJoinResultRequest<'a> {
+struct ApplyJoinResultRequest<'a> {
     event_b64: &'a str,
+    sender_agent_id: &'a str,
 }
 
 #[derive(Deserialize)]
-struct StageJoinResultResponse {
+struct ApplyJoinResultResponse {
     #[serde(default)]
-    staged: bool,
+    applied: bool,
 }
 
 impl SecureGroupsEndpoint {
@@ -602,31 +603,37 @@ impl SecureGroupsEndpoint {
         Ok(resp.applied)
     }
 
-    /// Stage a bridged engine-A join-result (`MemberAdded` with the inline
-    /// `TreeKEM` Welcome) into the local x0xd via
-    /// `POST /groups/<id>/join-result/<member>`, so the joiner's
-    /// `poll_join_result_until_treekem_ready` resolves WITHOUT the gossip /
-    /// direct-message anchor (which a dual-NAT gossip-off joiner cannot
-    /// reach). `group_id` is the STABLE group id (x0xd keys the
-    /// join-result by `{stable_group_id}:{member}`); `member` is the joiner
-    /// agent id; `event_b64` is the base64 `serde_json` of the `MemberAdded`.
-    /// The daemon re-applies it through the verifying MLS Welcome path, so a
-    /// forged stage fails -- a token-gated local-delivery shortcut, not a
-    /// validation bypass. Returns whether the daemon staged it (`false` on
-    /// a `400` non-`MemberAdded` / bad body, so the caller can fall back to a
-    /// normal bridge publish).
+    /// Apply a bridged engine-A join-result (`MemberAdded` with the inline
+    /// `TreeKEM` Welcome) on the local x0xd via
+    /// `POST /groups/<id>/join-result/<member>`, so a dual-NAT gossip-off
+    /// joiner converges WITHOUT the gossip / direct-message anchor (whose own
+    /// fetch DMs the NAT'd owner and never lands). The daemon runs the SAME
+    /// verifying path as an inbound join-result DM (`member` must equal this
+    /// node and `sender_agent_id` must equal the group creator, then
+    /// `apply_named_group_metadata_event` processes the Welcome into the
+    /// active `TreeKEM` group), so a forged push fails -- a token-gated
+    /// local-delivery shortcut, not a validation bypass.
+    ///
+    /// `group_id` is the STABLE group id (the `MemberAdded` carries it as its
+    /// `group_id`); `member` is the joiner (this node); `event_b64` is the
+    /// base64 `serde_json` of the `MemberAdded`; `sender_agent_id` is the
+    /// owner/creator (the authenticated bridge sender). Returns whether the
+    /// daemon applied it (`false` on a `409` idempotent no-op when this node
+    /// is already a member).
     ///
     /// # Errors
     /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (rejected
     /// locally before any HTTP -- path-traversal guard). [`X0xdError::Http`]
     /// / [`X0xdError::Url`] on transport / URL-join failure, and
     /// [`X0xdError::Rejected`] when x0xd returns a status other than
-    /// `200` / `400`.
-    pub async fn stage_join_result(
+    /// `200` / `409` (e.g. a `400` member / sender / event reject the caller
+    /// surfaces rather than silently dropping).
+    pub async fn apply_join_result(
         &self,
         group_id: &str,
         member: &str,
         event_b64: &str,
+        sender_agent_id: &str,
     ) -> Result<bool, X0xdError> {
         let group_id = validate_group_id_hex(group_id)?;
         let path = format!("groups/{group_id}/join-result/{member}");
@@ -635,20 +642,24 @@ impl SecureGroupsEndpoint {
             .http
             .post(url)
             .bearer_auth(&self.api_token)
-            .json(&StageJoinResultRequest { event_b64 })
+            .json(&ApplyJoinResultRequest {
+                event_b64,
+                sender_agent_id,
+            })
             .send()
             .await?;
-        // 200 = staged, 400 = a valid non-stage (non-MemberAdded / bad
-        // body) the caller falls back from. Anything else is a real failure.
+        // 200 = applied, 409 = idempotent no-op (already a member); both carry
+        // `{applied}`. Anything else (incl. a 400 member / sender / event
+        // reject) is a real failure the caller surfaces.
         let code = raw.status().as_u16();
-        if code != 200 && code != 400 {
+        if code != 200 && code != 409 {
             let body = raw.text().await.unwrap_or_default();
             return Err(X0xdError::Rejected(format!(
                 "x0xd POST /groups/{group_id}/join-result/{member} returned {code}: {body}"
             )));
         }
-        let resp: StageJoinResultResponse = raw.json().await?;
-        Ok(resp.staged)
+        let resp: ApplyJoinResultResponse = raw.json().await?;
+        Ok(resp.applied)
     }
 }
 
@@ -725,44 +736,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stage_join_result_returns_true_on_200() {
+    async fn apply_join_result_returns_true_on_200_applied() {
         let server = MockServer::start().await;
         let member = "b".repeat(64);
+        let owner = "c".repeat(64);
         Mock::given(method("POST"))
             .and(path(format!(
                 "/groups/{TEST_GROUP_HEX}/join-result/{member}"
             )))
-            .and(body_partial_json(serde_json::json!({ "event_b64": "ZXY" })))
+            .and(body_partial_json(serde_json::json!({
+                "event_b64": "ZXY",
+                "sender_agent_id": owner,
+            })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "staged": true })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "applied": true })),
             )
             .mount(&server)
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         assert!(endpoint
-            .stage_join_result(TEST_GROUP_HEX, &member, "ZXY")
+            .apply_join_result(TEST_GROUP_HEX, &member, "ZXY", &owner)
             .await
             .unwrap());
     }
 
     #[tokio::test]
-    async fn stage_join_result_returns_false_on_400_non_member_added() {
+    async fn apply_join_result_returns_false_on_409_idempotent() {
         let server = MockServer::start().await;
         let member = "b".repeat(64);
-        // 400 (non-MemberAdded / bad body) is a valid no-stage, not an error.
+        let owner = "c".repeat(64);
+        // 409 = already a member: a valid idempotent no-op, not an error.
         Mock::given(method("POST"))
             .respond_with(
-                ResponseTemplate::new(400).set_body_json(serde_json::json!({ "staged": false })),
+                ResponseTemplate::new(409).set_body_json(serde_json::json!({ "applied": false })),
             )
             .mount(&server)
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
         assert!(!endpoint
-            .stage_join_result(TEST_GROUP_HEX, &member, "ZXY")
+            .apply_join_result(TEST_GROUP_HEX, &member, "ZXY", &owner)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn apply_join_result_errs_on_403_reject() {
+        let server = MockServer::start().await;
+        let member = "b".repeat(64);
+        let owner = "c".repeat(64);
+        // 403 (member != self / sender != creator) and 404 (unknown local
+        // group) are surfaced as errors so the dispatch pump logs + drops:
+        // a self-targeted member_added the daemon refused is an anomaly,
+        // never a fall-through-to-publish.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("not the creator"))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .apply_join_result(TEST_GROUP_HEX, &member, "ZXY", &owner)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, X0xdError::Rejected(_)));
     }
 
     #[tokio::test]

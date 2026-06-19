@@ -1962,12 +1962,16 @@ impl Client {
         }
 
         // Reverse engine-A: a bridged `member_added` for THIS node is its
-        // own join-result (the owner's reply). Stage it into the local x0xd
-        // so `poll_join_result_until_treekem_ready` resolves -- gossip-off,
-        // the daemon's own fetch DMs the NAT'd owner and never lands. x0xd
-        // keys the join-result by `{stable_group_id}:{member}`, and the
-        // owner's MemberAdded carries `group_id` as that stable id. Every
-        // other bridged metadata event is a normal publish.
+        // own join-result (the owner's reply). APPLY it on the local x0xd --
+        // gossip-off, the daemon's own join-result fetch DMs the NAT'd owner
+        // and never lands, so this push IS the delivery. The daemon runs the
+        // same verifying path as an inbound join-result DM (`member` == this
+        // node, `sender` == the group creator, then the MLS Welcome applies),
+        // so the owner agent id passed is `transit.sender_agent_id` -- the
+        // AUTHENTICATED bridge sender, symmetric with the forward apply arm
+        // above. The owner's `MemberAdded` carries `group_id` as the STABLE
+        // id the daemon keys by. Every other bridged metadata event is a
+        // normal publish.
         let event_bytes = base64::engine::general_purpose::STANDARD
             .decode(wrapper.payload_b64.as_bytes())
             .map_err(|e| ChatError::Invalid(format!("bridge: payload b64: {e}")))?;
@@ -1977,14 +1981,12 @@ impl Client {
                 identity.agent_id_hex(),
             )
         {
-            if secure
-                .stage_join_result(&stable_group_id, &member, &wrapper.payload_b64)
+            let owner_hex = hex::encode(transit.sender_agent_id.as_bytes());
+            secure
+                .apply_join_result(&stable_group_id, &member, &wrapper.payload_b64, &owner_hex)
                 .await
-                .map_err(ChatError::from)?
-            {
-                return Ok(());
-            }
-            // 400 (not a stageable MemberAdded) -- fall through to publish.
+                .map_err(ChatError::from)?;
+            return Ok(());
         }
 
         secure
