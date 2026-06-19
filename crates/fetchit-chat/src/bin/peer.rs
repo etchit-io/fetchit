@@ -631,6 +631,28 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
     let group_hex = args.group.as_str();
     let gid = GroupId::parse(group_hex).context("invalid group id")?;
 
+    // Start the inbound relay reader BEFORE any join. Engine-A's
+    // `join_group_bridged` blocks until membership converges, and the
+    // owner's bridged join-result -- the authoritative `MemberAdded` that
+    // flips this joiner active -- arrives on this relay stream. It must be
+    // drained and dispatched (`decode_inbound` -> `dispatch_inbound_bridge`,
+    // which stages it into the local x0xd for the daemon's join-result poll
+    // to apply) WHILE the join waits, mirroring a real shell's always-on
+    // inbound pump. Spawning the reader after the join (the prior order)
+    // deadlocked the joiner: nothing consumed the reply, so membership never
+    // converged and the join timed out.
+    let mut inbound = client
+        .take_transport_inbound("relay")
+        .context("relay inbound already taken")?;
+    let client_clone = client.clone();
+    let reader_handle = tokio::spawn(async move {
+        while let Some(env) = inbound.recv().await {
+            if let Some(dm) = decode_inbound(&client_clone, env).await {
+                println!("[{}] {}", short(&dm.from.0), dm.body);
+            }
+        }
+    });
+
     if let Some(invite_path) = args.invite_file.as_deref() {
         // Read the single-line x0x://invite/<base64> link as written by
         // the owner-side `group-create` driver (trimmed so a trailing
@@ -669,9 +691,19 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
     }
 
     match (args.outbox_file.as_deref(), args.cursor_file.as_deref()) {
-        (None, None) => run_group_chat_loop(client, &gid, group_hex, display_name, None).await,
+        (None, None) => {
+            run_group_chat_loop(client, &gid, group_hex, display_name, None, reader_handle).await
+        }
         (Some(o), Some(c)) => {
-            run_group_chat_loop(client, &gid, group_hex, display_name, Some((o, c))).await
+            run_group_chat_loop(
+                client,
+                &gid,
+                group_hex,
+                display_name,
+                Some((o, c)),
+                reader_handle,
+            )
+            .await
         }
         (None, Some(_)) | (Some(_), None) => {
             anyhow::bail!("--outbox-file and --cursor-file must both be set or both omitted")
@@ -680,33 +712,23 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
 }
 
 /// Inner group loop shared by the stdin-idle and outbox-driven forms of
-/// `run_group_chat`. Spawns the same inbound reader + SSE recorder as
-/// [`run_chat_outbox`]; when `outbox` is `Some((outbox_file,
-/// cursor_file))` it drains outbound lines from disk through
-/// `Client::messages().send_private_group(...)`, advancing the cursor atomically on each
-/// ack, exactly like the DM rig. When `outbox` is `None` it just runs
-/// the inbound pump until the relay channel closes.
+/// `run_group_chat`. The inbound relay reader is spawned by the caller
+/// (`run_group_chat`, before any join) and handed in as `reader_handle`;
+/// this loop spawns the SSE reachability recorder and, when `outbox` is
+/// `Some((outbox_file, cursor_file))`, drains outbound lines from disk
+/// through `Client::messages().send_private_group(...)`, advancing the
+/// cursor atomically on each ack, exactly like the DM rig. When `outbox`
+/// is `None` it keeps the inbound reader alive until the relay channel
+/// closes.
 async fn run_group_chat_loop(
     client: &Client,
     gid: &GroupId,
     group_hex: &str,
     display_name: &str,
     outbox: Option<(&std::path::Path, &std::path::Path)>,
+    reader_handle: tokio::task::JoinHandle<()>,
 ) -> Result<()> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
-
-    let mut inbound = client
-        .take_transport_inbound("relay")
-        .context("relay inbound already taken")?;
-
-    let client_clone = client.clone();
-    let reader_handle = tokio::spawn(async move {
-        while let Some(env) = inbound.recv().await {
-            if let Some(dm) = decode_inbound(&client_clone, env).await {
-                println!("[{}] {}", short(&dm.from.0), dm.body);
-            }
-        }
-    });
 
     match client.spawn_sse_reachability_recorder() {
         Ok(_handle) => eprintln!("[peer] sse reachability recorder started"),
