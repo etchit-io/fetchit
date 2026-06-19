@@ -1949,13 +1949,11 @@ impl Client {
             let me = self.clone();
             let joiner_agent = *transit.sender_agent_id.as_bytes();
             tokio::spawn(async move {
-                // [engine-a gate diagnostic] surfaced via eprintln because the
-                // reply runs in a detached task -- its outcome is otherwise a
-                // silent log::warn (the peer test driver inits no logger).
-                // Remove / gate behind a feature before shell-activation.
                 match me.reply_to_bridged_join(wrapper, joiner_agent).await {
-                    Ok(()) => eprintln!("[engine-a] owner reply: bridged join-result to joiner"),
-                    Err(e) => eprintln!("[engine-a] owner reply FAILED: {e}"),
+                    Ok(()) => {
+                        log::info!("[chat] engine-a owner reply: bridged join-result to joiner");
+                    }
+                    Err(e) => log::warn!("[chat] engine-a owner reply failed: {e}"),
                 }
             });
             return Ok(());
