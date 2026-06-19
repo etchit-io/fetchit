@@ -42,6 +42,13 @@
 
 <!-- arch: id=chat-transport glob=crates/fetchit-chat/src/transport crates/fetchit-chat/src/groups crates/fetchit-relay-proto/src/envelope.rs verified=f9b9e98 -->
 
+## Chat -- cross-NAT group-join (engine A)
+
+- **Gossip-independent PQ TreeKEM group-join over the relay** (engine A): a NAT'd joiner converges into a group whose owner is also NAT'd, with no gossip/mDNS, so it holds under the v1 gossip-disabled config. Forward path -- the joiner's signed `member_joined` is bridged sealed to the owner, which applies it through `apply_metadata_event` (full ML-DSA + single-use invite + inviter gate) and publishes the authoritative `MemberAdded` -- `crates/fetchit-chat/src/client.rs:2170` (`join_group_bridged`), `crates/fetchit-chat/src/client.rs:1871` (`dispatch_inbound_bridge` forward arm), `crates/x0xd-client/src/secure.rs:574` (`apply_metadata_event`).
+- Reverse path -- the owner bridges the `MemberAdded` back sealed; the joiner self-detects it and applies it locally so its TreeKEM membership poll resolves -- `crates/fetchit-chat/src/client.rs:2012` (`reply_to_bridged_join`), `crates/fetchit-chat/src/groups/join_bridge.rs:92` (`member_added_self_target`) + `:77` (`stable_group_id_from_member_joined`), `crates/x0xd-client/src/secure.rs:631` (`apply_join_result`). The joiner daemon gates the applied event to MemberAdded-only, `member == self`, `sender == creator`, and re-verifies the signed commit (wiremock-tested 200/409/403 in `secure.rs`).
+
+<!-- arch: id=chat-engine-a glob=crates/fetchit-chat/src/client.rs crates/fetchit-chat/src/groups/join_bridge.rs crates/x0xd-client/src/secure.rs verified=42c3f0e -->
+
 ## Fediverse bridge (M4 / M5.1)
 
 - HTTP Signatures use **classical RSA-2048 + PKCS#1 v1.5 + SHA-256** (`rsa-v1_5-sha256`), NOT Ed25519 and NOT post-quantum -- `crates/fetchit-fedi/src/signature.rs`. The PQ binding is the ML-DSA-65 attestation in the Actor JSON-LD, not the per-POST signature. Crypto source of truth: `docs/honest-claims-crypto.md` §3.
