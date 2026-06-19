@@ -1,4 +1,4 @@
-//! [`ChatClient`] — daemonless chat surface exposed to the Android shell.
+//! [`ChatClient`] -- daemonless chat surface exposed to the Android shell.
 //!
 //! Wraps [`fetchit_chat::Client`] (built with the `daemonless` profile) and
 //! exposes connect, agent identity, pointer-URI pairing, DM send, and an
@@ -6,6 +6,7 @@
 //! fediverse public posts through a single [`ChatEventFfi`] stream.
 
 use crate::chat_error::ChatFfiError;
+use crate::group_ffi::GroupFfi;
 use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::messages::is_private_group_envelope;
 use fetchit_chat::Client;
@@ -13,6 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use url::Url;
+use x0x::daemon::{serve, DaemonConfig, DaemonUpdateConfig, ServerHandle};
+use x0x::exec::ExecPolicy;
 
 /// An inbound chat event delivered by [`ChatClient::next_event`].
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -33,14 +36,14 @@ pub enum ChatEventFfi {
     },
     /// A bridged fediverse public post. `activity_json` is raw
     /// `application/activity+json` bytes delivered verbatim from the relay.
-    /// Attribution comes from `verified_actor_url` — the relay-verified,
+    /// Attribution comes from `verified_actor_url` -- the relay-verified,
     /// denylist-canonical signing actor. The `activity_json` body is
     /// UNTRUSTED fediverse content; the render surface MUST sanitize it
     /// before display.
     PublicPost {
         /// Relay-verified actor URL.
         verified_actor_url: String,
-        /// Raw Activity Streams JSON bytes. UNTRUSTED — sanitize before
+        /// Raw Activity Streams JSON bytes. UNTRUSTED -- sanitize before
         /// rendering.
         activity_json: Vec<u8>,
     },
@@ -49,6 +52,23 @@ pub enum ChatEventFfi {
     Outbox {
         /// The bubble's current state.
         bubble: OutboxBubbleFfi,
+    },
+    /// An inbound private-group message, decrypted via the in-process x0xd
+    /// `/secure/decrypt` surface. Surfaced only for fresh
+    /// [`fetchit_chat::messages::PrivateGroupReceive::Persisted`] frames;
+    /// replays are dropped. Carries no delivery receipt -- the engine's
+    /// group path sends none (mirrors `peer.rs` + the desktop seam).
+    GroupMessage {
+        /// 64-hex group id the message belongs to.
+        group_id: String,
+        /// 64-hex sender agent id (ML-DSA verified by the decrypt path).
+        from_agent_id_hex: String,
+        /// Sender display name at send time, if any.
+        sender_name: Option<String>,
+        /// Plaintext body.
+        body: String,
+        /// Dedupe / message id for receipt correlation.
+        message_id: Option<String>,
     },
 }
 
@@ -139,21 +159,63 @@ fn route_envelope(
     EnvelopeRoute::Dispatch
 }
 
+/// Project a private-group decrypt outcome into the FFI event stream.
+///
+/// A fresh [`PrivateGroupReceive::Persisted`] entry becomes a
+/// [`ChatEventFfi::GroupMessage`] with the [`fetchit_chat::conversation::HistoryEntry`]
+/// fields mapped straight through (`sender_agent_id_hex` -> `from_agent_id_hex`,
+/// the `String` `message_id` wrapped in `Some`); a
+/// [`PrivateGroupReceive::Replay`] surfaces nothing, matching the engine's
+/// "caller MUST NOT surface anything" replay contract. Pure so the projection
+/// is unit-tested without a live x0xd; the inbound pump calls it on the same
+/// path it ships.
+fn project_group_receive(
+    group_id: String,
+    outcome: fetchit_chat::messages::PrivateGroupReceive,
+) -> Option<ChatEventFfi> {
+    match outcome {
+        fetchit_chat::messages::PrivateGroupReceive::Persisted(entry) => {
+            Some(ChatEventFfi::GroupMessage {
+                group_id,
+                from_agent_id_hex: entry.sender_agent_id_hex,
+                sender_name: entry.sender_name,
+                body: entry.body,
+                message_id: Some(entry.message_id),
+            })
+        }
+        fetchit_chat::messages::PrivateGroupReceive::Replay => None,
+    }
+}
+
 /// Daemonless chat client for the Android shell.
 ///
 /// Connect with [`ChatClient::connect`], which builds a
 /// [`fetchit_chat::Client`] using the daemonless profile (local ML-DSA-65
-/// signer; relay WebSocket transport in-process). Inbound events — DMs,
-/// receipts, and bridged fediverse public posts — are drained via
+/// signer; relay WebSocket transport in-process) and embeds an x0xd on a
+/// loopback port for the group `/secure` TreeKEM surface. Inbound events --
+/// DMs, receipts, and bridged fediverse public posts -- are drained via
 /// [`ChatClient::next_event`].
 ///
 /// Call [`ChatClient::disconnect`] when the app no longer needs live chat
-/// (background, account switch). [`Drop`] aborts all background tasks as a
-/// GC backstop, but `disconnect` is the deterministic path.
+/// (background, account switch): it aborts the background tasks and shuts the
+/// embedded x0xd down. [`Drop`] does the same as a GC backstop, but
+/// `disconnect` is the deterministic path.
 #[derive(uniffi::Object)]
 pub struct ChatClient {
     inner: Client,
     relay_url: String,
+    /// uniffi's tokio runtime handle, captured in connect (which runs on that
+    /// runtime). Sync methods that spawn engine tasks (start_outbox /
+    /// retry_outbox) enter() it first: they run on the Kotlin caller thread,
+    /// which has no ambient tokio runtime, so the engine's internal spawn would
+    /// otherwise panic with "no reactor running".
+    rt_handle: tokio::runtime::Handle,
+    /// The in-process x0xd serving the group `/secure` TreeKEM surface.
+    /// `connect` points the daemonless engine's `base_url`/`token` at this
+    /// handle's loopback address. `disconnect`/`Drop` call its sync
+    /// `shutdown()`. Held (not underscore-prefixed) because the teardown
+    /// paths read it.
+    x0xd: ServerHandle,
     events: Mutex<mpsc::UnboundedReceiver<ChatEventFfi>>,
     pump_abort: tokio::task::AbortHandle,
     drain_abort: tokio::task::AbortHandle,
@@ -184,6 +246,9 @@ impl Drop for ChatClient {
                 handle.abort();
             }
         }
+        // Trigger the embedded x0xd's graceful shutdown. Sync + non-consuming;
+        // the spawned serve future ends on the next poll.
+        self.x0xd.shutdown();
     }
 }
 
@@ -202,34 +267,123 @@ fn resolve_denylist_url() -> Option<String> {
         .or_else(|| Some(DEFAULT_DENYLIST_URL.to_string()))
 }
 
+/// Bring x0xd up in-process for the group `/secure` TreeKEM surface and
+/// return its [`ServerHandle`].
+///
+/// `connect` points the daemonless engine's `base_url`/`token` at the
+/// returned handle's loopback address so private-group encrypt/decrypt has a
+/// local x0xd without a separate daemon process. The DM path is unchanged --
+/// `daemonless(true)` keeps the local ML-DSA-65 vault signer; only the x0xd
+/// HTTP surface is redirected (the engine's P2 in-process-router shape).
+///
+/// Hardening, all load-bearing on a phone:
+/// - Both sockets bind ephemeral (API on loopback, gossip on the unspecified
+///   address) so the embed never clashes with a fixed port already in use on
+///   the device.
+/// - Self-update is fully disabled. `update.enabled = false` is the master
+///   gate -- every update task in `serve()` (gossip manifest listener, GitHub
+///   fallback poll, startup check, manifest re-broadcast) is spawned only when
+///   it is true, so the dominated sub-flags (`gossip_updates`,
+///   `fallback_check_interval_minutes`, `stop_on_upgrade`) need no separate
+///   handling. No self-modifying binary, as Play policy requires.
+/// - Remote `x0x-exec`-over-gossip is disabled via [`ExecPolicy::Disabled`].
+/// - The agent identity keys (`machine.key`/`agent.key`/`agent.cert`) are
+///   rooted under `<data_dir>/identity` via the fork's opt-in
+///   `DaemonConfig.identity_dir`. Without it `serve()` writes them to `~/.x0x`,
+///   which is unwritable on Android.
+///
+/// `disable_peer_cache` is left at the daemon default (`false`).
+///
+/// # Errors
+///
+/// [`ChatFfiError::Network`] when `serve()` fails to bind or start.
+async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, ChatFfiError> {
+    let cfg = DaemonConfig {
+        // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
+        api_address: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
+        // fixed-port clash with any other x0xd on the device.
+        bind_address: (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+        data_dir: x0xd_data.to_path_buf(),
+        // Android has no writable home -- root the identity keys under app
+        // storage via the fork's opt-in override (x0x-fork 71ff5af).
+        identity_dir: Some(x0xd_data.join("identity")),
+        // Play policy: no self-modifying binary. `enabled = false` dominates
+        // every update task; the other update fields are inert under it.
+        update: DaemonUpdateConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
+    // under x0x::exec. Gates remote x0x-exec-over-gossip only.
+    let exec_policy = ExecPolicy::Disabled {
+        path: PathBuf::new(),
+        reason: "embedded_mobile".to_owned(),
+        loaded_at_unix_ms: 0,
+    };
+    serve(cfg, exec_policy, false)
+        .await
+        .map_err(|e| ChatFfiError::Network {
+            reason: format!("x0xd serve: {e}"),
+        })
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
     ///
     /// `relay_url` must be an HTTP or WebSocket URL of a running fetch>it
-    /// relay (e.g. `http://67.207.94.66:8088`). `data_dir` is the
+    /// relay (e.g. `https://nyc-relay.etchit.io`). `data_dir` is the
     /// on-device path for the identity vault and conversation store.
     /// `passphrase` derives the at-rest master key.
     ///
     /// # Errors
     ///
     /// [`ChatFfiError::Invalid`] when `relay_url` is malformed.
-    /// [`ChatFfiError::Network`] on relay connect or vault bootstrap failure.
+    /// [`ChatFfiError::Network`] when the in-process x0xd fails to start, or
+    /// on relay connect or vault bootstrap failure.
     #[uniffi::constructor]
     pub async fn connect(
         relay_url: String,
         data_dir: String,
         passphrase: String,
     ) -> Result<Arc<Self>, ChatFfiError> {
+        // rustls 0.23 cannot auto-determine its process CryptoProvider when both
+        // aws-lc-rs and ring are in the dependency graph (the in-process x0x
+        // embed pulls both), so the first TLS use panics. Install aws-lc-rs
+        // explicitly -- it backs ant-quic's PQC and the relay TLS. Idempotent: a
+        // later call (reconnect) returns Err once a provider is set; we ignore it.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Capture uniffi's tokio runtime handle here (connect runs on it) so the
+        // sync start_outbox / retry_outbox methods can enter() it before the
+        // engine spawns the driver off the Kotlin caller thread.
+        let rt_handle = tokio::runtime::Handle::current();
+
         let parsed_url = Url::parse(&relay_url).map_err(|e| ChatFfiError::Invalid {
             reason: format!("relay_url: {e}"),
         })?;
+
+        // Embed x0xd in-process for group TreeKEM (/secure) BEFORE building
+        // the engine: `build()` runs a version probe against `base_url`, so
+        // x0xd must already be listening. `daemonless(true)` keeps the local
+        // ML-DSA-65 vault signer -- base_url/token only redirect the x0xd HTTP
+        // surface (the engine's P2 in-process-router shape), so the DM path is
+        // unchanged.
+        let x0xd_data = PathBuf::from(&data_dir).join("x0xd");
+        let x0xd = serve_inprocess(&x0xd_data).await?;
+        let x0xd_base = format!("http://{}", x0xd.local_addr());
+        let x0xd_token = x0xd.api_token().to_owned();
 
         let mut inner = Client::builder()
             .daemonless(true)
             .relay_url(parsed_url)
             .data_dir(PathBuf::from(&data_dir))
             .passphrase(passphrase)
+            .base_url(x0xd_base)
+            .token(x0xd_token)
             .build()
             .await
             .map_err(ChatFfiError::from)?;
@@ -315,6 +469,8 @@ impl ChatClient {
         Ok(Arc::new(Self {
             inner,
             relay_url,
+            rt_handle,
+            x0xd,
             events: Mutex::new(rx),
             pump_abort,
             drain_abort,
@@ -338,6 +494,10 @@ impl ChatClient {
                 handle.abort();
             }
         }
+        // Stop the embedded x0xd alongside the background-task teardown.
+        // Sync + non-consuming, so it is safe from this `&self` method
+        // (the consuming async `join()` would not be).
+        self.x0xd.shutdown();
     }
 
     /// The local agent id as lowercase 64-character hex.
@@ -413,6 +573,145 @@ impl ChatClient {
             .map_err(ChatFfiError::from)
     }
 
+    /// Create a group. `private=true` is the PQ MLS/`TreeKEM` path
+    /// (the default the UI offers); `false` is a plaintext public room.
+    ///
+    /// Returns the created [`GroupFfi`] with `is_private` already stamped
+    /// from the chosen preset (the engine's create paths warm the kind
+    /// locally, so the first send skips the cold `GET /groups/<id>`).
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn create_group(
+        &self,
+        name: String,
+        display_name: Option<String>,
+        private: bool,
+    ) -> Result<GroupFfi, ChatFfiError> {
+        let group = if private {
+            self.inner
+                .groups()
+                .create_private(&name, display_name.as_deref())
+                .await
+        } else {
+            self.inner
+                .groups()
+                .create(&name, display_name.as_deref())
+                .await
+        }
+        .map_err(ChatFfiError::from)?;
+        Ok(GroupFfi::from(group))
+    }
+
+    /// Join a group from an `x0x://invite/...` link.
+    ///
+    /// After the join converges, best-effort warms every other member's
+    /// ML-DSA card so the first inbound private-group frame decrypts
+    /// without a lazy mid-receive fetch. A prefetch failure is swallowed:
+    /// the join itself already succeeded, and the receive path re-resolves
+    /// any still-missing card on demand.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    /// [`ChatFfiError::Invalid`] for a malformed invite or self-join.
+    pub async fn join_group(
+        &self,
+        invite: String,
+        display_name: Option<String>,
+    ) -> Result<GroupFfi, ChatFfiError> {
+        // GroupInvite is a transparent newtype over the raw URI String.
+        let inv = fetchit_chat::groups::GroupInvite(invite);
+        let group = self
+            .inner
+            .groups()
+            .join(&inv, display_name.as_deref())
+            .await
+            .map_err(ChatFfiError::from)?;
+
+        // Best-effort: warm member cards so the first inbound private-group
+        // frame decrypts without a lazy fetch. Non-fatal -- the join already
+        // landed; the receive path re-resolves a missing card on demand.
+        // FetchitIdentity exposes the self id as hex only, so parse it back
+        // into the AgentId prefetch expects.
+        if let Ok(members) = self.inner.groups().members(&group.group_id).await {
+            if let Some(identity) = self.inner.identity_arc() {
+                if let Ok(me) = fetchit_chat::identity::AgentId::parse(identity.agent_id_hex()) {
+                    let _ = self
+                        .inner
+                        .messages()
+                        .prefetch_group_member_cards(&members, &me)
+                        .await;
+                }
+            }
+        }
+        Ok(GroupFfi::from(group))
+    }
+
+    /// Send a message to a group, routing private/public via the engine's
+    /// kind-aware `send_to_group` (private fans out over `TreeKEM`; public
+    /// posts plaintext). Returns the message id on success, or `None` when
+    /// the transport succeeded but no id was minted.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on transport, x0xd, or relay failure.
+    pub async fn send_group_message(
+        &self,
+        group_id: String,
+        body: String,
+        sender_name: String,
+    ) -> Result<Option<String>, ChatFfiError> {
+        self.inner
+            .messages()
+            .send_to_group(&group_id, &body, &sender_name)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// List the groups this agent belongs to.
+    ///
+    /// Groups from x0xd's list omit their confidentiality, so the returned
+    /// `is_private` is `None` until a send resolves the kind; the create
+    /// paths above return it stamped.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn list_groups(&self) -> Result<Vec<GroupFfi>, ChatFfiError> {
+        let groups = self
+            .inner
+            .groups()
+            .list()
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(groups.into_iter().map(GroupFfi::from).collect())
+    }
+
+    /// Mint a fresh `x0x://invite/...` link for a group, suitable for the
+    /// QR / share path.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn group_invite(&self, group_id: String) -> Result<String, ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        let invite = self
+            .inner
+            .groups()
+            .invite(&gid)
+            .await
+            .map_err(ChatFfiError::from)?;
+        // GroupInvite is a transparent newtype; `.0` is the raw x0x:// URI.
+        Ok(invite.0)
+    }
+
     /// Drain the next inbound event. Returns `None` when the pump has
     /// shut down (relay disconnected and all buffered events consumed).
     ///
@@ -482,6 +781,9 @@ impl ChatClient {
     /// should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
     /// Calling again aborts the previous driver before starting a new one.
     pub fn start_outbox(&self, display_name: String) {
+        // Sync FFI method called off the Kotlin thread; enter uniffi's runtime
+        // so start_outbox_driver's internal tokio::spawn has a reactor.
+        let _rt = self.rt_handle.enter();
         if let Some(handle) = self
             .inner
             .start_outbox_driver(Arc::new(move || display_name.clone()))
@@ -499,6 +801,8 @@ impl ChatClient {
     /// shell's "Retry" button. Fire-and-forget + coalescing; a no-op when
     /// the driver has not been started ([`ChatClient::start_outbox`]).
     pub fn retry_outbox(&self) {
+        // Defensive: same runtime-context guard as start_outbox.
+        let _rt = self.rt_handle.enter();
         self.inner.retry_outbox();
     }
 }
@@ -518,7 +822,7 @@ impl ChatClient {
 ///     [`ChatEventFfi::Dm`].
 ///   - `Receipt` outcomes produce a [`ChatEventFfi::Receipt`].
 ///   - Other outcomes (Welcomed, Rekeyed, stale epoch, etc.) are silently
-///     ignored — the conversation store is updated as a side-effect.
+///     ignored -- the conversation store is updated as a side-effect.
 ///
 /// A malformed or unrecognised envelope never panics the pump; errors are
 /// logged at `warn` level.
@@ -598,11 +902,36 @@ async fn run_inbound_pump(
             continue;
         }
 
-        // M2 private-group path (PQ-TreeKEM frames from x0xd /secure/encrypt).
-        // The daemonless profile has no x0xd, so these frames can't be decrypted
-        // here. Log and skip.
+        // M2 private-group receive: decrypt via the in-process x0xd
+        // /secure/decrypt and surface a GroupMessage. Mirrors the desktop
+        // handle_inbound seam and peer.rs decode_private_group: empty-group_id
+        // guard, then receive_private_group_envelope -> Persisted = surface /
+        // Replay = drop / Err = warn-never-crash. No DeliveryReceipt for group
+        // messages -- the engine's group path sends none. Self-source is
+        // already dropped above by route_envelope (EnvelopeRoute::SelfSource),
+        // so no re-filter is needed here.
         if is_private_group_envelope(&transit) {
-            log::warn!("[chat_ffi] private-group envelope received on daemonless client; skipping");
+            let group_id_hex = transit
+                .group_id
+                .as_ref()
+                .map(|g| hex::encode(g.as_bytes()))
+                .unwrap_or_default();
+            if group_id_hex.is_empty() {
+                log::warn!("[chat_ffi] private-group envelope without group_id; dropping");
+                continue;
+            }
+            match client
+                .messages()
+                .receive_private_group_envelope(&transit, &group_id_hex)
+                .await
+            {
+                Ok(outcome) => {
+                    if let Some(event) = project_group_receive(group_id_hex, outcome) {
+                        let _ = tx.send(event);
+                    }
+                }
+                Err(e) => log::warn!("[chat_ffi] private_group_decrypt_failed: {e}"),
+            }
             continue;
         }
 
@@ -665,7 +994,7 @@ async fn run_inbound_pump(
             }
             Ok(_other) => {
                 // Welcomed, Rekeyed, WelcomeIgnored, stale epoch, KEM/AEAD
-                // failures — conversation state may be updated as a side-
+                // failures -- conversation state may be updated as a side-
                 // effect; no FFI event needed.
             }
             Err(e) => {
@@ -749,7 +1078,7 @@ mod tests {
     async fn connect_against_prod_relay_round_trips_identity() {
         let dir = tempfile::TempDir::new().unwrap();
         let client = ChatClient::connect(
-            "http://67.207.94.66:8088".into(),
+            "https://nyc-relay.etchit.io".into(),
             dir.path().to_str().unwrap().to_owned(),
             "test-passphrase-ffi-smoke".into(),
         )
@@ -780,7 +1109,7 @@ mod tests {
     async fn pair_share_uri_publishes_and_returns_x0x_uri() {
         let dir = tempfile::TempDir::new().unwrap();
         let client = ChatClient::connect(
-            "http://67.207.94.66:8088".into(),
+            "https://nyc-relay.etchit.io".into(),
             dir.path().to_str().unwrap().to_owned(),
             "test-passphrase-ffi-pair-smoke".into(),
         )
@@ -794,6 +1123,94 @@ mod tests {
         assert!(
             uri.starts_with("x0x://pair/"),
             "pair URI must start with x0x://pair/, got: {uri:?}"
+        );
+    }
+
+    /// The in-process x0xd embed comes up on loopback with a non-empty API
+    /// token, and -- the load-bearing Android invariant -- roots its identity
+    /// keys (machine.key/agent.key) under the configured `identity_dir`, NOT
+    /// `~/.x0x`. The stock `serve()` wrote those keys to the home dir, which
+    /// is unwritable on Android; the fork's opt-in `DaemonConfig.identity_dir`
+    /// (set by `serve_inprocess`) fixes that. Proving the keys land under
+    /// app storage is what makes the embed device-viable.
+    #[tokio::test]
+    async fn inprocess_serve_binds_loopback_and_roots_identity_under_data_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let x0xd_data = dir.path().join("x0xd");
+        let handle = serve_inprocess(&x0xd_data)
+            .await
+            .expect("in-process serve should come up");
+
+        let addr = handle.local_addr();
+        assert!(
+            addr.ip().is_loopback(),
+            "API must bind loopback, got: {addr}"
+        );
+        assert!(
+            addr.port() != 0,
+            "OS-assigned port must be concrete, got: {addr}"
+        );
+        assert!(
+            !handle.api_token().is_empty(),
+            "api_token must be non-empty for the engine bearer auth"
+        );
+
+        // The identity keys must be under our configured dir, never ~/.x0x.
+        let identity_dir = x0xd_data.join("identity");
+        assert!(
+            identity_dir.join("machine.key").exists(),
+            "machine.key must be rooted under the configured identity_dir, \
+             not the home dir (Android has no writable home)"
+        );
+        assert!(
+            identity_dir.join("agent.key").exists(),
+            "agent.key must be rooted under the configured identity_dir"
+        );
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn project_group_receive_persisted_maps_to_group_message() {
+        use fetchit_chat::conversation::HistoryEntry;
+        use fetchit_chat::messages::PrivateGroupReceive;
+        let group_id = "f".repeat(64);
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: Some("alice".to_owned()),
+            body: "hello group".to_owned(),
+            ts_ms: 1_700_000_000_000,
+            message_id: "mid-7".to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+        };
+        let projected =
+            project_group_receive(group_id.clone(), PrivateGroupReceive::Persisted(entry));
+        match projected {
+            Some(ChatEventFfi::GroupMessage {
+                group_id: gid,
+                from_agent_id_hex,
+                sender_name,
+                body,
+                message_id,
+            }) => {
+                assert_eq!(gid, group_id);
+                assert_eq!(from_agent_id_hex, REAL_HEX);
+                assert_eq!(sender_name.as_deref(), Some("alice"));
+                assert_eq!(body, "hello group");
+                assert_eq!(message_id.as_deref(), Some("mid-7"));
+            }
+            other => panic!("expected GroupMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_group_receive_replay_maps_to_none() {
+        use fetchit_chat::messages::PrivateGroupReceive;
+        let projected = project_group_receive("f".repeat(64), PrivateGroupReceive::Replay);
+        assert!(
+            projected.is_none(),
+            "a Replay must surface nothing, got: {projected:?}"
         );
     }
 

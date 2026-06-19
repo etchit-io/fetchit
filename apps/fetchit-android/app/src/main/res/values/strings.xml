@@ -163,6 +163,7 @@
     <string name="chat_connect_failed_generic">couldn\'t connect to relay</string>
     <string name="chat_not_connected">not connected yet</string>
     <string name="chat_uri_copied">copied</string>
+    <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
     <string name="chat_feed_title">fediverse</string>
     <string name="chat_feed_subtitle">bridged public posts</string>
@@ -171,6 +172,26 @@
     <string name="chat_contact_name_title">name this contact</string>
     <string name="chat_contact_name_save">save</string>
     <string name="chat_contact_added">added %1$s</string>
+
+    <!-- Chat: groups -->
+    <string name="chat_new_group">new group</string>
+    <string name="chat_new_group_title">new group</string>
+    <string name="chat_new_group_name_hint">group name</string>
+    <string name="chat_new_group_private_label">private (end-to-end encrypted)</string>
+    <string name="chat_new_group_create">create</string>
+    <string name="chat_join_group">join group</string>
+    <string name="chat_join_group_title">join a group</string>
+    <string name="chat_join_group_hint">paste x0x://invite/… here</string>
+    <string name="chat_join_group_join">join</string>
+    <string name="chat_invalid_invite_uri">that doesn\'t look like a valid group invite</string>
+    <string name="chat_group_created">created %1$s</string>
+    <string name="chat_group_joined">joined %1$s</string>
+    <string name="chat_group_share_invite">share invite</string>
+    <string name="chat_group_invite_copied">invite copied</string>
+    <string name="chat_group_create_failed">couldn\'t create group: %1$s</string>
+    <string name="chat_group_join_failed">couldn\'t join group: %1$s</string>
+    <string name="chat_group_sender_unknown">someone</string>
+    <string name="chat_group_lock_glyph">🔒</string>
 
     <!-- Chat: thread screen -->
     <string name="thread_back_glyph">‹</string>

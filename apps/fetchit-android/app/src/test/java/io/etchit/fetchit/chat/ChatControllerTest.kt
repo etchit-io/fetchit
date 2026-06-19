@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 
@@ -19,6 +20,14 @@ class FakeGateway : ChatGateway {
     var startedOutbox: String? = null
     var retried = 0
     var snapshot: List<OutboxBubbleFfi> = emptyList()
+
+    // Group surface recorders (delegation assertions).
+    val createdGroups = mutableListOf<Triple<String, String?, Boolean>>()
+    val joinedGroups = mutableListOf<Pair<String, String?>>()
+    val sentGroupMessages = mutableListOf<Triple<String, String, String>>()
+    val invitesRequested = mutableListOf<String>()
+    var groups: List<GroupFfi> = emptyList()
+
     override fun agentIdHex() = "f".repeat(64)
     override suspend fun pairShareUri() = "x0x://pair/${"f".repeat(64)}?r=relay"
     override suspend fun importPairUri(uri: String) {}
@@ -28,6 +37,21 @@ class FakeGateway : ChatGateway {
     override fun startOutbox(displayName: String) { startedOutbox = displayName }
     override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = snapshot
     override fun retryOutbox() { retried++ }
+    override suspend fun createGroup(name: String, displayName: String?, private: Boolean): GroupFfi {
+        createdGroups += Triple(name, displayName, private)
+        return GroupFfi("c".repeat(64), name, 1uL, isOwner = true, isPrivate = private)
+    }
+    override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi {
+        joinedGroups += (invite to displayName)
+        return GroupFfi("d".repeat(64), null, 2uL, isOwner = false, isPrivate = true)
+    }
+    override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? {
+        sentGroupMessages += Triple(groupId, body, senderName); return "gm-${sentGroupMessages.size}"
+    }
+    override suspend fun listGroups(): List<GroupFfi> = groups
+    override suspend fun groupInvite(groupId: String): String {
+        invitesRequested += groupId; return "x0x://invite/$groupId"
+    }
     override suspend fun nextEvent(): ChatEventFfi? = events.receive()
     override fun disconnect() { events.trySend(null) }
 }
@@ -42,6 +66,55 @@ class ChatControllerTest {
         gw.events.send(null) // pump exits on null
         pump.join()
         assertEquals("hello", convo.messagesFor("a".repeat(64)).value.single().body)
+    }
+
+    @Test
+    fun inboundGroupMessageLandsInGroupConversation() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        val gid = "c".repeat(64)
+        gw.events.send(
+            ChatEventFfi.GroupMessage(
+                groupId = gid,
+                fromAgentIdHex = "a".repeat(64),
+                senderName = "alice",
+                body = "group hi",
+                messageId = "gm1",
+            ),
+        )
+        gw.events.send(null)
+        pump.join()
+        // Lands on the "g:" group key, NOT the bare sender-hex DM key.
+        val msg = convo.messagesFor(ConversationStore.convKeyGroup(gid)).value.single()
+        assertEquals("group hi", msg.body)
+        assertEquals(false, msg.outbound)
+        assertEquals("a".repeat(64), msg.senderAgentIdHex)
+        // A DM keyed by the sender hex must be untouched (no collision).
+        assertTrue(convo.messagesFor("a".repeat(64)).value.isEmpty())
+    }
+
+    @Test
+    fun gatewayDelegatesGroupCalls() = runTest {
+        val gw = FakeGateway()
+        val created = gw.createGroup("team", "alice", private = true)
+        assertEquals(Triple("team", "alice", true), gw.createdGroups.single())
+        assertEquals("c".repeat(64), created.groupId)
+
+        val joined = gw.joinGroup("x0x://invite/abc", "bob")
+        assertEquals("x0x://invite/abc" to "bob", gw.joinedGroups.single())
+        assertEquals(false, joined.isOwner)
+
+        val id = gw.sendGroupMessage("g".repeat(64), "yo", "alice")
+        assertEquals(Triple("g".repeat(64), "yo", "alice"), gw.sentGroupMessages.single())
+        assertEquals("gm-1", id)
+
+        val invite = gw.groupInvite("g".repeat(64))
+        assertEquals("g".repeat(64), gw.invitesRequested.single())
+        assertEquals("x0x://invite/${"g".repeat(64)}", invite)
+
+        gw.groups = listOf(GroupFfi("h".repeat(64), "team", 3uL, isOwner = true, isPrivate = true))
+        assertEquals("team", gw.listGroups().single().name)
     }
 
     @Test
@@ -80,6 +153,13 @@ class ChatControllerTest {
             override fun startOutbox(displayName: String) {}
             override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = emptyList()
             override fun retryOutbox() {}
+            override suspend fun createGroup(name: String, displayName: String?, private: Boolean): GroupFfi =
+                throw UnsupportedOperationException()
+            override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
+                throw UnsupportedOperationException()
+            override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? = null
+            override suspend fun listGroups(): List<GroupFfi> = emptyList()
+            override suspend fun groupInvite(groupId: String): String = ""
             override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
             override fun disconnect() {}
         }
