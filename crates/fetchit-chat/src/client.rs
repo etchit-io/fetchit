@@ -1961,6 +1961,32 @@ impl Client {
             return Ok(());
         }
 
+        // Reverse engine-A: a bridged `member_added` for THIS node is its
+        // own join-result (the owner's reply). Stage it into the local x0xd
+        // so `poll_join_result_until_treekem_ready` resolves -- gossip-off,
+        // the daemon's own fetch DMs the NAT'd owner and never lands. x0xd
+        // keys the join-result by `{stable_group_id}:{member}`, and the
+        // owner's MemberAdded carries `group_id` as that stable id. Every
+        // other bridged metadata event is a normal publish.
+        let event_bytes = base64::engine::general_purpose::STANDARD
+            .decode(wrapper.payload_b64.as_bytes())
+            .map_err(|e| ChatError::Invalid(format!("bridge: payload b64: {e}")))?;
+        if let Some((stable_group_id, member)) =
+            crate::groups::join_bridge::member_added_self_target(
+                &event_bytes,
+                identity.agent_id_hex(),
+            )
+        {
+            if secure
+                .stage_join_result(&stable_group_id, &member, &wrapper.payload_b64)
+                .await
+                .map_err(ChatError::from)?
+            {
+                return Ok(());
+            }
+            // 400 (not a stageable MemberAdded) -- fall through to publish.
+        }
+
         secure
             .publish(&wrapper.topic, &wrapper.payload_b64)
             .await
@@ -1999,12 +2025,15 @@ impl Client {
         let payload = base64::engine::general_purpose::STANDARD
             .decode(wrapper.payload_b64.as_bytes())
             .map_err(|e| ChatError::Invalid(format!("join reply: payload b64: {e}")))?;
-        // The bridge topic carries only the first 16 hex of the group id;
-        // take the full id from the event body (matches the apply path).
-        let group_id = crate::groups::join_bridge::group_id_from_member_joined(&payload)
-            .ok_or_else(|| {
-                ChatError::Invalid("join reply: member_joined has no group_id".to_owned())
-            })?;
+        // x0xd keys pending_join_results by {stable_group_id}:{member}, not
+        // the mls group_id, so poll the staged join-result by the STABLE id
+        // (a separate field in the member_joined payload).
+        let stable_group_id = crate::groups::join_bridge::stable_group_id_from_member_joined(
+            &payload,
+        )
+        .ok_or_else(|| {
+            ChatError::Invalid("join reply: member_joined has no stable_group_id".to_owned())
+        })?;
         let joiner_hex = crate::groups::join_bridge::member_agent_id_from_member_joined(&payload)
             .ok_or_else(|| {
             ChatError::Invalid("join reply: member_joined has no member_agent_id".into())
@@ -2024,7 +2053,7 @@ impl Client {
         }
         // Poll the LOCAL x0xd for the self-contained inline-welcome event.
         let result = self
-            .fetch_inline_join_result(group_id.as_str(), &joiner_hex)
+            .fetch_inline_join_result(&stable_group_id, &joiner_hex)
             .await?;
         let event = result
             .get("event")

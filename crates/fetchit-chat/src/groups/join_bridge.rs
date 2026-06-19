@@ -67,6 +67,41 @@ pub fn group_id_from_member_joined(payload: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Extract the STABLE group id (x0xd's `stable_group_id`, the
+/// `event_group_id` the join-result is keyed by) from a captured
+/// `member_joined` payload. The owner-side reply
+/// ([`crate::Client::reply_to_bridged_join`]) polls the local
+/// join-result by THIS stable id, not the mls `group_id`: x0xd keys
+/// `pending_join_results` as `{stable_group_id}:{member}`.
+#[must_use]
+pub fn stable_group_id_from_member_joined(payload: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    v.get("stable_group_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// If `payload` is a `member_added` event for `my_agent_hex` -- this
+/// node's own engine-A join-result, bridged back by the owner -- return
+/// its `(stable group_id, member agent_id)` for the local join-result
+/// stage. `None` for any other event (a normal bridge publish). The
+/// owner's `MemberAdded` carries `group_id` as the STABLE id (the staging
+/// key) and `agent_id` as the added member; `NamedGroupMetadataEvent` is
+/// internally tagged `"event"`, so the variant is the `event` field.
+#[must_use]
+pub fn member_added_self_target(payload: &[u8], my_agent_hex: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    if v.get("event").and_then(serde_json::Value::as_str) != Some("member_added") {
+        return None;
+    }
+    let agent_id = v.get("agent_id").and_then(serde_json::Value::as_str)?;
+    if !agent_id.eq_ignore_ascii_case(my_agent_hex) {
+        return None;
+    }
+    let group_id = v.get("group_id").and_then(serde_json::Value::as_str)?;
+    Some((group_id.to_owned(), agent_id.to_owned()))
+}
+
 /// Seal + ML-DSA-65 sign the captured native `member_joined` and send it
 /// to the group owner over the relay-routed transport, with the joiner's
 /// own ML-KEM-768 public key attached as `joiner_kem_pubkey`.
@@ -179,6 +214,56 @@ mod tests {
         assert_eq!(group_id_from_member_joined(b"not json"), None);
         assert_eq!(
             group_id_from_member_joined(br#"{"event":"member_joined"}"#),
+            None,
+        );
+    }
+
+    #[test]
+    fn extracts_stable_group_id() {
+        let p = br#"{"event":"member_joined","group_id":"mls123","stable_group_id":"stable456","member_agent_id":"m"}"#;
+        assert_eq!(
+            stable_group_id_from_member_joined(p).as_deref(),
+            Some("stable456"),
+        );
+        // mls group_id present but no stable_group_id -> None
+        assert_eq!(
+            stable_group_id_from_member_joined(br#"{"event":"member_joined","group_id":"mls123"}"#),
+            None,
+        );
+    }
+
+    #[test]
+    fn member_added_self_target_matches_only_self_member_added() {
+        let me = "aa11";
+        assert_eq!(
+            member_added_self_target(
+                br#"{"event":"member_added","group_id":"stableG","agent_id":"aa11","commit":"x"}"#,
+                me,
+            ),
+            Some(("stableG".to_owned(), "aa11".to_owned())),
+        );
+        // member_added for ANOTHER member -> None (normal bridge publish)
+        assert_eq!(
+            member_added_self_target(
+                br#"{"event":"member_added","group_id":"stableG","agent_id":"bb22"}"#,
+                me,
+            ),
+            None,
+        );
+        // member_removed for self -> None (not a join-result)
+        assert_eq!(
+            member_added_self_target(
+                br#"{"event":"member_removed","group_id":"stableG","agent_id":"aa11"}"#,
+                me,
+            ),
+            None,
+        );
+        // member_joined uses member_agent_id, not the bare agent_id -> None
+        assert_eq!(
+            member_added_self_target(
+                br#"{"event":"member_joined","group_id":"g","member_agent_id":"aa11"}"#,
+                me,
+            ),
             None,
         );
     }

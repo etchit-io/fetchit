@@ -255,6 +255,17 @@ struct ApplyMetadataEventResponse {
     applied: bool,
 }
 
+#[derive(Serialize)]
+struct StageJoinResultRequest<'a> {
+    event_b64: &'a str,
+}
+
+#[derive(Deserialize)]
+struct StageJoinResultResponse {
+    #[serde(default)]
+    staged: bool,
+}
+
 impl SecureGroupsEndpoint {
     /// Build a new endpoint against an x0xd daemon at `base_url`,
     /// authenticated with `api_token`.
@@ -590,6 +601,55 @@ impl SecureGroupsEndpoint {
         let resp: ApplyMetadataEventResponse = raw.json().await?;
         Ok(resp.applied)
     }
+
+    /// Stage a bridged engine-A join-result (`MemberAdded` with the inline
+    /// `TreeKEM` Welcome) into the local x0xd via
+    /// `POST /groups/<id>/join-result/<member>`, so the joiner's
+    /// `poll_join_result_until_treekem_ready` resolves WITHOUT the gossip /
+    /// direct-message anchor (which a dual-NAT gossip-off joiner cannot
+    /// reach). `group_id` is the STABLE group id (x0xd keys the
+    /// join-result by `{stable_group_id}:{member}`); `member` is the joiner
+    /// agent id; `event_b64` is the base64 `serde_json` of the `MemberAdded`.
+    /// The daemon re-applies it through the verifying MLS Welcome path, so a
+    /// forged stage fails -- a token-gated local-delivery shortcut, not a
+    /// validation bypass. Returns whether the daemon staged it (`false` on
+    /// a `400` non-`MemberAdded` / bad body, so the caller can fall back to a
+    /// normal bridge publish).
+    ///
+    /// # Errors
+    /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (rejected
+    /// locally before any HTTP -- path-traversal guard). [`X0xdError::Http`]
+    /// / [`X0xdError::Url`] on transport / URL-join failure, and
+    /// [`X0xdError::Rejected`] when x0xd returns a status other than
+    /// `200` / `400`.
+    pub async fn stage_join_result(
+        &self,
+        group_id: &str,
+        member: &str,
+        event_b64: &str,
+    ) -> Result<bool, X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
+        let path = format!("groups/{group_id}/join-result/{member}");
+        let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .post(url)
+            .bearer_auth(&self.api_token)
+            .json(&StageJoinResultRequest { event_b64 })
+            .send()
+            .await?;
+        // 200 = staged, 400 = a valid non-stage (non-MemberAdded / bad
+        // body) the caller falls back from. Anything else is a real failure.
+        let code = raw.status().as_u16();
+        if code != 200 && code != 400 {
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd POST /groups/{group_id}/join-result/{member} returned {code}: {body}"
+            )));
+        }
+        let resp: StageJoinResultResponse = raw.json().await?;
+        Ok(resp.staged)
+    }
 }
 
 #[cfg(test)]
@@ -662,6 +722,47 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, X0xdError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn stage_join_result_returns_true_on_200() {
+        let server = MockServer::start().await;
+        let member = "b".repeat(64);
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/groups/{TEST_GROUP_HEX}/join-result/{member}"
+            )))
+            .and(body_partial_json(serde_json::json!({ "event_b64": "ZXY" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "staged": true })),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        assert!(endpoint
+            .stage_join_result(TEST_GROUP_HEX, &member, "ZXY")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn stage_join_result_returns_false_on_400_non_member_added() {
+        let server = MockServer::start().await;
+        let member = "b".repeat(64);
+        // 400 (non-MemberAdded / bad body) is a valid no-stage, not an error.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({ "staged": false })),
+            )
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        assert!(!endpoint
+            .stage_join_result(TEST_GROUP_HEX, &member, "ZXY")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
