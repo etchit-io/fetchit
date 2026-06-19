@@ -3107,6 +3107,7 @@ dependencies = [
  "fetchit-chat",
  "fetchit-core",
  "fetchit-net",
+ "fetchit-relay-client",
  "fetchit-relay-proto",
  "fetchit-trust-client",
  "hex",

@@ -393,6 +393,44 @@ impl ChatClient {
         // surface (the engine's P2 in-process-router shape), so the DM path is
         // unchanged.
         let x0xd_data = PathBuf::from(&data_dir).join("x0xd");
+
+        // Identity unification (daemonless): seed the embedded x0xd's agent key
+        // with the chat vault's ML-DSA-65 keypair BEFORE serve() loads or mints
+        // its own, so the x0xd (TreeKEM group owner) and the chat client
+        // (pair-record + DM id) are ONE agent V. Otherwise the x0xd uses a
+        // SEPARATE id, the group it owns is keyed under that id, but the owner
+        // pair-record publishes under V -- so engine-A joiners resolve the owner
+        // KEM by the x0xd id and 404. The vault key round-trips into x0x's
+        // AgentKeypair to the SAME id (tests/identity_unification.rs).
+        // UNCONDITIONAL overwrite: an existing install already wrote agent.key
+        // for the OLD self-minted id, so skip-if-absent would silently keep the
+        // split. x0x persists agent.key in its own bincode (perms 0600, not
+        // app-sealed) -- within x0x's model + Android FBE; a fork-side seal is a
+        // logged hardening follow-up.
+        {
+            let provisioned = fetchit_chat::provision_local_signer_keypair(
+                std::path::Path::new(&data_dir),
+                &passphrase,
+            )
+            .map_err(ChatFfiError::from)?;
+            let agent_kp = x0x::identity::AgentKeypair::from_bytes(
+                provisioned.public_key.as_slice(),
+                provisioned.secret_key.as_slice(),
+            )
+            .map_err(|e| ChatFfiError::Network {
+                reason: format!("seed x0xd identity (from_bytes): {e}"),
+            })?;
+            let identity_dir = x0xd_data.join("identity");
+            std::fs::create_dir_all(&identity_dir).map_err(|e| ChatFfiError::Network {
+                reason: format!("create x0xd identity dir: {e}"),
+            })?;
+            x0x::storage::save_agent_keypair_to(&agent_kp, identity_dir.join("agent.key"))
+                .await
+                .map_err(|e| ChatFfiError::Network {
+                    reason: format!("seed x0xd agent.key: {e}"),
+                })?;
+        }
+
         let x0xd = serve_inprocess(&x0xd_data).await?;
         let x0xd_base = format!("http://{}", x0xd.local_addr());
         let x0xd_token = x0xd.api_token().to_owned();
@@ -407,6 +445,14 @@ impl ChatClient {
             .build()
             .await
             .map_err(ChatFfiError::from)?;
+
+        // Unified-identity confirm: V is the chat / pair-record id AND (via the
+        // seed above) the embedded x0xd group-owner id. Logged so the device
+        // test can verify GET /v1/pair-record/<V> = 200 before any transfer.
+        log::info!(
+            "[chat_ffi] connected as unified agent {}",
+            inner.local_agent_id_hex().unwrap_or_default()
+        );
 
         // M3: install the community denylist consumer so Android chat gates
         // RelayUrl / AgentId like desktop. `install_m3_denylist` also routes

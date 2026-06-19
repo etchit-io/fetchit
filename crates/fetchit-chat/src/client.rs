@@ -4168,6 +4168,77 @@ fn validate_actor_handle(handle: &str) -> Result<()> {
     Ok(())
 }
 
+/// The daemonless chat-vault ML-DSA-65 signing keypair, returned so an
+/// embedder can seed the in-process x0xd's agent identity to the SAME key.
+/// `secret_key` is zeroized on drop -- hand it straight to the x0xd identity
+/// seed; never log or persist it elsewhere.
+pub struct ProvisionedSignerKey {
+    /// ML-DSA-65 public-key bytes (saorsa-pqc encoding).
+    pub public_key: Vec<u8>,
+    /// ML-DSA-65 secret-key bytes; zeroized on drop.
+    pub secret_key: Zeroizing<Vec<u8>>,
+}
+
+/// Load-or-create the daemonless chat-vault ML-DSA-65 identity WITHOUT
+/// building the full [`Client`], returning its keypair bytes.
+///
+/// Android calls this BEFORE starting the in-process x0xd so it can seed the
+/// x0xd agent key with the vault key: otherwise the x0xd mints its own agent
+/// id, the group it owns is keyed under that id, but the owner pair-record is
+/// published under the vault id -- and engine-A joiners resolve the owner KEM
+/// by the x0xd id, so they 404. Idempotent: a later
+/// `Client::builder().build()` on the same `data_dir` + `passphrase` loads the
+/// identical vault (this mirrors that setup exactly).
+///
+/// # Errors
+/// Layout, master-key, or vault failures as [`ChatError`].
+pub fn provision_local_signer_keypair(
+    data_dir: &std::path::Path,
+    passphrase: &str,
+) -> Result<ProvisionedSignerKey> {
+    let layout = StoreLayout::ensure(data_dir.to_path_buf())?;
+    let identity_vault_path = layout.root.join(IDENTITY_VAULT_FILE);
+    let (master, kdf_id, argon_salt) = resolve_master_key(&identity_vault_path, Some(passphrase))?;
+    let vault = crate::local_signer::LocalSignerVault::load_or_create(
+        &layout.root,
+        &master,
+        kdf_id,
+        argon_salt.as_ref(),
+    )?;
+    // Persist the KEM identity vault too (mirrors build_with_chat's daemonless
+    // setup) so the master-key argon salt is stored in identity.json.enc.
+    // Otherwise the later Client::build()'s resolve_master_key, finding no
+    // identity vault, derives a FRESH salt -> a different master -> an
+    // AEAD-open failure on the local_signer vault we just sealed.
+    let _identity = FetchitIdentity::load_or_create(
+        &layout.root,
+        &master,
+        &hex::encode(vault.signer.agent_id()),
+        kdf_id,
+        argon_salt.as_ref(),
+    )?;
+    Ok(ProvisionedSignerKey {
+        public_key: vault.signer.public_key(),
+        secret_key: Zeroizing::new(vault.signer.secret_key_bytes()),
+    })
+}
+
+#[cfg(test)]
+mod provision_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::provision_local_signer_keypair;
+
+    #[test]
+    fn idempotent_and_nonempty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let k1 = provision_local_signer_keypair(dir.path(), "test-pass").unwrap();
+        let k2 = provision_local_signer_keypair(dir.path(), "test-pass").unwrap();
+        assert!(!k1.public_key.is_empty());
+        assert_eq!(k1.public_key, k2.public_key);
+        assert_eq!(k1.secret_key.as_slice(), k2.secret_key.as_slice());
+    }
+}
+
 pub(crate) fn resolve_master_key(
     identity_vault_path: &std::path::Path,
     passphrase: Option<&str>,

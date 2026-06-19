@@ -55,6 +55,11 @@ android_logger = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
+# For tests/identity_unification.rs: proves the chat vault's ML-DSA-65 agent
+# id equals x0x's AgentKeypair agent id for the same key bytes, across the two
+# linked saorsa-pqc versions -- the invariant the daemonless x0xd-adopts-vault
+# identity seed relies on.
+fetchit-relay-client = { path = "../fetchit-relay-client" }
 
 [build-dependencies]
 uniffi = { version = "=0.29.5", features = ["build"] }
