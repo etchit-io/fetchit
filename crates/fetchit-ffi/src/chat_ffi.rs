@@ -473,6 +473,22 @@ impl ChatClient {
 
         let pump_abort = spawn_inbound_pump(inner.clone(), tx);
 
+        // Best-effort pair-record publish at connect. A joiner hits
+        // ChatError::ShareCardMissing when this daemonless client HOSTS a group:
+        // the shared from_parts publish (client.rs:687, gated on a primary relay
+        // this build does not set) did not make it discoverable, so publish
+        // explicitly here -- now that the relay + the in-process x0xd are up --
+        // so a joiner's resolve_owner_kem_with_fallback finds the owner KEM via
+        // the relay pair-record. Mirrors the CLI connect publish; non-fatal.
+        {
+            let publish_client = inner.clone();
+            tokio::spawn(async move {
+                if let Err(e) = publish_client.publish_pair_record().await {
+                    log::warn!("[chat_ffi] pair-record publish at connect failed: {e}");
+                }
+            });
+        }
+
         Ok(Arc::new(Self {
             inner,
             relay_url,
