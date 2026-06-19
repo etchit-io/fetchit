@@ -314,6 +314,13 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
             enabled: false,
             ..Default::default()
         },
+        // gossip-OFF for v1: clear the hardcoded bootstrap (the
+        // --no-hard-coded-bootstrap equivalent -- daemon.rs sets
+        // config.bootstrap_peers = Vec::new()). The gossip runtime still starts
+        // (the relay / DM-inbox path needs it) but connects to 0 peers = silent:
+        // no version-skew churn against the live x0x net, which is pointless here
+        // (chat + the engine-A group bridge are relay-carried).
+        bootstrap_peers: Vec::new(),
         ..Default::default()
     };
     // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
@@ -604,7 +611,15 @@ impl ChatClient {
         Ok(GroupFfi::from(group))
     }
 
-    /// Join a group from an `x0x://invite/...` link.
+    /// Join a private group from an `x0x://invite/...` link via the engine-A
+    /// relay bridge ([`fetchit_chat::Client::join_group_bridged`]).
+    ///
+    /// The in-process x0xd runs gossip-off (empty bootstrap), so the join is
+    /// mesh-independent: it captures the joiner's signed `member_joined` inline
+    /// from `POST /groups/join`, bridges it to the owner over the relay, and
+    /// waits for membership to converge as the owner's authoritative add rides
+    /// the bridge back. `run_inbound_pump` (live since `connect`) applies that
+    /// bridged result via `dispatch_inbound_bridge`.
     ///
     /// After the join converges, best-effort warms every other member's
     /// ML-DSA card so the first inbound private-group frame decrypts
@@ -623,10 +638,12 @@ impl ChatClient {
     ) -> Result<GroupFfi, ChatFfiError> {
         // GroupInvite is a transparent newtype over the raw URI String.
         let inv = fetchit_chat::groups::GroupInvite(invite);
+        // Engine-A bridged join: gossip-off v1 cannot reach the owner over a
+        // cold/NAT gossip mesh, so route through the relay bridge. The plain
+        // groups().join() is the warm-gossip path; it is not used here.
         let group = self
             .inner
-            .groups()
-            .join(&inv, display_name.as_deref())
+            .join_group_bridged(&inv, display_name.as_deref())
             .await
             .map_err(ChatFfiError::from)?;
 

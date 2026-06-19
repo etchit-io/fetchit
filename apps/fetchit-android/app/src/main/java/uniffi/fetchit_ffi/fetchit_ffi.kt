@@ -1104,7 +1104,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri() != 9374.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 23500.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 13616.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_list_groups() != 779.toShort()) {
@@ -1140,7 +1140,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_client_peer_count() != 60187.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_constructor_chatclient_connect() != 24714.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_constructor_chatclient_connect() != 36013.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_constructor_client_connect() != 948.toShort()) {
@@ -1644,7 +1644,15 @@ public interface ChatClientInterface {
     suspend fun `importPairUri`(`uri`: kotlin.String)
     
     /**
-     * Join a group from an `x0x://invite/...` link.
+     * Join a private group from an `x0x://invite/...` link via the engine-A
+     * relay bridge ([`fetchit_chat::Client::join_group_bridged`]).
+     *
+     * The in-process x0xd runs gossip-off (empty bootstrap), so the join is
+     * mesh-independent: it captures the joiner's signed `member_joined` inline
+     * from `POST /groups/join`, bridges it to the owner over the relay, and
+     * waits for membership to converge as the owner's authoritative add rides
+     * the bridge back. `run_inbound_pump` (live since `connect`) applies that
+     * bridged result via `dispatch_inbound_bridge`.
      *
      * After the join converges, best-effort warms every other member's
      * ML-DSA card so the first inbound private-group frame decrypts
@@ -2024,7 +2032,15 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * Join a group from an `x0x://invite/...` link.
+     * Join a private group from an `x0x://invite/...` link via the engine-A
+     * relay bridge ([`fetchit_chat::Client::join_group_bridged`]).
+     *
+     * The in-process x0xd runs gossip-off (empty bootstrap), so the join is
+     * mesh-independent: it captures the joiner's signed `member_joined` inline
+     * from `POST /groups/join`, bridges it to the owner over the relay, and
+     * waits for membership to converge as the owner's authoritative add rides
+     * the bridge back. `run_inbound_pump` (live since `connect`) applies that
+     * bridged result via `dispatch_inbound_bridge`.
      *
      * After the join converges, best-effort warms every other member's
      * ML-DSA card so the first inbound private-group frame decrypts
@@ -2287,7 +2303,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * Connect to the relay and build a daemonless chat client.
      *
      * `relay_url` must be an HTTP or WebSocket URL of a running fetch>it
-     * relay (e.g. `http://67.207.94.66:8088`). `data_dir` is the
+     * relay (e.g. `https://nyc-relay.etchit.io`). `data_dir` is the
      * on-device path for the identity vault and conversation store.
      * `passphrase` derives the at-rest master key.
      *
