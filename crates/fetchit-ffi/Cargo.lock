@@ -8989,7 +8989,7 @@ dependencies = [
 
 [[package]]
 name = "x0x"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "ant-quic",
  "anyhow",
@@ -9039,6 +9039,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml 0.8.23",
  "tower-http",
  "tracing",

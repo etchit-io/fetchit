@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use url::Url;
-use x0x::daemon::{serve, DaemonConfig, DaemonUpdateConfig, ServerHandle};
+use x0x::server::{serve_with_options, DaemonConfig, ServeOptions, ServerHandle};
 use x0x::exec::ExecPolicy;
 
 /// An inbound chat event delivered by [`ChatClient::next_event`].
@@ -305,31 +305,30 @@ fn resolve_denylist_url() -> Option<String> {
 ///
 /// [`ChatFfiError::Network`] when `serve()` fails to bind or start.
 async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, ChatFfiError> {
-    let cfg = DaemonConfig {
+    // #115 DaemonConfig has private fields, so the struct-literal +
+    // `..Default::default()` form is rejected from this crate (E0451). Build from
+    // Default and set the public fields -- the same idiom #115's own bin uses
+    // (src/bin/x0xd.rs). Private fields (update, port_mapping_enabled, ...) keep
+    // their defaults; self-update is gated off via `ServeOptions` below.
+    #[allow(clippy::field_reassign_with_default)]
+    let cfg = {
+        let mut cfg = DaemonConfig::default();
         // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
-        api_address: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        cfg.api_address = (std::net::Ipv4Addr::LOCALHOST, 0).into();
         // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
         // fixed-port clash with any other x0xd on the device.
-        bind_address: (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
-        data_dir: x0xd_data.to_path_buf(),
+        cfg.bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0).into();
+        cfg.data_dir = x0xd_data.to_path_buf();
         // Android has no writable home -- root the identity keys under app
-        // storage via the fork's opt-in override (x0x-fork 71ff5af).
-        identity_dir: Some(x0xd_data.join("identity")),
-        // Play policy: no self-modifying binary. `enabled = false` dominates
-        // every update task; the other update fields are inert under it.
-        update: DaemonUpdateConfig {
-            enabled: false,
-            ..Default::default()
-        },
+        // storage via the opt-in identity_dir override.
+        cfg.identity_dir = Some(x0xd_data.join("identity"));
         // gossip-OFF (1 of 2): clear the hardcoded bootstrap seeds (== all the
         // --no-hard-coded-bootstrap flag does). NECESSARY but NOT sufficient --
-        // the peer cache also rejoins the public net; it is disabled at the
-        // serve() call below (2 of 2). With both, the gossip runtime still starts
-        // (the relay / DM-inbox path needs it) but holds 0 public peers: no
-        // version-skew churn against the live x0x net, pointless here (chat + the
-        // engine-A group bridge are relay-carried).
-        bootstrap_peers: Vec::new(),
-        ..Default::default()
+        // the peer cache also rejoins the public net; it is disabled via
+        // `ServeOptions.cli_disable_peer_cache` below (2 of 2). With both, the
+        // gossip runtime still starts (relay / DM-inbox) but holds 0 public peers.
+        cfg.bootstrap_peers = Vec::new();
+        cfg
     };
     // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
     // under x0x::exec. Gates remote x0x-exec-over-gossip only.
@@ -338,16 +337,28 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
         reason: "embedded_mobile".to_owned(),
         loaded_at_unix_ms: 0,
     };
-    // 3rd arg = disable_peer_cache; MUST be true for gossip-off. Empty bootstrap
-    // alone is not enough -- with the cache on, the embedded x0xd reconnects to
-    // cached public coordinators from a prior run (seen on-device: "Connected to
-    // cached peer ... :5483"). Cache off + empty bootstrap = gossip runtime up
-    // (relay / DM-inbox) at 0 public peers.
-    serve(cfg, exec_policy, true)
-        .await
-        .map_err(|e| ChatFfiError::Network {
-            reason: format!("x0xd serve: {e}"),
-        })
+    // ServeOptions.cli_disable_peer_cache MUST be true for gossip-off. Empty
+    // bootstrap alone is not enough -- with the cache on, the embedded x0xd
+    // reconnects to cached public coordinators from a prior run (seen on-device:
+    // "Connected to cached peer ... :5483"). Cache off + empty bootstrap = gossip
+    // runtime up (relay / DM-inbox) at 0 public peers. self_update_enabled = false
+    // keeps the embedded daemon from ever replacing/restarting the host app.
+    serve_with_options(
+        cfg,
+        ServeOptions {
+            skip_update_check: true,
+            // gossip-off embed has no inbound peers; skip UPnP router probing.
+            cli_no_port_mapping: true,
+            cli_disable_peer_cache: true,
+            instance_name: None,
+            exec_policy,
+            self_update_enabled: false,
+        },
+    )
+    .await
+    .map_err(|e| ChatFfiError::Network {
+        reason: format!("x0xd serve: {e}"),
+    })
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -433,7 +444,15 @@ impl ChatClient {
 
         let x0xd = serve_inprocess(&x0xd_data).await?;
         let x0xd_base = format!("http://{}", x0xd.local_addr());
-        let x0xd_token = x0xd.api_token().to_owned();
+        // #115 ServerHandle does not expose the API token; the daemon wrote it
+        // to <data_dir>/api-token via load_or_generate_api_token during serve(),
+        // so it exists by the time the handle returns.
+        let x0xd_token = std::fs::read_to_string(x0xd_data.join("api-token"))
+            .map_err(|e| ChatFfiError::Network {
+                reason: format!("read x0xd api-token: {e}"),
+            })?
+            .trim()
+            .to_owned();
 
         let mut inner = Client::builder()
             .daemonless(true)
@@ -1276,9 +1295,13 @@ mod tests {
             addr.port() != 0,
             "OS-assigned port must be concrete, got: {addr}"
         );
+        // #115 ServerHandle does not expose the token; it is written to
+        // <data_dir>/api-token during serve. Verify it is present + non-empty.
+        let api_token = std::fs::read_to_string(x0xd_data.join("api-token"))
+            .expect("api-token file must be written by serve");
         assert!(
-            !handle.api_token().is_empty(),
-            "api_token must be non-empty for the engine bearer auth"
+            !api_token.trim().is_empty(),
+            "api-token must be non-empty for the engine bearer auth"
         );
 
         // The identity keys must be under our configured dir, never ~/.x0x.
