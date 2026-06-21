@@ -31,6 +31,7 @@
 
 pub mod bridge;
 pub mod bridge_group_deleted;
+pub mod bridge_member_added;
 pub mod bridge_member_banned;
 pub mod bridge_member_removed;
 pub mod bridge_member_role_updated;

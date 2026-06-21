@@ -2100,7 +2100,86 @@ impl Client {
         self.router
             .send(&recipient, transport_out, hints.as_ref())
             .await?;
+
+        // R3 ("group only knows the first 2"): the joiner now has its
+        // Welcome, but EXISTING members never see the resulting
+        // `MemberAdded` commit cross-NAT, so they never advance their
+        // TreeKEM epoch or learn the new leaf. Fan the SAME authoritative
+        // staged event -- stripped to commit-only -- to them over the relay.
+        self.fan_member_added_to_existing(
+            &payload,
+            event,
+            &wrapper.topic,
+            joiner_agent,
+            chat,
+            primary_snapshot.as_deref(),
+        )
+        .await?;
         Ok(())
+    }
+
+    /// R3 fan-out: bridge the commit-only `MemberAdded` to the group's
+    /// EXISTING members so they advance their `TreeKEM` epoch and learn the
+    /// new leaf. The joiner is excluded (it already gets the full
+    /// Welcome-bearing event from [`Self::reply_to_bridged_join`]); the
+    /// owner (self / actor) is excluded too.
+    ///
+    /// The roster is fetched by the MLS `group_id` (the
+    /// `/groups/<id>/members` map key), NOT the stable id used for
+    /// `/join-result`: x0xd's `get_named_group_members` resolves its path id
+    /// strictly by `mls_group_id`, while `pending_join_results` keys by
+    /// `stable_group_id`. Both ids ride the captured `member_joined`
+    /// payload; [`crate::groups::join_bridge::group_id_from_member_joined`]
+    /// extracts the MLS one.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] when `member_joined` carries no `group_id`
+    ///   or it fails [`crate::groups::GroupId::parse`].
+    /// - Whatever `GET /groups/<id>/members` surfaces.
+    /// - Seal / sign / transport errors from
+    ///   [`crate::groups::dispatch::dispatch_member_added_bridge`].
+    async fn fan_member_added_to_existing(
+        &self,
+        member_joined_payload: &[u8],
+        event: &serde_json::Value,
+        metadata_topic: &str,
+        joiner_agent: [u8; 32],
+        chat: &ChatState,
+        primary_relay_url: Option<&str>,
+    ) -> Result<()> {
+        let mls_group_id =
+            crate::groups::join_bridge::group_id_from_member_joined(member_joined_payload)
+                .ok_or_else(|| {
+                    ChatError::Invalid("join reply: member_joined has no group_id".into())
+                })?;
+        let group_id = crate::groups::GroupId::parse(&mls_group_id)?;
+        let roster = self.groups().members(&group_id).await?;
+        // Map the hex roster to raw 32-byte agent ids. A roster entry that
+        // is not 32-byte hex can't be a recipient -- skip it rather than
+        // failing the whole fan-out (defense in depth; x0xd emits 64-hex).
+        let active_member_aids: Vec<[u8; 32]> = roster
+            .iter()
+            .filter_map(|aid| {
+                let mut bytes = [0u8; 32];
+                hex::decode_to_slice(&aid.0, &mut bytes)
+                    .ok()
+                    .map(|()| bytes)
+            })
+            .collect();
+        let commit_only = crate::groups::bridge_member_added::commit_only_member_added(event);
+        crate::groups::dispatch::dispatch_member_added_bridge(
+            chat.signer.as_ref(),
+            &self.router,
+            &chat.layout,
+            metadata_topic,
+            chat.signer.agent_id(),
+            joiner_agent,
+            commit_only,
+            &active_member_aids,
+            chat.local_machine_id,
+            primary_relay_url,
+        )
+        .await
     }
 
     /// Poll the local x0xd `GET /groups/<id>/join-result/<member>` until

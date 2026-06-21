@@ -185,6 +185,135 @@ where
     Ok(())
 }
 
+/// Build sealed [`ConvEnvelope`]s for a commit-only `MemberAdded`
+/// fan-out to EXISTING members (R3 — the "group only knows the first 2"
+/// fix).
+///
+/// Unlike the other builders, this takes the authoritative
+/// `event` (the owner's already-staged, signed `MemberAdded`, with the
+/// joiner-only Welcome fields stripped by
+/// [`crate::groups::bridge_member_added::commit_only_member_added`])
+/// directly rather than reconstructing it from inputs — the staged event
+/// is the cryptographic source of truth and must not be rebuilt.
+///
+/// Filters `actor_agent_id` (owner / self) and `joiner_agent_id` out of
+/// `active_member_aids`. The joiner is excluded because it already
+/// receives the full Welcome-bearing event from
+/// [`crate::Client::reply_to_bridged_join`]. Recipients missing a
+/// share-card are skipped (logged at `WARN`); any other error
+/// propagates.
+///
+/// This is the pure inner function; [`dispatch_member_added_bridge`]
+/// wraps it and routes via [`Router`].
+///
+/// # Errors
+/// - [`ChatError::Invalid`] on share-card b64 decode failure.
+/// - Any error surfaced by the KEM/AEAD/signing path in
+///   [`dispatch_owner_broadcast`].
+#[allow(clippy::too_many_arguments)]
+pub async fn build_member_added_envelopes<S>(
+    signer: &S,
+    layout: &StoreLayout,
+    metadata_topic: &str,
+    actor_agent_id: [u8; 32],
+    joiner_agent_id: [u8; 32],
+    event: serde_json::Value,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+) -> Result<Vec<ConvEnvelope>>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let mut recipients: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(active_member_aids.len());
+    for aid in active_member_aids {
+        if aid == &actor_agent_id || aid == &joiner_agent_id {
+            continue;
+        }
+        let aid_hex = hex::encode(aid);
+        match recipient_kem_key(layout, &aid_hex) {
+            Ok(kem) => recipients.push((*aid, kem)),
+            Err(ChatError::ShareCardMissing { .. }) => {
+                log::warn!("MemberAdded bridge: share-card missing for {aid_hex}; skipping");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    dispatch_owner_broadcast(
+        signer,
+        &OwnerBroadcastInputs {
+            topic: metadata_topic.to_owned(),
+            event_json: event,
+            recipients_kem: &recipients,
+            local_agent_id: actor_agent_id,
+            local_machine_id,
+        },
+    )
+    .await
+}
+
+/// Fan out a commit-only `MemberAdded` bridge envelope to every active
+/// member except the actor (owner) and the new joiner (R3).
+///
+/// The joiner already gets the full Welcome-bearing event from
+/// [`crate::Client::reply_to_bridged_join`]; this advances the EXISTING
+/// members' `TreeKEM` epoch so they learn the new leaf and the group
+/// grows past two cross-NAT.
+///
+/// Recipients whose share-card has not been imported are skipped with a
+/// `WARN` log. Other errors (bad b64, KEM/AEAD failure, signer error)
+/// propagate as hard failures.
+///
+/// # Errors
+/// - [`ChatError::ShareCardMissing`] is swallowed (warn-logged); see
+///   [`build_member_added_envelopes`] for full error list.
+/// - [`ChatError::NoTransportAvailable`] / relay errors forwarded from
+///   [`Router::send`].
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_member_added_bridge<S>(
+    signer: &S,
+    router: &Router,
+    layout: &StoreLayout,
+    metadata_topic: &str,
+    actor_agent_id: [u8; 32],
+    joiner_agent_id: [u8; 32],
+    event: serde_json::Value,
+    active_member_aids: &[[u8; 32]],
+    local_machine_id: [u8; 32],
+    primary_relay_url: Option<&str>,
+) -> Result<()>
+where
+    S: fetchit_relay_client::Signer + ?Sized,
+{
+    let envelopes = build_member_added_envelopes(
+        signer,
+        layout,
+        metadata_topic,
+        actor_agent_id,
+        joiner_agent_id,
+        event,
+        active_member_aids,
+        local_machine_id,
+    )
+    .await?;
+
+    for env in envelopes {
+        let recipient = AgentId(hex::encode(env.recipient_agent_id.as_bytes()));
+        let transport_out = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: Some(local_machine_id),
+            payload: Vec::new(),
+            timestamp_ms: env.envelope.timestamp_ms,
+            transit: Some(env.envelope),
+        };
+        let hints = resolve_hints_for_recipient(layout, &recipient.0, primary_relay_url);
+        router
+            .send(&recipient, transport_out, hints.as_ref())
+            .await?;
+    }
+    Ok(())
+}
+
 /// Build sealed [`ConvEnvelope`]s for a `MemberRoleUpdated` fan-out.
 ///
 /// Filters only `actor_agent_id` from `active_member_aids`. The target
@@ -848,6 +977,137 @@ mod tests {
             None,
             None,
             None,
+            &[aid_a, aid_b, aid_c, aid_d],
+            [0u8; 32],
+        )
+        .await
+        .unwrap();
+
+        // aid_a and aid_b skipped (filter); aid_d skipped (no card).
+        // aid_c has a card: 1 envelope.
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].recipient_agent_id.as_bytes(), &aid_c);
+    }
+
+    /// R3: the owner's authoritative (commit-only) `MemberAdded` fans out
+    /// to every active member EXCEPT the actor (owner/self, aid-a) and the
+    /// new joiner (aid-b -- already served the Welcome by
+    /// `reply_to_bridged_join`). Only aid-c receives an envelope, and the
+    /// sealed ciphertext unseals to the commit-only event verbatim
+    /// (`"event": "member_added"`, no welcome fields).
+    #[tokio::test]
+    async fn dispatch_member_added_bridge_skips_actor_and_joiner() {
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let aid_a = [0xaau8; 32]; // actor / owner -- excluded
+        let aid_b = [0xbbu8; 32]; // new joiner -- excluded
+        let aid_c = [0xccu8; 32]; // existing member -- included
+
+        let (pk_a, _) = kem_keygen().unwrap();
+        let (pk_b, _) = kem_keygen().unwrap();
+        let (pk_c, sk_c) = kem_keygen().unwrap();
+
+        store_card(&layout, aid_a, &pk_a);
+        store_card(&layout, aid_b, &pk_b);
+        store_card(&layout, aid_c, &pk_c);
+
+        // The authoritative commit-only event (welcome fields already
+        // stripped by `commit_only_member_added`).
+        let event = json!({
+            "event": "member_added",
+            "group_id": "group-1",
+            "revision": 4,
+            "actor": hex::encode(aid_a),
+            "agent_id": hex::encode(aid_b),
+            "display_name": "Joiner",
+            "treekem_commit_b64": "COMMITB64",
+            "treekem_epoch": 6,
+            "commit": { "state_hash": "h", "signature": "s" },
+        });
+
+        let envelopes = build_member_added_envelopes(
+            &StubSigner,
+            &layout,
+            "x0x.named_group/group-1/metadata",
+            aid_a, // actor / owner
+            aid_b, // new joiner
+            event,
+            &[aid_a, aid_b, aid_c],
+            [0x01u8; 32],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(envelopes.len(), 1, "exactly one envelope: aid-c only");
+
+        let env = &envelopes[0];
+        assert_eq!(
+            env.envelope.kind,
+            EnvelopeKind::X0xdGroupMetadataEvent,
+            "kind must be X0xdGroupMetadataEvent"
+        );
+        assert_eq!(
+            env.recipient_agent_id.as_bytes(),
+            &aid_c,
+            "sole recipient is aid-c"
+        );
+
+        let wrapper = crate::groups::bridge::unseal_bridge_wrapper(
+            &sk_c,
+            &env.envelope.kem_ciphertext,
+            &env.envelope.nonce,
+            &env.envelope.ciphertext,
+        )
+        .unwrap();
+        let payload_bytes = B64.decode(&wrapper.payload_b64).unwrap();
+        let inner: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(inner["event"], "member_added", "inner event field");
+        assert_eq!(inner["group_id"], "group-1");
+        assert_eq!(inner["actor"], hex::encode(aid_a));
+        assert_eq!(inner["agent_id"], hex::encode(aid_b));
+        assert_eq!(inner["revision"], 4u64);
+        assert_eq!(inner["treekem_commit_b64"], "COMMITB64");
+        // Commit-only: no joiner welcome fields rode along.
+        assert!(inner.get("treekem_welcome_b64").is_none());
+        assert!(inner.get("welcome_ref").is_none());
+    }
+
+    /// R3: when the share-card for a non-excluded recipient is missing,
+    /// that peer is silently skipped and no error is returned.
+    #[tokio::test]
+    async fn dispatch_member_added_bridge_skips_missing_share_card() {
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+
+        let aid_a = [0x01u8; 32]; // actor
+        let aid_b = [0x02u8; 32]; // joiner
+        let aid_c = [0x03u8; 32]; // existing member with a card
+        let aid_d = [0x04u8; 32]; // existing member, NO card -> skipped
+
+        let (pk_c, _) = kem_keygen().unwrap();
+        store_card(&layout, aid_c, &pk_c);
+
+        let event = json!({
+            "event": "member_added",
+            "group_id": "g",
+            "revision": 1,
+            "actor": hex::encode(aid_a),
+            "agent_id": hex::encode(aid_b),
+            "treekem_commit_b64": "C",
+        });
+
+        let envelopes = build_member_added_envelopes(
+            &StubSigner,
+            &layout,
+            "topic",
+            aid_a,
+            aid_b,
+            event,
             &[aid_a, aid_b, aid_c, aid_d],
             [0u8; 32],
         )
