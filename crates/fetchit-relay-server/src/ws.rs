@@ -2,7 +2,7 @@
 
 use crate::auth::AuthTokenState;
 use crate::server::ServerState;
-use crate::transit::Entry;
+use crate::transit::{Entry, TransitStore};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -516,7 +516,7 @@ mod tests {
     }
     use futures_util::stream::{self, StreamExt};
     use std::convert::Infallible;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
@@ -542,7 +542,7 @@ mod tests {
         tags.iter()
             .map(|&t| Entry {
                 envelope: marked_envelope(t),
-                enqueued_at: Instant::now(),
+                enqueued_at_ms: 1,
             })
             .collect()
     }

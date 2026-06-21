@@ -52,4 +52,9 @@ pub enum ServerError {
     /// Recipient's transit buffer is at capacity.
     #[error("transit buffer full for recipient")]
     TransitBufferFull,
+
+    /// A durable transit-store backend operation failed (open, read,
+    /// write, or delete). Carries a human-readable cause, never payload.
+    #[error("transit store backend error: {0}")]
+    TransitStore(String),
 }

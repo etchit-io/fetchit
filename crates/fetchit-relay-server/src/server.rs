@@ -17,7 +17,7 @@ use crate::ratelimit::RateLimiter;
 use crate::registry::{registry_router, RegistryState};
 use crate::session::SessionRegistry;
 use crate::signature::{MlDsa65Verifier, SignatureVerifier};
-use crate::transit::TransitBuffer;
+use crate::transit::{TransitBuffer, TransitStore};
 use crate::ws::ws_handler;
 use anyhow::Result;
 use axum::extract::{DefaultBodyLimit, State};
