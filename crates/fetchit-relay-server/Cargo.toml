@@ -31,7 +31,6 @@ default = []
 fediverse-inbox = [
     "dep:fetchit-fedi",
     "dep:rsa",
-    "dep:rusqlite",
     "dep:fetchit-trust-types",
     "dep:fetchit-trust-client",
     "fetchit-trust-client/reqwest",
@@ -54,10 +53,10 @@ fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust-types = { path = "../fetchit-trust-types", optional = true }
 fetchit-trust-client = { path = "../fetchit-trust-client", optional = true }
 rsa = { workspace = true, optional = true }
-# M5.1 Task 13: durable, in-relay actor-registry ledger. `bundled` compiles
-# SQLite from source (no system lib); gated under `fediverse-inbox` so the
-# default + community chat relays never pull it.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# `bundled` compiles SQLite from source (no system lib). Non-optional: it
+# backs both the durable transit store (the reliability floor, always on)
+# and the fediverse actor-registry ledger.
+rusqlite = { version = "0.32", features = ["bundled"] }
 futures-util.workspace = true
 hex.workspace = true
 postcard.workspace = true
@@ -75,6 +74,7 @@ url.workspace = true
 
 [dev-dependencies]
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+tempfile = "3.13"
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util", "signal", "net", "io-util"] }
 tokio-tungstenite = { workspace = true }
