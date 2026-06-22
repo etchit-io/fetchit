@@ -296,6 +296,17 @@ enum Mode {
     /// inbound pump. x0xd-backed (DAEMON mode): groups are daemon-gated,
     /// so this mode is unavailable under `--daemonless`.
     GroupChat(GroupChatArgs),
+    /// Mint a FRESH single-use invite for an EXISTING group (`--group`),
+    /// printing `invite=<x0x://invite/...>` on stdout. Run once PER
+    /// invitee: x0xd invites are single-use, so reusing one invite admits
+    /// only the first joiner. This is how a group grows past two members.
+    /// x0xd-backed (DAEMON mode): unavailable under `--daemonless`.
+    GroupInvite {
+        /// Group id (mls hex) to mint an invite for. Validated by
+        /// [`GroupId::parse`].
+        #[arg(long)]
+        group: String,
+    },
 }
 
 /// Parsed `group-chat` arguments. A standalone [`clap::Args`] group so
@@ -456,6 +467,7 @@ async fn main() -> Result<()> {
         Mode::PairMigrate { to } => run_pair_migrate(&client, &to).await,
         Mode::GroupCreate { name } => run_group_create(&client, &cli.display_name, &name).await,
         Mode::GroupChat(args) => run_group_chat(&client, &cli.display_name, &args).await,
+        Mode::GroupInvite { group } => run_group_invite(&client, &group).await,
     }
 }
 
@@ -633,6 +645,26 @@ async fn run_group_create(client: &Client, display_name: &str, name: &str) -> Re
     println!("group_id={}", g.group_id.as_str());
     println!("invite={}", inv.0);
     eprintln!("[peer] group created group_id={}", g.group_id.as_str());
+    Ok(())
+}
+
+/// Mint a FRESH single-use invite for an EXISTING group and print it on a
+/// labeled stdout line (`invite=<x0x://invite/...>`). Each call yields a
+/// distinct one-time invite that captures the group's CURRENT state, so a
+/// group OWNER runs this once per invitee to grow the group past two
+/// members. Reusing a single invite admits only the first joiner because
+/// x0xd invites are single-use (the owner consumes the secret on apply).
+/// Diagnostics go to stderr; only the `invite=` line reaches stdout so a
+/// calling script can grep it deterministically.
+async fn run_group_invite(client: &Client, group: &str) -> Result<()> {
+    let gid = GroupId::parse(group).context("invalid group id")?;
+    let inv = client
+        .groups()
+        .invite(&gid)
+        .await
+        .context("mint group invite")?;
+    println!("invite={}", inv.0);
+    eprintln!("[peer] minted fresh single-use invite for group {group}");
     Ok(())
 }
 
