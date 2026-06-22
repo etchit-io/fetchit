@@ -2443,12 +2443,17 @@ impl Client {
     /// `TreeKEM` keys, because x0xd exposes no keys-ready signal and a
     /// roster-active joiner can still be keyless (the Welcome is a separate
     /// cross-NAT-fragile pull). `captured` is the joiner's inline
-    /// `member_joined` from the one `join_post`; the bridge cannot run
-    /// without it (unpatched daemon), which is a clear error.
+    /// `member_joined` from the one `join_post`. With a captured event the
+    /// bridge ALWAYS runs (guaranteed keys). Without one -- an unpatched
+    /// daemon that returns no inline `member_joined`, so no bridge is
+    /// possible -- a native success is accepted on its own (native is the
+    /// only path that daemon offers), and only a native failure with no
+    /// captured event is the clear cannot-bridge error.
     ///
     /// # Errors
-    /// Returns [`ChatError::Invalid`] when there is no captured event to
-    /// bridge with; otherwise returns the `bridge` result.
+    /// Returns [`ChatError::Invalid`] when native convergence failed AND
+    /// there is no captured event to bridge with; otherwise returns the
+    /// `bridge` result (or `Ok` for a captured-less native success).
     async fn run_native_then_bridge<NF, NFut, BF, BFut>(
         captured: Option<crate::groups::join_bridge::CapturedSelfJoin>,
         native: NF,
@@ -2464,23 +2469,30 @@ impl Client {
         // join to the owner so EXISTING members converge natively. The
         // outcome does not gate the bridge -- a roster-active joiner can
         // still be keyless (the Welcome is a separate, cross-NAT-fragile
-        // pull), so the bridge below always runs to guarantee the keys.
-        if let Err(native_err) = native().await {
+        // pull), so the bridge below runs to guarantee the keys.
+        let native_result = native().await;
+        if let Err(ref native_err) = native_result {
             log::warn!(
                 "[chat] group join: native warm-gossip convergence did not land \
                  ({native_err}); bridging the Welcome over the relay anyway"
             );
         }
 
-        // Always deliver the Welcome over the relay bridge (guaranteed keys).
-        let captured = captured.ok_or_else(|| {
-            ChatError::Invalid(
-                "group join: x0xd returned no inline member_joined, so the TreeKEM \
-                 Welcome cannot be delivered over the relay bridge (unpatched daemon?)"
-                    .to_owned(),
-            )
-        })?;
-        bridge(captured).await
+        match captured {
+            // Patched daemon: always deliver the Welcome over the relay
+            // bridge so the joiner is guaranteed encryptable, even when
+            // native looked converged (roster-active != keys-applied).
+            Some(captured) => bridge(captured).await,
+            // Unpatched daemon: no inline member_joined exists to bridge, so
+            // the engine-A path is unavailable. Native is the only path that
+            // daemon offers -- accept its success, surface its failure.
+            None => native_result.map_err(|native_err| {
+                ChatError::Invalid(format!(
+                    "group join: native convergence failed ({native_err}) and the daemon \
+                     returned no inline member_joined, so the Welcome cannot be bridged"
+                ))
+            }),
+        }
     }
 
     /// Drain an inbound [`fetchit_relay_proto::EnvelopeKind::PublicPost`] envelope: decode the
@@ -4919,11 +4931,11 @@ mod tests {
         );
     }
 
-    /// Guard: with no captured `member_joined` the Welcome cannot be
-    /// bridged, so it surfaces a clear error and never invokes the bridge --
-    /// independent of the (best-effort) native outcome.
+    /// Guard: native FAILURE with no captured `member_joined` cannot bridge
+    /// (unpatched daemon), so it surfaces a clear error and never invokes
+    /// the bridge.
     #[tokio::test]
-    async fn native_then_bridge_without_captured_event_errors_clearly() {
+    async fn native_then_bridge_without_captured_event_errors_on_native_failure() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
@@ -4932,7 +4944,12 @@ mod tests {
 
         let out = Client::run_native_then_bridge(
             None::<crate::groups::join_bridge::CapturedSelfJoin>,
-            || async { Ok::<(), ChatError>(()) },
+            || async {
+                Err::<(), ChatError>(ChatError::JoinerNotConverged {
+                    group_id: "g".to_owned(),
+                    waited_ms: 1,
+                })
+            },
             move |_cap| async move {
                 b.store(true, Ordering::SeqCst);
                 Ok::<(), ChatError>(())
@@ -4950,6 +4967,38 @@ mod tests {
         assert!(
             !bridged.load(Ordering::SeqCst),
             "bridge must not run without a captured event"
+        );
+    }
+
+    /// Graceful degrade: native SUCCESS with no captured `member_joined`
+    /// (an unpatched daemon where warm gossip still converged) is accepted
+    /// on its own -- native is the only path that daemon offers, so erroring
+    /// would needlessly fail an otherwise-good join.
+    #[tokio::test]
+    async fn native_then_bridge_without_captured_event_accepts_native_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let bridged = Arc::new(AtomicBool::new(false));
+        let b = bridged.clone();
+
+        let out = Client::run_native_then_bridge(
+            None::<crate::groups::join_bridge::CapturedSelfJoin>,
+            || async { Ok::<(), ChatError>(()) },
+            move |_cap| async move {
+                b.store(true, Ordering::SeqCst);
+                Ok::<(), ChatError>(())
+            },
+        )
+        .await;
+
+        assert!(
+            out.is_ok(),
+            "native success with no captured event must be accepted"
+        );
+        assert!(
+            !bridged.load(Ordering::SeqCst),
+            "bridge cannot run without a captured event"
         );
     }
 
