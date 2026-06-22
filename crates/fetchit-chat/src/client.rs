@@ -2360,33 +2360,39 @@ impl Client {
         Ok(())
     }
 
-    /// Join a private group with the v1 shared join policy: try the native
-    /// warm-gossip path first, fall back to the engine-A relay bridge.
+    /// Join a private group with the v1 shared join policy: best-effort
+    /// native warm-gossip convergence, then ALWAYS deliver the joiner's
+    /// `TreeKEM` Welcome over the engine-A relay bridge.
     ///
-    /// The native [`crate::groups::Endpoint::join`] converges directly when
-    /// the gossip mesh can reach the owner (the common case against a
-    /// gossip-on daemon) and lets x0xd propagate the membership commit to
-    /// the *existing* members natively. When native convergence does not
-    /// land within [`crate::groups::membership::native_first_wait`] -- the
-    /// cold/dual-NAT corner where the joiner's gossip mesh never reaches the
-    /// owner -- the join falls back to the [`Self::join_group_bridged`]
-    /// relay bridge, reusing the SAME captured `member_joined` from the
-    /// single `join_post` so the single-use invite is consumed exactly
-    /// once.
+    /// Roster convergence does NOT imply the joiner holds the group's
+    /// `TreeKEM` keys: the roster arrives over gossip, but the Welcome is a
+    /// separate x0x content-pull that fails cross-NAT, leaving the joiner
+    /// roster-active but keyless and unable to encrypt (a tracked x0x
+    /// limitation, api-reference.md ADR-0012). x0xd exposes no keys-ready
+    /// signal to poll, so rather than guess, the join always re-delivers the
+    /// Welcome over the relay ([`Self::bridge_captured_join`]) -- the
+    /// sanctioned workaround -- which guarantees the joiner can encrypt.
     ///
-    /// Both app shells should call this rather than picking a path
-    /// statically: it keeps the warm path primary (so existing members
-    /// converge via gossip) while preserving the bridge for the corner the
-    /// gossip mesh cannot serve.
+    /// The native [`crate::groups::Endpoint::join`] membership wait still
+    /// runs FIRST (best-effort, outcome non-gating): it lets gossip deliver
+    /// the joiner's `member_joined` to the owner so the *existing* members
+    /// converge natively. Skipping it would deliver the join to the owner
+    /// only via `apply_metadata_event`, which does NOT gossip-publish,
+    /// forcing existing members onto the R3 relay fan-out instead.
+    ///
+    /// The single `join_post` is consumed exactly once: the captured
+    /// `member_joined` is reused by the bridge, never a second `join_post`
+    /// that would spend the single-use invite. Idempotent on the warm path:
+    /// the owner re-applies (`409`) and re-sends a Welcome the joiner may
+    /// already hold.
     ///
     /// # Errors
     /// - Propagates `join_post` errors (malformed invite, self-join,
-    ///   network failure) directly -- the bridge cannot help once the join
-    ///   itself failed.
-    /// - [`ChatError::Invalid`] when native convergence fails AND the
-    ///   daemon returned no inline `member_joined`, so the bridge fallback
-    ///   cannot proceed.
-    /// - Otherwise propagates the bridge fallback's error.
+    ///   network failure) directly.
+    /// - [`ChatError::Invalid`] when the daemon returned no inline
+    ///   `member_joined` (unpatched daemon), so the Welcome cannot be
+    ///   bridged.
+    /// - Otherwise propagates the bridge's error.
     pub async fn join_group_auto(
         &self,
         invite: &groups::GroupInvite,
@@ -2405,7 +2411,7 @@ impl Client {
         let group_id = group.group_id.clone();
         let native_wait = crate::groups::membership::native_first_wait();
 
-        Self::run_native_first_join(
+        Self::run_native_then_bridge(
             captured,
             move || async move {
                 self.groups()
@@ -2426,24 +2432,24 @@ impl Client {
         Ok(group)
     }
 
-    /// Pure native-first-then-bridge orchestration over a single
-    /// `join_post`. Factored from [`Self::join_group_auto`] so the policy
-    /// (try native convergence; on failure fall back to the engine-A
-    /// bridge, reusing the SAME captured `member_joined`) is unit-testable
-    /// without a live daemon or relay.
+    /// Pure native-best-effort-then-always-bridge orchestration over a
+    /// single `join_post`. Factored from [`Self::join_group_auto`] so the
+    /// policy is unit-testable without a live daemon or relay.
     ///
-    /// `native` runs the warm-gossip membership wait. `bridge` runs the
-    /// engine-A relay-bridge tail with the captured event. `captured` is
-    /// the joiner's inline `member_joined` from the one `join_post`; it is
-    /// needed only on the fallback path -- a native success never touches
-    /// it, and a fallback with no captured event cannot bridge and surfaces
-    /// a clear error.
+    /// `native` runs the warm-gossip membership wait BEST-EFFORT: its
+    /// outcome only logs and never gates the bridge, so gossip can deliver
+    /// the join to the owner (existing members converge natively) before the
+    /// bridge runs. `bridge` then ALWAYS runs to GUARANTEE the joiner's
+    /// `TreeKEM` keys, because x0xd exposes no keys-ready signal and a
+    /// roster-active joiner can still be keyless (the Welcome is a separate
+    /// cross-NAT-fragile pull). `captured` is the joiner's inline
+    /// `member_joined` from the one `join_post`; the bridge cannot run
+    /// without it (unpatched daemon), which is a clear error.
     ///
     /// # Errors
-    /// Returns [`ChatError::Invalid`] when `native` fails and there is no
-    /// captured event to bridge with; otherwise returns the `bridge`
-    /// fallback's result. A native success is returned verbatim.
-    async fn run_native_first_join<NF, NFut, BF, BFut>(
+    /// Returns [`ChatError::Invalid`] when there is no captured event to
+    /// bridge with; otherwise returns the `bridge` result.
+    async fn run_native_then_bridge<NF, NFut, BF, BFut>(
         captured: Option<crate::groups::join_bridge::CapturedSelfJoin>,
         native: NF,
         bridge: BF,
@@ -2454,23 +2460,27 @@ impl Client {
         BF: FnOnce(crate::groups::join_bridge::CapturedSelfJoin) -> BFut,
         BFut: std::future::Future<Output = Result<()>>,
     {
-        match native().await {
-            Ok(()) => Ok(()),
-            Err(native_err) => {
-                let captured = captured.ok_or_else(|| {
-                    ChatError::Invalid(format!(
-                        "group join: native convergence failed ({native_err}) and the \
-                         daemon returned no inline member_joined, so the engine-A bridge \
-                         fallback cannot proceed"
-                    ))
-                })?;
-                log::warn!(
-                    "[chat] group join: native warm-gossip convergence failed ({native_err}); \
-                     falling back to the engine-A relay bridge"
-                );
-                bridge(captured).await
-            }
+        // Best-effort native warm-gossip convergence: lets gossip carry the
+        // join to the owner so EXISTING members converge natively. The
+        // outcome does not gate the bridge -- a roster-active joiner can
+        // still be keyless (the Welcome is a separate, cross-NAT-fragile
+        // pull), so the bridge below always runs to guarantee the keys.
+        if let Err(native_err) = native().await {
+            log::warn!(
+                "[chat] group join: native warm-gossip convergence did not land \
+                 ({native_err}); bridging the Welcome over the relay anyway"
+            );
         }
+
+        // Always deliver the Welcome over the relay bridge (guaranteed keys).
+        let captured = captured.ok_or_else(|| {
+            ChatError::Invalid(
+                "group join: x0xd returned no inline member_joined, so the TreeKEM \
+                 Welcome cannot be delivered over the relay bridge (unpatched daemon?)"
+                    .to_owned(),
+            )
+        })?;
+        bridge(captured).await
     }
 
     /// Drain an inbound [`fetchit_relay_proto::EnvelopeKind::PublicPost`] envelope: decode the
@@ -4835,10 +4845,11 @@ mod tests {
         }
     }
 
-    /// Native-first policy: a native (warm-gossip) convergence success is
-    /// returned verbatim and the engine-A bridge fallback never runs.
+    /// Always-bridge policy: even when native (warm-gossip) convergence
+    /// SUCCEEDS, the bridge still runs -- roster-active does not imply the
+    /// joiner has `TreeKEM` keys, so the Welcome is always re-delivered.
     #[tokio::test]
-    async fn native_first_join_returns_native_success_without_bridging() {
+    async fn native_then_bridge_runs_bridge_even_on_native_success() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
@@ -4849,7 +4860,7 @@ mod tests {
             payload: vec![1, 2, 3],
         });
 
-        let out = Client::run_native_first_join(
+        let out = Client::run_native_then_bridge(
             captured,
             || async { Ok::<(), ChatError>(()) },
             move |_cap| async move {
@@ -4861,16 +4872,16 @@ mod tests {
 
         assert!(out.is_ok());
         assert!(
-            !bridged.load(Ordering::SeqCst),
-            "bridge must be skipped when native convergence succeeds"
+            bridged.load(Ordering::SeqCst),
+            "bridge must ALWAYS run to guarantee keys, even when native converged"
         );
     }
 
-    /// Fallback: when native convergence fails, the bridge runs with the
-    /// SAME captured `member_joined` -- proving the single-use invite is
-    /// reused, not re-fetched via a second `join_post`.
+    /// Native best-effort: when native convergence fails, the bridge still
+    /// runs with the SAME captured `member_joined` -- proving the single-use
+    /// invite is reused, not re-fetched via a second `join_post`.
     #[tokio::test]
-    async fn native_first_join_falls_back_to_bridge_reusing_captured_event() {
+    async fn native_then_bridge_runs_bridge_reusing_captured_on_native_failure() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
@@ -4881,7 +4892,7 @@ mod tests {
             payload: vec![9, 9, 9],
         });
 
-        let out = Client::run_native_first_join(
+        let out = Client::run_native_then_bridge(
             captured,
             || async {
                 Err::<(), ChatError>(ChatError::JoinerNotConverged {
@@ -4908,25 +4919,20 @@ mod tests {
         );
     }
 
-    /// Fallback guard: native failure with no captured `member_joined`
-    /// cannot bridge, so it surfaces a clear error and never invokes the
-    /// bridge.
+    /// Guard: with no captured `member_joined` the Welcome cannot be
+    /// bridged, so it surfaces a clear error and never invokes the bridge --
+    /// independent of the (best-effort) native outcome.
     #[tokio::test]
-    async fn native_first_join_without_captured_event_errors_clearly() {
+    async fn native_then_bridge_without_captured_event_errors_clearly() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
         let bridged = Arc::new(AtomicBool::new(false));
         let b = bridged.clone();
 
-        let out = Client::run_native_first_join(
+        let out = Client::run_native_then_bridge(
             None::<crate::groups::join_bridge::CapturedSelfJoin>,
-            || async {
-                Err::<(), ChatError>(ChatError::JoinerNotConverged {
-                    group_id: "g".to_owned(),
-                    waited_ms: 1,
-                })
-            },
+            || async { Ok::<(), ChatError>(()) },
             move |_cap| async move {
                 b.store(true, Ordering::SeqCst);
                 Ok::<(), ChatError>(())
