@@ -53,6 +53,33 @@ fn resolve_membership_wait(raw: Option<String>) -> Duration {
         .map_or(MEMBERSHIP_WAIT_TIMEOUT, Duration::from_secs)
 }
 
+/// Default native-first convergence window before
+/// [`crate::Client::join_group_auto`] falls back to the engine-A relay
+/// bridge. Deliberately shorter than [`MEMBERSHIP_WAIT_TIMEOUT`]: when the
+/// warm-gossip path can reach the owner it converges in seconds, so a
+/// shorter ceiling fails the cold/dual-NAT corner over to the bridge
+/// promptly instead of blocking the full 60s on a mesh that will never
+/// form for that pair.
+pub const NATIVE_FIRST_WAIT: Duration = Duration::from_secs(15);
+
+/// Resolve the native-first convergence wait, honouring the
+/// `FETCHIT_NATIVE_FIRST_WAIT_SECS` environment override and falling back
+/// to [`NATIVE_FIRST_WAIT`]. The override lets soak rigs widen or tighten
+/// the warm-path window before the bridge fallback engages.
+#[must_use]
+pub fn native_first_wait() -> Duration {
+    resolve_native_first_wait(std::env::var("FETCHIT_NATIVE_FIRST_WAIT_SECS").ok())
+}
+
+/// Pure core of [`native_first_wait`]: parse an optional raw seconds
+/// string, falling back to [`NATIVE_FIRST_WAIT`] on absent or unparseable
+/// input. Split out so the fallback is unit-testable without mutating
+/// process environment.
+fn resolve_native_first_wait(raw: Option<String>) -> Duration {
+    raw.and_then(|r| r.parse::<u64>().ok())
+        .map_or(NATIVE_FIRST_WAIT, Duration::from_secs)
+}
+
 /// Poll `members_fetcher` on `poll_interval` until `self_id` appears
 /// in the returned roster, or `timeout` elapses.
 ///
@@ -126,6 +153,22 @@ mod tests {
             resolve_membership_wait(Some("300".to_owned())),
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn resolve_native_first_wait_defaults_and_honours_override() {
+        assert_eq!(resolve_native_first_wait(None), NATIVE_FIRST_WAIT);
+        assert_eq!(
+            resolve_native_first_wait(Some("garbage".to_owned())),
+            NATIVE_FIRST_WAIT
+        );
+        assert_eq!(
+            resolve_native_first_wait(Some("5".to_owned())),
+            Duration::from_secs(5)
+        );
+        // The native-first window must stay below the full membership
+        // ceiling, else the bridge fallback never gets a chance to run.
+        assert!(NATIVE_FIRST_WAIT < MEMBERSHIP_WAIT_TIMEOUT);
     }
 
     #[tokio::test]
