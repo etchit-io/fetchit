@@ -978,11 +978,14 @@ pub async fn chat_group_join(
     display_name: Option<String>,
 ) -> Result<fetchit_chat::groups::Group, String> {
     ensure_chat_enabled(&app_state)?;
+    // Native warm-gossip join first (so existing members converge via
+    // gossip against the gossip-on x0xd this shell spawns), with the
+    // engine-A relay bridge as the dual-NAT fallback. join_group_auto
+    // consumes the single-use invite exactly once across both paths.
     state
         .get()
         .await?
-        .groups()
-        .join(&GroupInvite(invite), display_name.as_deref())
+        .join_group_auto(&GroupInvite(invite), display_name.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
