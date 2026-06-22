@@ -56,6 +56,18 @@ function getRadios(): {
   };
 }
 
+function getBtnByText(text: string): HTMLButtonElement {
+  const btns = host.querySelectorAll<HTMLButtonElement>(".chat-dialog__btn");
+  for (const b of btns) {
+    if (b.textContent === text) return b;
+  }
+  throw new Error(`button "${text}" not found`);
+}
+
+function getInviteBox(): HTMLTextAreaElement {
+  return host.querySelector<HTMLTextAreaElement>("textarea.chat-dialog__uri")!;
+}
+
 describe("mountNewGroup", () => {
   it("renders both preset radios with Private selected by default", () => {
     mountNewGroup(host, "Alice", { onClose: () => {}, onCreated: () => {} });
@@ -106,5 +118,39 @@ describe("mountNewGroup", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(createGroupMock).toHaveBeenCalledWith("lounge", "Alice", "public_open");
+  });
+
+  it("mints a fresh invite per invitee via the New invite button", async () => {
+    createGroupMock.mockResolvedValueOnce({
+      group_id: "g1",
+      name: "fam",
+    } as Group);
+    groupInviteMock
+      .mockResolvedValueOnce("x0x://invite/first")
+      .mockResolvedValueOnce("x0x://invite/second");
+    mountNewGroup(host, "Alice", { onClose: () => {}, onCreated: () => {} });
+
+    const input = getNameInput();
+    input.value = "fam";
+    input.dispatchEvent(new Event("input"));
+    getCreateBtn().click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // One invite minted on create, shown in the invite box.
+    expect(groupInviteMock).toHaveBeenCalledTimes(1);
+    expect(groupInviteMock).toHaveBeenLastCalledWith("g1");
+    const box = getInviteBox();
+    expect(box.value).toBe("x0x://invite/first");
+
+    // "New invite" mints a FRESH single-use invite for the next person,
+    // so the group can grow past two members (x0xd invites are single-use).
+    const newInviteBtn = getBtnByText("New invite");
+    expect(newInviteBtn.hidden).toBe(false);
+    newInviteBtn.click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(groupInviteMock).toHaveBeenCalledTimes(2);
+    expect(groupInviteMock).toHaveBeenLastCalledWith("g1");
+    expect(box.value).toBe("x0x://invite/second");
   });
 });
