@@ -1028,9 +1028,12 @@ class ChatModeView(
     }
 
     /**
-     * Offer to share a fresh invite for [groupId]: mint one via the gateway
-     * and copy it to the clipboard, the existing share path for chat URIs
-     * (the same clipboard route the pair-QR long-press uses). A QR card is
+     * Offer to share a fresh single-use invite for [groupId]: mint one via
+     * the gateway and copy it to the clipboard, the existing share path for
+     * chat URIs (the same clipboard route the pair-QR long-press uses). x0xd
+     * group invites are single-use, so the snackbar action mints a FRESH
+     * invite for the NEXT member (it re-offers, so the owner repeats once per
+     * invitee) -- this is how a group grows past two members. A QR card is
      * not produced -- [QrShare] cards are scoped to `autonomi://` /
      * `x0x://pair/` payloads, and an invite blob is neither.
      */
@@ -1040,8 +1043,8 @@ class ChatModeView(
             val invite = runCatching { gw.groupInvite(groupId) }.getOrNull() ?: return@launch
             copyToClipboard(invite)
             Snackbar.make(container, context.getString(R.string.chat_group_share_invite), Snackbar.LENGTH_LONG)
-                .setAction(context.getString(R.string.chat_group_invite_copied)) {
-                    copyToClipboard(invite)
+                .setAction(context.getString(R.string.chat_group_new_invite)) {
+                    offerShareInvite(groupId)
                 }
                 .show()
         }
