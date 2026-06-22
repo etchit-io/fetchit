@@ -913,6 +913,14 @@ fn build_chat_state(
 #[allow(clippy::too_many_lines)] // dominated by the invoke-handler list
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // rustls 0.23 cannot auto-determine its process CryptoProvider when both
+    // aws-lc-rs and ring are compiled in (the Autonomi and chat dep trees pull
+    // both), so the first relay TLS handshake panics. Install aws-lc-rs
+    // explicitly before anything connects -- it backs ant-quic PQC and the
+    // relay TLS, matching the fetchit-ffi and fetchit-chat-peer entry points.
+    // Idempotent: a later call returns Err once a provider is set; we ignore it.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // Boot the x0xd supervisor before the Tauri runtime starts.
     // In E1, bundled_x0xd_binary_path() returns None so this always
     // falls back to the installed binary (or no-op if absent).
