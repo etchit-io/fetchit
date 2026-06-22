@@ -349,6 +349,13 @@ struct GroupChatArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23 cannot auto-determine its process CryptoProvider when both
+    // aws-lc-rs and ring are in the dependency graph (the x0xd embed pulls
+    // both), so the first TLS use panics. Install aws-lc-rs explicitly -- it
+    // backs ant-quic's PQC and the relay TLS. Idempotent: a later call returns
+    // Err once a provider is set; we ignore it.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let cli = Cli::parse();
     let token = resolve_token(&cli)?;
     let passphrase = resolve_passphrase(&cli)?;

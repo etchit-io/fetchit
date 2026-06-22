@@ -2972,6 +2972,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest 0.12.28",
  "rsa",
+ "rustls",
  "saorsa-pqc 0.5.1",
  "semver 1.0.28",
  "serde",
