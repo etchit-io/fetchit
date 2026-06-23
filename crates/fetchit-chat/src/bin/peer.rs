@@ -1119,6 +1119,16 @@ async fn decode_private_group(
                 short(&group_id_hex),
                 entry.body.len()
             );
+            // Opt-in plaintext surface for an INTERACTIVE comms peer (a
+            // human chatting through this rig), NOT the soak/systemd peer.
+            // Defaults OFF so the metadata-only promise above holds for the
+            // long-lived journalctl / PEER_RX_LOG destinations; only a
+            // manually-run peer that sets FETCHIT_PEER_GROUP_PRINT=1 (its
+            // stdout going to a private, operator-chosen file) prints the
+            // decrypted body, on stdout, as a clean monitorable line.
+            if std::env::var("FETCHIT_PEER_GROUP_PRINT").as_deref() == Ok("1") {
+                println!("[group {}] {}", short(&entry.sender_agent_id_hex), entry.body);
+            }
             // The M2 echo is opt-out: a group soak peer sets
             // FETCHIT_PEER_ECHO=0 so the group does not self-amplify --
             // every non-author member echoing every message (including
