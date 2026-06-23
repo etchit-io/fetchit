@@ -68,6 +68,13 @@ We just proved reliable PQ DMs + multi-member group chat end-to-end (desktop + o
 
 **P0.2 Names + photos data model.** A contact/group has an optional display name (already partly present) + an optional photo. Add photo storage (encrypted at rest) + a deterministic fallback avatar (initials on a per-identity color, as desktop does). Replace every hex-short-id display in the main flow with name + avatar. Keep the hex reachable only in a contact's Advanced detail.
 
+**P0.2b Per-identity bubble color (group readability — "who is who").** In a group, give each sender a stable, palette-derived visual identity so messages are scannable at a glance (raised live: hard to tell senders apart). Hard constraint: no wild colors — only subtle variations of the oxidation palette (`BRAND.md` / design-tokens-v2). The trick for "more options without more colors" is **combinatorics, not a bigger palette**: combine a few palette-derived axes that multiply —
+- *fill tint* (a handful of subtle palette-adjacent bubble backgrounds),
+- *accent* (left-border / name color in a palette accent),
+- so e.g. 4 fills × 3 accents ≈ 12 distinct on-brand looks from ~5 base tokens.
+
+Each agent gets a **deterministic** (fill, accent) combo derived from its `agent_id` (hash → index), so the same person always looks the same everywhere. Tie it to the **existing per-identity avatar color** (the initials-gradient hue) so avatar + bubble accent + sender-name color all share one hue per person = coherent identity, not just a bubble color. Self keeps the current right-aligned copper convention; others get their left-aligned per-identity treatment. Keep text contrast on every variant (tints stay subtle). Desktop + Android share the same derivation so a person looks identical across shells.
+
 **P0.3 Onboarding + nav + jargon rewrite.** First-run empty state teaches "Add your first person" (Show my code / Scan a code) with a picture and one plain sentence. Nav stays two levels (list ↔ conversation), one "+" → {Message someone, New group}, back always goes home. Audit `strings.xml` end-to-end: replace crypto jargon with human words. (Lands after Bob's Android rebase settles.)
 
 **P0.4 Offline + human status.** Status copy in words, including the offline reassurance ("No internet — I'll send it when you're back online"). Build on the existing delivery-tick + outbox state.
