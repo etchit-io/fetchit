@@ -873,17 +873,35 @@ class ChatModeView(
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             when (val row = getItem(position)) {
-                is MessageRow.Dm -> holder.bindDm(row.msg, onLinkTap)
+                is MessageRow.Dm -> {
+                    // The previous message decides whether this is the first of a
+                    // consecutive run from the same sender — desktop names a run
+                    // once, not on every line (groupAttribution).
+                    val prevSender = if (position > 0) {
+                        (getItem(position - 1) as? MessageRow.Dm)?.msg?.senderAgentIdHex
+                    } else {
+                        null
+                    }
+                    holder.bindDm(row.msg, onLinkTap, prevSender)
+                }
                 is MessageRow.Post -> holder.bindPost(row.post)
             }
         }
 
         inner class VH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+            private val sender: TextView = itemView.findViewById(R.id.messageSender)
             private val bubble: TextView = itemView.findViewById(R.id.messageBubble)
             private val meta: TextView = itemView.findViewById(R.id.messageMeta)
 
-            fun bindDm(msg: ChatMessage, onLinkTap: (String) -> Unit) {
+            fun bindDm(
+                msg: ChatMessage,
+                onLinkTap: (String) -> Unit,
+                prevSenderAgentIdHex: String?,
+            ) {
                 if (msg.outbound) {
+                    // Self keeps the copper out-bubble; the who-is-who accent is
+                    // inbound-only, so no sender label or identity tint here.
+                    sender.visibility = View.GONE
                     bubble.setBackgroundResource(R.drawable.bg_bubble_out)
                     (bubble.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                         android.view.Gravity.END
@@ -910,16 +928,36 @@ class ChatModeView(
                         itemView.setOnClickListener(null)
                     }
                 } else {
-                    bubble.setBackgroundResource(R.drawable.bg_bubble_in)
                     (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                     bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                     meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                     (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                         android.view.Gravity.START
                     val time = timeFmt.format(Date(msg.sentAtMs))
-                    // Group messages attribute their sender; a DM (null sender)
-                    // shows the bare time, since the peer IS the thread.
-                    meta.text = msg.senderAgentIdHex?.let { "${groupSenderLabel(it)} · $time" } ?: time
+                    val groupSender = msg.senderAgentIdHex
+                    if (groupSender != null) {
+                        // Group message: a per-identity left stripe + faint tint
+                        // keyed off the sender's agent id, matching the avatar and
+                        // (on desktop) the bubble accent — so "who is who" is
+                        // scannable at a glance, pixel-for-pixel with desktop.
+                        bubble.background = identityBubbleBackground(groupSender)
+                        // Name the sender once at the top of a consecutive run, in
+                        // their identity hue (desktop's groupAttribution + the
+                        // chat-sender--id label color).
+                        if (prevSenderAgentIdHex == groupSender) {
+                            sender.visibility = View.GONE
+                        } else {
+                            sender.visibility = View.VISIBLE
+                            sender.text = groupSenderLabel(groupSender)
+                            sender.setTextColor(IdentityColor.senderNameColor(groupSender))
+                        }
+                    } else {
+                        // DM: the peer IS the thread, so no per-identity accent or
+                        // sender label — the bare inbound bubble + time.
+                        sender.visibility = View.GONE
+                        bubble.setBackgroundResource(R.drawable.bg_bubble_in)
+                    }
+                    meta.text = time
                     // Linkify autonomi:// addresses in inbound text.
                     val addresses = ChatUris.autonomiAddresses(msg.body)
                     if (addresses.isEmpty()) {
@@ -954,6 +992,7 @@ class ChatModeView(
             }
 
             fun bindPost(post: FeedPost) {
+                sender.visibility = View.GONE
                 bubble.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
@@ -964,6 +1003,42 @@ class ChatModeView(
                 (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                     android.view.Gravity.START
                 meta.text = post.actorUrl
+            }
+
+            /**
+             * Inbound group-bubble background keyed off the sender's identity:
+             * a rounded faint-tint fill with a 3dp left stripe in the identity
+             * hue. Mirrors the desktop `.chat-row--in .chat-bubble--idN` rule
+             * (`border-left: 3px solid HUE; background: HUE 10-12% over ink-2`).
+             * Built per-bind rather than as eight static drawables so the tint
+             * math stays in one place ([IdentityColor]) and tracks any palette
+             * change in lockstep with desktop.
+             */
+            private fun identityBubbleBackground(agentIdHex: String): android.graphics.drawable.Drawable {
+                val density = itemView.resources.displayMetrics.density
+                val radius = 16f * density
+                val stripe = (3f * density).toInt()
+                // The accent is the full rounded bubble in the identity hue. The
+                // fill covers it except for a `stripe`-wide left band, so only
+                // that band of the hue shows through as the left border. The
+                // fill's left corners are square (the accent's rounded corners
+                // sit under them); its right corners stay rounded.
+                val accent = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    cornerRadius = radius
+                    setColor(IdentityColor.stripeColor(agentIdHex))
+                }
+                val fill = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    // top-left, top-right, bottom-right, bottom-left (x/y pairs).
+                    cornerRadii = floatArrayOf(
+                        0f, 0f, radius, radius, radius, radius, 0f, 0f,
+                    )
+                    setColor(IdentityColor.bubbleTint(agentIdHex))
+                }
+                val layers = android.graphics.drawable.LayerDrawable(arrayOf(accent, fill))
+                layers.setLayerInset(1, stripe, 0, 0, 0)
+                return layers
             }
         }
 
