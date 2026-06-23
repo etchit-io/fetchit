@@ -19,3 +19,10 @@ export function avatarGradientClass(agentId: string): string {
 export function bubbleIdentityClass(agentId: string): string {
   return `chat-bubble--id${identityIndex(agentId)}`;
 }
+
+// Per-identity color class for a group sender-name label, sharing the avatar
+// and bubble index (hue) so the name, avatar, and bubble stripe all read as the
+// one identity.
+export function senderIdentityClass(agentId: string): string {
+  return `chat-sender--id${identityIndex(agentId)}`;
+}

@@ -376,6 +376,53 @@ describe("renderBubble — reply affordance", () => {
   });
 });
 
+describe("renderBubble — group sender attribution", () => {
+  it("renders a sender label in the sender's identity color when attribution is set", () => {
+    const row = renderBubble(
+      bubble({ mine: false, from: "ab".repeat(32), body: "hi all" }),
+      makeHandlers(),
+      "Alice",
+    );
+    const sender = row.querySelector(".chat-bubble__sender");
+    expect(sender).not.toBeNull();
+    expect(sender?.textContent).toBe("Alice");
+    expect(sender?.className).toMatch(/chat-sender--id[0-7]\b/);
+  });
+
+  it("paints no sender label when attribution is omitted (DM / follow-on / own)", () => {
+    const row = renderBubble(bubble({ mine: false, body: "hi" }), makeHandlers());
+    expect(row.querySelector(".chat-bubble__sender")).toBeNull();
+  });
+
+  it("renders the sender label above the bubble body", () => {
+    const row = renderBubble(
+      bubble({ mine: false, from: "ab".repeat(32), body: "morning" }),
+      makeHandlers(),
+      "Alice",
+    );
+    const stack = row.querySelector(".chat-bubble__stack")!;
+    const kids = Array.from(stack.children);
+    const senderIdx = kids.findIndex((k) => k.classList.contains("chat-bubble__sender"));
+    const bubbleIdx = kids.findIndex((k) => k.classList.contains("chat-bubble"));
+    expect(senderIdx).toBeGreaterThanOrEqual(0);
+    expect(senderIdx).toBeLessThan(bubbleIdx);
+  });
+
+  it("bubbleRenderKey changes with attribution so the diff repaints when a label appears/changes", () => {
+    const none = bubbleRenderKey(bubble({ id: "m1" }));
+    const alice = bubbleRenderKey(bubble({ id: "m1" }), "Alice");
+    const bob = bubbleRenderKey(bubble({ id: "m1" }), "Bob");
+    expect(alice).not.toBe(none);
+    expect(alice).not.toBe(bob);
+  });
+
+  it("writes the attribution-aware key onto data-key so reuse stays consistent", () => {
+    const b = bubble({ id: "m1", mine: false, from: "ab".repeat(32) });
+    const row = renderBubble(b, makeHandlers(), "Alice");
+    expect(row.dataset.key).toBe(bubbleRenderKey(b, "Alice"));
+  });
+});
+
 describe("renderBubble — inline image attachment", () => {
   const ATT = { mime: "image/png", width: 8, height: 6, bytes_b64: "iVBORw0KAAA=" };
 

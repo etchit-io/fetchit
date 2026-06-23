@@ -6,7 +6,7 @@
 
 import type { ChatBubble, QuotedRef } from "./state";
 import type { Attachment } from "./types";
-import { bubbleIdentityClass } from "./avatarColor";
+import { bubbleIdentityClass, senderIdentityClass } from "./avatarColor";
 import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
 import { appendInlineMarkdown } from "./markdown";
 import { attachmentDataUrl } from "./imageAttach";
@@ -40,21 +40,36 @@ export interface BubbleHandlers {
 /// existing element instead of recreating it — which is what keeps
 /// the `chat-bubble-pop` enter animation from re-firing on every
 /// store mutation.
-export function bubbleRenderKey(b: ChatBubble): string {
+export function bubbleRenderKey(b: ChatBubble, attribution?: string): string {
   const att = b.attachment ? `${b.attachment.mime}:${b.attachment.width}x${b.attachment.height}` : "";
-  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}|${b.replyTo?.messageId ?? ""}|${att}`;
+  return `${b.id}|${b.status ?? ""}|${b.failureReason ?? ""}|${b.verified ?? ""}|${b.replyTo?.messageId ?? ""}|${att}|${attribution ?? ""}`;
 }
 
+/// Render a bubble. `attribution`, when set, is the sender's display name
+/// shown as a small colored label above the bubble — used for the first
+/// bubble of each consecutive run in a group so senders are named, not just
+/// color-coded. Omitted for DMs, own messages, and follow-on bubbles.
 export function renderBubble(
   b: ChatBubble,
   handlers: BubbleHandlers,
+  attribution?: string,
 ): HTMLElement {
   const row = document.createElement("div");
   row.className = `chat-row chat-row--${b.mine ? "out" : "in"}`;
-  row.dataset.key = bubbleRenderKey(b);
+  row.dataset.key = bubbleRenderKey(b, attribution);
 
   const stack = document.createElement("div");
   stack.className = "chat-bubble__stack";
+
+  // Sender label rides at the very top of the stack, in the sender's identity
+  // hue (matching their avatar and bubble stripe), so a group reads as named
+  // people at a glance.
+  if (attribution) {
+    const sender = document.createElement("div");
+    sender.className = `chat-bubble__sender ${senderIdentityClass(b.from)}`;
+    sender.textContent = attribution;
+    stack.appendChild(sender);
+  }
 
   // Quoted parent renders above the body, independent of whether the
   // body itself collapses to an autonomi preview card.

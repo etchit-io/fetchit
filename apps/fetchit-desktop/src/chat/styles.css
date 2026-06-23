@@ -637,6 +637,27 @@ body.chat-docked {
 .chat-row--in .chat-bubble--id6 { border-left: 3px solid #8fae56; background: color-mix(in srgb, #8fae56 10%, var(--ink-2)); }
 .chat-row--in .chat-bubble--id7 { border-left: 3px solid #6e86a8; background: color-mix(in srgb, #6e86a8 12%, var(--ink-2)); }
 
+/* Group sender label: small, bold, in the sender's identity hue (matching
+   their avatar and bubble stripe) so a group reads as named people. Shown only
+   on the first bubble of a consecutive run. Lightened toward the foreground so
+   small text stays legible on the dark surface while keeping the identity.
+   --bone is the theme-flipping foreground (light on dark, dark on light). */
+.chat-bubble__sender {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  margin: 0 0 2px 4px;
+}
+.chat-sender--id0 { color: color-mix(in srgb, #c9732b 78%, var(--bone)); }
+.chat-sender--id1 { color: color-mix(in srgb, #d9a440 78%, var(--bone)); }
+.chat-sender--id2 { color: color-mix(in srgb, #56b292 78%, var(--bone)); }
+.chat-sender--id3 { color: color-mix(in srgb, #c2553e 78%, var(--bone)); }
+.chat-sender--id4 { color: color-mix(in srgb, #a8743a 78%, var(--bone)); }
+.chat-sender--id5 { color: color-mix(in srgb, #8a5a62 78%, var(--bone)); }
+.chat-sender--id6 { color: color-mix(in srgb, #8fae56 78%, var(--bone)); }
+.chat-sender--id7 { color: color-mix(in srgb, #6e86a8 78%, var(--bone)); }
+
 .chat-bubble__meta {
   font-size: 10px;
   color: var(--ash);
