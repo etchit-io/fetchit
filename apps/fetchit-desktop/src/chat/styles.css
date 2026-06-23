@@ -624,6 +624,19 @@ body.chat-docked {
   box-shadow: var(--edge-highlight);
 }
 
+/* Per-identity accents for inbound bubbles: a left stripe + faint fill tint in
+   the sender's identity hue, matching the avatar gradient (same index), so
+   group senders are scannable at a glance. Subtle and palette-adjacent by
+   design -- variations of the oxidation identity palette, not new colors. */
+.chat-row--in .chat-bubble--id0 { border-left: 3px solid #c9732b; background: color-mix(in srgb, #c9732b 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id1 { border-left: 3px solid #d9a440; background: color-mix(in srgb, #d9a440 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id2 { border-left: 3px solid #56b292; background: color-mix(in srgb, #56b292 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id3 { border-left: 3px solid #c2553e; background: color-mix(in srgb, #c2553e 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id4 { border-left: 3px solid #a8743a; background: color-mix(in srgb, #a8743a 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id5 { border-left: 3px solid #8a5a62; background: color-mix(in srgb, #8a5a62 12%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id6 { border-left: 3px solid #8fae56; background: color-mix(in srgb, #8fae56 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id7 { border-left: 3px solid #6e86a8; background: color-mix(in srgb, #6e86a8 12%, var(--ink-2)); }
+
 .chat-bubble__meta {
   font-size: 10px;
   color: var(--ash);

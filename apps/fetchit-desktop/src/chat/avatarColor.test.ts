@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { avatarGradientClass } from "./avatarColor";
+import { avatarGradientClass, bubbleIdentityClass } from "./avatarColor";
 
 describe("avatarGradientClass", () => {
   it("is deterministic for the same agent id", () => {
@@ -15,5 +15,21 @@ describe("avatarGradientClass", () => {
   it("falls back to g0 on malformed input", () => {
     expect(avatarGradientClass("")).toBe("chat-avatar--g0");
     expect(avatarGradientClass("zz")).toBe("chat-avatar--g0");
+  });
+});
+
+describe("bubbleIdentityClass", () => {
+  it("shares the avatar's index so a person's avatar and bubble match", () => {
+    const id = "07" + "11".repeat(31);
+    expect(bubbleIdentityClass(id)).toBe("chat-bubble--id7");
+    expect(avatarGradientClass(id)).toBe("chat-avatar--g7");
+  });
+  it("maps the first byte modulo 8", () => {
+    expect(bubbleIdentityClass("00" + "11".repeat(31))).toBe("chat-bubble--id0");
+    expect(bubbleIdentityClass("10" + "11".repeat(31))).toBe("chat-bubble--id0");
+    expect(bubbleIdentityClass("0f" + "11".repeat(31))).toBe("chat-bubble--id7");
+  });
+  it("falls back to id0 on malformed input", () => {
+    expect(bubbleIdentityClass("")).toBe("chat-bubble--id0");
   });
 });

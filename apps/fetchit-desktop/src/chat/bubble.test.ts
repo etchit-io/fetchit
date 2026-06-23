@@ -34,6 +34,19 @@ describe("renderBubble — content", () => {
     expect(row.querySelectorAll("a")).toHaveLength(0);
   });
 
+  it("gives an inbound bubble a per-identity accent class; self bubbles get none", () => {
+    const handlers = makeHandlers();
+    const inbound = renderBubble(
+      bubble({ mine: false, from: "ab".repeat(32) }),
+      handlers,
+    ).querySelector(".chat-bubble");
+    expect(inbound?.className).toMatch(/chat-bubble--id[0-7]\b/);
+    const mineBubble = renderBubble(bubble({ mine: true }), handlers).querySelector(
+      ".chat-bubble",
+    );
+    expect(mineBubble?.className).not.toMatch(/chat-bubble--id/);
+  });
+
   it("strips autonomi:// URLs from the text bubble (preview card represents them)", () => {
     const handlers = makeHandlers();
     const row = renderBubble(

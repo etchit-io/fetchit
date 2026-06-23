@@ -6,6 +6,7 @@
 
 import type { ChatBubble, QuotedRef } from "./state";
 import type { Attachment } from "./types";
+import { bubbleIdentityClass } from "./avatarColor";
 import { extractAutonomiAddresses, mountAutonomiPreview } from "./bubblePreview";
 import { appendInlineMarkdown } from "./markdown";
 import { attachmentDataUrl } from "./imageAttach";
@@ -65,6 +66,13 @@ export function renderBubble(
 
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble";
+  // Per-identity accent on inbound bubbles so senders are distinguishable in a
+  // group at a glance — a left stripe + faint tint in the sender's identity
+  // hue, matching their avatar. Self keeps the copper out-bubble. The index is
+  // deterministic from the sender agent id, so a person looks the same always.
+  if (!b.mine) {
+    bubble.classList.add(bubbleIdentityClass(b.from));
+  }
   const showStatus = b.mine && !!b.status;
   if (showStatus) {
     bubble.dataset.status = b.status;
