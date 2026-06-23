@@ -324,6 +324,16 @@ struct GroupChatArgs {
     #[arg(long)]
     engine_a: bool,
 
+    /// Drive the join through the v1 shared join policy
+    /// ([`Client::join_group_auto`]): best-effort native warm-gossip
+    /// convergence first (so existing members converge over gossip), then
+    /// always bridge the `TreeKEM` Welcome over the relay so the joiner is
+    /// guaranteed encryptable even when roster-active-but-keyless. This is
+    /// the path the app shells use. Mutually exclusive with `--engine-a`;
+    /// requires `--invite-file`.
+    #[arg(long)]
+    auto: bool,
+
     /// Path to a UTF-8 outbox file. When set, outbound group lines are
     /// read from this file (resuming from `--cursor-file`) instead of
     /// stdin staying idle. Pair with `--cursor-file`.
@@ -671,7 +681,16 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
             invite.0.len(),
             invite_path.display(),
         );
-        let group = if args.engine_a {
+        if args.engine_a && args.auto {
+            anyhow::bail!("--engine-a and --auto are mutually exclusive");
+        }
+        let group = if args.auto {
+            eprintln!("[peer] joining via the v1 shared policy (join_group_auto)");
+            client
+                .join_group_auto(&invite, Some(display_name))
+                .await
+                .context("Client::join_group_auto(invite)")?
+        } else if args.engine_a {
             eprintln!("[peer] joining via engine-A cross-NAT bridge (join_group_bridged)");
             client
                 .join_group_bridged(&invite, Some(display_name))

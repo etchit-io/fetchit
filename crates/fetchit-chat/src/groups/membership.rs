@@ -53,14 +53,20 @@ fn resolve_membership_wait(raw: Option<String>) -> Duration {
         .map_or(MEMBERSHIP_WAIT_TIMEOUT, Duration::from_secs)
 }
 
-/// Default native-first convergence window before
-/// [`crate::Client::join_group_auto`] falls back to the engine-A relay
-/// bridge. Deliberately shorter than [`MEMBERSHIP_WAIT_TIMEOUT`]: when the
-/// warm-gossip path can reach the owner it converges in seconds, so a
-/// shorter ceiling fails the cold/dual-NAT corner over to the bridge
-/// promptly instead of blocking the full 60s on a mesh that will never
-/// form for that pair.
-pub const NATIVE_FIRST_WAIT: Duration = Duration::from_secs(15);
+/// Default best-effort native convergence window in
+/// [`crate::Client::join_group_auto`] before it proceeds to always-bridge
+/// the Welcome. Deliberately shorter than [`MEMBERSHIP_WAIT_TIMEOUT`] so a
+/// cold/dual-NAT join does not block the full 60s on a mesh that may never
+/// form for that pair before the relay bridge guarantees the keys.
+///
+/// Sized at 25s, not 15s: a live cross-region join showed the gossip roster
+/// converging just after a 15s window, which on the unpatched-daemon path
+/// (no inline `member_joined` to bridge) turned an otherwise-good native
+/// join into a spurious cannot-bridge error. 25s covers that
+/// gossip-into-joiner saturation while still failing fast on a genuinely
+/// unreachable owner. On the patched-daemon path the window only delays the
+/// (always-run) bridge when gossip is slow.
+pub const NATIVE_FIRST_WAIT: Duration = Duration::from_secs(25);
 
 /// Resolve the native-first convergence wait, honouring the
 /// `FETCHIT_NATIVE_FIRST_WAIT_SECS` environment override and falling back
