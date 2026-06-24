@@ -57,13 +57,7 @@ impl ServerConfig {
                 env!("FETCHIT_RELAY_GIT_SHORT"),
             ),
             max_envelope_bytes: fetchit_relay_proto::DEFAULT_MAX_ENVELOPE_BYTES,
-            // 36h so a recipient offline for up to ~1.5 days still gets
-            // their queued messages on reconnect (15 min was far too tight
-            // for phones). Bounded by transit_per_recipient + the global
-            // byte cap, so longer retention can't OOM. NOTE: still RAM-only,
-            // so a relay restart drops the buffer regardless of TTL — the
-            // durable fix is the disk-backed store (reliable-PQ-delivery R2).
-            transit_ttl: Duration::from_secs(36 * 60 * 60),
+            transit_ttl: Duration::from_secs(15 * 60),
             transit_per_recipient: 256,
             transit_total_bytes_cap: 1 << 30,
             challenge_ttl: Duration::from_secs(60),
