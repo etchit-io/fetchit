@@ -30,3 +30,18 @@ fun groupTitle(group: GroupFfi?, groupId: String): String {
     val name = group?.name?.trim()
     return if (!name.isNullOrEmpty()) name else groupId.take(8)
 }
+
+/**
+ * Label for an inbound group message's sender.
+ *
+ * Precedence mirrors desktop's `notify.ts`: the sender's self-attached
+ * [senderName] (the display name that rode the encrypted message) wins when
+ * non-blank, then a locally-saved [contactName], then a short `agent-<6hex>`
+ * form. Keeps group attribution readable for un-saved senders — the common
+ * case — instead of dropping to a raw agent id. Single source of truth so the
+ * bubble label cannot drift from this ordering.
+ */
+fun groupSenderLabel(senderName: String?, contactName: String?, agentIdHex: String): String =
+    senderName?.trim()?.takeIf { it.isNotEmpty() }
+        ?: contactName?.trim()?.takeIf { it.isNotEmpty() }
+        ?: "agent-${agentIdHex.take(6)}"

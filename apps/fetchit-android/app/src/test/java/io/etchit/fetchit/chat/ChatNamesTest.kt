@@ -48,4 +48,31 @@ class ChatNamesTest {
         val agentId = "cafebabe" + "0".repeat(56)
         assertEquals("agent-cafeba", displayNameOrDefault(context, agentId))
     }
+
+    // ── groupSenderLabel: inbound group-sender attribution ───────────────
+
+    @Test
+    fun group_sender_label_prefers_sender_name() {
+        // The name that rode the encrypted message wins (desktop notify.ts parity).
+        assertEquals("Alice", groupSenderLabel("Alice", "Mum", "abcdef".repeat(10) + "abcd"))
+    }
+
+    @Test
+    fun group_sender_label_sender_name_beats_contact() {
+        // Both present -> sender_name still wins, matching desktop.
+        assertEquals("Alice", groupSenderLabel("Alice", "Mum", "ab".repeat(32)))
+    }
+
+    @Test
+    fun group_sender_label_falls_back_to_contact_when_sender_name_blank() {
+        assertEquals("Mum", groupSenderLabel(null, "Mum", "ab".repeat(32)))
+        assertEquals("Mum", groupSenderLabel("   ", "Mum", "ab".repeat(32)))
+    }
+
+    @Test
+    fun group_sender_label_falls_back_to_agent_prefix_when_all_blank() {
+        val agentId = "abcdef1234567890" + "0".repeat(48)
+        assertEquals("agent-abcdef", groupSenderLabel(null, null, agentId))
+        assertEquals("agent-abcdef", groupSenderLabel("  ", "", agentId))
+    }
 }

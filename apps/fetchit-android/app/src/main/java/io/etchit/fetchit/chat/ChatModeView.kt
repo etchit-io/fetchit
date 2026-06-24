@@ -870,15 +870,17 @@ class ChatModeView(
         io.etchit.fetchit.chat.displayNameOrDefault(context, gw.agentIdHex())
 
     /**
-     * Label for an inbound group message's sender [agentIdHex]: a known
-     * contact's display name when one exists, otherwise a short `agent-<6hex>`
-     * form (mirrors the [displayNameOrDefault] fallback shape). The send-time
-     * sender_name is not threaded onto [ChatMessage]; resolving locally keeps
-     * the label consistent with how the same agent shows elsewhere.
+     * Label for an inbound group message's sender: the sender's self-attached
+     * [senderName] (which rides the encrypted message) when present, else a
+     * known contact's display name, else a short `agent-<6hex>` form. Delegates
+     * the precedence to [io.etchit.fetchit.chat.groupSenderLabel] so it stays
+     * in lockstep with desktop's `notify.ts` ordering.
      */
-    private fun groupSenderLabel(agentIdHex: String): String =
-        controller.contacts.contacts.value.find { it.agentIdHex == agentIdHex }?.displayName
-            ?: "agent-${agentIdHex.take(6)}"
+    private fun groupSenderLabel(agentIdHex: String, senderName: String?): String {
+        val contactName = controller.contacts.contacts.value
+            .find { it.agentIdHex == agentIdHex }?.displayName
+        return io.etchit.fetchit.chat.groupSenderLabel(senderName, contactName, agentIdHex)
+    }
 
     /** Flush the outbox now, in response to a tap on a failed message bubble. */
     private fun retryOutbox() {
@@ -1007,7 +1009,7 @@ class ChatModeView(
                             sender.visibility = View.GONE
                         } else {
                             sender.visibility = View.VISIBLE
-                            sender.text = groupSenderLabel(groupSender)
+                            sender.text = groupSenderLabel(groupSender, msg.senderName)
                             sender.setTextColor(IdentityColor.senderNameColor(groupSender))
                         }
                     } else {

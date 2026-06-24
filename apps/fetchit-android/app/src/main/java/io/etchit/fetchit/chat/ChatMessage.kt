@@ -24,6 +24,13 @@ data class ChatMessage(
      * for outbound messages. The UI renders a sender label when non-null.
      */
     val senderAgentIdHex: String? = null,
+    /**
+     * Sender's self-attached display name that rode the encrypted group
+     * message, when present. Preferred over a locally-saved contact name and
+     * the `agent-<hex>` fallback for the inbound group sender label. Null for
+     * DMs and outbound messages.
+     */
+    val senderName: String? = null,
 )
 
 /** One bridged fediverse post, already reduced to plain text. */

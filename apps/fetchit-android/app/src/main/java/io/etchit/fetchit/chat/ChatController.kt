@@ -318,6 +318,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                             // Group bubbles attribute the sender; the UI shows a
                             // label off this (DMs leave it null).
                             senderAgentIdHex = ev.fromAgentIdHex,
+                            // Sender's self-attached display name (rides the
+                            // encrypted message); the label prefers it over the
+                            // agent-id fallback.
+                            senderName = ev.senderName,
                         ),
                     )
                     is ChatEventFfi.Receipt -> convo.markDelivered(ev.messageId)
