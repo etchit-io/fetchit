@@ -916,10 +916,12 @@ pub fn run() {
     // rustls 0.23 refuses to auto-select a crypto provider when both
     // `ring` and `aws-lc-rs` are linked (a transitive dep pulls aws-lc-rs
     // in alongside ring), panicking on the first TLS handshake — which
-    // breaks every chat/relay/x0xd HTTPS call. Install ring as the
-    // process-wide default before anything touches the network. Ignore
-    // the error: a second call (e.g. test re-entry) just means it's set.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // breaks every chat/relay/x0xd HTTPS call. Install aws-lc-rs (NOT
+    // ring): it backs ant-quic's post-quantum crypto as well as the relay
+    // TLS, so ring would silently drop PQC on the QUIC path. Matches the
+    // FFI (chat_ffi.rs). Install before anything touches the network;
+    // ignore the error — a second call just means a provider is already set.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Boot the x0xd supervisor before the Tauri runtime starts.
     // In E1, bundled_x0xd_binary_path() returns None so this always
