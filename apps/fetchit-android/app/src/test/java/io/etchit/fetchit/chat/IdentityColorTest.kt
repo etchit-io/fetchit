@@ -64,14 +64,16 @@ class IdentityColorTest {
     // ── initials: avatar-label helper (mirrors desktop avatarColor.initials) ──
 
     @Test
-    fun initials_take_first_letter_of_the_first_two_words() {
-        assertEquals("AL", IdentityColor.initials("Ada Lovelace"))
-        assertEquals("GH", IdentityColor.initials("  grace   hopper  "))
+    fun initials_is_the_first_letter_of_the_name() {
+        // A single first letter (Josh -> J), uppercased, for one or many words.
+        assertEquals("J", IdentityColor.initials("Josh"))
+        assertEquals("A", IdentityColor.initials("Ada Lovelace"))
+        assertEquals("M", IdentityColor.initials("Mononym"))
     }
 
     @Test
-    fun initials_take_first_two_letters_of_a_single_word() {
-        assertEquals("MO", IdentityColor.initials("Mononym"))
+    fun initials_trims_and_uppercases() {
+        assertEquals("G", IdentityColor.initials("  grace hopper  "))
     }
 
     @Test

@@ -24,21 +24,13 @@ object IdentityColor {
         agentIdHex.take(2).toIntOrNull(16)?.rem(8) ?: 0
 
     /**
-     * Up-to-two-letter initials for an avatar fallback, mirroring desktop
-     * `avatarColor.initials`: two+ words -> first letter of the first two;
-     * one word -> its first two letters; blank/whitespace -> "?". Always
-     * uppercased. One source of truth so the identity badge, the group
-     * member list, and any avatar derive their label the same way across
-     * both shells.
+     * Single-letter avatar initial: the first letter of the name, uppercased;
+     * blank/whitespace -> "?". One source of truth so the identity badge, the
+     * group member list, and any avatar derive their label the same way across
+     * both shells (desktop `avatarColor.initials` mirrors this).
      */
-    fun initials(name: String): String {
-        val parts = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-        return when (parts.size) {
-            0 -> "?"
-            1 -> parts[0].take(2).uppercase()
-            else -> (parts[0].take(1) + parts[1].take(1)).uppercase()
-        }
-    }
+    fun initials(name: String): String =
+        name.trim().firstOrNull()?.uppercase() ?: "?"
 
     // The eight oxidation hues, in index order, exactly as the desktop palette
     // (.chat-avatar--g0..7 / .chat-bubble--id0..7 / .chat-sender--id0..7):
