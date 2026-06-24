@@ -152,13 +152,16 @@
     <!-- Chat: conversation list + onboarding -->
     <string name="chat_connecting">connecting…</string>
     <string name="chat_connection_lost">connection lost</string>
-    <string name="chat_empty_hint">scan a friend\'s code, or share yours</string>
+    <string name="chat_empty_hint">Add someone to start chatting</string>
     <string name="chat_share_my_code">share my code</string>
     <string name="chat_scan_a_code">scan a code</string>
     <string name="chat_add_contact">add contact</string>
     <string name="chat_add_contact_title">add a contact</string>
     <string name="chat_add_contact_import">import</string>
-    <string name="chat_paste_pair_uri_hint">paste x0x://pair/… here</string>
+    <!-- Add-contact input hint. Leads with plain language, not the raw
+         x0x://pair/ scheme — the input still accepts a pasted pair URI.
+         Matches the desktop add-contact placeholder verbatim. -->
+    <string name="chat_paste_pair_uri_hint">Paste a share link, or @name@etchit.io</string>
     <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
@@ -184,7 +187,7 @@
     <string name="chat_new_group_create">create</string>
     <string name="chat_join_group">join group</string>
     <string name="chat_join_group_title">join a group</string>
-    <string name="chat_join_group_hint">paste x0x://invite/… here</string>
+    <string name="chat_join_group_hint">Paste your group invite link</string>
     <string name="chat_join_group_join">join</string>
     <string name="chat_invalid_invite_uri">that doesn\'t look like a valid group invite</string>
     <string name="chat_group_created">created %1$s</string>
