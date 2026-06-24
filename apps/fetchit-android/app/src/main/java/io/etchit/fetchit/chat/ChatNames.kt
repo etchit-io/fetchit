@@ -1,6 +1,7 @@
 package io.etchit.fetchit.chat
 
 import android.content.Context
+import io.etchit.fetchit.R
 import io.etchit.fetchit.SettingsStore
 import uniffi.fetchit_ffi.GroupFfi
 
@@ -54,3 +55,13 @@ fun groupSenderLabel(senderName: String?, contactName: String?, agentIdHex: Stri
     senderName?.trim()?.takeIf { it.isNotEmpty() }
         ?: contactName?.trim()?.takeIf { it.isNotEmpty() }
         ?: "agent-${agentIdHex.take(6)}"
+
+/**
+ * String-resource id for a conversation row's destructive overflow action:
+ * `chat_leave_group` for a group row, `chat_remove_chat` for a contact row.
+ * Kept as a pure function (returns the res id, doesn't resolve the string) so
+ * the kind-aware label choice is JVM-testable without a Context, mirroring
+ * desktop's kind-aware "Remove this chat / Leave this group".
+ */
+fun rowRemoveLabel(isGroup: Boolean): Int =
+    if (isGroup) R.string.chat_leave_group else R.string.chat_remove_chat

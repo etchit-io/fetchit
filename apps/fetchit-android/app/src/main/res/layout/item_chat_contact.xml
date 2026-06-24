@@ -49,4 +49,16 @@
 
     </LinearLayout>
 
+    <!-- Per-row overflow: remove a chat / leave a group. Hidden on the pinned
+         fediverse row, which has no destructive action. -->
+    <ImageButton
+        android:id="@+id/contactRowMore"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginStart="8dp"
+        android:src="@drawable/ic_more_vert"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:scaleType="centerInside"
+        android:contentDescription="@string/chat_row_more" />
+
 </LinearLayout>

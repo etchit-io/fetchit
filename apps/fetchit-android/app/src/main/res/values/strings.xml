@@ -7,6 +7,7 @@
     <string name="hint_address">Autonomi address</string>
     <string name="action_retry">retry</string>
     <string name="action_close">close</string>
+    <string name="action_cancel">cancel</string>
     <!-- Success message shown for any binary that fetch&gt;it can't
          render natively. Open / Save buttons sit below it. -->
     <string name="binary_success_size">✓ %1$s downloaded</string>
@@ -225,6 +226,17 @@
     <string name="chat_group_join_failed">couldn\'t join the group — check the invite and try again</string>
     <string name="chat_group_sender_unknown">someone</string>
     <string name="chat_group_lock_glyph">🔒</string>
+
+    <!-- Chat: remove a chat / leave a group from the list row overflow -->
+    <string name="chat_row_more">more</string>
+    <string name="chat_remove_chat">Remove this chat</string>
+    <string name="chat_leave_group">Leave this group</string>
+    <string name="chat_remove_chat_title">Remove this chat?</string>
+    <string name="chat_remove_chat_message">%1$s will be deleted from this device.</string>
+    <string name="chat_remove_chat_confirm">remove</string>
+    <string name="chat_leave_group_title">Leave this group?</string>
+    <string name="chat_leave_group_message">You\'ll need a new invite to rejoin %1$s.</string>
+    <string name="chat_leave_group_confirm">leave</string>
 
     <!-- Chat: thread screen -->
     <string name="thread_back_glyph">‹</string>

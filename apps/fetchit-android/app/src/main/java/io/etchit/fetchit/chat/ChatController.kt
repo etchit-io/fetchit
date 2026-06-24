@@ -149,6 +149,27 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     }
 
     /**
+     * Remove a contact from the conversation list. Asks the engine to forget
+     * the peer, then drops it from the local contact store so the row clears
+     * even when the engine call fails (e.g. offline) -- the engine remove is
+     * idempotent and best-effort, mirroring the desktop affordance. The local
+     * delete is the user-visible effect and always runs.
+     */
+    suspend fun removeContact(agentIdHex: String) {
+        removeContactVia(gateway, agentIdHex) { contacts.delete(agentIdHex) }
+    }
+
+    /**
+     * Leave a group from the conversation list. Asks the engine to leave, then
+     * refreshes the group list so the row disappears. The leave failure is
+     * swallowed (mirrors [refreshGroups]); the refresh reconciles the list with
+     * the engine's actual membership either way.
+     */
+    suspend fun leaveGroup(groupId: String) {
+        leaveGroupVia(gateway, groupId) { refreshGroups() }
+    }
+
+    /**
      * Load the agent's groups into [groups] and ensure each has a conversation
      * flow in [conversations] (keyed by [ConversationStore.convKeyGroup]) so the
      * list screen can render a row -- with title `name ?: groupId.take(8)` --
@@ -330,6 +351,61 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                 }
             }
             onStopped(false)
+        }
+
+        /**
+         * Ask [gw] (if connected) to forget [agentIdHex], swallowing+logging any
+         * failure, then run [dropLocal] to clear the local store. The local drop
+         * is the user-visible effect and always runs, even when [gw] is `null`
+         * (not connected) or the engine call fails (e.g. offline) — the engine
+         * remove is best-effort and idempotent.
+         *
+         * Companion function so the swallow-then-drop seam is JVM-testable with a
+         * [FakeGateway], mirroring [pumpEvents].
+         */
+        suspend fun removeContactVia(
+            gw: ChatGateway?,
+            agentIdHex: String,
+            logWarn: (String, Throwable) -> Unit = { msg, t ->
+                android.util.Log.w("fetchit.chat", msg, t)
+            },
+            dropLocal: suspend () -> Unit,
+        ) {
+            if (gw != null) {
+                try {
+                    gw.removeContact(agentIdHex)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logWarn("removeContact failed", e)
+                }
+            }
+            dropLocal()
+        }
+
+        /**
+         * Ask [gw] to leave [groupId], swallowing+logging any failure, then run
+         * [refresh] to reconcile the group list with the engine's membership.
+         * No-op when [gw] is `null`. Companion function for the same JVM-test
+         * reason as [removeContactVia].
+         */
+        suspend fun leaveGroupVia(
+            gw: ChatGateway?,
+            groupId: String,
+            logWarn: (String, Throwable) -> Unit = { msg, t ->
+                android.util.Log.w("fetchit.chat", msg, t)
+            },
+            refresh: suspend () -> Unit,
+        ) {
+            if (gw == null) return
+            try {
+                gw.leaveGroup(groupId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logWarn("leaveGroup failed", e)
+            }
+            refresh()
         }
 
         /**

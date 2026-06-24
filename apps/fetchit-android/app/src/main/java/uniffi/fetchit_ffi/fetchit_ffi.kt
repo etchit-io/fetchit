@@ -775,6 +775,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -814,6 +818,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_join_group(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_leave_group(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_list_groups(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_next_event(
@@ -823,6 +829,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_outbox_snapshot(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_publish_outcome(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_retry_outbox(
 ): Short
@@ -911,6 +919,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_import_pair_uri(`ptr`: Pointer,`uri`
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_join_group(`ptr`: Pointer,`invite`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_leave_group(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_list_groups(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_next_event(`ptr`: Pointer,
@@ -920,6 +930,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_outbox_snapshot(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_pair_publish_outcome(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_pair_share_uri(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_remove_contact(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_retry_outbox(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1113,6 +1125,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 13616.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_leave_group() != 25370.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_list_groups() != 779.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1126,6 +1141,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri() != 50989.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact() != 56807.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_retry_outbox() != 56685.toShort()) {
@@ -1677,6 +1695,19 @@ public interface ChatClientInterface {
     suspend fun `joinGroup`(`invite`: kotlin.String, `displayName`: kotlin.String?): GroupFfi
     
     /**
+     * Leave a group, dropping it from the local list.
+     *
+     * Mirrors the desktop `chat_group_leave` command. Rejoining requires a
+     * fresh invite, so the shell should confirm before calling.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+     * [`ChatFfiError::Network`] on relay or x0xd failure.
+     */
+    suspend fun `leaveGroup`(`groupId`: kotlin.String)
+    
+    /**
      * List the groups this agent belongs to.
      *
      * Groups from x0xd's list omit their confidentiality, so the returned
@@ -1731,6 +1762,19 @@ public interface ChatClientInterface {
      * [`ChatFfiError::Invalid`] when pair URI construction fails.
      */
     suspend fun `pairShareUri`(): kotlin.String
+    
+    /**
+     * Remove a contact, dropping the conversation from the local store.
+     *
+     * Mirrors the desktop `chat_remove_contact` command: the engine forgets
+     * the peer; the shell is responsible for clearing any cached UI state.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `agent_id_hex` is not valid 64-hex.
+     * [`ChatFfiError::Network`] on store failure.
+     */
+    suspend fun `removeContact`(`agentIdHex`: kotlin.String)
     
     /**
      * Kick the outbox driver to re-send every retryable bubble now -- the
@@ -2092,6 +2136,39 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Leave a group, dropping it from the local list.
+     *
+     * Mirrors the desktop `chat_group_leave` command. Rejoining requires a
+     * fresh invite, so the shell should confirm before calling.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+     * [`ChatFfiError::Network`] on relay or x0xd failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `leaveGroup`(`groupId`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_leave_group(
+                thisPtr,
+                FfiConverterString.lower(`groupId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * List the groups this agent belongs to.
      *
      * Groups from x0xd's list omit their confidentiality, so the returned
@@ -2225,6 +2302,39 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Remove a contact, dropping the conversation from the local store.
+     *
+     * Mirrors the desktop `chat_remove_contact` command: the engine forgets
+     * the peer; the shell is responsible for clearing any cached UI state.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `agent_id_hex` is not valid 64-hex.
+     * [`ChatFfiError::Network`] on store failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `removeContact`(`agentIdHex`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_remove_contact(
+                thisPtr,
+                FfiConverterString.lower(`agentIdHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )

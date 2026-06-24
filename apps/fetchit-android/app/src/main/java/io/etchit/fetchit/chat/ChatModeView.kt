@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -290,6 +291,8 @@ class ChatModeView(
             onFeedTap = { showScreen(Screen.Feed, pushToStack = true) },
             onContactTap = { contact -> openThread(contact.agentIdHex) },
             onGroupTap = { group -> openGroupThread(group.groupId) },
+            onRemoveContact = { anchor, contact -> showContactRowMenu(anchor, contact) },
+            onLeaveGroup = { anchor, group -> showGroupRowMenu(anchor, group) },
         )
         rv.layoutManager = LinearLayoutManager(context)
         rv.adapter = adapter
@@ -391,6 +394,71 @@ class ChatModeView(
             }
             show()
         }
+    }
+
+    /**
+     * Per-row overflow popup off a conversation row's "⋮" button. One
+     * kind-aware destructive entry: "Remove this chat" for a contact, "Leave
+     * this group" for a group ([rowRemoveLabel] picks the label). Selecting it
+     * opens the confirm dialog. Mirrors desktop's per-row remove affordance.
+     */
+    private fun showContactRowMenu(anchor: View, contact: ChatContact) {
+        val label = context.getString(rowRemoveLabel(isGroup = false))
+        PopupMenu(context, anchor).apply {
+            menu.add(label)
+            setOnMenuItemClickListener {
+                confirmRemoveContact(contact)
+                true
+            }
+            show()
+        }
+    }
+
+    private fun showGroupRowMenu(anchor: View, group: GroupFfi) {
+        val label = context.getString(rowRemoveLabel(isGroup = true))
+        PopupMenu(context, anchor).apply {
+            menu.add(label)
+            setOnMenuItemClickListener {
+                confirmLeaveGroup(group)
+                true
+            }
+            show()
+        }
+    }
+
+    /**
+     * Confirm before removing a contact: destructive verb as the positive
+     * button, cancel as negative. On confirm the controller forgets the peer
+     * and drops it from the local store so the row clears. Mirrors desktop's
+     * confirm-before-remove.
+     */
+    private fun confirmRemoveContact(contact: ChatContact) {
+        val name = contact.displayName.ifBlank { "${contact.agentIdHex.take(8)}…" }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_remove_chat_title))
+            .setMessage(context.getString(R.string.chat_remove_chat_message, name))
+            .setPositiveButton(context.getString(R.string.chat_remove_chat_confirm)) { _, _ ->
+                lifecycleScope.launch { controller.removeContact(contact.agentIdHex) }
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
+    }
+
+    /**
+     * Confirm before leaving a group: destructive verb as the positive button,
+     * cancel as negative. On confirm the controller leaves and refreshes the
+     * group list so the row disappears.
+     */
+    private fun confirmLeaveGroup(group: GroupFfi) {
+        val title = groupTitle(group, group.groupId)
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_leave_group_title))
+            .setMessage(context.getString(R.string.chat_leave_group_message, title))
+            .setPositiveButton(context.getString(R.string.chat_leave_group_confirm)) { _, _ ->
+                lifecycleScope.launch { controller.leaveGroup(group.groupId) }
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
     }
 
     private suspend fun onShareMyCodeClicked() {
@@ -1167,6 +1235,8 @@ class ChatModeView(
         private val onFeedTap: () -> Unit,
         private val onContactTap: (ChatContact) -> Unit,
         private val onGroupTap: (GroupFfi) -> Unit,
+        private val onRemoveContact: (View, ChatContact) -> Unit,
+        private val onLeaveGroup: (View, GroupFfi) -> Unit,
     ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         private val TYPE_FEED = 0
@@ -1222,8 +1292,10 @@ class ChatModeView(
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             when (val row = rows[position]) {
                 is Row.Fediverse -> (holder as FeedViewHolder).bind(onFeedTap)
-                is Row.Group -> (holder as GroupViewHolder).bind(row.group, row.preview, onGroupTap)
-                is Row.Contact -> (holder as ContactViewHolder).bind(row.contact, row.preview, onContactTap)
+                is Row.Group ->
+                    (holder as GroupViewHolder).bind(row.group, row.preview, onGroupTap, onLeaveGroup)
+                is Row.Contact ->
+                    (holder as ContactViewHolder).bind(row.contact, row.preview, onContactTap, onRemoveContact)
             }
         }
     }
@@ -1232,11 +1304,16 @@ class ChatModeView(
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+        private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
         fun bind(onTap: () -> Unit) {
             shortId.text = "✦"
             name.text = context.getString(R.string.chat_feed_title)
             preview.text = context.getString(R.string.chat_feed_subtitle)
+            // The pinned fediverse row is not removable; hide its overflow and
+            // detach the listener a recycled holder might still carry.
+            more.visibility = View.GONE
+            more.setOnClickListener(null)
             itemView.setOnClickListener { onTap() }
         }
     }
@@ -1245,16 +1322,20 @@ class ChatModeView(
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+        private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
         fun bind(
             contact: ChatContact,
             lastPreview: String,
             onTap: (ChatContact) -> Unit,
+            onMore: (View, ChatContact) -> Unit,
         ) {
             shortId.text = "${contact.agentIdHex.take(8)}…"
             name.text = contact.displayName
             preview.text = lastPreview
             itemView.setOnClickListener { onTap(contact) }
+            more.visibility = View.VISIBLE
+            more.setOnClickListener { anchor -> onMore(anchor, contact) }
         }
     }
 
@@ -1262,11 +1343,13 @@ class ChatModeView(
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+        private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
         fun bind(
             group: GroupFfi,
             lastPreview: String,
             onTap: (GroupFfi) -> Unit,
+            onMore: (View, GroupFfi) -> Unit,
         ) {
             // A lock glyph marks private (PQ) groups; public / unknown-kind
             // groups show a generic group glyph in the id slot.
@@ -1275,6 +1358,8 @@ class ChatModeView(
             name.text = groupTitle(group, group.groupId)
             preview.text = lastPreview
             itemView.setOnClickListener { onTap(group) }
+            more.visibility = View.VISIBLE
+            more.setOnClickListener { anchor -> onMore(anchor, group) }
         }
     }
 

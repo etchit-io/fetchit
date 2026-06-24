@@ -28,6 +28,13 @@ class FakeGateway : ChatGateway {
     val invitesRequested = mutableListOf<String>()
     var groups: List<GroupFfi> = emptyList()
 
+    // Remove / leave recorders (delegation assertions). When set, the matching
+    // throw lets a test exercise the swallow-the-failure path.
+    val removedContacts = mutableListOf<String>()
+    val leftGroups = mutableListOf<String>()
+    var removeContactThrows = false
+    var leaveGroupThrows = false
+
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
     override suspend fun pairShareUri() = "x0x://pair/${"f".repeat(64)}?r=relay"
@@ -52,6 +59,14 @@ class FakeGateway : ChatGateway {
     override suspend fun listGroups(): List<GroupFfi> = groups
     override suspend fun groupInvite(groupId: String): String {
         invitesRequested += groupId; return "x0x://invite/$groupId"
+    }
+    override suspend fun removeContact(agentIdHex: String) {
+        removedContacts += agentIdHex
+        if (removeContactThrows) throw RuntimeException("remove boom")
+    }
+    override suspend fun leaveGroup(groupId: String) {
+        leftGroups += groupId
+        if (leaveGroupThrows) throw RuntimeException("leave boom")
     }
     override suspend fun nextEvent(): ChatEventFfi? = events.receive()
     override fun disconnect() { events.trySend(null) }
@@ -119,6 +134,80 @@ class ChatControllerTest {
     }
 
     @Test
+    fun removeContactDelegatesToGatewayThenDropsLocal() = runTest {
+        val gw = FakeGateway()
+        var dropped: String? = null
+        ChatController.removeContactVia(gw, "a".repeat(64), logWarn = { _, _ -> }) {
+            dropped = "a".repeat(64)
+        }
+        // Engine forget happened, then the local drop ran.
+        assertEquals("a".repeat(64), gw.removedContacts.single())
+        assertEquals("a".repeat(64), dropped)
+    }
+
+    @Test
+    fun removeContactDropsLocalEvenWhenGatewayFails() = runTest {
+        val gw = FakeGateway().apply { removeContactThrows = true }
+        var dropped = false
+        ChatController.removeContactVia(gw, "a".repeat(64), logWarn = { _, _ -> }) {
+            dropped = true
+        }
+        // The engine call was attempted (recorded) and threw, but the local
+        // drop still ran — the user-visible removal must not depend on the relay.
+        assertEquals("a".repeat(64), gw.removedContacts.single())
+        assertTrue(dropped)
+    }
+
+    @Test
+    fun removeContactDropsLocalWhenNotConnected() = runTest {
+        var dropped = false
+        ChatController.removeContactVia(gw = null, agentIdHex = "a".repeat(64)) {
+            dropped = true
+        }
+        assertTrue(dropped)
+    }
+
+    @Test
+    fun leaveGroupDelegatesToGatewayThenRefreshes() = runTest {
+        val gw = FakeGateway()
+        var refreshed = false
+        ChatController.leaveGroupVia(gw, "g".repeat(64), logWarn = { _, _ -> }) {
+            refreshed = true
+        }
+        assertEquals("g".repeat(64), gw.leftGroups.single())
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun leaveGroupRefreshesEvenWhenGatewayFails() = runTest {
+        val gw = FakeGateway().apply { leaveGroupThrows = true }
+        var refreshed = false
+        ChatController.leaveGroupVia(gw, "g".repeat(64), logWarn = { _, _ -> }) {
+            refreshed = true
+        }
+        assertEquals("g".repeat(64), gw.leftGroups.single())
+        // Failure swallowed; the refresh still reconciles the list.
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun leaveGroupNoOpsWhenNotConnected() = runTest {
+        var refreshed = false
+        ChatController.leaveGroupVia(gw = null, groupId = "g".repeat(64)) {
+            refreshed = true
+        }
+        // No gateway: nothing to leave and no refresh.
+        assertTrue(!refreshed)
+    }
+
+    @Test
+    fun rowRemoveLabelIsKindAware() {
+        // Group rows leave; contact rows remove. Pure res-id mapping, no Context.
+        assertEquals(io.etchit.fetchit.R.string.chat_leave_group, rowRemoveLabel(isGroup = true))
+        assertEquals(io.etchit.fetchit.R.string.chat_remove_chat, rowRemoveLabel(isGroup = false))
+    }
+
+    @Test
     fun receiptMarksDelivered() = runTest {
         val gw = FakeGateway()
         val convo = ConversationStore()
@@ -162,6 +251,8 @@ class ChatControllerTest {
             override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? = null
             override suspend fun listGroups(): List<GroupFfi> = emptyList()
             override suspend fun groupInvite(groupId: String): String = ""
+            override suspend fun removeContact(agentIdHex: String) {}
+            override suspend fun leaveGroup(groupId: String) {}
             override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
             override fun disconnect() {}
         }

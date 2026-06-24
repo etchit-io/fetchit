@@ -69,6 +69,15 @@ interface ChatGateway {
     suspend fun groupInvite(groupId: String): String
 
     /**
+     * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
+     * dropping its conversation. The caller clears any local UI/store state.
+     */
+    suspend fun removeContact(agentIdHex: String)
+
+    /** Leave the group [groupId]; rejoining needs a fresh invite. */
+    suspend fun leaveGroup(groupId: String)
+
+    /**
      * Block until the next [ChatEventFfi] arrives from the relay, or return
      * `null` when the client has been disconnected and the event queue is
      * drained.
@@ -98,6 +107,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.sendGroupMessage(groupId, body, senderName)
     override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
+    override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
+    override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun nextEvent(): ChatEventFfi? = inner.nextEvent()
     override fun disconnect() = inner.disconnect()
 }

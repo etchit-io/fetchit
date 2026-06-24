@@ -857,6 +857,49 @@ impl ChatClient {
         Ok(invite.0)
     }
 
+    /// Remove a contact, dropping the conversation from the local store.
+    ///
+    /// Mirrors the desktop `chat_remove_contact` command: the engine forgets
+    /// the peer; the shell is responsible for clearing any cached UI state.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `agent_id_hex` is not valid 64-hex.
+    /// [`ChatFfiError::Network`] on store failure.
+    pub async fn remove_contact(&self, agent_id_hex: String) -> Result<(), ChatFfiError> {
+        let id = fetchit_chat::identity::AgentId::parse(agent_id_hex).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: e.to_string(),
+            }
+        })?;
+        self.inner
+            .contacts()
+            .remove(&id)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Leave a group, dropping it from the local list.
+    ///
+    /// Mirrors the desktop `chat_group_leave` command. Rejoining requires a
+    /// fresh invite, so the shell should confirm before calling.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn leave_group(&self, group_id: String) -> Result<(), ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        self.inner
+            .groups()
+            .leave(&gid)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
     /// Drain the next inbound event. Returns `None` when the pump has
     /// shut down (relay disconnected and all buffered events consumed).
     ///
