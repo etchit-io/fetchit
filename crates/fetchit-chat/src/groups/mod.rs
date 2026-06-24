@@ -261,6 +261,15 @@ struct AddMemberRequest<'a> {
     display_name: Option<&'a str>,
 }
 
+/// Body for `PATCH /groups/<id>` (group metadata update). Only the
+/// fields we set are serialized; an omitted field leaves x0xd's value
+/// untouched. We only ever set `name` (rename).
+#[derive(Serialize)]
+struct UpdateGroupRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+}
+
 #[derive(Deserialize)]
 struct GroupsResponse {
     #[serde(default)]
@@ -649,6 +658,36 @@ impl<'a> Endpoint<'a> {
         self.http.delete(&path).await
     }
 
+    /// Rename a group. `PATCH /groups/<id>` with the new name; x0xd
+    /// gates it to admin+ and propagates a `GroupMetadataUpdated` event
+    /// so other members see the new name.
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces (a non-admin caller
+    /// 4xxs as [`ChatError::Daemon`]).
+    pub async fn rename(&self, group: &GroupId, name: &str) -> Result<()> {
+        let path = format!("/groups/{}", group.as_str());
+        let _: serde_json::Value = self
+            .http
+            .patch_json(&path, &UpdateGroupRequest { name: Some(name) })
+            .await?;
+        Ok(())
+    }
+
+    /// Ban a member. `POST /groups/<id>/ban/<agent_id>`; x0xd gates to
+    /// admin+, refuses to ban the owner, removes the member (driving the
+    /// `TreeKEM` re-key for a private group), and blocks their rejoin.
+    /// Stronger than [`Self::remove_member`], which a banned-then-removed
+    /// member could undo with a fresh invite.
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces.
+    pub async fn ban_member(&self, group: &GroupId, agent_id: &AgentId) -> Result<()> {
+        let path = format!("/groups/{}/ban/{}", group.as_str(), agent_id.0);
+        let _: serde_json::Value = self.http.post_json(&path, &serde_json::json!({})).await?;
+        Ok(())
+    }
+
     /// Fetch the recent message history for a group. Daemon-side
     /// messages don't carry a stable `message_id` on public groups, so
     /// we synthesise one from the cryptographic signature (which is
@@ -976,6 +1015,44 @@ mod tests {
             .await
             .expect("remove_member");
         // Unmatched (wrong) route would 404 -> the mount asserts the DELETE path.
+    }
+
+    #[tokio::test]
+    async fn rename_patches_the_group_with_the_new_name() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("PATCH"))
+            .and(path(format!("/groups/{gid}")))
+            .and(body_partial_json(serde_json::json!({ "name": "New Name" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        Endpoint::new(&http)
+            .rename(&GroupId::parse(gid).unwrap(), "New Name")
+            .await
+            .expect("rename");
+    }
+
+    #[tokio::test]
+    async fn ban_member_posts_to_the_ban_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        let target = "b".repeat(64);
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{gid}/ban/{target}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        Endpoint::new(&http)
+            .ban_member(&GroupId::parse(gid).unwrap(), &AgentId(target.clone()))
+            .await
+            .expect("ban");
     }
 
     #[tokio::test]

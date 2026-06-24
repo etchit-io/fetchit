@@ -4,7 +4,12 @@
 // the display name they joined with, else a saved-contact label, else a
 // short agent id.
 
-import { groupMembers, groupRemoveMember } from "./api";
+import {
+  groupBanMember,
+  groupMembers,
+  groupRemoveMember,
+  groupRename,
+} from "./api";
 import { avatarGradientClass, initials } from "./avatarColor";
 import { chatConfirm } from "./confirmDialog";
 import { friendlyError } from "./errors";
@@ -15,6 +20,9 @@ export interface MemberListOpts {
   groupTitle: string;
   store: ChatStore;
   onClose: () => void;
+  /// Called after a change that the rest of the app should pick up
+  /// (rename, remove, ban) so the caller can refresh groups/roster.
+  onChanged?: () => void;
 }
 
 /// Resolve a member's display name: the name they joined with (from the
@@ -84,8 +92,9 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
     }
     status.hidden = true;
     let count = members.length;
+    let currentName = opts.groupTitle;
     const renderCount = (): void => {
-      title.textContent = `In ${opts.groupTitle} · ${count}`;
+      title.textContent = `In ${currentName} · ${count}`;
     };
     renderCount();
 
@@ -93,6 +102,46 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
     // x0xd is the real gate, this just hides controls that would 4xx.
     const myRole = members.find((m) => m.agent_id === me)?.role;
     const canModerate = myRole === "owner" || myRole === "admin";
+
+    // Owner/admin: click the title to rename the group inline.
+    if (canModerate) {
+      title.classList.add("chat-members__title--editable");
+      title.title = "Rename this group";
+      title.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "chat-members__rename";
+        input.value = currentName;
+        title.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        const finish = (commit: boolean): void => {
+          if (done) return;
+          done = true;
+          const next = input.value.trim();
+          input.replaceWith(title);
+          renderCount();
+          if (!commit || next === "" || next === currentName) return;
+          void (async () => {
+            try {
+              await groupRename(opts.groupId, next);
+              currentName = next;
+              renderCount();
+              opts.onChanged?.();
+            } catch (e) {
+              status.hidden = false;
+              status.textContent = `Couldn't rename: ${friendlyError(e)}`;
+            }
+          })();
+        };
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") finish(true);
+          else if (e.key === "Escape") finish(false);
+        });
+        input.addEventListener("blur", () => finish(true));
+      });
+    }
 
     for (const m of members) {
       const li = document.createElement("li");
@@ -118,36 +167,59 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
         li.appendChild(tag);
       }
 
-      // An owner/admin may remove any non-owner who is not themselves.
+      // An owner/admin may remove (kick) or ban any non-owner who is not
+      // themselves. Both confirm; on success the row drops and the app
+      // refreshes. Ban is the stronger action (blocks rejoin).
       if (canModerate && m.agent_id !== me && m.role !== "owner") {
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.className = "chat-member__remove";
-        remove.textContent = "Remove";
-        remove.title = `Remove ${name} from the group`;
-        remove.addEventListener("click", () => {
-          void (async () => {
-            const ok = await chatConfirm({
-              title: "Remove member",
-              message:
-                `Remove ${name} from this group? They lose access to new messages.`,
-              confirmLabel: "Remove",
-            });
-            if (!ok) return;
-            remove.disabled = true;
-            try {
-              await groupRemoveMember(opts.groupId, m.agent_id);
-              li.remove();
-              count -= 1;
-              renderCount();
-            } catch (e) {
-              remove.disabled = false;
-              status.hidden = false;
-              status.textContent = `Couldn't remove: ${friendlyError(e)}`;
-            }
-          })();
-        });
-        li.appendChild(remove);
+        const moderate = (
+          text: string,
+          className: string,
+          message: string,
+          run: () => Promise<void>,
+        ): HTMLButtonElement => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = className;
+          btn.textContent = text;
+          btn.title = `${text} ${name}`;
+          btn.addEventListener("click", () => {
+            void (async () => {
+              const ok = await chatConfirm({
+                title: `${text} member`,
+                message,
+                confirmLabel: text,
+              });
+              if (!ok) return;
+              btn.disabled = true;
+              try {
+                await run();
+                li.remove();
+                count -= 1;
+                renderCount();
+                opts.onChanged?.();
+              } catch (e) {
+                btn.disabled = false;
+                status.hidden = false;
+                status.textContent =
+                  `Couldn't ${text.toLowerCase()}: ${friendlyError(e)}`;
+              }
+            })();
+          });
+          return btn;
+        };
+
+        li.appendChild(moderate(
+          "Remove",
+          "chat-member__remove",
+          `Remove ${name} from this group? They lose access to new messages.`,
+          () => groupRemoveMember(opts.groupId, m.agent_id),
+        ));
+        li.appendChild(moderate(
+          "Ban",
+          "chat-member__remove chat-member__ban",
+          `Ban ${name}? They are removed and cannot rejoin.`,
+          () => groupBanMember(opts.groupId, m.agent_id),
+        ));
       }
 
       list.appendChild(li);

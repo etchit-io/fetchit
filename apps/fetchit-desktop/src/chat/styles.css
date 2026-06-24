@@ -376,6 +376,28 @@ body.chat-docked {
   background: color-mix(in srgb, var(--rust) 30%, transparent);
 }
 .chat-member__remove:disabled { opacity: 0.5; cursor: default; }
+.chat-member__ban {
+  color: color-mix(in srgb, var(--rust) 80%, var(--bone));
+  border-color: color-mix(in srgb, var(--rust) 50%, var(--line));
+}
+.chat-member__ban:hover:not(:disabled) {
+  color: var(--bone);
+  border-color: var(--rust);
+  background: color-mix(in srgb, var(--rust) 50%, transparent);
+}
+.chat-members__title--editable { cursor: text; }
+.chat-members__title--editable:hover { text-decoration: underline dotted; }
+.chat-members__rename {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--bone);
+  background: var(--ink);
+  border: 1px solid var(--copper);
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
 .chat-conv--active {
   background: linear-gradient(
     90deg,

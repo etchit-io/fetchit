@@ -1092,6 +1092,46 @@ pub async fn chat_group_remove_member(
         .map_err(|e| e.to_string())
 }
 
+/// Rename a group. x0xd authorizes (admin+); the desktop only shows the
+/// rename control to an owner/admin.
+#[tauri::command]
+pub async fn chat_group_rename(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+    name: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .groups()
+        .rename(&gid, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Ban a member from a group (kick + block rejoin). x0xd authorizes
+/// (admin+, not the owner); the desktop only shows this to an owner/admin.
+#[tauri::command]
+pub async fn chat_group_ban_member(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+    agent_id: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .groups()
+        .ban_member(&gid, &fetchit_chat::identity::AgentId(agent_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn chat_group_messages(
     app_state: tauri::State<'_, AppState>,

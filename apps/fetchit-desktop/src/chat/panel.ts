@@ -534,6 +534,9 @@ export function mountChatPanel(
           groupTitle: store.active()?.title ?? "this group",
           store,
           onClose: hideDialog,
+          onChanged: () => {
+            void refreshGroups();
+          },
         }),
       );
     },

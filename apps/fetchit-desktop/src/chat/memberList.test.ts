@@ -163,4 +163,56 @@ describe("member moderation", () => {
     expect(host.querySelectorAll(".chat-member__role").length).toBe(2);
     expect(host.querySelector(".chat-member__remove")).toBeNull();
   });
+
+  it("an owner can ban a non-owner member, dropping the row", async () => {
+    mount([
+      { agent_id: ME, display_name: "Me", role: "owner" },
+      { agent_id: BOB, display_name: "Bob", role: "member" },
+    ]);
+    await vi.waitFor(() =>
+      expect(host.querySelectorAll(".chat-member").length).toBe(2),
+    );
+    const ban = host.querySelector<HTMLButtonElement>(".chat-member__ban");
+    expect(ban).not.toBeNull();
+    ban!.click();
+    await confirmRemove();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("chat_group_ban_member", {
+      groupId: "g1", agentId: BOB,
+    });
+    expect(host.querySelectorAll(".chat-member").length).toBe(1);
+  });
+
+  it("an owner can rename the group from the title", async () => {
+    const onChanged = vi.fn();
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === "chat_group_members"
+        ? Promise.resolve([{ agent_id: ME, display_name: "Me", role: "owner" }])
+        : Promise.resolve(),
+    );
+    mountMemberList(host, {
+      groupId: "g1", groupTitle: "Old", store: makeStore(), onClose: () => {}, onChanged,
+    });
+    await vi.waitFor(() =>
+      expect(host.querySelector(".chat-members__title--editable")).not.toBeNull(),
+    );
+    host.querySelector<HTMLElement>(".chat-members__title--editable")!.click();
+    const input = host.querySelector<HTMLInputElement>(".chat-members__rename")!;
+    expect(input.value).toBe("Old");
+    input.value = "New Name";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await vi.waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("chat_group_rename", {
+        groupId: "g1", name: "New Name",
+      }),
+    );
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it("a plain member cannot rename (title not editable)", async () => {
+    mount([{ agent_id: ME, display_name: "Me", role: "member" }]);
+    await vi.waitFor(() =>
+      expect(host.querySelectorAll(".chat-member").length).toBe(1),
+    );
+    expect(host.querySelector(".chat-members__title--editable")).toBeNull();
+  });
 });
