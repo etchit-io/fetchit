@@ -27,6 +27,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import io.etchit.fetchit.QrShare
 import io.etchit.fetchit.R
+import io.etchit.fetchit.SettingsStore
 
 import io.etchit.fetchit.fetchitApp
 import kotlinx.coroutines.CoroutineScope
@@ -268,8 +269,21 @@ class ChatModeView(
         val emptyState = view.findViewById<View>(R.id.chatEmptyState)
         val lostBanner = view.findViewById<TextView>(R.id.chatConnectionLostBanner)
         val addBtn = view.findViewById<View>(R.id.addContactButton)
-        val shareBtn = view.findViewById<View>(R.id.sharePairButton)
-        val scanBtn = view.findViewById<View>(R.id.scanPairButton)
+        val identityBadge = view.findViewById<View>(R.id.chatIdentityBadge)
+        val identityAvatar = view.findViewById<TextView>(R.id.chatIdentityAvatar)
+        val identityName = view.findViewById<TextView>(R.id.chatIdentityName)
+        val addPersonBtn = view.findViewById<View>(R.id.onboardAddPersonButton)
+        val createGroupBtn = view.findViewById<View>(R.id.onboardCreateGroupButton)
+
+        // Own-identity header badge: the user sees themselves by name +
+        // initials avatar on the self (copper) hue, never the 64-hex. Tapping
+        // it opens the share-my-code card. The display name resolves from the
+        // connected gateway when available, else from the saved setting (no
+        // connection needed); "You"/"?" before any name is set.
+        bindIdentityBadge(identityAvatar, identityName)
+        identityBadge.setOnClickListener {
+            lifecycleScope.launch { onShareMyCodeClicked() }
+        }
 
         // Adapter: pinned fediverse row at position 0, then groups + contacts.
         val adapter = ContactListAdapter(
@@ -287,9 +301,9 @@ class ChatModeView(
             controller.contacts.contacts
                 .combine(controller.groups) { contacts, groups -> contacts to groups }
                 .collect { (contacts, groups) ->
-                    val hasRows = contacts.isNotEmpty() || groups.isNotEmpty()
-                    rv.visibility = if (hasRows) View.VISIBLE else View.GONE
-                    emptyState.visibility = if (hasRows) View.GONE else View.VISIBLE
+                    val onboarding = showChatOnboarding(contacts.size, groups.size)
+                    rv.visibility = if (onboarding) View.GONE else View.VISIBLE
+                    emptyState.visibility = if (onboarding) View.VISIBLE else View.GONE
                     // The FAB is a list-level affordance (it offers group
                     // create/join, reachable with zero contacts), so it stays
                     // visible whenever the list view is shown.
@@ -313,34 +327,65 @@ class ChatModeView(
             }
         }
 
-        // Share my code button: opens the dismissible pair-QR modal.
-        shareBtn.setOnClickListener {
-            lifecycleScope.launch { onShareMyCodeClicked() }
-        }
+        // Onboarding primary action: add your first person.
+        addPersonBtn.setOnClickListener { showAddContactDialog() }
 
-        // Scan a code button: delegate to MainActivity's scanner.
-        scanBtn.setOnClickListener { onLaunchScanner() }
+        // Onboarding secondary action: create a group.
+        createGroupBtn.setOnClickListener { showNewGroupDialog() }
 
-        // FAB: a popup with the three list-level actions -- add a contact,
-        // start a new group, or join one from an invite link.
+        // FAB: a popup with the list-level actions -- add a contact, start a
+        // new group, join one from an invite link, or scan a code (the scan
+        // affordance re-homed here now the identity badge owns share-my-code).
         addBtn.setOnClickListener { anchor -> showListActionsMenu(anchor) }
     }
 
     /**
-     * Popup menu off the list FAB: add a DM contact, create a new group, or
-     * join a group from a pasted invite. Each entry opens its own dialog,
-     * mirroring [showAddContactDialog].
+     * Paint the own-identity header badge: the user's initials avatar on the
+     * self (copper) hue plus their display name — never the raw 64-hex
+     * (grandma-UI rule 1: the user sees themselves by name). The full code
+     * stays one tap away via the share card the badge opens.
+     *
+     * The name resolves from the connected gateway's agent id when one is
+     * available, else from the saved chat display name (no connection
+     * required). Before any name is set the badge reads "You" with a "?"
+     * avatar, mirroring desktop's empty-name fallback.
+     */
+    private fun bindIdentityBadge(avatar: TextView, name: TextView) {
+        val gw = controller.gateway()
+        val displayName = if (gw != null) {
+            displayNameOrDefault(gw)
+        } else {
+            SettingsStore(context).chatDisplayName()
+        }
+        // Before any name is set: show "You" with a "?" avatar (initials("")
+        // is "?"); once set, the real name drives both label and initials.
+        name.text = displayName.ifBlank { context.getString(R.string.chat_identity_you) }
+        avatar.text = IdentityColor.initials(displayName)
+        // Self hue is copper — the same OVAL background the avatar gets
+        // everywhere. Set in code so the circle isn't a static drawable.
+        avatar.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(SELF_HUE)
+        }
+    }
+
+    /**
+     * Popup menu off the list FAB: add a DM contact, create a new group, join
+     * a group from a pasted invite, or scan a code. Each entry opens its own
+     * dialog (or the scanner), mirroring [showAddContactDialog].
      */
     private fun showListActionsMenu(anchor: View) {
         PopupMenu(context, anchor).apply {
             menu.add(context.getString(R.string.chat_add_contact))
             menu.add(context.getString(R.string.chat_new_group))
             menu.add(context.getString(R.string.chat_join_group))
+            menu.add(context.getString(R.string.chat_scan_a_code))
             setOnMenuItemClickListener { item ->
                 when (item.title) {
                     context.getString(R.string.chat_add_contact) -> showAddContactDialog()
                     context.getString(R.string.chat_new_group) -> showNewGroupDialog()
                     context.getString(R.string.chat_join_group) -> showJoinGroupDialog()
+                    context.getString(R.string.chat_scan_a_code) -> onLaunchScanner()
                 }
                 true
             }
@@ -1235,5 +1280,9 @@ class ChatModeView(
 
     private companion object {
         private const val TAG = "ChatModeView"
+
+        // The self (outbound) hue — copper, matching the copper out-bubble and
+        // the desktop self identity. Drawn behind the own-identity badge avatar.
+        private const val SELF_HUE = 0xFFC9732B.toInt()
     }
 }

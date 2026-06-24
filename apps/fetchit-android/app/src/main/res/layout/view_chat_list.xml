@@ -1,86 +1,162 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- Contact list — hidden when there are no contacts -->
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/chatContactList"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:paddingBottom="72dp"
-        android:clipToPadding="false"
-        android:visibility="gone" />
-
-    <!-- Empty-state onboarding block — visible when contact list is empty -->
+    <!-- Header + content stack. The FAB stays a sibling FrameLayout child so
+         it floats over this column at bottom|end. -->
     <LinearLayout
-        android:id="@+id/chatEmptyState"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center"
-        android:padding="32dp">
+        android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/chatConnectingText"
-            android:layout_width="wrap_content"
+        <!-- Persistent own-identity badge — the user sees themselves by name
+             + avatar, never the raw 64-hex (grandma-UI rule 1). The whole row
+             is tappable and opens the share-my-code card. -->
+        <LinearLayout
+            android:id="@+id/chatIdentityBadge"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/chat_connecting"
-            android:textColor="?attr/fetchitAsh"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:contentDescription="@string/chat_identity_badge_desc">
+
+            <TextView
+                android:id="@+id/chatIdentityAvatar"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:gravity="center"
+                android:textColor="?attr/fetchitInk"
+                android:textStyle="bold"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/chatIdentityName"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="12dp"
+                android:textColor="?attr/fetchitBone"
+                android:textSize="16sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+        </LinearLayout>
+
+        <!-- Persistent offline-reassurance banner — visible while the chat
+             connection is down (pump STOPPED_ERROR) and auto-cleared on
+             reconnect. Calm, not alarming: copper-tinted, the copy reassures
+             that queued messages are saved and resend on the next connect.
+             The background tint and text color are set from code per-tone, so
+             the XML carries only the layout + default copy. -->
+        <TextView
+            android:id="@+id/chatConnectionLostBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/chat_offline_reassurance"
+            android:contentDescription="@string/chat_offline_reassurance_desc"
             android:fontFamily="monospace"
             android:textSize="13sp"
+            android:gravity="center"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="8dp"
             android:visibility="gone" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/chat_empty_hint"
-            android:textColor="?attr/fetchitAsh"
-            android:fontFamily="@font/instrument_serif"
-            android:textStyle="italic"
-            android:textSize="15sp"
-            android:gravity="center" />
-
-        <Button
-            android:id="@+id/sharePairButton"
+        <!-- Content area: the contact list and the empty-state onboarding
+             share this region, only one visible at a time. -->
+        <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="@string/chat_share_my_code"
-            android:backgroundTint="?attr/fetchitCopper"
-            android:textColor="?attr/fetchitInk" />
+            android:layout_height="0dp"
+            android:layout_weight="1">
 
-        <Button
-            android:id="@+id/scanPairButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/chat_scan_a_code"
-            android:backgroundTint="?attr/fetchitInk3"
-            android:textColor="?attr/fetchitCopper" />
+            <!-- Contact list — hidden when there are no contacts -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/chatContactList"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:paddingBottom="72dp"
+                android:clipToPadding="false"
+                android:visibility="gone" />
+
+            <!-- First-run onboarding block — visible when the list is empty.
+                 Brand spark, a welcome, one plain sentence, and one obvious
+                 primary action (add your first person) with a secondary
+                 (create a group). Never a dead end. -->
+            <LinearLayout
+                android:id="@+id/chatEmptyState"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:padding="32dp">
+
+                <TextView
+                    android:id="@+id/chatConnectingText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/chat_connecting"
+                    android:textColor="?attr/fetchitAsh"
+                    android:fontFamily="monospace"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
+
+                <ImageView
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:layout_marginBottom="12dp"
+                    android:src="@drawable/ic_mark_lit"
+                    android:contentDescription="@string/chat_onboard_mark_desc"
+                    app:tint="?attr/fetchitCopper" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/chat_onboard_title"
+                    android:textColor="?attr/fetchitBone"
+                    android:textStyle="bold"
+                    android:textSize="20sp"
+                    android:gravity="center" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/chat_onboard_body"
+                    android:textColor="?attr/fetchitAsh"
+                    android:fontFamily="@font/instrument_serif"
+                    android:textStyle="italic"
+                    android:textSize="16sp"
+                    android:gravity="center" />
+
+                <Button
+                    android:id="@+id/onboardAddPersonButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:text="@string/chat_onboard_add_person"
+                    android:backgroundTint="?attr/fetchitCopper"
+                    android:textColor="?attr/fetchitInk" />
+
+                <Button
+                    android:id="@+id/onboardCreateGroupButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/chat_onboard_create_group"
+                    android:backgroundTint="?attr/fetchitInk3"
+                    android:textColor="?attr/fetchitCopper" />
+
+            </LinearLayout>
+
+        </FrameLayout>
 
     </LinearLayout>
-
-    <!-- Persistent offline-reassurance banner — visible while the chat
-         connection is down (pump STOPPED_ERROR) and auto-cleared on
-         reconnect. Calm, not alarming: copper-tinted, the copy reassures
-         that queued messages are saved and resend on the next connect.
-         The background tint and text color are set from code per-tone, so
-         the XML carries only the layout + default copy. -->
-    <TextView
-        android:id="@+id/chatConnectionLostBanner"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:text="@string/chat_offline_reassurance"
-        android:contentDescription="@string/chat_offline_reassurance_desc"
-        android:fontFamily="monospace"
-        android:textSize="13sp"
-        android:gravity="center"
-        android:paddingHorizontal="16dp"
-        android:paddingVertical="8dp"
-        android:visibility="gone" />
 
     <!-- Add-contact FAB — always visible in list mode -->
     <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton

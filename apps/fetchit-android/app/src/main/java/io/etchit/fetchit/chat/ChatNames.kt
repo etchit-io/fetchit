@@ -32,6 +32,15 @@ fun groupTitle(group: GroupFfi?, groupId: String): String {
 }
 
 /**
+ * Whether the first-run onboarding empty-state should show: true only when
+ * the user has neither a contact nor a group yet. Pure predicate so the
+ * list-screen detection is JVM-testable without inflating a view, mirroring
+ * desktop's `convs.length === 0` onboarding gate.
+ */
+fun showChatOnboarding(contactCount: Int, groupCount: Int): Boolean =
+    contactCount == 0 && groupCount == 0
+
+/**
  * Label for an inbound group message's sender.
  *
  * Precedence mirrors desktop's `notify.ts`: the sender's self-attached

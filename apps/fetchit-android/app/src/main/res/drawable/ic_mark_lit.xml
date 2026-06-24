@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    LIT spark mark — the four-point spark that brands LIT Chat. The
+    pathData is copied verbatim from the desktop shell's `lit` mark
+    (apps/fetchit-desktop/src/ui/icons.ts) so the two shells draw an
+    identical glyph. White fill here; the onboarding ImageView tints it
+    copper via ?attr/fetchitCopper.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12 2.5C12.5 7.5 14.5 9.5 19.5 10 14.5 10.5 12.5 12.5 12 17.5 11.5 12.5 9.5 10.5 4.5 10 9.5 9.5 11.5 7.5 12 2.5Z" />
+</vector>
