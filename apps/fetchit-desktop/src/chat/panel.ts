@@ -29,6 +29,7 @@ import { mountJoinGroup } from "./joinGroup";
 import { mountPendingContactsDialog } from "./pendingContacts";
 import { ChatStore } from "./state";
 import { connectionBannerCopy } from "./connectionBanner";
+import { avatarGradientClass, initials } from "./avatarColor";
 import { mark } from "../ui/icons";
 
 export interface ChatPanelHandlers {
@@ -54,6 +55,31 @@ export interface ChatPanelApi {
 }
 
 const DOCK_KEY = "fetchit-chat:dock";
+
+/// Render the header identity badge as the user's own avatar + display
+/// name instead of a raw agent-id hex (grandma-UI rule 1: the user sees
+/// themselves by name). The full code stays one tap away via the share
+/// card the badge opens; the hex never shows in the main flow.
+export function fillIdentityBadge(
+  badge: HTMLElement,
+  name: string,
+  agentId: string,
+): void {
+  badge.replaceChildren();
+  const avatar = document.createElement("span");
+  avatar.className = "chat-panel__id-avatar";
+  avatar.classList.add(avatarGradientClass(agentId));
+  avatar.textContent = initials(name);
+  const label = document.createElement("span");
+  label.className = "chat-panel__id-name";
+  label.textContent = name;
+  badge.appendChild(avatar);
+  badge.appendChild(label);
+  // Restore the share affordance after a prior bootstrap-failure state
+  // may have repurposed the badge as a retry button.
+  badge.title = "Share my code";
+  badge.setAttribute("aria-label", "Share my code");
+}
 
 /// Wait between bootstrap retries when `open()` throws partway —
 /// matches the x0xd supervisor's poll cadence (`spawn_x0xd_supervisor`
@@ -579,7 +605,7 @@ export function mountChatPanel(
       ]);
       displayName = persistedName;
       store.setIdentity(me);
-      idBadge.textContent = `${me.agent_id.slice(0, 8)}…`;
+      fillIdentityBadge(idBadge, resolveName(), me.agent_id);
       const [contacts, online, groups] = await Promise.all([
         listContacts(),
         presenceOnline(),

@@ -3,7 +3,7 @@
 
 import type { ChatStore, Conversation, NearbyPeer } from "./state";
 import { convKey } from "./state";
-import { avatarGradientClass } from "./avatarColor";
+import { avatarGradientClass, initials } from "./avatarColor";
 import { icon, mark, type IconName } from "../ui/icons";
 
 export interface SidebarHandlers {
@@ -266,13 +266,6 @@ function onboarding(handlers: SidebarHandlers): HTMLElement {
   li.appendChild(body);
   li.appendChild(actions);
   return li;
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
 function relativeShort(ms: number): string {

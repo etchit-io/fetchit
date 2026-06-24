@@ -75,15 +75,34 @@ body.chat-docked {
 }
 
 .chat-panel__id {
-  font-family: ui-monospace, "JetBrains Mono", monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  color: var(--ash);
-  padding: 2px 8px;
+  color: var(--bone-dim);
+  padding: 2px 10px 2px 2px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: transparent;
   cursor: pointer;
   transition: color var(--dur-micro) ease, border-color var(--dur-micro) ease;
+}
+.chat-panel__id-avatar {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+}
+.chat-panel__id-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Daemon-status pill — surfaces a plain-English "Reconnecting…" or

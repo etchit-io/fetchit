@@ -2,8 +2,23 @@ import { describe, it, expect } from "vitest";
 import {
   avatarGradientClass,
   bubbleIdentityClass,
+  initials,
   senderIdentityClass,
 } from "./avatarColor";
+
+describe("initials", () => {
+  it("takes the first letter of the first two words", () => {
+    expect(initials("Ada Lovelace")).toBe("AL");
+    expect(initials("  grace   hopper  ")).toBe("GH");
+  });
+  it("takes the first two letters of a single word", () => {
+    expect(initials("Mononym")).toBe("MO");
+  });
+  it("falls back to a question mark for an empty name", () => {
+    expect(initials("")).toBe("?");
+    expect(initials("   ")).toBe("?");
+  });
+});
 
 describe("avatarGradientClass", () => {
   it("is deterministic for the same agent id", () => {
