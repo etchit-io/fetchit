@@ -49,6 +49,13 @@
 
 <!-- arch: id=chat-engine-a glob=crates/fetchit-chat/src/client.rs crates/fetchit-chat/src/groups/join_bridge.rs crates/x0xd-client/src/secure.rs verified=42c3f0e -->
 
+## Chat -- who-is-who (per-identity color + sealed sender name)
+
+- Per-identity **bubble color + sender-name label** so group senders are scannable at a glance: a deterministic hue index off `agent_id` drives the avatar gradient, the bubble accent stripe, and the sender-name color as one identity -- `apps/fetchit-desktop/src/chat/avatarColor.ts` (`identityIndex` %8 + `avatarGradientClass` / `bubbleIdentityClass` / `senderIdentityClass`), rendered in `bubble.ts` + `conversation.ts` (`groupAttribution`). Android mirrors the same index in `IdentityColor.kt`.
+- **Sealed sender display name** rides INSIDE the encrypted private-group frame, so the relay never sees who said what: `send_private_group` encodes `{sender_name, body}` via `encode_group_plaintext` (NUL-magic-prefixed JSON) before `secure.encrypt`; `receive_private_group_envelope` recovers it via `decode_group_plaintext`, falling back to a legacy bare-body frame (name unknown) -- `crates/fetchit-chat/src/messages.rs:1043` + `:1418`, `crates/fetchit-chat/src/conversation/types.rs:393` (`GROUP_BODY_MAGIC`, `encode_group_plaintext` / `decode_group_plaintext`). The label resolves sender_name -> saved-contact -> short id on both shells (desktop `state.ts` `displayNameFor`; Android `ChatNames.groupSenderLabel`). Verified end-to-end on device 2026-06-24.
+
+<!-- arch: id=chat-who-is-who glob=crates/fetchit-chat/src/messages.rs crates/fetchit-chat/src/conversation/types.rs apps/fetchit-desktop/src/chat/avatarColor.ts apps/fetchit-desktop/src/chat/bubble.ts apps/fetchit-desktop/src/chat/conversation.ts apps/fetchit-desktop/src/chat/state.ts verified=1a57ed8 -->
+
 ## Fediverse bridge (M4 / M5.1)
 
 - HTTP Signatures use **classical RSA-2048 + PKCS#1 v1.5 + SHA-256** (`rsa-v1_5-sha256`), NOT Ed25519 and NOT post-quantum -- `crates/fetchit-fedi/src/signature.rs`. The PQ binding is the ML-DSA-65 attestation in the Actor JSON-LD, not the per-POST signature. Crypto source of truth: `docs/honest-claims-crypto.md` §3.
