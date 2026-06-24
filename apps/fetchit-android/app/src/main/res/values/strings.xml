@@ -160,7 +160,7 @@
     <string name="chat_add_contact_import">import</string>
     <string name="chat_paste_pair_uri_hint">paste x0x://pair/… here</string>
     <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
-    <string name="chat_connect_failed_generic">couldn\'t connect to relay</string>
+    <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <string name="chat_not_connected">not connected yet</string>
     <string name="chat_uri_copied">copied</string>
     <string name="chat_pair_copy_link">copy link</string>
@@ -188,8 +188,8 @@
     <string name="chat_group_joined">joined %1$s</string>
     <string name="chat_group_share_invite">share invite</string>
     <string name="chat_group_invite_copied">invite copied</string>
-    <string name="chat_group_create_failed">couldn\'t create group: %1$s</string>
-    <string name="chat_group_join_failed">couldn\'t join group: %1$s</string>
+    <string name="chat_group_create_failed">couldn\'t create the group — try again in a moment</string>
+    <string name="chat_group_join_failed">couldn\'t join the group — check the invite and try again</string>
     <string name="chat_group_sender_unknown">someone</string>
     <string name="chat_group_lock_glyph">🔒</string>
 
@@ -199,7 +199,7 @@
     <string name="thread_send_desc">send message</string>
     <string name="thread_message_hint">message…</string>
     <string name="chat_send_glyph">➤</string>
-    <string name="thread_send_failed">send failed: %1$s</string>
+    <string name="thread_send_failed">couldn\'t send — tap the message to try again</string>
     <string name="chat_msg_failed_retry">⚠ tap to retry</string>
     <string name="chat_retrying">retrying…</string>
 

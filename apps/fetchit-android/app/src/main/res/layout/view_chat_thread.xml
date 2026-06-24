@@ -86,7 +86,7 @@
             android:textColor="?attr/fetchitBone"
             android:textColorHint="?attr/fetchitAsh"
             android:fontFamily="monospace"
-            android:textSize="14sp"
+            android:textSize="16sp"
             android:background="?attr/fetchitInk3"
             android:padding="10dp" />
 

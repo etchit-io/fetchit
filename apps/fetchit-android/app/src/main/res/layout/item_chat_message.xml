@@ -31,7 +31,7 @@
         android:padding="10dp"
         android:textColor="?attr/fetchitBone"
         android:fontFamily="monospace"
-        android:textSize="14sp"
+        android:textSize="16sp"
         android:lineSpacingExtra="2dp"
         android:textIsSelectable="true" />
 
