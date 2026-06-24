@@ -16,9 +16,9 @@ use crate::chat_crypto::{
 };
 use crate::chat_identity::FetchitIdentity;
 use crate::conversation::{
-    build_message_outbox, build_receipt_outbox, build_welcome_outbox, Conversation,
-    ConversationRegistry, HistoryEntry, Member, MemberDevice, MemberDeviceStatus, MutateAction,
-    OutboundEnvelope as ChatOutbound, Role, TrustState,
+    build_message_outbox, build_receipt_outbox, build_welcome_outbox, decode_group_plaintext,
+    encode_group_plaintext, Conversation, ConversationRegistry, HistoryEntry, Member, MemberDevice,
+    MemberDeviceStatus, MutateAction, OutboundEnvelope as ChatOutbound, Role, TrustState,
 };
 use crate::error::{ChatError, Result};
 use crate::groups::{Group, GroupId as ChatGroupId};
@@ -1044,7 +1044,7 @@ impl<'a> Endpoint<'a> {
         &self,
         group_id: &str,
         body: &str,
-        _sender_name: &str,
+        sender_name: &str,
     ) -> Result<Option<String>> {
         if self.router.is_empty() {
             return Err(ChatError::NoTransportAvailable);
@@ -1058,7 +1058,12 @@ impl<'a> Endpoint<'a> {
 
         let group_id_bytes = parse_group_id_hex(group_id)?;
         let secure = self.secure_groups()?;
-        let frame = secure.encrypt(group_id, body.as_bytes()).await?;
+        // Seal the sender display name alongside the body so receivers can
+        // attribute the message by name (who-is-who). Legacy receivers
+        // that predate this format read the bare body via the fallback in
+        // `decode_group_plaintext`.
+        let plaintext = encode_group_plaintext(sender_name, body);
+        let frame = secure.encrypt(group_id, &plaintext).await?;
         let envelope = build_private_group_envelope(
             &frame,
             group_id_bytes,
@@ -1608,12 +1613,15 @@ impl<'a> Endpoint<'a> {
         let plaintext = secure
             .decrypt(group_id_hex, &frame, Some(&sender_agent_id_hex))
             .await?;
-        let body = String::from_utf8(plaintext)
-            .map_err(|e| ChatError::Invalid(format!("body utf8: {e}")))?;
+        // New senders seal {sender_name, body}; legacy senders sealed the
+        // bare body. `decode_group_plaintext` handles both, so a received
+        // group message is attributed by name when the sender provided one.
+        let (body, sender_name) =
+            decode_group_plaintext(&plaintext).map_err(ChatError::Invalid)?;
 
         let entry = HistoryEntry {
             sender_agent_id_hex: sender_agent_id_hex.clone(),
-            sender_name: None,
+            sender_name,
             body,
             ts_ms: env.timestamp_ms,
             message_id: hex::encode(envelope_dedupe_bytes(env)),
@@ -2481,13 +2489,16 @@ mod tests {
         let identity = Arc::new(identity);
         let peer_hex = "b".repeat(64);
         mount_encrypt_and_two_member_roster(&server, identity.agent_id_hex(), &peer_hex).await;
-        // Assert the encrypt body explicitly via a partial-json
-        // matcher so a future param rename trips the test.
+        // Assert the encrypt body explicitly via a partial-json matcher
+        // so a future param rename trips the test. The sealed plaintext
+        // now carries the sender display name alongside the body
+        // (who-is-who), so it is the magic-prefixed payload, not the bare
+        // body bytes.
         let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
         Mock::given(method("POST"))
             .and(path(&encrypt_path))
             .and(body_partial_json(serde_json::json!({
-                "payload_b64": B64.encode(b"hello group"),
+                "payload_b64": B64.encode(encode_group_plaintext("Alice", "hello group")),
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
@@ -3717,6 +3728,48 @@ mod tests {
         let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
         assert_eq!(conv.history.len(), 1);
         assert_eq!(conv.history.back().unwrap().body, "hi from peer");
+        // Legacy bare-body frame -> no name (the decode fallback path).
+        assert_eq!(entry.sender_name, None);
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_attributes_sender_name_from_new_frame() {
+        let server = MockServer::start().await;
+        // A new-format sender seals {sender_name, body}; the receiver must
+        // surface the name on the HistoryEntry (who-is-who).
+        mount_decrypt(&server, &encode_group_plaintext("Alice", "hi from peer")).await;
+        let rig = build_rig();
+        mount_members_with_self_only(&server, rig.identity.agent_id_hex()).await;
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env = craft_inbound_envelope(&sender_signer, &sender_aid, b"hi", 555).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+        );
+
+        let out = endpoint
+            .receive_private_group_envelope(&env, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        let PrivateGroupReceive::Persisted(entry) = out else {
+            panic!("expected Persisted, got {out:?}");
+        };
+        assert_eq!(entry.body, "hi from peer");
+        assert_eq!(entry.sender_name.as_deref(), Some("Alice"));
     }
 
     #[tokio::test]
