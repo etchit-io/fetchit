@@ -274,6 +274,42 @@ body.chat-docked {
   position: relative;
 }
 .chat-conv:hover { background: color-mix(in srgb, var(--copper) 6%, transparent); }
+
+/* Per-row remove/leave, revealed on hover or keyboard focus. Destructive,
+   so it tints toward rust on hover; the timestamp + unread badge yield
+   their space while it shows. */
+.chat-conv__remove {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ash);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-micro) ease, color var(--dur-micro) ease,
+    background var(--dur-micro) ease;
+}
+.chat-conv__remove .icon { width: 16px; height: 16px; }
+.chat-conv:hover .chat-conv__remove,
+.chat-conv:focus-within .chat-conv__remove { opacity: 1; }
+.chat-conv__remove:hover {
+  color: var(--bone);
+  background: color-mix(in srgb, var(--rust) 40%, transparent);
+}
+.chat-conv__remove:focus-visible { opacity: 1; outline: 2px solid var(--copper); }
+.chat-conv:hover .chat-conv__ts,
+.chat-conv:hover .chat-conv__unread,
+.chat-conv:focus-within .chat-conv__ts,
+.chat-conv:focus-within .chat-conv__unread { opacity: 0; }
 .chat-conv--active {
   background: linear-gradient(
     90deg,

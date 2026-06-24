@@ -445,6 +445,36 @@ export function mountChatPanel(
     });
   };
 
+  // Remove/leave actions, shared by the sidebar row remove button and
+  // the in-conversation Remove/Leave controls. Action-only; every caller
+  // confirms first. (They reference refreshContacts/refreshGroups, defined
+  // below — fine, the closures only run on user action.)
+  const removeContactAction = (agentId: string): void => {
+    void (async () => {
+      try {
+        await removeContact(agentId);
+        store.clearDmTranscript(agentId);
+        unwatchPresence([agentId]).catch((e) =>
+          console.warn("[chat] unwatchPresence:", e),
+        );
+        await refreshContacts();
+      } catch (e) {
+        console.warn("[chat] remove contact failed:", e);
+      }
+    })();
+  };
+  const leaveGroupAction = (groupId: string): void => {
+    void (async () => {
+      try {
+        await leaveGroup(groupId);
+        await refreshGroups();
+        store.setActive(null);
+      } catch (e) {
+        console.warn("[chat] leave group failed:", e);
+      }
+    })();
+  };
+
   mountSidebar(sidebarEl, store, {
     onSelect: (conv) => {
       store.setActive(conv.key);
@@ -452,6 +482,8 @@ export function mountChatPanel(
     onNewContact: openAddContact,
     onNewGroup: openNewGroup,
     onJoinGroup: () => openJoinGroup(),
+    onRemoveContact: removeContactAction,
+    onLeaveGroup: leaveGroupAction,
   });
 
   const openPrefilledAddContact = (uri: string): void => {
@@ -492,31 +524,8 @@ export function mountChatPanel(
         }
       })();
     },
-    onRemoveContact: (agentId) => {
-      void (async () => {
-        try {
-          await removeContact(agentId);
-          store.clearDmTranscript(agentId);
-          unwatchPresence([agentId]).catch((e) =>
-            console.warn("[chat] unwatchPresence:", e),
-          );
-          await refreshContacts();
-        } catch (e) {
-          console.warn("[chat] remove contact failed:", e);
-        }
-      })();
-    },
-    onLeaveGroup: (groupId) => {
-      void (async () => {
-        try {
-          await leaveGroup(groupId);
-          await refreshGroups();
-          store.setActive(null);
-        } catch (e) {
-          console.warn("[chat] leave group failed:", e);
-        }
-      })();
-    },
+    onRemoveContact: removeContactAction,
+    onLeaveGroup: leaveGroupAction,
     resolveSenderName: resolveName,
   });
 
