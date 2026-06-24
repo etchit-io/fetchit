@@ -798,6 +798,26 @@ body.chat-docked {
   border-color: var(--copper);
 }
 
+/* Calm, persistent offline reassurance. "warn" (down) uses the copper accent
+   to be noticeable without alarming; "info" (reconnecting) is muted ash so a
+   transient blip stays quiet. */
+.chat-connection-banner {
+  padding: 6px 16px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.3;
+  border-bottom: 1px solid var(--line);
+}
+.chat-connection-banner[hidden] { display: none; }
+.chat-connection-banner[data-tone="info"] {
+  background: color-mix(in srgb, var(--ash) 14%, transparent);
+  color: var(--ash);
+}
+.chat-connection-banner[data-tone="warn"] {
+  background: color-mix(in srgb, var(--copper) 14%, transparent);
+  color: var(--copper);
+}
+
 .chat-outbox-banner {
   display: flex;
   justify-content: center;

@@ -241,16 +241,16 @@ describe("applyRelayStatusEvent", () => {
     expect(store.allNotices()).toHaveLength(0);
   });
 
-  it("terminal disconnect sets down and raises the lost-connection notice", () => {
+  it("terminal disconnect sets down without an alarming one-time notice (banner owns it)", () => {
     applyRelayStatusEvent(store, {
       kind: "permanently_disconnected",
       reason: "gave up",
       attempts: 20,
     });
     expect(store.getRelayStatus()).toBe("down");
-    const notices = store.allNotices();
-    expect(notices).toHaveLength(1);
-    expect(notices[0]!.body).toContain("Lost connection");
+    // The persistent connection banner renders off "down" with calm
+    // reassurance; no alarming "close and reopen" toast is raised.
+    expect(store.allNotices()).toHaveLength(0);
   });
 
   it("drops unknown kinds without touching the store", () => {

@@ -40,10 +40,11 @@ export interface RelayStatusEvent {
   attempts?: number;
 }
 
-/// Map one `chat:relay-status` payload onto the store: the header
-/// pill state for every transition, plus the lost-connection notice
-/// on the terminal one. Unknown kinds are dropped so a newer backend
-/// can grow the vocabulary without breaking an older frontend.
+/// Map one `chat:relay-status` payload onto the store's relay state for
+/// every transition. The persistent connection banner + header pill render
+/// off that state; no one-time notice is raised on the terminal one. Unknown
+/// kinds are dropped so a newer backend can grow the vocabulary without
+/// breaking an older frontend.
 export function applyRelayStatusEvent(
   store: ChatStore,
   payload: RelayStatusEvent,
@@ -55,11 +56,12 @@ export function applyRelayStatusEvent(
       store.setRelayStatus(payload.kind);
       break;
     case "permanently_disconnected":
+      // The persistent connection banner (driven by RelayStatus "down") owns
+      // the offline state with calm, honest reassurance — messages are saved
+      // and resend on reconnect. We no longer raise the old one-time "close
+      // and reopen" notice: the link auto-reconnects on a backoff, so that
+      // instruction was both alarming and misleading.
       store.setRelayStatus("down");
-      store.pushNotice(
-        "warn",
-        "Lost connection to the chat relay. Close and reopen Chat to reconnect.",
-      );
       break;
   }
 }

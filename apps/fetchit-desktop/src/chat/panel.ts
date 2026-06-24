@@ -28,6 +28,7 @@ import { mountNewGroup } from "./newGroup";
 import { mountJoinGroup } from "./joinGroup";
 import { mountPendingContactsDialog } from "./pendingContacts";
 import { ChatStore } from "./state";
+import { connectionBannerCopy } from "./connectionBanner";
 import { mark } from "../ui/icons";
 
 export interface ChatPanelHandlers {
@@ -147,6 +148,15 @@ export function mountChatPanel(
   headerEl.appendChild(dockBtn);
   headerEl.appendChild(closeBtn);
 
+  // Calm, persistent offline banner — the grandma-grade reassurance that
+  // messages are safe while the connection is down. Sits above the outbox
+  // banner so the "why" (offline) reads before the "what" (N waiting).
+  const connectionBanner = document.createElement("div");
+  connectionBanner.className = "chat-connection-banner";
+  connectionBanner.hidden = true;
+  connectionBanner.setAttribute("role", "status");
+  connectionBanner.setAttribute("aria-live", "polite");
+
   const outboxBanner = document.createElement("div");
   outboxBanner.className = "chat-outbox-banner";
   outboxBanner.hidden = true;
@@ -192,6 +202,7 @@ export function mountChatPanel(
   layout.appendChild(conversationEl);
 
   host.appendChild(headerEl);
+  host.appendChild(connectionBanner);
   host.appendChild(outboxBanner);
   host.appendChild(noticesEl);
   host.appendChild(layout);
@@ -204,6 +215,26 @@ export function mountChatPanel(
     lastUnread = next;
     handlers.onUnreadChange?.(next);
   });
+
+  // Calm offline reassurance, repainted on every store-emit. Driven by the
+  // shared `connectionBannerCopy` vocabulary so desktop and Android show the
+  // same words. Hidden whenever fully connected.
+  const renderConnectionBanner = (): void => {
+    const copy = connectionBannerCopy(
+      store.getDaemonStatus(),
+      store.getRelayStatus(),
+    );
+    if (!copy) {
+      connectionBanner.hidden = true;
+      connectionBanner.textContent = "";
+      return;
+    }
+    connectionBanner.dataset.tone = copy.tone;
+    connectionBanner.textContent = copy.text;
+    connectionBanner.hidden = false;
+  };
+  store.subscribe(renderConnectionBanner);
+  renderConnectionBanner();
 
   const renderOutboxBanner = (): void => {
     const pending = store.pendingOutbound();
