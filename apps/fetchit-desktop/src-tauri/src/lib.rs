@@ -913,6 +913,14 @@ fn build_chat_state(
 #[allow(clippy::too_many_lines)] // dominated by the invoke-handler list
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // rustls 0.23 refuses to auto-select a crypto provider when both
+    // `ring` and `aws-lc-rs` are linked (a transitive dep pulls aws-lc-rs
+    // in alongside ring), panicking on the first TLS handshake — which
+    // breaks every chat/relay/x0xd HTTPS call. Install ring as the
+    // process-wide default before anything touches the network. Ignore
+    // the error: a second call (e.g. test re-entry) just means it's set.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Boot the x0xd supervisor before the Tauri runtime starts.
     // In E1, bundled_x0xd_binary_path() returns None so this always
     // falls back to the installed binary (or no-op if absent).

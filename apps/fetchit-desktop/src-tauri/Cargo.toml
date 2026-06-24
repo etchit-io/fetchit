@@ -84,6 +84,10 @@ url = "2.5"
 # canonical bootstrap_peers.toml. rustls-tls keeps us off the system
 # OpenSSL dep tree on Linux.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Direct dep only to install the `ring` CryptoProvider as rustls' process
+# default at startup (see `run()`); both ring and aws-lc-rs are in the tree
+# transitively, so rustls 0.23 won't auto-pick one and panics without this.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Parse the upstream bootstrap_peers.toml. Tolerant scan over any TOML
 # string leaves that pass parse_bootstrap_peer, so a future minor
 # schema rotation at WithAutonomi doesn't blow up the refresh.
