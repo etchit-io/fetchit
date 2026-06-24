@@ -298,7 +298,14 @@ class ChatModeView(
                 }
         }
 
-        // Observe pump state to show connection-lost banner.
+        // Observe pump state to drive the persistent offline-reassurance
+        // banner. It stays up the whole time the connection is down
+        // (STOPPED_ERROR) and clears itself the moment the pump is RUNNING
+        // again — there is no one-time toast. The copy reassures that queued
+        // messages are saved; the durable outbox resends them on the next
+        // connect (a reconnect happens on the next chat-mode entry, which
+        // calls ensureGateway and flips the pump back to RUNNING).
+        applyOfflineBannerTone(lostBanner)
         listPumpStateJob = lifecycleScope.launch {
             controller.pumpState.collect { state ->
                 lostBanner.visibility =
@@ -743,6 +750,31 @@ class ChatModeView(
                 }
                 .show()
         }.getOrThrow()
+    }
+
+    /**
+     * Paint the offline-reassurance banner in the calm "warn" tone: a faint
+     * copper-tinted fill behind bone text, matching the app's copper accent
+     * rather than the old alarming dark-red pill. Warn (not info/ash) is the
+     * only tone Android surfaces — the connection model exposes a single
+     * down state (pump [PumpState.STOPPED_ERROR]); there is no in-pump
+     * "reconnecting" phase to paint in the muted info tone (desktop's
+     * `relay === "reconnecting"`). Resolved once at bind time from the active
+     * theme so it tracks the dark/dim/light palettes.
+     */
+    private fun applyOfflineBannerTone(banner: TextView) {
+        val copper = themeColor(R.attr.fetchitCopper)
+        val bone = themeColor(R.attr.fetchitBone)
+        // ~22% copper over the surface reads as a calm tint, not an alert.
+        banner.setBackgroundColor((copper and 0x00FFFFFF) or (0x38 shl 24))
+        banner.setTextColor(bone)
+    }
+
+    /** Resolve a theme color attribute against the host context's theme. */
+    private fun themeColor(attr: Int): Int {
+        val tv = android.util.TypedValue()
+        context.theme.resolveAttribute(attr, tv, true)
+        return tv.data
     }
 
     private fun showConnecting(visible: Boolean) {

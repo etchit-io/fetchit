@@ -62,19 +62,24 @@
 
     </LinearLayout>
 
-    <!-- Connection-lost banner — shown when pump is in STOPPED_ERROR state -->
+    <!-- Persistent offline-reassurance banner — visible while the chat
+         connection is down (pump STOPPED_ERROR) and auto-cleared on
+         reconnect. Calm, not alarming: copper-tinted, the copy reassures
+         that queued messages are saved and resend on the next connect.
+         The background tint and text color are set from code per-tone, so
+         the XML carries only the layout + default copy. -->
     <TextView
         android:id="@+id/chatConnectionLostBanner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
-        android:text="@string/chat_connection_lost"
-        android:textColor="?attr/fetchitBone"
+        android:text="@string/chat_offline_reassurance"
+        android:contentDescription="@string/chat_offline_reassurance_desc"
         android:fontFamily="monospace"
-        android:textSize="11sp"
+        android:textSize="13sp"
         android:gravity="center"
-        android:paddingVertical="6dp"
-        android:background="#FF3A3832"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="8dp"
         android:visibility="gone" />
 
     <!-- Add-contact FAB — always visible in list mode -->

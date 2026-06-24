@@ -151,7 +151,19 @@
 
     <!-- Chat: conversation list + onboarding -->
     <string name="chat_connecting">connecting…</string>
-    <string name="chat_connection_lost">connection lost</string>
+    <!-- Calm, persistent offline-reassurance banner. Replaces the old
+         alarming "connection lost" pill: the durable outbox holds queued
+         messages and resends them on the next connect, so the honest,
+         calming truth is that nothing is lost. Strings mirror the desktop
+         connectionBanner.ts verbatim so a person reads identical words
+         across shells. Android has no in-pump reconnect and no separate
+         daemon state (x0xd is in-process), so only the relay-down "warn"
+         state is representable; the info/reconnecting state has no Android
+         source and is intentionally absent. -->
+    <string name="chat_offline_reassurance">No connection. Your messages are saved and will send once you\'re back online.</string>
+    <!-- Banner content-description: the banner is a persistent status line,
+         labelled for TalkBack as a reassurance, not an alarm. -->
+    <string name="chat_offline_reassurance_desc">offline — your messages are saved</string>
     <string name="chat_empty_hint">Add someone to start chatting</string>
     <string name="chat_share_my_code">share my code</string>
     <string name="chat_scan_a_code">scan a code</string>
