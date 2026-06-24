@@ -1083,11 +1083,12 @@ pub async fn chat_group_remove_member(
 ) -> Result<(), String> {
     ensure_chat_enabled(&app_state)?;
     let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    let aid = fetchit_chat::identity::AgentId::parse(agent_id).map_err(|e| e.to_string())?;
     state
         .get()
         .await?
         .groups()
-        .remove_member(&gid, &fetchit_chat::identity::AgentId(agent_id))
+        .remove_member(&gid, &aid)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1123,11 +1124,12 @@ pub async fn chat_group_ban_member(
 ) -> Result<(), String> {
     ensure_chat_enabled(&app_state)?;
     let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    let aid = fetchit_chat::identity::AgentId::parse(agent_id).map_err(|e| e.to_string())?;
     state
         .get()
         .await?
         .groups()
-        .ban_member(&gid, &fetchit_chat::identity::AgentId(agent_id))
+        .ban_member(&gid, &aid)
         .await
         .map_err(|e| e.to_string())
 }
