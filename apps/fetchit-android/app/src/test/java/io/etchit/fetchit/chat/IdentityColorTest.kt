@@ -60,4 +60,23 @@ class IdentityColorTest {
         assertEquals(0xFFD38F55.toInt(), IdentityColor.senderNameColor("00" + "11".repeat(31)))
         assertEquals(0xFF8C9EB7.toInt(), IdentityColor.senderNameColor("07" + "11".repeat(31)))
     }
+
+    // ── initials: avatar-label helper (mirrors desktop avatarColor.initials) ──
+
+    @Test
+    fun initials_take_first_letter_of_the_first_two_words() {
+        assertEquals("AL", IdentityColor.initials("Ada Lovelace"))
+        assertEquals("GH", IdentityColor.initials("  grace   hopper  "))
+    }
+
+    @Test
+    fun initials_take_first_two_letters_of_a_single_word() {
+        assertEquals("MO", IdentityColor.initials("Mononym"))
+    }
+
+    @Test
+    fun initials_fall_back_to_question_mark_for_a_blank_name() {
+        assertEquals("?", IdentityColor.initials(""))
+        assertEquals("?", IdentityColor.initials("   "))
+    }
 }
