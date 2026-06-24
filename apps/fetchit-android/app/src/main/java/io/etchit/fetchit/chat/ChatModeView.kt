@@ -7,6 +7,7 @@ import android.text.SpannableString
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -165,8 +166,7 @@ class ChatModeView(
             // hand-typed or third-party QR; the relay hint is a URL so lowercasing
             // the whole uri is safe.
             runCatching { gw.importPairUri(uri.trim().lowercase()) }.onFailure { e ->
-                val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-                snackbar(reason)
+                snackbar(userFacingError(e, "importPairUri", R.string.chat_error_invalid))
                 return@launch
             }
             promptDisplayName(agentId)
@@ -344,8 +344,7 @@ class ChatModeView(
     private suspend fun onShareMyCodeClicked() {
         val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return
         val uri = runCatching { gw.pairShareUri() }.getOrElse { e ->
-            val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-            snackbar(reason)
+            snackbar(userFacingError(e, "pairShareUri"))
             return
         }
         showPairQrDialog(uri)
@@ -485,8 +484,7 @@ class ChatModeView(
             val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return@launch
             val senderName = displayNameOrDefault(gw)
             val group = runCatching { gw.createGroup(name, senderName, private) }.getOrElse { e ->
-                val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-                snackbar(context.getString(R.string.chat_group_create_failed, reason))
+                snackbar(userFacingError(e, "createGroup", R.string.chat_group_create_failed))
                 return@launch
             }
             controller.refreshGroups()
@@ -505,8 +503,7 @@ class ChatModeView(
             val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return@launch
             val senderName = displayNameOrDefault(gw)
             val group = runCatching { gw.joinGroup(inviteUri, senderName) }.getOrElse { e ->
-                val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-                snackbar(context.getString(R.string.chat_group_join_failed, reason))
+                snackbar(userFacingError(e, "joinGroup", R.string.chat_group_join_failed))
                 return@launch
             }
             controller.refreshGroups()
@@ -582,8 +579,7 @@ class ChatModeView(
                     if (screenStack.lastOrNull() == Screen.Thread(peer)) {
                         messageInput.setText(body)
                     }
-                    val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-                    snackbar(context.getString(R.string.thread_send_failed, reason))
+                    snackbar(userFacingError(e, "enqueueDm", R.string.thread_send_failed))
                 }
             }
         }
@@ -675,8 +671,7 @@ class ChatModeView(
                         if (screenStack.lastOrNull() == Screen.GroupThread(groupId)) {
                             messageInput.setText(body)
                         }
-                        val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-                        snackbar(context.getString(R.string.thread_send_failed, reason))
+                        snackbar(userFacingError(e, "sendGroupMessage", R.string.thread_send_failed))
                     }
             }
         }
@@ -729,8 +724,9 @@ class ChatModeView(
 
     /**
      * Connect to the relay, showing UI feedback. Returns the gateway on
-     * success. On [ChatFfiException] shows a Snackbar with the reason + a
-     * retry action.
+     * success. On failure shows a Snackbar with a plain user-facing message
+     * (via [userFacingError]) + a retry action; the raw engine reason goes to
+     * logcat, never to the screen.
      */
     private suspend fun connectWithFeedback(): ChatGateway {
         showConnecting(true)
@@ -740,8 +736,8 @@ class ChatModeView(
             showConnecting(false)
         }.onFailure { e ->
             showConnecting(false)
-            val reason = (e as? ChatFfiException)?.let { ffiReason(it) } ?: e.message.orEmpty()
-            Snackbar.make(container, reason, Snackbar.LENGTH_INDEFINITE)
+            val message = userFacingError(e, "ensureGateway", R.string.chat_connect_failed_generic)
+            Snackbar.make(container, message, Snackbar.LENGTH_INDEFINITE)
                 .setAction(context.getString(R.string.action_retry)) {
                     lifecycleScope.launch { connectWithFeedback() }
                 }
@@ -802,9 +798,40 @@ class ChatModeView(
         cm.setPrimaryClip(ClipData.newPlainText("pair URI", text))
     }
 
-    private fun ffiReason(e: ChatFfiException): String = when (e) {
+    /**
+     * Raw engine reason for an error, for **logcat only** — never shown to the
+     * user. The on-screen copy comes from [userFacingError]; raw engine text
+     * like "transport error" or "invalid key package" is meaningless and scary
+     * to a non-technical user.
+     */
+    private fun ffiReason(e: Throwable): String = when (e) {
         is ChatFfiException.Invalid -> e.reason
         is ChatFfiException.Network -> e.reason
+        else -> e.message.orEmpty()
+    }
+
+    /**
+     * Map an engine error to a short, warm, plain-language Snackbar string and
+     * log the raw reason to logcat for debugging. Only the on-screen text is
+     * sanitized; the raw [ffiReason] always reaches `Log.w(TAG, ...)`.
+     *
+     * @param fallbackRes the path-specific friendly string to use when the
+     *   error is not a recognized [ChatFfiException] variant (e.g. the
+     *   send/group paths pass their own "couldn't send"/"couldn't join" copy).
+     */
+    private fun userFacingError(
+        e: Throwable,
+        where: String,
+        fallbackRes: Int = R.string.chat_error_generic,
+    ): String {
+        Log.w(TAG, "$where: ${ffiReason(e)}", e)
+        return when (e) {
+            is ChatFfiException.Network ->
+                context.getString(R.string.chat_connect_failed_generic)
+            is ChatFfiException.Invalid ->
+                context.getString(R.string.chat_error_invalid)
+            else -> context.getString(fallbackRes)
+        }
     }
 
     private fun displayNameOrDefault(gw: ChatGateway): String =
@@ -1170,5 +1197,9 @@ class ChatModeView(
             preview.text = lastPreview
             itemView.setOnClickListener { onTap(group) }
         }
+    }
+
+    private companion object {
+        private const val TAG = "ChatModeView"
     }
 }

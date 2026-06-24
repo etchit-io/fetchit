@@ -161,6 +161,9 @@
     <string name="chat_paste_pair_uri_hint">paste x0x://pair/… here</string>
     <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
+    <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
+    <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>
+    <string name="chat_error_generic">something went wrong — please try again</string>
     <string name="chat_not_connected">not connected yet</string>
     <string name="chat_uri_copied">copied</string>
     <string name="chat_pair_copy_link">copy link</string>
