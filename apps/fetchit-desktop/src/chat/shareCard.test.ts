@@ -1,20 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const pairShareUriMock = vi.fn<() => Promise<string>>();
+const setDisplayNameMock = vi.fn<(n: string) => Promise<void>>(
+  () => Promise.resolve(),
+);
 
 vi.mock("./api", () => ({
   pairShareUri: () => pairShareUriMock(),
+  getDisplayName: () => Promise.resolve("Old Name"),
+  setDisplayName: (n: string) => setDisplayNameMock(n),
 }));
 
 import { mountShareCard } from "./shareCard";
 
 const POINTER_URI
   = "x0x://pair/" + "ab".repeat(32) + "?r=https%3A%2F%2Frelay.example";
+const MY_ID = "cd".repeat(32);
 
 let host: HTMLElement;
 
 beforeEach(() => {
   pairShareUriMock.mockReset();
+  setDisplayNameMock.mockClear();
   host = document.createElement("div");
   document.body.appendChild(host);
 });
@@ -44,7 +51,7 @@ describe("mountShareCard", () => {
           resolveShare = resolve;
         }),
     );
-    mountShareCard(host, { onClose: () => {} });
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {} });
 
     // Before the invoke resolves the dialog must announce it is
     // publishing the reachability record (so a shared URI never 404s).
@@ -58,7 +65,7 @@ describe("mountShareCard", () => {
 
   it("renders the short pointer URI as copyable text and a QR on success", async () => {
     pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
-    mountShareCard(host, { onClose: () => {} });
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {} });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -74,7 +81,7 @@ describe("mountShareCard", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
     pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
-    mountShareCard(host, { onClose: () => {} });
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {} });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -86,7 +93,7 @@ describe("mountShareCard", () => {
 
   it("shows an honest offline error when publishing fails", async () => {
     pairShareUriMock.mockRejectedValueOnce(new Error("relay unreachable"));
-    mountShareCard(host, { onClose: () => {} });
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {} });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -106,7 +113,7 @@ describe("mountShareCard", () => {
           resolveShare = resolve;
         }),
     );
-    mountShareCard(host, { onClose: () => {} });
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {} });
 
     // Capture the dialog's children, then close the dialog the way panel.ts
     // hideDialog does (replaceChildren detaches `inner`).
@@ -135,7 +142,7 @@ describe("mountShareCard", () => {
     const execCommand = vi.fn().mockReturnValue(true);
     Object.assign(document, { execCommand });
     pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
-    mountShareCard(host, { onClose: () => {} });
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {} });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -148,10 +155,29 @@ describe("mountShareCard", () => {
     expect(execCommand).toHaveBeenCalledWith("copy");
   });
 
+  it("shows the agent id for verification and saves a name change", async () => {
+    pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
+    const onNameSaved = vi.fn();
+    mountShareCard(host, { agentId: MY_ID, onClose: () => {}, onNameSaved });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The full agent id is reachable here for impersonation checks.
+    expect(host.querySelector(".chat-dialog__idval")?.textContent).toBe(MY_ID);
+
+    const nameInput = host.querySelector<HTMLInputElement>(".chat-dialog__name")!;
+    expect(nameInput.value).toBe("Old Name");
+    nameInput.value = "Josh";
+    nameInput.dispatchEvent(new Event("blur"));
+    await Promise.resolve();
+    expect(setDisplayNameMock).toHaveBeenCalledWith("Josh");
+    expect(onNameSaved).toHaveBeenCalledWith("Josh");
+  });
+
   it("invokes onClose for Cancel and the backdrop", async () => {
     pairShareUriMock.mockResolvedValueOnce(POINTER_URI);
     const onClose = vi.fn();
-    mountShareCard(host, { onClose });
+    mountShareCard(host, { agentId: MY_ID, onClose });
     await Promise.resolve();
 
     const closeBtn = host.querySelectorAll<HTMLButtonElement>(".chat-dialog__btn")[1];

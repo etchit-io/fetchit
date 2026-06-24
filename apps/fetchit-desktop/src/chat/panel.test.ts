@@ -53,13 +53,15 @@ describe("fillIdentityBadge", () => {
     ).toBe(true);
   });
 
-  it("restores the share affordance after a failure state", () => {
+  it("restores the badge after a failure state, with the id on hover", () => {
     const badge = document.createElement("button");
     badge.title = "Tap to retry";
     badge.textContent = "Chat unavailable";
     fillIdentityBadge(badge, "Ada", "cd".repeat(32));
-    expect(badge.title).toBe("Share my code");
-    expect(badge.getAttribute("aria-label")).toBe("Share my code");
+    // The full agent id is reachable on hover (anti-impersonation); the
+    // aria-label tells assistive tech the click sets a name + shares.
+    expect(badge.title).toContain("cd".repeat(32));
+    expect(badge.getAttribute("aria-label")).toContain("set your name");
     expect(badge.textContent).not.toContain("Chat unavailable");
   });
 });

@@ -76,10 +76,14 @@ export function fillIdentityBadge(
   label.textContent = name;
   badge.appendChild(avatar);
   badge.appendChild(label);
-  // Restore the share affordance after a prior bootstrap-failure state
-  // may have repurposed the badge as a retry button.
-  badge.title = "Share my code";
-  badge.setAttribute("aria-label", "Share my code");
+  // Full agent id on hover so it stays verifiable against impersonation
+  // (the visible flow shows the name; the id is one hover away). Restores
+  // the badge after a prior bootstrap-failure state repurposed it.
+  badge.title = `Your ID: ${agentId}`;
+  badge.setAttribute(
+    "aria-label",
+    `You: ${name}. Click to set your name and share your code.`,
+  );
 }
 
 /// Wait between bootstrap retries when `open()` throws partway —
@@ -327,7 +331,17 @@ export function mountChatPanel(
 
   const openShareCard = (): void => {
     showDialog((root) => {
-      mountShareCard(root, { onClose: hideDialog });
+      mountShareCard(root, {
+        agentId: store.identity()?.agent_id ?? "",
+        onClose: hideDialog,
+        onNameSaved: (name) => {
+          // Reflect the new name immediately: update the cached name used
+          // for outbound sends + re-fill the header badge.
+          displayName = name;
+          const me = store.identity();
+          if (me) fillIdentityBadge(idBadge, resolveName(), me.agent_id);
+        },
+      });
     });
   };
 
