@@ -282,9 +282,7 @@ class ChatModeView(
         // connected gateway when available, else from the saved setting (no
         // connection needed); "You"/"?" before any name is set.
         bindIdentityBadge(identityAvatar, identityName)
-        identityBadge.setOnClickListener {
-            lifecycleScope.launch { onShareMyCodeClicked() }
-        }
+        identityBadge.setOnClickListener { onIdentityBadgeTap(identityAvatar, identityName) }
 
         // Adapter: pinned fediverse row at position 0, then groups + contacts.
         val adapter = ContactListAdapter(
@@ -354,22 +352,68 @@ class ChatModeView(
      * avatar, mirroring desktop's empty-name fallback.
      */
     private fun bindIdentityBadge(avatar: TextView, name: TextView) {
-        val gw = controller.gateway()
-        val displayName = if (gw != null) {
-            displayNameOrDefault(gw)
+        // Read the SAVED name only -- never displayNameOrDefault, whose
+        // agent-<hex> fallback would leak the very hex this badge exists to
+        // hide (grandma rule 1: the user sees themselves by name). When no
+        // name is set yet, invite them to add one rather than dead-end on "?".
+        val saved = SettingsStore(context).chatDisplayName()
+        if (saved.isBlank()) {
+            name.text = context.getString(R.string.chat_identity_add_name)
+            avatar.text = "+"
         } else {
-            SettingsStore(context).chatDisplayName()
+            name.text = saved
+            avatar.text = IdentityColor.initials(saved)
         }
-        // Before any name is set: show "You" with a "?" avatar (initials("")
-        // is "?"); once set, the real name drives both label and initials.
-        name.text = displayName.ifBlank { context.getString(R.string.chat_identity_you) }
-        avatar.text = IdentityColor.initials(displayName)
         // Self hue is copper — the same OVAL background the avatar gets
         // everywhere. Set in code so the circle isn't a static drawable.
         avatar.background = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.OVAL
             setColor(SELF_HUE)
         }
+    }
+
+    /**
+     * Tap on the identity badge: when no display name is set yet, invite the
+     * user to add one (the most useful first action — and it stops the badge
+     * dead-ending on "?"); once a name exists, the badge shares the user's
+     * code, mirroring desktop where the badge opens the share card.
+     */
+    private fun onIdentityBadgeTap(avatar: TextView, name: TextView) {
+        if (SettingsStore(context).chatDisplayName().isBlank()) {
+            promptSetMyName(avatar, name)
+        } else {
+            lifecycleScope.launch { onShareMyCodeClicked() }
+        }
+    }
+
+    /**
+     * Prompt for the user's own display name — the name people see on the
+     * messages they send (persisted via [SettingsStore.saveChatDisplayName],
+     * the same value [displayNameOrDefault] feeds into every outbound send).
+     * Re-binds the badge so it reflects the new name immediately.
+     */
+    private fun promptSetMyName(avatar: TextView, name: TextView) {
+        val editText = EditText(context).apply {
+            setText(SettingsStore(context).chatDisplayName())
+            hint = context.getString(R.string.chat_identity_name_hint)
+            setSelection(text.length)
+        }
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(editText)
+        }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_identity_name_title))
+            .setMessage(context.getString(R.string.chat_identity_name_message))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.chat_identity_name_save)) { _, _ ->
+                SettingsStore(context).saveChatDisplayName(editText.text.toString())
+                bindIdentityBadge(avatar, name)
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
     }
 
     /**

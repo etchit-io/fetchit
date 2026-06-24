@@ -181,6 +181,13 @@
     <string name="chat_identity_badge_desc">share my code</string>
     <!-- Own-identity badge label before the user has set a display name. -->
     <string name="chat_identity_you">You</string>
+    <!-- Own-identity badge: invitation + set-your-name dialog (the name people
+         see on your messages). Shown until a display name is saved. -->
+    <string name="chat_identity_add_name">Add your name</string>
+    <string name="chat_identity_name_title">Your name</string>
+    <string name="chat_identity_name_message">This is the name people see on your messages.</string>
+    <string name="chat_identity_name_hint">Your name</string>
+    <string name="chat_identity_name_save">save</string>
     <string name="chat_share_my_code">share my code</string>
     <string name="chat_scan_a_code">scan a code</string>
     <string name="chat_add_contact">add contact</string>
