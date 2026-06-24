@@ -86,3 +86,81 @@ describe("mountMemberList", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("member moderation", () => {
+  let host: HTMLElement;
+  beforeEach(() => {
+    localStorage.clear();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+  });
+  afterEach(() => {
+    host.remove();
+    vi.mocked(invoke).mockReset();
+  });
+
+  const CAROL = "c".repeat(64);
+
+  async function confirmRemove(): Promise<void> {
+    const ok = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        ".chat-dialog:not([hidden]) .chat-dialog__btn",
+      ),
+    ].find((b) => !b.classList.contains("chat-dialog__btn--ghost"));
+    ok!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  function mount(roster: unknown[]): void {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === "chat_group_members"
+        ? Promise.resolve(roster)
+        : Promise.resolve(),
+    );
+    mountMemberList(host, {
+      groupId: "g1", groupTitle: "G", store: makeStore(), onClose: () => {},
+    });
+  }
+
+  it("an owner can remove a non-owner member, dropping the row", async () => {
+    mount([
+      { agent_id: ME, display_name: "Me", role: "owner" },
+      { agent_id: BOB, display_name: "Bob", role: "member" },
+    ]);
+    await vi.waitFor(() =>
+      expect(host.querySelectorAll(".chat-member").length).toBe(2),
+    );
+    const remove = host.querySelector<HTMLButtonElement>(".chat-member__remove");
+    expect(remove).not.toBeNull();
+    remove!.click();
+    await confirmRemove();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("chat_group_remove_member", {
+      groupId: "g1", agentId: BOB,
+    });
+    expect(host.querySelectorAll(".chat-member").length).toBe(1);
+  });
+
+  it("a plain member sees no remove controls", async () => {
+    mount([
+      { agent_id: ME, display_name: "Me", role: "member" },
+      { agent_id: BOB, display_name: "Bob", role: "member" },
+    ]);
+    await vi.waitFor(() =>
+      expect(host.querySelectorAll(".chat-member").length).toBe(2),
+    );
+    expect(host.querySelector(".chat-member__remove")).toBeNull();
+  });
+
+  it("never offers remove on another owner or on self, and tags owners", async () => {
+    mount([
+      { agent_id: ME, display_name: "Me", role: "owner" },
+      { agent_id: CAROL, display_name: "Carol", role: "owner" },
+    ]);
+    await vi.waitFor(() =>
+      expect(host.querySelectorAll(".chat-member").length).toBe(2),
+    );
+    expect(host.querySelectorAll(".chat-member__role").length).toBe(2);
+    expect(host.querySelector(".chat-member__remove")).toBeNull();
+  });
+});

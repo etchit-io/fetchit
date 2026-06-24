@@ -114,6 +114,9 @@ export interface Group {
 export interface GroupMember {
   agent_id: string;
   display_name?: string | null;
+  /// Role: "owner" / "admin" / "member" (absent if the daemon omits it).
+  /// Drives the role tag and owner-gated moderation controls.
+  role?: string | null;
 }
 
 /// One private-group message. Two producers share this shape:

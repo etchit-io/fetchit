@@ -1032,15 +1032,18 @@ pub async fn chat_group_leave(
         .map_err(|e| e.to_string())
 }
 
-/// A group member surfaced to the UI: agent id plus the display name they
-/// joined with, when x0xd has one. The frontend resolves a still-nameless
-/// member to a saved-contact label or a short id, mirroring who-is-who.
+/// A group member surfaced to the UI: agent id, the display name they
+/// joined with (when x0xd has one), and their role. The frontend resolves
+/// a still-nameless member to a saved-contact label or a short id, and
+/// gates moderation controls on the viewer's own role.
 #[derive(serde::Serialize)]
 pub struct GroupMemberDto {
     /// The member's agent id (64-hex).
     pub agent_id: String,
     /// Display name the member joined with, if any.
     pub display_name: Option<String>,
+    /// Role: `"owner"` / `"admin"` / `"member"` (absent if x0xd omits it).
+    pub role: Option<String>,
 }
 
 #[tauri::command]
@@ -1063,8 +1066,30 @@ pub async fn chat_group_members(
         .map(|m| GroupMemberDto {
             agent_id: m.agent_id.0,
             display_name: m.display_name,
+            role: m.role,
         })
         .collect())
+}
+
+/// Remove (kick) a member from a group. x0xd authorizes (admin+ only,
+/// target must not be the owner); the desktop only shows this to an
+/// owner/admin, but x0xd is the real gate.
+#[tauri::command]
+pub async fn chat_group_remove_member(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+    agent_id: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .groups()
+        .remove_member(&gid, &fetchit_chat::identity::AgentId(agent_id))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -340,12 +340,42 @@ body.chat-docked {
   font-weight: 600;
 }
 .chat-member__name {
+  flex: 1;
+  min-width: 0;
   font-size: 14px;
   color: var(--bone);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chat-member__role {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--ash);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.chat-member__remove {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ash);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: color var(--dur-micro) ease, border-color var(--dur-micro) ease,
+    background var(--dur-micro) ease;
+}
+.chat-member__remove:hover:not(:disabled) {
+  color: var(--bone);
+  border-color: var(--ash);
+  background: color-mix(in srgb, var(--rust) 30%, transparent);
+}
+.chat-member__remove:disabled { opacity: 0.5; cursor: default; }
 .chat-conv--active {
   background: linear-gradient(
     90deg,

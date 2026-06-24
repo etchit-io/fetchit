@@ -4,8 +4,9 @@
 // the display name they joined with, else a saved-contact label, else a
 // short agent id.
 
-import { groupMembers } from "./api";
+import { groupMembers, groupRemoveMember } from "./api";
 import { avatarGradientClass, initials } from "./avatarColor";
+import { chatConfirm } from "./confirmDialog";
 import { friendlyError } from "./errors";
 import type { ChatStore } from "./state";
 
@@ -82,7 +83,17 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
       return;
     }
     status.hidden = true;
-    title.textContent = `In ${opts.groupTitle} · ${members.length}`;
+    let count = members.length;
+    const renderCount = (): void => {
+      title.textContent = `In ${opts.groupTitle} · ${count}`;
+    };
+    renderCount();
+
+    // The viewer's own role decides whether moderation controls show;
+    // x0xd is the real gate, this just hides controls that would 4xx.
+    const myRole = members.find((m) => m.agent_id === me)?.role;
+    const canModerate = myRole === "owner" || myRole === "admin";
+
     for (const m of members) {
       const li = document.createElement("li");
       li.className = "chat-member";
@@ -99,6 +110,46 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
 
       li.appendChild(avatar);
       li.appendChild(label);
+
+      if (m.role === "owner" || m.role === "admin") {
+        const tag = document.createElement("span");
+        tag.className = "chat-member__role";
+        tag.textContent = m.role;
+        li.appendChild(tag);
+      }
+
+      // An owner/admin may remove any non-owner who is not themselves.
+      if (canModerate && m.agent_id !== me && m.role !== "owner") {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "chat-member__remove";
+        remove.textContent = "Remove";
+        remove.title = `Remove ${name} from the group`;
+        remove.addEventListener("click", () => {
+          void (async () => {
+            const ok = await chatConfirm({
+              title: "Remove member",
+              message:
+                `Remove ${name} from this group? They lose access to new messages.`,
+              confirmLabel: "Remove",
+            });
+            if (!ok) return;
+            remove.disabled = true;
+            try {
+              await groupRemoveMember(opts.groupId, m.agent_id);
+              li.remove();
+              count -= 1;
+              renderCount();
+            } catch (e) {
+              remove.disabled = false;
+              status.hidden = false;
+              status.textContent = `Couldn't remove: ${friendlyError(e)}`;
+            }
+          })();
+        });
+        li.appendChild(remove);
+      }
+
       list.appendChild(li);
     }
   })();

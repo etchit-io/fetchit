@@ -176,6 +176,15 @@ export async function groupMembers(groupId: string): Promise<GroupMember[]> {
   return invoke<GroupMember[]>("chat_group_members", { groupId });
 }
 
+/// Remove (kick) a member from a group. The daemon authorizes (admin+,
+/// not the owner); the UI only offers this to an owner/admin.
+export async function groupRemoveMember(
+  groupId: string,
+  agentId: string,
+): Promise<void> {
+  await invoke("chat_group_remove_member", { groupId, agentId });
+}
+
 /// Which create-group surface to invoke on the daemon.
 ///
 /// `"private_secure"` routes to `groups::create_private` (PQ-encrypted x0x

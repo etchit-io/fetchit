@@ -279,19 +279,24 @@ struct GroupMemberEntry {
     #[serde(default)]
     display_name: Option<String>,
     #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
     state: Option<String>,
 }
 
 /// A group member as surfaced for the roster ("who is in this group")
 /// view: their agent id, the display name they joined with (when x0xd
-/// has one), and their membership state. Distinct from the bare
-/// [`AgentId`] list [`Endpoint::members`] returns for send fanout.
+/// has one), their role, and their membership state. Distinct from the
+/// bare [`AgentId`] list [`Endpoint::members`] returns for send fanout.
 #[derive(Debug, Clone)]
 pub struct GroupMemberInfo {
     /// The member's agent id.
     pub agent_id: AgentId,
     /// Display name the member joined or was added with, if x0xd has one.
     pub display_name: Option<String>,
+    /// Role as reported by x0xd (`"owner"` / `"admin"` / `"member"`).
+    /// Drives owner-gated moderation controls in the UI.
+    pub role: Option<String>,
     /// Membership state as reported by x0xd (e.g. `"active"`).
     pub state: Option<String>,
 }
@@ -623,9 +628,25 @@ impl<'a> Endpoint<'a> {
             .map(|m| GroupMemberInfo {
                 agent_id: m.agent_id,
                 display_name: m.display_name,
+                role: m.role,
                 state: m.state,
             })
             .collect())
+    }
+
+    /// Remove (kick) a member from a group. Hits
+    /// `DELETE /groups/<id>/members/<agent_id>`, which x0xd authorizes
+    /// (admin+ only, and the target must not be the owner) and, for a
+    /// private group, drives the `TreeKEM` commit that re-keys the room
+    /// without the removed member. The UI gates this on the viewer's
+    /// role, but x0xd is the real authority — a non-admin caller gets a
+    /// 4xx surfaced as [`ChatError::Daemon`].
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces.
+    pub async fn remove_member(&self, group: &GroupId, agent_id: &AgentId) -> Result<()> {
+        let path = format!("/groups/{}/members/{}", group.as_str(), agent_id.0);
+        self.http.delete(&path).await
     }
 
     /// Fetch the recent message history for a group. Daemon-side
@@ -911,7 +932,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "members": [
-                    {"agent_id": "a".repeat(64), "display_name": "Alice", "state": "active"},
+                    {"agent_id": "a".repeat(64), "display_name": "Alice", "role": "owner", "state": "active"},
                     {"agent_id": "b".repeat(64), "state": "active"},
                     {"agent_id": "c".repeat(64), "display_name": "Carol", "state": "removed"},
                 ]
@@ -924,12 +945,37 @@ mod tests {
             .member_roster(&GroupId::parse(gid).unwrap())
             .await
             .expect("roster");
-        // Non-active (Carol) filtered out; display names preserved, absent -> None.
+        // Non-active (Carol) filtered out; display names + role preserved, absent -> None.
         assert_eq!(roster.len(), 2);
         assert_eq!(roster[0].agent_id.0, "a".repeat(64));
         assert_eq!(roster[0].display_name.as_deref(), Some("Alice"));
+        assert_eq!(roster[0].role.as_deref(), Some("owner"));
         assert_eq!(roster[1].agent_id.0, "b".repeat(64));
         assert_eq!(roster[1].display_name, None);
+        assert_eq!(roster[1].role, None);
+    }
+
+    #[tokio::test]
+    async fn remove_member_deletes_the_member_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        let target = "b".repeat(64);
+        Mock::given(method("DELETE"))
+            .and(path(format!("/groups/{gid}/members/{target}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true
+            })))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        endpoint
+            .remove_member(&GroupId::parse(gid).unwrap(), &AgentId(target.clone()))
+            .await
+            .expect("remove_member");
+        // Unmatched (wrong) route would 404 -> the mount asserts the DELETE path.
     }
 
     #[tokio::test]
