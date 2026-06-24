@@ -29,7 +29,7 @@ export function mountShareCard(
   inner.className = "chat-dialog__panel";
 
   const title = document.createElement("h3");
-  title.textContent = "Share my card";
+  title.textContent = "Share my code";
 
   const help = document.createElement("p");
   help.className = "chat-dialog__help";

@@ -226,7 +226,7 @@ function emptyState(): HTMLElement {
   title.textContent = "No conversations yet";
   const body = document.createElement("div");
   body.className = "chat-conv-empty__body";
-  body.textContent = "Add a contact's card to start a DM, or create a group.";
+  body.textContent = "Add someone to start chatting, or create a group.";
   li.appendChild(title);
   li.appendChild(body);
   return li;

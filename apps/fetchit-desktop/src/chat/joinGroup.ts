@@ -34,7 +34,7 @@ export function mountJoinGroup(
   // Textarea (not input) so a multi-KB invite URI wraps visually.
   const input = document.createElement("textarea");
   input.className = "chat-dialog__uri";
-  input.placeholder = "x0x://invite/…";
+  input.placeholder = "Paste your group invite link";
   input.spellcheck = false;
   input.rows = 4;
   input.wrap = "soft";

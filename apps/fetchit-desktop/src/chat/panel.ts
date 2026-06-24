@@ -108,13 +108,13 @@ export function mountChatPanel(
   idBadge.type = "button";
   idBadge.className = "chat-panel__id";
   idBadge.textContent = "—";
-  idBadge.title = "Share your card";
-  idBadge.setAttribute("aria-label", "Share your card");
+  idBadge.title = "Share my code";
+  idBadge.setAttribute("aria-label", "Share my code");
 
   const shareBtn = document.createElement("button");
   shareBtn.type = "button";
   shareBtn.className = "chat-panel__share";
-  shareBtn.textContent = "Share my card";
+  shareBtn.textContent = "Share my code";
 
   // First-contact request badge — hidden until the store has at least
   // one pending TOFU welcome to surface. Clicking opens the dialog
