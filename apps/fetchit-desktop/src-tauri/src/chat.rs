@@ -1032,6 +1032,41 @@ pub async fn chat_group_leave(
         .map_err(|e| e.to_string())
 }
 
+/// A group member surfaced to the UI: agent id plus the display name they
+/// joined with, when x0xd has one. The frontend resolves a still-nameless
+/// member to a saved-contact label or a short id, mirroring who-is-who.
+#[derive(serde::Serialize)]
+pub struct GroupMemberDto {
+    /// The member's agent id (64-hex).
+    pub agent_id: String,
+    /// Display name the member joined with, if any.
+    pub display_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn chat_group_members(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+) -> Result<Vec<GroupMemberDto>, String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    let roster = state
+        .get()
+        .await?
+        .groups()
+        .member_roster(&gid)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(roster
+        .into_iter()
+        .map(|m| GroupMemberDto {
+            agent_id: m.agent_id.0,
+            display_name: m.display_name,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn chat_group_messages(
     app_state: tauri::State<'_, AppState>,

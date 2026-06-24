@@ -1153,6 +1153,7 @@ pub fn run() {
             chat::chat_group_send,
             chat::chat_group_messages,
             chat::chat_group_leave,
+            chat::chat_group_members,
             chat::chat_set_passphrase,
             chat::chat_custody_status,
             chat::chat_rekey_vault,

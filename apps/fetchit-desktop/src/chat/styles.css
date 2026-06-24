@@ -310,6 +310,42 @@ body.chat-docked {
 .chat-conv:hover .chat-conv__unread,
 .chat-conv:focus-within .chat-conv__ts,
 .chat-conv:focus-within .chat-conv__unread { opacity: 0; }
+
+/* Group header actions (Members / Leave) + the member-list dialog. */
+.chat-group-actions { display: inline-flex; gap: 6px; }
+.chat-members {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+}
+.chat-member__avatar {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+}
+.chat-member__name {
+  font-size: 14px;
+  color: var(--bone);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .chat-conv--active {
   background: linear-gradient(
     90deg,

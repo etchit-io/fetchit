@@ -30,6 +30,7 @@ import { mountPendingContactsDialog } from "./pendingContacts";
 import { ChatStore } from "./state";
 import { connectionBannerCopy } from "./connectionBanner";
 import { avatarGradientClass, initials } from "./avatarColor";
+import { mountMemberList } from "./memberList";
 import { mark } from "../ui/icons";
 
 export interface ChatPanelHandlers {
@@ -526,6 +527,16 @@ export function mountChatPanel(
     },
     onRemoveContact: removeContactAction,
     onLeaveGroup: leaveGroupAction,
+    onShowMembers: (groupId) => {
+      showDialog((root) =>
+        mountMemberList(root, {
+          groupId,
+          groupTitle: store.active()?.title ?? "this group",
+          store,
+          onClose: hideDialog,
+        }),
+      );
+    },
     resolveSenderName: resolveName,
   });
 

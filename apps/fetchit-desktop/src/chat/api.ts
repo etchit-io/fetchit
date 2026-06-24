@@ -9,6 +9,7 @@ import type {
   CardWithUri,
   Contact,
   Group,
+  GroupMember,
   GroupMessage,
   OnlineAgent,
   OutboxBubbleDto,
@@ -167,6 +168,12 @@ export async function unwatchPresence(agentIds: string[]): Promise<void> {
 
 export async function listGroups(): Promise<Group[]> {
   return invoke<Group[]>("chat_groups_list");
+}
+
+/// Active roster for a group ("who is in this group"), with the display
+/// name each member joined with where the daemon has one.
+export async function groupMembers(groupId: string): Promise<GroupMember[]> {
+  return invoke<GroupMember[]>("chat_group_members", { groupId });
 }
 
 /// Which create-group surface to invoke on the daemon.

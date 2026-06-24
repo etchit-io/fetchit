@@ -53,6 +53,8 @@ export interface ConversationHandlers {
   onSetTrust: (agentId: string, level: TrustLevel) => void;
   onRemoveContact: (agentId: string) => void;
   onLeaveGroup: (groupId: string) => void;
+  /// Open the "who is in this group" member list for the given group.
+  onShowMembers: (groupId: string) => void;
   /// Navigate to the full profile page for the given agent (caller closes chat).
   onOpenFullProfile: (agentId: string) => void;
   /// Resolves the user's current display name at send time, so a rename
@@ -325,6 +327,13 @@ export function mountConversation(
       trustEl.hidden = false;
       trustEl.replaceChildren();
       trustEl.className = "chat-group-actions";
+      const membersBtn = document.createElement("button");
+      membersBtn.type = "button";
+      membersBtn.className = "chat-trust__remove chat-group-actions__members";
+      membersBtn.textContent = "Members";
+      membersBtn.title = "Who is in this group";
+      membersBtn.addEventListener("click", () => handlers.onShowMembers(groupId));
+      trustEl.appendChild(membersBtn);
       const leaveBtn = document.createElement("button");
       leaveBtn.type = "button";
       leaveBtn.className = "chat-trust__remove";
