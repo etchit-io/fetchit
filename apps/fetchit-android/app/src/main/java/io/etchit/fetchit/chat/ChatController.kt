@@ -18,6 +18,7 @@ import org.json.JSONObject
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.GroupFfi
+import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 import java.io.File
@@ -167,6 +168,65 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      */
     suspend fun leaveGroup(groupId: String) {
         leaveGroupVia(gateway, groupId) { refreshGroups() }
+    }
+
+    /**
+     * Roster of active members for [groupId] -- "who is in this group". Returns
+     * the empty list (and logs) on any failure or when not connected, so the
+     * member-list dialog degrades gracefully rather than crashing -- non-fatal,
+     * mirroring [loadGroups]. The flags on each row are cosmetic; x0xd remains
+     * the authority on every moderation call.
+     */
+    suspend fun groupMembers(groupId: String): List<GroupMemberFfi> {
+        val gw = gateway ?: return emptyList()
+        return try {
+            gw.groupMembers(groupId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("fetchit.chat", "groupMembers failed", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Remove [agentIdHex] from [groupId], then refresh the group + roster.
+     * x0xd is the authorization gate (admin+, refuses an owner-target, drives
+     * the TreeKEM re-key); the [onError] callback surfaces the x0xd rejection
+     * to the caller so an unauthorized attempt is shown, never silently
+     * swallowed. Refresh runs regardless so the list reconciles with the
+     * engine's actual membership.
+     */
+    suspend fun removeMember(
+        groupId: String,
+        agentIdHex: String,
+        onError: (Throwable) -> Unit = {},
+    ) {
+        moderateVia(gateway, onError, { it.removeMember(groupId, agentIdHex) }) { refreshGroups() }
+    }
+
+    /**
+     * Ban [agentIdHex] from [groupId] (removed and cannot rejoin), then refresh.
+     * Same x0xd-gated contract as [removeMember]: surface the rejection.
+     */
+    suspend fun banMember(
+        groupId: String,
+        agentIdHex: String,
+        onError: (Throwable) -> Unit = {},
+    ) {
+        moderateVia(gateway, onError, { it.banMember(groupId, agentIdHex) }) { refreshGroups() }
+    }
+
+    /**
+     * Rename [groupId] to [newName], then refresh so the new title surfaces.
+     * x0xd gates the rename to admin+; surface its rejection via [onError].
+     */
+    suspend fun renameGroup(
+        groupId: String,
+        newName: String,
+        onError: (Throwable) -> Unit = {},
+    ) {
+        moderateVia(gateway, onError, { it.renameGroup(groupId, newName) }) { refreshGroups() }
     }
 
     /**
@@ -404,6 +464,40 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                 throw e
             } catch (e: Exception) {
                 logWarn("leaveGroup failed", e)
+            }
+            refresh()
+        }
+
+        /**
+         * Run an x0xd-gated moderation [action] (remove / ban / rename) against
+         * [gw], then [refresh] the list. No-op when [gw] is `null`. Unlike the
+         * remove/leave seams, a moderation failure is NOT silently swallowed:
+         * x0xd is the sole authorization gate, so an unauthorized or rejected
+         * call must reach the user. The failure is reported via [onError] (and
+         * logged) BUT [refresh] still runs so the list reconciles with the
+         * engine either way.
+         *
+         * Companion function so the report-then-refresh seam is JVM-testable
+         * with a [FakeGateway], mirroring [removeContactVia] / [leaveGroupVia].
+         */
+        suspend fun moderateVia(
+            gw: ChatGateway?,
+            onError: (Throwable) -> Unit,
+            action: suspend (ChatGateway) -> Unit,
+            logWarn: (String, Throwable) -> Unit = { msg, t ->
+                android.util.Log.w("fetchit.chat", msg, t)
+            },
+            refresh: suspend () -> Unit,
+        ) {
+            if (gw == null) return
+            try {
+                action(gw)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // x0xd is the authority -- surface its rejection, do not swallow.
+                logWarn("group moderation failed", e)
+                onError(e)
             }
             refresh()
         }

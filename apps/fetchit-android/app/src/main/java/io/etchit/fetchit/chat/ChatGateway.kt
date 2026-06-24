@@ -3,6 +3,7 @@ package io.etchit.fetchit.chat
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.GroupFfi
+import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
@@ -78,6 +79,27 @@ interface ChatGateway {
     suspend fun leaveGroup(groupId: String)
 
     /**
+     * Roster of active members for [groupId] -- "who is in this group". Each
+     * [GroupMemberFfi] carries the member's role plus pre-derived
+     * `isOwner` / `isAdmin` flags; those flags are COSMETIC (they only hide
+     * controls that would 4xx). x0xd is the sole authorization gate.
+     */
+    suspend fun groupMembers(groupId: String): List<GroupMemberFfi>
+
+    /**
+     * Remove [agentIdHex] from [groupId]. x0xd authorizes (admin+, refuses an
+     * owner-target) and drives the TreeKEM re-key; a failure (incl. an
+     * unauthorized caller) surfaces as a thrown exception the UI must show.
+     */
+    suspend fun removeMember(groupId: String, agentIdHex: String)
+
+    /** Ban [agentIdHex] from [groupId] (removed and cannot rejoin); x0xd-gated. */
+    suspend fun banMember(groupId: String, agentIdHex: String)
+
+    /** Rename [groupId] to [newName]; x0xd gates the rename to admin+. */
+    suspend fun renameGroup(groupId: String, newName: String)
+
+    /**
      * Block until the next [ChatEventFfi] arrives from the relay, or return
      * `null` when the client has been disconnected and the event queue is
      * drained.
@@ -109,6 +131,14 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
+    override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =
+        inner.groupMembers(groupId)
+    override suspend fun removeMember(groupId: String, agentIdHex: String) =
+        inner.removeMember(groupId, agentIdHex)
+    override suspend fun banMember(groupId: String, agentIdHex: String) =
+        inner.banMember(groupId, agentIdHex)
+    override suspend fun renameGroup(groupId: String, newName: String) =
+        inner.renameGroup(groupId, newName)
     override suspend fun nextEvent(): ChatEventFfi? = inner.nextEvent()
     override fun disconnect() = inner.disconnect()
 }

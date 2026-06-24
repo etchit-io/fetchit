@@ -245,6 +245,25 @@
     <string name="chat_leave_group_message">You\'ll need a new invite to rejoin %1$s.</string>
     <string name="chat_leave_group_confirm">leave</string>
 
+    <!-- Chat: group member list + moderation. Confirm copy is the verbatim
+         desktop wording; the destructive verbs stay lowercase. -->
+    <string name="chat_members_desc">group members</string>
+    <string name="chat_members_title">Members</string>
+    <string name="chat_member_you">%1$s (you)</string>
+    <string name="chat_member_remove">Remove</string>
+    <string name="chat_member_ban">Ban</string>
+    <string name="chat_member_remove_title">Remove member?</string>
+    <string name="chat_member_remove_message">Remove %1$s from this group? They lose access to new messages.</string>
+    <string name="chat_member_remove_confirm">remove</string>
+    <string name="chat_member_ban_title">Ban member?</string>
+    <string name="chat_member_ban_message">Ban %1$s? They are removed and cannot rejoin.</string>
+    <string name="chat_member_ban_confirm">ban</string>
+    <string name="chat_group_rename_title">Rename group</string>
+    <string name="chat_group_rename_message">Everyone in the group sees the new name.</string>
+    <string name="chat_group_rename_hint">Group name</string>
+    <string name="chat_group_rename_save">save</string>
+    <string name="chat_moderation_failed">Couldn\'t complete that. %1$s</string>
+
     <!-- Chat: thread screen -->
     <string name="thread_back_glyph">‹</string>
     <string name="thread_back_desc">back to conversation list</string>

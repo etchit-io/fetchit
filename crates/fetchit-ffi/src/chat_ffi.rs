@@ -7,6 +7,7 @@
 
 use crate::chat_error::ChatFfiError;
 use crate::group_ffi::GroupFfi;
+use crate::member_ffi::GroupMemberFfi;
 use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::messages::is_private_group_envelope;
 use fetchit_chat::Client;
@@ -14,8 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use url::Url;
-use x0x::server::{serve_with_options, DaemonConfig, ServeOptions, ServerHandle};
 use x0x::exec::ExecPolicy;
+use x0x::server::{serve_with_options, DaemonConfig, ServeOptions, ServerHandle};
 
 /// An inbound chat event delivered by [`ChatClient::next_event`].
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -900,6 +901,130 @@ impl ChatClient {
             .map_err(ChatFfiError::from)
     }
 
+    /// Roster of active members for a group ("who is in this group").
+    ///
+    /// Mirrors the desktop `chat_group_members` command. The engine roster is
+    /// already filtered to active members; each is mapped into a
+    /// [`GroupMemberFfi`] with `is_owner` / `is_admin` pre-derived from the
+    /// x0xd role so the UI can hide controls that would 4xx. Those booleans are
+    /// cosmetic -- x0xd is the real authorization gate.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    pub async fn group_members(
+        &self,
+        group_id: String,
+    ) -> Result<Vec<GroupMemberFfi>, ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        let roster = self
+            .inner
+            .groups()
+            .member_roster(&gid)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(roster.into_iter().map(GroupMemberFfi::from).collect())
+    }
+
+    /// Remove a member from a group. `DELETE /groups/<id>/members/<agent_id>`.
+    ///
+    /// Mirrors the desktop `chat_group_remove_member` command. x0xd authorizes
+    /// the call (admin+, refuses an owner-target) and drives the TreeKEM re-key
+    /// on private groups -- a client-side role check is cosmetic, so the shell
+    /// must surface the error a non-admin caller gets back.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id or
+    /// `agent_id_hex` is not valid 64-hex.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure (incl. authorization
+    /// rejection).
+    pub async fn remove_member(
+        &self,
+        group_id: String,
+        agent_id_hex: String,
+    ) -> Result<(), ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        let id = fetchit_chat::identity::AgentId::parse(agent_id_hex).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: e.to_string(),
+            }
+        })?;
+        self.inner
+            .groups()
+            .remove_member(&gid, &id)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Ban a member from a group. `POST /groups/<id>/ban/<agent_id>`.
+    ///
+    /// Mirrors the desktop `chat_group_ban_member` command. Like
+    /// [`remove_member`](Self::remove_member) but the ban prevents rejoin;
+    /// x0xd is the authorization gate and drives the re-key, so surface its
+    /// error on failure rather than gating on a client role check.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id or
+    /// `agent_id_hex` is not valid 64-hex.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure (incl. authorization
+    /// rejection).
+    pub async fn ban_member(
+        &self,
+        group_id: String,
+        agent_id_hex: String,
+    ) -> Result<(), ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        let id = fetchit_chat::identity::AgentId::parse(agent_id_hex).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: e.to_string(),
+            }
+        })?;
+        self.inner
+            .groups()
+            .ban_member(&gid, &id)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Rename a group. `PATCH /groups/<id>` with the new name.
+    ///
+    /// Mirrors the desktop `chat_group_rename` command. x0xd gates the rename
+    /// to admin+, so a non-admin caller gets an error the shell must surface --
+    /// the client cannot authorize it locally.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
+    /// [`ChatFfiError::Network`] on relay or x0xd failure (incl. authorization
+    /// rejection).
+    pub async fn rename_group(
+        &self,
+        group_id: String,
+        new_name: String,
+    ) -> Result<(), ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        self.inner
+            .groups()
+            .rename(&gid, &new_name)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
     /// Drain the next inbound event. Returns `None` when the pump has
     /// shut down (relay disconnected and all buffered events consumed).
     ///
@@ -1253,6 +1378,52 @@ mod tests {
             ),
             EnvelopeRoute::SelfSource,
         );
+    }
+
+    // The moderation methods parse their ids up front; an invalid id never
+    // reaches the engine. These exercise that same parse the FFI methods call
+    // first -- the rejection path that yields `ChatFfiError::Invalid` -- without
+    // standing up a live client.
+
+    #[test]
+    fn group_members_rejects_invalid_group_id() {
+        // `/` is outside [a-zA-Z0-9_-] (the path-traversal guard), so it is
+        // rejected; the FFI maps this to ChatFfiError::Invalid before the
+        // engine is ever hit.
+        let err = fetchit_chat::groups::GroupId::parse("bad/id").unwrap_err();
+        let mapped = ChatFfiError::Invalid {
+            reason: err.to_string(),
+        };
+        assert!(matches!(mapped, ChatFfiError::Invalid { .. }));
+    }
+
+    #[test]
+    fn remove_member_rejects_invalid_agent_id() {
+        // Valid group id, but the agent id is short -> the AgentId parse rejects.
+        assert!(fetchit_chat::groups::GroupId::parse(&"a".repeat(64)).is_ok());
+        let err = fetchit_chat::identity::AgentId::parse("xyz").unwrap_err();
+        let mapped = ChatFfiError::Invalid {
+            reason: err.to_string(),
+        };
+        assert!(matches!(mapped, ChatFfiError::Invalid { .. }));
+    }
+
+    #[test]
+    fn ban_member_rejects_invalid_group_id() {
+        let err = fetchit_chat::groups::GroupId::parse("").unwrap_err();
+        let mapped = ChatFfiError::Invalid {
+            reason: err.to_string(),
+        };
+        assert!(matches!(mapped, ChatFfiError::Invalid { .. }));
+    }
+
+    #[test]
+    fn rename_group_rejects_invalid_group_id() {
+        let err = fetchit_chat::groups::GroupId::parse("has space").unwrap_err();
+        let mapped = ChatFfiError::Invalid {
+            reason: err.to_string(),
+        };
+        assert!(matches!(mapped, ChatFfiError::Invalid { .. }));
     }
 
     /// Verify that the daemonless client connects to the production NYC relay

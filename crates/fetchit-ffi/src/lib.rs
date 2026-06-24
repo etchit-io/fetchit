@@ -19,6 +19,7 @@ mod chat_error;
 mod chat_ffi;
 mod error;
 mod group_ffi;
+mod member_ffi;
 mod rendition_ffi;
 
 use std::path::PathBuf;
@@ -34,6 +35,7 @@ pub use chat_error::ChatFfiError;
 pub use chat_ffi::{ChatClient, ChatEventFfi, OutboxBubbleFfi, OutboxStatusFfi};
 pub use error::FetchitError;
 pub use group_ffi::GroupFfi;
+pub use member_ffi::GroupMemberFfi;
 pub use rendition_ffi::{ArchiveEntryFFI, RenditionFFI};
 
 uniffi::setup_scaffolding!();

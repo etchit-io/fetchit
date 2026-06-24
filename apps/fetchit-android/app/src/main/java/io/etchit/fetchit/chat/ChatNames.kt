@@ -65,3 +65,41 @@ fun groupSenderLabel(senderName: String?, contactName: String?, agentIdHex: Stri
  */
 fun rowRemoveLabel(isGroup: Boolean): Int =
     if (isGroup) R.string.chat_leave_group else R.string.chat_remove_chat
+
+/**
+ * Label for one row in the group member list.
+ *
+ * Precedence: the member's on-wire [wireName] (the display name x0xd has for
+ * them) wins when non-blank, then a locally-saved [contactName], then a short
+ * `<8hex>…` form. Pure so the member-row label is JVM-testable without a
+ * Context, mirroring [groupSenderLabel] and the desktop member roster.
+ */
+fun memberDisplayName(wireName: String?, contactName: String?, agentIdHex: String): String =
+    wireName?.trim()?.takeIf { it.isNotEmpty() }
+        ?: contactName?.trim()?.takeIf { it.isNotEmpty() }
+        ?: "${agentIdHex.take(8)}…"
+
+/**
+ * Whether the *viewer* can moderate this group at all -- i.e. their own role
+ * is owner or admin. Cosmetic gate only: it decides whether the UI shows the
+ * moderation affordances, NOT whether a call is authorized. x0xd is the real
+ * authorization gate and rejects an unauthorized call regardless of this.
+ */
+fun canModerate(myRole: String?): Boolean = myRole == "owner" || myRole == "admin"
+
+/**
+ * Whether the per-row moderation overflow (Remove / Ban) should show for a
+ * given target member: only when the [viewerCanModerate], the target is not
+ * the viewer themselves ([isSelf]), and the target is not the group owner
+ * ([targetIsOwner]) -- x0xd refuses an owner-target, so the control is hidden
+ * to match. Cosmetic only; x0xd remains the authority on every actual call.
+ */
+fun canModerateMember(viewerCanModerate: Boolean, isSelf: Boolean, targetIsOwner: Boolean): Boolean =
+    viewerCanModerate && !isSelf && !targetIsOwner
+
+/**
+ * The role chip to draw beside a member's name, or `null` for an ordinary
+ * member (no chip). Only `owner` / `admin` get a tag; any other (or null)
+ * role yields `null`. Pure so the chip choice is JVM-testable.
+ */
+fun memberRoleTag(role: String?): String? = role?.takeIf { it == "owner" || it == "admin" }

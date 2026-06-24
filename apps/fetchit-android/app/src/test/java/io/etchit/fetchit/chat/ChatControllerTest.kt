@@ -7,6 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.GroupFfi
+import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 
@@ -34,6 +35,17 @@ class FakeGateway : ChatGateway {
     val leftGroups = mutableListOf<String>()
     var removeContactThrows = false
     var leaveGroupThrows = false
+
+    // Member-list + moderation recorders. `members` is the roster groupMembers
+    // returns; the *Throws flags exercise the report-then-refresh seam.
+    var members: List<GroupMemberFfi> = emptyList()
+    val removedMembers = mutableListOf<Pair<String, String>>()
+    val bannedMembers = mutableListOf<Pair<String, String>>()
+    val renamedGroups = mutableListOf<Pair<String, String>>()
+    var groupMembersThrows = false
+    var removeMemberThrows = false
+    var banMemberThrows = false
+    var renameGroupThrows = false
 
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
@@ -67,6 +79,22 @@ class FakeGateway : ChatGateway {
     override suspend fun leaveGroup(groupId: String) {
         leftGroups += groupId
         if (leaveGroupThrows) throw RuntimeException("leave boom")
+    }
+    override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> {
+        if (groupMembersThrows) throw RuntimeException("members boom")
+        return members
+    }
+    override suspend fun removeMember(groupId: String, agentIdHex: String) {
+        removedMembers += (groupId to agentIdHex)
+        if (removeMemberThrows) throw RuntimeException("remove member boom")
+    }
+    override suspend fun banMember(groupId: String, agentIdHex: String) {
+        bannedMembers += (groupId to agentIdHex)
+        if (banMemberThrows) throw RuntimeException("ban boom")
+    }
+    override suspend fun renameGroup(groupId: String, newName: String) {
+        renamedGroups += (groupId to newName)
+        if (renameGroupThrows) throw RuntimeException("rename boom")
     }
     override suspend fun nextEvent(): ChatEventFfi? = events.receive()
     override fun disconnect() { events.trySend(null) }
@@ -207,6 +235,137 @@ class ChatControllerTest {
         assertEquals(io.etchit.fetchit.R.string.chat_remove_chat, rowRemoveLabel(isGroup = false))
     }
 
+    // ── group member list + moderation: pure helpers ───────────────────
+
+    @Test
+    fun memberDisplayNamePrefersWireThenContactThenShortHex() {
+        val hex = "a".repeat(64)
+        // Wire name wins.
+        assertEquals("Ada", memberDisplayName("  Ada  ", "Saved", hex))
+        // Blank wire -> saved contact name.
+        assertEquals("Saved", memberDisplayName("   ", "Saved", hex))
+        assertEquals("Saved", memberDisplayName(null, "Saved", hex))
+        // Neither -> short hex with ellipsis.
+        assertEquals("${"a".repeat(8)}…", memberDisplayName(null, "  ", hex))
+        assertEquals("${"a".repeat(8)}…", memberDisplayName(null, null, hex))
+    }
+
+    @Test
+    fun canModerateIsOwnerOrAdmin() {
+        assertTrue(canModerate("owner"))
+        assertTrue(canModerate("admin"))
+        assertTrue(!canModerate("member"))
+        assertTrue(!canModerate(null))
+    }
+
+    @Test
+    fun canModerateMemberExcludesSelfOwnerAndNonModerators() {
+        // Happy path: a moderator targeting an ordinary other member.
+        assertTrue(canModerateMember(viewerCanModerate = true, isSelf = false, targetIsOwner = false))
+        // A non-moderator viewer never sees the control.
+        assertTrue(!canModerateMember(viewerCanModerate = false, isSelf = false, targetIsOwner = false))
+        // Cannot moderate yourself.
+        assertTrue(!canModerateMember(viewerCanModerate = true, isSelf = true, targetIsOwner = false))
+        // Cannot target the owner (x0xd refuses; control is hidden to match).
+        assertTrue(!canModerateMember(viewerCanModerate = true, isSelf = false, targetIsOwner = true))
+    }
+
+    @Test
+    fun memberRoleTagOnlyForOwnerOrAdmin() {
+        assertEquals("owner", memberRoleTag("owner"))
+        assertEquals("admin", memberRoleTag("admin"))
+        assertEquals(null, memberRoleTag("member"))
+        assertEquals(null, memberRoleTag(null))
+    }
+
+    // ── group member list + moderation: controller seams ───────────────
+
+    @Test
+    fun groupMembersDelegatesAndReturnsRoster() = runTest {
+        val gw = FakeGateway().apply {
+            members = listOf(
+                GroupMemberFfi("a".repeat(64), "Ada", "owner", isOwner = true, isAdmin = true),
+            )
+        }
+        // The seam mirrors the controller body: gateway present -> delegate.
+        assertEquals("Ada", gw.groupMembers("g".repeat(64)).single().displayName)
+    }
+
+    @Test
+    fun removeMemberDelegatesThenRefreshes() = runTest {
+        val gw = FakeGateway()
+        var refreshed = false
+        ChatController.moderateVia(
+            gw,
+            onError = { _ -> },
+            action = { it.removeMember("g".repeat(64), "a".repeat(64)) },
+            logWarn = { _, _ -> },
+        ) { refreshed = true }
+        assertEquals("g".repeat(64) to "a".repeat(64), gw.removedMembers.single())
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun banMemberDelegatesThenRefreshes() = runTest {
+        val gw = FakeGateway()
+        var refreshed = false
+        ChatController.moderateVia(
+            gw,
+            onError = { _ -> },
+            action = { it.banMember("g".repeat(64), "a".repeat(64)) },
+            logWarn = { _, _ -> },
+        ) { refreshed = true }
+        assertEquals("g".repeat(64) to "a".repeat(64), gw.bannedMembers.single())
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun renameGroupDelegatesThenRefreshes() = runTest {
+        val gw = FakeGateway()
+        var refreshed = false
+        ChatController.moderateVia(
+            gw,
+            onError = { _ -> },
+            action = { it.renameGroup("g".repeat(64), "new name") },
+            logWarn = { _, _ -> },
+        ) { refreshed = true }
+        assertEquals("g".repeat(64) to "new name", gw.renamedGroups.single())
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun moderationFailureIsReportedNotSwallowedAndStillRefreshes() = runTest {
+        val gw = FakeGateway().apply { removeMemberThrows = true }
+        var reported: Throwable? = null
+        var refreshed = false
+        ChatController.moderateVia(
+            gw,
+            onError = { e -> reported = e },
+            action = { it.removeMember("g".repeat(64), "a".repeat(64)) },
+            logWarn = { _, _ -> },
+        ) { refreshed = true }
+        // x0xd is the authority: the rejection surfaces via onError (NOT
+        // swallowed), and the refresh still runs to reconcile the list.
+        assertEquals("g".repeat(64) to "a".repeat(64), gw.removedMembers.single())
+        assertTrue(reported != null)
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun moderationNoOpsWhenNotConnected() = runTest {
+        var reported: Throwable? = null
+        var refreshed = false
+        ChatController.moderateVia(
+            gw = null,
+            onError = { e -> reported = e },
+            action = { error("should not be called") },
+            logWarn = { _, _ -> },
+        ) { refreshed = true }
+        // No gateway: nothing to call, no error, no refresh.
+        assertTrue(reported == null)
+        assertTrue(!refreshed)
+    }
+
     @Test
     fun receiptMarksDelivered() = runTest {
         val gw = FakeGateway()
@@ -253,6 +412,10 @@ class ChatControllerTest {
             override suspend fun groupInvite(groupId: String): String = ""
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
+            override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
+            override suspend fun removeMember(groupId: String, agentIdHex: String) {}
+            override suspend fun banMember(groupId: String, agentIdHex: String) {}
+            override suspend fun renameGroup(groupId: String, newName: String) {}
             override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
             override fun disconnect() {}
         }

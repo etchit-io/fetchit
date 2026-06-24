@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import uniffi.fetchit_ffi.ChatFfiException
 import uniffi.fetchit_ffi.GroupFfi
+import uniffi.fetchit_ffi.GroupMemberFfi
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -505,6 +506,215 @@ class ChatModeView(
             .show()
     }
 
+    /**
+     * Open the group member list ("who is in this group") for [groupId]. Loads
+     * the roster, resolves the viewer's own role, and builds one row per
+     * active member into a scrollable column inside a MaterialAlertDialog.
+     *
+     * Moderation is COSMETIC here: the per-row Remove/Ban overflow and the
+     * rename affordance are shown only when the viewer's role permits, but
+     * x0xd is the sole authorization gate. Any moderation call that x0xd
+     * rejects surfaces its error via a Snackbar — never silently swallowed.
+     */
+    private fun showGroupMembersDialog(groupId: String) {
+        lifecycleScope.launch {
+            val members = controller.groupMembers(groupId)
+            val myHex = controller.gateway()?.agentIdHex()
+            val myRole = members.firstOrNull { it.agentIdHex == myHex }?.role
+            val viewerCanModerate = canModerate(myRole)
+
+            val density = context.resources.displayMetrics.density
+            val pad = (16 * density).toInt()
+            val column = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(pad, (8 * density).toInt(), pad, 0)
+            }
+            for (m in members) {
+                column.addView(memberRow(groupId, m, myHex, viewerCanModerate))
+            }
+            val scroll = android.widget.ScrollView(context).apply { addView(column) }
+
+            MaterialAlertDialogBuilder(context)
+                .setTitle(context.getString(R.string.chat_members_title))
+                .setView(scroll)
+                .setNegativeButton(context.getString(R.string.action_close), null)
+                .show()
+        }
+    }
+
+    /**
+     * Build one member row: a tinted circular avatar, the resolved display
+     * name (with " (you)" for self), an optional owner/admin chip, and — when
+     * [viewerCanModerate] and the target is neither self nor the owner — a
+     * trailing overflow with Remove / Ban. The overflow visibility is cosmetic
+     * (it only hides controls that would 4xx).
+     */
+    private fun memberRow(
+        groupId: String,
+        member: GroupMemberFfi,
+        myHex: String?,
+        viewerCanModerate: Boolean,
+    ): View {
+        val density = context.resources.displayMetrics.density
+        val savedContactName = controller.contacts.contacts.value
+            .firstOrNull { it.agentIdHex == member.agentIdHex }?.displayName
+        val name = memberDisplayName(member.displayName, savedContactName, member.agentIdHex)
+        val isSelf = member.agentIdHex == myHex
+
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            val v = (8 * density).toInt()
+            setPadding(0, v, 0, v)
+        }
+
+        // Tinted circular avatar with the identity initial.
+        val avatarSize = (36 * density).toInt()
+        val avatar = TextView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(avatarSize, avatarSize)
+            gravity = android.view.Gravity.CENTER
+            text = IdentityColor.initials(name)
+            setTextColor(0xFFFFFFFF.toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(IdentityColor.stripeColor(member.agentIdHex))
+            }
+        }
+        row.addView(avatar)
+
+        val label = TextView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f,
+            ).apply { marginStart = (12 * density).toInt() }
+            text = if (isSelf) context.getString(R.string.chat_member_you, name) else name
+            setTextColor(themeColor(R.attr.fetchitBone))
+            textSize = 15f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        row.addView(label)
+
+        memberRoleTag(member.role)?.let { tag ->
+            row.addView(TextView(context).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { marginStart = (8 * density).toInt() }
+                text = tag
+                setTextColor(themeColor(R.attr.fetchitAsh))
+                textSize = 11f
+            })
+        }
+
+        if (canModerateMember(viewerCanModerate, isSelf, member.isOwner)) {
+            val more = ImageButton(context).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    (40 * density).toInt(), (40 * density).toInt(),
+                ).apply { marginStart = (4 * density).toInt() }
+                setImageResource(R.drawable.ic_more_vert)
+                background = null
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                contentDescription = context.getString(R.string.chat_row_more)
+                setOnClickListener { anchor -> showMemberModerationMenu(anchor, groupId, member, name) }
+            }
+            row.addView(more)
+        }
+
+        return row
+    }
+
+    /**
+     * Per-member overflow: Remove + Ban, each opening a destructive confirm
+     * dialog. Mirrors [showGroupRowMenu]; the confirms mirror
+     * [confirmLeaveGroup].
+     */
+    private fun showMemberModerationMenu(
+        anchor: View,
+        groupId: String,
+        member: GroupMemberFfi,
+        name: String,
+    ) {
+        PopupMenu(context, anchor).apply {
+            menu.add(context.getString(R.string.chat_member_remove))
+            menu.add(context.getString(R.string.chat_member_ban))
+            setOnMenuItemClickListener { item ->
+                when (item.title) {
+                    context.getString(R.string.chat_member_remove) ->
+                        confirmRemoveMember(groupId, member, name)
+                    context.getString(R.string.chat_member_ban) ->
+                        confirmBanMember(groupId, member, name)
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    private fun confirmRemoveMember(groupId: String, member: GroupMemberFfi, name: String) {
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_member_remove_title))
+            .setMessage(context.getString(R.string.chat_member_remove_message, name))
+            .setPositiveButton(context.getString(R.string.chat_member_remove_confirm)) { _, _ ->
+                lifecycleScope.launch {
+                    controller.removeMember(groupId, member.agentIdHex) { e ->
+                        snackbar(userFacingError(e, "removeMember", R.string.chat_moderation_failed))
+                    }
+                }
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
+    }
+
+    private fun confirmBanMember(groupId: String, member: GroupMemberFfi, name: String) {
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_member_ban_title))
+            .setMessage(context.getString(R.string.chat_member_ban_message, name))
+            .setPositiveButton(context.getString(R.string.chat_member_ban_confirm)) { _, _ ->
+                lifecycleScope.launch {
+                    controller.banMember(groupId, member.agentIdHex) { e ->
+                        snackbar(userFacingError(e, "banMember", R.string.chat_moderation_failed))
+                    }
+                }
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
+    }
+
+    /**
+     * Prompt to rename [groupId]. Admin-gated tap target (the group title);
+     * x0xd authorizes the actual rename, so a rejection surfaces via Snackbar.
+     * Mirrors [promptSetMyName]'s dialog shape.
+     */
+    private fun promptRenameGroup(groupId: String) {
+        val current = controller.groups.value.firstOrNull { it.groupId == groupId }
+        val editText = EditText(context).apply {
+            setText(groupTitle(current, groupId))
+            hint = context.getString(R.string.chat_group_rename_hint)
+            setSelection(text.length)
+        }
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(editText)
+        }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_group_rename_title))
+            .setMessage(context.getString(R.string.chat_group_rename_message))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.chat_group_rename_save)) { _, _ ->
+                val newName = editText.text.toString().trim()
+                if (newName.isEmpty()) return@setPositiveButton
+                lifecycleScope.launch {
+                    controller.renameGroup(groupId, newName) { e ->
+                        snackbar(userFacingError(e, "renameGroup", R.string.chat_moderation_failed))
+                    }
+                }
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
+    }
+
     private suspend fun onShareMyCodeClicked() {
         val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return
         val uri = runCatching { gw.pairShareUri() }.getOrElse { e ->
@@ -712,6 +922,10 @@ class ChatModeView(
         view.findViewById<TextView>(R.id.threadPeerShortId).text = "${peer.take(8)}…"
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
         view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+        // A DM has no member list; hide the (shared-layout) members button and
+        // detach any group-thread rename listener a recycled view might carry.
+        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
+        view.findViewById<TextView>(R.id.threadPeerName).setOnClickListener(null)
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
@@ -788,10 +1002,31 @@ class ChatModeView(
             title
         }
 
-        view.findViewById<TextView>(R.id.threadPeerName).text = titleText
+        val peerName = view.findViewById<TextView>(R.id.threadPeerName)
+        peerName.text = titleText
         view.findViewById<TextView>(R.id.threadPeerShortId).text = "${groupId.take(8)}…"
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
         view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+
+        // Group member list + moderation entry. Visible on a group thread only
+        // (DM/feed headers hide it). The members button opens the roster dialog;
+        // the title becomes a rename affordance once we know the viewer is admin+
+        // (resolved async below — until then it is inert). All role checks here
+        // are COSMETIC: x0xd is the sole authorization gate.
+        val membersButton = view.findViewById<ImageButton>(R.id.threadMembersButton)
+        membersButton.visibility = View.VISIBLE
+        membersButton.setOnClickListener { showGroupMembersDialog(groupId) }
+        // Resolve the viewer's own role from the roster, then enable the title-tap
+        // rename only when they can moderate. Non-fatal: an empty/failed roster
+        // leaves the title inert.
+        lifecycleScope.launch {
+            val roster = controller.groupMembers(groupId)
+            val myHex = controller.gateway()?.agentIdHex()
+            val myRole = roster.firstOrNull { it.agentIdHex == myHex }?.role
+            if (canModerate(myRole)) {
+                peerName.setOnClickListener { promptRenameGroup(groupId) }
+            }
+        }
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
@@ -864,8 +1099,9 @@ class ChatModeView(
             context.getString(R.string.chat_feed_title)
         view.findViewById<TextView>(R.id.threadPeerShortId).text = ""
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
-        // Feed is read-only — hide the send row.
+        // Feed is read-only — hide the send row and the (group-only) members button.
         view.findViewById<View>(R.id.threadSendRow).visibility = View.GONE
+        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
