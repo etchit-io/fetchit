@@ -43,6 +43,37 @@ describe("mountSidebar — empty state", () => {
     expect(empty?.textContent).toContain("No conversations yet");
     expect(host.querySelectorAll(".chat-conv").length).toBe(0);
   });
+
+  it("carries the brand mark and a single obvious primary action", () => {
+    const store = makeStore();
+    mountSidebar(host, store, noopHandlers());
+    // The onboarding names the app with the LIT spark mark.
+    expect(host.querySelector(".chat-conv-empty .mark--lit")).not.toBeNull();
+    const primary = host.querySelector<HTMLButtonElement>(".chat-onboard__primary");
+    expect(primary).not.toBeNull();
+    expect(primary?.textContent).toContain("Add your first person");
+  });
+
+  it("primary action opens add-contact, secondary opens new-group", () => {
+    const store = makeStore();
+    const handlers = noopHandlers();
+    mountSidebar(host, store, handlers);
+    host.querySelector<HTMLButtonElement>(".chat-onboard__primary")!.click();
+    expect(handlers.onNewContact).toHaveBeenCalledTimes(1);
+    host.querySelector<HTMLButtonElement>(".chat-onboard__secondary")!.click();
+    expect(handlers.onNewGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the listbox role on the empty list so the buttons are not bogus options", () => {
+    const store = makeStore();
+    mountSidebar(host, store, noopHandlers());
+    expect(host.querySelector(".chat-conv-list")?.getAttribute("role")).toBeNull();
+    // Once a conversation exists, the list is a listbox again.
+    store.recordDirectMessage({
+      from: PEER_A, to: ME, body: "hi", timestamp_ms: 1, message_id: "1",
+    });
+    expect(host.querySelector(".chat-conv-list")?.getAttribute("role")).toBe("listbox");
+  });
 });
 
 describe("mountSidebar — conversation list", () => {

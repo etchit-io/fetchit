@@ -4,7 +4,7 @@
 import type { ChatStore, Conversation, NearbyPeer } from "./state";
 import { convKey } from "./state";
 import { avatarGradientClass } from "./avatarColor";
-import { icon, type IconName } from "../ui/icons";
+import { icon, mark, type IconName } from "../ui/icons";
 
 export interface SidebarHandlers {
   onSelect: (conv: Conversation) => void;
@@ -49,8 +49,13 @@ export function mountSidebar(
   const render = (): void => {
     const convs = store.conversationsSorted();
     if (convs.length === 0) {
-      list.replaceChildren(emptyState());
+      // First-run onboarding carries its own actions, so the list is no
+      // longer a listbox — drop the role so the buttons aren't trapped
+      // as bogus options for assistive tech.
+      list.removeAttribute("role");
+      list.replaceChildren(onboarding(handlers));
     } else {
+      list.setAttribute("role", "listbox");
       list.replaceChildren();
       const activeKey = store.active() ? convKey(store.active()!.key) : null;
       for (const conv of convs) {
@@ -218,17 +223,48 @@ function iconButton(
   return b;
 }
 
-function emptyState(): HTMLElement {
+// First-run / no-conversations state. Per the idiot-proof rules this is
+// never a dead end: it names the app, says what to do in one plain
+// sentence, and carries the single obvious next action as a big button.
+function onboarding(handlers: SidebarHandlers): HTMLElement {
   const li = document.createElement("li");
   li.className = "chat-conv-empty";
+
+  const spark = mark("lit", { label: "LIT Chat" });
+  spark.classList.add("chat-onboard__mark");
+
   const title = document.createElement("div");
   title.className = "chat-conv-empty__title";
-  title.textContent = "No conversations yet";
+  title.textContent = "Welcome to LIT Chat";
+
   const body = document.createElement("div");
   body.className = "chat-conv-empty__body";
-  body.textContent = "Add someone to start chatting, or create a group.";
+  body.textContent
+    = "No conversations yet. Add someone you know and say hello.";
+
+  const actions = document.createElement("div");
+  actions.className = "chat-onboard__actions";
+
+  const primary = document.createElement("button");
+  primary.type = "button";
+  primary.className = "chat-dialog__btn chat-onboard__primary";
+  primary.appendChild(icon("add-contact"));
+  primary.appendChild(document.createTextNode("Add your first person"));
+  primary.addEventListener("click", handlers.onNewContact);
+
+  const secondary = document.createElement("button");
+  secondary.type = "button";
+  secondary.className = "chat-dialog__btn chat-dialog__btn--ghost chat-onboard__secondary";
+  secondary.textContent = "Create a group";
+  secondary.addEventListener("click", handlers.onNewGroup);
+
+  actions.appendChild(primary);
+  actions.appendChild(secondary);
+
+  li.appendChild(spark);
   li.appendChild(title);
   li.appendChild(body);
+  li.appendChild(actions);
   return li;
 }
 
