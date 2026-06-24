@@ -260,6 +260,15 @@ struct AddMemberRequest<'a> {
     display_name: Option<&'a str>,
 }
 
+/// Body for `PATCH /groups/<id>` (group metadata update). Only the
+/// fields we set are serialized; an omitted field leaves x0xd's value
+/// untouched. We only ever set `name` (rename).
+#[derive(Serialize)]
+struct UpdateGroupRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+}
+
 #[derive(Deserialize)]
 struct GroupsResponse {
     #[serde(default)]
@@ -276,7 +285,28 @@ struct GroupsResponse {
 struct GroupMemberEntry {
     agent_id: AgentId,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
     state: Option<String>,
+}
+
+/// A group member as surfaced for the roster ("who is in this group")
+/// view: their agent id, the display name they joined with (when x0xd
+/// has one), their role, and their membership state. Distinct from the
+/// bare [`AgentId`] list [`Endpoint::members`] returns for send fanout.
+#[derive(Debug, Clone)]
+pub struct GroupMemberInfo {
+    /// The member's agent id.
+    pub agent_id: AgentId,
+    /// Display name the member joined or was added with, if x0xd has one.
+    pub display_name: Option<String>,
+    /// Role as reported by x0xd (`"owner"` / `"admin"` / `"member"`).
+    /// Drives owner-gated moderation controls in the UI.
+    pub role: Option<String>,
+    /// Membership state as reported by x0xd (e.g. `"active"`).
+    pub state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -587,6 +617,76 @@ impl<'a> Endpoint<'a> {
             .collect())
     }
 
+    /// Fetch the active group roster with display names, for the
+    /// "who is in this group" view. Same `/members` call as
+    /// [`Self::members`] but keeps the per-member display name x0xd
+    /// returns (members join/are-added with one) instead of dropping it,
+    /// so the UI can show real names rather than bare agent ids.
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces; a 404 (unknown
+    /// group) lands as [`ChatError::Daemon`].
+    pub async fn member_roster(&self, group: &GroupId) -> Result<Vec<GroupMemberInfo>> {
+        let path = format!("/groups/{}/members", group.as_str());
+        let resp: GroupMembersResponse = self.http.get_json(&path).await?;
+        Ok(resp
+            .members
+            .into_iter()
+            .filter(|m| m.state.as_deref().is_none_or(|s| s == "active"))
+            .map(|m| GroupMemberInfo {
+                agent_id: m.agent_id,
+                display_name: m.display_name,
+                role: m.role,
+                state: m.state,
+            })
+            .collect())
+    }
+
+    /// Remove (kick) a member from a group. Hits
+    /// `DELETE /groups/<id>/members/<agent_id>`, which x0xd authorizes
+    /// (admin+ only, and the target must not be the owner) and, for a
+    /// private group, drives the `TreeKEM` commit that re-keys the room
+    /// without the removed member. The UI gates this on the viewer's
+    /// role, but x0xd is the real authority — a non-admin caller gets a
+    /// 4xx surfaced as [`ChatError::Daemon`].
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces.
+    pub async fn remove_member(&self, group: &GroupId, agent_id: &AgentId) -> Result<()> {
+        let path = format!("/groups/{}/members/{}", group.as_str(), agent_id.0);
+        self.http.delete(&path).await
+    }
+
+    /// Rename a group. `PATCH /groups/<id>` with the new name; x0xd
+    /// gates it to admin+ and propagates a `GroupMetadataUpdated` event
+    /// so other members see the new name.
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces (a non-admin caller
+    /// 4xxs as [`ChatError::Daemon`]).
+    pub async fn rename(&self, group: &GroupId, name: &str) -> Result<()> {
+        let path = format!("/groups/{}", group.as_str());
+        let _: serde_json::Value = self
+            .http
+            .patch_json(&path, &UpdateGroupRequest { name: Some(name) })
+            .await?;
+        Ok(())
+    }
+
+    /// Ban a member. `POST /groups/<id>/ban/<agent_id>`; x0xd gates to
+    /// admin+, refuses to ban the owner, removes the member (driving the
+    /// `TreeKEM` re-key for a private group), and blocks their rejoin.
+    /// Stronger than [`Self::remove_member`], which a banned-then-removed
+    /// member could undo with a fresh invite.
+    ///
+    /// # Errors
+    /// Whatever the underlying HTTP layer surfaces.
+    pub async fn ban_member(&self, group: &GroupId, agent_id: &AgentId) -> Result<()> {
+        let path = format!("/groups/{}/ban/{}", group.as_str(), agent_id.0);
+        let _: serde_json::Value = self.http.post_json(&path, &serde_json::json!({})).await?;
+        Ok(())
+    }
+
     /// Fetch the recent message history for a group. Daemon-side
     /// messages don't carry a stable `message_id` on public groups, so
     /// we synthesise one from the cryptographic signature (which is
@@ -857,6 +957,101 @@ mod tests {
         assert_eq!(ids.len(), 3);
         assert_eq!(ids[0].0, "a".repeat(64));
         assert_eq!(ids[2].0, "c".repeat(64));
+    }
+
+    #[tokio::test]
+    async fn member_roster_keeps_display_names_and_filters_non_active() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{gid}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": "a".repeat(64), "display_name": "Alice", "role": "owner", "state": "active"},
+                    {"agent_id": "b".repeat(64), "state": "active"},
+                    {"agent_id": "c".repeat(64), "display_name": "Carol", "state": "removed"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        let roster = endpoint
+            .member_roster(&GroupId::parse(gid).unwrap())
+            .await
+            .expect("roster");
+        // Non-active (Carol) filtered out; display names + role preserved, absent -> None.
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0].agent_id.0, "a".repeat(64));
+        assert_eq!(roster[0].display_name.as_deref(), Some("Alice"));
+        assert_eq!(roster[0].role.as_deref(), Some("owner"));
+        assert_eq!(roster[1].agent_id.0, "b".repeat(64));
+        assert_eq!(roster[1].display_name, None);
+        assert_eq!(roster[1].role, None);
+    }
+
+    #[tokio::test]
+    async fn remove_member_deletes_the_member_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        let target = "b".repeat(64);
+        Mock::given(method("DELETE"))
+            .and(path(format!("/groups/{gid}/members/{target}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true
+            })))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        let endpoint = Endpoint::new(&http);
+        endpoint
+            .remove_member(&GroupId::parse(gid).unwrap(), &AgentId(target.clone()))
+            .await
+            .expect("remove_member");
+        // Unmatched (wrong) route would 404 -> the mount asserts the DELETE path.
+    }
+
+    #[tokio::test]
+    async fn rename_patches_the_group_with_the_new_name() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        Mock::given(method("PATCH"))
+            .and(path(format!("/groups/{gid}")))
+            .and(body_partial_json(serde_json::json!({ "name": "New Name" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        Endpoint::new(&http)
+            .rename(&GroupId::parse(gid).unwrap(), "New Name")
+            .await
+            .expect("rename");
+    }
+
+    #[tokio::test]
+    async fn ban_member_posts_to_the_ban_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let gid = "abc";
+        let target = "b".repeat(64);
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{gid}/ban/{target}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let http = crate::http::Http::new(server.uri(), "tok".to_owned()).expect("http");
+        Endpoint::new(&http)
+            .ban_member(&GroupId::parse(gid).unwrap(), &AgentId(target.clone()))
+            .await
+            .expect("ban");
     }
 
     #[tokio::test]

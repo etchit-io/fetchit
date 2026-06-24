@@ -109,6 +109,15 @@ impl Http {
             .await
     }
 
+    pub(crate) async fn patch_json<B: Serialize, R: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<R> {
+        self.with_retry(|| self.request_json_once(Method::PATCH, path, Some(body)))
+            .await
+    }
+
     pub(crate) async fn delete(&self, path: &str) -> Result<()> {
         self.with_retry(|| self.delete_once(path)).await
     }
