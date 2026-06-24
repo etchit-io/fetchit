@@ -38,7 +38,7 @@ describe("fillIdentityBadge", () => {
     expect(badge.querySelector(".chat-panel__id-name")?.textContent).toBe(
       "Ada Lovelace",
     );
-    expect(badge.querySelector(".chat-panel__id-avatar")?.textContent).toBe("AL");
+    expect(badge.querySelector(".chat-panel__id-avatar")?.textContent).toBe("A");
     // The 64-hex must not leak into the visible badge text.
     expect(badge.textContent).not.toContain(agentId.slice(0, 8));
   });

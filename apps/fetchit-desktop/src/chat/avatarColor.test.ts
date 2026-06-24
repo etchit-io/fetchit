@@ -7,12 +7,10 @@ import {
 } from "./avatarColor";
 
 describe("initials", () => {
-  it("takes the first letter of the first two words", () => {
-    expect(initials("Ada Lovelace")).toBe("AL");
-    expect(initials("  grace   hopper  ")).toBe("GH");
-  });
-  it("takes the first two letters of a single word", () => {
-    expect(initials("Mononym")).toBe("MO");
+  it("takes the first letter of the name only", () => {
+    expect(initials("Josh")).toBe("J");
+    expect(initials("Ada Lovelace")).toBe("A");
+    expect(initials("  grace   hopper  ")).toBe("G");
   });
   it("falls back to a question mark for an empty name", () => {
     expect(initials("")).toBe("?");
