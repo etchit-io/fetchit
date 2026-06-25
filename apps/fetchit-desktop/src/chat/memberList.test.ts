@@ -102,11 +102,16 @@ describe("member moderation", () => {
   const CAROL = "c".repeat(64);
 
   async function confirmRemove(): Promise<void> {
+    // The confirm prompt is a separate .chat-dialog host on document.body,
+    // so scope to dialog buttons OUTSIDE the member-list host (which now
+    // carries its own "Invite someone" dialog button).
     const ok = [
       ...document.querySelectorAll<HTMLButtonElement>(
         ".chat-dialog:not([hidden]) .chat-dialog__btn",
       ),
-    ].find((b) => !b.classList.contains("chat-dialog__btn--ghost"));
+    ].find(
+      (b) => !b.classList.contains("chat-dialog__btn--ghost") && !host.contains(b),
+    );
     ok!.click();
     await Promise.resolve();
     await Promise.resolve();
@@ -121,6 +126,12 @@ describe("member moderation", () => {
     mountMemberList(host, {
       groupId: "g1", groupTitle: "G", store: makeStore(), onClose: () => {},
     });
+  }
+
+  function findBtn(text: string): HTMLButtonElement | undefined {
+    return [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent === text,
+    );
   }
 
   it("an owner can remove a non-owner member, dropping the row", async () => {
@@ -214,5 +225,39 @@ describe("member moderation", () => {
       expect(host.querySelectorAll(".chat-member").length).toBe(1),
     );
     expect(host.querySelector(".chat-members__title--editable")).toBeNull();
+  });
+
+  it("an owner can mint a fresh invite for the existing group", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === "chat_group_members"
+        ? Promise.resolve([{ agent_id: ME, display_name: "Me", role: "owner" }])
+        : cmd === "chat_group_invite"
+          ? Promise.resolve("x0x://invite/freshticket")
+          : Promise.resolve(),
+    );
+    mountMemberList(host, {
+      groupId: "g1", groupTitle: "Devs", store: makeStore(), onClose: () => {},
+    });
+    await vi.waitFor(() => expect(findBtn("Invite someone")).toBeTruthy());
+    findBtn("Invite someone")!.click();
+    await vi.waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("chat_group_invite", {
+        groupId: "g1",
+      }),
+    );
+    const box = host.querySelector<HTMLTextAreaElement>(".chat-dialog__uri");
+    await vi.waitFor(() => {
+      expect(box).not.toBeNull();
+      expect(box!.hidden).toBe(false);
+      expect(box!.value).toBe("x0x://invite/freshticket");
+    });
+  });
+
+  it("a plain member sees no invite control", async () => {
+    mount([{ agent_id: ME, display_name: "Me", role: "member" }]);
+    await vi.waitFor(() =>
+      expect(host.querySelectorAll(".chat-member").length).toBe(1),
+    );
+    expect(findBtn("Invite someone")).toBeUndefined();
   });
 });

@@ -6,6 +6,7 @@
 
 import {
   groupBanMember,
+  groupInvite,
   groupMembers,
   groupRemoveMember,
   groupRename,
@@ -141,6 +142,60 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
         });
         input.addEventListener("blur", () => finish(true));
       });
+    }
+
+    // Owner/admin: mint and share a fresh invite so more people can join
+    // after the group already exists. groups().invite works on any group
+    // the caller is in, not only at creation; x0xd is the real gate on
+    // who may invite, mirroring the moderation gating above.
+    if (canModerate) {
+      const inviteBox = document.createElement("textarea");
+      inviteBox.className = "chat-dialog__uri";
+      inviteBox.readOnly = true;
+      inviteBox.rows = 4;
+      inviteBox.wrap = "soft";
+      inviteBox.setAttribute("aria-label", "Invite link");
+      inviteBox.hidden = true;
+      inner.insertBefore(inviteBox, actions);
+
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "chat-dialog__btn";
+      copyBtn.textContent = "Copy invite";
+      copyBtn.hidden = true;
+      copyBtn.addEventListener("click", () => {
+        void navigator.clipboard.writeText(inviteBox.value).catch(() => {});
+      });
+
+      const inviteBtn = document.createElement("button");
+      inviteBtn.type = "button";
+      inviteBtn.className = "chat-dialog__btn";
+      inviteBtn.textContent = "Invite someone";
+      inviteBtn.addEventListener("click", () => {
+        void (async () => {
+          inviteBtn.disabled = true;
+          const restore = inviteBtn.textContent;
+          inviteBtn.textContent = "Creating invite…";
+          try {
+            inviteBox.value = await groupInvite(opts.groupId);
+            inviteBox.hidden = false;
+            copyBtn.hidden = false;
+            status.hidden = false;
+            status.textContent =
+              "Share this link. They join when they paste it.";
+            copyBtn.focus();
+          } catch (e) {
+            status.hidden = false;
+            status.textContent = `Couldn't create invite: ${friendlyError(e)}`;
+          } finally {
+            inviteBtn.disabled = false;
+            inviteBtn.textContent = restore;
+          }
+        })();
+      });
+
+      actions.insertBefore(inviteBtn, closeBtn);
+      actions.insertBefore(copyBtn, closeBtn);
     }
 
     for (const m of members) {
