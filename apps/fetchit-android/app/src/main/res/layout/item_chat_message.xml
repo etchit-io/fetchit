@@ -8,6 +8,21 @@
     android:orientation="vertical"
     android:padding="2dp">
 
+    <!-- Group sender-name label: the sender's identity hue, shown once at the
+         top of a consecutive run. Visibility + color set by the adapter; gone
+         for DMs, own messages, and follow-on bubbles. Mirrors desktop's
+         .chat-bubble__sender. -->
+    <TextView
+        android:id="@+id/messageSender"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_marginBottom="2dp"
+        android:fontFamily="monospace"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/messageBubble"
         android:layout_width="wrap_content"
@@ -16,7 +31,7 @@
         android:padding="10dp"
         android:textColor="?attr/fetchitBone"
         android:fontFamily="monospace"
-        android:textSize="14sp"
+        android:textSize="16sp"
         android:lineSpacingExtra="2dp"
         android:textIsSelectable="true" />
 

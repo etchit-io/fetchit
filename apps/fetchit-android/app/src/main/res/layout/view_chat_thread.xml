@@ -54,6 +54,19 @@
             android:fontFamily="monospace"
             android:textSize="11sp" />
 
+        <!-- Group member list / moderation entry. Visible only on a group
+             thread; GONE for DM and feed headers. -->
+        <ImageButton
+            android:id="@+id/threadMembersButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:src="@drawable/ic_people"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:scaleType="centerInside"
+            android:visibility="gone"
+            android:contentDescription="@string/chat_members_desc" />
+
     </LinearLayout>
 
     <!-- Message list -->
@@ -86,7 +99,7 @@
             android:textColor="?attr/fetchitBone"
             android:textColorHint="?attr/fetchitAsh"
             android:fontFamily="monospace"
-            android:textSize="14sp"
+            android:textSize="16sp"
             android:background="?attr/fetchitInk3"
             android:padding="10dp" />
 

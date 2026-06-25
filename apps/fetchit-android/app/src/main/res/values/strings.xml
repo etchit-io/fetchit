@@ -7,6 +7,7 @@
     <string name="hint_address">Autonomi address</string>
     <string name="action_retry">retry</string>
     <string name="action_close">close</string>
+    <string name="action_cancel">cancel</string>
     <!-- Success message shown for any binary that fetch&gt;it can't
          render natively. Open / Save buttons sit below it. -->
     <string name="binary_success_size">✓ %1$s downloaded</string>
@@ -151,18 +152,59 @@
 
     <!-- Chat: conversation list + onboarding -->
     <string name="chat_connecting">connecting…</string>
-    <string name="chat_connection_lost">connection lost</string>
-    <string name="chat_empty_hint">scan a friend\'s code, or share yours</string>
+    <!-- Calm, persistent offline-reassurance banner. Replaces the old
+         alarming "connection lost" pill: the durable outbox holds queued
+         messages and resends them on the next connect, so the honest,
+         calming truth is that nothing is lost. Strings mirror the desktop
+         connectionBanner.ts verbatim so a person reads identical words
+         across shells. Android has no in-pump reconnect and no separate
+         daemon state (x0xd is in-process), so only the relay-down "warn"
+         state is representable; the info/reconnecting state has no Android
+         source and is intentionally absent. -->
+    <string name="chat_offline_reassurance">No connection. Your messages are saved and will send once you\'re back online.</string>
+    <!-- Banner content-description: the banner is a persistent status line,
+         labelled for TalkBack as a reassurance, not an alarm. -->
+    <string name="chat_offline_reassurance_desc">offline — your messages are saved</string>
+    <string name="chat_empty_hint">Add someone to start chatting</string>
+    <!-- First-run onboarding (mirrors desktop sidebar.ts): the welcome
+         title, one plain body sentence (verbatim from the desktop source),
+         and the two action buttons. The body italic-serif copy reassures
+         and teaches the next step. -->
+    <string name="chat_onboard_title">Welcome to LIT Chat</string>
+    <string name="chat_onboard_body">No conversations yet. Add someone you know and say hello.</string>
+    <string name="chat_onboard_add_person">Add your first person</string>
+    <string name="chat_onboard_create_group">Create a group</string>
+    <string name="chat_onboard_mark_desc">LIT Chat</string>
+    <!-- Own-identity header badge content-description (mirrors desktop's
+         "Share my code" badge label): the badge shows the user by name +
+         avatar and opens their share-my-code card. -->
+    <string name="chat_identity_badge_desc">share my code</string>
+    <!-- Own-identity badge label before the user has set a display name. -->
+    <string name="chat_identity_you">You</string>
+    <!-- Own-identity badge: invitation + set-your-name dialog (the name people
+         see on your messages). Shown until a display name is saved. -->
+    <string name="chat_identity_add_name">Add your name</string>
+    <string name="chat_identity_name_title">Your name</string>
+    <string name="chat_identity_name_message">This is the name people see on your messages.</string>
+    <string name="chat_identity_name_hint">Your name</string>
+    <string name="chat_identity_name_save">save</string>
     <string name="chat_share_my_code">share my code</string>
     <string name="chat_scan_a_code">scan a code</string>
     <string name="chat_add_contact">add contact</string>
     <string name="chat_add_contact_title">add a contact</string>
     <string name="chat_add_contact_import">import</string>
-    <string name="chat_paste_pair_uri_hint">paste x0x://pair/… here</string>
+    <!-- Add-contact input hint. Leads with plain language, not the raw
+         x0x://pair/ scheme — the input still accepts a pasted pair URI.
+         Matches the desktop add-contact placeholder verbatim. -->
+    <string name="chat_paste_pair_uri_hint">Paste a share link, or @name@etchit.io</string>
     <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
-    <string name="chat_connect_failed_generic">couldn\'t connect to relay</string>
+    <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
+    <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
+    <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>
+    <string name="chat_error_generic">something went wrong — please try again</string>
     <string name="chat_not_connected">not connected yet</string>
     <string name="chat_uri_copied">copied</string>
+    <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
     <string name="chat_feed_title">fediverse</string>
     <string name="chat_feed_subtitle">bridged public posts</string>
@@ -172,13 +214,63 @@
     <string name="chat_contact_name_save">save</string>
     <string name="chat_contact_added">added %1$s</string>
 
+    <!-- Chat: groups -->
+    <string name="chat_new_group">new group</string>
+    <string name="chat_new_group_title">new group</string>
+    <string name="chat_new_group_name_hint">group name</string>
+    <string name="chat_new_group_private_label">private (end-to-end encrypted)</string>
+    <string name="chat_new_group_create">create</string>
+    <string name="chat_join_group">join group</string>
+    <string name="chat_join_group_title">join a group</string>
+    <string name="chat_join_group_hint">Paste your group invite link</string>
+    <string name="chat_join_group_join">join</string>
+    <string name="chat_invalid_invite_uri">that doesn\'t look like a valid group invite</string>
+    <string name="chat_group_created">created %1$s</string>
+    <string name="chat_group_joined">joined %1$s</string>
+    <string name="chat_group_share_invite">share invite</string>
+    <string name="chat_group_invite_copied">invite copied</string>
+    <string name="chat_group_create_failed">couldn\'t create the group — try again in a moment</string>
+    <string name="chat_group_join_failed">couldn\'t join the group — check the invite and try again</string>
+    <string name="chat_group_sender_unknown">someone</string>
+    <string name="chat_group_lock_glyph">🔒</string>
+
+    <!-- Chat: remove a chat / leave a group from the list row overflow -->
+    <string name="chat_row_more">more</string>
+    <string name="chat_remove_chat">Remove this chat</string>
+    <string name="chat_leave_group">Leave this group</string>
+    <string name="chat_remove_chat_title">Remove this chat?</string>
+    <string name="chat_remove_chat_message">%1$s will be deleted from this device.</string>
+    <string name="chat_remove_chat_confirm">remove</string>
+    <string name="chat_leave_group_title">Leave this group?</string>
+    <string name="chat_leave_group_message">You\'ll need a new invite to rejoin %1$s.</string>
+    <string name="chat_leave_group_confirm">leave</string>
+
+    <!-- Chat: group member list + moderation. Confirm copy is the verbatim
+         desktop wording; the destructive verbs stay lowercase. -->
+    <string name="chat_members_desc">group members</string>
+    <string name="chat_members_title">Members</string>
+    <string name="chat_member_you">%1$s (you)</string>
+    <string name="chat_member_remove">Remove</string>
+    <string name="chat_member_ban">Ban</string>
+    <string name="chat_member_remove_title">Remove member?</string>
+    <string name="chat_member_remove_message">Remove %1$s from this group? They lose access to new messages.</string>
+    <string name="chat_member_remove_confirm">remove</string>
+    <string name="chat_member_ban_title">Ban member?</string>
+    <string name="chat_member_ban_message">Ban %1$s? They are removed and cannot rejoin.</string>
+    <string name="chat_member_ban_confirm">ban</string>
+    <string name="chat_group_rename_title">Rename group</string>
+    <string name="chat_group_rename_message">Everyone in the group sees the new name.</string>
+    <string name="chat_group_rename_hint">Group name</string>
+    <string name="chat_group_rename_save">save</string>
+    <string name="chat_moderation_failed">Couldn\'t complete that. %1$s</string>
+
     <!-- Chat: thread screen -->
     <string name="thread_back_glyph">‹</string>
     <string name="thread_back_desc">back to conversation list</string>
     <string name="thread_send_desc">send message</string>
     <string name="thread_message_hint">message…</string>
     <string name="chat_send_glyph">➤</string>
-    <string name="thread_send_failed">send failed: %1$s</string>
+    <string name="thread_send_failed">couldn\'t send — tap the message to try again</string>
     <string name="chat_msg_failed_retry">⚠ tap to retry</string>
     <string name="chat_retrying">retrying…</string>
 

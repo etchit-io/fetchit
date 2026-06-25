@@ -1,4 +1,4 @@
-//! [`RenditionFFI`] — FFI-friendly mirror of [`fetchit_core::Rendition`].
+//! [`RenditionFFI`] -- FFI-friendly mirror of [`fetchit_core::Rendition`].
 //!
 //! `bytes::Bytes` payloads cross the boundary as `Vec<u8>` (copied);
 //! `serde_json::Value` is flattened to a pretty-printed `String`. The
@@ -72,7 +72,7 @@ pub enum RenditionFFI {
         /// Optional language tag.
         language: Option<String>,
     },
-    /// A self-contained HTML document — render in a `WebView`.
+    /// A self-contained HTML document -- render in a `WebView`.
     Html {
         /// Raw HTML source.
         body: String,

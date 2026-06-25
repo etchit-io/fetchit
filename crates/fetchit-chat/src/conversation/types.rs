@@ -384,6 +384,63 @@ pub struct WelcomePayload {
     pub name: Option<String>,
 }
 
+/// Magic prefix marking a private-group plaintext that carries a
+/// structured [`GroupBodyV1`] payload (sender display name + body)
+/// instead of a bare UTF-8 body. The leading NUL guarantees no
+/// collision with a human-typed message: chat bodies are never sent
+/// with a leading NUL byte. Legacy senders emit the bare body, which
+/// [`decode_group_plaintext`] still accepts (name unknown).
+const GROUP_BODY_MAGIC: &[u8] = b"\x00LITG1\x00";
+
+/// Structured inner payload of a private-group frame (format v1). Holds
+/// only what a group bubble needs to attribute a message; additive
+/// fields stay backward-compatible via serde defaults.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupBodyV1 {
+    /// Sender display name, when the sender published one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    /// Plaintext message body.
+    pub body: String,
+}
+
+/// Encode a private-group plaintext that carries the sender display
+/// name alongside the body. An empty `sender_name` is encoded as
+/// absent. Round-trips through [`decode_group_plaintext`].
+#[must_use]
+pub fn encode_group_plaintext(sender_name: &str, body: &str) -> Vec<u8> {
+    let payload = GroupBodyV1 {
+        sender_name: (!sender_name.is_empty()).then(|| sender_name.to_owned()),
+        body: body.to_owned(),
+    };
+    let mut out = GROUP_BODY_MAGIC.to_vec();
+    // Serializing a String + Option<String> cannot fail; default to the
+    // bare magic only on the impossible error so the frame stays valid.
+    out.extend_from_slice(&serde_json::to_vec(&payload).unwrap_or_default());
+    out
+}
+
+/// Decode a decrypted private-group plaintext into `(body, sender_name)`.
+/// New frames carry [`GROUP_BODY_MAGIC`] + JSON; legacy frames are a
+/// bare UTF-8 body with no name. The magic prefix is the only
+/// discriminator, so a legacy body that happens to be valid JSON is
+/// returned verbatim.
+///
+/// # Errors
+/// Returns a message when a magic-prefixed frame fails to JSON-parse,
+/// or a legacy frame is not valid UTF-8.
+pub fn decode_group_plaintext(plaintext: &[u8]) -> Result<(String, Option<String>), String> {
+    if let Some(rest) = plaintext.strip_prefix(GROUP_BODY_MAGIC) {
+        let payload: GroupBodyV1 =
+            serde_json::from_slice(rest).map_err(|e| format!("group payload json: {e}"))?;
+        Ok((payload.body, payload.sender_name))
+    } else {
+        let body =
+            String::from_utf8(plaintext.to_vec()).map_err(|e| format!("body utf8: {e}"))?;
+        Ok((body, None))
+    }
+}
+
 /// Inner payload of a Message envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessagePayload {
@@ -479,6 +536,48 @@ pub(super) fn now_ms() -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_plaintext_round_trips_name_and_body() {
+        let enc = encode_group_plaintext("Alice", "hi there");
+        let (body, name) = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(body, "hi there");
+        assert_eq!(name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn group_plaintext_empty_name_encodes_absent() {
+        let enc = encode_group_plaintext("", "no name");
+        let (body, name) = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(body, "no name");
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn group_plaintext_legacy_bare_body_decodes_with_no_name() {
+        // A pre-upgrade sender encrypts the raw body with no magic prefix.
+        let (body, name) = decode_group_plaintext(b"plain old body").unwrap();
+        assert_eq!(body, "plain old body");
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn group_plaintext_body_with_unicode_and_json_chars_survives() {
+        let tricky = r#"{"not":"a payload"} literal, with emoji"#;
+        let enc = encode_group_plaintext("Bob", tricky);
+        let (body, name) = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(body, tricky);
+        assert_eq!(name.as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn group_plaintext_legacy_body_that_looks_like_json_is_kept_verbatim() {
+        // A legacy body that happens to be JSON must NOT be mis-parsed —
+        // the magic prefix is the only discriminator.
+        let (body, name) = decode_group_plaintext(br#"{"body":"x"}"#).unwrap();
+        assert_eq!(body, r#"{"body":"x"}"#);
+        assert_eq!(name, None);
+    }
 
     #[test]
     fn message_payload_decodes_legacy_json_without_reply_field() {

@@ -31,7 +31,7 @@
             android:layout_height="wrap_content"
             android:textColor="?attr/fetchitBone"
             android:fontFamily="monospace"
-            android:textSize="14sp"
+            android:textSize="16sp"
             android:singleLine="true"
             android:ellipsize="end" />
 
@@ -48,5 +48,17 @@
             android:ellipsize="end" />
 
     </LinearLayout>
+
+    <!-- Per-row overflow: remove a chat / leave a group. Hidden on the pinned
+         fediverse row, which has no destructive action. -->
+    <ImageButton
+        android:id="@+id/contactRowMore"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginStart="8dp"
+        android:src="@drawable/ic_more_vert"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:scaleType="centerInside"
+        android:contentDescription="@string/chat_row_more" />
 
 </LinearLayout>

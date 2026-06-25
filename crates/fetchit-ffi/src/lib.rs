@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// fetch>it FFI — uniffi bindings over fetchit-core + fetchit-net.
+// fetch>it FFI -- uniffi bindings over fetchit-core + fetchit-net.
 // Copyright (C) the fetch>it contributors.
 
-//! `fetchit-uniffi` — Kotlin (Android) surface for fetch>it.
+//! `fetchit-uniffi` -- Kotlin (Android) surface for fetch>it.
 //!
 //! Mirrors etchit's FFI shape: proc-macro `setup_scaffolding!()`,
 //! `#[uniffi::export]` on free functions, `#[uniffi::Object]` on the
@@ -11,13 +11,15 @@
 //! Kotlin code can pattern-match on what fetch>it returned.
 //!
 //! The heavy lifting lives in [`fetchit_core`] (handler engine) and
-//! [`fetchit_net`] (Autonomi client). This crate is glue — adapter
+//! [`fetchit_net`] (Autonomi client). This crate is glue -- adapter
 //! types, error mapping, and the `cdylib` packaging that ships into
 //! `apps/fetchit-android/app/src/main/jniLibs/<arch>/`.
 
 mod chat_error;
 mod chat_ffi;
 mod error;
+mod group_ffi;
+mod member_ffi;
 mod rendition_ffi;
 
 use std::path::PathBuf;
@@ -30,8 +32,12 @@ use fetchit_core::{Address, Hint, NetworkClient, RenderContext};
 use fetchit_net::{set_data_home as set_data_home_inner, AutonomiClient, DEFAULT_PEERS};
 
 pub use chat_error::ChatFfiError;
-pub use chat_ffi::{ChatClient, ChatEventFfi, OutboxBubbleFfi, OutboxStatusFfi};
+pub use chat_ffi::{
+    ChatClient, ChatEventFfi, ChatHistoryMessageFfi, OutboxBubbleFfi, OutboxStatusFfi,
+};
 pub use error::FetchitError;
+pub use group_ffi::GroupFfi;
+pub use member_ffi::GroupMemberFfi;
 pub use rendition_ffi::{ArchiveEntryFFI, RenditionFFI};
 
 uniffi::setup_scaffolding!();
@@ -40,7 +46,7 @@ uniffi::setup_scaffolding!();
 ///
 /// On Android this routes `log` crate output to logcat under the
 /// `fetchit_ffi` tag. On other platforms it is a no-op so host tests
-/// can call it unconditionally. Idempotent — repeated calls are
+/// can call it unconditionally. Idempotent -- repeated calls are
 /// harmless.
 #[uniffi::export]
 pub fn setup_logger() {
@@ -51,7 +57,7 @@ pub fn setup_logger() {
         INIT.call_once(|| {
             // Info, not Debug: `saorsa_transport` / `saorsa_core` emit a
             // per-tick `connection: drive` debug line for every live QUIC
-            // connection — at a healthy peer count that floods logcat
+            // connection -- at a healthy peer count that floods logcat
             // with thousands of lines a second and burns CPU formatting
             // them. Info keeps the occasional DHT / peer events without
             // the firehose.
@@ -66,7 +72,7 @@ pub fn setup_logger() {
 
 /// Set `HOME` and `XDG_DATA_HOME` to `path` if unset.
 ///
-/// Required on Android, where neither variable is set by default —
+/// Required on Android, where neither variable is set by default --
 /// `ant-core`'s internal `data_dir()` resolution will otherwise panic.
 /// Pass `context.filesDir.absolutePath` from `Application.onCreate`
 /// before any other fetch>it call.
@@ -86,7 +92,7 @@ pub fn default_peers() -> Vec<String> {
     DEFAULT_PEERS.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// Run handler detection on local bytes — no network.
+/// Run handler detection on local bytes -- no network.
 ///
 /// Useful for previewing a file the user picked locally, or for unit-
 /// testing the handler set from Kotlin without standing up a client.

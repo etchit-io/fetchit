@@ -1,6 +1,7 @@
 package io.etchit.fetchit.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -41,6 +42,49 @@ class ChatUrisTest {
         val upper = "A".repeat(64)
         val uri = "x0x://pair/$upper?r=relay"
         assertEquals(upper.lowercase(), ChatUris.pairUriAgentId(uri))
+    }
+
+    // ── group invite uris ─────────────────────────────────────────────
+    // The invite body is an opaque MLS Welcome blob (not a fixed 64-hex
+    // shape), so the Join-group dialog validates only the scheme + path
+    // prefix and a non-empty body -- the engine rejects a malformed blob.
+
+    @Test
+    fun validInviteUriAccepted() {
+        assertTrue(ChatUris.isInviteUri("x0x://invite/AAAAbbbbCCCC=="))
+    }
+
+    @Test
+    fun inviteUriWithSurroundingWhitespaceAccepted() {
+        assertTrue(ChatUris.isInviteUri("  x0x://invite/blob  "))
+    }
+
+    @Test
+    fun inviteSchemeIsCaseInsensitive() {
+        // A hand-typed or pasted uri may carry an uppercase scheme; only the
+        // scheme+path is normalised (the opaque base64 body is left intact).
+        assertTrue(ChatUris.isInviteUri("X0X://INVITE/SomeBlob"))
+    }
+
+    @Test
+    fun pairUriIsNotAnInviteUri() {
+        assertFalse(ChatUris.isInviteUri("x0x://pair/$validHex"))
+    }
+
+    @Test
+    fun wrongSchemeIsNotAnInviteUri() {
+        assertFalse(ChatUris.isInviteUri("https://invite/blob"))
+    }
+
+    @Test
+    fun emptyInviteBodyRejected() {
+        assertFalse(ChatUris.isInviteUri("x0x://invite/"))
+        assertFalse(ChatUris.isInviteUri("x0x://invite/   "))
+    }
+
+    @Test
+    fun blankStringIsNotAnInviteUri() {
+        assertFalse(ChatUris.isInviteUri(""))
     }
 
     // ── autonomiAddresses ─────────────────────────────────────────────
