@@ -1127,7 +1127,11 @@ async fn decode_private_group(
             // stdout going to a private, operator-chosen file) prints the
             // decrypted body, on stdout, as a clean monitorable line.
             if std::env::var("FETCHIT_PEER_GROUP_PRINT").as_deref() == Ok("1") {
-                println!("[group {}] {}", short(&entry.sender_agent_id_hex), entry.body);
+                println!(
+                    "[group {}] {}",
+                    short(&entry.sender_agent_id_hex),
+                    entry.body
+                );
             }
             // The M2 echo is opt-out: a group soak peer sets
             // FETCHIT_PEER_ECHO=0 so the group does not self-amplify --

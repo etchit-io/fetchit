@@ -1616,8 +1616,7 @@ impl<'a> Endpoint<'a> {
         // New senders seal {sender_name, body}; legacy senders sealed the
         // bare body. `decode_group_plaintext` handles both, so a received
         // group message is attributed by name when the sender provided one.
-        let (body, sender_name) =
-            decode_group_plaintext(&plaintext).map_err(ChatError::Invalid)?;
+        let (body, sender_name) = decode_group_plaintext(&plaintext).map_err(ChatError::Invalid)?;
 
         let entry = HistoryEntry {
             sender_agent_id_hex: sender_agent_id_hex.clone(),

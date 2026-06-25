@@ -435,8 +435,7 @@ pub fn decode_group_plaintext(plaintext: &[u8]) -> Result<(String, Option<String
             serde_json::from_slice(rest).map_err(|e| format!("group payload json: {e}"))?;
         Ok((payload.body, payload.sender_name))
     } else {
-        let body =
-            String::from_utf8(plaintext.to_vec()).map_err(|e| format!("body utf8: {e}"))?;
+        let body = String::from_utf8(plaintext.to_vec()).map_err(|e| format!("body utf8: {e}"))?;
         Ok((body, None))
     }
 }
