@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
@@ -46,6 +47,13 @@ class FakeGateway : ChatGateway {
     var removeMemberThrows = false
     var banMemberThrows = false
     var renameGroupThrows = false
+
+    // Persisted-history recorder. `history` is the transcript conversationHistory
+    // returns, keyed by conv key; requestedHistory records the lookups; the
+    // throws flag exercises the non-fatal hydrate path.
+    var history: Map<String, List<ChatHistoryMessageFfi>> = emptyMap()
+    val requestedHistory = mutableListOf<String>()
+    var conversationHistoryThrows = false
 
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
@@ -95,6 +103,11 @@ class FakeGateway : ChatGateway {
     override suspend fun renameGroup(groupId: String, newName: String) {
         renamedGroups += (groupId to newName)
         if (renameGroupThrows) throw RuntimeException("rename boom")
+    }
+    override suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi> {
+        requestedHistory += convKey
+        if (conversationHistoryThrows) throw RuntimeException("history boom")
+        return history[convKey].orEmpty()
     }
     override suspend fun nextEvent(): ChatEventFfi? = events.receive()
     override fun disconnect() { events.trySend(null) }
@@ -416,6 +429,7 @@ class ChatControllerTest {
             override suspend fun removeMember(groupId: String, agentIdHex: String) {}
             override suspend fun banMember(groupId: String, agentIdHex: String) {}
             override suspend fun renameGroup(groupId: String, newName: String) {}
+            override suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi> = emptyList()
             override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
             override fun disconnect() {}
         }
@@ -515,6 +529,104 @@ class ChatControllerTest {
         assertTrue(msg.delivered)
         assertEquals("m1", msg.messageId)
     }
+
+    // ── persisted-history hydration (reload-on-open) ────────────────────
+
+    @Test
+    fun hydrateDmDedupsAgainstLiveMessageOfSameId() = runTest {
+        val peer = "a".repeat(64)
+        val key = ConversationStore.convKeyDm(peer)
+        val convo = ConversationStore()
+        // A live inbound event already landed this message (id "m1").
+        convo.append(
+            key,
+            ChatMessage(outbound = false, body = "live one", sentAtMs = 100L, messageId = "m1"),
+        )
+        // The persisted transcript carries the SAME m1 plus an older m0 the live
+        // pump never saw (it predates this process).
+        val gw = FakeGateway().apply {
+            history = mapOf(
+                key to listOf(
+                    historyMsg(body = "older zero", sentAtMs = 50L, messageId = "m0"),
+                    historyMsg(body = "persisted one", sentAtMs = 100L, messageId = "m1"),
+                ),
+            )
+        }
+
+        ChatController.hydrateConversationVia(gw, key, convo, logWarn = { _, _ -> })
+
+        val msgs = convo.messagesFor(key).value
+        // m1 must NOT double; m0 is added; total is 2, ordered by timestamp.
+        assertEquals(2, msgs.size)
+        assertEquals(listOf("m0", "m1"), msgs.map { it.messageId })
+        assertEquals("older zero", msgs.first().body)
+        // The pre-existing live copy of m1 is the one kept (hydrated dup dropped).
+        assertEquals("live one", msgs.last().body)
+        assertEquals(listOf(key), gw.requestedHistory)
+    }
+
+    @Test
+    fun hydrateDmOutboundDerivesFromEngineFlag() = runTest {
+        val peer = "a".repeat(64)
+        val key = ConversationStore.convKeyDm(peer)
+        val convo = ConversationStore()
+        val gw = FakeGateway().apply {
+            history = mapOf(
+                key to listOf(
+                    historyMsg(body = "i sent", sentAtMs = 10L, messageId = "s1", outbound = true),
+                    historyMsg(body = "they sent", sentAtMs = 20L, messageId = "r1", outbound = false),
+                ),
+            )
+        }
+
+        ChatController.hydrateConversationVia(gw, key, convo, logWarn = { _, _ -> })
+
+        val msgs = convo.messagesFor(key).value
+        assertEquals(2, msgs.size)
+        assertTrue(msgs.first { it.messageId == "s1" }.outbound)
+        assertTrue(!msgs.first { it.messageId == "r1" }.outbound)
+    }
+
+    @Test
+    fun hydrateFailureIsNonFatalAndLeavesThreadUntouched() = runTest {
+        val key = ConversationStore.convKeyDm("a".repeat(64))
+        val convo = ConversationStore()
+        convo.append(key, ChatMessage(outbound = false, body = "live", sentAtMs = 1L, messageId = "m1"))
+        val gw = FakeGateway().apply { conversationHistoryThrows = true }
+
+        // Must not throw; the existing live message is preserved.
+        ChatController.hydrateConversationVia(gw, key, convo, logWarn = { _, _ -> })
+
+        val msgs = convo.messagesFor(key).value
+        assertEquals(1, msgs.size)
+        assertEquals("live", msgs.single().body)
+    }
+
+    @Test
+    fun hydrateNullGatewayIsNoOp() = runTest {
+        val key = ConversationStore.convKeyDm("a".repeat(64))
+        val convo = ConversationStore()
+        ChatController.hydrateConversationVia(null, key, convo, logWarn = { _, _ -> })
+        assertTrue(convo.messagesFor(key).value.isEmpty())
+    }
+
+    private fun historyMsg(
+        body: String,
+        sentAtMs: Long,
+        messageId: String,
+        outbound: Boolean = false,
+        fromAgentIdHex: String = "a".repeat(64),
+        senderName: String? = null,
+        delivered: Boolean = false,
+    ) = ChatHistoryMessageFfi(
+        outbound = outbound,
+        fromAgentIdHex = fromAgentIdHex,
+        senderName = senderName,
+        body = body,
+        sentAtMs = sentAtMs.toULong(),
+        messageId = messageId,
+        delivered = delivered,
+    )
 
     private fun bubble(
         id: String,

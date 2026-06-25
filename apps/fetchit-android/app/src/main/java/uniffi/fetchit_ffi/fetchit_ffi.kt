@@ -787,6 +787,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -815,6 +817,8 @@ fun uniffi_fetchit_ffi_checksum_func_setup_logger(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_agent_id_hex(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_ban_member(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_group(
 ): Short
@@ -924,6 +928,8 @@ fun uniffi_fetchit_ffi_fn_constructor_chatclient_connect(`relayUrl`: RustBuffer.
 fun uniffi_fetchit_ffi_fn_method_chatclient_agent_id_hex(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_ban_member(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,`agentIdHex`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_history(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_group(`ptr`: Pointer,`name`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,`private`: Byte,
 ): Long
@@ -1132,6 +1138,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_ban_member() != 17081.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history() != 28009.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_group() != 1975.toShort()) {
@@ -1656,6 +1665,37 @@ public interface ChatClientInterface {
     suspend fun `banMember`(`groupId`: kotlin.String, `agentIdHex`: kotlin.String)
     
     /**
+     * Persisted message transcript for a conversation, for reload-on-open.
+     *
+     * The engine already persists every DM and private-group message to the
+     * encrypted at-rest vault ([`fetchit_chat::conversation::HistoryEntry`]);
+     * this surfaces that transcript so the shell's message store survives a
+     * process kill instead of starting empty.
+     *
+     * `conv_key` is the SHELL's conversation key, mirroring how the engine
+     * keys conversations: a `g:`-prefixed 64-hex group id resolves the group
+     * conversation directly ([`ConversationRegistry::get`]); a bare 64-hex
+     * peer agent id resolves that peer's current DM
+     * ([`ConversationRegistry::find_dm_with`], which scans for the two-member
+     * conversation containing the peer -- the engine has no stable
+     * peer-keyed DM id, so the DM is resolved, not constructed). An unknown
+     * or not-yet-persisted conversation returns an empty list (not an error).
+     *
+     * Each entry is mapped to the SAME shape the live event projections
+     * carry; `outbound` is derived against the local agent id so a hydrated
+     * transcript renders identically to live traffic and de-dups by
+     * `message_id`.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state (no registry).
+     * [`ChatFfiError::Network`] on a vault open / AEAD / parse failure while
+     * hydrating from disk.
+     */
+    suspend fun `conversationHistory`(`convKey`: kotlin.String): List<ChatHistoryMessageFfi>
+    
+    /**
      * Create a group. `private=true` is the PQ MLS/`TreeKEM` path
      * (the default the UI offers); `false` is a plaintext public room.
      *
@@ -2070,6 +2110,56 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Persisted message transcript for a conversation, for reload-on-open.
+     *
+     * The engine already persists every DM and private-group message to the
+     * encrypted at-rest vault ([`fetchit_chat::conversation::HistoryEntry`]);
+     * this surfaces that transcript so the shell's message store survives a
+     * process kill instead of starting empty.
+     *
+     * `conv_key` is the SHELL's conversation key, mirroring how the engine
+     * keys conversations: a `g:`-prefixed 64-hex group id resolves the group
+     * conversation directly ([`ConversationRegistry::get`]); a bare 64-hex
+     * peer agent id resolves that peer's current DM
+     * ([`ConversationRegistry::find_dm_with`], which scans for the two-member
+     * conversation containing the peer -- the engine has no stable
+     * peer-keyed DM id, so the DM is resolved, not constructed). An unknown
+     * or not-yet-persisted conversation returns an empty list (not an error).
+     *
+     * Each entry is mapped to the SAME shape the live event projections
+     * carry; `outbound` is derived against the local agent id so a hydrated
+     * transcript renders identically to live traffic and de-dups by
+     * `message_id`.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state (no registry).
+     * [`ChatFfiError::Network`] on a vault open / AEAD / parse failure while
+     * hydrating from disk.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `conversationHistory`(`convKey`: kotlin.String) : List<ChatHistoryMessageFfi> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_conversation_history(
+                thisPtr,
+                FfiConverterString.lower(`convKey`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeChatHistoryMessageFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -3136,6 +3226,93 @@ public object FfiConverterTypeArchiveEntryFFI: FfiConverterRustBuffer<ArchiveEnt
     override fun write(value: ArchiveEntryFfi, buf: ByteBuffer) {
             FfiConverterString.write(value.`path`, buf)
             FfiConverterOptionalULong.write(value.`size`, buf)
+    }
+}
+
+
+
+/**
+ * One persisted message in a conversation transcript, surfaced to the shell
+ * for reload-on-open from the encrypted at-rest vault.
+ *
+ * Mapped from [`fetchit_chat::conversation::HistoryEntry`] into the SAME
+ * fields the live [`ChatEventFfi::Dm`] / [`ChatEventFfi::GroupMessage`] /
+ * [`OutboxBubbleFfi`] projections already carry, so a hydrated transcript
+ * renders identically to live traffic. `outbound` is derived by the getter
+ * (`HistoryEntry` is sender-stamped, not self-stamped): an entry whose
+ * `sender_agent_id_hex` equals the local agent id is one this device sent.
+ */
+data class ChatHistoryMessageFfi (
+    /**
+     * `true` when this device sent the message (sender == local agent id).
+     */
+    var `outbound`: kotlin.Boolean, 
+    /**
+     * Hex sender agent id (64 lowercase hex chars). Carried for the group
+     * sender label; the shell leaves the DM label null.
+     */
+    var `fromAgentIdHex`: kotlin.String, 
+    /**
+     * Sender display name at send time, if any.
+     */
+    var `senderName`: kotlin.String?, 
+    /**
+     * Plaintext body.
+     */
+    var `body`: kotlin.String, 
+    /**
+     * Sender-asserted Unix-ms timestamp (preserves ordering across a reload).
+     */
+    var `sentAtMs`: kotlin.ULong, 
+    /**
+     * Logical message id (hex). The de-dup key against an already-present
+     * live message of the same id. Empty for legacy pre-id entries.
+     */
+    var `messageId`: kotlin.String, 
+    /**
+     * `true` once the recipient's delivery receipt arrived. Only meaningful
+     * for entries this device sent (`outbound`).
+     */
+    var `delivered`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<ChatHistoryMessageFfi> {
+    override fun read(buf: ByteBuffer): ChatHistoryMessageFfi {
+        return ChatHistoryMessageFfi(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ChatHistoryMessageFfi) = (
+            FfiConverterBoolean.allocationSize(value.`outbound`) +
+            FfiConverterString.allocationSize(value.`fromAgentIdHex`) +
+            FfiConverterOptionalString.allocationSize(value.`senderName`) +
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterULong.allocationSize(value.`sentAtMs`) +
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterBoolean.allocationSize(value.`delivered`)
+    )
+
+    override fun write(value: ChatHistoryMessageFfi, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`outbound`, buf)
+            FfiConverterString.write(value.`fromAgentIdHex`, buf)
+            FfiConverterOptionalString.write(value.`senderName`, buf)
+            FfiConverterString.write(value.`body`, buf)
+            FfiConverterULong.write(value.`sentAtMs`, buf)
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterBoolean.write(value.`delivered`, buf)
     }
 }
 
@@ -4450,6 +4627,34 @@ public object FfiConverterSequenceTypeArchiveEntryFFI: FfiConverterRustBuffer<Li
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeArchiveEntryFFI.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeChatHistoryMessageFfi: FfiConverterRustBuffer<List<ChatHistoryMessageFfi>> {
+    override fun read(buf: ByteBuffer): List<ChatHistoryMessageFfi> {
+        val len = buf.getInt()
+        return List<ChatHistoryMessageFfi>(len) {
+            FfiConverterTypeChatHistoryMessageFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ChatHistoryMessageFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeChatHistoryMessageFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ChatHistoryMessageFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeChatHistoryMessageFfi.write(it, buf)
         }
     }
 }

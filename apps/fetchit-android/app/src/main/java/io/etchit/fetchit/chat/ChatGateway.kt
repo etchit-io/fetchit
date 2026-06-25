@@ -2,6 +2,7 @@ package io.etchit.fetchit.chat
 
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
@@ -100,6 +101,21 @@ interface ChatGateway {
     suspend fun renameGroup(groupId: String, newName: String)
 
     /**
+     * Persisted message transcript for a conversation, for reload-on-open. The
+     * engine already persists every DM and private-group message to the
+     * encrypted at-rest vault; this surfaces it so threads are not empty after
+     * a process kill.
+     *
+     * [convKey] is the shell conversation key: a `g:`-prefixed group id
+     * ([ConversationStore.convKeyGroup]) resolves the group conversation; a
+     * bare peer agent-id hex ([ConversationStore.convKeyDm]) resolves that
+     * peer's current DM. An unknown / not-yet-persisted conversation returns an
+     * empty list. Entries are ordered oldest-first; `outbound` is pre-derived
+     * by the engine against the local agent id.
+     */
+    suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi>
+
+    /**
      * Block until the next [ChatEventFfi] arrives from the relay, or return
      * `null` when the client has been disconnected and the event queue is
      * drained.
@@ -139,6 +155,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.banMember(groupId, agentIdHex)
     override suspend fun renameGroup(groupId: String, newName: String) =
         inner.renameGroup(groupId, newName)
+    override suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi> =
+        inner.conversationHistory(convKey)
     override suspend fun nextEvent(): ChatEventFfi? = inner.nextEvent()
     override fun disconnect() = inner.disconnect()
 }

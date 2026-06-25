@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
+import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
@@ -127,8 +128,12 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             // enqueued (and vault-persisted) before this process subscribed.
             startOutboxAndHydrate(gw)
             // Seed the group list so the conversation screen can show existing
-            // groups (and their threads) immediately after connect.
+            // groups (and their threads) immediately after connect. loadGroups
+            // also hydrates each group's persisted transcript.
             loadGroups(gw)
+            // Hydrate known contacts' DM threads from the persisted vault so the
+            // list shows previews and threads are not empty on reopen.
+            hydrateContacts(gw)
             // Surface the connect-time pair-record publish outcome. On Android
             // its failure is otherwise invisible (fetchit_chat log records do not
             // reach logcat), so a relay/TLS failure would look like a phantom
@@ -168,6 +173,18 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      */
     suspend fun leaveGroup(groupId: String) {
         leaveGroupVia(gateway, groupId) { refreshGroups() }
+    }
+
+    /**
+     * Hydrate the thread for [convKey] from the engine's persisted vault so an
+     * opened conversation shows its history immediately instead of waiting on
+     * (or losing) it across a process kill. [convKey] is a
+     * [ConversationStore.convKeyDm] or [ConversationStore.convKeyGroup] value.
+     * Non-fatal + idempotent: the merge de-dups by message id, so re-opening a
+     * thread does not double messages. No-op when not connected.
+     */
+    suspend fun hydrateConversation(convKey: String) {
+        hydrateConversationVia(gateway, convKey, conversations)
     }
 
     /**
@@ -248,9 +265,26 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         for (g in loaded) {
             // Touch the flow so a freshly-loaded group surfaces as an (empty)
             // conversation the list screen can render.
-            conversations.messagesFor(ConversationStore.convKeyGroup(g.groupId))
+            val key = ConversationStore.convKeyGroup(g.groupId)
+            conversations.messagesFor(key)
+            // Hydrate the persisted transcript so the list shows a last-message
+            // preview and the thread is non-empty on reopen. Non-fatal per
+            // group: a hydrate failure must not break the group list.
+            hydrateConversationVia(gw, key, conversations)
         }
         _groups.value = loaded
+    }
+
+    /**
+     * Hydrate every known contact's DM thread from the persisted vault on
+     * connect, so the list screen shows last-message previews and threads are
+     * not empty on reopen. Non-fatal per contact, mirroring [loadGroups].
+     * Groups are hydrated inside [loadGroups]; this covers the DM side.
+     */
+    private suspend fun hydrateContacts(gw: ChatGateway) {
+        for (c in contacts.contacts.value) {
+            hydrateConversationVia(gw, ConversationStore.convKeyDm(c.agentIdHex), conversations)
+        }
     }
 
     /**
@@ -524,6 +558,63 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             val plain = htmlStripper(content)
             if (plain.isEmpty()) null else FeedPost(ev.verifiedActorUrl, plain, System.currentTimeMillis())
         }.getOrNull()
+
+        /**
+         * Map a persisted FFI transcript into [ChatMessage]s, keeping the
+         * uniffi [ChatHistoryMessageFfi] type out of [ConversationStore].
+         * Mirrors the live-event projection: an inbound entry carries the
+         * group sender attribution; an outbound entry leaves those null, the
+         * same shape the pump and [projectOutbox] produce, so a hydrated copy
+         * de-dups cleanly against its live twin by [ChatMessage.messageId].
+         *
+         * A blank persisted `message_id` (legacy pre-id entries) becomes a null
+         * [ChatMessage.messageId] so it reads as unmatchable, never as the
+         * empty-string id.
+         */
+        fun historyToMessages(history: List<ChatHistoryMessageFfi>): List<ChatMessage> =
+            history.map { h ->
+                ChatMessage(
+                    outbound = h.outbound,
+                    body = h.body,
+                    sentAtMs = h.sentAtMs.toLong(),
+                    messageId = h.messageId.takeIf { it.isNotBlank() },
+                    delivered = h.delivered,
+                    // Sender attribution only on inbound entries (the group
+                    // label reads off these); outbound + DM entries leave null,
+                    // matching the live pump.
+                    senderAgentIdHex = if (h.outbound) null else h.fromAgentIdHex,
+                    senderName = if (h.outbound) null else h.senderName,
+                )
+            }
+
+        /**
+         * Hydrate the thread for [convKey] from the engine's persisted vault
+         * via [gw], merging into [convo] (de-duped by message id). Non-fatal:
+         * a missing gateway, a fetch failure, or an empty transcript leaves the
+         * thread untouched and is logged, mirroring [loadGroups].
+         *
+         * Companion function so the fetch-then-merge seam is JVM-testable with
+         * a [FakeGateway], mirroring [removeContactVia] / [projectOutbox].
+         */
+        suspend fun hydrateConversationVia(
+            gw: ChatGateway?,
+            convKey: String,
+            convo: ConversationStore,
+            logWarn: (String, Throwable) -> Unit = { msg, t ->
+                android.util.Log.w("fetchit.chat", msg, t)
+            },
+        ) {
+            if (gw == null) return
+            val history = try {
+                gw.conversationHistory(convKey)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logWarn("conversationHistory failed for $convKey", e)
+                return
+            }
+            convo.mergeHistory(convKey, historyToMessages(history))
+        }
 
         /**
          * Project an FFI outbox [bubble] into [convo], upserting by bubble id.

@@ -15,8 +15,11 @@ import kotlinx.coroutines.flow.asStateFlow
  * (event pump + send path) never interleave partial updates.
  * [StateFlow]s themselves are thread-safe for observers.
  *
- * In-memory only for v1 — messages are ephemeral across process restarts,
- * matching desktop behaviour. Persistence is a designated follow-up.
+ * The in-memory map is a per-process projection; the durable transcript lives
+ * in the engine's encrypted at-rest vault. On open / list load the controller
+ * hydrates threads from that vault via [ChatGateway.conversationHistory] and
+ * folds them in with [mergeHistory] (de-duped by message id), so messages
+ * survive a process kill instead of starting empty.
  */
 class ConversationStore {
 
@@ -103,6 +106,43 @@ class ConversationStore {
             } else {
                 list + msg
             }
+        }
+    }
+
+    /**
+     * Merge a persisted transcript ([msgs]) into the thread for [key],
+     * de-duplicating against messages already present so a reloaded copy and
+     * its live event never double up.
+     *
+     * De-dup key is [ChatMessage.messageId]: a hydrated entry is dropped when a
+     * message with the same non-blank id is already in the thread (whether it
+     * arrived as a live inbound event or as an outbox bubble — both carry the
+     * engine's `messageId`). Entries with a blank/null id (legacy pre-id
+     * persisted messages) are always kept, since they cannot be matched.
+     *
+     * Surviving entries are appended and the whole thread is re-sorted by
+     * [ChatMessage.sentAtMs] so persisted history interleaves correctly with
+     * any live messages already shown. A stable sort preserves the relative
+     * order of same-timestamp messages.
+     *
+     * Safe to call from any coroutine; holds [lock] for the whole merge.
+     */
+    fun mergeHistory(key: String, msgs: List<ChatMessage>) {
+        if (msgs.isEmpty()) return
+        synchronized(lock) {
+            val flow = flowFor(key)
+            val existing = flow.value
+            val seenIds = existing.mapNotNull { it.messageId?.takeIf(String::isNotBlank) }.toHashSet()
+            val additions = ArrayList<ChatMessage>(msgs.size)
+            for (m in msgs) {
+                val id = m.messageId?.takeIf(String::isNotBlank)
+                // Drop a hydrated message whose id is already shown (live event
+                // or outbox bubble). Keep id-less legacy entries — unmatchable.
+                if (id != null && !seenIds.add(id)) continue
+                additions.add(m)
+            }
+            if (additions.isEmpty()) return
+            flow.value = (existing + additions).sortedBy { it.sentAtMs }
         }
     }
 

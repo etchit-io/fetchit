@@ -130,6 +130,56 @@ impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
     }
 }
 
+/// One persisted message in a conversation transcript, surfaced to the shell
+/// for reload-on-open from the encrypted at-rest vault.
+///
+/// Mapped from [`fetchit_chat::conversation::HistoryEntry`] into the SAME
+/// fields the live [`ChatEventFfi::Dm`] / [`ChatEventFfi::GroupMessage`] /
+/// [`OutboxBubbleFfi`] projections already carry, so a hydrated transcript
+/// renders identically to live traffic. `outbound` is derived by the getter
+/// (`HistoryEntry` is sender-stamped, not self-stamped): an entry whose
+/// `sender_agent_id_hex` equals the local agent id is one this device sent.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChatHistoryMessageFfi {
+    /// `true` when this device sent the message (sender == local agent id).
+    pub outbound: bool,
+    /// Hex sender agent id (64 lowercase hex chars). Carried for the group
+    /// sender label; the shell leaves the DM label null.
+    pub from_agent_id_hex: String,
+    /// Sender display name at send time, if any.
+    pub sender_name: Option<String>,
+    /// Plaintext body.
+    pub body: String,
+    /// Sender-asserted Unix-ms timestamp (preserves ordering across a reload).
+    pub sent_at_ms: u64,
+    /// Logical message id (hex). The de-dup key against an already-present
+    /// live message of the same id. Empty for legacy pre-id entries.
+    pub message_id: String,
+    /// `true` once the recipient's delivery receipt arrived. Only meaningful
+    /// for entries this device sent (`outbound`).
+    pub delivered: bool,
+}
+
+/// Map one persisted [`HistoryEntry`](fetchit_chat::conversation::HistoryEntry)
+/// to its FFI shape, deriving `outbound` from `local_agent_id_hex`.
+///
+/// Pure so the projection is unit-tested without a live client; the getter
+/// calls it on the same path it ships.
+fn history_entry_to_ffi(
+    entry: fetchit_chat::conversation::HistoryEntry,
+    local_agent_id_hex: &str,
+) -> ChatHistoryMessageFfi {
+    ChatHistoryMessageFfi {
+        outbound: entry.sender_agent_id_hex == local_agent_id_hex,
+        from_agent_id_hex: entry.sender_agent_id_hex,
+        sender_name: entry.sender_name,
+        body: entry.body,
+        sent_at_ms: entry.ts_ms,
+        message_id: entry.message_id,
+        delivered: entry.delivered_at_ms.is_some(),
+    }
+}
+
 /// Routing verdict for one inbound transit envelope, in evaluation
 /// order: self-originated envelopes are dropped before dispatch, and
 /// the all-zeros bridge sentinel can never match a real agent id, so
@@ -1025,6 +1075,75 @@ impl ChatClient {
             .map_err(ChatFfiError::from)
     }
 
+    /// Persisted message transcript for a conversation, for reload-on-open.
+    ///
+    /// The engine already persists every DM and private-group message to the
+    /// encrypted at-rest vault ([`fetchit_chat::conversation::HistoryEntry`]);
+    /// this surfaces that transcript so the shell's message store survives a
+    /// process kill instead of starting empty.
+    ///
+    /// `conv_key` is the SHELL's conversation key, mirroring how the engine
+    /// keys conversations: a `g:`-prefixed 64-hex group id resolves the group
+    /// conversation directly ([`ConversationRegistry::get`]); a bare 64-hex
+    /// peer agent id resolves that peer's current DM
+    /// ([`ConversationRegistry::find_dm_with`], which scans for the two-member
+    /// conversation containing the peer -- the engine has no stable
+    /// peer-keyed DM id, so the DM is resolved, not constructed). An unknown
+    /// or not-yet-persisted conversation returns an empty list (not an error).
+    ///
+    /// Each entry is mapped to the SAME shape the live event projections
+    /// carry; `outbound` is derived against the local agent id so a hydrated
+    /// transcript renders identically to live traffic and de-dups by
+    /// `message_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+    /// 64-hex agent id, or when the client has no chat state (no registry).
+    /// [`ChatFfiError::Network`] on a vault open / AEAD / parse failure while
+    /// hydrating from disk.
+    pub async fn conversation_history(
+        &self,
+        conv_key: String,
+    ) -> Result<Vec<ChatHistoryMessageFfi>, ChatFfiError> {
+        let registry = self.inner.registry_arc().ok_or(ChatFfiError::Invalid {
+            reason: "no chat state".to_owned(),
+        })?;
+        // Mirror the shell key scheme: "g:<hex>" is a group, bare hex is a DM
+        // peer. The engine keys every conversation by group_id_hex, so a group
+        // is a direct get; a DM has no peer-keyed id and must be resolved.
+        let conv = if let Some(group_id) = conv_key.strip_prefix("g:") {
+            let gid = fetchit_chat::groups::GroupId::parse(group_id).map_err(|e| {
+                ChatFfiError::Invalid {
+                    reason: e.to_string(),
+                }
+            })?;
+            registry
+                .get(gid.as_str())
+                .await
+                .map_err(ChatFfiError::from)?
+        } else {
+            let peer = fetchit_chat::identity::AgentId::parse(conv_key).map_err(|e| {
+                ChatFfiError::Invalid {
+                    reason: e.to_string(),
+                }
+            })?;
+            registry
+                .find_dm_with(&peer.0)
+                .await
+                .map_err(ChatFfiError::from)?
+        };
+        let Some(conv) = conv else {
+            return Ok(Vec::new());
+        };
+        let local = self.inner.local_agent_id_hex().unwrap_or_default();
+        Ok(conv
+            .history
+            .into_iter()
+            .map(|entry| history_entry_to_ffi(entry, &local))
+            .collect())
+    }
+
     /// Drain the next inbound event. Returns `None` when the pump has
     /// shut down (relay disconnected and all buffered events consumed).
     ///
@@ -1616,5 +1735,47 @@ mod tests {
         assert_eq!(ffi.message_id.as_deref(), Some("mid-9"));
         assert_eq!(ffi.enqueued_at_ms, 1_700_000_000_000);
         assert_eq!(ffi.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn history_entry_from_other_sender_is_inbound() {
+        use fetchit_chat::conversation::HistoryEntry;
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: Some("alice".to_owned()),
+            body: "hi from alice".to_owned(),
+            ts_ms: 1_700_000_000_000,
+            message_id: "mid-1".to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+        };
+        // Local agent id differs from the sender -> inbound.
+        let ffi = history_entry_to_ffi(entry, ZEROS_HEX);
+        assert!(!ffi.outbound, "a message from another agent is inbound");
+        assert_eq!(ffi.from_agent_id_hex, REAL_HEX);
+        assert_eq!(ffi.sender_name.as_deref(), Some("alice"));
+        assert_eq!(ffi.body, "hi from alice");
+        assert_eq!(ffi.sent_at_ms, 1_700_000_000_000);
+        assert_eq!(ffi.message_id, "mid-1");
+        assert!(!ffi.delivered, "no receipt -> not delivered");
+    }
+
+    #[test]
+    fn history_entry_from_self_is_outbound_and_delivered_tracks_receipt() {
+        use fetchit_chat::conversation::HistoryEntry;
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: None,
+            body: "my own message".to_owned(),
+            ts_ms: 1_700_000_000_001,
+            message_id: "mid-2".to_owned(),
+            attachment: None,
+            delivered_at_ms: Some(1_700_000_000_500),
+        };
+        // Local agent id EQUALS the sender -> outbound; receipt present -> delivered.
+        let ffi = history_entry_to_ffi(entry, REAL_HEX);
+        assert!(ffi.outbound, "a message from self is outbound");
+        assert!(ffi.delivered, "a present delivered_at_ms maps to delivered");
+        assert_eq!(ffi.message_id, "mid-2");
     }
 }

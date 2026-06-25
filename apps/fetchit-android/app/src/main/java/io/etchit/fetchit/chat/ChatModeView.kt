@@ -964,6 +964,10 @@ class ChatModeView(
 
         // Collect messages for this peer; job cancelled on screen switch.
         threadCollectJob = lifecycleScope.launch {
+            // Hydrate the persisted transcript before/as the thread renders so a
+            // reopened DM is not empty after a process kill. Idempotent (de-duped
+            // by message id) and non-fatal.
+            controller.hydrateConversation(ConversationStore.convKeyDm(peer))
             controller.conversations.messagesFor(peer).collect { msgs ->
                 val prevSize = adapter.itemCount
                 val rows = msgs.map { MessageRow.Dm(it) }
@@ -1077,6 +1081,10 @@ class ChatModeView(
 
         // Collect messages for this group; job cancelled on screen switch.
         threadCollectJob = lifecycleScope.launch {
+            // Hydrate the persisted transcript before/as the thread renders so a
+            // reopened group is not empty after a process kill. Idempotent
+            // (de-duped by message id) and non-fatal.
+            controller.hydrateConversation(ConversationStore.convKeyGroup(groupId))
             controller.conversations.messagesFor(ConversationStore.convKeyGroup(groupId)).collect { msgs ->
                 val prevSize = adapter.itemCount
                 val rows = msgs.map { MessageRow.Dm(it) }

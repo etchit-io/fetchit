@@ -1,6 +1,10 @@
 package io.etchit.fetchit.chat
 
-/** One message in a 1:1 thread. In-memory only for v1 (mirrors desktop ephemerality). */
+/**
+ * One message in a 1:1 or group thread. Held in-memory per process, but
+ * rehydrated on open / list load from the engine's encrypted at-rest vault
+ * (see [ConversationStore.mergeHistory]) so messages survive a process kill.
+ */
 data class ChatMessage(
     val outbound: Boolean,
     val body: String,
