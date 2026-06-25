@@ -105,6 +105,29 @@ impl MlDsaSigner {
         })
     }
 
+    /// Reconstruct a signer deterministically from a 32-byte seed.
+    ///
+    /// The same `seed` always yields the same keypair, hence the same
+    /// [`agent_id`](Signer::agent_id). That determinism is what makes
+    /// seed backup and restore possible: the 32 seed bytes alone recover
+    /// the full identity. Backed by FIPS-204 ML-DSA-65 seeded key
+    /// generation (`saorsa-pqc`'s `generate_keypair_from_seed`), which is
+    /// infallible, so this constructor cannot fail.
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (public_key, secret_key) = dsa.generate_keypair_from_seed(seed);
+        let public_key_bytes = public_key.to_bytes();
+        let agent_id = derive_agent_id(&public_key_bytes);
+        Self {
+            dsa,
+            public_key,
+            secret_key,
+            public_key_bytes,
+            agent_id,
+        }
+    }
+
     /// The signer's secret-key bytes (caller is responsible for safe storage).
     #[must_use]
     pub fn secret_key_bytes(&self) -> Vec<u8> {
@@ -170,5 +193,50 @@ mod tests {
         assert!(dsa
             .verify(restored.public_key_value(), msg, &sig_value)
             .unwrap());
+    }
+
+    #[test]
+    fn from_seed_is_deterministic() {
+        let seed = [42u8; 32];
+        let a = MlDsaSigner::from_seed(&seed);
+        let b = MlDsaSigner::from_seed(&seed);
+        assert_eq!(a.agent_id(), b.agent_id());
+        assert_eq!(a.public_key(), b.public_key());
+        assert_eq!(a.secret_key_bytes(), b.secret_key_bytes());
+    }
+
+    #[test]
+    fn from_seed_differs_by_seed() {
+        let a = MlDsaSigner::from_seed(&[1u8; 32]);
+        let b = MlDsaSigner::from_seed(&[2u8; 32]);
+        assert_ne!(a.agent_id(), b.agent_id());
+        assert_ne!(a.public_key(), b.public_key());
+    }
+
+    #[tokio::test]
+    async fn from_seed_signs_and_self_verifies() {
+        let signer = MlDsaSigner::from_seed(&[7u8; 32]);
+        let msg = b"seed-derived signer signs";
+        let sig = signer.sign(msg).await.unwrap();
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let sig_value =
+            saorsa_pqc::api::sig::MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &sig).unwrap();
+        assert!(dsa
+            .verify(signer.public_key_value(), msg, &sig_value)
+            .unwrap());
+    }
+
+    #[test]
+    fn from_seed_reproduces_golden_agent_id() {
+        // Cross-platform / cross-pin reproducibility contract: seed
+        // `[42u8; 32]` must always derive this exact agent_id. If this
+        // ever fails, seeded keygen drifted and a restore would yield a
+        // different identity than the backup. The same value must
+        // reproduce on aarch64 (Android device-verify).
+        let signer = MlDsaSigner::from_seed(&[42u8; 32]);
+        assert_eq!(
+            hex::encode(signer.agent_id()),
+            "d53d604e4fb156e5bad3cf6ac68926dbae6c6e6d3b99f2744db3406447a3b6f0"
+        );
     }
 }
