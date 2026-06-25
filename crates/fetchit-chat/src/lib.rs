@@ -44,6 +44,7 @@ pub mod pair_uri;
 pub mod presence;
 pub mod profile;
 pub mod public;
+pub mod recovery_phrase;
 pub mod rekey;
 pub mod relay_http;
 pub mod relay_transport;
@@ -60,6 +61,7 @@ pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
 pub use events::{Event, EventStream};
 pub use local_signer::reveal_local_signer_seed;
+pub use recovery_phrase::{recovery_phrase_to_seed, seed_to_recovery_phrase};
 pub use transport::{Reachability, Router, SendReceipt, Transport};
 
 /// Re-export of the relay-client's connection-state enum so downstream
