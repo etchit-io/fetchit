@@ -547,11 +547,20 @@ class ChatModeView(
             }
             val scroll = android.widget.ScrollView(context).apply { addView(column) }
 
-            MaterialAlertDialogBuilder(context)
+            val membersDialog = MaterialAlertDialogBuilder(context)
                 .setTitle(context.getString(R.string.chat_members_title))
                 .setView(scroll)
                 .setNegativeButton(context.getString(R.string.action_close), null)
-                .show()
+            // Mint + share a fresh invite. Owner/admin only (cosmetic gate --
+            // x0xd authorizes invite generation). Invites are single-use per
+            // joiner, so this is the only path to grow a private group past its
+            // first invitee from the UI.
+            if (viewerCanModerate) {
+                membersDialog.setNeutralButton(
+                    context.getString(R.string.chat_group_invite_someone),
+                ) { _, _ -> offerShareInvite(groupId) }
+            }
+            membersDialog.show()
         }
     }
 

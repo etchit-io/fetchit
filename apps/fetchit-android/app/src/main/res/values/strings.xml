@@ -249,6 +249,7 @@
          desktop wording; the destructive verbs stay lowercase. -->
     <string name="chat_members_desc">group members</string>
     <string name="chat_members_title">Members</string>
+    <string name="chat_group_invite_someone">Invite someone</string>
     <string name="chat_member_you">%1$s (you)</string>
     <string name="chat_member_remove">Remove</string>
     <string name="chat_member_ban">Ban</string>
