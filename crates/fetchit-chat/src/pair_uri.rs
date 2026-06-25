@@ -18,13 +18,13 @@ const HOST_SEGMENT: &str = "pair";
 
 /// Maximum total URI length. QR codes with > 512 bytes of alphanumeric
 /// data require a version that most phone cameras refuse to scan.
-const MAX_URI_LEN: usize = 512;
+pub(crate) const MAX_URI_LEN: usize = 512;
 
 /// Maximum relay URL byte length (mirrors the pair-record spec).
-const MAX_RELAY_LEN: usize = 256;
+pub(crate) const MAX_RELAY_LEN: usize = 256;
 
 /// Maximum number of relay entries per URI (mirrors the pair-record spec).
-const MAX_RELAYS: usize = 4;
+pub(crate) const MAX_RELAYS: usize = 4;
 
 /// Errors from [`emit_pair_uri`] and [`parse_pair_uri`].
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -178,7 +178,7 @@ fn validate_agent_id_hex(s: &str) -> Result<(), PairUriError> {
     }
 }
 
-fn validate_relay(relay: &str) -> Result<(), PairUriError> {
+pub(crate) fn validate_relay(relay: &str) -> Result<(), PairUriError> {
     if relay.len() > MAX_RELAY_LEN {
         return Err(PairUriError::InvalidRelay(format!(
             "relay URL exceeds {MAX_RELAY_LEN} bytes"
@@ -208,7 +208,7 @@ fn validate_relay(relay: &str) -> Result<(), PairUriError> {
 /// - lowercase the host
 /// - strip default port (80 for http, 443 for https)
 /// - strip a trailing `/` on an empty path
-fn normalize_relay(relay: &str) -> Result<String, PairUriError> {
+pub(crate) fn normalize_relay(relay: &str) -> Result<String, PairUriError> {
     let mut url = relay
         .parse::<Url>()
         .map_err(|e| PairUriError::InvalidRelay(format!("URL parse: {e}")))?;
