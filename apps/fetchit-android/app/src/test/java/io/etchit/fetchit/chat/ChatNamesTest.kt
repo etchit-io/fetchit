@@ -75,4 +75,70 @@ class ChatNamesTest {
         assertEquals("agent-abcdef", groupSenderLabel(null, null, agentId))
         assertEquals("agent-abcdef", groupSenderLabel("  ", "", agentId))
     }
+
+    // ── disambiguateMemberLabels: same-name collision suffixing ──────────
+
+    @Test
+    fun disambiguate_suffixes_both_members_sharing_a_name() {
+        // Two "Bob" rows -> each gets its OWN short-id suffix.
+        val out = disambiguateMemberLabels(
+            listOf(
+                "aaaaaa" + "0".repeat(58) to "Bob",
+                "bbbbbb" + "0".repeat(58) to "Bob",
+            ),
+        )
+        assertEquals(listOf("Bob · aaaaaa", "Bob · bbbbbb"), out)
+    }
+
+    @Test
+    fun disambiguate_leaves_unique_names_unchanged() {
+        val out = disambiguateMemberLabels(
+            listOf(
+                "aaaaaa" + "0".repeat(58) to "Alice",
+                "bbbbbb" + "0".repeat(58) to "Bob",
+            ),
+        )
+        assertEquals(listOf("Alice", "Bob"), out)
+    }
+
+    @Test
+    fun disambiguate_suffixes_all_three_on_a_three_way_collision() {
+        val out = disambiguateMemberLabels(
+            listOf(
+                "aaaaaa" + "0".repeat(58) to "Bob",
+                "bbbbbb" + "0".repeat(58) to "Bob",
+                "cccccc" + "0".repeat(58) to "Bob",
+            ),
+        )
+        assertEquals(listOf("Bob · aaaaaa", "Bob · bbbbbb", "Bob · cccccc"), out)
+    }
+
+    @Test
+    fun disambiguate_mixes_collisions_and_uniques_in_order() {
+        // Order is preserved; only the colliding "Bob" rows are suffixed.
+        val out = disambiguateMemberLabels(
+            listOf(
+                "aaaaaa" + "0".repeat(58) to "Bob",
+                "dddddd" + "0".repeat(58) to "Carol",
+                "bbbbbb" + "0".repeat(58) to "Bob",
+            ),
+        )
+        assertEquals(listOf("Bob · aaaaaa", "Carol", "Bob · bbbbbb"), out)
+    }
+
+    @Test
+    fun disambiguate_lowercases_the_short_id_prefix() {
+        val out = disambiguateMemberLabels(
+            listOf(
+                "ABCDEF" + "0".repeat(58) to "Bob",
+                "FEDCBA" + "0".repeat(58) to "Bob",
+            ),
+        )
+        assertEquals(listOf("Bob · abcdef", "Bob · fedcba"), out)
+    }
+
+    @Test
+    fun disambiguate_empty_list_is_empty() {
+        assertEquals(emptyList<String>(), disambiguateMemberLabels(emptyList()))
+    }
 }

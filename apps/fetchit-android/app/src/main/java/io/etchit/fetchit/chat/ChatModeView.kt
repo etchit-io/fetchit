@@ -511,10 +511,13 @@ class ChatModeView(
      * the roster, resolves the viewer's own role, and builds one row per
      * active member into a scrollable column inside a MaterialAlertDialog.
      *
-     * Moderation is COSMETIC here: the per-row Remove/Ban overflow and the
-     * rename affordance are shown only when the viewer's role permits, but
-     * x0xd is the sole authorization gate. Any moderation call that x0xd
-     * rejects surfaces its error via a Snackbar — never silently swallowed.
+     * Moderation is COSMETIC here: each row taps into a detail sheet whose
+     * Remove/Ban actions appear only when the viewer's role permits, but x0xd
+     * is the sole authorization gate. Any moderation call that x0xd rejects
+     * surfaces its error via a Snackbar — never silently swallowed.
+     *
+     * Two members can share a resolved display name (re-key ghosts); their
+     * labels are disambiguated with a short agent-id suffix before rendering.
      */
     private fun showGroupMembersDialog(groupId: String) {
         lifecycleScope.launch {
@@ -523,14 +526,24 @@ class ChatModeView(
             val myRole = members.firstOrNull { it.agentIdHex == myHex }?.role
             val viewerCanModerate = canModerate(myRole)
 
+            // Resolve each member's name (wire → saved contact → short id), then
+            // disambiguate any same-name collisions so identical rows are
+            // distinguishable. Labels stay aligned to `members` by index.
+            val resolved = members.map { m ->
+                val savedContactName = controller.contacts.contacts.value
+                    .firstOrNull { it.agentIdHex == m.agentIdHex }?.displayName
+                m.agentIdHex to memberDisplayName(m.displayName, savedContactName, m.agentIdHex)
+            }
+            val labels = disambiguateMemberLabels(resolved)
+
             val density = context.resources.displayMetrics.density
             val pad = (16 * density).toInt()
             val column = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(pad, (8 * density).toInt(), pad, 0)
             }
-            for (m in members) {
-                column.addView(memberRow(groupId, m, myHex, viewerCanModerate))
+            members.forEachIndexed { i, m ->
+                column.addView(memberRow(groupId, m, labels[i], myHex, viewerCanModerate))
             }
             val scroll = android.widget.ScrollView(context).apply { addView(column) }
 
@@ -543,22 +556,20 @@ class ChatModeView(
     }
 
     /**
-     * Build one member row: a tinted circular avatar, the resolved display
-     * name (with " (you)" for self), an optional owner/admin chip, and — when
-     * [viewerCanModerate] and the target is neither self nor the owner — a
-     * trailing overflow with Remove / Ban. The overflow visibility is cosmetic
-     * (it only hides controls that would 4xx).
+     * Build one member row: a tinted circular avatar, the pre-disambiguated
+     * display [name] (with " (you)" for self), and an optional owner/admin
+     * chip. The whole row is tappable and opens [showMemberDetailSheet]; there
+     * is no per-row overflow — moderation lives in the detail sheet, so the tap
+     * is never a dead gesture.
      */
     private fun memberRow(
         groupId: String,
         member: GroupMemberFfi,
+        name: String,
         myHex: String?,
         viewerCanModerate: Boolean,
     ): View {
         val density = context.resources.displayMetrics.density
-        val savedContactName = controller.contacts.contacts.value
-            .firstOrNull { it.agentIdHex == member.agentIdHex }?.displayName
-        val name = memberDisplayName(member.displayName, savedContactName, member.agentIdHex)
         val isSelf = member.agentIdHex == myHex
 
         val row = LinearLayout(context).apply {
@@ -566,6 +577,12 @@ class ChatModeView(
             gravity = android.view.Gravity.CENTER_VERTICAL
             val v = (8 * density).toInt()
             setPadding(0, v, 0, v)
+            isClickable = true
+            isFocusable = true
+            setBackgroundResource(selectableItemBackground())
+            setOnClickListener {
+                showMemberDetailSheet(groupId, member, name, isSelf, viewerCanModerate)
+            }
         }
 
         // Tinted circular avatar with the identity initial.
@@ -606,48 +623,163 @@ class ChatModeView(
             })
         }
 
-        if (canModerateMember(viewerCanModerate, isSelf, member.isOwner)) {
-            val more = ImageButton(context).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    (40 * density).toInt(), (40 * density).toInt(),
-                ).apply { marginStart = (4 * density).toInt() }
-                setImageResource(R.drawable.ic_more_vert)
-                background = null
-                scaleType = ImageView.ScaleType.CENTER_INSIDE
-                contentDescription = context.getString(R.string.chat_row_more)
-                setOnClickListener { anchor -> showMemberModerationMenu(anchor, groupId, member, name) }
-            }
-            row.addView(more)
-        }
-
         return row
     }
 
     /**
-     * Per-member overflow: Remove + Ban, each opening a destructive confirm
-     * dialog. Mirrors [showGroupRowMenu]; the confirms mirror
-     * [confirmLeaveGroup].
+     * Resolve the platform attr `?attr/selectableItemBackground` to a drawable
+     * res id so a member row gets the standard touch ripple. Falls back to 0
+     * (no background) if the attr can't be resolved.
      */
-    private fun showMemberModerationMenu(
-        anchor: View,
+    private fun selectableItemBackground(): Int {
+        val tv = android.util.TypedValue()
+        return if (context.theme.resolveAttribute(
+                android.R.attr.selectableItemBackground, tv, true,
+            )
+        ) {
+            tv.resourceId
+        } else {
+            0
+        }
+    }
+
+    /**
+     * Member detail / action sheet, opened by tapping any member row. Shows the
+     * tinted avatar + initials, the disambiguated [name], the owner/admin role
+     * tag (if any), and a short agent-id. Always offers **Copy ID**; for an
+     * owner/admin viewer on a non-owner, non-self target it also offers
+     * **Remove** and **Ban** (reusing the existing destructive confirm flows).
+     *
+     * Moderation gating here is COSMETIC — it reuses [canModerateMember] only to
+     * hide controls that x0xd would reject; x0xd is the sole authorization gate
+     * and any rejection surfaces via a Snackbar.
+     */
+    private fun showMemberDetailSheet(
         groupId: String,
         member: GroupMemberFfi,
         name: String,
+        isSelf: Boolean,
+        viewerCanModerate: Boolean,
     ) {
-        PopupMenu(context, anchor).apply {
-            menu.add(context.getString(R.string.chat_member_remove))
-            menu.add(context.getString(R.string.chat_member_ban))
-            setOnMenuItemClickListener { item ->
-                when (item.title) {
-                    context.getString(R.string.chat_member_remove) ->
-                        confirmRemoveMember(groupId, member, name)
-                    context.getString(R.string.chat_member_ban) ->
-                        confirmBanMember(groupId, member, name)
-                }
-                true
-            }
-            show()
+        val density = context.resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(pad, (16 * density).toInt(), pad, 0)
         }
+
+        val avatarSize = (44 * density).toInt()
+        header.addView(
+            TextView(context).apply {
+                layoutParams = LinearLayout.LayoutParams(avatarSize, avatarSize)
+                gravity = android.view.Gravity.CENTER
+                text = IdentityColor.initials(name)
+                setTextColor(0xFFFFFFFF.toInt())
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(IdentityColor.stripeColor(member.agentIdHex))
+                }
+            },
+        )
+
+        val nameColumn = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f,
+            ).apply { marginStart = (14 * density).toInt() }
+        }
+        nameColumn.addView(
+            TextView(context).apply {
+                text = if (isSelf) context.getString(R.string.chat_member_you, name) else name
+                setTextColor(themeColor(R.attr.fetchitBone))
+                textSize = 17f
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            },
+        )
+        memberRoleTag(member.role)?.let { tag ->
+            nameColumn.addView(
+                TextView(context).apply {
+                    text = tag
+                    setTextColor(themeColor(R.attr.fetchitAsh))
+                    textSize = 12f
+                },
+            )
+        }
+        // Short agent-id: first 8 hex + ellipsis. The full id is on Copy ID.
+        nameColumn.addView(
+            TextView(context).apply {
+                text = "${member.agentIdHex.take(8)}…"
+                setTextColor(themeColor(R.attr.fetchitAsh))
+                textSize = 12f
+            },
+        )
+        header.addView(nameColumn)
+
+        val sheet = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(header)
+        }
+
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setView(sheet)
+            .setNegativeButton(context.getString(R.string.action_close), null)
+            .create()
+
+        // Actions render as full-width tappable rows inside the sheet (a custom
+        // view can't share the dialog with a setItems list, and there are only
+        // three button slots). Each row dismisses the sheet, then acts.
+        fun actionRow(labelRes: Int, destructive: Boolean, onTap: () -> Unit): View =
+            TextView(context).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+                text = context.getString(labelRes)
+                textSize = 16f
+                setTextColor(
+                    if (destructive) themeColor(R.attr.fetchitCopper) else themeColor(R.attr.fetchitBone),
+                )
+                setPadding(pad, (14 * density).toInt(), pad, (14 * density).toInt())
+                isClickable = true
+                isFocusable = true
+                setBackgroundResource(selectableItemBackground())
+                setOnClickListener {
+                    dialog.dismiss()
+                    onTap()
+                }
+            }
+
+        sheet.addView(android.view.View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (12 * density).toInt(),
+            )
+        })
+
+        sheet.addView(
+            actionRow(R.string.chat_member_copy_id, destructive = false) {
+                copyToClipboard(member.agentIdHex)
+                snackbar(context.getString(R.string.chat_member_id_copied))
+            },
+        )
+
+        // Moderation lives here now (was the per-row overflow). Cosmetic gate;
+        // x0xd authorizes the call and rejections surface via Snackbar.
+        if (canModerateMember(viewerCanModerate, isSelf, member.isOwner)) {
+            sheet.addView(
+                actionRow(R.string.chat_member_remove, destructive = true) {
+                    confirmRemoveMember(groupId, member, name)
+                },
+            )
+            sheet.addView(
+                actionRow(R.string.chat_member_ban, destructive = true) {
+                    confirmBanMember(groupId, member, name)
+                },
+            )
+        }
+        dialog.show()
     }
 
     private fun confirmRemoveMember(groupId: String, member: GroupMemberFfi, name: String) {

@@ -258,6 +258,8 @@
     <string name="chat_member_ban_title">Ban member?</string>
     <string name="chat_member_ban_message">Ban %1$s? They are removed and cannot rejoin.</string>
     <string name="chat_member_ban_confirm">ban</string>
+    <string name="chat_member_copy_id">Copy ID</string>
+    <string name="chat_member_id_copied">Agent ID copied</string>
     <string name="chat_group_rename_title">Rename group</string>
     <string name="chat_group_rename_message">Everyone in the group sees the new name.</string>
     <string name="chat_group_rename_hint">Group name</string>

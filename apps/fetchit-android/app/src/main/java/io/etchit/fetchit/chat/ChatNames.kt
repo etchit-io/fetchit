@@ -80,6 +80,29 @@ fun memberDisplayName(wireName: String?, contactName: String?, agentIdHex: Strin
         ?: "${agentIdHex.take(8)}…"
 
 /**
+ * Disambiguate member labels that collide on the resolved display name.
+ *
+ * A group can hold two members with the same resolved name (e.g. two "Bob"
+ * ghost identities from re-key churn), which render as identical, confusing
+ * rows. Each input is `(agentIdHex, resolvedDisplayName)`; the output is the
+ * label per member **in the same order**. When a resolved name is shared by
+ * two or more members, every colliding member's label gets a short
+ * disambiguator `" · <first 6 of agentIdHex, lowercased>"`; names that are
+ * unique are returned unchanged. Deterministic and order-preserving so the
+ * member-row labels are JVM-testable without a Context.
+ */
+fun disambiguateMemberLabels(members: List<Pair<String, String>>): List<String> {
+    val nameCounts = members.groupingBy { it.second }.eachCount()
+    return members.map { (agentIdHex, name) ->
+        if ((nameCounts[name] ?: 0) >= 2) {
+            "$name · ${agentIdHex.take(6).lowercase()}"
+        } else {
+            name
+        }
+    }
+}
+
+/**
  * Whether the *viewer* can moderate this group at all -- i.e. their own role
  * is owner or admin. Cosmetic gate only: it decides whether the UI shows the
  * moderation affordances, NOT whether a call is authorized. x0xd is the real
