@@ -59,6 +59,7 @@ pub use denylist::DenylistCheck;
 pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
 pub use events::{Event, EventStream};
+pub use local_signer::reveal_local_signer_seed;
 pub use transport::{Reachability, Router, SendReceipt, Transport};
 
 /// Re-export of the relay-client's connection-state enum so downstream

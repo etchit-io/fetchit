@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zeroize::{Zeroize, Zeroizing};
 
-const IDENTITY_FILE: &str = "identity.json.enc";
+pub(crate) const IDENTITY_FILE: &str = "identity.json.enc";
 
 /// On-disk identity payload (plaintext after vault open). Contains
 /// secret KEM bytes — never log, never send over a wire.

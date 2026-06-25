@@ -14,6 +14,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use fetchit_relay_client::MlDsaSigner;
 use fetchit_relay_client::Signer as _;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -28,6 +29,14 @@ struct LocalSignerPayload {
     version: u8,
     ml_dsa_public_key_b64: String,
     ml_dsa_secret_key_b64: String,
+    /// Base64 of the 32-byte ML-DSA seed the keypair was derived from.
+    /// Present for identities minted seed-first; absent for legacy
+    /// randomly-generated vaults, which have no recoverable seed and so
+    /// cannot be backed up — those must rotate to a fresh identity to
+    /// gain one. Additive and optional, so old and new vaults stay
+    /// mutually readable without a version bump.
+    #[serde(default)]
+    identity_seed_b64: Option<String>,
     /// Random per-install token fed to `derive_machine_id`; NOT derived
     /// from the keypair so a restored identity on a new device still
     /// gets a distinct machine fingerprint.
@@ -37,6 +46,9 @@ struct LocalSignerPayload {
 impl Drop for LocalSignerPayload {
     fn drop(&mut self) {
         self.ml_dsa_secret_key_b64.zeroize();
+        if let Some(seed) = self.identity_seed_b64.as_mut() {
+            seed.zeroize();
+        }
     }
 }
 
@@ -97,19 +109,77 @@ impl LocalSignerVault {
             });
         }
 
-        let signer = MlDsaSigner::generate()
-            .map_err(|e| ChatError::Invalid(format!("local signer keygen: {e}")))?;
+        // Mint seed-first so the identity is backup-recoverable: the
+        // 32-byte seed is persisted and `from_seed` reproduces the exact
+        // keypair (hence agent id) from it alone.
+        let mut seed = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        let signer = MlDsaSigner::from_seed(&seed);
+        let vault = Self::persist_new(&path, master, kdf_id, argon_salt, signer, &seed)?;
+        seed.zeroize();
+        Ok(vault)
+    }
+
+    /// Read the 32-byte identity seed from an existing vault, decrypting
+    /// only long enough to extract it. The platform layer gates this
+    /// behind a biometric prompt before any display. Returns `Ok(None)`
+    /// for legacy vaults minted before seed persistence — those
+    /// identities have no recoverable seed and must rotate to a fresh
+    /// one to gain a backup.
+    ///
+    /// # Errors
+    /// `ChatError::Invalid` if no vault exists, decryption or parsing
+    /// fails, or the stored seed is malformed; `ChatError::Io` on
+    /// filesystem errors.
+    pub(crate) fn reveal_identity_seed(
+        data_dir: &Path,
+        master: &MasterKey,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, ChatError> {
+        let path = data_dir.join(LOCAL_SIGNER_FILE);
+        if !path.exists() {
+            return Err(ChatError::Invalid(
+                "no local signer vault to reveal".to_owned(),
+            ));
+        }
+        let bytes = Zeroizing::new(open_from_path(&path, master)?);
+        let payload: LocalSignerPayload = serde_json::from_slice(&bytes)
+            .map_err(|e| ChatError::Invalid(format!("local signer payload parse: {e}")))?;
+        let Some(seed_b64) = payload.identity_seed_b64.as_ref() else {
+            return Ok(None);
+        };
+        let raw = Zeroizing::new(
+            B64.decode(seed_b64)
+                .map_err(|e| ChatError::Invalid(format!("local signer seed b64: {e}")))?,
+        );
+        let seed: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| ChatError::Invalid("local signer seed wrong length".to_owned()))?;
+        Ok(Some(Zeroizing::new(seed)))
+    }
+
+    /// Seal a brand-new vault for `signer` derived from `seed`. Shared by
+    /// fresh-identity creation and seed restore.
+    fn persist_new(
+        path: &Path,
+        master: &MasterKey,
+        kdf_id: u8,
+        argon_salt: Option<&[u8; crate::at_rest::ARGON_SALT_LEN]>,
+        signer: MlDsaSigner,
+        seed: &[u8; 32],
+    ) -> Result<Self, ChatError> {
         let machine_token = hex::encode(fresh_argon_salt());
         let sk_bytes = Zeroizing::new(signer.secret_key_bytes());
         let payload = LocalSignerPayload {
             version: 1,
             ml_dsa_public_key_b64: B64.encode(signer.public_key()),
             ml_dsa_secret_key_b64: B64.encode(sk_bytes.as_slice()),
+            identity_seed_b64: Some(B64.encode(seed)),
             machine_token: machine_token.clone(),
         };
         let mut plaintext = serde_json::to_vec(&payload)
             .map_err(|e| ChatError::Invalid(format!("local signer serialize: {e}")))?;
-        let seal_result = seal_to_path(&path, &plaintext, master, kdf_id, argon_salt);
+        let seal_result = seal_to_path(path, &plaintext, master, kdf_id, argon_salt);
         plaintext.zeroize();
         seal_result?;
         Ok(Self {
@@ -117,6 +187,29 @@ impl LocalSignerVault {
             machine_token,
         })
     }
+}
+
+/// Reveal the 32-byte identity backup seed for the local signing
+/// identity stored under `data_dir`, deriving the vault master key from
+/// `passphrase`.
+///
+/// Returns `Ok(None)` for legacy identities minted before seed backup
+/// existed — those have no recoverable seed and must rotate to a fresh
+/// identity to gain one. The platform layer is responsible for gating
+/// this call behind a biometric prompt before the seed is shown.
+///
+/// # Errors
+/// `ChatError::Invalid` if no identity vault exists under `data_dir`, the
+/// passphrase is wrong, or stored material is malformed; `ChatError::Io`
+/// on filesystem errors.
+pub fn reveal_local_signer_seed(
+    data_dir: &Path,
+    passphrase: &str,
+) -> Result<Option<Zeroizing<[u8; 32]>>, ChatError> {
+    let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
+    let (master, _kdf_id, _argon_salt) =
+        crate::client::resolve_master_key(&identity_vault, Some(passphrase))?;
+    LocalSignerVault::reveal_identity_seed(data_dir, &master)
 }
 
 #[cfg(test)]
@@ -181,5 +274,59 @@ mod tests {
             LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
                 .unwrap();
         assert_eq!(again.signer.agent_id(), created.signer.agent_id());
+    }
+
+    #[test]
+    fn new_identity_persists_recoverable_seed() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        let vault =
+            LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+                .unwrap();
+        let seed = LocalSignerVault::reveal_identity_seed(dir.path(), &master)
+            .unwrap()
+            .expect("a freshly minted identity has a recoverable seed");
+        // The persisted seed reconstructs the exact same identity.
+        let rebuilt = MlDsaSigner::from_seed(&seed);
+        assert_eq!(rebuilt.agent_id(), vault.signer.agent_id());
+    }
+
+    #[test]
+    fn reveal_seed_is_stable_across_reload() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        let _ = LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+        let s1 = LocalSignerVault::reveal_identity_seed(dir.path(), &master)
+            .unwrap()
+            .unwrap();
+        let _ = LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+        let s2 = LocalSignerVault::reveal_identity_seed(dir.path(), &master)
+            .unwrap()
+            .unwrap();
+        assert_eq!(*s1, *s2);
+    }
+
+    #[test]
+    fn reveal_returns_none_for_legacy_vault_without_seed() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        // Hand-seal a v1 payload with NO identity_seed_b64 (a pre-backup
+        // vault). reveal must report it has no recoverable seed.
+        let legacy = serde_json::json!({
+            "version": 1,
+            "ml_dsa_public_key_b64": "AA",
+            "ml_dsa_secret_key_b64": "AA",
+            "machine_token": "deadbeef",
+        });
+        let plaintext = serde_json::to_vec(&legacy).unwrap();
+        let path = dir.path().join(LOCAL_SIGNER_FILE);
+        seal_to_path(&path, &plaintext, &master, kdf_id_argon2(), Some(&salt)).unwrap();
+        let revealed = LocalSignerVault::reveal_identity_seed(dir.path(), &master).unwrap();
+        assert!(revealed.is_none());
     }
 }
