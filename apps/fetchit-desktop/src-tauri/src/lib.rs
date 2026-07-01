@@ -733,15 +733,38 @@ fn bundled_x0xd_binary_path() -> Option<std::path::PathBuf> {
 /// `%APPDATA%\fetchit\x0xd.toml` on Windows,
 /// `~/Library/Application Support/fetchit/x0xd.toml` on macOS),
 /// substituting any `FETCHIT_*_RELAY_AGENT_ID` env vars set at build/release
-/// time. Subsequent runs reuse the existing file so user edits persist.
-fn bundled_x0xd_toml_path() -> std::path::PathBuf {
+/// time plus the app-managed `identity_dir` (the directory fetch>it seeds
+/// from the chat vault so the daemon boots as the unified agent).
+/// Subsequent runs reuse the existing file so user edits persist —
+/// except `identity_dir`, which is appended when missing so installs
+/// that predate identity unification pick it up.
+fn bundled_x0xd_toml_path(identity_dir: &std::path::Path) -> std::path::PathBuf {
     let cfg_base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
     let app_cfg = cfg_base.join("fetchit");
     let _ = std::fs::create_dir_all(&app_cfg);
     let dst = app_cfg.join("x0xd.toml");
-    if !dst.exists() {
+    // TOML basic strings treat backslash as an escape; forward slashes
+    // work on every OS the daemon runs on.
+    let id_dir_toml = identity_dir.display().to_string().replace('\\', "/");
+    if dst.exists() {
+        // Existing install: user edits persist, but identity unification
+        // needs the daemon reading the seeded directory. Append the key
+        // only when absent so a hand-edited value wins.
+        if let Ok(body) = std::fs::read_to_string(&dst) {
+            let has_identity_dir = body
+                .lines()
+                .any(|l| l.trim_start().starts_with("identity_dir"));
+            if !has_identity_dir {
+                let _ = std::fs::write(
+                    &dst,
+                    format!("{body}\nidentity_dir = \"{id_dir_toml}\"\n"),
+                );
+            }
+        }
+    } else {
         let tpl = include_str!("../resources/x0xd.toml.tpl");
         let mut filled = tpl.to_owned();
+        filled = filled.replace("PLACEHOLDER_IDENTITY_DIR", &id_dir_toml);
         if let Ok(ny) = std::env::var("FETCHIT_NY_RELAY_AGENT_ID") {
             filled = filled.replace("PLACEHOLDER_NY_RELAY_AGENT_ID_HEX", &ny);
         }
@@ -775,8 +798,9 @@ mod e2_tests {
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
         let aid = "deadbeef".repeat(8); // 64-hex
         std::env::set_var("FETCHIT_NY_RELAY_AGENT_ID", &aid);
+        let id_dir = temp.path().join("x0xd-identity");
 
-        let path = bundled_x0xd_toml_path();
+        let path = bundled_x0xd_toml_path(&id_dir);
         let body = std::fs::read_to_string(&path).expect("template must be copied on first run");
 
         assert!(body.contains(&aid), "NY placeholder must be substituted");
@@ -784,13 +808,59 @@ mod e2_tests {
             !body.contains("PLACEHOLDER_NY_RELAY_AGENT_ID_HEX"),
             "NY placeholder must be removed"
         );
+        assert!(
+            body.contains(&format!("identity_dir = \"{}\"", id_dir.display())),
+            "identity_dir must be substituted so the daemon boots as the seeded agent"
+        );
+        assert!(!body.contains("PLACEHOLDER_IDENTITY_DIR"));
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("FETCHIT_NY_RELAY_AGENT_ID");
     }
+
+    #[test]
+    fn existing_toml_gains_identity_dir_but_keeps_user_edits() {
+        let _guard = ENV_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+        // Simulate an install that predates identity unification: a
+        // user-edited TOML with no identity_dir.
+        let cfg_dir = temp.path().join("fetchit");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("x0xd.toml"), "# my precious edits\n").unwrap();
+        let id_dir = temp.path().join("x0xd-identity");
+
+        let path = bundled_x0xd_toml_path(&id_dir);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# my precious edits"), "user edits persist");
+        assert!(
+            body.contains(&format!("identity_dir = \"{}\"", id_dir.display())),
+            "identity_dir appended for pre-unification installs"
+        );
+
+        // A hand-set identity_dir wins: calling again must not stack a
+        // second entry.
+        let again = bundled_x0xd_toml_path(&temp.path().join("other"));
+        let body2 = std::fs::read_to_string(&again).unwrap();
+        assert_eq!(
+            body2.matches("identity_dir").count(),
+            1,
+            "existing identity_dir must not be duplicated or overridden"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
 }
 
-/// Boot the x0xd supervisor synchronously before the Tauri runtime starts.
+/// Boot the x0xd supervisor synchronously, blocking the caller (the Tauri
+/// `setup` hook, on the main thread, before the webview shows content).
+///
+/// `identity_dir` is the app-managed directory the chat vault seeded with
+/// the unified `agent.key`; it is substituted into (or appended to) the
+/// bundled TOML so the daemon boots as that agent.
 ///
 /// Builds a [`x0xd_supervisor::SupervisorConfig`], blocks on
 /// [`x0xd_supervisor::boot_supervisor`] using a fresh Tokio runtime, and
@@ -798,7 +868,7 @@ mod e2_tests {
 /// - Bundled binary chosen: `Some("http://127.0.0.1:<managed-port>")`.
 /// - Installed binary chosen (or no binary available): `None`; the chat
 ///   client falls back to `discover_local()` on first use.
-fn boot_x0xd_supervisor_blocking() -> Option<String> {
+fn boot_x0xd_supervisor_blocking(identity_dir: &std::path::Path) -> Option<String> {
     use std::time::Duration;
     use x0xd_supervisor::{BinaryChoice, SupervisorConfig};
 
@@ -810,7 +880,7 @@ fn boot_x0xd_supervisor_blocking() -> Option<String> {
     let cfg = SupervisorConfig {
         bundled_binary: bundled_x0xd_binary_path(),
         bundled_version,
-        bundled_toml: bundled_x0xd_toml_path(),
+        bundled_toml: bundled_x0xd_toml_path(identity_dir),
         port_range: (45_000, 45_100),
         crash_window: Duration::from_secs(30),
         crash_threshold: 3,
@@ -923,12 +993,6 @@ pub fn run() {
     // ignore the error: a second call just means a provider is already set.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // Boot the x0xd supervisor before the Tauri runtime starts.
-    // In E1, bundled_x0xd_binary_path() returns None so this always
-    // falls back to the installed binary (or no-op if absent).
-    // F1+F2 wire the real bundled binary; E2 wires the real TOML path.
-    let x0xd_base_url = boot_x0xd_supervisor_blocking();
-
     // Two scheme aliases for the same protocol handler. The localhost HTTP
     // server is the third path WebKit's `<video>` will accept (it ignores
     // custom URI schemes for media), spawned in `setup` below.
@@ -1024,6 +1088,32 @@ pub fn run() {
             );
             let server_state = state.clone();
             app.manage(state);
+
+            // Identity unification (bundled daemon): seed x0xd's agent.key
+            // from the chat vault BEFORE the supervisor spawns it, so the
+            // daemon boots as the SAME agent the chat client pairs and
+            // publishes under — and the identity the 24-word recovery
+            // phrase backs up IS the identity groups are keyed to.
+            // `None` = keychain custody, matching build_chat_state below.
+            // Non-fatal: a passphrase-mode vault can't unlock here (no
+            // passphrase at boot), so the daemon keeps its previous
+            // identity and chat behaves exactly as before this feature.
+            let x0xd_identity_dir = app_data.join("x0xd-identity");
+            match fetchit_chat::seed_x0xd_agent_key(
+                &app_data.join("chat"),
+                None,
+                &x0xd_identity_dir,
+            ) {
+                Ok(id) => eprintln!("[fetchit][supervisor] x0xd identity unified as {id}"),
+                Err(e) => eprintln!(
+                    "[fetchit][supervisor] identity seed skipped ({e}); daemon keeps its own key"
+                ),
+            }
+
+            // Boot the x0xd supervisor (blocking; the webview shows no
+            // content until setup returns, so this is still "before the
+            // app is up" from the user's perspective).
+            let x0xd_base_url = boot_x0xd_supervisor_blocking(&x0xd_identity_dir);
 
             // Drive the reader denylist's signed-manifest refresh loop
             // (needs a runtime context; the loop outlives this task via its

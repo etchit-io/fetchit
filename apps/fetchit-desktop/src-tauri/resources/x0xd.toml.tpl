@@ -18,3 +18,9 @@
 # and update the first-run substitution in lib.rs to fill the
 # placeholders. The substitution path already exists; it currently
 # operates on no-op comment lines.
+
+# identity_dir pins the daemon's identity material to an app-managed
+# directory that fetch>it seeds from the chat vault before each spawn
+# (identity unification: daemon agent id == chat agent id == what the
+# recovery phrase restores). Substituted at first run.
+identity_dir = "PLACEHOLDER_IDENTITY_DIR"
