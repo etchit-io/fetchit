@@ -57,7 +57,8 @@ mod members_singleflight;
 
 pub use chat_identity::FetchitIdentity;
 pub use client::{
-    provision_local_signer_keypair, Client, ClientBuilder, ProvisionedSignerKey, RelayFailoverEvent,
+    provision_local_signer_keypair, Client, ClientBuilder, EnsureV2Outcome, FediLookup,
+    FediLookupKind, MintOutcome, ProvisionedSignerKey, RelayFailoverEvent,
 };
 pub use denylist::DenylistCheck;
 pub use discovery::{discover_local, DaemonEndpoint};

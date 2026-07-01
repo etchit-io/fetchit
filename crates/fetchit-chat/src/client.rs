@@ -4246,6 +4246,85 @@ impl Client {
         })
     }
 
+    /// Resolve a fediverse handle to a verified (or public-only) identity
+    /// card: `WebFinger` -> actor doc -> v2 attestation verify -> the sender's
+    /// relay profile-index (for the share URI + handle-takeover continuity).
+    /// Shared by the desktop lookup command and the FFI. The rich display
+    /// profile (name/bio/avatar) is NOT fetched here -- it lives in the
+    /// Autonomi manifest at the returned `profile_addr`, which the shell's
+    /// reader loads separately.
+    ///
+    /// A crypto/attestation failure returns a `PublicOnly` card with a
+    /// visible `verify_failure` (fail closed, visibly); a transport failure
+    /// after that point is an error.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] on a malformed handle, a `WebFinger`/actor-fetch
+    /// transport failure, or an unreachable sender relay.
+    pub async fn lookup_fedi_handle(&self, handle: &str) -> Result<FediLookup> {
+        let parsed = fetchit_fedi::parse_mention(&handle.trim().to_lowercase())
+            .map_err(|e| ChatError::Invalid(format!("handle: {e}")))?;
+        let canonical = format!("@{}@{}", parsed.local, parsed.instance);
+        let actor_url = fetchit_fedi::resolve_handle(&parsed)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("couldn't resolve {canonical}: {e}")))?;
+        let actor = fetchit_fedi::lookup::fetch_remote_actor(&actor_url)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
+        let actor_url_str = actor.id.to_string();
+
+        let Some(att) = actor.attestation_v2.clone() else {
+            return Ok(FediLookup::public_only(canonical, actor_url_str, None));
+        };
+        let agent_id_hex = match actor.verify_attestation_v2() {
+            Ok(id) => id,
+            Err(e) => {
+                return Ok(FediLookup::public_only(
+                    canonical,
+                    actor_url_str,
+                    Some(e.to_string()),
+                ))
+            }
+        };
+        // The attested relay hint is part of the verified binding; one that
+        // does not parse fails closed to public-only, like a bad signature.
+        let Ok(relay) = att.relay_hint.parse::<url::Url>() else {
+            return Ok(FediLookup::public_only(
+                canonical,
+                actor_url_str,
+                Some("attested relay hint is not a valid URL".into()),
+            ));
+        };
+        let http = crate::relay_http::guarded_client();
+        let record = crate::pair::fetch_index_record_by_id(&relay, &agent_id_hex, &http)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("couldn't reach their relay: {e}")))?;
+        let share_uri =
+            crate::profile::to_v3_share_uri(&agent_id_hex, &record.profile_addr, &relay).map_err(
+                |e| ChatError::Invalid(format!("couldn't build the contact pointer: {e}")),
+            )?;
+        // Continuity ledger: surfaces "handle changed hands". Best-effort; a
+        // layout-less (REST-only) client just skips it.
+        let previous_agent_id_hex = self.layout().and_then(|layout| {
+            match crate::fedi_resolutions::note_resolution(layout, &canonical, &agent_id_hex) {
+                Ok(crate::fedi_resolutions::ResolutionChange::Changed {
+                    previous_agent_id_hex,
+                }) => Some(previous_agent_id_hex),
+                _ => None,
+            }
+        });
+        Ok(FediLookup {
+            kind: FediLookupKind::Verified,
+            handle: canonical,
+            actor_url: actor_url_str,
+            agent_id_hex: Some(agent_id_hex),
+            profile_addr: Some(record.profile_addr),
+            share_uri: Some(share_uri),
+            previous_agent_id_hex,
+            verify_failure: None,
+        })
+    }
+
     /// Re-sign the v2 attestation in place: same handle, same actor
     /// URL, SAME RSA keypair (HTTP-Signature key continuity is the
     /// invariant; this function never regenerates RSA material).
@@ -4491,6 +4570,58 @@ pub struct EnsureV2Outcome {
     /// Why the pass could not complete (profile unpublished, bridge
     /// unreachable); user-facing copy.
     pub pending: Option<String>,
+}
+
+/// Verified-vs-public classification of a [`Client::lookup_fedi_handle`]
+/// result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FediLookupKind {
+    /// The v2 attestation verified: the actor is cryptographically bound to
+    /// the returned chat `agent_id`.
+    Verified,
+    /// No attestation, or it failed to verify: display the account but do
+    /// NOT trust the identity binding.
+    PublicOnly,
+}
+
+/// One resolved fediverse account card (identity + share pointer) from
+/// [`Client::lookup_fedi_handle`]. The rich display fields (name/bio/avatar)
+/// are fetched separately from the Autonomi manifest at `profile_addr`.
+#[derive(Clone, Debug)]
+pub struct FediLookup {
+    /// Verified or public-only.
+    pub kind: FediLookupKind,
+    /// Canonical `@local@instance` handle.
+    pub handle: String,
+    /// Actor URL the handle resolved to.
+    pub actor_url: String,
+    /// Verified chat agent id (verified kind only).
+    pub agent_id_hex: Option<String>,
+    /// Autonomi profile-manifest address (verified only); the shell's reader
+    /// loads name/bio/avatar from it.
+    pub profile_addr: Option<String>,
+    /// Synthesized v3 share URI for "message privately" (verified only).
+    pub share_uri: Option<String>,
+    /// Set when this handle previously resolved to a DIFFERENT agent id on
+    /// this device (a possible handle takeover).
+    pub previous_agent_id_hex: Option<String>,
+    /// Set when an attestation was present but failed verification.
+    pub verify_failure: Option<String>,
+}
+
+impl FediLookup {
+    fn public_only(handle: String, actor_url: String, verify_failure: Option<String>) -> Self {
+        Self {
+            kind: FediLookupKind::PublicOnly,
+            handle,
+            actor_url,
+            agent_id_hex: None,
+            profile_addr: None,
+            share_uri: None,
+            previous_agent_id_hex: None,
+            verify_failure,
+        }
+    }
 }
 
 /// Outcome of [`Client::publish_public_post`]: which recipient inboxes
@@ -6115,6 +6246,16 @@ mod tests {
         assert!(!outcome.upgraded);
         assert!(!outcome.registered);
         assert!(outcome.pending.is_some());
+    }
+
+    #[tokio::test]
+    async fn lookup_fedi_handle_rejects_a_malformed_handle() {
+        // A handle that isn't `@user@host` fails at parse, before any network
+        // (hermetic). WebFinger/actor/verify branches are covered by the
+        // composed pieces' own tests.
+        let (client, _dir) = test_client_no_denylist();
+        let err = client.lookup_fedi_handle("not-a-handle").await.unwrap_err();
+        assert!(matches!(err, ChatError::Invalid(ref m) if m.contains("handle")));
     }
 
     #[test]

@@ -462,6 +462,42 @@ pub struct EnsureV2Ffi {
     pub pending: Option<String>,
 }
 
+/// Verified-vs-public classification of a [`ChatClient::fedi_lookup`] result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LookupKindFfi {
+    /// The v2 attestation verified: the actor is bound to `agentIdHex`.
+    Verified,
+    /// No attestation / verification failed: display but do not trust.
+    PublicOnly,
+    /// The handle does not resolve to any account.
+    NotFound,
+}
+
+/// One resolved fediverse account card from [`ChatClient::fedi_lookup`]. The
+/// rich display fields (name/bio/avatar) are fetched separately from the
+/// Autonomi manifest at `profile_addr`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LookupFfi {
+    /// Verified, public-only, or not-found.
+    pub kind: LookupKindFfi,
+    /// Canonical `@local@instance` handle.
+    pub handle: String,
+    /// Actor URL the handle resolved to (empty for not-found).
+    pub actor_url: String,
+    /// Verified chat agent id (verified only).
+    pub agent_id_hex: Option<String>,
+    /// Autonomi profile-manifest address (verified only); load name/bio/avatar
+    /// from it via the reader.
+    pub profile_addr: Option<String>,
+    /// Synthesized v3 share URI for "message privately" (verified only).
+    pub share_uri: Option<String>,
+    /// Set when this handle previously resolved to a DIFFERENT agent id on
+    /// this device (a possible handle takeover) -- render a warning.
+    pub previous_agent_id_hex: Option<String>,
+    /// Set when an attestation was present but failed verification.
+    pub verify_failure: Option<String>,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -1042,6 +1078,52 @@ impl ChatClient {
             registered: outcome.registered,
             pending: outcome.pending,
         })
+    }
+
+    /// Resolve a `@user@host` fediverse handle to an account card: verified
+    /// (attestation-bound to a chat agent id, with a share URI for "message
+    /// privately") or public-only. Load the rich profile (name/bio/avatar)
+    /// from `profileAddr` via the reader.
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on a transport failure (WebFinger/actor fetch,
+    /// unreachable sender relay). A handle that simply does NOT resolve is
+    /// returned as a `NotFound` card, not an error.
+    pub async fn fedi_lookup(&self, handle: String) -> Result<LookupFfi, ChatFfiError> {
+        match self.inner.lookup_fedi_handle(&handle).await {
+            Ok(l) => Ok(LookupFfi {
+                kind: match l.kind {
+                    fetchit_chat::FediLookupKind::Verified => LookupKindFfi::Verified,
+                    fetchit_chat::FediLookupKind::PublicOnly => LookupKindFfi::PublicOnly,
+                },
+                handle: l.handle,
+                actor_url: l.actor_url,
+                agent_id_hex: l.agent_id_hex,
+                profile_addr: l.profile_addr,
+                share_uri: l.share_uri,
+                previous_agent_id_hex: l.previous_agent_id_hex,
+                verify_failure: l.verify_failure,
+            }),
+            Err(e) => {
+                // Contract: a genuine "no such handle" (a resolve miss) is a
+                // NotFound card, not an FFI error; every other transport
+                // failure surfaces as an error.
+                if e.to_string().contains("couldn't resolve") {
+                    Ok(LookupFfi {
+                        kind: LookupKindFfi::NotFound,
+                        handle,
+                        actor_url: String::new(),
+                        agent_id_hex: None,
+                        profile_addr: None,
+                        share_uri: None,
+                        previous_agent_id_hex: None,
+                        verify_failure: None,
+                    })
+                } else {
+                    Err(ChatFfiError::from(e))
+                }
+            }
+        }
     }
 
     /// List the groups this agent belongs to.
