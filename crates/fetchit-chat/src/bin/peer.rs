@@ -330,8 +330,9 @@ struct GroupChatArgs {
     /// ([`Client::join_group_bridged`]) instead of the direct
     /// `groups().join`. The joiner bridges its native `member_joined` to a
     /// NAT'd owner over the relay and converges on the bridged-back inline
-    /// welcome -- the gossip-independent path the cross-NAT ship-gate
-    /// exercises with gossip disabled. Requires `--invite-file`.
+    /// welcome -- the gossip-independent FALLBACK for the dual-NAT corner
+    /// (the cross-NAT ship-gate exercises it with gossip disabled to isolate
+    /// it; the direct `groups().join` is the primary path). Requires `--invite-file`.
     #[arg(long)]
     engine_a: bool,
 

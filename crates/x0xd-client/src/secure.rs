@@ -557,7 +557,7 @@ impl SecureGroupsEndpoint {
     /// x0xd `POST /groups/<id>/apply-metadata-event`, with NO gossip
     /// publish. Engine A's cross-NAT group-join re-injects the joiner's
     /// bridged `member_joined` this way: with the metadata gossip mesh off
-    /// (v1 + dual-NAT) a plain `publish` reaches no local apply path, so
+    /// (the dual-NAT corner where gossip can't reach a NAT'd owner) a plain `publish` reaches no local apply path, so
     /// the owner must apply directly. The daemon re-runs full membership
     /// authority on the event (ML-DSA signature + single-use
     /// `invite_secret` + inviter-gate), so this is a local-delivery
