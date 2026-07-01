@@ -200,6 +200,28 @@ fn open_sealed(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, ChatError> {
     aead_open(key, &nonce, ct, FEDI_VAULT_AAD)
 }
 
+/// List the handles of every actor identity minted into this vault, by
+/// enumerating `<root>/fedi/<handle>.json.enc`. Sorted for deterministic
+/// order. The `handle_resolutions.json` continuity ledger shares the dir
+/// but is skipped (not a `.json.enc` vault file).
+///
+/// Fail-safe: an unreadable or absent fedi dir (nothing minted yet) yields
+/// an empty list, never an error -- it backs the FFI `actor_status`
+/// onboarding gate, which must answer "no handle" cleanly.
+#[must_use]
+pub fn list_actor_handles(layout: &StoreLayout) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(&layout.fedi_dir) else {
+        return Vec::new();
+    };
+    let mut handles: Vec<String> = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| name.strip_suffix(".json.enc").map(str::to_owned))
+        .collect();
+    handles.sort();
+    handles
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -260,6 +282,30 @@ mod tests {
             .expect("vault file should exist after save");
         assert_eq!(recovered, v);
         assert!(recovered.ml_dsa_attestation_v2.is_some());
+    }
+
+    #[test]
+    fn list_actor_handles_enumerates_minted_and_skips_the_resolutions_ledger() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = fixture_master(0x42);
+        // No handle minted yet -> empty (the FFI actor_status onboarding gate).
+        assert!(list_actor_handles(&layout).is_empty());
+
+        let mut a = sample_vault();
+        a.handle = "alice".into();
+        save_actor_identity(&a, &master, &layout).unwrap();
+        let mut b = sample_vault();
+        b.handle = "bob".into();
+        save_actor_identity(&b, &master, &layout).unwrap();
+        // The continuity ledger shares the fedi dir but is NOT a vault file.
+        std::fs::write(layout.fedi_resolutions_path(), b"{}").unwrap();
+
+        assert_eq!(
+            list_actor_handles(&layout),
+            vec!["alice".to_string(), "bob".to_string()],
+            "enumerates *.json.enc handles, sorted, skipping the ledger"
+        );
     }
 
     #[test]
