@@ -1319,14 +1319,18 @@ class ChatModeView(
                 // bubble locally so the sender sees it, mirroring desktop -- the
                 // group receive path filters self-source, so there is no echo.
                 runCatching { gw.sendGroupMessage(groupId, body, senderName) }
-                    .onSuccess { messageId ->
+                    .onSuccess { receipt ->
                         controller.conversations.append(
                             ConversationStore.convKeyGroup(groupId),
                             ChatMessage(
                                 outbound = true,
                                 body = body,
                                 sentAtMs = System.currentTimeMillis(),
-                                messageId = messageId,
+                                messageId = receipt.messageId,
+                                // Honest delivery tick: a relay-accepted send shows
+                                // delivered now; a queued send (relay down) flips to
+                                // delivered when the outbox flushes on reconnect.
+                                delivered = receipt.delivered,
                             ),
                         )
                     }

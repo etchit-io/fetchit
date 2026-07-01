@@ -9,6 +9,7 @@ import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.GroupSendReceiptFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
@@ -76,8 +77,9 @@ class FakeGateway : ChatGateway {
         joinedGroups += (invite to displayName)
         return GroupFfi("d".repeat(64), null, 2uL, isOwner = false, isPrivate = true)
     }
-    override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? {
-        sentGroupMessages += Triple(groupId, body, senderName); return "gm-${sentGroupMessages.size}"
+    override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): GroupSendReceiptFfi {
+        sentGroupMessages += Triple(groupId, body, senderName)
+        return GroupSendReceiptFfi("gm-${sentGroupMessages.size}", delivered = true)
     }
     override suspend fun listGroups(): List<GroupFfi> = groups
     override suspend fun groupInvite(groupId: String): String {
@@ -171,9 +173,9 @@ class ChatControllerTest {
         assertEquals("x0x://invite/abc" to "bob", gw.joinedGroups.single())
         assertEquals(false, joined.isOwner)
 
-        val id = gw.sendGroupMessage("g".repeat(64), "yo", "alice")
+        val receipt = gw.sendGroupMessage("g".repeat(64), "yo", "alice")
         assertEquals(Triple("g".repeat(64), "yo", "alice"), gw.sentGroupMessages.single())
-        assertEquals("gm-1", id)
+        assertEquals("gm-1", receipt.messageId)
 
         val invite = gw.groupInvite("g".repeat(64))
         assertEquals("g".repeat(64), gw.invitesRequested.single())
@@ -429,7 +431,8 @@ class ChatControllerTest {
                 throw UnsupportedOperationException()
             override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
                 throw UnsupportedOperationException()
-            override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? = null
+            override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): GroupSendReceiptFfi =
+                GroupSendReceiptFfi(null, delivered = false)
             override suspend fun listGroups(): List<GroupFfi> = emptyList()
             override suspend fun groupInvite(groupId: String): String = ""
             override fun fediActorStatus(): String? = null
@@ -655,5 +658,6 @@ class ChatControllerTest {
         messageId = messageId,
         enqueuedAtMs = 1uL,
         lastError = lastError,
+        groupClientMessageId = null,
     )
 }

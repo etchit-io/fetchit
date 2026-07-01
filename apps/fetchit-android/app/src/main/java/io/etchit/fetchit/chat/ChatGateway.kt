@@ -5,6 +5,7 @@ import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.GroupSendReceiptFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
@@ -60,10 +61,13 @@ interface ChatGateway {
 
     /**
      * Send [body] to [groupId], routed private/public by the engine's
-     * kind-aware `send_to_group`. Returns the message id, or `null` when the
-     * transport succeeded but no id was minted.
+     * kind-aware `send_to_group`. Returns a [GroupSendReceiptFfi]: `messageId`
+     * is the client UI anchor (`null` for a public group), and `delivered` is
+     * the honest tick signal — `true` when the relay accepted the send,
+     * `false` when every member was durably queued (relay down), which flips
+     * to sent once the outbox flushes.
      */
-    suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String?
+    suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): GroupSendReceiptFfi
 
     /** Groups this agent belongs to. */
     suspend fun listGroups(): List<GroupFfi>
@@ -157,7 +161,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.createGroup(name, displayName, private)
     override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
         inner.joinGroup(invite, displayName)
-    override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? =
+    override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): GroupSendReceiptFfi =
         inner.sendGroupMessage(groupId, body, senderName)
     override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)

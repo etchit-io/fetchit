@@ -789,6 +789,20 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -810,6 +824,10 @@ fun uniffi_fetchit_ffi_checksum_func_detect(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_extract_archive_entry(
 ): Short
+fun uniffi_fetchit_ffi_checksum_func_restore_recovery_phrase(
+): Short
+fun uniffi_fetchit_ffi_checksum_func_reveal_recovery_phrase(
+): Short
 fun uniffi_fetchit_ffi_checksum_func_set_data_home(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_setup_logger(
@@ -825,6 +843,16 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_create_group(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_disconnect(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_group_invite(
 ): Short
@@ -937,6 +965,16 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_disconnect(`ptr`: Pointer,uniffi_out
 ): Unit
 fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_ensure_v2(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_group_invite(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_group_members(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
@@ -988,6 +1026,10 @@ fun uniffi_fetchit_ffi_fn_func_default_peers(uniffi_out_err: UniffiRustCallStatu
 fun uniffi_fetchit_ffi_fn_func_detect(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_extract_archive_entry(`archiveBytes`: RustBuffer.ByValue,`entryPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_func_restore_recovery_phrase(`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`phrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_func_reveal_recovery_phrase(`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_set_data_home(`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1128,6 +1170,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_func_extract_archive_entry() != 6186.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_func_restore_recovery_phrase() != 32528.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_func_reveal_recovery_phrase() != 17555.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_func_set_data_home() != 51169.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1150,6 +1198,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 2558.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 19997.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2() != 23776.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 61307.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_group_invite() != 61583.toShort()) {
@@ -1197,7 +1260,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_dm() != 44912.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message() != 60893.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message() != 57470.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
@@ -1743,6 +1806,63 @@ public interface ChatClientInterface {
     suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): kotlin.String
     
     /**
+     * The active minted fediverse handle, or `None` when the user has not
+     * opted in to public posting. Reads the local vault only (no network),
+     * so the onboarding gate can query it before anything connects.
+     */
+    fun `fediActorStatus`(): kotlin.String?
+    
+    /**
+     * Run the v2 upgrade + re-register pass, called when the fedi hub opens
+     * for an already-minted handle. Never errors for blockers -- they land
+     * in [`EnsureV2Ffi::pending`]. A no-op (all false) when no handle is
+     * minted yet.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] on a bad relay/registry URL or a vault
+     * access failure.
+     */
+    suspend fun `fediEnsureV2`(): EnsureV2Ffi
+    
+    /**
+     * Resolve a `@user@host` fediverse handle to an account card: verified
+     * (attestation-bound to a chat agent id, with a share URI for "message
+     * privately") or public-only. Load the rich profile (name/bio/avatar)
+     * from `profileAddr` via the reader.
+     *
+     * # Errors
+     * [`ChatFfiError`] on a transport failure (WebFinger/actor fetch,
+     * unreachable sender relay). A handle that simply does NOT resolve is
+     * returned as a `NotFound` card, not an error.
+     */
+    suspend fun `fediLookup`(`handle`: kotlin.String): LookupFfi
+    
+    /**
+     * Opt in to public posting: mint the actor identity for `handle` (with
+     * its v2 attestation binding the published profile + active relay) and
+     * register it with the directory. Requires a published profile; the
+     * error explains how to get one. Directory-registration failure is NOT
+     * an error -- it lands in the returned [`MintOutcomeFfi`].
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
+     * profile, or the mint failing.
+     */
+    suspend fun `fediMint`(`handle`: kotlin.String): MintOutcomeFfi
+    
+    /**
+     * Publish a public post as the active minted handle. `@user@host`
+     * mentions are extracted from `body_md`; the engine resolves them via
+     * WebFinger and runs denylist gating before any delivery. Delivery is
+     * best-effort: the report lists accepted + failed inboxes.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted, or the publish
+     * fails before any delivery was attempted.
+     */
+    suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
+    
+    /**
      * Mint a fresh `x0x://invite/...` link for a group, suitable for the
      * QR / share path.
      *
@@ -1948,7 +2068,7 @@ public interface ChatClientInterface {
      * [`ChatFfiError::Invalid`] when `group_id` is not a valid group id.
      * [`ChatFfiError::Network`] on transport, x0xd, or relay failure.
      */
-    suspend fun `sendGroupMessage`(`groupId`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): kotlin.String?
+    suspend fun `sendGroupMessage`(`groupId`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): GroupSendReceiptFfi
     
     /**
      * Start the background outbox retry driver: re-sends failed/unacked
@@ -2254,6 +2374,149 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The active minted fediverse handle, or `None` when the user has not
+     * opted in to public posting. Reads the local vault only (no network),
+     * so the onboarding gate can query it before anything connects.
+     */override fun `fediActorStatus`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Run the v2 upgrade + re-register pass, called when the fedi hub opens
+     * for an already-minted handle. Never errors for blockers -- they land
+     * in [`EnsureV2Ffi::pending`]. A no-op (all false) when no handle is
+     * minted yet.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] on a bad relay/registry URL or a vault
+     * access failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediEnsureV2`() : EnsureV2Ffi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_ensure_v2(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeEnsureV2Ffi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Resolve a `@user@host` fediverse handle to an account card: verified
+     * (attestation-bound to a chat agent id, with a share URI for "message
+     * privately") or public-only. Load the rich profile (name/bio/avatar)
+     * from `profileAddr` via the reader.
+     *
+     * # Errors
+     * [`ChatFfiError`] on a transport failure (WebFinger/actor fetch,
+     * unreachable sender relay). A handle that simply does NOT resolve is
+     * returned as a `NotFound` card, not an error.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediLookup`(`handle`: kotlin.String) : LookupFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(
+                thisPtr,
+                FfiConverterString.lower(`handle`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeLookupFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Opt in to public posting: mint the actor identity for `handle` (with
+     * its v2 attestation binding the published profile + active relay) and
+     * register it with the directory. Requires a published profile; the
+     * error explains how to get one. Directory-registration failure is NOT
+     * an error -- it lands in the returned [`MintOutcomeFfi`].
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
+     * profile, or the mint failing.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediMint`(`handle`: kotlin.String) : MintOutcomeFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(
+                thisPtr,
+                FfiConverterString.lower(`handle`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeMintOutcomeFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Publish a public post as the active minted handle. `@user@host`
+     * mentions are extracted from `body_md`; the engine resolves them via
+     * WebFinger and runs denylist gating before any delivery. Delivery is
+     * best-effort: the report lists accepted + failed inboxes.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted, or the publish
+     * fails before any delivery was attempted.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?) : PublishReportFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(
+                thisPtr,
+                FfiConverterString.lower(`bodyMd`),FfiConverterOptionalString.lower(`replyToActorUrl`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypePublishReportFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -2737,7 +3000,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendGroupMessage`(`groupId`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String) : kotlin.String? {
+    override suspend fun `sendGroupMessage`(`groupId`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String) : GroupSendReceiptFfi {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_send_group_message(
@@ -2749,7 +3012,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterOptionalString.lift(it) },
+        { FfiConverterTypeGroupSendReceiptFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -3319,6 +3582,97 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
 
 
 /**
+ * Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
+ * errors for blockers -- those land in `pending`.
+ */
+data class EnsureV2Ffi (
+    /**
+     * True when a fresh v2 attestation was signed + stored this pass.
+     */
+    var `upgraded`: kotlin.Boolean, 
+    /**
+     * True when the directory holds the current record.
+     */
+    var `registered`: kotlin.Boolean, 
+    /**
+     * Why the pass could not complete (profile unpublished, bridge down).
+     */
+    var `pending`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEnsureV2Ffi: FfiConverterRustBuffer<EnsureV2Ffi> {
+    override fun read(buf: ByteBuffer): EnsureV2Ffi {
+        return EnsureV2Ffi(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EnsureV2Ffi) = (
+            FfiConverterBoolean.allocationSize(value.`upgraded`) +
+            FfiConverterBoolean.allocationSize(value.`registered`) +
+            FfiConverterOptionalString.allocationSize(value.`pending`)
+    )
+
+    override fun write(value: EnsureV2Ffi, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`upgraded`, buf)
+            FfiConverterBoolean.write(value.`registered`, buf)
+            FfiConverterOptionalString.write(value.`pending`, buf)
+    }
+}
+
+
+
+/**
+ * One inbox that rejected a published post. uniffi has no tuples, so the
+ * engine's `(target, error)` pair is surfaced as a struct.
+ */
+data class FailedDeliveryFfi (
+    /**
+     * The inbox URL, or the actor URL when the actor fetch itself failed.
+     */
+    var `target`: kotlin.String, 
+    /**
+     * The failure reason.
+     */
+    var `error`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFailedDeliveryFfi: FfiConverterRustBuffer<FailedDeliveryFfi> {
+    override fun read(buf: ByteBuffer): FailedDeliveryFfi {
+        return FailedDeliveryFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FailedDeliveryFfi) = (
+            FfiConverterString.allocationSize(value.`target`) +
+            FfiConverterString.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FailedDeliveryFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`target`, buf)
+            FfiConverterString.write(value.`error`, buf)
+    }
+}
+
+
+
+/**
  * A group as surfaced to Android.
  */
 data class GroupFfi (
@@ -3447,6 +3801,188 @@ public object FfiConverterTypeGroupMemberFfi: FfiConverterRustBuffer<GroupMember
 
 
 /**
+ * Receipt for a group send: the message id plus whether it reached the
+ * relay. `delivered` is the honest tick signal -- `true` = relay-accepted,
+ * `false` = durably queued (relay down), which flips to delivered when the
+ * outbox flushes on reconnect. Correlate the flip by matching a group
+ * outbox event's client message id back to `message_id`.
+ */
+data class GroupSendReceiptFfi (
+    /**
+     * Client message id (the UI bubble anchor); `None` for a public group.
+     */
+    var `messageId`: kotlin.String?, 
+    /**
+     * `true` = relay-accepted; `false` = durably queued (relay down).
+     */
+    var `delivered`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeGroupSendReceiptFfi: FfiConverterRustBuffer<GroupSendReceiptFfi> {
+    override fun read(buf: ByteBuffer): GroupSendReceiptFfi {
+        return GroupSendReceiptFfi(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: GroupSendReceiptFfi) = (
+            FfiConverterOptionalString.allocationSize(value.`messageId`) +
+            FfiConverterBoolean.allocationSize(value.`delivered`)
+    )
+
+    override fun write(value: GroupSendReceiptFfi, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`messageId`, buf)
+            FfiConverterBoolean.write(value.`delivered`, buf)
+    }
+}
+
+
+
+/**
+ * One resolved fediverse account card from [`ChatClient::fedi_lookup`]. The
+ * rich display fields (name/bio/avatar) are fetched separately from the
+ * Autonomi manifest at `profile_addr`.
+ */
+data class LookupFfi (
+    /**
+     * Verified, public-only, or not-found.
+     */
+    var `kind`: LookupKindFfi, 
+    /**
+     * Canonical `@local@instance` handle.
+     */
+    var `handle`: kotlin.String, 
+    /**
+     * Actor URL the handle resolved to (empty for not-found).
+     */
+    var `actorUrl`: kotlin.String, 
+    /**
+     * Verified chat agent id (verified only).
+     */
+    var `agentIdHex`: kotlin.String?, 
+    /**
+     * Autonomi profile-manifest address (verified only); load name/bio/avatar
+     * from it via the reader.
+     */
+    var `profileAddr`: kotlin.String?, 
+    /**
+     * Synthesized v3 share URI for "message privately" (verified only).
+     */
+    var `shareUri`: kotlin.String?, 
+    /**
+     * Set when this handle previously resolved to a DIFFERENT agent id on
+     * this device (a possible handle takeover) -- render a warning.
+     */
+    var `previousAgentIdHex`: kotlin.String?, 
+    /**
+     * Set when an attestation was present but failed verification.
+     */
+    var `verifyFailure`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLookupFfi: FfiConverterRustBuffer<LookupFfi> {
+    override fun read(buf: ByteBuffer): LookupFfi {
+        return LookupFfi(
+            FfiConverterTypeLookupKindFfi.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LookupFfi) = (
+            FfiConverterTypeLookupKindFfi.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`handle`) +
+            FfiConverterString.allocationSize(value.`actorUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`agentIdHex`) +
+            FfiConverterOptionalString.allocationSize(value.`profileAddr`) +
+            FfiConverterOptionalString.allocationSize(value.`shareUri`) +
+            FfiConverterOptionalString.allocationSize(value.`previousAgentIdHex`) +
+            FfiConverterOptionalString.allocationSize(value.`verifyFailure`)
+    )
+
+    override fun write(value: LookupFfi, buf: ByteBuffer) {
+            FfiConverterTypeLookupKindFfi.write(value.`kind`, buf)
+            FfiConverterString.write(value.`handle`, buf)
+            FfiConverterString.write(value.`actorUrl`, buf)
+            FfiConverterOptionalString.write(value.`agentIdHex`, buf)
+            FfiConverterOptionalString.write(value.`profileAddr`, buf)
+            FfiConverterOptionalString.write(value.`shareUri`, buf)
+            FfiConverterOptionalString.write(value.`previousAgentIdHex`, buf)
+            FfiConverterOptionalString.write(value.`verifyFailure`, buf)
+    }
+}
+
+
+
+/**
+ * Result of [`ChatClient::fedi_mint`]: the identity is always created +
+ * persisted locally on success; directory registration is best-effort and
+ * reported honestly (mirrors the desktop mint-outcome DTO).
+ */
+data class MintOutcomeFfi (
+    /**
+     * Canonical actor URL of the minted identity.
+     */
+    var `actorUrl`: kotlin.String, 
+    /**
+     * True when the directory accepted the registration.
+     */
+    var `registered`: kotlin.Boolean, 
+    /**
+     * Why registration is pending, when it is (bridge unreachable, etc.).
+     */
+    var `registrationError`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMintOutcomeFfi: FfiConverterRustBuffer<MintOutcomeFfi> {
+    override fun read(buf: ByteBuffer): MintOutcomeFfi {
+        return MintOutcomeFfi(
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MintOutcomeFfi) = (
+            FfiConverterString.allocationSize(value.`actorUrl`) +
+            FfiConverterBoolean.allocationSize(value.`registered`) +
+            FfiConverterOptionalString.allocationSize(value.`registrationError`)
+    )
+
+    override fun write(value: MintOutcomeFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`actorUrl`, buf)
+            FfiConverterBoolean.write(value.`registered`, buf)
+            FfiConverterOptionalString.write(value.`registrationError`, buf)
+    }
+}
+
+
+
+/**
  * One outbound DM bubble surfaced to the shell, mirrored from
  * [`fetchit_chat::outbox::OutboxBubble`]. `peer` is rendered as lowercase
  * 64-char hex so Kotlin never handles the raw `AgentId` newtype.
@@ -3479,7 +4015,14 @@ data class OutboxBubbleFfi (
     /**
      * Last send error, populated when `status` is `Failed`.
      */
-    var `lastError`: kotlin.String?
+    var `lastError`: kotlin.String?, 
+    /**
+     * For a private-group fan-out bubble, the UI message anchor
+     * (`GroupOutbound.client_message_id`) so the shell can correlate this
+     * bubble reaching `Delivered` back to the one UI message and flip its
+     * pending tick to sent. `None` for a DM bubble.
+     */
+    var `groupClientMessageId`: kotlin.String?
 ) {
     
     companion object
@@ -3498,6 +4041,7 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterOptionalString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -3508,7 +4052,8 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterTypeOutboxStatusFfi.allocationSize(value.`status`) +
             FfiConverterOptionalString.allocationSize(value.`messageId`) +
             FfiConverterULong.allocationSize(value.`enqueuedAtMs`) +
-            FfiConverterOptionalString.allocationSize(value.`lastError`)
+            FfiConverterOptionalString.allocationSize(value.`lastError`) +
+            FfiConverterOptionalString.allocationSize(value.`groupClientMessageId`)
     )
 
     override fun write(value: OutboxBubbleFfi, buf: ByteBuffer) {
@@ -3519,6 +4064,50 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterOptionalString.write(value.`messageId`, buf)
             FfiConverterULong.write(value.`enqueuedAtMs`, buf)
             FfiConverterOptionalString.write(value.`lastError`, buf)
+            FfiConverterOptionalString.write(value.`groupClientMessageId`, buf)
+    }
+}
+
+
+
+/**
+ * Result of [`ChatClient::fedi_publish`]: which inboxes accepted the post
+ * and which failed. Delivery is best-effort, so a non-empty `failed` is not
+ * itself an error -- the post still reached every inbox in `delivered`.
+ */
+data class PublishReportFfi (
+    /**
+     * Inbox URLs that accepted the activity.
+     */
+    var `delivered`: List<kotlin.String>, 
+    /**
+     * Per-recipient failures.
+     */
+    var `failed`: List<FailedDeliveryFfi>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePublishReportFfi: FfiConverterRustBuffer<PublishReportFfi> {
+    override fun read(buf: ByteBuffer): PublishReportFfi {
+        return PublishReportFfi(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceTypeFailedDeliveryFfi.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PublishReportFfi) = (
+            FfiConverterSequenceString.allocationSize(value.`delivered`) +
+            FfiConverterSequenceTypeFailedDeliveryFfi.allocationSize(value.`failed`)
+    )
+
+    override fun write(value: PublishReportFfi, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`delivered`, buf)
+            FfiConverterSequenceTypeFailedDeliveryFfi.write(value.`failed`, buf)
     }
 }
 
@@ -4025,6 +4614,49 @@ public object FfiConverterTypeFetchitError : FfiConverterRustBuffer<FetchitExcep
     }
 
 }
+
+
+
+/**
+ * Verified-vs-public classification of a [`ChatClient::fedi_lookup`] result.
+ */
+
+enum class LookupKindFfi {
+    
+    /**
+     * The v2 attestation verified: the actor is bound to `agentIdHex`.
+     */
+    VERIFIED,
+    /**
+     * No attestation / verification failed: display but do not trust.
+     */
+    PUBLIC_ONLY,
+    /**
+     * The handle does not resolve to any account.
+     */
+    NOT_FOUND;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLookupKindFfi: FfiConverterRustBuffer<LookupKindFfi> {
+    override fun read(buf: ByteBuffer) = try {
+        LookupKindFfi.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: LookupKindFfi) = 4UL
+
+    override fun write(value: LookupKindFfi, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -4665,6 +5297,34 @@ public object FfiConverterSequenceTypeChatHistoryMessageFfi: FfiConverterRustBuf
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeFailedDeliveryFfi: FfiConverterRustBuffer<List<FailedDeliveryFfi>> {
+    override fun read(buf: ByteBuffer): List<FailedDeliveryFfi> {
+        val len = buf.getInt()
+        return List<FailedDeliveryFfi>(len) {
+            FfiConverterTypeFailedDeliveryFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FailedDeliveryFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFailedDeliveryFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FailedDeliveryFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFailedDeliveryFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeGroupFfi: FfiConverterRustBuffer<List<GroupFfi>> {
     override fun read(buf: ByteBuffer): List<GroupFfi> {
         val len = buf.getInt()
@@ -4825,6 +5485,49 @@ public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<Li
     uniffiRustCallWithError(FetchitException) { _status ->
     UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_extract_archive_entry(
         FfiConverterByteArray.lower(`archiveBytes`),FfiConverterString.lower(`entryPath`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Restore the identity from its 24-word BIP39 recovery phrase, sealing a fresh
+         * vault under `data_dir` keyed by `passphrase`. Reproduces the exact signing
+         * agent id (returned hex); the ML-KEM key and prior message history do NOT come
+         * back. Refuses if an identity already exists -- call only on a fresh install,
+         * before the first `connect`.
+         *
+         * # Errors
+         * `ChatFfiError` if the phrase is not valid BIP39, an identity already exists
+         * under `data_dir`, or vault setup fails.
+         */
+    @Throws(ChatFfiException::class) fun `restoreRecoveryPhrase`(`dataDir`: kotlin.String, `passphrase`: kotlin.String, `phrase`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_restore_recovery_phrase(
+        FfiConverterString.lower(`dataDir`),FfiConverterString.lower(`passphrase`),FfiConverterString.lower(`phrase`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Reveal the identity's 24-word BIP39 recovery phrase for backup, reading the
+         * on-device vault under `data_dir` and re-deriving its key from `passphrase`.
+         * `None` for legacy identities minted before seed backup existed (they have no
+         * recoverable seed and must rotate to gain one). A pure vault read, usable
+         * without a live connection. Gate behind a device re-auth prompt before
+         * display; the returned string is the raw backup secret.
+         *
+         * # Errors
+         * `ChatFfiError` if no vault exists under `data_dir`, the passphrase is wrong,
+         * or the stored material is malformed.
+         */
+    @Throws(ChatFfiException::class) fun `revealRecoveryPhrase`(`dataDir`: kotlin.String, `passphrase`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_reveal_recovery_phrase(
+        FfiConverterString.lower(`dataDir`),FfiConverterString.lower(`passphrase`),_status)
 }
     )
     }
