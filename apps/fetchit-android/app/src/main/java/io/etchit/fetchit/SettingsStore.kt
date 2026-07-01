@@ -67,6 +67,27 @@ class SettingsStore(context: Context) {
     }
 
     /**
+     * Whether the chat client keeps its connection while the app is
+     * backgrounded. Defaults to `true`.
+     *
+     * Chat holds a relay/QUIC connection that is slow to re-establish on
+     * mobile networks; dropping it on every idle period forces a costly
+     * reconnect on return and briefly fails sends mid-reconnect. Keeping it
+     * warm across app switches and screen-off is the default so messaging
+     * stays instant. The reader/browse client is unaffected — it always
+     * idle-disconnects, since its reconnect is a cheap per-fetch bootstrap.
+     *
+     * Set `false` to save battery: chat also disconnects after the idle
+     * grace period, at the cost of a slow reconnect on the next foreground.
+     */
+    fun chatKeepConnected(): Boolean = prefs.getBoolean(KEY_CHAT_KEEP_CONNECTED, true)
+
+    /** Persist the chat keep-connected preference. */
+    fun saveChatKeepConnected(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CHAT_KEEP_CONNECTED, enabled).apply()
+    }
+
+    /**
      * Last-used mode to restore on next launch.
      *
      * Default rule (exact): returns "chat" ONLY when the pref is absent
@@ -96,6 +117,7 @@ class SettingsStore(context: Context) {
         const val KEY_PEERS = "bootstrap_peers"
         const val KEY_THEME = "theme"
         const val KEY_CHAT_DISPLAY_NAME = "chat_display_name"
+        const val KEY_CHAT_KEEP_CONNECTED = "chat_keep_connected"
         const val KEY_MODE = "mode"
         const val MODE_BROWSE = "browse"
         const val MODE_CHAT = "chat"

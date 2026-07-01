@@ -286,6 +286,12 @@
     <!-- Chat: settings section header -->
     <string name="settings_chat_title">chat</string>
 
+    <!-- Chat: keep-connected setting -->
+    <string name="settings_chat_keepalive_title">keep chat connected</string>
+    <string name="settings_chat_keepalive_summary">stays online in the background so messages send instantly. uses more battery.</string>
+    <string name="settings_chat_keepalive_on">chat stays connected</string>
+    <string name="settings_chat_keepalive_off">chat disconnects when idle · saves battery</string>
+
     <!-- Chat: label printed on the branded pair-code QR card. -->
     <string name="chat_pair_card_label">fetch&gt;it chat</string>
 

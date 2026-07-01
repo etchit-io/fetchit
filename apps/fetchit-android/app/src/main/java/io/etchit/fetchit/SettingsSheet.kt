@@ -39,6 +39,7 @@ class SettingsSheet(
         bindThemePicker()
         observePeerCount()
         bindChatDisplayName()
+        bindChatKeepConnected()
     }
 
     private fun bindThemePicker() {
@@ -162,6 +163,19 @@ class SettingsSheet(
             if (!hasFocus) {
                 store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
             }
+        }
+    }
+
+    private fun bindChatKeepConnected() {
+        // Set the initial state before attaching the listener so opening
+        // Settings does not fire a spurious toast.
+        binding.chatKeepConnectedSwitch.isChecked = store.chatKeepConnected()
+        binding.chatKeepConnectedSwitch.setOnCheckedChangeListener { _, isChecked ->
+            store.saveChatKeepConnected(isChecked)
+            toast(
+                if (isChecked) R.string.settings_chat_keepalive_on
+                else R.string.settings_chat_keepalive_off,
+            )
         }
     }
 

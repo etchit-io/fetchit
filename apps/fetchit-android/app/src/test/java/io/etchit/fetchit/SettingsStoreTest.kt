@@ -163,6 +163,33 @@ class SettingsStoreTest {
         assertEquals("", store.chatDisplayName())
     }
 
+    // ── chatKeepConnected ─────────────────────────────────────────────
+
+    /**
+     * Default is ON: a fresh install keeps chat connected across
+     * backgrounding so messages send instantly, without the user first
+     * discovering the setting.
+     */
+    @Test
+    fun chatKeepConnected_defaults_to_true_when_unset() {
+        assertTrue(SettingsStore(context).chatKeepConnected())
+    }
+
+    @Test
+    fun saveChatKeepConnected_false_then_reads_false() {
+        val store = SettingsStore(context)
+        store.saveChatKeepConnected(false)
+        assertFalse(store.chatKeepConnected())
+    }
+
+    @Test
+    fun saveChatKeepConnected_round_trips_across_a_fresh_instance() {
+        SettingsStore(context).saveChatKeepConnected(false)
+        assertFalse(SettingsStore(context).chatKeepConnected())
+        SettingsStore(context).saveChatKeepConnected(true)
+        assertTrue(SettingsStore(context).chatKeepConnected())
+    }
+
     // ── lastMode: default rule ─────────────────────────────────────────
 
     /**

@@ -113,9 +113,17 @@ open class FetchitApplication : Application() {
     }
 
     /**
-     * Disconnect both the Autonomi browse client and the chat gateway (if chat
-     * was ever started). Called by [IdleDisconnect] on app backgrounding after
-     * the idle grace period.
+     * Called by [IdleDisconnect] on app backgrounding after the idle grace
+     * period. Always disconnects the Autonomi browse client (its reconnect is
+     * a cheap per-fetch lazy bootstrap). Only tears the chat gateway down when
+     * the user has opted out of [SettingsStore.chatKeepConnected].
+     *
+     * Chat holds a relay/QUIC connection that is slow to re-establish on
+     * mobile networks, so dropping it every idle period forces a costly
+     * reconnect on return and briefly fails sends mid-reconnect. The default
+     * ([chatKeepConnected] == true) keeps chat warm across backgrounding so
+     * messaging stays instant; the battery-saving opt-out restores the old
+     * disconnect-on-idle behaviour.
      *
      * The `_chatController` nullable check is intentional: accessing
      * [chatController] here would construct the controller, defeating the
@@ -123,7 +131,9 @@ open class FetchitApplication : Application() {
      */
     private fun disconnectAll() {
         disconnect()
-        _chatController?.disconnect()
+        if (!SettingsStore(this).chatKeepConnected()) {
+            _chatController?.disconnect()
+        }
     }
 
     /**
