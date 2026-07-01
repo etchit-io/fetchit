@@ -173,6 +173,11 @@ export interface ChatBubble {
   /// cached; UI surfaces an "unverified sender" badge.
   /// `undefined` — outbound bubble (verification doesn't apply).
   verified?: boolean;
+  /// Resolved display name of the sender, for group attribution. Set on
+  /// inbound group bubbles from the live `sender_name` wire field, falling
+  /// back to the contact roster. `undefined` on DM bubbles (the title names
+  /// the peer) and when no name is known (the renderer shows a short id).
+  senderName?: string;
 }
 
 /// Shell-only render metadata for an outbound bubble that the engine
@@ -300,6 +305,15 @@ export class ChatStore {
 
   contact(id: AgentId): Contact | undefined {
     return this.contacts.get(id);
+  }
+
+  /// Resolve a contact's display name (label preferred over the card's
+  /// display_name) from the roster, or `undefined` when the sender is not a
+  /// known contact. Used to attribute group bubbles whose history-poll wire
+  /// carries no sender name.
+  displayNameFor(id: AgentId): string | undefined {
+    const c = this.contacts.get(id);
+    return c?.label ?? c?.display_name ?? undefined;
   }
 
   /// M3 G2: apply an `EntryKind::AgentId` denylist transition. `added`
@@ -545,6 +559,8 @@ export class ChatStore {
       body: m.body,
       timestampMs: m.timestamp_ms,
       mine: m.from === this.myId(),
+      // History-poll wire carries no sender name, so resolve from the roster.
+      senderName: m.sender_name ?? this.displayNameFor(m.from),
     }));
     // Skip the emit when the poll returned the same set we already
     // have — re-rendering the stream every 4s tears down any in-flight
@@ -567,12 +583,14 @@ export class ChatStore {
   appendGroupMessage(msg: GroupMessage): void {
     const conv = this.ensureGroup(msg.group_id);
     const mine = msg.from === this.myId();
+    const senderName = msg.sender_name ?? this.displayNameFor(msg.from);
     const bubble: ChatBubble = {
       id: msg.message_id,
       from: msg.from,
       body: msg.body,
       timestampMs: msg.timestamp_ms,
       mine,
+      ...(senderName ? { senderName } : {}),
       ...(msg.attachment ? { attachment: msg.attachment } : {}),
     };
     if (bubble.id && conv.messages.some((m) => m.id === bubble.id)) {

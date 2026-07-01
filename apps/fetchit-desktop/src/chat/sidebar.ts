@@ -3,14 +3,21 @@
 
 import type { ChatStore, Conversation, NearbyPeer } from "./state";
 import { convKey } from "./state";
-import { avatarGradientClass } from "./avatarColor";
-import { icon, type IconName } from "../ui/icons";
+import { avatarGradientClass, initials } from "./avatarColor";
+import { chatConfirm } from "./confirmDialog";
+import { icon, mark, type IconName } from "../ui/icons";
 
 export interface SidebarHandlers {
   onSelect: (conv: Conversation) => void;
   onNewContact: () => void;
   onNewGroup: () => void;
   onJoinGroup: () => void;
+  /// Remove a DM from the list: deletes the contact + its local
+  /// transcript. The sidebar confirms first.
+  onRemoveContact: (agentId: string) => void;
+  /// Leave a group from the list: leaves + drops the conversation. The
+  /// sidebar confirms first.
+  onLeaveGroup: (groupId: string) => void;
 }
 
 export function mountSidebar(
@@ -49,12 +56,17 @@ export function mountSidebar(
   const render = (): void => {
     const convs = store.conversationsSorted();
     if (convs.length === 0) {
-      list.replaceChildren(emptyState());
+      // First-run onboarding carries its own actions, so the list is no
+      // longer a listbox — drop the role so the buttons aren't trapped
+      // as bogus options for assistive tech.
+      list.removeAttribute("role");
+      list.replaceChildren(onboarding(handlers));
     } else {
+      list.setAttribute("role", "listbox");
       list.replaceChildren();
       const activeKey = store.active() ? convKey(store.active()!.key) : null;
       for (const conv of convs) {
-        list.appendChild(rowFor(conv, store, activeKey, handlers.onSelect));
+        list.appendChild(rowFor(conv, store, activeKey, handlers));
       }
     }
     renderNearby(nearbySection, store.nearbyPeersUnknown(), handlers.onNewContact);
@@ -131,18 +143,18 @@ function rowFor(
   conv: Conversation,
   store: ChatStore,
   activeKey: string | null,
-  onSelect: (c: Conversation) => void,
+  handlers: SidebarHandlers,
 ): HTMLElement {
   const li = document.createElement("li");
   li.className = "chat-conv";
   if (convKey(conv.key) === activeKey) li.classList.add("chat-conv--active");
   li.setAttribute("role", "option");
   li.tabIndex = 0;
-  li.addEventListener("click", () => onSelect(conv));
+  li.addEventListener("click", () => handlers.onSelect(conv));
   li.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      onSelect(conv);
+      handlers.onSelect(conv);
     }
   });
 
@@ -200,6 +212,42 @@ function rowFor(
     li.appendChild(badge);
   }
 
+  // Per-row remove, revealed on hover/focus. Reachable from the list
+  // itself so old chats and groups can be cleared without opening each
+  // one and hunting for a menu. Destructive, so it always confirms.
+  const isGroup = conv.key.kind === "group";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "chat-conv__remove";
+  const removeLabel = isGroup ? "Leave this group" : "Remove this chat";
+  remove.title = removeLabel;
+  remove.setAttribute("aria-label", removeLabel);
+  remove.appendChild(icon("close"));
+  remove.addEventListener("click", (e) => {
+    // Don't let the click also select/open the conversation.
+    e.stopPropagation();
+    void (async () => {
+      const ok = await chatConfirm(
+        isGroup
+          ? {
+            title: "Leave group",
+            message: `Leave "${conv.title}"? You'll need a new invite to rejoin.`,
+            confirmLabel: "Leave",
+          }
+          : {
+            title: "Remove chat",
+            message:
+              `Remove your chat with ${conv.title}? Its messages will be deleted from this device.`,
+            confirmLabel: "Remove",
+          },
+      );
+      if (!ok) return;
+      if (conv.key.kind === "group") handlers.onLeaveGroup(conv.key.groupId);
+      else handlers.onRemoveContact(conv.key.peer);
+    })();
+  });
+  li.appendChild(remove);
+
   return li;
 }
 
@@ -218,25 +266,49 @@ function iconButton(
   return b;
 }
 
-function emptyState(): HTMLElement {
+// First-run / no-conversations state. Per the idiot-proof rules this is
+// never a dead end: it names the app, says what to do in one plain
+// sentence, and carries the single obvious next action as a big button.
+function onboarding(handlers: SidebarHandlers): HTMLElement {
   const li = document.createElement("li");
   li.className = "chat-conv-empty";
+
+  const spark = mark("lit", { label: "LIT Chat" });
+  spark.classList.add("chat-onboard__mark");
+
   const title = document.createElement("div");
   title.className = "chat-conv-empty__title";
-  title.textContent = "No conversations yet";
+  title.textContent = "Welcome to LIT Chat";
+
   const body = document.createElement("div");
   body.className = "chat-conv-empty__body";
-  body.textContent = "Add a contact's card to start a DM, or create a group.";
+  body.textContent
+    = "No conversations yet. Add someone you know and say hello.";
+
+  const actions = document.createElement("div");
+  actions.className = "chat-onboard__actions";
+
+  const primary = document.createElement("button");
+  primary.type = "button";
+  primary.className = "chat-dialog__btn chat-onboard__primary";
+  primary.appendChild(icon("add-contact"));
+  primary.appendChild(document.createTextNode("Add your first person"));
+  primary.addEventListener("click", handlers.onNewContact);
+
+  const secondary = document.createElement("button");
+  secondary.type = "button";
+  secondary.className = "chat-dialog__btn chat-dialog__btn--ghost chat-onboard__secondary";
+  secondary.textContent = "Create a group";
+  secondary.addEventListener("click", handlers.onNewGroup);
+
+  actions.appendChild(primary);
+  actions.appendChild(secondary);
+
+  li.appendChild(spark);
   li.appendChild(title);
   li.appendChild(body);
+  li.appendChild(actions);
   return li;
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
 function relativeShort(ms: number): string {

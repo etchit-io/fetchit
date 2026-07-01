@@ -49,8 +49,8 @@ export function mountAddContact(
   const help = document.createElement("p");
   help.className = "chat-dialog__help";
   help.textContent
-    = "Paste a share link from someone you trust — usually x0x://pair/… "
-      + "Or type their fediverse handle, like @name@etchit.io";
+    = "Paste a share link from someone you trust, "
+      + "or type their handle like @name@etchit.io";
 
   // Share URIs are long (KEM/ML-DSA keys + signature add up to ~17KB).
   // A single-line <input> forces the text engine to lay out the entire
@@ -58,11 +58,11 @@ export function mountAddContact(
   // past 65535 px; textarea wraps visually and keeps the box bounded.
   const input = document.createElement("textarea");
   input.className = "chat-dialog__uri";
-  input.placeholder = "x0x://pair/… or @name@etchit.io";
+  input.placeholder = "Paste a share link, or @name@etchit.io";
   input.spellcheck = false;
   input.rows = 4;
   input.wrap = "soft";
-  input.setAttribute("aria-label", "Card URI");
+  input.setAttribute("aria-label", "Share link");
 
   const status = document.createElement("p");
   status.className = "chat-dialog__status";

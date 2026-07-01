@@ -27,6 +27,7 @@ pub mod events;
 pub mod fedi_identity;
 pub mod fedi_resolutions;
 pub mod fedi_vault;
+pub mod group_invite_uri;
 pub mod groups;
 pub mod groups_reachability;
 pub mod identity;
@@ -44,6 +45,7 @@ pub mod pair_uri;
 pub mod presence;
 pub mod profile;
 pub mod public;
+pub mod recovery_phrase;
 pub mod rekey;
 pub mod relay_http;
 pub mod relay_transport;
@@ -61,6 +63,11 @@ pub use denylist::DenylistCheck;
 pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
 pub use events::{Event, EventStream};
+pub use group_invite_uri::{
+    emit_ginvite_uri, parse_ginvite_uri, GinviteUriError, ParsedGinviteUri,
+};
+pub use local_signer::reveal_local_signer_seed;
+pub use recovery_phrase::{recovery_phrase_to_seed, seed_to_recovery_phrase};
 pub use transport::{Reachability, Router, SendReceipt, Transport};
 
 /// Re-export of the relay-client's connection-state enum so downstream

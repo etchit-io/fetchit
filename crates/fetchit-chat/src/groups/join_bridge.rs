@@ -81,17 +81,21 @@ pub fn stable_group_id_from_member_joined(payload: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// If `payload` is a `member_added` event for `my_agent_hex` -- this
-/// node's own engine-A join-result, bridged back by the owner -- return
-/// its `(stable group_id, member agent_id)` for the local join-result
-/// stage. `None` for any other event (a normal bridge publish). The
-/// owner's `MemberAdded` carries `group_id` as the STABLE id (the staging
-/// key) and `agent_id` as the added member; `NamedGroupMetadataEvent` is
-/// internally tagged `"event"`, so the variant is the `event` field.
+/// If `payload` is a self-targeted engine-A join-result for `my_agent_hex`
+/// -- bridged back by the owner -- return its `(stable group_id, member
+/// agent_id)` for the local join-result stage. `None` for any other event
+/// (a normal bridge publish).
+///
+/// Two event kinds qualify, both carrying `group_id` (the STABLE staging
+/// key) and `agent_id` (this node): `member_added` for a fresh join, and
+/// `member_rekeyed` for a returning member that lost local `TreeKEM` state
+/// (its self-contained Welcome rebuilds the tree). `NamedGroupMetadataEvent`
+/// is internally tagged `"event"`, so the variant is the `event` field.
 #[must_use]
 pub fn member_added_self_target(payload: &[u8], my_agent_hex: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    if v.get("event").and_then(serde_json::Value::as_str) != Some("member_added") {
+    let event_kind = v.get("event").and_then(serde_json::Value::as_str);
+    if event_kind != Some("member_added") && event_kind != Some("member_rekeyed") {
         return None;
     }
     let agent_id = v.get("agent_id").and_then(serde_json::Value::as_str)?;
@@ -246,6 +250,22 @@ mod tests {
         assert_eq!(
             member_added_self_target(
                 br#"{"event":"member_added","group_id":"stableG","agent_id":"bb22"}"#,
+                me,
+            ),
+            None,
+        );
+        // member_rekeyed for self -> Some (a returning-member join-result)
+        assert_eq!(
+            member_added_self_target(
+                br#"{"event":"member_rekeyed","group_id":"stableG","agent_id":"aa11","commit":"x"}"#,
+                me,
+            ),
+            Some(("stableG".to_owned(), "aa11".to_owned())),
+        );
+        // member_rekeyed for ANOTHER member -> None (normal bridge publish)
+        assert_eq!(
+            member_added_self_target(
+                br#"{"event":"member_rekeyed","group_id":"stableG","agent_id":"bb22"}"#,
                 me,
             ),
             None,

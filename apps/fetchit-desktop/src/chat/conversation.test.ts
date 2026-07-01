@@ -31,6 +31,7 @@ const noopHandlers = {
   onSetTrust: () => {},
   onRemoveContact: () => {},
   onLeaveGroup: () => {},
+  onShowMembers: () => {},
   onOpenFullProfile: () => {},
   resolveSenderName: () => "Tester",
 };

@@ -271,12 +271,12 @@ describe("mountAddContact", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
-  it("uses a multi-row textarea with the Card URI aria-label", () => {
+  it("uses a multi-row textarea with a plain-language aria-label", () => {
     mountAddContact(host, { onClose: () => {}, onImported: () => {} });
     const input = getInput();
     expect(input.tagName).toBe("TEXTAREA");
     expect(input.rows).toBeGreaterThanOrEqual(2);
-    expect(input.getAttribute("aria-label")).toBe("Card URI");
+    expect(input.getAttribute("aria-label")).toBe("Share link");
   });
 
   it("enables Add for an x0x://pair/ pointer URI", () => {

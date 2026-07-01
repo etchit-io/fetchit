@@ -28,6 +28,9 @@ import { mountNewGroup } from "./newGroup";
 import { mountJoinGroup } from "./joinGroup";
 import { mountPendingContactsDialog } from "./pendingContacts";
 import { ChatStore } from "./state";
+import { connectionBannerCopy } from "./connectionBanner";
+import { avatarGradientClass, initials } from "./avatarColor";
+import { mountMemberList } from "./memberList";
 import { mark } from "../ui/icons";
 
 export interface ChatPanelHandlers {
@@ -53,6 +56,35 @@ export interface ChatPanelApi {
 }
 
 const DOCK_KEY = "fetchit-chat:dock";
+
+/// Render the header identity badge as the user's own avatar + display
+/// name instead of a raw agent-id hex (grandma-UI rule 1: the user sees
+/// themselves by name). The full code stays one tap away via the share
+/// card the badge opens; the hex never shows in the main flow.
+export function fillIdentityBadge(
+  badge: HTMLElement,
+  name: string,
+  agentId: string,
+): void {
+  badge.replaceChildren();
+  const avatar = document.createElement("span");
+  avatar.className = "chat-panel__id-avatar";
+  avatar.classList.add(avatarGradientClass(agentId));
+  avatar.textContent = initials(name);
+  const label = document.createElement("span");
+  label.className = "chat-panel__id-name";
+  label.textContent = name;
+  badge.appendChild(avatar);
+  badge.appendChild(label);
+  // Full agent id on hover so it stays verifiable against impersonation
+  // (the visible flow shows the name; the id is one hover away). Restores
+  // the badge after a prior bootstrap-failure state repurposed it.
+  badge.title = `Your ID: ${agentId}`;
+  badge.setAttribute(
+    "aria-label",
+    `You: ${name}. Click to set your name and share your code.`,
+  );
+}
 
 /// Wait between bootstrap retries when `open()` throws partway —
 /// matches the x0xd supervisor's poll cadence (`spawn_x0xd_supervisor`
@@ -107,13 +139,13 @@ export function mountChatPanel(
   idBadge.type = "button";
   idBadge.className = "chat-panel__id";
   idBadge.textContent = "—";
-  idBadge.title = "Share your card";
-  idBadge.setAttribute("aria-label", "Share your card");
+  idBadge.title = "Share my code";
+  idBadge.setAttribute("aria-label", "Share my code");
 
   const shareBtn = document.createElement("button");
   shareBtn.type = "button";
   shareBtn.className = "chat-panel__share";
-  shareBtn.textContent = "Share my card";
+  shareBtn.textContent = "Share my code";
 
   // First-contact request badge — hidden until the store has at least
   // one pending TOFU welcome to surface. Clicking opens the dialog
@@ -146,6 +178,15 @@ export function mountChatPanel(
   headerEl.appendChild(pendingBtn);
   headerEl.appendChild(dockBtn);
   headerEl.appendChild(closeBtn);
+
+  // Calm, persistent offline banner — the grandma-grade reassurance that
+  // messages are safe while the connection is down. Sits above the outbox
+  // banner so the "why" (offline) reads before the "what" (N waiting).
+  const connectionBanner = document.createElement("div");
+  connectionBanner.className = "chat-connection-banner";
+  connectionBanner.hidden = true;
+  connectionBanner.setAttribute("role", "status");
+  connectionBanner.setAttribute("aria-live", "polite");
 
   const outboxBanner = document.createElement("div");
   outboxBanner.className = "chat-outbox-banner";
@@ -192,6 +233,7 @@ export function mountChatPanel(
   layout.appendChild(conversationEl);
 
   host.appendChild(headerEl);
+  host.appendChild(connectionBanner);
   host.appendChild(outboxBanner);
   host.appendChild(noticesEl);
   host.appendChild(layout);
@@ -204,6 +246,26 @@ export function mountChatPanel(
     lastUnread = next;
     handlers.onUnreadChange?.(next);
   });
+
+  // Calm offline reassurance, repainted on every store-emit. Driven by the
+  // shared `connectionBannerCopy` vocabulary so desktop and Android show the
+  // same words. Hidden whenever fully connected.
+  const renderConnectionBanner = (): void => {
+    const copy = connectionBannerCopy(
+      store.getDaemonStatus(),
+      store.getRelayStatus(),
+    );
+    if (!copy) {
+      connectionBanner.hidden = true;
+      connectionBanner.textContent = "";
+      return;
+    }
+    connectionBanner.dataset.tone = copy.tone;
+    connectionBanner.textContent = copy.text;
+    connectionBanner.hidden = false;
+  };
+  store.subscribe(renderConnectionBanner);
+  renderConnectionBanner();
 
   const renderOutboxBanner = (): void => {
     const pending = store.pendingOutbound();
@@ -269,7 +331,17 @@ export function mountChatPanel(
 
   const openShareCard = (): void => {
     showDialog((root) => {
-      mountShareCard(root, { onClose: hideDialog });
+      mountShareCard(root, {
+        agentId: store.identity()?.agent_id ?? "",
+        onClose: hideDialog,
+        onNameSaved: (name) => {
+          // Reflect the new name immediately: update the cached name used
+          // for outbound sends + re-fill the header badge.
+          displayName = name;
+          const me = store.identity();
+          if (me) fillIdentityBadge(idBadge, resolveName(), me.agent_id);
+        },
+      });
     });
   };
 
@@ -388,6 +460,36 @@ export function mountChatPanel(
     });
   };
 
+  // Remove/leave actions, shared by the sidebar row remove button and
+  // the in-conversation Remove/Leave controls. Action-only; every caller
+  // confirms first. (They reference refreshContacts/refreshGroups, defined
+  // below — fine, the closures only run on user action.)
+  const removeContactAction = (agentId: string): void => {
+    void (async () => {
+      try {
+        await removeContact(agentId);
+        store.clearDmTranscript(agentId);
+        unwatchPresence([agentId]).catch((e) =>
+          console.warn("[chat] unwatchPresence:", e),
+        );
+        await refreshContacts();
+      } catch (e) {
+        console.warn("[chat] remove contact failed:", e);
+      }
+    })();
+  };
+  const leaveGroupAction = (groupId: string): void => {
+    void (async () => {
+      try {
+        await leaveGroup(groupId);
+        await refreshGroups();
+        store.setActive(null);
+      } catch (e) {
+        console.warn("[chat] leave group failed:", e);
+      }
+    })();
+  };
+
   mountSidebar(sidebarEl, store, {
     onSelect: (conv) => {
       store.setActive(conv.key);
@@ -395,6 +497,8 @@ export function mountChatPanel(
     onNewContact: openAddContact,
     onNewGroup: openNewGroup,
     onJoinGroup: () => openJoinGroup(),
+    onRemoveContact: removeContactAction,
+    onLeaveGroup: leaveGroupAction,
   });
 
   const openPrefilledAddContact = (uri: string): void => {
@@ -435,30 +539,20 @@ export function mountChatPanel(
         }
       })();
     },
-    onRemoveContact: (agentId) => {
-      void (async () => {
-        try {
-          await removeContact(agentId);
-          store.clearDmTranscript(agentId);
-          unwatchPresence([agentId]).catch((e) =>
-            console.warn("[chat] unwatchPresence:", e),
-          );
-          await refreshContacts();
-        } catch (e) {
-          console.warn("[chat] remove contact failed:", e);
-        }
-      })();
-    },
-    onLeaveGroup: (groupId) => {
-      void (async () => {
-        try {
-          await leaveGroup(groupId);
-          await refreshGroups();
-          store.setActive(null);
-        } catch (e) {
-          console.warn("[chat] leave group failed:", e);
-        }
-      })();
+    onRemoveContact: removeContactAction,
+    onLeaveGroup: leaveGroupAction,
+    onShowMembers: (groupId) => {
+      showDialog((root) =>
+        mountMemberList(root, {
+          groupId,
+          groupTitle: store.active()?.title ?? "this group",
+          store,
+          onClose: hideDialog,
+          onChanged: () => {
+            void refreshGroups();
+          },
+        }),
+      );
     },
     resolveSenderName: resolveName,
   });
@@ -548,7 +642,7 @@ export function mountChatPanel(
       ]);
       displayName = persistedName;
       store.setIdentity(me);
-      idBadge.textContent = `${me.agent_id.slice(0, 8)}…`;
+      fillIdentityBadge(idBadge, resolveName(), me.agent_id);
       const [contacts, online, groups] = await Promise.all([
         listContacts(),
         presenceOnline(),

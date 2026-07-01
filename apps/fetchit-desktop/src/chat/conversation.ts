@@ -5,7 +5,13 @@ import { bubbleRenderKey, renderBubble, type BubbleHandlers } from "./bubble";
 import { mountComposer } from "./composer";
 import { chatConfirm } from "./confirmDialog";
 import { openImageLightbox } from "./lightbox";
-import { convKey, quotedRef, type ChatStore, type Conversation } from "./state";
+import {
+  convKey,
+  quotedRef,
+  type ChatBubble,
+  type ChatStore,
+  type Conversation,
+} from "./state";
 import {
   dmConnect,
   fetchAvatar,
@@ -21,6 +27,23 @@ import type { TrustLevel } from "./types";
 
 const GROUP_POLL_INTERVAL_MS = 4_000;
 
+/// The sender-name label to show above a group bubble, or `undefined` for no
+/// label. Shown only for the first bubble of a consecutive run from a non-self
+/// sender — so a run of messages from one person is named once, not on every
+/// line. DMs and own messages never carry a label. Falls back to a short agent
+/// id when no display name resolved.
+function groupAttribution(
+  isGroup: boolean,
+  messages: ChatBubble[],
+  i: number,
+): string | undefined {
+  const b = messages[i];
+  if (!isGroup || b.mine) return undefined;
+  const prev = messages[i - 1];
+  if (prev && prev.from === b.from) return undefined;
+  return b.senderName ?? `${b.from.slice(0, 8)}…`;
+}
+
 export interface ConversationHandlers {
   onAutonomi: (addr: string) => void;
   onCard: (uri: string) => void;
@@ -30,6 +53,8 @@ export interface ConversationHandlers {
   onSetTrust: (agentId: string, level: TrustLevel) => void;
   onRemoveContact: (agentId: string) => void;
   onLeaveGroup: (groupId: string) => void;
+  /// Open the "who is in this group" member list for the given group.
+  onShowMembers: (groupId: string) => void;
   /// Navigate to the full profile page for the given agent (caller closes chat).
   onOpenFullProfile: (agentId: string) => void;
   /// Resolves the user's current display name at send time, so a rename
@@ -302,6 +327,13 @@ export function mountConversation(
       trustEl.hidden = false;
       trustEl.replaceChildren();
       trustEl.className = "chat-group-actions";
+      const membersBtn = document.createElement("button");
+      membersBtn.type = "button";
+      membersBtn.className = "chat-trust__remove chat-group-actions__members";
+      membersBtn.textContent = "Members";
+      membersBtn.title = "Who is in this group";
+      membersBtn.addEventListener("click", () => handlers.onShowMembers(groupId));
+      trustEl.appendChild(membersBtn);
       const leaveBtn = document.createElement("button");
       leaveBtn.type = "button";
       leaveBtn.className = "chat-trust__remove";
@@ -329,7 +361,12 @@ export function mountConversation(
     // re-opening the panel after a close picks the poll back up even
     // when the same group is still active.
     const panelVisible = store.isPanelVisible();
-    const newStreamKey = `${convKey(conv.key)}|${conv.messages.map(bubbleRenderKey).join("|")}`;
+    // Per-bubble keys here drive whole-stream change detection; the
+    // attribution label is a pure function of this same message sequence, so
+    // sequence changes that flip a label already flip this key.
+    const newStreamKey = `${convKey(conv.key)}|${conv.messages
+      .map((b) => bubbleRenderKey(b))
+      .join("|")}`;
 
     if (!panelVisible) {
       // Defer scroll-to-bottom until we're visible again. Don't touch
@@ -384,17 +421,19 @@ export function mountConversation(
       }
       const activeBubbleHandlers =
         conv.key.kind === "dm" ? dmBubbleHandlers : bubbleHandlers;
+      const isGroup = conv.key.kind !== "dm";
       const ordered: HTMLElement[] = [];
-      for (const b of conv.messages) {
-        const key = bubbleRenderKey(b);
+      conv.messages.forEach((b, i) => {
+        const attribution = groupAttribution(isGroup, conv.messages, i);
+        const key = bubbleRenderKey(b, attribution);
         const reused = existing.get(key);
         if (reused) {
           existing.delete(key);
           ordered.push(reused);
         } else {
-          ordered.push(renderBubble(b, activeBubbleHandlers));
+          ordered.push(renderBubble(b, activeBubbleHandlers, attribution));
         }
-      }
+      });
       stream.replaceChildren(...ordered);
       lastStreamKey = newStreamKey;
       const pendingForThisConv = pendingScrollForKey === convKey(conv.key);

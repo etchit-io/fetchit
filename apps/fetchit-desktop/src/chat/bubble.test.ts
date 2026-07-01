@@ -34,6 +34,19 @@ describe("renderBubble — content", () => {
     expect(row.querySelectorAll("a")).toHaveLength(0);
   });
 
+  it("gives an inbound bubble a per-identity accent class; self bubbles get none", () => {
+    const handlers = makeHandlers();
+    const inbound = renderBubble(
+      bubble({ mine: false, from: "ab".repeat(32) }),
+      handlers,
+    ).querySelector(".chat-bubble");
+    expect(inbound?.className).toMatch(/chat-bubble--id[0-7]\b/);
+    const mineBubble = renderBubble(bubble({ mine: true }), handlers).querySelector(
+      ".chat-bubble",
+    );
+    expect(mineBubble?.className).not.toMatch(/chat-bubble--id/);
+  });
+
   it("strips autonomi:// URLs from the text bubble (preview card represents them)", () => {
     const handlers = makeHandlers();
     const row = renderBubble(
@@ -360,6 +373,53 @@ describe("renderBubble — reply affordance", () => {
     const row = renderBubble(b, { ...makeHandlers(), onReply });
     row.querySelector<HTMLButtonElement>(".chat-bubble__reply-btn")!.click();
     expect(onReply).toHaveBeenCalledWith(b);
+  });
+});
+
+describe("renderBubble — group sender attribution", () => {
+  it("renders a sender label in the sender's identity color when attribution is set", () => {
+    const row = renderBubble(
+      bubble({ mine: false, from: "ab".repeat(32), body: "hi all" }),
+      makeHandlers(),
+      "Alice",
+    );
+    const sender = row.querySelector(".chat-bubble__sender");
+    expect(sender).not.toBeNull();
+    expect(sender?.textContent).toBe("Alice");
+    expect(sender?.className).toMatch(/chat-sender--id[0-7]\b/);
+  });
+
+  it("paints no sender label when attribution is omitted (DM / follow-on / own)", () => {
+    const row = renderBubble(bubble({ mine: false, body: "hi" }), makeHandlers());
+    expect(row.querySelector(".chat-bubble__sender")).toBeNull();
+  });
+
+  it("renders the sender label above the bubble body", () => {
+    const row = renderBubble(
+      bubble({ mine: false, from: "ab".repeat(32), body: "morning" }),
+      makeHandlers(),
+      "Alice",
+    );
+    const stack = row.querySelector(".chat-bubble__stack")!;
+    const kids = Array.from(stack.children);
+    const senderIdx = kids.findIndex((k) => k.classList.contains("chat-bubble__sender"));
+    const bubbleIdx = kids.findIndex((k) => k.classList.contains("chat-bubble"));
+    expect(senderIdx).toBeGreaterThanOrEqual(0);
+    expect(senderIdx).toBeLessThan(bubbleIdx);
+  });
+
+  it("bubbleRenderKey changes with attribution so the diff repaints when a label appears/changes", () => {
+    const none = bubbleRenderKey(bubble({ id: "m1" }));
+    const alice = bubbleRenderKey(bubble({ id: "m1" }), "Alice");
+    const bob = bubbleRenderKey(bubble({ id: "m1" }), "Bob");
+    expect(alice).not.toBe(none);
+    expect(alice).not.toBe(bob);
+  });
+
+  it("writes the attribution-aware key onto data-key so reuse stays consistent", () => {
+    const b = bubble({ id: "m1", mine: false, from: "ab".repeat(32) });
+    const row = renderBubble(b, makeHandlers(), "Alice");
+    expect(row.dataset.key).toBe(bubbleRenderKey(b, "Alice"));
   });
 });
 

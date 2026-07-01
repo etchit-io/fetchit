@@ -1032,6 +1032,108 @@ pub async fn chat_group_leave(
         .map_err(|e| e.to_string())
 }
 
+/// A group member surfaced to the UI: agent id, the display name they
+/// joined with (when x0xd has one), and their role. The frontend resolves
+/// a still-nameless member to a saved-contact label or a short id, and
+/// gates moderation controls on the viewer's own role.
+#[derive(serde::Serialize)]
+pub struct GroupMemberDto {
+    /// The member's agent id (64-hex).
+    pub agent_id: String,
+    /// Display name the member joined with, if any.
+    pub display_name: Option<String>,
+    /// Role: `"owner"` / `"admin"` / `"member"` (absent if x0xd omits it).
+    pub role: Option<String>,
+}
+
+#[tauri::command]
+pub async fn chat_group_members(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+) -> Result<Vec<GroupMemberDto>, String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    let roster = state
+        .get()
+        .await?
+        .groups()
+        .member_roster(&gid)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(roster
+        .into_iter()
+        .map(|m| GroupMemberDto {
+            agent_id: m.agent_id.0,
+            display_name: m.display_name,
+            role: m.role,
+        })
+        .collect())
+}
+
+/// Remove (kick) a member from a group. x0xd authorizes (admin+ only,
+/// target must not be the owner); the desktop only shows this to an
+/// owner/admin, but x0xd is the real gate.
+#[tauri::command]
+pub async fn chat_group_remove_member(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+    agent_id: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    let aid = fetchit_chat::identity::AgentId::parse(agent_id).map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .groups()
+        .remove_member(&gid, &aid)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Rename a group. x0xd authorizes (admin+); the desktop only shows the
+/// rename control to an owner/admin.
+#[tauri::command]
+pub async fn chat_group_rename(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+    name: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .groups()
+        .rename(&gid, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Ban a member from a group (kick + block rejoin). x0xd authorizes
+/// (admin+, not the owner); the desktop only shows this to an owner/admin.
+#[tauri::command]
+pub async fn chat_group_ban_member(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    group_id: String,
+    agent_id: String,
+) -> Result<(), String> {
+    ensure_chat_enabled(&app_state)?;
+    let gid = GroupId::parse(&group_id).map_err(|e| e.to_string())?;
+    let aid = fetchit_chat::identity::AgentId::parse(agent_id).map_err(|e| e.to_string())?;
+    state
+        .get()
+        .await?
+        .groups()
+        .ban_member(&gid, &aid)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn chat_group_messages(
     app_state: tauri::State<'_, AppState>,

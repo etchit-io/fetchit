@@ -107,6 +107,18 @@ export interface Group {
   is_owner?: boolean;
 }
 
+/// One member of a group, as returned by `chat_group_members`: their
+/// agent id and the display name they joined with (when the daemon has
+/// one). The UI resolves a still-nameless member to a saved-contact
+/// label or a short id, mirroring the who-is-who sender label.
+export interface GroupMember {
+  agent_id: string;
+  display_name?: string | null;
+  /// Role: "owner" / "admin" / "member" (absent if the daemon omits it).
+  /// Drives the role tag and owner-gated moderation controls.
+  role?: string | null;
+}
+
 /// One private-group message. Two producers share this shape:
 /// the daemon history poll (`chat_group_messages` -> `groupHistory`,
 /// which always sets `kind` via the Rust `default_kind`) and the live

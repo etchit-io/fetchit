@@ -31,7 +31,28 @@ function noopHandlers(): SidebarHandlers {
     onNewContact: vi.fn(),
     onNewGroup: vi.fn(),
     onJoinGroup: vi.fn(),
+    onRemoveContact: vi.fn(),
+    onLeaveGroup: vi.fn(),
   };
+}
+
+// chatConfirm mounts a singleton dialog on document.body; click its
+// confirm (non-ghost) or cancel (ghost) button, then flush microtasks so
+// the awaiting click handler runs.
+async function clickDialog(which: "confirm" | "cancel"): Promise<void> {
+  const buttons = [
+    ...document.querySelectorAll<HTMLButtonElement>(
+      ".chat-dialog:not([hidden]) .chat-dialog__btn",
+    ),
+  ];
+  const btn = buttons.find((b) =>
+    which === "cancel"
+      ? b.classList.contains("chat-dialog__btn--ghost")
+      : !b.classList.contains("chat-dialog__btn--ghost"),
+  );
+  btn!.click();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe("mountSidebar — empty state", () => {
@@ -42,6 +63,37 @@ describe("mountSidebar — empty state", () => {
     expect(empty).not.toBeNull();
     expect(empty?.textContent).toContain("No conversations yet");
     expect(host.querySelectorAll(".chat-conv").length).toBe(0);
+  });
+
+  it("carries the brand mark and a single obvious primary action", () => {
+    const store = makeStore();
+    mountSidebar(host, store, noopHandlers());
+    // The onboarding names the app with the LIT spark mark.
+    expect(host.querySelector(".chat-conv-empty .mark--lit")).not.toBeNull();
+    const primary = host.querySelector<HTMLButtonElement>(".chat-onboard__primary");
+    expect(primary).not.toBeNull();
+    expect(primary?.textContent).toContain("Add your first person");
+  });
+
+  it("primary action opens add-contact, secondary opens new-group", () => {
+    const store = makeStore();
+    const handlers = noopHandlers();
+    mountSidebar(host, store, handlers);
+    host.querySelector<HTMLButtonElement>(".chat-onboard__primary")!.click();
+    expect(handlers.onNewContact).toHaveBeenCalledTimes(1);
+    host.querySelector<HTMLButtonElement>(".chat-onboard__secondary")!.click();
+    expect(handlers.onNewGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the listbox role on the empty list so the buttons are not bogus options", () => {
+    const store = makeStore();
+    mountSidebar(host, store, noopHandlers());
+    expect(host.querySelector(".chat-conv-list")?.getAttribute("role")).toBeNull();
+    // Once a conversation exists, the list is a listbox again.
+    store.recordDirectMessage({
+      from: PEER_A, to: ME, body: "hi", timestamp_ms: 1, message_id: "1",
+    });
+    expect(host.querySelector(".chat-conv-list")?.getAttribute("role")).toBe("listbox");
   });
 });
 
@@ -285,5 +337,58 @@ describe("mountSidebar — dispose", () => {
     // No re-render happened, so the empty-state node is still in place.
     expect(host.querySelector(".chat-conv-empty")).not.toBeNull();
     expect(host.querySelectorAll(".chat-conv")).toHaveLength(0);
+  });
+});
+
+describe("mountSidebar — remove from the list", () => {
+  function withDm(): SidebarHandlers {
+    const store = makeStore();
+    store.recordDirectMessage({
+      from: PEER_A, to: ME, body: "hi", timestamp_ms: 1, message_id: "1",
+    });
+    const handlers = noopHandlers();
+    mountSidebar(host, store, handlers);
+    return handlers;
+  }
+
+  it("every conversation row carries a remove affordance", () => {
+    withDm();
+    const remove = host.querySelector<HTMLButtonElement>(".chat-conv__remove");
+    expect(remove).not.toBeNull();
+    expect(remove?.getAttribute("aria-label")).toBe("Remove this chat");
+  });
+
+  it("confirming a DM remove calls onRemoveContact with the peer", async () => {
+    const handlers = withDm();
+    host.querySelector<HTMLButtonElement>(".chat-conv__remove")!.click();
+    await clickDialog("confirm");
+    expect(handlers.onRemoveContact).toHaveBeenCalledWith(PEER_A);
+    expect(handlers.onLeaveGroup).not.toHaveBeenCalled();
+  });
+
+  it("cancelling the confirm removes nothing", async () => {
+    const handlers = withDm();
+    host.querySelector<HTMLButtonElement>(".chat-conv__remove")!.click();
+    await clickDialog("cancel");
+    expect(handlers.onRemoveContact).not.toHaveBeenCalled();
+  });
+
+  it("clicking remove does not also open the conversation", () => {
+    const handlers = withDm();
+    host.querySelector<HTMLButtonElement>(".chat-conv__remove")!.click();
+    expect(handlers.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("a group row's remove leaves the group", async () => {
+    const store = makeStore();
+    store.loadGroups([{ group_id: "g1", name: "Book Club" }]);
+    const handlers = noopHandlers();
+    mountSidebar(host, store, handlers);
+    const remove = host.querySelector<HTMLButtonElement>(".chat-conv__remove")!;
+    expect(remove.getAttribute("aria-label")).toBe("Leave this group");
+    remove.click();
+    await clickDialog("confirm");
+    expect(handlers.onLeaveGroup).toHaveBeenCalledWith("g1");
+    expect(handlers.onRemoveContact).not.toHaveBeenCalled();
   });
 });

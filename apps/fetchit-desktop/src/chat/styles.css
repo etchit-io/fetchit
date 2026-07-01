@@ -75,15 +75,34 @@ body.chat-docked {
 }
 
 .chat-panel__id {
-  font-family: ui-monospace, "JetBrains Mono", monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  color: var(--ash);
-  padding: 2px 8px;
+  color: var(--bone-dim);
+  padding: 2px 10px 2px 2px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: transparent;
   cursor: pointer;
   transition: color var(--dur-micro) ease, border-color var(--dur-micro) ease;
+}
+.chat-panel__id-avatar {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+}
+.chat-panel__id-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Daemon-status pill — surfaces a plain-English "Reconnecting…" or
@@ -255,6 +274,130 @@ body.chat-docked {
   position: relative;
 }
 .chat-conv:hover { background: color-mix(in srgb, var(--copper) 6%, transparent); }
+
+/* Per-row remove/leave, revealed on hover or keyboard focus. Destructive,
+   so it tints toward rust on hover; the timestamp + unread badge yield
+   their space while it shows. */
+.chat-conv__remove {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ash);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-micro) ease, color var(--dur-micro) ease,
+    background var(--dur-micro) ease;
+}
+.chat-conv__remove .icon { width: 16px; height: 16px; }
+.chat-conv:hover .chat-conv__remove,
+.chat-conv:focus-within .chat-conv__remove { opacity: 1; }
+.chat-conv__remove:hover {
+  color: var(--bone);
+  background: color-mix(in srgb, var(--rust) 40%, transparent);
+}
+.chat-conv__remove:focus-visible { opacity: 1; outline: 2px solid var(--copper); }
+.chat-conv:hover .chat-conv__ts,
+.chat-conv:hover .chat-conv__unread,
+.chat-conv:focus-within .chat-conv__ts,
+.chat-conv:focus-within .chat-conv__unread { opacity: 0; }
+
+/* Group header actions (Members / Leave) + the member-list dialog. */
+.chat-group-actions { display: inline-flex; gap: 6px; }
+.chat-members {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+}
+.chat-member__avatar {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+}
+.chat-member__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--bone);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-member__role {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--ash);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.chat-member__remove {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ash);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: color var(--dur-micro) ease, border-color var(--dur-micro) ease,
+    background var(--dur-micro) ease;
+}
+.chat-member__remove:hover:not(:disabled) {
+  color: var(--bone);
+  border-color: var(--ash);
+  background: color-mix(in srgb, var(--rust) 30%, transparent);
+}
+.chat-member__remove:disabled { opacity: 0.5; cursor: default; }
+.chat-member__ban {
+  color: color-mix(in srgb, var(--rust) 80%, var(--bone));
+  border-color: color-mix(in srgb, var(--rust) 50%, var(--line));
+}
+.chat-member__ban:hover:not(:disabled) {
+  color: var(--bone);
+  border-color: var(--rust);
+  background: color-mix(in srgb, var(--rust) 50%, transparent);
+}
+.chat-members__title--editable { cursor: text; }
+.chat-members__title--editable:hover { text-decoration: underline dotted; }
+.chat-members__rename {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--bone);
+  background: var(--ink);
+  border: 1px solid var(--copper);
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
 .chat-conv--active {
   background: linear-gradient(
     90deg,
@@ -364,12 +507,46 @@ body.chat-docked {
 }
 
 .chat-conv-empty {
-  padding: 24px 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 40px 22px;
   color: var(--ash);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
 }
-.chat-conv-empty__title { color: var(--bone-dim); font-weight: 600; margin-bottom: 4px; }
+.chat-conv-empty__title {
+  color: var(--bone);
+  font-weight: 700;
+  font-size: 16px;
+  margin: 0;
+}
+.chat-conv-empty__body { margin: 0 0 4px; max-width: 28ch; }
+.chat-onboard__mark {
+  width: 44px;
+  height: 44px;
+  color: var(--copper);
+  margin-bottom: 2px;
+}
+.chat-onboard__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 220px;
+}
+.chat-onboard__primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 14px;
+  font-size: 14px;
+}
+.chat-onboard__primary .icon { width: 18px; height: 18px; }
+.chat-onboard__secondary { padding: 9px 14px; }
 
 .chat-conversation {
   display: flex;
@@ -624,6 +801,40 @@ body.chat-docked {
   box-shadow: var(--edge-highlight);
 }
 
+/* Per-identity accents for inbound bubbles: a left stripe + faint fill tint in
+   the sender's identity hue, matching the avatar gradient (same index), so
+   group senders are scannable at a glance. Subtle and palette-adjacent by
+   design -- variations of the oxidation identity palette, not new colors. */
+.chat-row--in .chat-bubble--id0 { border-left: 3px solid #c9732b; background: color-mix(in srgb, #c9732b 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id1 { border-left: 3px solid #d9a440; background: color-mix(in srgb, #d9a440 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id2 { border-left: 3px solid #56b292; background: color-mix(in srgb, #56b292 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id3 { border-left: 3px solid #c2553e; background: color-mix(in srgb, #c2553e 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id4 { border-left: 3px solid #a8743a; background: color-mix(in srgb, #a8743a 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id5 { border-left: 3px solid #8a5a62; background: color-mix(in srgb, #8a5a62 12%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id6 { border-left: 3px solid #8fae56; background: color-mix(in srgb, #8fae56 10%, var(--ink-2)); }
+.chat-row--in .chat-bubble--id7 { border-left: 3px solid #6e86a8; background: color-mix(in srgb, #6e86a8 12%, var(--ink-2)); }
+
+/* Group sender label: small, bold, in the sender's identity hue (matching
+   their avatar and bubble stripe) so a group reads as named people. Shown only
+   on the first bubble of a consecutive run. Lightened toward the foreground so
+   small text stays legible on the dark surface while keeping the identity.
+   --bone is the theme-flipping foreground (light on dark, dark on light). */
+.chat-bubble__sender {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  margin: 0 0 2px 4px;
+}
+.chat-sender--id0 { color: color-mix(in srgb, #c9732b 78%, var(--bone)); }
+.chat-sender--id1 { color: color-mix(in srgb, #d9a440 78%, var(--bone)); }
+.chat-sender--id2 { color: color-mix(in srgb, #56b292 78%, var(--bone)); }
+.chat-sender--id3 { color: color-mix(in srgb, #c2553e 78%, var(--bone)); }
+.chat-sender--id4 { color: color-mix(in srgb, #a8743a 78%, var(--bone)); }
+.chat-sender--id5 { color: color-mix(in srgb, #8a5a62 78%, var(--bone)); }
+.chat-sender--id6 { color: color-mix(in srgb, #8fae56 78%, var(--bone)); }
+.chat-sender--id7 { color: color-mix(in srgb, #6e86a8 78%, var(--bone)); }
+
 .chat-bubble__meta {
   font-size: 10px;
   color: var(--ash);
@@ -762,6 +973,26 @@ body.chat-docked {
 .chat-trust__remove:hover {
   color: var(--copper);
   border-color: var(--copper);
+}
+
+/* Calm, persistent offline reassurance. "warn" (down) uses the copper accent
+   to be noticeable without alarming; "info" (reconnecting) is muted ash so a
+   transient blip stays quiet. */
+.chat-connection-banner {
+  padding: 6px 16px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.3;
+  border-bottom: 1px solid var(--line);
+}
+.chat-connection-banner[hidden] { display: none; }
+.chat-connection-banner[data-tone="info"] {
+  background: color-mix(in srgb, var(--ash) 14%, transparent);
+  color: var(--ash);
+}
+.chat-connection-banner[data-tone="warn"] {
+  background: color-mix(in srgb, var(--copper) 14%, transparent);
+  color: var(--copper);
 }
 
 .chat-outbox-banner {
@@ -1247,6 +1478,39 @@ textarea.chat-dialog__uri {
   overflow-y: auto;
 }
 .chat-dialog__uri:focus { border-color: var(--copper); }
+
+/* "Your name" field + the verification id row in the share-my-code dialog. */
+.chat-dialog__field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--bone-dim);
+  margin: 4px 0 8px;
+}
+.chat-dialog__name {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  font-size: 14px;
+  color: var(--bone);
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  outline: none;
+}
+.chat-dialog__name:focus { border-color: var(--copper); }
+.chat-dialog__idrow {
+  font-size: 11px;
+  color: var(--ash);
+  margin: 8px 0 0;
+  word-break: break-all;
+}
+.chat-dialog__idval {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  color: var(--bone-dim);
+  user-select: all;
+}
 
 .chat-dialog__actions {
   display: flex;

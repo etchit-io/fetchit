@@ -28,7 +28,43 @@ vi.mock("./conversation", () => ({
   mountConversation: mountConversationMock,
 }));
 
-import { mountChatPanel } from "./panel";
+import { fillIdentityBadge, mountChatPanel } from "./panel";
+
+describe("fillIdentityBadge", () => {
+  it("shows the user's name and avatar, never the raw hex (rule 1)", () => {
+    const badge = document.createElement("button");
+    const agentId = "ab".repeat(32);
+    fillIdentityBadge(badge, "Ada Lovelace", agentId);
+    expect(badge.querySelector(".chat-panel__id-name")?.textContent).toBe(
+      "Ada Lovelace",
+    );
+    expect(badge.querySelector(".chat-panel__id-avatar")?.textContent).toBe("A");
+    // The 64-hex must not leak into the visible badge text.
+    expect(badge.textContent).not.toContain(agentId.slice(0, 8));
+  });
+
+  it("derives the avatar hue deterministically from the agent id", () => {
+    const badge = document.createElement("button");
+    fillIdentityBadge(badge, "Bob", "07" + "11".repeat(31));
+    expect(
+      badge.querySelector(".chat-panel__id-avatar")?.classList.contains(
+        "chat-avatar--g7",
+      ),
+    ).toBe(true);
+  });
+
+  it("restores the badge after a failure state, with the id on hover", () => {
+    const badge = document.createElement("button");
+    badge.title = "Tap to retry";
+    badge.textContent = "Chat unavailable";
+    fillIdentityBadge(badge, "Ada", "cd".repeat(32));
+    // The full agent id is reachable on hover (anti-impersonation); the
+    // aria-label tells assistive tech the click sets a name + shares.
+    expect(badge.title).toContain("cd".repeat(32));
+    expect(badge.getAttribute("aria-label")).toContain("set your name");
+    expect(badge.textContent).not.toContain("Chat unavailable");
+  });
+});
 
 let host: HTMLElement;
 

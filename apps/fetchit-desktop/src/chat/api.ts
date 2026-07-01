@@ -9,6 +9,7 @@ import type {
   CardWithUri,
   Contact,
   Group,
+  GroupMember,
   GroupMessage,
   OnlineAgent,
   OutboxBubbleDto,
@@ -167,6 +168,36 @@ export async function unwatchPresence(agentIds: string[]): Promise<void> {
 
 export async function listGroups(): Promise<Group[]> {
   return invoke<Group[]>("chat_groups_list");
+}
+
+/// Active roster for a group ("who is in this group"), with the display
+/// name each member joined with where the daemon has one.
+export async function groupMembers(groupId: string): Promise<GroupMember[]> {
+  return invoke<GroupMember[]>("chat_group_members", { groupId });
+}
+
+/// Remove (kick) a member from a group. The daemon authorizes (admin+,
+/// not the owner); the UI only offers this to an owner/admin.
+export async function groupRemoveMember(
+  groupId: string,
+  agentId: string,
+): Promise<void> {
+  await invoke("chat_group_remove_member", { groupId, agentId });
+}
+
+/// Ban a member (kick + block rejoin). Daemon-authorized (admin+, not
+/// the owner); the UI only offers this to an owner/admin.
+export async function groupBanMember(
+  groupId: string,
+  agentId: string,
+): Promise<void> {
+  await invoke("chat_group_ban_member", { groupId, agentId });
+}
+
+/// Rename a group. Daemon-authorized (admin+); the UI only offers the
+/// rename control to an owner/admin.
+export async function groupRename(groupId: string, name: string): Promise<void> {
+  await invoke("chat_group_rename", { groupId, name });
 }
 
 /// Which create-group surface to invoke on the daemon.
