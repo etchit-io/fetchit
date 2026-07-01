@@ -22,6 +22,7 @@ use fetchit_relay_proto::derive_agent_id;
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use x0xd_client::Signer;
 use thiserror::Error;
 
 /// Wire shape of the relay's `GET /v1/profile/{agent_id}` response.
@@ -114,6 +115,18 @@ pub enum PairError {
 const ALL_ZEROS_PROFILE_ADDR: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// The reserved `profile_addr` a fetch>it-published **minimal** profile
+/// index record carries: a handle-only relay pointer with NO Autonomi
+/// manifest yet. Lets a fresh identity mint a fediverse handle and be
+/// looked up without first publishing a full profile through etch/it (which
+/// needs a wallet). Distinct from the all-zeros tombstone (readers reject
+/// that) and, at 256 bits, from any real Autonomi address. A reader that
+/// tries to load the rich manifest from it gets an ordinary miss and shows
+/// a handle-only card; etch/it later replaces it with the real manifest
+/// address — a same-`agent_id` profile upgrade, not a handle takeover.
+pub const MINIMAL_PROFILE_ADDR: &str =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
 /// JCS-canonicalise the record value with the `sig` field stripped.
 /// Round-trips via `serde_json::Value` so the field order on the
 /// strongly-typed struct doesn't affect canonical output.
@@ -180,6 +193,77 @@ pub fn verify_index_record(record: &ProfileIndexRecord) -> std::result::Result<V
         return Err(PairError::SigVerifyFailed);
     }
     Ok(pubkey_bytes)
+}
+
+/// Sign a **minimal** (handle-only) profile index record for `agent_id_hex`.
+/// The record carries [`MINIMAL_PROFILE_ADDR`] as its `profile_addr` (no
+/// Autonomi manifest yet) and is otherwise an ordinary self-signed
+/// [`ProfileIndexRecord`], so relays and readers accept and verify it
+/// exactly like a full one. The signature is produced over
+/// `SIGN_DOMAIN_PROFILE || jcs_canonical(record sans sig)` — the SAME input
+/// [`verify_index_record`] checks — via `signer` (the chat identity's
+/// ML-DSA-65 key). The record is self-verified before return, so a broken
+/// sign/verify pipeline fails here rather than publishing a record readers
+/// would reject.
+///
+/// # Errors
+/// Canonicalisation failure, the `signer` being unreachable, or the produced
+/// record failing self-verification.
+pub(crate) async fn sign_minimal_index_record(
+    agent_id_hex: &str,
+    kem_pubkey: &[u8],
+    ml_dsa_pubkey: &[u8],
+    issued_at_ms: u64,
+    signer: &dyn Signer,
+) -> std::result::Result<ProfileIndexRecord, PairError> {
+    let mut record = ProfileIndexRecord {
+        agent_id: agent_id_hex.to_owned(),
+        profile_addr: MINIMAL_PROFILE_ADDR.to_owned(),
+        kem_pubkey: B64URL.encode(kem_pubkey),
+        ml_dsa_pubkey: B64URL.encode(ml_dsa_pubkey),
+        issued_at_ms,
+        sig: String::new(),
+    };
+    let canonical = canonical_bytes_sans_sig(&record)?;
+    let mut sign_input = Vec::with_capacity(SIGN_DOMAIN_PROFILE.len() + canonical.len());
+    sign_input.extend_from_slice(SIGN_DOMAIN_PROFILE);
+    sign_input.extend_from_slice(&canonical);
+    let sig = signer
+        .sign(&sign_input)
+        .await
+        .map_err(|e| PairError::Pqc(format!("sign profile record: {e}")))?;
+    record.sig = B64URL.encode(&sig);
+    verify_index_record(&record)?;
+    Ok(record)
+}
+
+/// POST a signed profile index record to `{relay}/v1/profile`. Used to
+/// publish a minimal profile so a fresh identity is mintable + lookupable
+/// without an etch/it (wallet) round-trip.
+///
+/// # Errors
+/// Blocked relay host, transport failure, or a non-2xx relay status.
+pub(crate) async fn publish_index_record(
+    relay: &url::Url,
+    record: &ProfileIndexRecord,
+    http: &reqwest::Client,
+) -> std::result::Result<(), PairError> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| PairError::RelayBlocked(e.to_string()))?;
+    let url = relay
+        .join("v1/profile")
+        .map_err(|e| PairError::Decode(format!("build relay url: {e}")))?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.post(url.clone())
+            .json(record)
+            .timeout(Duration::from_secs(10))
+    })
+    .await?;
+    if !resp.status().is_success() {
+        return Err(PairError::RelayStatus(resp.status().as_u16()));
+    }
+    Ok(())
 }
 
 /// Resolve a contact's relay index record by relay base URL + agent id
@@ -488,6 +572,75 @@ mod tests {
         let (pk, sk) = dsa.generate_keypair().unwrap();
         let r = mk_signed_record(&dsa, &sk, &pk.to_bytes(), &"a".repeat(64), 1);
         verify_index_record(&r).expect("happy path verify");
+    }
+
+    /// A `Signer` backed by a real ML-DSA-65 keypair, so a record it signs
+    /// verifies for real (mirrors the `fedi_identity` test signer).
+    struct RealSigner {
+        pk: Vec<u8>,
+        sk: MlDsaSecretKey,
+    }
+    impl RealSigner {
+        fn new() -> Self {
+            let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+            let (pk, sk) = dsa.generate_keypair().unwrap();
+            Self {
+                pk: pk.to_bytes(),
+                sk,
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl x0xd_client::Signer for RealSigner {
+        fn agent_id(&self) -> [u8; 32] {
+            derive_agent_id(&self.pk)
+        }
+        fn public_key(&self) -> Vec<u8> {
+            self.pk.clone()
+        }
+        async fn sign(&self, message: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+            Ok(dsa.sign(&self.sk, message).map_err(|e| e.to_string())?.to_bytes())
+        }
+    }
+
+    #[tokio::test]
+    async fn minimal_index_record_signs_and_self_verifies() {
+        let signer = RealSigner::new();
+        let agent_id_hex = hex::encode(signer.agent_id());
+        let kem_pub = vec![7u8; 1184];
+        let record = sign_minimal_index_record(
+            &agent_id_hex,
+            &kem_pub,
+            &signer.public_key(),
+            1_700_000_000_000,
+            &signer,
+        )
+        .await
+        .expect("sign minimal");
+        // Carries the sentinel, NOT the tombstone, so relays/readers accept it.
+        assert_eq!(record.profile_addr, MINIMAL_PROFILE_ADDR);
+        assert_ne!(record.profile_addr, ALL_ZEROS_PROFILE_ADDR);
+        assert_eq!(record.agent_id, agent_id_hex);
+        // The sign side matches the verify side exactly.
+        verify_index_record(&record).expect("minimal record verifies like a real one");
+    }
+
+    #[tokio::test]
+    async fn minimal_index_record_agent_id_must_derive_from_the_signer_key() {
+        // A record whose agent_id does not derive from the signing key must
+        // not slip through — self-verify catches the mismatch at sign time.
+        let signer = RealSigner::new();
+        let wrong_agent = "a".repeat(64);
+        let err = sign_minimal_index_record(
+            &wrong_agent,
+            &vec![0u8; 1184],
+            &signer.public_key(),
+            1,
+            &signer,
+        )
+        .await;
+        assert!(matches!(err, Err(PairError::DerivationMismatch)));
     }
 
     #[test]

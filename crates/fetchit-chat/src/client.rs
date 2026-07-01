@@ -4130,6 +4130,42 @@ impl Client {
         .with_attestation_v2(attestation_v2))
     }
 
+    /// Publish a **minimal** (handle-only) profile index record for this
+    /// identity to `relay`, so a fresh identity with no etch/it-published
+    /// profile can still mint a fediverse handle and be looked up. fetch>it
+    /// signs the record with the chat identity's ML-DSA key and POSTs it — a
+    /// blind relay pointer ([`crate::pair::MINIMAL_PROFILE_ADDR`]), no wallet,
+    /// no Autonomi write. The rich profile (name / bio / avatar) stays an
+    /// optional etch/it upgrade. Idempotent-ish: re-publishing overwrites the
+    /// prior minimal record with a fresher `issued_at_ms`.
+    ///
+    /// # Errors
+    /// Chat state uninitialised, the signer being unreachable, or a relay
+    /// write failure.
+    pub async fn publish_minimal_profile(&self, relay: &url::Url, now_ms: u64) -> Result<()> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+        let kem_pub = chat.identity.kem_public_key().to_vec();
+        let ml_dsa_pub = chat.signer.public_key();
+        let http = crate::relay_http::guarded_client();
+        let record = crate::pair::sign_minimal_index_record(
+            &agent_id_hex,
+            &kem_pub,
+            &ml_dsa_pub,
+            now_ms,
+            chat.signer.as_ref(),
+        )
+        .await
+        .map_err(|e| ChatError::Invalid(format!("sign minimal profile: {e}")))?;
+        crate::pair::publish_index_record(relay, &record, &http)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("publish minimal profile: {e}")))?;
+        Ok(())
+    }
+
     /// Mint an actor identity for `handle` AND register it with the
     /// fediverse directory in one engine call, so the desktop command and
     /// the FFI mint path share this orchestration (the DRY lift). Fetches
@@ -4139,16 +4175,21 @@ impl Client {
     /// [`crate::fedi_identity::register_or_update_actor`] at `registry_base`
     /// (prod `https://etchit.io/`).
     ///
+    /// **One-tap:** if no profile is published yet (relay 404 / tombstoned —
+    /// the common case for a fresh identity), fetch>it first publishes a
+    /// minimal handle-only record ([`Self::publish_minimal_profile`]) and
+    /// binds it, so minting a handle never dead-ends into an etch/it
+    /// round-trip. An existing real profile is used as-is and never clobbered.
+    ///
     /// Directory registration failure is REPORTED in [`MintOutcome`], never
     /// fatal: a bridge outage degrades to "registration pending", never a
-    /// failed mint. The three composed steps are each unit-tested on their
-    /// own (`fetch_index_record_by_id`, `mint_actor_identity_v2`,
-    /// `register_or_update_actor`); the hermetic test here covers the
-    /// no-published-profile error arm.
+    /// failed mint. The composed steps are each unit-tested on their own
+    /// (`fetch_index_record_by_id`, `sign_minimal_index_record`,
+    /// `mint_actor_identity_v2`, `register_or_update_actor`).
     ///
     /// # Errors
-    /// - [`ChatError::Invalid`] when no profile is published (relay 404 /
-    ///   tombstoned) -- the user must publish their profile first.
+    /// - [`ChatError::Invalid`] on a transient relay error fetching the
+    ///   profile record, or if publishing the minimal fallback fails.
     /// - The mint itself failing (handle validation, key/attestation, vault).
     pub async fn mint_and_register_actor(
         &self,
@@ -4165,15 +4206,27 @@ impl Client {
             .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
         let agent_id_hex = chat.identity.agent_id_hex().to_string();
         let http = crate::relay_http::guarded_client();
-        let record = crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http)
-            .await
-            .map_err(|e| ChatError::Invalid(format!("profile record: {e}")))?;
+        // One-tap mint: if no profile is published yet (the common case for a
+        // fresh identity), publish a minimal handle-only record and bind it,
+        // rather than dead-ending the user into an etch/it round-trip. Only a
+        // genuine "no profile" (404 / tombstoned) triggers the fallback — a
+        // transient relay error propagates, and an EXISTING real profile is
+        // used as-is and never clobbered.
+        let profile_addr =
+            match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http).await {
+                Ok(record) => record.profile_addr,
+                Err(crate::pair::PairError::RelayStatus(404) | crate::pair::PairError::Tombstoned) => {
+                    self.publish_minimal_profile(relay, now_ms).await?;
+                    crate::pair::MINIMAL_PROFILE_ADDR.to_owned()
+                }
+                Err(e) => return Err(ChatError::Invalid(format!("profile record: {e}"))),
+            };
         let identity = self
             .mint_actor_identity_v2(
                 handle,
                 domain,
                 passphrase,
-                &record.profile_addr,
+                &profile_addr,
                 relay.as_str(),
                 now_ms,
             )
@@ -6284,28 +6337,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mint_and_register_actor_errors_when_no_profile_published() {
-        use wiremock::matchers::method;
+    async fn mint_and_register_actor_one_taps_a_minimal_profile_when_none_exists() {
+        use wiremock::matchers::{method, path, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        // The relay has no published profile-index record for us (404), so
-        // the mint must not proceed -- the user must publish their profile
-        // first. Hermetic: the registry is never reached.
+        // One-tap: a fresh identity with no published profile (relay 404)
+        // must NOT dead-end. Mint publishes a minimal handle-only record to
+        // the relay (the POST .expect(1) proves it), then mints. Hermetic:
+        // the registry is unreachable, so registration degrades to pending
+        // but the mint still succeeds.
         let (client, _dir) = test_client_no_denylist();
         let relay_server = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path_regex(r"^/v1/profile/.+$"))
             .respond_with(ResponseTemplate::new(404))
+            .mount(&relay_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/profile"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
             .mount(&relay_server)
             .await;
         let relay = format!("{}/", relay_server.uri()).parse().unwrap();
         let registry = "http://unused.invalid/".parse().unwrap();
-        let err = client
-            .mint_and_register_actor("alice", "etchit.io", None, &relay, &registry, 1)
+        let outcome = client
+            .mint_and_register_actor("alice", "etchit.io", Some("d9-test"), &relay, &registry, 1)
             .await
-            .unwrap_err();
+            .expect("one-tap mint publishes the minimal profile then mints");
         assert!(
-            matches!(err, ChatError::Invalid(ref m) if m.contains("profile record")),
-            "expected a profile-record error, got {err:?}"
+            outcome.actor_url.contains("alice"),
+            "minted actor url, got {}",
+            outcome.actor_url
         );
+        // Registry was unreachable: registration is pending, not a failure.
+        assert!(!outcome.registered);
+        assert!(outcome.registration_error.is_some());
+        // relay_server drop asserts the .expect(1) minimal-publish POST fired.
     }
 
     #[tokio::test]
