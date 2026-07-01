@@ -1641,7 +1641,12 @@ class ChatModeView(
             }
 
             fun bindPost(post: FeedPost) {
-                sender.visibility = View.GONE
+                // Actor attribution from the relay-verified URL (never a
+                // body-asserted actor), formatted as a readable @user@domain in
+                // the fediverse (copper) hue.
+                sender.visibility = View.VISIBLE
+                sender.text = fediActorDisplay(post.actorUrl)
+                sender.setTextColor(themeColor(R.attr.fetchitCopper))
                 bubble.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
@@ -1651,7 +1656,8 @@ class ChatModeView(
                 meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                 (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                     android.view.Gravity.START
-                meta.text = post.actorUrl
+                // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
+                meta.text = context.getString(R.string.chat_feed_post_public_badge)
             }
 
             /**
