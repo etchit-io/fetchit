@@ -4715,6 +4715,8 @@ pub struct ProvisionedSignerKey {
     pub public_key: Vec<u8>,
     /// ML-DSA-65 secret-key bytes; zeroized on drop.
     pub secret_key: Zeroizing<Vec<u8>>,
+    /// The derived agent id, lowercase 64-hex.
+    pub agent_id_hex: String,
 }
 
 /// Load-or-create the daemonless chat-vault ML-DSA-65 identity WITHOUT
@@ -4748,16 +4750,18 @@ pub fn provision_local_signer_keypair(
     // Otherwise the later Client::build()'s resolve_master_key, finding no
     // identity vault, derives a FRESH salt -> a different master -> an
     // AEAD-open failure on the local_signer vault we just sealed.
+    let agent_id_hex = hex::encode(vault.signer.agent_id());
     let _identity = FetchitIdentity::load_or_create(
         &layout.root,
         &master,
-        &hex::encode(vault.signer.agent_id()),
+        &agent_id_hex,
         kdf_id,
         argon_salt.as_ref(),
     )?;
     Ok(ProvisionedSignerKey {
         public_key: vault.signer.public_key(),
         secret_key: Zeroizing::new(vault.signer.secret_key_bytes()),
+        agent_id_hex,
     })
 }
 

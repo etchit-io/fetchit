@@ -2962,6 +2962,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "base64",
+ "bincode",
  "bip39",
  "bytes",
  "chacha20poly1305",

@@ -50,6 +50,7 @@ pub mod rekey;
 pub mod relay_http;
 pub mod relay_transport;
 pub mod transport;
+pub mod x0xd_seed;
 
 mod client;
 mod http;
@@ -71,6 +72,7 @@ pub use client::restore_identity_from_recovery_phrase;
 pub use local_signer::{reveal_local_signer_recovery_phrase, reveal_local_signer_seed};
 pub use recovery_phrase::{recovery_phrase_to_seed, seed_to_recovery_phrase};
 pub use transport::{Reachability, Router, SendReceipt, Transport};
+pub use x0xd_seed::seed_x0xd_agent_key;
 
 /// Re-export of the relay-client's connection-state enum so downstream
 /// shells (the desktop bridge) can match on it without taking a direct

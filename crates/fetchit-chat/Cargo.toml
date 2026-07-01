@@ -32,6 +32,9 @@ clap.workspace = true
 directories.workspace = true
 fetchit-fedi = { path = "../fetchit-fedi" }
 fetchit-relay-client = { path = "../fetchit-relay-client" }
+# agent.key writer only (x0xd_seed): pinned to the bundled x0xd's on-disk
+# keypair format, which is bincode 1.x — bump only with the daemon.
+bincode = "1.3"
 flate2 = "1.0"
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust = { path = "../fetchit-trust" }
