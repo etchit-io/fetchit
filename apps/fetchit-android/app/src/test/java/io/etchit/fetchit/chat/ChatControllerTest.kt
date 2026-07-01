@@ -524,6 +524,39 @@ class ChatControllerTest {
     }
 
     @Test
+    fun groupFanoutBubbleFlipsGroupTickAndCreatesNoDmRow() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val gid = "c".repeat(64)
+        val gkey = ConversationStore.convKeyGroup(gid)
+        // The send path appended the outbound group message with the receipt's
+        // client message id and a queued (undelivered) tick.
+        convo.append(
+            gkey,
+            ChatMessage(outbound = true, body = "hi all", sentAtMs = 1L, messageId = "cm-1"),
+        )
+        val member = "b".repeat(64)
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        // A queued fan-out copy still in flight must NOT fabricate a DM row
+        // with the member, and must not flip the tick yet.
+        gw.events.send(
+            ChatEventFfi.Outbox(
+                bubble("ob-1", peer = member, status = OutboxStatusFfi.SENDING, groupClientMessageId = "cm-1"),
+            ),
+        )
+        // The first copy reaching the relay flips the ONE group message.
+        gw.events.send(
+            ChatEventFfi.Outbox(
+                bubble("ob-1", peer = member, status = OutboxStatusFfi.DELIVERED, groupClientMessageId = "cm-1"),
+            ),
+        )
+        gw.events.send(null)
+        pump.join()
+        assertTrue(convo.messagesFor(member).value.isEmpty())
+        assertTrue(convo.messagesFor(gkey).value.single().delivered)
+    }
+
+    @Test
     fun upsertOutboxKeyedByIdSeparatesDistinctBubbles() {
         val convo = ConversationStore()
         convo.upsertOutbox("a".repeat(64), "ob-1", "one", 1L, null, delivered = false, failed = false, lastError = null)
@@ -650,6 +683,7 @@ class ChatControllerTest {
         status: OutboxStatusFfi = OutboxStatusFfi.SENDING,
         messageId: String? = null,
         lastError: String? = null,
+        groupClientMessageId: String? = null,
     ) = OutboxBubbleFfi(
         id = id,
         peerAgentIdHex = peer,
@@ -658,6 +692,6 @@ class ChatControllerTest {
         messageId = messageId,
         enqueuedAtMs = 1uL,
         lastError = lastError,
-        groupClientMessageId = null,
+        groupClientMessageId = groupClientMessageId,
     )
 }

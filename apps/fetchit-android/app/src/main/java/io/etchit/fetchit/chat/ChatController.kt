@@ -662,8 +662,23 @@ class ChatController(private val appContext: Context, private val scope: Corouti
          * Project an FFI outbox [bubble] into [convo], upserting by bubble id.
          * Maps the FFI status enum to the [ChatMessage] delivered/failed flags
          * so [ConversationStore] stays free of any uniffi types.
+         *
+         * A bubble carrying a [OutboxBubbleFfi.groupClientMessageId] is one
+         * per-member fan-out copy of a queued GROUP message, not a DM —
+         * upserting it by `peerAgentIdHex` would fabricate a phantom DM thread
+         * with that member. Instead it backs the ONE message in the group
+         * thread: the first copy to reach the relay flips that message's
+         * delivery tick (honest "sent"); Sending/Failed copies leave the
+         * queued clock in place while the engine outbox keeps retrying.
          */
         fun projectOutbox(convo: ConversationStore, bubble: OutboxBubbleFfi) {
+            val groupAnchor = bubble.groupClientMessageId
+            if (groupAnchor != null) {
+                if (bubble.status == OutboxStatusFfi.DELIVERED) {
+                    convo.markDelivered(groupAnchor)
+                }
+                return
+            }
             convo.upsertOutbox(
                 peerAgentIdHex = bubble.peerAgentIdHex,
                 outboxId = bubble.id,
