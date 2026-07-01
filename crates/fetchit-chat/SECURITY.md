@@ -233,6 +233,40 @@ Signature gates in `crates/fetchit-relay-server/src/inbox/`.
   no per-agent logs and the in-memory routing state has a 15-minute
   TTL, but a global passive adversary with court access to the relay
   sees the graph until M3+ sealed-sender / mix-net work.
+- Hiding **group co-membership** from the relay. Private-group content
+  messages fan out as one `TransitEnvelope` per non-self member, and
+  every envelope in that fanout carries the same `group_id` field. An
+  observer with full relay-process state can cluster fanouts by
+  `group_id` and recover the set of AgentIds in a group together
+  without decrypting any message content. The group's membership
+  roster lives only at the x0xd daemon and is never on the relay;
+  what the relay sees is the recipient set on each fanout. Defeating
+  this exposure needs sealed-sender envelopes plus recipient-set
+  unlinkability (Signal-style) or oblivious routing across non-
+  colluding relays — both are post-v1.0 work.
+- Hiding **group control-plane events** when the relay-mediated
+  bridge is consented for a group. M2.5 ships a per-group "Use the
+  relay if direct gossip fails" toggle (default OFF). When you opt
+  in for a group whose gossip mesh can't reach a member, the chat-
+  peer wraps the signed x0xd `NamedGroupMetadataEvent`
+  (MemberAdded / Welcome / Commit / PolicyUpdated / …) as a DM-
+  shaped envelope and sends it via the relay; the recipient's chat-
+  peer hands the inner payload to its local x0xd `/publish` and the
+  daemon's pubsub loopback advances local MLS state via the normal
+  apply path. The seal encrypts the inner event end-to-end, but the
+  relay sees one envelope per non-self member of the bridged group
+  with the recipient AgentId in cleartext — the same recipient-set
+  clustering signal the previous bullet describes, applied to
+  control-plane traffic. The relay keeps no per-agent logs and
+  routing state expires in 15 minutes, but a relay operator who
+  chose to log this metadata could rebuild the co-membership graph
+  for opted-in groups. Declining the bridge keeps the group's
+  control-plane direct-gossip-only; if the gossip mesh can't reach
+  a peer, that peer is unreachable and the group will desync for
+  them. Adding a peer to a `private_secure` group also requires
+  that you have already exchanged contact cards with that peer
+  (the bridge seal is keyed on the recipient's ML-KEM-768 public
+  key from their share-card).
 - Direct peer-to-peer mode without a relay in the path (M2 brings
   LAN-direct; full WAN peer-to-peer remains future work).
 - Cross-vendor MLS wire interop. The PQ TreeKEM is `saorsa-mls`'s
