@@ -158,6 +158,50 @@ impl LocalSignerVault {
         Ok(Some(Zeroizing::new(seed)))
     }
 
+    /// Reveal the identity backup seed encoded as its 24-word BIP39
+    /// recovery phrase, ready to display for safekeeping. `Ok(None)` for
+    /// legacy vaults with no recoverable seed (see [`Self::reveal_identity_seed`]).
+    ///
+    /// # Errors
+    /// Propagates [`Self::reveal_identity_seed`] failures, plus
+    /// `ChatError::Invalid` if the BIP39 encoder rejects the seed.
+    pub(crate) fn reveal_recovery_phrase(
+        data_dir: &Path,
+        master: &MasterKey,
+    ) -> Result<Option<Zeroizing<String>>, ChatError> {
+        match Self::reveal_identity_seed(data_dir, master)? {
+            Some(seed) => Ok(Some(crate::recovery_phrase::seed_to_recovery_phrase(&seed)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Seal a NEW vault whose identity is derived from a restored backup
+    /// `seed`, reproducing the exact ML-DSA agent id. Refuses (does not
+    /// overwrite) when a local signer vault already exists under `data_dir`,
+    /// so restore can never clobber a live identity.
+    ///
+    /// # Errors
+    /// `ChatError::Invalid` if a vault already exists; otherwise as
+    /// [`Self::persist_new`].
+    pub(crate) fn restore_from_seed(
+        data_dir: &Path,
+        master: &MasterKey,
+        kdf_id: u8,
+        argon_salt: Option<&[u8; crate::at_rest::ARGON_SALT_LEN]>,
+        seed: &[u8; 32],
+    ) -> Result<Self, ChatError> {
+        let path = data_dir.join(LOCAL_SIGNER_FILE);
+        if path.exists() {
+            return Err(ChatError::Invalid(
+                "a local signer identity already exists under this data dir; \
+                 refusing to overwrite it on restore"
+                    .to_owned(),
+            ));
+        }
+        let signer = MlDsaSigner::from_seed(seed);
+        Self::persist_new(&path, master, kdf_id, argon_salt, signer, seed)
+    }
+
     /// Seal a brand-new vault for `signer` derived from `seed`. Shared by
     /// fresh-identity creation and seed restore.
     fn persist_new(
@@ -210,6 +254,25 @@ pub fn reveal_local_signer_seed(
     let (master, _kdf_id, _argon_salt) =
         crate::client::resolve_master_key(&identity_vault, Some(passphrase))?;
     LocalSignerVault::reveal_identity_seed(data_dir, &master)
+}
+
+/// Reveal the local signing identity's 24-word BIP39 recovery phrase for the
+/// identity stored under `data_dir`, deriving the vault master key from
+/// `passphrase`. `Ok(None)` for legacy identities minted before seed backup
+/// existed. The platform layer must gate this behind a biometric / re-auth
+/// prompt before the phrase is shown.
+///
+/// # Errors
+/// As [`reveal_local_signer_seed`], plus `ChatError::Invalid` if the stored
+/// seed cannot be BIP39-encoded.
+pub fn reveal_local_signer_recovery_phrase(
+    data_dir: &Path,
+    passphrase: &str,
+) -> Result<Option<Zeroizing<String>>, ChatError> {
+    let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
+    let (master, _kdf_id, _argon_salt) =
+        crate::client::resolve_master_key(&identity_vault, Some(passphrase))?;
+    LocalSignerVault::reveal_recovery_phrase(data_dir, &master)
 }
 
 #[cfg(test)]
@@ -328,5 +391,43 @@ mod tests {
         seal_to_path(&path, &plaintext, &master, kdf_id_argon2(), Some(&salt)).unwrap();
         let revealed = LocalSignerVault::reveal_identity_seed(dir.path(), &master).unwrap();
         assert!(revealed.is_none());
+    }
+
+    #[test]
+    fn reveal_recovery_phrase_round_trips_to_the_seed() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        let _ = LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+        let seed = LocalSignerVault::reveal_identity_seed(dir.path(), &master)
+            .unwrap()
+            .unwrap();
+        let phrase = LocalSignerVault::reveal_recovery_phrase(dir.path(), &master)
+            .unwrap()
+            .unwrap();
+        // A 24-word BIP39 phrase that decodes back to the exact backup seed.
+        assert_eq!(phrase.split_whitespace().count(), 24);
+        let back = crate::recovery_phrase::recovery_phrase_to_seed(&phrase).unwrap();
+        assert_eq!(*back, *seed);
+    }
+
+    #[test]
+    fn reveal_recovery_phrase_is_none_for_legacy_vault() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        let legacy = serde_json::json!({
+            "version": 1,
+            "ml_dsa_public_key_b64": "AA",
+            "ml_dsa_secret_key_b64": "AA",
+            "machine_token": "deadbeef",
+        });
+        let plaintext = serde_json::to_vec(&legacy).unwrap();
+        let path = dir.path().join(LOCAL_SIGNER_FILE);
+        seal_to_path(&path, &plaintext, &master, kdf_id_argon2(), Some(&salt)).unwrap();
+        assert!(LocalSignerVault::reveal_recovery_phrase(dir.path(), &master)
+            .unwrap()
+            .is_none());
     }
 }

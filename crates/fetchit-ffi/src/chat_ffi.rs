@@ -1460,6 +1460,50 @@ async fn run_inbound_pump(
     }
 }
 
+/// Reveal the identity's 24-word BIP39 recovery phrase for backup, reading the
+/// on-device vault under `data_dir` and re-deriving its key from `passphrase`.
+/// `None` for legacy identities minted before seed backup existed (they have no
+/// recoverable seed and must rotate to gain one). A pure vault read, usable
+/// without a live connection. Gate behind a device re-auth prompt before
+/// display; the returned string is the raw backup secret.
+///
+/// # Errors
+/// `ChatFfiError` if no vault exists under `data_dir`, the passphrase is wrong,
+/// or the stored material is malformed.
+#[uniffi::export]
+pub fn reveal_recovery_phrase(
+    data_dir: String,
+    passphrase: String,
+) -> Result<Option<String>, ChatFfiError> {
+    let phrase = fetchit_chat::reveal_local_signer_recovery_phrase(
+        std::path::Path::new(&data_dir),
+        &passphrase,
+    )?;
+    Ok(phrase.map(|p| p.to_string()))
+}
+
+/// Restore the identity from its 24-word BIP39 recovery phrase, sealing a fresh
+/// vault under `data_dir` keyed by `passphrase`. Reproduces the exact signing
+/// agent id (returned hex); the ML-KEM key and prior message history do NOT come
+/// back. Refuses if an identity already exists -- call only on a fresh install,
+/// before the first `connect`.
+///
+/// # Errors
+/// `ChatFfiError` if the phrase is not valid BIP39, an identity already exists
+/// under `data_dir`, or vault setup fails.
+#[uniffi::export]
+pub fn restore_recovery_phrase(
+    data_dir: String,
+    passphrase: String,
+    phrase: String,
+) -> Result<String, ChatFfiError> {
+    Ok(fetchit_chat::restore_identity_from_recovery_phrase(
+        std::path::Path::new(&data_dir),
+        &passphrase,
+        &phrase,
+    )?)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
