@@ -31,7 +31,7 @@ pub enum OutboxStatus {
 /// A bubble's `group` is `None` for a DM (whose plaintext `body` is
 /// re-encrypted on every send) and `Some` for a per-member group fan-out
 /// copy. The already-sealed `envelope` is re-sent **verbatim** on retry:
-/// x0xd's TreeKEM seal ratchets, so re-sealing the same plaintext would mint
+/// x0xd's `TreeKEM` seal ratchets, so re-sealing the same plaintext would mint
 /// a distinct frame -- a duplicate at the receiver and a wasted epoch step.
 /// Storing the sealed bytes is what lets a group send survive the sender
 /// being offline and flush intact on reconnect.

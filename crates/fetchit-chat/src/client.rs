@@ -1338,7 +1338,7 @@ impl Client {
     /// Direct messaging endpoint — sends route through the Router.
     #[must_use]
     pub fn messages(&self) -> messages::Endpoint<'_> {
-        messages::Endpoint::new_with_denylist(
+        let endpoint = messages::Endpoint::new_with_denylist(
             &self.http,
             &self.router,
             self.chat.as_ref().map(|c| &c.identity),
@@ -1351,7 +1351,16 @@ impl Client {
             Arc::clone(&self.primary_relay_url),
             Arc::clone(&self.neg_resolve_cache),
             Arc::clone(&self.group_kinds),
-        )
+        );
+        // Wire the durable-outbox sink so a private-group send that reaches
+        // no member enqueues a retryable bubble per undelivered member
+        // instead of hard-failing; the retry driver's RealOutboxTransport
+        // re-sends each stored frame on reconnect. REST-only clients (no
+        // chat state) leave it unwired -> pre-durability hard-fail behavior.
+        match self.chat.as_ref() {
+            Some(c) => endpoint.with_outbox(&c.outbox, &c.outbox_tx),
+            None => endpoint,
+        }
     }
 
     /// Group messaging endpoint.
@@ -3218,14 +3227,27 @@ impl crate::outbox::driver::OutboxTransport for RealOutboxTransport {
         let client = self.client.clone();
         let sender_name = (self.name_provider)();
         async move {
-            // RETRY fidelity: OutboxBubble stores body only, so a resend
-            // drops the original attachment + reply_to (faithful to desktop
-            // outboxDriver.ts; full-fidelity retry is a deferred Josh-gated
-            // improvement -- see the outbox-lift plan notes).
-            let message_id = client
-                .messages()
-                .send(&bubble.peer, &bubble.body, &sender_name, None, None)
-                .await?;
+            // A group bubble re-sends its STORED sealed frame verbatim (a
+            // re-seal would ratchet TreeKEM and duplicate at the receiver);
+            // a DM re-encrypts its body. RETRY fidelity for DMs: OutboxBubble
+            // stores body only, so a DM resend drops the original attachment
+            // + reply_to (faithful to desktop outboxDriver.ts; full-fidelity
+            // retry is a deferred Josh-gated improvement -- see the
+            // outbox-lift plan notes).
+            let message_id = match &bubble.group {
+                Some(group) => {
+                    client
+                        .messages()
+                        .resend_group_bubble(&bubble.peer, &group.group_id, &group.envelope)
+                        .await?
+                }
+                None => {
+                    client
+                        .messages()
+                        .send(&bubble.peer, &bubble.body, &sender_name, None, None)
+                        .await?
+                }
+            };
             let accepted_at_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));

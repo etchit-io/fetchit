@@ -104,7 +104,7 @@ pub struct OutboundEnvelope {
 /// Decodes the postcard `sealed_envelope` (see [`crate::outbox::GroupOutbound`])
 /// and wraps it as a [`OutboundKind::Group`] [`OutboundEnvelope`] addressed via
 /// `group_id`. The sealed frame is forwarded **verbatim**: a durable group
-/// send never re-seals, because x0xd's TreeKEM seal ratchets -- re-sealing the
+/// send never re-seals, because x0xd's `TreeKEM` seal ratchets -- re-sealing the
 /// same plaintext would mint a distinct frame (a duplicate at the receiver and
 /// a wasted epoch step). Retrying therefore re-sends exactly what the first
 /// attempt sealed.

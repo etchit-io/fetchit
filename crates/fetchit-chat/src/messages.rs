@@ -1288,6 +1288,32 @@ impl<'a> Endpoint<'a> {
         Ok(Some(message_id))
     }
 
+    /// Re-send one durable private-group fan-out copy: rebuild the Group
+    /// wire envelope from the STORED sealed frame (never re-sealing -- see
+    /// [`crate::outbox::GroupOutbound`]) and route it to `peer`. The outbox
+    /// retry driver calls this for a bubble whose `group` is set; the
+    /// returned id is the relay's dedupe-key when it assigns one.
+    ///
+    /// # Errors
+    /// [`ChatError::NoTransportAvailable`] with an empty router,
+    /// [`ChatError::Invalid`] if the stored frame will not decode, or the
+    /// router's transport error forwarded verbatim.
+    pub(crate) async fn resend_group_bubble(
+        &self,
+        peer: &crate::identity::AgentId,
+        group_id: &str,
+        sealed_frame: &[u8],
+    ) -> Result<Option<String>> {
+        if self.router.is_empty() {
+            return Err(ChatError::NoTransportAvailable);
+        }
+        let envelope =
+            crate::transport::group_resend_envelope(group_id, sealed_frame, self.local_machine_id)?;
+        let hints = self.resolve_hints_for(&peer.0).await;
+        let receipt = self.router.send(peer, envelope, hints.as_ref()).await?;
+        Ok(receipt.message_id)
+    }
+
     /// Pre-resolve and persist sender keys for a group's base members so
     /// their first message decrypts even though the joiner never
     /// DM-paired with them.
@@ -3507,9 +3533,9 @@ mod tests {
             2,
             "one durable bubble per undelivered member"
         );
-        let mut peers: Vec<String> = bubbles.iter().map(|b| b.peer.0.clone()).collect();
-        peers.sort();
-        assert_eq!(peers, vec![peer1.clone(), peer2.clone()]);
+        let mut queued_peers: Vec<String> = bubbles.iter().map(|b| b.peer.0.clone()).collect();
+        queued_peers.sort();
+        assert_eq!(queued_peers, vec![peer1.clone(), peer2.clone()]);
         for b in &bubbles {
             assert_eq!(
                 b.status,
@@ -3538,6 +3564,61 @@ mod tests {
             own, 1,
             "sender's own copy persists even when all sends queued"
         );
+    }
+
+    #[tokio::test]
+    async fn resend_group_bubble_routes_the_stored_sealed_frame() {
+        // The outbox retry path re-sends a group bubble by routing its
+        // STORED sealed frame verbatim (never re-sealing). Assert the frame
+        // that reaches the wire is exactly the one the bubble carried.
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let http = Http::new("http://127.0.0.1:1".to_owned(), "tok".to_owned()).unwrap();
+        let (transport, captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [9u8; 32],
+            None,
+        );
+        let sealed = TransitEnvelope {
+            version: 3,
+            kind: EnvelopeKind::PrivateGroupChat,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: ProtoAgentId::from_bytes([1u8; 32]),
+            sender_machine_id: MachineId::from_bytes([2u8; 32]),
+            timestamp_ms: 77,
+            epoch: 0,
+            ciphertext: vec![3, 3, 3],
+            nonce: vec![0u8; 12],
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        let frame = postcard::to_allocvec(&sealed).unwrap();
+        let peer = AgentId("d".repeat(64));
+        let mid = endpoint
+            .resend_group_bubble(&peer, TEST_GROUP_HEX, &frame)
+            .await
+            .expect("resend routes ok");
+        assert_eq!(mid.as_deref(), Some("captured-msg-id"));
+        let sent = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a transit envelope reached the wire");
+        assert_eq!(
+            sent.ciphertext,
+            vec![3, 3, 3],
+            "the stored frame is routed verbatim"
+        );
+        assert_eq!(sent.timestamp_ms, 77);
     }
 
     #[tokio::test]
