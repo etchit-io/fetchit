@@ -35,11 +35,11 @@ describe("initOnboarding", () => {
     const h = host();
     await initOnboarding(h, { onChatStart: vi.fn() });
     expect(h.hidden).toBe(false);
-    expect(h.textContent).toContain(
-      "Your chat keys are created on this device and stay only here. "
-        + "If you switch computers you start fresh, and add your people "
-        + "again with a QR code. Nothing about you is stored in any cloud.",
-    );
+    // The copy must tell the truth about backup: the identity is
+    // recoverable via the 24-word phrase, never "you start fresh".
+    expect(h.textContent).toContain(ONBOARDING_COPY.honesty);
+    expect(ONBOARDING_COPY.honesty).toContain("24 words");
+    expect(ONBOARDING_COPY.honesty).not.toContain("start fresh");
   });
 
   it("keeps Start disabled until a 1..=64 char name is typed", async () => {
@@ -131,6 +131,77 @@ describe("initOnboarding", () => {
     await vi.waitFor(() => expect(h.hidden).toBe(true));
     expect(invoke).toHaveBeenCalledWith("set_onboarding_done");
     expect(onChatStart).not.toHaveBeenCalled();
+  });
+
+  it("restore link swaps to phrase entry, gates on 24 words, restores, restarts", async () => {
+    vi.useFakeTimers();
+    (invoke as InvokeMock).mockImplementation((cmd: string) => {
+      if (cmd === "onboarding_done") return Promise.resolve(false);
+      if (cmd === "chat_restore_recovery_phrase") return Promise.resolve("ab".repeat(32));
+      return Promise.resolve(null);
+    });
+    const h = host();
+    await initOnboarding(h, { onChatStart: vi.fn() });
+    h.querySelector<HTMLButtonElement>(".onboarding__restore-link")!.click();
+
+    const phrase = h.querySelector<HTMLTextAreaElement>(".onboarding__phrase")!;
+    const go = h.querySelector<HTMLButtonElement>(".onboarding__restore .onboarding__start")!;
+    // 23 words: still disabled. 24: enabled.
+    phrase.value = Array(23).fill("word").join(" ");
+    phrase.dispatchEvent(new Event("input"));
+    expect(go.disabled).toBe(true);
+    phrase.value = Array(24).fill("word").join(" ");
+    phrase.dispatchEvent(new Event("input"));
+    expect(go.disabled).toBe(false);
+
+    go.click();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("chat_restore_recovery_phrase", {
+        phrase: Array(24).fill("word").join(" "),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenCalledWith("restart_app");
+    vi.useRealTimers();
+  });
+
+  it("a rejected restore shows the error and does not restart", async () => {
+    vi.useFakeTimers();
+    (invoke as InvokeMock).mockImplementation((cmd: string) => {
+      if (cmd === "onboarding_done") return Promise.resolve(false);
+      if (cmd === "chat_restore_recovery_phrase") {
+        return Promise.reject(new Error("that phrase has a typo — check word 7"));
+      }
+      return Promise.resolve(null);
+    });
+    const h = host();
+    await initOnboarding(h, { onChatStart: vi.fn() });
+    h.querySelector<HTMLButtonElement>(".onboarding__restore-link")!.click();
+    const phrase = h.querySelector<HTMLTextAreaElement>(".onboarding__phrase")!;
+    phrase.value = Array(24).fill("word").join(" ");
+    phrase.dispatchEvent(new Event("input"));
+    h.querySelector<HTMLButtonElement>(".onboarding__restore .onboarding__start")!.click();
+
+    await vi.waitFor(() => {
+      const err = h.querySelector<HTMLParagraphElement>(".onboarding__error")!;
+      expect(err.hidden).toBe(false);
+      expect(err.textContent).toContain("typo");
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).not.toHaveBeenCalledWith("restart_app");
+    vi.useRealTimers();
+  });
+
+  it("Back returns from restore mode to the name form", async () => {
+    (invoke as InvokeMock).mockResolvedValue(false);
+    const h = host();
+    await initOnboarding(h, { onChatStart: vi.fn() });
+    h.querySelector<HTMLButtonElement>(".onboarding__restore-link")!.click();
+    expect(h.querySelector(".onboarding__restore")).not.toBeNull();
+    h.querySelector<HTMLButtonElement>(".onboarding__restore .onboarding__skip")!.click();
+    expect(h.querySelector(".onboarding__restore")).toBeNull();
+    const name = h.querySelector<HTMLInputElement>(".onboarding__name")!;
+    expect(name.hidden).toBe(false);
   });
 
   it("exports the locked copy object", () => {

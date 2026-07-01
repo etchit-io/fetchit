@@ -8,11 +8,21 @@ export const ONBOARDING_COPY = {
   title: "Welcome to fetch>it",
   question: "What should we call you?",
   honesty:
-    "Your chat keys are created on this device and stay only here. "
-    + "If you switch computers you start fresh, and add your people "
-    + "again with a QR code. Nothing about you is stored in any cloud.",
+    "Your chat keys are created on this device and stay only here — "
+    + "nothing about you is stored in any cloud. You can write your "
+    + "identity down as 24 words any time in Settings → Identity backup, "
+    + "and bring it to a new computer.",
   start: "Start",
   skip: "Skip for now",
+  restoreLink: "I already have a recovery phrase",
+  restoreQuestion: "Type your 24 words, in order",
+  restorePlaceholder: "apple banana cherry …",
+  restoreGo: "Restore my identity",
+  restoreBack: "Back",
+  restoreDone: "Identity restored — restarting fetch>it…",
+  restoreNote:
+    "Restoring brings your identity to this computer. Messages from "
+    + "your old device don't come along — history lives on each device.",
 } as const;
 
 const NAME_MAX = 64;
@@ -66,11 +76,30 @@ export async function initOnboarding(host: HTMLElement, opts: OnboardingOpts): P
   skip.type = "button";
   skip.textContent = ONBOARDING_COPY.skip;
 
-  card.append(title, label, honesty, start, skip);
+  const restoreLink = document.createElement("button");
+  restoreLink.className = "onboarding__restore-link";
+  restoreLink.type = "button";
+  restoreLink.textContent = ONBOARDING_COPY.restoreLink;
+
+  card.append(title, label, honesty, start, skip, restoreLink);
   root.append(card);
   host.append(root);
   host.hidden = false;
   input.focus();
+
+  // Restore mode: swaps the card body for a phrase entry. Kept in the
+  // same overlay so Back returns without losing the typed name.
+  restoreLink.addEventListener("click", () => {
+    mountRestore(card, {
+      back: () => {
+        restoreCard.remove();
+        for (const el of [title, label, honesty, start, skip, restoreLink]) el.hidden = false;
+        input.focus();
+      },
+    });
+    const restoreCard = card.lastElementChild as HTMLElement;
+    for (const el of [title, label, honesty, start, skip, restoreLink]) el.hidden = true;
+  });
 
   const validName = (): string | null => {
     const name = input.value.trim();
@@ -111,4 +140,76 @@ export async function initOnboarding(host: HTMLElement, opts: OnboardingOpts): P
     void invoke("set_onboarding_done").catch(() => {});
     finish();
   });
+}
+
+/// Mount the restore-from-phrase form into `card`. On success the app
+/// restarts (boot re-seeds the daemon's agent key from the restored
+/// vault), so there is deliberately no post-success path here.
+function mountRestore(card: HTMLElement, opts: { back: () => void }): void {
+  const wrap = document.createElement("div");
+  wrap.className = "onboarding__restore";
+
+  const q = document.createElement("p");
+  q.className = "onboarding__question";
+  q.textContent = ONBOARDING_COPY.restoreQuestion;
+
+  const phrase = document.createElement("textarea");
+  phrase.className = "onboarding__phrase";
+  phrase.rows = 3;
+  phrase.placeholder = ONBOARDING_COPY.restorePlaceholder;
+  phrase.spellcheck = false;
+
+  const note = document.createElement("p");
+  note.className = "onboarding__honesty";
+  note.textContent = ONBOARDING_COPY.restoreNote;
+
+  const err = document.createElement("p");
+  err.className = "onboarding__error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+
+  const go = document.createElement("button");
+  go.className = "onboarding__start";
+  go.type = "button";
+  go.textContent = ONBOARDING_COPY.restoreGo;
+  go.disabled = true;
+
+  const back = document.createElement("button");
+  back.className = "onboarding__skip";
+  back.type = "button";
+  back.textContent = ONBOARDING_COPY.restoreBack;
+
+  // A BIP39 phrase is exactly 24 words; enable the button on shape, let
+  // the checksum in the backend catch typos with a precise error.
+  const wordCount = (): number => phrase.value.trim().split(/\s+/).filter(Boolean).length;
+  phrase.addEventListener("input", () => {
+    go.disabled = wordCount() !== 24;
+  });
+
+  go.addEventListener("click", () => {
+    go.disabled = true;
+    err.hidden = true;
+    void (async () => {
+      try {
+        await invoke<string>("chat_restore_recovery_phrase", {
+          phrase: phrase.value.trim(),
+        });
+        q.textContent = ONBOARDING_COPY.restoreDone;
+        phrase.disabled = true;
+        back.disabled = true;
+        // Give the success line a beat to paint before the relaunch.
+        setTimeout(() => void invoke("restart_app").catch(() => {}), 800);
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = String(e);
+        go.disabled = false;
+      }
+    })();
+  });
+
+  back.addEventListener("click", opts.back);
+
+  wrap.append(q, phrase, note, err, go, back);
+  card.append(wrap);
+  phrase.focus();
 }

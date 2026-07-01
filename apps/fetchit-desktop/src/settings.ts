@@ -12,6 +12,7 @@ import {
   ADVERTISED_RELAYS_HTML,
   initAdvertisedRelaysPanel,
 } from "./settingsAdvertisedRelays";
+import { BACKUP_PANEL_HTML, initBackupPanel } from "./settingsBackup";
 import { CUSTODY_PANEL_HTML, initCustodyPanel } from "./settingsCustody";
 import { EXTENDED_CARD_HTML, initExtendedCardPanel } from "./settingsExtendedCard";
 
@@ -115,6 +116,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
     if (verEl) verEl.textContent = v;
   });
   initAdvertisedRelaysPanel(root);
+  initBackupPanel(root);
   initCustodyPanel(root);
   initExtendedCardPanel(root);
   const close = root.querySelector<HTMLButtonElement>(".settings-close");
@@ -687,6 +689,10 @@ function buildPage(): HTMLElement {
         Send chat directly between devices on the same network. Falls back to relay automatically.
       </p>
       ${ADVERTISED_RELAYS_HTML}
+    </section>
+    <section class="setting-group" id="group-backup">
+      <h2>Identity backup</h2>
+      ${BACKUP_PANEL_HTML}
     </section>
     <section class="setting-group" id="group-advanced">
       <h2>Advanced</h2>

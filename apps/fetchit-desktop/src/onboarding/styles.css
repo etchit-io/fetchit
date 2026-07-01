@@ -105,3 +105,43 @@
 .onboarding__skip:hover {
   color: var(--bone);
 }
+
+.onboarding__restore-link {
+  align-self: center;
+  margin-top: 2px;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  color: var(--ash);
+  font-size: 0.78rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.onboarding__restore-link:hover {
+  color: var(--bone);
+}
+
+.onboarding__restore {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding__phrase {
+  width: 100%;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--ash);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 25%);
+  color: var(--bone);
+  font-family: var(--mono, monospace);
+  font-size: 0.9rem;
+}
+
+.onboarding__error {
+  margin: 0;
+  color: var(--rust);
+  font-size: 0.82rem;
+}
