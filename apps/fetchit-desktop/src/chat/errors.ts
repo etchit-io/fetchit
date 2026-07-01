@@ -79,6 +79,13 @@ export function friendlyError(raw: unknown): string {
     return "That card isn't valid. Ask the sender to share again.";
   }
 
-  // Fallback to the raw text — never silently swallow.
-  return msg;
+  // Unmatched errors: raw Rust `Display` output (type names, nested
+  // sources) reads as noise to a person. Pass through short plain
+  // sentences; route anything structured to the console and show a
+  // friendly line instead — never silently swallow.
+  if (msg.length <= 90 && !msg.includes("(")) {
+    return msg;
+  }
+  console.warn("[chat] unmapped error:", msg);
+  return "Something went wrong. Try again in a moment.";
 }

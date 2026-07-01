@@ -109,7 +109,9 @@ export function mountShareCard(
   const idValue = document.createElement("code");
   idValue.className = "chat-dialog__idval";
   idValue.textContent = handlers.agentId;
-  idRow.title = "Share this so people can verify it is really you.";
+  idRow.title
+    = "To prove it's really you, read this code aloud in person or on a "
+    + "call and have them compare it to what their app shows for you.";
   idRow.append(idLabel, idValue);
 
   const actions = document.createElement("div");

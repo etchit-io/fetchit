@@ -634,6 +634,14 @@ export function mountChatPanel(
     store.setPanelVisible(true);
     // Each attempt starts clean; a failure below re-renders the card.
     host.querySelector(".chat-unavailable")?.remove();
+    // Immediate feedback: the first health + identity round-trips can
+    // take seconds on a cold daemon start, and a silent panel reads as
+    // frozen. Removed on success or failure below.
+    const loading = document.createElement("div");
+    loading.className = "chat-loading";
+    loading.setAttribute("role", "status");
+    loading.textContent = "Starting chat…";
+    host.append(loading);
     try {
       await health();
       const [me, persistedName] = await Promise.all([
@@ -681,8 +689,10 @@ export function mountChatPanel(
         clearTimeout(bootstrapRetryTimer);
         bootstrapRetryTimer = null;
       }
+      loading.remove();
       opening = false;
     } catch (e) {
+      loading.remove();
       idBadge.textContent = "Chat unavailable";
       idBadge.title = "Tap to retry";
       renderChatUnavailableCard(host, classifyBootstrapError(e));

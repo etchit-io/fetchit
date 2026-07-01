@@ -2208,3 +2208,28 @@ body:not([data-view="settings"]) #settings {
   font-size: 13px;
   user-select: text;
 }
+
+/* Chat panel bootstrap: immediate feedback while the daemon cold-starts. */
+.chat-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 12px;
+  color: var(--ash);
+  font-size: 13px;
+}
+
+.chat-loading::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--ash);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: chat-loading-spin 0.8s linear infinite;
+}
+
+@keyframes chat-loading-spin {
+  to { transform: rotate(360deg); }
+}

@@ -79,12 +79,23 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
 
   const me = opts.store.myId();
 
-  void (async () => {
+  const load = async (): Promise<void> => {
     let members;
     try {
       members = await groupMembers(opts.groupId);
     } catch (e) {
-      status.textContent = `Couldn't load members: ${friendlyError(e)}`;
+      // Failure happens before any list mutation or handler binding, so
+      // retrying re-runs the whole load safely.
+      status.textContent = `Couldn't load members: ${friendlyError(e)} `;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "chat-dialog__btn";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => {
+        status.textContent = "Loading…";
+        void load();
+      });
+      status.append(retry);
       return;
     }
     if (members.length === 0) {
@@ -279,5 +290,6 @@ export function mountMemberList(root: HTMLElement, opts: MemberListOpts): void {
 
       list.appendChild(li);
     }
-  })();
+  };
+  void load();
 }

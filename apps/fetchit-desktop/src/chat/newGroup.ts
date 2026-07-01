@@ -70,13 +70,13 @@ export function mountNewGroup(
   presetFieldset.appendChild(makePresetRadio(
     "private_secure",
     "Private group",
-    "PQ-encrypted via x0x MLS — only members can read.",
+    "Encrypted end-to-end — nobody outside the group can read it.",
     true,
   ));
   presetFieldset.appendChild(makePresetRadio(
     "public_open",
     "Public room",
-    "Plaintext on relay — see security docs before using.",
+    "Not private — anyone on the relay can read these messages.",
     false,
   ));
 
@@ -212,8 +212,8 @@ export function mountNewGroup(
       const label = group.name ?? group.group_id.slice(0, 8);
       title.textContent
         = preset === "private_secure"
-          ? `Group "${label}" created — PQ-encrypted via x0x MLS`
-          : `Group "${label}" created — public room (plaintext on relay)`;
+          ? `Private group "${label}" created — only members can read it`
+          : `Public room "${label}" created — anyone on the relay can read it`;
       help.textContent = "Each invite is single-use, so send every person their own. Tap New invite for the next member.";
       status.textContent = "";
       handlers.onCreated();

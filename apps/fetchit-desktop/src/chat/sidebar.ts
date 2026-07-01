@@ -98,7 +98,8 @@ function renderNearby(
   const note = document.createElement("p");
   note.className = "chat-nearby__note";
   note.textContent =
-    "Devices announcing on your network. Add via paste-URI to trust them.";
+    "People running Fetch on your local network. To chat with one, add "
+    + "them like any contact — with their share link or QR code.";
   host.appendChild(note);
 
   const ul = document.createElement("ul");

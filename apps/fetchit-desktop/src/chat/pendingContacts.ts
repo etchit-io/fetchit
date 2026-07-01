@@ -40,7 +40,8 @@ export function mountPendingContactsDialog(
   help.className = "chat-dialog__help";
   help.textContent
     = "These people sent you a first message but you haven't added them yet."
-    + " Only accept if you recognise the agent id from a card they shared.";
+    + " Accept to allow private messages. Not sure who it is?"
+    + " Ask them over another channel to read you their ID and compare.";
 
   const list = document.createElement("div");
   list.className = "pending-contacts-list";
