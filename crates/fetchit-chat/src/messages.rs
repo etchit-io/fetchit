@@ -1173,7 +1173,18 @@ impl<'a> Endpoint<'a> {
         // member's retry bubble carries these exact bytes. Re-sealing on
         // retry would ratchet the TreeKEM epoch and duplicate at the
         // receiver, so the outbox stores the frame, never the plaintext.
-        let sealed_frame = postcard::to_allocvec(&envelope).ok();
+        let sealed_frame = match postcard::to_allocvec(&envelope) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                // Near-impossible for a valid TransitEnvelope, but a silent
+                // skip would drop retry durability for this send (undelivered
+                // members hard-fail instead of queuing), so surface it.
+                log::warn!(
+                    "[chat] group send: sealed-frame encode failed, retry durability disabled for this message: {e}"
+                );
+                None
+            }
+        };
         let mut first_err: Option<ChatError> = None;
         let mut delivered = 0usize;
         let mut attempted = 0usize;
