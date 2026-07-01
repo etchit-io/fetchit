@@ -412,6 +412,23 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
     })
 }
 
+/// Fediverse host whose directory serves minted actors. Mirrors the desktop
+/// `DEFAULT_FEDI_DOMAIN`; the registry base is `https://{FEDI_DOMAIN}/`.
+const FEDI_DOMAIN: &str = "etchit.io";
+
+/// Result of [`ChatClient::fedi_mint`]: the identity is always created +
+/// persisted locally on success; directory registration is best-effort and
+/// reported honestly (mirrors the desktop mint-outcome DTO).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MintOutcomeFfi {
+    /// Canonical actor URL of the minted identity.
+    pub actor_url: String,
+    /// True when the directory accepted the registration.
+    pub registered: bool,
+    /// Why registration is pending, when it is (bridge unreachable, etc.).
+    pub registration_error: Option<String>,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -865,6 +882,51 @@ impl ChatClient {
             .send_to_group(&group_id, &body, &sender_name)
             .await
             .map_err(ChatFfiError::from)
+    }
+
+    /// The active minted fediverse handle, or `None` when the user has not
+    /// opted in to public posting. Reads the local vault only (no network),
+    /// so the onboarding gate can query it before anything connects.
+    #[must_use]
+    pub fn fedi_actor_status(&self) -> Option<String> {
+        self.inner
+            .layout()
+            .map(fetchit_chat::fedi_vault::list_actor_handles)
+            .and_then(|handles| handles.into_iter().next())
+    }
+
+    /// Opt in to public posting: mint the actor identity for `handle` (with
+    /// its v2 attestation binding the published profile + active relay) and
+    /// register it with the directory. Requires a published profile; the
+    /// error explains how to get one. Directory-registration failure is NOT
+    /// an error -- it lands in the returned [`MintOutcomeFfi`].
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
+    /// profile, or the mint failing.
+    pub async fn fedi_mint(&self, handle: String) -> Result<MintOutcomeFfi, ChatFfiError> {
+        let handle = handle.trim().to_lowercase();
+        let relay = url::Url::parse(&self.relay_url).map_err(|e| ChatFfiError::Invalid {
+            reason: format!("relay url: {e}"),
+        })?;
+        let registry_base = url::Url::parse(&format!("https://{FEDI_DOMAIN}/")).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: format!("registry url: {e}"),
+            }
+        })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let outcome = self
+            .inner
+            .mint_and_register_actor(&handle, FEDI_DOMAIN, None, &relay, &registry_base, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(MintOutcomeFfi {
+            actor_url: outcome.actor_url,
+            registered: outcome.registered,
+            registration_error: outcome.registration_error,
+        })
     }
 
     /// List the groups this agent belongs to.
