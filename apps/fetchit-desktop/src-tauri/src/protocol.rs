@@ -1,8 +1,8 @@
 //! `fetchit://<64-hex>` custom URI scheme — serves Autonomi bytes to the
-//! WebView so `<img>`, `<audio>`, `<video>`, `<iframe>`, and the EPUB/PDF
+//! `WebView` so `<img>`, `<audio>`, `<video>`, `<iframe>`, and the EPUB/PDF
 //! readers can stream content without round-tripping IPC for every load.
 //!
-//! Mirrors `HtmlView.shouldInterceptRequest` from the Android app: the WebView
+//! Mirrors `HtmlView.shouldInterceptRequest` from the Android app: the `WebView`
 //! never reaches the public internet for these URIs — the handler resolves the
 //! address against the in-process cache (or fetches over Autonomi on miss).
 
@@ -48,30 +48,33 @@ async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> Resp
 
     let Some(addr) = extract_addr(host, path) else {
         diag!("[fetchit] err bad-address scheme={scheme} host={host} path={path}");
-        return error(StatusCode::BAD_REQUEST, "fetchit:// requires a 64-hex address");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "fetchit:// requires a 64-hex address",
+        );
     };
 
     let state = app.state::<AppState>();
-    let bytes = match state.cached_bytes(&addr) {
-        Some(b) => {
-            diag!("[fetchit] cache-hit {} bytes", b.len());
-            b
-        }
-        None => {
-            diag!("[fetchit] cache-miss → network");
-            match fetch_into_cache(&state, addr).await {
-                Ok(b) => {
-                    diag!("[fetchit] fetched {} bytes", b.len());
-                    b
-                }
-                Err(msg) => {
-                    diag!("[fetchit] err fetch-failed: {msg}");
-                    return error(StatusCode::BAD_GATEWAY, &msg);
-                }
+    let bytes = if let Some(b) = state.cached_bytes(&addr) {
+        diag!("[fetchit] cache-hit {} bytes", b.len());
+        b
+    } else {
+        diag!("[fetchit] cache-miss → network");
+        match fetch_into_cache(&state, addr).await {
+            Ok(b) => {
+                diag!("[fetchit] fetched {} bytes", b.len());
+                b
+            }
+            Err(msg) => {
+                diag!("[fetchit] err fetch-failed: {msg}");
+                return error(StatusCode::BAD_GATEWAY, &msg);
             }
         }
     };
-    let range = request.headers().get(header::RANGE).and_then(|v| v.to_str().ok());
+    let range = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
     let resp = build(&bytes, range);
     diag!(
         "[fetchit] resp status={} mime={} bytes={}",
@@ -138,7 +141,10 @@ fn build(bytes: &Bytes, range: Option<&str>) -> Response<Vec<u8>> {
             .header(header::CONTENT_TYPE, mime)
             .header(header::CONTENT_LENGTH, len)
             .header(header::ACCEPT_RANGES, "bytes")
-            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{total}"),
+            )
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(slice.to_vec())
             .unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR));
@@ -184,6 +190,7 @@ fn empty(status: StatusCode) -> Response<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

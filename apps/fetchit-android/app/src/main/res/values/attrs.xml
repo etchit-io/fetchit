@@ -18,4 +18,6 @@
     <attr name="fetchitCopperBright" format="color" />
     <attr name="fetchitRust"         format="color" />
     <attr name="fetchitSignalOk"     format="color" />
+    <attr name="fetchitGold"         format="color" />
+    <attr name="fetchitGoldBright"   format="color" />
 </resources>

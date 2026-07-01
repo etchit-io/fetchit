@@ -1,4 +1,4 @@
-# QR share — design spec
+# QR share -- design spec
 
 Shared design contract for the QR-share affordance across every
 fetch>it / etch/it surface (desktop and mobile, reader and writer).
@@ -9,7 +9,7 @@ platform produced it.
 ## Why we do this
 
 The Autonomi address (`autonomi://<64-hex>`) doesn't auto-linkify in
-Gmail / WhatsApp / SMS / iMessage — the messengers' allowlist is
+Gmail / WhatsApp / SMS / iMessage -- the messengers' allowlist is
 `http`, `https`, `mailto`, `tel`. Recipients receive the address as
 plain text and have nothing to tap. The QR sidesteps the messengers:
 scan with a phone camera, OS routes the `autonomi://` intent to the
@@ -43,7 +43,7 @@ Both **fetch>it** and **etch/it** wordmarks appear in monospace bold:
 the `>` (fetch>it) or `/` (etch/it) glyph is copper, the surrounding
 `fetch`/`etch` and `it` are ink, with ~0.05em breathing room on each
 side. The card's center brand and the modal header both use the
-**fetch>it** wordmark on every surface — *fetch>it is the reader, so
+**fetch>it** wordmark on every surface -- *fetch>it is the reader, so
 the recipient (the one who needs to install something) is always
 pointed at fetch>it*, regardless of which app produced the share.
 
@@ -83,7 +83,7 @@ pointed at fetch>it*, regardless of which app produced the share.
 ### Encoding
 
 - Payload: `autonomi://<64-hex>` (canonical URL form, **not** bare hex).
-- Error correction: level **H** (~30% recoverable). Non-negotiable —
+- Error correction: level **H** (~30% recoverable). Non-negotiable --
   the center logo occludes ~16% of the matrix; dropping below H
   produces unreadable codes.
 - Quiet zone: 2 modules (standard).
@@ -102,9 +102,9 @@ pointed at fetch>it*, regardless of which app produced the share.
 A single-line text input sits below the QR.
 
 - **Placeholder:** *add a title (optional)*, in ash.
-- **Pre-fill:** when the caller has a meaningful label — an etch's
+- **Pre-fill:** when the caller has a meaningful label -- an etch's
   title, a fetched page's `<title>`, an envelope's `meta.title`, a
-  filename — the input is pre-filled with that string. The user can
+  filename -- the input is pre-filled with that string. The user can
   edit or clear it before exporting.
 - **Style:** Instrument Serif italic, ink colour, dashed-ash border
   that goes solid copper on focus. The dashed style is the visual
@@ -123,7 +123,7 @@ chars. Example: `4cc9e528…7902af39`. The full 64-hex still lives
 inside the QR payload and inside the clipboard buttons; the visible
 row is purely for human glance-comparison.
 
-### Action row — 2×2 grid
+### Action row -- 2×2 grid
 
 Four buttons, fixed labels, lowercase:
 
@@ -136,7 +136,7 @@ Four buttons, fixed labels, lowercase:
 
 Buttons are copper-filled with bone text, each button `flex 1` so the
 2×2 stays even. **Each button must be one line, no wrap.** That's
-why the text-copy buttons drop the "Copy" prefix — the longer
+why the text-copy buttons drop the "Copy" prefix -- the longer
 "Copy autonomi://…" wrapped on narrow Android screens.
 
 On click, the button flashes a short confirmation ("Copied!" /
@@ -149,14 +149,14 @@ A single line, centred: **scan with fetch>it on mobile · etchit.io**.
 
 - "fetch" / "it" in ink, the `>` chevron in copper.
 - `etchit.io` in copper, weight 600.
-- Always the same text on every surface — the footer is the brand
+- Always the same text on every surface -- the footer is the brand
   beacon that survives screen-cropping.
 
 ### Close
 
 - Desktop: Esc, backdrop click, or the explicit `×` button.
 - Mobile: system back, or the explicit `×` button. (No tap-outside
-  dismissal — the modal is fullscreen on mobile.)
+  dismissal -- the modal is fullscreen on mobile.)
 
 ## Export card (PNG)
 
@@ -190,7 +190,7 @@ Constraints:
   padding inside a thin-stroked rounded panel.
 - **Wordmark at the top.** The first thing the recipient sees should
   be the brand, not the QR. This is reversed from older mobile cards
-  where the wordmark sat below the QR — bring legacy renderers in
+  where the wordmark sat below the QR -- bring legacy renderers in
   line on this revision.
 - **Title row:** present only when the user typed something. When
   absent the address sits flush below the QR, no empty gap.
@@ -212,7 +212,7 @@ card, wordmark and all.
 ### Save image
 
 - Opens a native save / file-picker dialog with the suggested name.
-- Writes the PNG bytes via the platform's native filesystem layer —
+- Writes the PNG bytes via the platform's native filesystem layer --
   on Tauri this means a Rust-side command writing through `std::fs`
   (the JS-side `download` attribute trick doesn't work in the
   WebView).
@@ -224,7 +224,7 @@ card, wordmark and all.
 - Decodes the PNG to RGBA in native code, hands it to the OS
   clipboard via a single backend call. On Tauri / desktop this means
   one Rust frame: do not bounce a resource handle across two
-  JS-to-Rust IPC hops — webkit2gtk drops those handles before the
+  JS-to-Rust IPC hops -- webkit2gtk drops those handles before the
   second call completes.
 - The screenshot-watcher (etch/it desktop) must suppress its next
   poll when copy image fires, otherwise the user's own QR
@@ -259,10 +259,10 @@ the placeholder visible.
 
 ### Desktop (TypeScript + Tauri 2)
 
-- `src/qr.ts` — `renderQrSvg(text, opts)` for the live QR,
+- `src/qr.ts` -- `renderQrSvg(text, opts)` for the live QR,
   `renderExportCardSvg(address, title?)` for the export card,
   `abbreviateAddress(hex)` for the address row.
-- `src/ui/qrModal.ts` — modal mount + open/close API:
+- `src/ui/qrModal.ts` -- modal mount + open/close API:
   `open(address, title?: string | null)`.
 - Backend commands (Rust): `save_bytes_to_path` and
   `copy_png_to_clipboard`. The PNG → RGBA decode happens in Rust
@@ -271,10 +271,10 @@ the placeholder visible.
 
 ### Android (Kotlin)
 
-- `QrShare.kt` — `renderCardFor(address, label?): Bitmap` produces
+- `QrShare.kt` -- `renderCardFor(address, label?): Bitmap` produces
   the export card. `QrBitmap.renderQrWithLogo(payload, sizePx)` is
   the bare QR used inside the modal.
-- `QrPreviewDialog.kt` — modal as a `Dialog` with the share-card
+- `QrPreviewDialog.kt` -- modal as a `Dialog` with the share-card
   theme. Title field is an `EditText` (read at export time, not at
   open time, so user typing lands on the saved/copied card).
 - Save image writes via `MediaStore.Downloads`; Copy image uses
@@ -295,7 +295,7 @@ the placeholder visible.
   on App Store guidance; most users expect *Save to Photos*).
 - Copy image: `UIPasteboard.general.image = renderedUIImage`. iOS
   pasteboard is synchronous, no JS-IPC dance needed.
-- Title pre-fill sources mirror Android — feed in the etch's stored
+- Title pre-fill sources mirror Android -- feed in the etch's stored
   title / page title / filename when available, otherwise present
   the empty placeholder.
 
@@ -309,7 +309,7 @@ the placeholder visible.
 - Animated / coloured QR variants beyond the brand chevron. The
   center logo is the only deviation from a vanilla QR; everything
   else is a scanner regression risk we don't take.
-- Cross-process share-image suppression — if fetch>it and etch/it
+- Cross-process share-image suppression -- if fetch>it and etch/it
   desktop run side-by-side and the user copies a QR from fetch>it,
   etch/it's screenshot watcher will catch it once and prompt. The
   persistent dismissed-set absorbs that into a one-time event per

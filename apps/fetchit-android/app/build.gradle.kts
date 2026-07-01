@@ -86,6 +86,16 @@ android {
             useLegacyPackaging = true
         }
     }
+
+    testOptions {
+        // Pure-logic unit tests touch android.util.Log only for logging —
+        // let the framework stubs return defaults instead of throwing, so
+        // those files (e.g. EpubBook) are JVM-testable without a device.
+        unitTests.isReturnDefaultValues = true
+        // Robolectric Activity tests need the merged resources — themes,
+        // drawables, layouts — on the unit-test classpath.
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 dependencies {
@@ -128,4 +138,14 @@ dependencies {
     // in-app "scan a QR" button so users can pull addresses off a
     // printed page or another phone's screen without leaving fetch>it.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // JVM unit tests — `./gradlew :app:testDebugUnitTest`, no device needed.
+    // JUnit covers pure Kotlin; Robolectric runs tests that touch Android
+    // framework classes (org.json, SharedPreferences, …) on the JVM.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // Real org.json for plain-JVM tests: android.jar's stub throws "not
+    // mocked", which silently nulled ChatController.decodePost under test.
+    testImplementation("org.json:json:20240303")
 }

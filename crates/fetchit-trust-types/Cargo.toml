@@ -1,0 +1,19 @@
+[package]
+name = "fetchit-trust-types"
+description = "Shared wire types + DenylistQuery trait for the fetch>it trust service and its consumers. Leaf crate: serde only, no server, crypto, or async deps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

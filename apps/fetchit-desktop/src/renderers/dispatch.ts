@@ -11,8 +11,15 @@ import { renderAudio } from "./audio";
 import { renderVideo } from "./video";
 import { renderPdf } from "./pdf";
 import { renderBinary } from "./binary";
+import { renderBlocked } from "./blocked";
 
-export function render(r: Rendition, into: HTMLElement, address: string): void {
+export function render(
+  r: Rendition,
+  into: HTMLElement,
+  address: string,
+  query = "",
+  onViewProfile?: (agentId: string) => void,
+): void {
   into.replaceChildren();
   const src = `autonomi://${address}`;
   switch (r.kind) {
@@ -23,7 +30,7 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       renderEtchitEnvelope(r, into);
       return;
     case "json":
-      renderJson(r, into);
+      renderJson(r, into, onViewProfile);
       return;
     case "tabular":
       renderTabular(r, into);
@@ -37,7 +44,7 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       else renderArchive(r, into, address);
       return;
     case "html":
-      renderHtml(r, into, address);
+      renderHtml(r, into, address, query);
       return;
     case "image":
       renderImage(r, into, src);
@@ -53,6 +60,9 @@ export function render(r: Rendition, into: HTMLElement, address: string): void {
       return;
     case "binary":
       renderBinary(r, into);
+      return;
+    case "blocked":
+      renderBlocked(r, into);
       return;
   }
   const _exhaustive: never = r;

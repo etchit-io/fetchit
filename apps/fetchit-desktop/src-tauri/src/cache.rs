@@ -1,7 +1,7 @@
 //! Process-local cache of fetched Autonomi bytes, keyed by [`Address`].
 //!
 //! Sized for a single user session: an HTML page can reference its own
-//! `autonomi://` assets, and the WebView will issue parallel loads — caching
+//! `autonomi://` assets, and the `WebView` will issue parallel loads — caching
 //! avoids re-fetching the same address from the network in the same session.
 
 use bytes::Bytes;
@@ -33,6 +33,7 @@ impl BytesCache {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

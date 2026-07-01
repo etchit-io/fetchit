@@ -1,0 +1,39 @@
+[package]
+name = "fetchit-trust-client"
+description = "Consumer-side denylist verifier — periodic refresh + ML-DSA-65 verification + hot lookup index for fetch>it clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fetchit-trust = { path = "../fetchit-trust" }
+async-trait = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+tracing = { workspace = true }
+
+[features]
+default = []
+# Opt-in production HTTP client (reqwest::Client). Without this feature
+# the crate stays pure-Rust and callers provide their own HttpClient impl.
+reqwest = ["dep:reqwest"]
+
+[dependencies.reqwest]
+workspace = true
+optional = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+hex = { workspace = true }
+postcard = { workspace = true }

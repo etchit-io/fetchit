@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { Rendition } from "./types";
 
 export type TabStatus = "empty" | "loading" | "rendered" | "error";
@@ -5,7 +6,12 @@ export type TabStatus = "empty" | "loading" | "rendered" | "error";
 export interface Tab {
   id: string;
   address: string | null;
+  /** Query string from the address (`?…`), or `""`. Carried into SPAs. */
+  query: string;
   shortLabel: string;
+  /** Friendly label shown in the address bar for non-hex tabs (e.g. a
+   * handle), or `null` to fall back to the raw `address`. */
+  display: string | null;
   status: TabStatus;
   error: string | null;
   rendition: Rendition | null;
@@ -46,7 +52,9 @@ export class TabStore {
     const tab: Tab = {
       id: `t${this.seq}`,
       address: null,
+      query: "",
       shortLabel: "new tab",
+      display: null,
       status: "empty",
       error: null,
       rendition: null,
@@ -60,22 +68,25 @@ export class TabStore {
   }
 
   /**
-   * Move the tab to `address` and mark it loading. When `recordHistory` is
-   * true (the default) any non-null previous address is pushed onto the
-   * tab's back stack — set false during a back-navigation so we don't
-   * record the move we just popped from.
+   * Move the tab to `address` (carrying its optional `query`) and mark it
+   * loading. When `recordHistory` is true (the default) any non-null
+   * previous address is pushed onto the tab's back stack — set false
+   * during a back-navigation so we don't record the move we just popped
+   * from.
    */
-  startFetch(id: string, address: string, recordHistory = true): void {
+  startFetch(id: string, address: string, recordHistory = true, query = ""): void {
     const tab = this.byId(id);
     if (!tab) return;
     if (recordHistory && tab.address && tab.address !== address) {
       tab.history.push(tab.address);
     }
     tab.address = address;
+    tab.query = query;
     tab.shortLabel = shortLabel(address);
     tab.status = "loading";
     tab.error = null;
     tab.rendition = null;
+    tab.display = null;
     this.notify();
   }
 
@@ -98,6 +109,17 @@ export class TabStore {
     this.notify();
   }
 
+  /** Mark a profile (shell-route) tab rendered: no Rendition, carry a display label. */
+  renderProfile(id: string, display: string): void {
+    const tab = this.byId(id);
+    if (!tab) return;
+    tab.status = "rendered";
+    tab.rendition = null;
+    tab.display = display;
+    tab.shortLabel = trim(display, 22);
+    this.notify();
+  }
+
   setError(id: string, error: string): void {
     const tab = this.byId(id);
     if (!tab) return;
@@ -109,6 +131,11 @@ export class TabStore {
   close(id: string): void {
     const idx = this.tabs.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    // Cancel any in-flight fetch for the tab so the Rust task stops
+    // making progress instead of running to completion against a DOM
+    // root that no longer exists. Fire-and-forget — the backend
+    // tolerates no-op cancel calls if no fetch is pending.
+    void invoke("cancel_fetch", { tabId: id }).catch(() => {});
     const [removed] = this.tabs.splice(idx, 1);
     removed.root.remove();
     if (this.activeId === id) {

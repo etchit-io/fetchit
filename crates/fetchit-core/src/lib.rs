@@ -42,6 +42,6 @@ pub mod registry;
 
 pub use address::Address;
 pub use error::{Error, Result};
-pub use handler::{Confidence, ContentHandler, Hint, RenderContext, Rendition};
+pub use handler::{Confidence, ContentHandler, Hint, RenderContext, RenderingContext, Rendition};
 pub use network::NetworkClient;
 pub use registry::HandlerRegistry;

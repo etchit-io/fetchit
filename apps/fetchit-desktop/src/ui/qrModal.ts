@@ -15,6 +15,11 @@ export interface QrModalApi {
    *  pass the etch / page / file title so the recipient sees what they're
    *  about to open before they scan. */
   open(address: string, title?: string | null): void;
+  /** Render a non-address payload (e.g. a `fetchit://import?…` URL
+   *  carrying a bookmark list). `summary` is shown below the QR in
+   *  place of the abbreviated address. The copy + save-image actions
+   *  are hidden — the QR itself is the share artifact. */
+  openImport(url: string, summary: string): void;
   close(): void;
   isOpen(): boolean;
 }
@@ -65,10 +70,8 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
   const copyPng = host.querySelector(".qr-modal-copy-png") as HTMLButtonElement;
   const closeBtn = host.querySelector(".qr-modal-close") as HTMLButtonElement;
 
-  // Rasterise the full branded card (wordmark + QR + address + "scan
-  // with fetch>it on mobile · etchit.io" footer) to a PNG blob. Save
-  // image and Copy image both call this so the exported artifact
-  // carries the brand chrome, not just an anonymous QR.
+  // Rasterise the export-card SVG (wordmark + QR + address + footer)
+  // to a PNG blob. Shared path for Save image and Copy image.
   async function rasterise(): Promise<Blob | null> {
     if (!currentAddr) return null;
     // Read the live input each call so a title typed after the modal
@@ -103,6 +106,13 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
 
   let currentAddr: string | null = null;
 
+  const actionsRow = host.querySelector(".qr-modal-actions") as HTMLElement;
+
+  const setImportModeVisibility = (importMode: boolean): void => {
+    actionsRow.style.display = importMode ? "none" : "";
+    titleInput.style.display = importMode ? "none" : "";
+  };
+
   const flash = (btn: HTMLButtonElement, msg: string): void => {
     const original = btn.textContent ?? "";
     btn.textContent = msg;
@@ -129,12 +139,12 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
     open(address, title) {
       currentAddr = address;
       // Pre-fill the title with any caller-derived label (etch title,
-      // page <title>, filename) but leave it editable — recipients
-      // benefit most when the sharer can tweak before exporting.
+      // page <title>, filename). The input stays editable so the
+      // caller's label can be overridden before export.
       titleInput.value = (title ?? "").trim();
       codeEl.textContent = abbreviateAddress(address);
-      // Copper-colored center mark so the QR carries the brand chevron even
-      // when the modal frame is cropped out of a screenshot.
+      // Copper-colored center mark — survives screenshots cropped to
+      // just the QR.
       qrSlot.replaceChildren(
         renderQrSvg(`autonomi://${address}`, {
           cellSize: 8,
@@ -142,6 +152,28 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
           centerLogo: { text: ">", sizeRatio: 0.16, color: "var(--copper)" },
         }),
       );
+      setImportModeVisibility(false);
+      host.hidden = false;
+      document.addEventListener("keydown", onKey);
+      host.addEventListener("click", onBackdrop);
+      closeBtn.focus();
+    },
+    openImport(url, summary) {
+      currentAddr = null;
+      titleInput.value = "";
+      codeEl.textContent = summary;
+      // Smaller cells + medium ECC let the QR fit the larger
+      // import-URL payload (~1–2 KB) while staying readable; the
+      // single-address QR uses larger cells + H-level ECC because the
+      // payload is fixed-size and small.
+      qrSlot.replaceChildren(
+        renderQrSvg(url, {
+          cellSize: 6,
+          errorCorrectionLevel: "M",
+          centerLogo: { text: ">", sizeRatio: 0.16, color: "var(--copper)" },
+        }),
+      );
+      setImportModeVisibility(true);
       host.hidden = false;
       document.addEventListener("keydown", onKey);
       host.addEventListener("click", onBackdrop);
@@ -151,6 +183,7 @@ export function mountQrModal(host: HTMLElement): QrModalApi {
       host.hidden = true;
       currentAddr = null;
       titleInput.value = "";
+      setImportModeVisibility(false);
       document.removeEventListener("keydown", onKey);
       host.removeEventListener("click", onBackdrop);
     },

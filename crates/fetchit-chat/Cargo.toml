@@ -1,0 +1,77 @@
+[package]
+name = "fetchit-chat"
+description = "Rust client for the x0xd gossip-network daemon — chat, contacts, presence, groups."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fetchit-chat-peer"
+path = "src/bin/peer.rs"
+required-features = []
+
+[[bin]]
+name = "profile-fixture-gen"
+path = "src/bin/profile_fixture_gen.rs"
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chacha20poly1305.workspace = true
+clap.workspace = true
+directories.workspace = true
+fetchit-fedi = { path = "../fetchit-fedi" }
+fetchit-relay-client = { path = "../fetchit-relay-client" }
+flate2 = "1.0"
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+fetchit-trust = { path = "../fetchit-trust" }
+fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"] }
+x0xd-client = { path = "../x0xd-client" }
+futures-util.workspace = true
+hex.workspace = true
+hkdf.workspace = true
+keyring.workspace = true
+log.workspace = true
+lru.workspace = true
+postcard.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rsa.workspace = true
+# rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring are
+# in the dependency graph (the x0xd embed pulls both). This direct dep makes
+# rustls::crypto::aws_lc_rs reachable so binaries install it explicitly before
+# the first TLS use. Caret on the minor so it unifies with whatever 0.23.x the
+# embed resolves.
+rustls = "0.23"
+saorsa-pqc.workspace = true
+serde.workspace = true
+snow = "0.10"
+mdns-sd = { version = "0.20", default-features = false }
+semver = "1"
+serde_jcs = "0.2"
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+url.workspace = true
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+zeroize.workspace = true
+bip39 = { version = "2.2.2", features = ["zeroize"] }
+
+[dev-dependencies]
+axum.workspace = true
+fetchit-relay-server = { path = "../fetchit-relay-server" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+tempfile = "3.13"
+tracing.workspace = true
+wiremock = "0.6"

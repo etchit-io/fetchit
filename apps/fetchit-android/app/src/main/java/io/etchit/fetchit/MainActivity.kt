@@ -19,6 +19,7 @@ import androidx.media3.common.util.UnstableApi
 import com.google.android.material.snackbar.Snackbar
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import io.etchit.fetchit.chat.ChatModeView
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,8 +68,55 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      */
     private val backStack = ArrayDeque<String>()
 
+    private enum class Mode { BROWSE, CHAT }
+    private var currentMode = Mode.BROWSE
+    private lateinit var chatModeView: ChatModeView
+
+    /**
+     * Switch between browse and chat modes.
+     *
+     * @param persist when true (the default for button-click switches) the
+     *   chosen mode is written to [SettingsStore] so the app wakes into it
+     *   next launch. Pass [persist] = false for deep-link entries — a
+     *   crafted `x0x://pair/` URI must not permanently overwrite the user's
+     *   chosen wake-up mode.
+     */
+    private fun setMode(mode: Mode, persist: Boolean = true) {
+        if (mode == currentMode) return
+        currentMode = mode
+        if (persist) SettingsStore(this).saveLastMode(if (mode == Mode.BROWSE) "browse" else "chat")
+        val browse = mode == Mode.BROWSE
+        binding.swipeRefresh.isEnabled = browse
+        binding.swipeRefresh.visibility = if (browse) View.VISIBLE else View.GONE
+        binding.chatContainer.visibility = if (browse) View.GONE else View.VISIBLE
+        // Settings sheet intrudes into the chat container — hide in chat, restore in browse.
+        val sheetBehavior = com.google.android.material.bottomsheet.BottomSheetBehavior
+            .from(binding.settingsSheet)
+        if (browse) {
+            binding.settingsSheet.visibility = View.VISIBLE
+            sheetBehavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
+        } else {
+            sheetBehavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
+            binding.settingsSheet.visibility = View.GONE
+        }
+        if (!browse) {
+            // Chat mode always needs back enabled so the gesture returns to browse.
+            backCallback.isEnabled = true
+            chatModeView.onShown()
+        } else {
+            // Restore browse back-stack logic: only enabled when there is history.
+            backCallback.isEnabled = backStack.size >= 2 || viewingArchiveEntry
+        }
+    }
+
     private val backCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
+            // Chat mode: let chat consume the back press first; if it
+            // doesn't (stack at root), flip back to browse.
+            if (currentMode == Mode.CHAT) {
+                if (!chatModeView.onBack()) setMode(Mode.BROWSE)
+                return
+            }
             // Inner-archive nav: viewing an entry preview, back returns
             // to the listing — no refetch, no address-stack change.
             val ctx = archiveContext
@@ -94,11 +142,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private var statusJob: Job? = null
 
     /**
-     * True once any fetch has succeeded this session. Before that, the
-     * timed status text frames a slow fetch as "connecting / first
-     * connection takes a moment" (the bootstrap warmup is the likely
-     * culprit). After, it's just "fetching / still fetching" — saying
-     * "first connection" on every fetch is misleading.
+     * True once any fetch has succeeded this session. Selects between
+     * the pre-first-connection status string set (mentions the bootstrap
+     * warmup) and the steady-state set.
      */
     private var hasConnectedOnce = false
 
@@ -202,8 +248,21 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      */
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         val raw = result?.contents ?: return@registerForActivityResult
-        val addr = parseAutonomiInput(raw)
-        if (addr == null) {
+        val importPayload = parseBookmarkImportUrl(raw)
+        if (importPayload != null) {
+            handleBookmarkImport(importPayload)
+            return@registerForActivityResult
+        }
+        // x0x://pair/ URIs go to the chat pairing flow BEFORE the autonomi check.
+        // persist = false: scanning a pair QR must not permanently overwrite
+        // the user's chosen wake-up mode (same policy as the deep-link path).
+        if (io.etchit.fetchit.chat.ChatUris.isPairUri(raw)) {
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.importFromUri(raw)
+            return@registerForActivityResult
+        }
+        val parsed = parseAutonomiUrl(raw)
+        if (parsed == null) {
             Snackbar.make(
                 binding.rootCoordinator,
                 R.string.scan_qr_not_autonomi,
@@ -211,7 +270,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             ).show()
             return@registerForActivityResult
         }
-        loadAddress(addr)
+        loadAddress(parsed.address, parsed.query)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -227,12 +286,26 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
         settingsSheet = SettingsSheet(binding, this).also { it.bind() }
+        chatModeView = ChatModeView(
+            context = this,
+            container = binding.chatContainer,
+            controller = fetchitApp().chatController,
+            lifecycleScope = lifecycleScope,
+            lifecycleOwner = this,
+            onLaunchScanner = ::onScanClicked,
+            onOpenAutonomi = { addr ->
+                setMode(Mode.BROWSE)
+                loadAddress(addr)
+            },
+        )
 
         binding.fetchButton.setOnTapListener { onFetchClicked() }
         binding.bookmarkButton.setOnClickListener {
             BookmarkSheet().show(supportFragmentManager, "bookmarks")
         }
         binding.scanButton.setOnClickListener { onScanClicked() }
+        binding.modeChatButton.setOnClickListener { setMode(Mode.CHAT) }
+        binding.modeBrowseButton.setOnClickListener { setMode(Mode.BROWSE) }
         binding.closeButton.setOnClickListener {
             archiveContext = null
             viewingArchiveEntry = false
@@ -269,16 +342,22 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
         // In-page autonomi:// links: tapping <a href="autonomi://addr">
         // inside a rendered SPA loads that address as a fresh fetch.
-        binding.htmlView.setOnAutonomiNavigate(::loadAddress)
+        binding.htmlView.setOnAutonomiNavigate { loadAddress(it) }
         binding.htmlView.setOnAutonomiBack(::navigateBack)
+
+        // Restore the last-used mode (browse or chat). Applied before
+        // handleViewIntent so a deep-link intent can override it.
+        // setMode early-returns on BROWSE (the initial state) so this
+        // only triggers a real switch when the persisted mode is "chat".
+        val lastMode = SettingsStore(this).lastMode()
+        if (lastMode == "chat") setMode(Mode.CHAT)
 
         // External entry: another app, a QR scanner, or a clicked link
         // routed an autonomi://<addr> intent at us — pick it up.
         handleViewIntent(intent)
 
-        // Pull-down-from-top: full reset to the idle screen — clear
-        // the address input, dismiss any rendition, restore the fetch
-        // button. Lighter than ✕ + manual address-clear.
+        // Pull-down-from-top: full reset — clear the address input,
+        // dismiss any rendition, restore the fetch button.
         binding.swipeRefresh.setColorSchemeColors(themeColor(R.attr.fetchitCopper))
         binding.swipeRefresh.setProgressBackgroundColorSchemeColor(themeColor(R.attr.fetchitInk3))
         binding.swipeRefresh.setOnRefreshListener { resetToIdle() }
@@ -320,7 +399,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         val clip = cm.primaryClip ?: return
         if (clip.itemCount == 0) return
         val text = clip.getItemAt(0)?.coerceToText(this)?.toString() ?: return
-        val addr = parseAutonomiInput(text) ?: return
+        val parsed = parseAutonomiUrl(text) ?: return
+        val addr = parsed.address
 
         // Truncated display so the chip stays readable on phones.
         val display = "autonomi://${addr.take(6)}…${addr.takeLast(4)}"
@@ -330,7 +410,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             binding.pasteChip.visibility = View.GONE
             binding.addressInput.setText(addr)
             binding.addressInput.setSelection(addr.length)
-            lifecycleScope.launch { doFetch(addr) }
+            lifecycleScope.launch { doFetch(addr, parsed.query) }
         }
     }
 
@@ -343,50 +423,107 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
     private fun handleViewIntent(intent: Intent?) {
         val uri = intent?.data ?: return
+        // `fetchit://import?v=1&data=…` is the bookmark-import deep
+        // link the desktop's QR-share emits. Route to the
+        // confirmation dialog before anything else.
+        if (uri.scheme == "fetchit" && uri.host == "import") {
+            val parsed = parseBookmarkImportUrl(uri.toString()) ?: return
+            handleBookmarkImport(parsed)
+            return
+        }
+        // `x0x://pair/<agent-id>?r=<relay>` deep links: switch to chat
+        // mode and hand the URI to ChatModeView which runs connect-first
+        // import (Task 4 guarantees this). persist = false so a crafted
+        // pair URI cannot permanently overwrite the user's wake-up mode.
+        if (uri.scheme == "x0x" && uri.host == "pair") {
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.importFromUri(uri.toString())
+            return
+        }
         if (uri.scheme != "autonomi") return
         // `autonomi://abc…` parses with `host = "abc…"`. Some senders
         // produce `autonomi:abc…` (opaque) which lands in
-        // `schemeSpecificPart` — accept both shapes.
-        val raw = uri.host ?: uri.schemeSpecificPart?.removePrefix("//") ?: return
-        val addr = parseAutonomiInput(raw) ?: return
-        loadAddress(addr)
+        // `schemeSpecificPart` — accept both shapes. Keep any `?query`
+        // so it reaches the renderer.
+        val host = uri.host
+        val raw = if (host != null) {
+            host + (uri.encodedQuery?.let { "?$it" } ?: "")
+        } else {
+            uri.schemeSpecificPart?.removePrefix("//") ?: return
+        }
+        val parsed = parseAutonomiUrl(raw) ?: return
+        loadAddress(parsed.address, parsed.query)
+    }
+
+    /**
+     * Show the import-confirmation dialog and, on positive, merge the
+     * incoming bookmarks into [`BookmarkStore`]. De-duplication by
+     * address is handled inside [`BookmarkStore.mergeImport`] —
+     * existing bookmarks win on conflict so the user's chosen labels
+     * survive a re-import.
+     */
+    private fun handleBookmarkImport(payload: BookmarkImport) {
+        if (payload.bookmarks.isEmpty()) {
+            Snackbar.make(
+                binding.rootCoordinator,
+                R.string.bookmark_import_empty,
+                Snackbar.LENGTH_LONG,
+            ).show()
+            return
+        }
+        showBookmarkImportDialog(this, payload) { confirmed ->
+            val bookmarks = confirmed.bookmarks.map {
+                Bookmark.create(label = it.label.ifBlank { it.address }, address = it.address)
+            }
+            store.mergeImport(bookmarks)
+            val added = bookmarks.size
+            Snackbar.make(
+                binding.rootCoordinator,
+                resources.getQuantityString(
+                    R.plurals.bookmark_import_added,
+                    added,
+                    added,
+                ),
+                Snackbar.LENGTH_SHORT,
+            ).show()
+        }
     }
 
     /** Populate the input and kick off a fetch. Used by deep links + in-page navigation. */
-    private fun loadAddress(addr: String) {
+    private fun loadAddress(addr: String, query: String = "") {
         binding.addressInput.setText(addr)
         binding.addressInput.setSelection(addr.length)
-        lifecycleScope.launch { doFetch(addr) }
+        lifecycleScope.launch { doFetch(addr, query) }
     }
 
     private fun onFetchClicked() {
         val raw = binding.addressInput.text.toString()
-        val addr = parseAutonomiInput(raw)
-        if (addr == null) {
+        val parsed = parseAutonomiUrl(raw)
+        if (parsed == null) {
             showValidationError(getString(R.string.error_invalid_address))
             return
         }
+        val addr = parsed.address
         // Re-write the input in canonical form (drop the optional
         // `autonomi://` so the user sees what's actually being fetched).
         if (raw.trim() != addr) {
             binding.addressInput.setText(addr)
             binding.addressInput.setSelection(addr.length)
         }
-        lifecycleScope.launch { doFetch(addr) }
+        lifecycleScope.launch { doFetch(addr, parsed.query) }
     }
 
-    private suspend fun doFetch(addr: String) {
+    private suspend fun doFetch(addr: String, query: String = "") {
         val app = fetchitApp()
         // Disk cache first — Autonomi addresses are immutable, so a hit
-        // is always correct, even across app restarts. On a hit we render
-        // straight over whatever's on screen, with no "fetching" chrome
-        // and no blank frame in between — so back-navigation and revisits
-        // feel instant instead of looking like the page is reloading.
+        // is always correct, even across app restarts. Cache-hit path
+        // renders directly without clearing or toggling the in-flight
+        // fetch chrome.
         val cached = withContext(Dispatchers.IO) { app.bytesCache.get(addr) }
         if (cached != null) {
             try {
                 val rendition = withContext(Dispatchers.IO) { detect(cached) }
-                afterRender(addr, rendition, cached)
+                afterRender(addr, rendition, cached, query)
                 binding.swipeRefresh.isRefreshing = false
                 return
             } catch (e: Exception) {
@@ -405,12 +542,12 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
                 app.bytesCache.put(addr, b)
                 detect(b) to b
             }
-            afterRender(addr, rendition, bytes)
+            afterRender(addr, rendition, bytes, query)
         } catch (e: FetchitException) {
-            showFetchError(addr, e.message ?: e.toString())
+            showFetchError(addr, query, e.message ?: e.toString())
         } catch (e: Exception) {
             Log.e(TAG, "fetch failed", e)
-            showFetchError(addr, e.message ?: e.toString())
+            showFetchError(addr, query, e.message ?: e.toString())
         } finally {
             setFetchInFlight(false)
             binding.swipeRefresh.isRefreshing = false
@@ -418,7 +555,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     /** Common tail of a successful fetch: bind the rendition and record nav state. */
-    private fun afterRender(addr: String, rendition: RenditionFfi, bytes: ByteArray) {
+    private fun afterRender(addr: String, rendition: RenditionFfi, bytes: ByteArray, query: String = "") {
         lastBinary = null
         cacheBinaryHandle(rendition)
         // Archive-context bookkeeping: capture the listing when we land
@@ -437,7 +574,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (rendition is RenditionFfi.Archive && EpubBook.looksLikeEpub(rendition.entries.map { it.path })) {
             renderer.bindEpub(addr, bytes, rendition.entries)
         } else {
-            renderer.render(rendition, addr)
+            renderer.render(rendition, addr, query)
         }
         hasConnectedOnce = true
         lastFetchAddr = addr
@@ -481,12 +618,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.fetchButton.setFetching(inFlight)
         statusJob?.cancel()
         if (inFlight) {
-            // Two-stage status: a short line appears after a brief delay
-            // so quick cache hits don't flash text; a longer one
-            // replaces it if the fetch drags. Before the first
-            // successful fetch the wording leans on the bootstrap
-            // warmup ("connecting / first connection takes a moment");
-            // after, it's just "fetching / still fetching".
+            // Two-stage status: an initial delay before any text appears,
+            // then a second timer swaps to the long-fetch string. The
+            // string-set pair is selected by hasConnectedOnce.
             val short = if (hasConnectedOnce) R.string.status_fetching else R.string.status_connecting
             val long = if (hasConnectedOnce) R.string.status_still_fetching else R.string.status_first_connection
             statusJob = lifecycleScope.launch {
@@ -503,7 +637,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     private fun onAudioError(msg: String) {
-        showFetchError(currentAddressInput(), msg)
+        showFetchError(currentAddressInput(), "", msg)
     }
 
     /**
@@ -518,7 +652,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.bookmarkButton.visibility = chrome
         binding.kindText.visibility = chrome
         binding.closeButton.visibility = chrome
-        binding.settingsSheet.visibility = chrome
+        if (currentMode == Mode.BROWSE) binding.settingsSheet.visibility = chrome
 
         val insets = WindowCompat.getInsetsController(window, window.decorView)
         if (on) {
@@ -588,13 +722,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      * by string-matching known patterns. The technical detail still
      * lands in logcat for debugging.
      */
-    private fun showFetchError(addr: String, msg: String) {
+    private fun showFetchError(addr: String, query: String, msg: String) {
         renderer.clear()
         Log.w(TAG, "fetch error for $addr: $msg")
         val friendly = friendlyFetchError(msg)
         Snackbar.make(binding.rootCoordinator, friendly, Snackbar.LENGTH_INDEFINITE)
             .setAction(R.string.action_retry) {
-                lifecycleScope.launch { doFetch(addr) }
+                lifecycleScope.launch { doFetch(addr, query) }
             }
             .show()
     }
@@ -640,21 +774,33 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      * user can copy the address, copy the `autonomi://` URL, share the
      * branded PNG card, or fall back to plain-text share. Visible only
      * while content is rendered (see [`RenditionRenderer`]).
+     *
+     * Passes [openThreadFromBrowse] so the dialog can surface the
+     * "send in chat" action alongside the existing share affordances.
      */
     private fun onShareCurrentClicked() {
         val addr = lastFetchAddr ?: return
-        showQrPreviewDialog(this, addr)
+        showQrPreviewDialog(this, addr, onOpenThread = ::openThreadFromBrowse)
+    }
+
+    /**
+     * Switch to chat mode and open the thread for [agentIdHex].
+     * Used as the "open" callback from the browse-to-chat share bridge
+     * (mirrors how [onOpenAutonomi] crosses the boundary in the other
+     * direction).
+     */
+    private fun openThreadFromBrowse(agentIdHex: String) {
+        setMode(Mode.CHAT)
+        chatModeView.openThread(agentIdHex)
     }
 
     private companion object {
         const val TAG = "fetchit"
-        /** Wait this long before flashing any status text — keeps fast
-         *  cache hits invisible (no flicker). */
+        /** Initial delay before any status text appears; fetches that
+         *  finish below this duration display none. */
         const val STATUS_INITIAL_DELAY_MS = 1_500L
-        /** Switch from "connecting…" to the long-fetch reassurance after
-         *  this many ms. fetch>it's connect warmup runs up to ~10s
-         *  before it returns, so we reassure the user a couple of
-         *  seconds before that ceiling. */
+        /** Switch to the long-fetch string after this many ms. Set
+         *  below the ~10s ant-core connect-warmup ceiling. */
         const val STATUS_LONG_THRESHOLD_MS = 8_000L
     }
 }

@@ -26,7 +26,7 @@ under the AGPL, *and* grant the project the right to also offer it
 under the commercial track. The CLA does not transfer ownership; it
 just lets the project maintain both license offerings consistently.
 
-If the CLA is a hard no for you, that's understandable — please open an
+If the CLA is a hard no for you, that's understandable. Please open an
 issue describing the change and a maintainer will pick it up.
 
 ## Quality bar
@@ -34,14 +34,51 @@ issue describing the change and a maintainer will pick it up.
 fetch>it ships open-source from commit one. That means:
 
 - `cargo fmt --all` clean
-- `cargo clippy --all-targets -- -D warnings` clean
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
 - `cargo test --workspace` green
 - Every public item has rustdoc
 - `unwrap()` / `expect()` only in tests
 - New public functions ship with the tests that cover them, in the
   same change
 
-CI runs all of the above on every push and pull request.
+CI runs all of the above on every push and pull request. The full test
+matrix (every app, plus the network-test tiers) is documented in
+[`docs/TESTING.md`](docs/TESTING.md).
+
+## Docs track code
+
+Doc-comments and living architecture docs are part of the code, not a
+separate artifact. When you change or add behavior:
+
+- Update the affected doc-comments (`//!` / `///`) and any living
+  architecture doc (per-crate module docs, files under `docs/`) in the
+  **same change**. A behavior change that leaves the docs describing the
+  old behavior is an incomplete change.
+- Don't write doc-comments that expire. Describe what the code does now;
+  phrasing like "ships X for now", "lands next milestone", "doesn't exist
+  today", or "scaffolding, wiring lands later" becomes a lie the moment
+  the work lands. Future work belongs in an issue or a `TODO` with an
+  issue reference, not in a description of current behavior.
+- Treat code as the source of truth for current behavior. Doc-comments
+  and design docs can drift; verify against the code before relying on
+  them. Dated specs and plans under `docs/superpowers/` are point-in-time
+  records, not a description of the current system.
+
+## Know what's already built
+
+Before proposing to build something, confirm it isn't already there. We have lost
+time scoping work for features that already shipped.
+
+- Check first: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) (a code-anchored
+  index of shipped capabilities) or `scripts/whats-built.sh <keyword>`.
+- Before calling anything missing or a gap, verify against the code and cite the
+  `file:symbol` you checked. Memory, a doc, or a generated summary is not enough
+  on its own.
+- A capability may live on an unmerged branch, so run `git branch -a` before
+  concluding it's absent; your checkout only shows the current branch.
+- When you add a capability, record it in
+  [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) in the same change (anchored, and
+  stamped so `scripts/check-arch-stamps.sh` keeps it honest).
 
 ## Adding a content handler
 

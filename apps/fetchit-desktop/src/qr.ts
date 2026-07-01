@@ -27,8 +27,8 @@ export interface QrSvgOptions {
    */
   errorCorrectionLevel?: QrErrorCorrection;
   /**
-   * Embed a short text mark in the QR's center (a "branded QR"). The library
-   * draws a white square big enough for the glyph and stamps the text on top.
+   * Embed a short text mark in the QR's center. A white panel sized
+   * for the glyph is drawn and the text stamped on top.
    * Only safe with `errorCorrectionLevel: "H"` for non-trivial payloads.
    */
   centerLogo?: {
@@ -137,12 +137,11 @@ export function serializeSvg(svg: SVGSVGElement): string {
   return new XMLSerializer().serializeToString(svg);
 }
 
-// ── Exportable branded card ─────────────────────────────────────────
+// ── Exportable card ─────────────────────────────────────────────────
 //
-// The QR-share modal shows a stripped-down preview, but Save image /
-// Copy image need to produce a fully branded artifact — the recipient
-// needs to see "fetch>it" wordmark + the address + a scan-with hint,
-// otherwise the QR is anonymous and the brand is lost.
+// Exportable card SVG used by Save image / Copy image. Includes
+// wordmark + abbreviated address + footer in addition to the QR (the
+// share-modal preview omits these).
 
 const CARD_W = 720;
 const CARD_PAD = 40;
@@ -157,21 +156,19 @@ const FAMILY_MONO =
   "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 /** Abbreviated form of a 64-hex Autonomi address, suited for inline
- *  display next to a QR code (the full hex stays inside the QR + on the
- *  clipboard). Same 8+…+8 shape across desktop + mobile so a card and a
- *  bookmark / history row look related. */
+ *  display next to a QR code (the full hex stays inside the QR + on
+ *  the clipboard). Same 8+…+8 shape as the bookmark / history-row
+ *  truncation on desktop and Android. */
 export function abbreviateAddress(address: string): string {
   const hex = address.toLowerCase();
   if (hex.length <= 17) return hex;
   return `${hex.slice(0, 8)}…${hex.slice(-8)}`;
 }
 
-/** Build the full export-card SVG for an `autonomi://<hex>` address.
- *  Layout: fetch>it wordmark, QR with copper centre mark, optional
- *  serif-italic title, abbreviated address (single line), "scan with
- *  fetch>it on mobile · etchit.io" footer. Title is shown only when
- *  the caller has something meaningful (etch title, page <title>,
- *  filename) — recipients otherwise have no idea what they're opening. */
+/** Build the export-card SVG for an `autonomi://<hex>` address.
+ *  Layout: wordmark, QR with centre mark, optional title, abbreviated
+ *  address, footer. Title row is emitted only when `title` is
+ *  non-empty. */
 export function renderExportCardSvg(
   address: string,
   title?: string | null,
@@ -181,8 +178,8 @@ export function renderExportCardSvg(
   const titleText = (title ?? "").trim();
   const showTitle = titleText.length > 0;
   // Cap title at ~40 chars so it fits one line at `titleSize` on a
-  // 720-wide card. Past that the renderer can't keep it readable
-  // without shrinking, which makes the layout feel uneven.
+  // 720-wide card; longer text would overflow the card width at this
+  // font size.
   const titleClamped = showTitle && titleText.length > 40
     ? `${titleText.slice(0, 39)}…`
     : titleText;

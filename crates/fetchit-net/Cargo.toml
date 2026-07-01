@@ -12,6 +12,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Opt-in: the LocalDevnet integration test. It links ant-node, so it is
+# kept out of the regular `cargo test` build — enable explicitly with
+# `--features devnet-tests`.
+devnet-tests = ["ant-core/devnet"]
+
 [dependencies]
 fetchit-core = { path = "../fetchit-core" }
 ant-core = { workspace = true }
@@ -21,8 +27,16 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
 log = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }
+serde_json = { workspace = true }
+tempfile = "3.13"
+
+# The LocalDevnet integration test — only built when `devnet-tests` is on,
+# so the regular test build never links ant-node.
+[[test]]
+name = "devnet"
+path = "tests/devnet.rs"
+required-features = ["devnet-tests"]

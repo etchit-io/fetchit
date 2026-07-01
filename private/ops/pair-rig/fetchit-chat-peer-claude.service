@@ -1,0 +1,57 @@
+[Unit]
+Description=fetchit-chat-peer (claude-fetchit-B) for the Bob↔Alice pair rig
+# BindsTo (not Requires) so an x0xd-claude-here clean exit cascades a
+# restart here too — the embedded x0xd port-file self-heal handles
+# transient drift, BindsTo handles the case where x0xd actually goes
+# down and comes back on a new pid + port (Josh's "fix it once and
+# for all" ruling, 2026-06-03).
+BindsTo=x0xd-claude-here.service
+After=x0xd-claude-here.service
+
+[Service]
+Type=simple
+# Environment overrides for claude-chat-peer-start. Edit PEER_ADDR
+# to Alice's 64-hex agent id; the rest match the defaults baked into
+# the wrapper but are spelled out here so a systemctl edit doesn't
+# need to read the wrapper to know what's configurable.
+#
+# X0XD_BASE is intentionally NOT set — the wrapper reads it from
+# ~/.local/share/x0x-${X0XD_NAME}/api.port at every launch, so the
+# daemon picking a different port across restarts is transparent.
+# The chat-peer binary's own `--x0xd-port-file` flag (b552a65) is the
+# durable in-process self-heal; this env is only the initial seed.
+Environment=X0XD_NAME=claude-here
+Environment=PEER_DATA_DIR=%h/.local/share/fetchit-claude-peer
+Environment=PEER_DISPLAY=claude-fetchit-B
+Environment=PEER_BIN=%h/Desktop/etchit-fetchit/fetchit/target/debug/fetchit-chat-peer
+Environment=PEER_RELAY=http://67.207.94.66:8088
+Environment=PEER_OUTBOX_FILE=/tmp/claude-pair/to-alice.txt
+Environment=PEER_CURSOR_FILE=%h/.local/share/fetchit-claude-peer/chat-peer.cursor
+Environment=PEER_RX_LOG=/tmp/claude-rx
+Environment=PEER_ADDR=a48e8af11d8f76a73e59acda012caa4977ecfad91a232aa7e4eebd9537fcc947
+
+# The wrapper now invokes `chat --outbox-file/--cursor-file` (b552a65).
+# Permanent send failure exits 2; `Restart=always` brings us back
+# against a freshly-resolved x0xd port (the chat-peer's
+# `--x0xd-port-file` self-heal handles transient drift inside one
+# process; this is the cross-process safety net).
+ExecStart=%h/.local/bin/claude-chat-peer-start
+
+Restart=always
+RestartSec=3
+# Give chat-peer time to flush in-flight envelopes on SIGTERM.
+TimeoutStopSec=10
+KillMode=mixed
+
+MemoryMax=512M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# Two WantedBy targets: default.target so the unit auto-starts at
+# session login, AND x0xd-claude-here.service so a `systemctl start
+# x0xd-claude-here` also pulls this unit back up (closes the
+# BindsTo-cascades-stop-but-not-start gap surfaced by test 5 on
+# 2026-06-03). Re-enable after editing to materialize the dependency
+# symlinks: `systemctl --user reenable fetchit-chat-peer-claude`.
+WantedBy=default.target x0xd-claude-here.service

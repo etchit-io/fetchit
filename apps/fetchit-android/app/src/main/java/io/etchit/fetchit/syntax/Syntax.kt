@@ -6,9 +6,7 @@ import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 
 /**
- * Token-coloring framework. Ported from etchit-android's
- * `SyntaxHighlighters.kt` (single 653-line file there) and split per
- * language under this package per fetch>it's no-bloat rule.
+ * Token-coloring framework. One language per file under this package.
  *
  * Each language is a regex-based pass that walks the buffer, emits
  * tokens, and lets [`applyTokens`] stamp spans on the destination
@@ -16,8 +14,7 @@ import android.text.style.StyleSpan
  * inside escaped quotes, triple-quoted Python strings spanning
  * megabytes) gracefully fall back to plain text rather than mis-color.
  *
- * Same color values etchit uses, so the family looks consistent
- * across viewers and the editor.
+ * Colour values kept in sync with etchit's palette.
  */
 
 /**
@@ -40,7 +37,7 @@ interface SyntaxHighlighter {
     fun tokenize(text: CharSequence): List<HighlightToken>
 }
 
-/** Strict brand palette — every colour is from etchit's spec. */
+/** Token colour palette (kept in sync with etchit's). */
 object SyntaxColors {
     const val DEFAULT = 0xFFf5f2eb.toInt() // bone — left implicit
     const val KEYWORD = 0xFFc9732b.toInt() // copper

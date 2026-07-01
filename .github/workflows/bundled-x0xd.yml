@@ -1,0 +1,79 @@
+name: bundled-x0xd
+
+# Manual trigger + PRs that touch the bundled-binary surface. Cloning
+# x0x and building a release binary is ~15min on ubuntu-latest, so PRs
+# that only touch unrelated crates (chat, relay-client, core, web)
+# skip this lane via the `paths` filter. workflow_dispatch always
+# triggers regardless of path scope.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/fetchit-desktop/src-tauri/**'
+      - 'crates/x0xd-client/**'
+      - '.github/workflows/bundled-x0xd.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  X0XD_PIN_SHA: "aec35ab25b64374539ffeaa205a57d983e027226"
+
+jobs:
+  build-bundled-x0xd:
+    name: Build bundled x0xd + fetchit-desktop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fetchit
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux webkit deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
+
+      - name: Cache fetchit-desktop build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+          cache-on-failure: true
+
+      - name: Clone pinned saorsa-labs/x0x
+        run: |
+          git clone https://github.com/saorsa-labs/x0x "$HOME/x0x"
+          cd "$HOME/x0x"
+          git checkout "$X0XD_PIN_SHA"
+
+      # Cache after clone so Swatinem can hash the freshly-checked-out
+      # Cargo.lock when it computes the cache key. With the opposite
+      # order the restore-time key uses a fallback (no lock on disk)
+      # but the save-time key uses the lock, the two diverge, and the
+      # cache never hits across runs.
+      - name: Cache x0x build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ~/x0x
+          cache-on-failure: true
+
+      - name: Build x0xd
+        run: |
+          cd "$HOME/x0x"
+          cargo build --release --bin x0xd
+
+      - name: Build fetchit-desktop with bundled binary
+        env:
+          FETCHIT_BUNDLED_X0XD_PATH: /home/runner/x0x/target/release/x0xd
+          FETCHIT_BUNDLED_X0XD_VERSION: "0.21.3-pre.fetchit"
+        run: |
+          cargo build --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
+
+      - name: Confirm x0xd staged into resources
+        run: |
+          ls -lh apps/fetchit-desktop/src-tauri/resources/x0xd/

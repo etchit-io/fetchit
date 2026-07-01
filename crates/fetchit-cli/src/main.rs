@@ -63,6 +63,13 @@ enum Command {
         /// Override the soft cap on rendered text/JSON, in bytes.
         #[arg(long)]
         max_bytes: Option<usize>,
+        /// Stream the download to this path instead of rendering.
+        /// Switches the underlying call from `data_download` (returns
+        /// `Bytes`, no progress) to `file_download_with_progress`
+        /// (writes to disk, emits progress events) — the same path
+        /// the `ant` CLI uses, for apples-to-apples benchmarking.
+        #[arg(long, value_name = "PATH")]
+        to: Option<PathBuf>,
     },
 }
 
@@ -81,7 +88,8 @@ fn main() -> ExitCode {
             peers,
             data_home,
             max_bytes,
-        } => run_get(&addr, peers, data_home.as_deref(), max_bytes),
+            to,
+        } => run_get(&addr, peers, data_home.as_deref(), max_bytes, to.as_deref()),
     }
 }
 
@@ -103,6 +111,7 @@ fn run_get(
     peer_overrides: Vec<String>,
     data_home: Option<&Path>,
     max_bytes: Option<usize>,
+    to: Option<&Path>,
 ) -> ExitCode {
     let parsed = match addr.parse::<Address>() {
         Ok(a) => a,
@@ -133,6 +142,7 @@ fn run_get(
         }
     };
 
+    let to_owned = to.map(Path::to_path_buf);
     runtime.block_on(async move {
         eprintln!("fetchit: connecting to {} bootstrap peer(s)…", peers.len());
         let client = match AutonomiClient::connect(&peers).await {
@@ -145,26 +155,42 @@ fn run_get(
         eprintln!("fetchit: connected ({} peer(s))", client.peer_count().await);
 
         eprintln!("fetchit: fetching {parsed}…");
-        let bytes = match client.fetch(&parsed).await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("fetchit: fetch failed: {e}");
-                return ExitCode::from(1);
+        if let Some(out_path) = to_owned {
+            // Stream-to-disk path — matches `ant file download`'s call
+            // shape exactly. Progress events are accepted but discarded
+            // so stderr stays quiet enough for benchmark timings.
+            match client.fetch_with_progress(&parsed, &out_path, |_| {}).await {
+                Ok(()) => {
+                    let bytes = std::fs::metadata(&out_path).map_or(0, |m| m.len());
+                    eprintln!("fetchit: wrote {bytes} bytes to {}", out_path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("fetchit: fetch failed: {e}");
+                    ExitCode::from(1)
+                }
             }
-        };
-
-        let mut ctx = RenderContext::default();
-        if let Some(n) = max_bytes {
-            ctx.max_text_bytes = n;
-        }
-        match default_registry().render(bytes, &Hint::default(), &ctx) {
-            Ok(rendition) => {
-                print_rendition(&rendition);
-                ExitCode::SUCCESS
+        } else {
+            let bytes = match client.fetch(&parsed).await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("fetchit: fetch failed: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let mut ctx = RenderContext::default();
+            if let Some(n) = max_bytes {
+                ctx.max_text_bytes = n;
             }
-            Err(e) => {
-                eprintln!("fetchit: render failed: {e}");
-                ExitCode::from(1)
+            match default_registry().render(bytes, &Hint::default(), &ctx) {
+                Ok(rendition) => {
+                    print_rendition(&rendition);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("fetchit: render failed: {e}");
+                    ExitCode::from(1)
+                }
             }
         }
     })

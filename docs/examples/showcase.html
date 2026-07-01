@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fetch&gt;it · showcase</title>
+<style>
+:root {
+  /* default — copper */
+  --bg:        #16110d;
+  --bg-2:      #1f1813;
+  --line:      #3a2e23;
+  --ink:       #f1e8da;
+  --ink-dim:   #c4b6a3;
+  --muted:     #8a7e6e;
+  --accent:    #d3823a;
+  --accent-2:  #ed9a4f;
+
+  /* swatch colors — fixed regardless of selected theme */
+  --sw-copper:   #d3823a;
+  --sw-forest:   #5cb380;
+  --sw-midnight: #8a7df5;
+  --sw-paper:    #b85a2e;
+  --sw-noir:     #f0f0f0;
+
+  --font-display: ui-serif, "Iowan Old Style", "Apple Garamond", Baskerville, "Times New Roman", Times, serif;
+  --font-body:    -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Helvetica Neue", Roboto, system-ui, sans-serif;
+  --font-mono:    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Shared motion vocabulary — paired with fetch>it for cross-app coherence. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-micro: 160ms;
+  --dur-trans: 280ms;
+  --dur-enter: 720ms;
+}
+
+html[data-theme="forest"] {
+  --bg:       #0c1812;
+  --bg-2:     #132019;
+  --line:     #1d3b2c;
+  --ink:      #e6f0e8;
+  --ink-dim:  #b1c5b6;
+  --muted:    #708778;
+  --accent:   #5cb380;
+  --accent-2: #8ed7a5;
+}
+html[data-theme="midnight"] {
+  --bg:       #0a0f20;
+  --bg-2:     #131a30;
+  --line:     #2a345a;
+  --ink:      #e6e9ff;
+  --ink-dim:  #b3b9d5;
+  --muted:    #757b9a;
+  --accent:   #8a7df5;
+  --accent-2: #b0a3ff;
+}
+html[data-theme="paper"] {
+  --bg:       #f4ecdd;
+  --bg-2:     #ece2cf;
+  --line:     #d8c8a8;
+  --ink:      #1c130a;
+  --ink-dim:  #4a3925;
+  --muted:    #7a6a52;
+  --accent:   #b85a2e;
+  --accent-2: #9c4521;
+}
+html[data-theme="noir"] {
+  --bg:       #050505;
+  --bg-2:     #111;
+  --line:     #2a2a2a;
+  --ink:      #f3f3f3;
+  --ink-dim:  #b8b8b8;
+  --muted:    #6f6f6f;
+  --accent:   #e7e7e7;
+  --accent-2: #fff;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  min-height: 100vh;
+  padding: 48px 24px 96px;
+  transition: background-color var(--dur-trans) ease-out, color var(--dur-trans) ease-out;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+.shell { max-width: 880px; margin: 0 auto; }
+
+/* ─── composer panel ───────────────────────────────────────────── */
+.composer {
+  padding: 28px 32px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  margin-bottom: 64px;
+}
+.composer-title {
+  margin: 0 0 22px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.composer-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 20px;
+  margin-bottom: 22px;
+}
+@media (max-width: 600px) {
+  .composer-grid { grid-template-columns: 1fr; }
+}
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field.wide { grid-column: 1 / -1; }
+.field > span {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.field input,
+.field textarea {
+  font: 14px/1.55 var(--font-body);
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 13px;
+  outline: none;
+  transition: border-color var(--dur-micro) ease-out;
+  width: 100%;
+}
+.field input:focus,
+.field textarea:focus { border-color: var(--accent); }
+.field textarea { min-height: 92px; resize: vertical; }
+
+.picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  margin-bottom: 22px;
+  padding-top: 6px;
+}
+.picker { display: flex; align-items: center; gap: 12px; }
+.picker-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.swatches { display: flex; gap: 8px; }
+.sw {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 2px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--dur-micro) ease-out, border-color var(--dur-micro) ease-out, box-shadow var(--dur-micro) ease-out;
+}
+.sw:hover { transform: scale(1.12); }
+.sw.active {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 3px var(--accent);
+}
+.sw-copper   { background: var(--sw-copper); }
+.sw-forest   { background: var(--sw-forest); }
+.sw-midnight { background: var(--sw-midnight); }
+.sw-paper    { background: var(--sw-paper); }
+.sw-noir     { background: var(--sw-noir); }
+
+.layouts { display: flex; gap: 6px; }
+.layouts button {
+  font: 12px var(--font-mono);
+  background: var(--bg);
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: all var(--dur-micro) ease-out;
+}
+.layouts button:hover { border-color: var(--accent); color: var(--ink); }
+.layouts button.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.composer-actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.btn {
+  font: 600 13.5px var(--font-body);
+  padding: 10px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid;
+  transition: all var(--dur-micro) ease-out;
+}
+.btn.primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+.btn.primary:hover {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--ink-dim);
+  border-color: var(--line);
+}
+.btn.ghost:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+/* ─── preview ──────────────────────────────────────────────────── */
+#preview {
+  animation: enter var(--dur-enter) var(--ease-out-expo) both;
+}
+@keyframes enter {
+  from { opacity: 0; transform: translateY(20px); }
+}
+
+.cover {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  aspect-ratio: 16 / 10;
+  margin-bottom: 56px;
+}
+.cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  animation: kenburns 32s ease-in-out infinite alternate;
+}
+@keyframes kenburns {
+  to { transform: scale(1.08) translate(2%, -2%); }
+}
+.cover-gradient {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(70% 70% at 22% 28%, var(--accent) 0%, transparent 55%),
+    radial-gradient(60% 60% at 78% 78%, var(--accent-2) 0%, transparent 60%),
+    linear-gradient(135deg, var(--bg-2), var(--bg));
+  opacity: 0.85;
+}
+.cover-mark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font: 600 14px/1 var(--font-display);
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--ink);
+  opacity: 0.42;
+  pointer-events: none;
+}
+.cover-mark span { color: var(--accent-2); }
+
+.eyebrow {
+  display: inline-block;
+  font: 500 11px var(--font-mono);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  margin-bottom: 24px;
+}
+
+h1.title {
+  font: 600 clamp(34px, 5.6vw, 58px)/1.04 var(--font-display);
+  letter-spacing: -0.018em;
+  color: var(--ink);
+  margin: 0 0 28px;
+}
+
+.body {
+  font: 18px/1.7 var(--font-body);
+  color: var(--ink-dim);
+  margin-bottom: 36px;
+  max-width: 640px;
+}
+.body p { margin: 0 0 1.2em; }
+.body p:last-child { margin-bottom: 0; }
+
+.signature {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding-top: 26px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 14.5px;
+}
+.signature .author {
+  color: var(--ink-dim);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.signature .dot { color: var(--accent); font-weight: 700; }
+.signature .date {
+  font: 12.5px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+}
+
+/* layout: side */
+body[data-layout="side"] #preview {
+  display: grid;
+  grid-template-columns: 1fr 1.1fr;
+  gap: 56px;
+  align-items: start;
+}
+body[data-layout="side"] .cover {
+  margin-bottom: 0;
+  aspect-ratio: 4 / 5;
+  position: sticky;
+  top: 32px;
+}
+@media (max-width: 700px) {
+  body[data-layout="side"] #preview {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+  body[data-layout="side"] .cover {
+    position: static;
+    aspect-ratio: 16 / 10;
+    margin-bottom: 0;
+  }
+}
+
+/* layout: prose */
+body[data-layout="prose"] .cover { display: none; }
+body[data-layout="prose"] .body > p:first-of-type::first-letter {
+  font: 600 4.4em/0.86 var(--font-display);
+  float: left;
+  padding: 0.07em 0.14em 0 0;
+  color: var(--accent);
+}
+
+/* preview empty-state placeholder */
+.placeholder {
+  text-align: center;
+  padding: 80px 24px;
+  background: var(--bg-2);
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  color: var(--muted);
+  font: 14.5px/1.65 var(--font-body);
+}
+.placeholder strong {
+  display: block;
+  font: 600 18px var(--font-display);
+  color: var(--ink-dim);
+  margin-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+
+/* ─── recipe footer ────────────────────────────────────────────── */
+.recipe {
+  margin-top: 56px;
+  padding: 18px 22px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  font: 12.5px/1.7 var(--font-mono);
+  color: var(--muted);
+  word-break: break-all;
+}
+.recipe-label {
+  display: block;
+  color: var(--ink-dim);
+  font-weight: 600;
+  margin-bottom: 6px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+#recipe-url { color: var(--accent-2); display: block; }
+#recipe-url.empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body data-layout="hero">
+<div class="shell">
+
+  <header class="composer">
+    <h2 class="composer-title">Compose</h2>
+
+    <div class="composer-grid">
+      <label class="field">
+        <span>Title</span>
+        <input id="i-title" type="text" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Eyebrow</span>
+        <input id="i-eyebrow" type="text" autocomplete="off" placeholder="ESSAY · CHANGELOG · NOTE">
+      </label>
+      <label class="field wide">
+        <span>Body</span>
+        <textarea id="i-body" rows="4" placeholder="Body copy. Use blank lines to break paragraphs."></textarea>
+      </label>
+      <label class="field wide">
+        <span>Body address — fetch body from Autonomi (64-hex; overrides inline body when set)</span>
+        <input id="i-bodyAddr" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Author</span>
+        <input id="i-author" type="text" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Date</span>
+        <input id="i-date" type="text" autocomplete="off" placeholder="May 2026">
+      </label>
+      <label class="field wide">
+        <span>Cover image · 64-hex Autonomi address (optional)</span>
+        <input id="i-img" type="text" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+
+    <div class="picker-row">
+      <div class="picker">
+        <span class="picker-label">Theme</span>
+        <div class="swatches">
+          <button type="button" data-theme="copper"   class="sw sw-copper"   title="copper"   aria-label="copper"></button>
+          <button type="button" data-theme="forest"   class="sw sw-forest"   title="forest"   aria-label="forest"></button>
+          <button type="button" data-theme="midnight" class="sw sw-midnight" title="midnight" aria-label="midnight"></button>
+          <button type="button" data-theme="paper"    class="sw sw-paper"    title="paper"    aria-label="paper"></button>
+          <button type="button" data-theme="noir"     class="sw sw-noir"     title="noir"     aria-label="noir"></button>
+        </div>
+      </div>
+      <div class="picker">
+        <span class="picker-label">Layout</span>
+        <div class="layouts">
+          <button type="button" data-layout="hero">hero</button>
+          <button type="button" data-layout="side">side</button>
+          <button type="button" data-layout="prose">prose</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer-actions">
+      <button type="button" id="copy-url" class="btn primary">Copy share URL</button>
+      <button type="button" id="reset"    class="btn ghost">Reset</button>
+    </div>
+  </header>
+
+  <main id="preview"></main>
+
+  <footer class="recipe">
+    <span class="recipe-label">URL recipe — the part after this page's address</span>
+    <code id="recipe-url"></code>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var KEYS    = ["title", "body", "bodyAddr", "eyebrow", "author", "date", "img", "theme", "layout"];
+  var THEMES  = ["copper", "forest", "midnight", "paper", "noir"];
+  var LAYOUTS = ["hero", "side", "prose"];
+  var DEFAULTS = { theme: "copper", layout: "hero" };
+  var HEX64 = /^[0-9a-fA-F]{64}$/;
+
+  // Map JS state key to URL param key (most match; bodyAddr → body-addr).
+  function urlKey(k) { return k === "bodyAddr" ? "body-addr" : k; }
+
+  var STATE = {
+    title: "", body: "", bodyAddr: "", eyebrow: "", author: "", date: "", img: "",
+    theme: "copper", layout: "hero",
+  };
+
+  // Hydrate STATE from URL — prefer fetch>it's explicit channel, fall
+  // back to location.search.
+  var queryStr = (window.fetchit && window.fetchit.query) || location.search;
+  var params = new URLSearchParams(queryStr);
+  KEYS.forEach(function (k) {
+    var v = params.get(urlKey(k));
+    if (v != null) STATE[k] = v;
+  });
+  if (THEMES.indexOf(STATE.theme)   < 0) STATE.theme  = "copper";
+  if (LAYOUTS.indexOf(STATE.layout) < 0) STATE.layout = "hero";
+
+  document.documentElement.dataset.theme = STATE.theme;
+  document.body.dataset.layout           = STATE.layout;
+
+  // DOM refs
+  var input = {};
+  ["title", "body", "bodyAddr", "eyebrow", "author", "date", "img"].forEach(function (k) {
+    input[k] = document.getElementById("i-" + k);
+  });
+  var swatches   = Array.from(document.querySelectorAll(".sw"));
+  var layoutBtns = Array.from(document.querySelectorAll(".layouts button"));
+  var preview    = document.getElementById("preview");
+  var recipeUrl  = document.getElementById("recipe-url");
+  var copyBtn    = document.getElementById("copy-url");
+  var resetBtn   = document.getElementById("reset");
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls)          e.className   = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function span(cls, text) { return el("span", cls, text); }
+
+  function paragraphsOf(text) {
+    return text.replace(/\\n/g, "\n")
+               .split(/(?:\r?\n){2,}/)
+               .map(function (s) { return s.trim(); })
+               .filter(Boolean);
+  }
+
+  function syncInputs() {
+    ["title", "body", "bodyAddr", "eyebrow", "author", "date", "img"].forEach(function (k) {
+      if (input[k] && input[k].value !== STATE[k]) input[k].value = STATE[k];
+    });
+    swatches.forEach(function (sw) {
+      sw.classList.toggle("active", sw.dataset.theme === STATE.theme);
+    });
+    layoutBtns.forEach(function (b) {
+      b.classList.toggle("active", b.dataset.layout === STATE.layout);
+    });
+  }
+
+  function buildCover() {
+    var cover = el("div", "cover");
+    if (STATE.img && HEX64.test(STATE.img)) {
+      var i = el("img");
+      i.alt = "";
+      // Root-relative — fetch>it routes to the local media server, or
+      // resolves against the synthetic origin on Android.
+      i.src = "/" + STATE.img.toLowerCase();
+      cover.appendChild(i);
+    } else {
+      cover.appendChild(el("div", "cover-gradient"));
+      var mark = el("div", "cover-mark");
+      mark.append("fetch", span(null, "›"), "it");
+      cover.appendChild(mark);
+    }
+    return cover;
+  }
+
+  function buildSignature() {
+    if (!STATE.author && !STATE.date) return null;
+    var sig = el("div", "signature");
+    if (STATE.author)             sig.appendChild(el("span", "author", STATE.author));
+    if (STATE.author && STATE.date) sig.appendChild(el("span", "dot",    "·"));
+    if (STATE.date)               sig.appendChild(el("span", "date",   STATE.date));
+    return sig;
+  }
+
+  function buildBody() {
+    var b = el("div", "body");
+    paragraphsOf(STATE.body).forEach(function (para) {
+      b.appendChild(el("p", null, para));
+    });
+    return b;
+  }
+
+  function renderPreview() {
+    preview.replaceChildren();
+    var hasContent =
+      STATE.title || STATE.body || STATE.bodyAddr || STATE.img ||
+      STATE.eyebrow || STATE.author || STATE.date;
+    if (!hasContent) {
+      var ph = el("div", "placeholder");
+      ph.appendChild(el("strong", null, "Your composed card will appear here"));
+      ph.appendChild(document.createTextNode(
+        "Fill out the composer above. Theme and layout switch the look; the rest is your content."
+      ));
+      preview.appendChild(ph);
+      return;
+    }
+    preview.appendChild(buildCover());
+    if (STATE.eyebrow) preview.appendChild(el("div", "eyebrow", STATE.eyebrow));
+    if (STATE.title)   preview.appendChild(el("h1",  "title",   STATE.title));
+    // Body — addressable form (fetched from Autonomi) wins over inline.
+    if (STATE.bodyAddr && HEX64.test(STATE.bodyAddr)) {
+      var addrBody = el("div", "body");
+      addrBody.appendChild(el("p", null, "Loading body from address…"));
+      preview.appendChild(addrBody);
+      fetchBody(addrBody, STATE.bodyAddr);
+    } else if (STATE.body) {
+      preview.appendChild(buildBody());
+    }
+    var sig = buildSignature();
+    if (sig) preview.appendChild(sig);
+  }
+
+  function fetchBody(bodyEl, addr) {
+    fetch("/" + addr.toLowerCase()).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.text();
+    }).then(function (text) {
+      bodyEl.replaceChildren();
+      paragraphsOf(text).forEach(function (para) {
+        bodyEl.appendChild(el("p", null, para));
+      });
+    }).catch(function (e) {
+      bodyEl.replaceChildren(
+        el("p", null, "[Couldn't load body: " + (e.message || String(e)) + "]")
+      );
+    });
+  }
+
+  function currentParams() {
+    var p = new URLSearchParams();
+    if (STATE.eyebrow)  p.set("eyebrow",   STATE.eyebrow);
+    if (STATE.title)    p.set("title",     STATE.title);
+    if (STATE.body)     p.set("body",      STATE.body);
+    if (STATE.bodyAddr) p.set("body-addr", STATE.bodyAddr);
+    if (STATE.author)   p.set("author",    STATE.author);
+    if (STATE.date)     p.set("date",      STATE.date);
+    if (STATE.img)      p.set("img",       STATE.img);
+    if (STATE.theme  !== DEFAULTS.theme)  p.set("theme",  STATE.theme);
+    if (STATE.layout !== DEFAULTS.layout) p.set("layout", STATE.layout);
+    return p;
+  }
+
+  function renderRecipe() {
+    var qs = currentParams().toString();
+    if (qs) {
+      recipeUrl.textContent = "?" + qs;
+      recipeUrl.classList.remove("empty");
+    } else {
+      recipeUrl.textContent = "(fill the composer above — the URL will compose itself)";
+      recipeUrl.classList.add("empty");
+    }
+  }
+
+  function updateURL() {
+    // Best-effort sync to the iframe's URL. WebKit on about:srcdoc may
+    // refuse; the recipe display stays accurate regardless.
+    try {
+      var qs = currentParams().toString();
+      history.replaceState(history.state, "", qs ? "?" + qs : "?");
+    } catch (_) {}
+  }
+
+  function reactToChange() {
+    document.documentElement.dataset.theme = STATE.theme;
+    document.body.dataset.layout           = STATE.layout;
+    syncInputs();
+    renderPreview();
+    renderRecipe();
+    updateURL();
+  }
+
+  function composeShareUrl() {
+    var addr = (window.fetchit && window.fetchit.address) || "<showcase-address>";
+    var qs = currentParams().toString();
+    return "autonomi://" + addr + (qs ? "?" + qs : "");
+  }
+
+  function copyShareUrl() {
+    var url = composeShareUrl();
+    var orig = copyBtn.textContent;
+    var done = function (label) {
+      copyBtn.textContent = label;
+      setTimeout(function () { copyBtn.textContent = orig; }, 1600);
+    };
+
+    // Modern path first.
+    var modern;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        modern = navigator.clipboard.writeText(url);
+      }
+    } catch (_) {}
+    if (modern && typeof modern.then === "function") {
+      modern.then(function () { done("✓ Copied"); }, fallback);
+      return;
+    }
+    fallback();
+
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = url;
+      ta.style.cssText = "position:fixed;opacity:0;pointer-events:none;top:0;left:0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (_) {}
+      document.body.removeChild(ta);
+      done(ok ? "✓ Copied" : "Copy blocked — select URL below");
+    }
+  }
+
+  function reset() {
+    STATE.title = STATE.body = STATE.bodyAddr = STATE.eyebrow = STATE.author = STATE.date = STATE.img = "";
+    STATE.theme  = DEFAULTS.theme;
+    STATE.layout = DEFAULTS.layout;
+    reactToChange();
+  }
+
+  // Text input wiring
+  ["title", "body", "bodyAddr", "eyebrow", "author", "date", "img"].forEach(function (k) {
+    input[k].addEventListener("input", function (e) {
+      STATE[k] = e.target.value;
+      renderPreview();
+      renderRecipe();
+      updateURL();
+    });
+  });
+
+  // Swatches
+  swatches.forEach(function (sw) {
+    sw.addEventListener("click", function () {
+      STATE.theme = sw.dataset.theme;
+      reactToChange();
+    });
+  });
+
+  // Layout buttons
+  layoutBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      STATE.layout = b.dataset.layout;
+      reactToChange();
+    });
+  });
+
+  copyBtn.addEventListener("click", copyShareUrl);
+  resetBtn.addEventListener("click", reset);
+
+  // Initial render
+  syncInputs();
+  renderPreview();
+  renderRecipe();
+})();
+</script>
+</body>
+</html>

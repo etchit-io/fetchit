@@ -14,8 +14,10 @@ import uniffi.fetchit_ffi.defaultPeers
  */
 class SettingsStore(context: Context) {
 
+    private val appContext: Context = context.applicationContext
+
     private val prefs: SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /** Current peer list. User override if set, otherwise the FFI defaults. */
     fun peers(): List<String> {
@@ -52,9 +54,50 @@ class SettingsStore(context: Context) {
         prefs.edit().putString(KEY_THEME, theme.id).apply()
     }
 
+    /**
+     * User-chosen display name sent with outgoing DMs.
+     * Empty string means unset — callers should fall back to a
+     * synthesised default (e.g. "agent-" + first 6 hex of the agent id).
+     */
+    fun chatDisplayName(): String = prefs.getString(KEY_CHAT_DISPLAY_NAME, "").orEmpty()
+
+    /** Persist [name]. Pass an empty string to clear the override. */
+    fun saveChatDisplayName(name: String) {
+        prefs.edit().putString(KEY_CHAT_DISPLAY_NAME, name.trim()).apply()
+    }
+
+    /**
+     * Last-used mode to restore on next launch.
+     *
+     * Default rule (exact): returns "chat" ONLY when the pref is absent
+     * AND [BookmarkStore](context).bookmarks.value.isEmpty() — i.e. a true
+     * first run with no saved bookmarks.  The chat empty-state is the
+     * intended onboarding screen on first launch.
+     *
+     * In all other cases (pref present, or pref absent but bookmarks exist)
+     * this returns "browse", so existing users wake in browse.
+     */
+    fun lastMode(): String {
+        if (prefs.contains(KEY_MODE)) return prefs.getString(KEY_MODE, MODE_BROWSE) ?: MODE_BROWSE
+        // Pref absent: first run — check bookmarks to distinguish a genuine
+        // first run (no bookmarks) from a pref-cleared reinstall that
+        // somehow retained data (bookmarks present).
+        val hasBookmarks = BookmarkStore(appContext).bookmarks.value.isNotEmpty()
+        return if (hasBookmarks) MODE_BROWSE else MODE_CHAT
+    }
+
+    /** Persist [mode]. Values are [MODE_BROWSE] or [MODE_CHAT]. */
+    fun saveLastMode(mode: String) {
+        prefs.edit().putString(KEY_MODE, mode).apply()
+    }
+
     private companion object {
         const val PREFS_NAME = "fetchit_settings"
         const val KEY_PEERS = "bootstrap_peers"
         const val KEY_THEME = "theme"
+        const val KEY_CHAT_DISPLAY_NAME = "chat_display_name"
+        const val KEY_MODE = "mode"
+        const val MODE_BROWSE = "browse"
+        const val MODE_CHAT = "chat"
     }
 }

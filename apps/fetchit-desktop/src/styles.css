@@ -1,13 +1,38 @@
 /*
- * Theme tokens. The variable names are inherited from the brand bible
- * (etchit.io/brand.html) and play semantic roles:
+ * Theme tokens. Variable naming mirrors etch/it for cross-app
+ * consistency; see docs/BRAND.md for the canonical role / value
+ * mapping. Each theme redefines the same set so existing rules stay
+ * unchanged.
  *   --ink   canvas background           --bone     primary text
  *   --ink-2 elevated surface            --bone-dim secondary text
  *   --line  dividers / hairlines        --ash      labels / muted
  *   --copper / --copper-bright accent + hover  --rust  error
  *   --signal-ok status                  color-scheme matches surface
- * Each theme redefines the same set so existing rules stay unchanged.
+ *   --gold / --gold-bright  rare highlight + hover (v2)
+ *   --signal-ok retuned from lime to patina green (v2)
+ *   --elev-1/-2/-3  layered elevation shadows
+ *   --edge-highlight  inset top-edge light on raised surfaces
+ *   --surface-grad  faint top sheen gradient for cards
+ *   --grain  film-grain canvas texture (:root only, inherits)
+ *   --focus-ring  focus-visible ring (:root only, inherits)
+ *   --r-ctl / --r-card / --r-pill  corner radii (:root only, inherits)
+ *   --font-display  bundled display serif (:root only, inherits)
  */
+
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./assets/fonts/InstrumentSerif-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./assets/fonts/InstrumentSerif-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
 
 :root, body[data-theme="dark"] {
   --ink: #0a0a0a;
@@ -19,21 +44,54 @@
   --bone-dim: #d6cfc0;
   --ash: #8a8a8a;
   --rust: #ff8a7a;
-  --signal-ok: #6ab04c;
+  --signal-ok: #56b292;
+  --gold: #d9a440;
+  --gold-bright: #e8bc62;
+  --elev-1: 0 1px 2px rgba(12, 8, 4, 0.5), 0 2px 8px rgba(12, 8, 4, 0.25);
+  --elev-2: 0 4px 12px rgba(12, 8, 4, 0.45), 0 12px 32px rgba(12, 8, 4, 0.3);
+  --elev-3: 0 8px 24px rgba(12, 8, 4, 0.5), 0 24px 64px rgba(12, 8, 4, 0.35);
+  --edge-highlight: inset 0 1px 0 0 rgba(245, 242, 235, 0.05);
+  --surface-grad: linear-gradient(180deg, rgba(245, 242, 235, 0.025), transparent 56px);
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--copper) 22%, transparent);
+  --r-ctl: 8px;
+  --r-card: 12px;
+  --r-pill: 999px;
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
   color-scheme: dark;
+
+  /* Motion tokens shared with etch/it. --ease-out-expo for one-shot
+     transitions (enter, reveal); --dur-micro/-trans/-enter for the
+     three durations. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-micro: 160ms;
+  --dur-trans: 280ms;
+  --dur-enter: 720ms;
 }
 
 body[data-theme="dim"] {
-  --ink: #1a1612;
-  --ink-2: #221d18;
-  --line: #2a2520;
+  /* "Warm dusk" — option A from the sessions-chat 2026-05-30 audit.
+     A literal step between Dark (L≈4%) and Light (L≈94%): the canvas
+     lifts to L≈20% so Dim reads as a meaningful middle ground without
+     flipping contrast direction. Bone-on-ink ≈ 10.5:1 (AAA). Stays in
+     the warm/copper family, no token churn to other surfaces. */
+  --ink: #3a322a;
+  --ink-2: #443c33;
+  --line: #524a40;
   --copper: #c9732b;
   --copper-bright: #e58a3f;
   --bone: #f5f2eb;
-  --bone-dim: #e6dfd0;
+  --bone-dim: #d9d2c4;
   --ash: #a09a90;
   --rust: #ff8a7a;
-  --signal-ok: #6ab04c;
+  --signal-ok: #56b292;
+  --gold: #d9a440;
+  --gold-bright: #e8bc62;
+  --elev-1: 0 1px 2px rgba(18, 12, 6, 0.45), 0 2px 8px rgba(18, 12, 6, 0.22);
+  --elev-2: 0 4px 12px rgba(18, 12, 6, 0.4), 0 12px 32px rgba(18, 12, 6, 0.26);
+  --elev-3: 0 8px 24px rgba(18, 12, 6, 0.45), 0 24px 64px rgba(18, 12, 6, 0.3);
+  --edge-highlight: inset 0 1px 0 0 rgba(245, 242, 235, 0.06);
+  --surface-grad: linear-gradient(180deg, rgba(245, 242, 235, 0.03), transparent 56px);
   color-scheme: dark;
 }
 
@@ -47,7 +105,14 @@ body[data-theme="light"] {
   --bone-dim: #1a1814;
   --ash: #3a3a3a;
   --rust: #c0392b;
-  --signal-ok: #3d7e2c;
+  --signal-ok: #2f7e62;
+  --gold: #a87a1f;
+  --gold-bright: #8f6512;
+  --elev-1: 0 1px 2px rgba(60, 44, 28, 0.14), 0 2px 8px rgba(60, 44, 28, 0.08);
+  --elev-2: 0 4px 12px rgba(60, 44, 28, 0.14), 0 12px 32px rgba(60, 44, 28, 0.1);
+  --elev-3: 0 8px 24px rgba(60, 44, 28, 0.16), 0 24px 64px rgba(60, 44, 28, 0.12);
+  --edge-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.7);
+  --surface-grad: linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 56px);
   color-scheme: light;
 }
 
@@ -81,6 +146,7 @@ body[data-theme="light"] {
   z-index: 1;
   padding: 8px 14px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   color: var(--ash);
@@ -113,12 +179,49 @@ body {
 
 body {
   margin: 0;
-  background: var(--ink);
+  background-color: var(--ink);
+  background-image: var(--grain);
   color: var(--bone);
   font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--copper) 32%, transparent);
+  color: var(--bone);
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ash) 38%, transparent) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ash) 32%, transparent);
+  border-radius: var(--r-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--copper) 45%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
 }
 
 #bar {
@@ -127,7 +230,11 @@ body {
   gap: 12px;
   padding: 10px 14px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
   border-bottom: 1px solid var(--line);
+  box-shadow: var(--edge-highlight), var(--elev-1);
+  position: relative;
+  z-index: 5;
 }
 
 #mark {
@@ -143,49 +250,108 @@ body {
   color: var(--copper);
 }
 
-#addr {
+.addr-shell {
+  position: relative;
   flex: 1;
   min-width: 0;
+}
+#addr {
+  width: 100%;
+  box-sizing: border-box;
   background: var(--ink);
   color: var(--bone);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 9px 12px;
   font: 13px/1 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
   outline: none;
+  transition: border-color var(--dur-micro), box-shadow var(--dur-micro);
 }
 #addr::placeholder {
   color: var(--ash);
 }
 #addr:focus {
   border-color: var(--copper);
+  box-shadow: var(--focus-ring);
+}
+
+.addr-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  box-shadow: var(--elev-2), var(--edge-highlight);
+  z-index: 20;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.addr-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.addr-suggestion:hover,
+.addr-suggestion.is-active {
+  background: color-mix(in srgb, var(--copper) 10%, transparent);
+}
+.addr-suggestion-label {
+  color: var(--bone);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.addr-suggestion-address {
+  color: var(--ash);
+  font: 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+  flex-shrink: 0;
 }
 
 #go {
-  background: var(--copper);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
   color: var(--ink);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 9px 18px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
-#go:hover {
-  background: var(--copper-bright);
+#go:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+#go:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
 }
 #go:disabled {
   background: var(--ash);
   cursor: default;
+  box-shadow: none;
 }
 
 #back-toggle,
 #bookmark-toggle,
 #share-toggle,
+#chat-toggle,
 #settings-toggle {
   background: transparent;
   color: var(--ash);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   width: 38px;
   height: 38px;
   padding: 0;
@@ -195,15 +361,29 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: color var(--dur-micro), border-color var(--dur-micro),
+    background var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
 #bookmark-toggle:hover:not(:disabled),
 #share-toggle:hover:not(:disabled),
+#chat-toggle:hover,
 #settings-toggle:hover {
   border-color: var(--copper);
   color: var(--copper-bright);
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  transform: translateY(-1px);
 }
 #back-toggle:hover:not(:disabled) {
   color: var(--bone);
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  transform: translateY(-1px);
+}
+#back-toggle:active:not(:disabled),
+#bookmark-toggle:active:not(:disabled),
+#share-toggle:active:not(:disabled),
+#chat-toggle:active:not(:disabled),
+#settings-toggle:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
 }
 #back-toggle:disabled,
 #bookmark-toggle:disabled,
@@ -243,7 +423,7 @@ body:not([data-view="settings"]) #settings {
 .qr-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(26, 24, 20, 0.55);
+  background: color-mix(in srgb, var(--ink) 60%, transparent);
   backdrop-filter: blur(2px);
 }
 .qr-modal-card {
@@ -254,7 +434,7 @@ body:not([data-view="settings"]) #settings {
   border-radius: 12px;
   padding: 1.25rem 1.5rem 1.5rem;
   width: min(420px, 92vw);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--elev-3);
 }
 .qr-modal-header {
   display: flex;
@@ -316,7 +496,7 @@ body:not([data-view="settings"]) #settings {
   margin: 0.7rem 0 0.15rem;
   padding: 0.5rem 0.6rem;
   text-align: center;
-  font-family: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  font-family: var(--font-display);
   font-style: italic;
   font-weight: 400;
   font-size: 1.1rem;
@@ -326,7 +506,7 @@ body:not([data-view="settings"]) #settings {
   border: 1px dashed var(--ash);
   border-radius: 4px;
   outline: none;
-  transition: border-color 0.15s, background-color 0.15s;
+  transition: border-color var(--dur-micro), background-color var(--dur-micro);
 }
 .qr-modal-title-input::placeholder {
   color: var(--ash);
@@ -404,13 +584,17 @@ body:not([data-view="settings"]) #settings {
   justify-content: space-between;
   margin-bottom: 24px;
   padding-bottom: 16px;
-  border-bottom: 1px solid var(--line);
+  background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--copper) 55%, transparent),
+      transparent 320px
+    )
+    bottom left / 100% 1px no-repeat;
 }
 .settings-head h1 {
-  font-size: 22px;
+  font: 400 26px/1.2 var(--font-display);
   margin: 0;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 .settings-close {
   background: transparent;
@@ -431,8 +615,10 @@ body:not([data-view="settings"]) #settings {
   margin-bottom: 32px;
   padding: 20px 22px;
   background: var(--ink-2);
+  background-image: var(--surface-grad);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .setting-group h2 {
   font-size: 15px;
@@ -483,6 +669,7 @@ body:not([data-view="settings"]) #settings {
 .setting-row input[type="number"]:focus {
   outline: none;
   border-color: var(--copper);
+  box-shadow: var(--focus-ring);
 }
 .setting-row select option {
   background: var(--ink);
@@ -520,6 +707,14 @@ body:not([data-view="settings"]) #settings {
   border-radius: 6px;
   border: 1px dashed var(--line);
 }
+.bookmark-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.bookmark-toolbar .setting-action {
+  flex: 0 0 auto;
+}
 .bookmark-row {
   display: flex;
   align-items: stretch;
@@ -528,9 +723,23 @@ body:not([data-view="settings"]) #settings {
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
+  box-shadow: var(--edge-highlight);
+  transition: border-color var(--dur-micro), transform var(--dur-micro),
+    box-shadow var(--dur-micro);
 }
 .bookmark-row:hover {
   border-color: var(--copper);
+  transform: translateY(-1px);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+}
+.bookmark-select {
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0 10px 0 12px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--copper);
+  cursor: pointer;
 }
 .bookmark-main {
   flex: 1;
@@ -579,6 +788,20 @@ body:not([data-view="settings"]) #settings {
   font-size: 11px;
   color: var(--ash);
 }
+.bookmark-share {
+  background: transparent;
+  color: var(--ash);
+  border: none;
+  border-left: 1px solid var(--line);
+  width: 38px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.bookmark-share:hover {
+  background: color-mix(in srgb, var(--copper) 12%, transparent);
+  color: var(--copper);
+}
 .bookmark-delete {
   background: transparent;
   color: var(--ash);
@@ -616,7 +839,7 @@ body:not([data-view="settings"]) #settings {
   border-right: 1.5px solid var(--copper);
   border-bottom: 1.5px solid var(--copper);
   transform: rotate(-45deg);
-  transition: transform 120ms ease;
+  transition: transform var(--dur-micro) ease;
   margin-left: auto;
 }
 .setting-collapsible[open] > summary::after {
@@ -639,12 +862,15 @@ body:not([data-view="settings"]) #settings {
   border-radius: 8px;
   cursor: pointer;
   background: var(--ink);
-  transition: border-color 140ms ease, background 140ms ease;
+  transition: border-color var(--dur-micro), background var(--dur-micro),
+    box-shadow var(--dur-micro);
 }
 .settings-theme-option:hover { border-color: var(--copper); }
 .settings-theme-option:has(input:checked) {
   border-color: var(--copper);
   background: color-mix(in srgb, var(--copper) 8%, var(--ink));
+  box-shadow: 0 0 0 1px var(--copper),
+    0 2px 12px color-mix(in srgb, var(--copper) 25%, transparent);
 }
 .settings-theme-option input[type="radio"] {
   appearance: none;
@@ -734,7 +960,7 @@ body:not([data-view="settings"]) #settings {
   border-radius: 4px;
   cursor: pointer;
   position: relative;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--dur-micro) ease;
 }
 .setting-row input[type="checkbox"]:hover {
   border-color: var(--ash);
@@ -756,6 +982,7 @@ body:not([data-view="settings"]) #settings {
 .setting-row input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--copper);
   outline-offset: 1px;
+  box-shadow: none;
 }
 .setting-stats {
   margin: 14px 0;
@@ -776,17 +1003,23 @@ body:not([data-view="settings"]) #settings {
   background: transparent;
   color: var(--bone);
   border: 1px solid var(--copper);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   padding: 7px 14px;
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   margin-top: 4px;
+  transition: background var(--dur-micro), color var(--dur-micro),
+    transform var(--dur-micro);
 }
 .setting-action:hover {
   background: var(--copper);
   color: var(--ink);
+  transform: translateY(-1px);
+}
+.setting-action:active {
+  transform: scale(0.98);
 }
 .setting-action:disabled {
   opacity: 0.4;
@@ -805,6 +1038,18 @@ body:not([data-view="settings"]) #settings {
   display: flex;
   gap: 10px;
   margin-top: 4px;
+}
+.setting-pill {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px 2px;
+  font: 500 11px/1.6 ui-sans-serif, system-ui, sans-serif;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
 }
 .setting-error {
   margin: 8px 0 0;
@@ -854,6 +1099,7 @@ body:not([data-view="settings"]) #settings {
 #peers-editor:focus {
   outline: none;
   border-color: var(--copper);
+  box-shadow: var(--focus-ring);
 }
 
 #tabs {
@@ -898,13 +1144,17 @@ body:not([data-view="settings"]) #settings {
   font: 12.5px/1.2 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
   white-space: nowrap;
   outline: none;
+  transition: color var(--dur-micro), background var(--dur-micro), border-color var(--dur-micro);
+  border-radius: 6px 6px 0 0;
 }
 .tab:hover {
   color: var(--bone);
+  background: color-mix(in srgb, var(--bone) 4%, transparent);
 }
 .tab.is-active {
   color: var(--bone);
   border-bottom-color: var(--copper);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--copper) 9%, transparent), transparent);
 }
 .tab.is-loading .tab-label::after {
   content: " …";
@@ -943,6 +1193,7 @@ body:not([data-view="settings"]) #settings {
   color: var(--ash);
   font-size: 12.5px;
   border-bottom: 1px solid transparent;
+  transition: opacity var(--dur-micro);
 }
 #status:empty {
   display: none;
@@ -969,33 +1220,45 @@ body:not([data-view="settings"]) #settings {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   color: var(--ash);
   font-size: 13.5px;
-  pointer-events: none;
   user-select: none;
 }
-
-.tab-spinner {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.tab-empty-mark {
+  width: 56px;
+  height: 56px;
+  color: var(--copper);
+  margin-bottom: 6px;
+  filter: drop-shadow(0 0 28px color-mix(in srgb, var(--copper) 35%, transparent));
 }
-.tab-spinner-ring {
-  width: 36px;
-  height: 36px;
-  border: 3px solid var(--line);
-  border-top-color: var(--copper);
-  border-radius: 50%;
-  animation: fetchit-spin 800ms linear infinite;
+.tab-empty-cta {
+  appearance: none;
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  color: var(--ink);
+  border: none;
+  border-radius: var(--r-ctl);
+  padding: 9px 18px;
+  font: 600 14px/1 var(--font-mono, monospace);
+  cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
-@keyframes fetchit-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.tab-empty-cta:hover {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+.tab-empty-cta:active {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
+}
+.tab-empty-hint {
+  margin: 0;
+  font: italic 17px/1.5 var(--font-display);
+  color: var(--bone-dim);
 }
 
 .tab-error {
@@ -1005,8 +1268,20 @@ body:not([data-view="settings"]) #settings {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
   padding: 24px;
+}
+.tab-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rust);
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+  padding: 18px 22px;
+  max-width: 560px;
 }
 .tab-error-heading {
   margin: 0;
@@ -1064,7 +1339,14 @@ body:not([data-view="settings"]) #settings {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 24px 0;
+  width: min(680px, 100%);
+  margin: 24px auto 0;
+  padding: 18px;
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .rendered-audio audio {
   width: min(640px, 100%);
@@ -1096,6 +1378,22 @@ body:not([data-view="settings"]) #settings {
   border: none;
   display: block;
 }
+.self-contained-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 3px 10px;
+  background: color-mix(in srgb, var(--ink) 82%, transparent);
+  color: var(--signal-ok);
+  border: 1px solid var(--signal-ok);
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+  z-index: 10;
+  user-select: none;
+}
+.self-contained-badge:hover { opacity: 1; }
 
 /* ── EPUB reader ───────────────────────────────────────────────────── */
 
@@ -1147,7 +1445,7 @@ body:not([data-view="settings"]) #settings {
 }
 .epub-toc-item:hover {
   color: var(--ink);
-  background: rgba(184, 115, 51, 0.06);
+  background: color-mix(in srgb, var(--copper) 7%, transparent);
 }
 .epub-toc-item.is-active {
   color: var(--ink);
@@ -1186,10 +1484,17 @@ body:not([data-view="settings"]) #settings {
   cursor: pointer;
   font-family: inherit;
   font-size: 0.85rem;
+  transition: color var(--dur-micro), border-color var(--dur-micro),
+    background var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
 }
 .epub-nav button:hover:not(:disabled) {
   border-color: var(--copper);
   color: var(--copper);
+  background: color-mix(in srgb, var(--copper) 8%, transparent);
+  transform: translateY(-1px);
+}
+.epub-nav button:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
 }
 .epub-nav button:disabled {
   opacity: 0.4;
@@ -1242,7 +1547,7 @@ body:not([data-view="settings"]) #settings {
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--dur-micro), color var(--dur-micro);
 }
 .archive-save-all:hover {
   background: var(--copper);
@@ -1264,8 +1569,16 @@ body:not([data-view="settings"]) #settings {
   padding: 10px 12px;
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   flex-wrap: wrap;
+  box-shadow: var(--edge-highlight);
+  transition: border-color var(--dur-micro), transform var(--dur-micro),
+    box-shadow var(--dur-micro);
+}
+.archive-row:hover {
+  border-color: color-mix(in srgb, var(--copper) 45%, var(--line));
+  transform: translateY(-1px);
+  box-shadow: var(--elev-1), var(--edge-highlight);
 }
 .archive-row-main {
   flex: 1;
@@ -1300,7 +1613,7 @@ body:not([data-view="settings"]) #settings {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.12s, color 0.12s;
+  transition: border-color var(--dur-micro), color var(--dur-micro);
 }
 .archive-row-actions button:hover:not(:disabled) {
   border-color: var(--copper);
@@ -1360,3 +1673,522 @@ body:not([data-view="settings"]) #settings {
   border: 0;
   background: var(--bone);
 }
+
+/* === Fetcher mascot ===
+ * Styles for the SVG mascot mounted by `src/ui/mascot.ts`. Theme
+ * tokens: --bone (stroke / dark zone), --ink (canvas / paper),
+ * --copper (saddle / body), --rust (tongue).
+ */
+.mascot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  user-select: none;
+  /* Animation timing tokens — overridden per state. */
+  --mascot-gait: 0.6s;
+  --mascot-ground: 0.55s;
+  --mascot-cloud: 38s;
+}
+.mascot-stage {
+  position: relative;
+  width: min(720px, 92%);
+  max-height: 70%;
+  aspect-ratio: 720 / 280;
+}
+.mascot-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.mascot-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+  margin: 0;
+  text-align: center;
+  font-size: 13.5px;
+  letter-spacing: 0.04em;
+  color: var(--ash);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Scene background --- */
+.mascot-sky-top    { stop-color: var(--bone); stop-opacity: 0; }
+.mascot-sky-bottom { stop-color: var(--bone); stop-opacity: 0.08; }
+
+.mascot-hill {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.22;
+}
+
+.mascot-cloud circle {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  opacity: 0.45;
+}
+.mascot-cloud {
+  animation: mascot-cloud-drift var(--mascot-cloud) linear infinite;
+}
+.mascot-cloud--b { animation-duration: calc(var(--mascot-cloud) * 1.3); animation-delay: -12s; }
+.mascot-cloud--c { animation-duration: calc(var(--mascot-cloud) * 0.85); animation-delay: -22s; }
+@keyframes mascot-cloud-drift {
+  from { transform: translateX(640px); }
+  to   { transform: translateX(-820px); }
+}
+
+.mascot-ground-line {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.42;
+}
+.mascot-ground-tick {
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  opacity: 0.34;
+}
+.mascot-ground-ticks {
+  animation: mascot-ground-scroll var(--mascot-ground) linear infinite;
+}
+@keyframes mascot-ground-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-30px); }
+}
+
+/* --- Dust trail. Four puffs with staggered delays so the loop
+   never empties. --- */
+.mascot-dust-puff {
+  fill: var(--bone);
+  fill-opacity: 0.2;
+  stroke: var(--bone);
+  stroke-opacity: 0.4;
+  stroke-width: 1.1;
+}
+.mascot-dust-puff--1 { animation: mascot-dust 0.8s linear infinite; }
+.mascot-dust-puff--2 { animation: mascot-dust 0.8s linear infinite; animation-delay: -0.2s; }
+.mascot-dust-puff--3 { animation: mascot-dust 0.8s linear infinite; animation-delay: -0.4s; }
+.mascot-dust-puff--4 { animation: mascot-dust 0.8s linear infinite; animation-delay: -0.6s; }
+@keyframes mascot-dust {
+  0%   { transform: translateX(0) translateY(0) scale(0.6); opacity: 0; }
+  15%  { transform: translateX(-6px) translateY(-2px) scale(0.95); opacity: 0.75; }
+  55%  { transform: translateX(-32px) translateY(-6px) scale(1.3); opacity: 0.4; }
+  100% { transform: translateX(-70px) translateY(-12px) scale(1.7); opacity: 0; }
+}
+
+/* --- Puppy group. No wobble filter — see scene SVG comment. --- */
+.puppy {
+  animation: puppy-bound var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-bound {
+  0%, 100% { transform: translateY(-12px); }
+  50%      { transform: translateY(0); }
+}
+
+.puppy-body {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.4;
+  stroke-opacity: 0.45;
+}
+.puppy-belly {
+  fill: var(--bone);
+  fill-opacity: 0.2;
+  stroke: none;
+}
+.puppy-saddle {
+  fill: var(--bone);
+  fill-opacity: 0.85;
+  stroke: none;
+}
+
+.puppy-head {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.4;
+  stroke-opacity: 0.45;
+}
+.puppy-skullcap {
+  fill: var(--bone);
+  fill-opacity: 0.85;
+  stroke: none;
+}
+
+.puppy-snout {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.2;
+  stroke-opacity: 0.45;
+}
+.puppy-snout-light {
+  fill: var(--bone);
+  fill-opacity: 0.22;
+  stroke: none;
+}
+
+.puppy-mouth {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-opacity: 0.78;
+  stroke-linecap: round;
+}
+.puppy-nose {
+  fill: var(--bone);
+  fill-opacity: 0.9;
+  stroke: none;
+}
+.puppy-nose-highlight {
+  fill: var(--ink);
+  stroke: none;
+}
+
+.puppy-brow {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-opacity: 0.85;
+}
+.puppy-brow-wrap {
+  transform-origin: 384px 110px;
+  transition: transform 280ms var(--ease-out-expo, ease-out);
+}
+.mascot--sprinting .puppy-brow-wrap {
+  transform: translateY(-1.5px) rotate(-3deg);
+}
+
+.puppy-collar {
+  fill: none;
+  stroke: var(--copper-bright);
+  stroke-width: 1.7;
+  opacity: 0.85;
+}
+.puppy-collar-tag {
+  fill: var(--copper-bright);
+  stroke: var(--bone);
+  stroke-width: 0.5;
+}
+.puppy-collar-tag-wrap {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-tag-swing var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-tag-swing {
+  0%, 100% { transform: rotate(-14deg); }
+  50%      { transform: rotate(14deg); }
+}
+
+.puppy-eye-white {
+  fill: var(--ink);
+  stroke: var(--bone);
+  stroke-width: 1.1;
+}
+.puppy-pupil { fill: var(--bone); }
+.puppy-eye-highlight {
+  fill: var(--ink);
+  stroke: none;
+}
+.puppy-eyelid {
+  fill: var(--bone);
+  fill-opacity: 0.92;
+  stroke: var(--bone);
+  stroke-width: 1.1;
+  transform-origin: 384px 116px;
+  transform: scaleY(0);
+  transition: transform 110ms ease-out;
+}
+.mascot.is-blinking .puppy-eyelid {
+  transform: scaleY(1);
+}
+
+.puppy-tongue {
+  fill: var(--rust);
+  fill-opacity: 0.85;
+  stroke: var(--rust);
+  stroke-width: 1;
+}
+.puppy-tongue-wrap {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-tongue-bob var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-tongue-bob {
+  0%, 100% { transform: rotate(-6deg); }
+  50%      { transform: rotate(8deg) translateY(2px); }
+}
+
+.puppy-tail-fill {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-opacity: 0.45;
+}
+.puppy-tail-tip {
+  fill: var(--bone);
+  fill-opacity: 0.55;
+  stroke: none;
+}
+.puppy-tail-wrap {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-tail-whip var(--mascot-gait) ease-in-out infinite;
+}
+@keyframes puppy-tail-whip {
+  0%, 100% { transform: rotate(18deg); }
+  50%      { transform: rotate(-10deg); }
+}
+
+.puppy-ear-back-fill,
+.puppy-ear-front-fill {
+  fill: var(--copper);
+  stroke: var(--bone);
+  stroke-width: 1.3;
+  stroke-opacity: 0.45;
+}
+.puppy-ear-back-shadow,
+.puppy-ear-front-shadow {
+  fill: var(--bone);
+  fill-opacity: 0.55;
+  stroke: none;
+}
+.puppy-ear {
+  /* transform-origin set inline in SVG. */
+  animation: puppy-ear-flop var(--mascot-gait) ease-in-out infinite;
+}
+.puppy-ear--back { opacity: 0.9; }
+@keyframes puppy-ear-flop {
+  0%, 100% { transform: rotate(-6deg) translateY(-3px); }
+  50%      { transform: rotate(8deg) translateY(2px); }
+}
+
+/* --- Legs. The `.puppy-leg-knee` group is nested inside `.puppy-leg`
+   in the SVG so its CSS rotation composes with the parent's; that's
+   what makes the joint bend through the cycle. --- */
+.puppy-leg-upper,
+.puppy-leg-lower {
+  stroke: var(--copper);
+  stroke-width: 5.5;
+  stroke-linecap: round;
+  fill: none;
+}
+.puppy-leg-paw {
+  fill: var(--bone);
+  fill-opacity: 0.45;
+  stroke: var(--copper);
+  stroke-width: 1;
+}
+.puppy-leg--front-far .puppy-leg-upper,
+.puppy-leg--front-far .puppy-leg-lower,
+.puppy-leg--back-far .puppy-leg-upper,
+.puppy-leg--back-far .puppy-leg-lower {
+  stroke-opacity: 0.75;
+}
+
+.puppy-leg {
+  animation: puppy-leg-upper var(--mascot-gait) ease-in-out infinite;
+}
+.puppy-leg .puppy-leg-knee {
+  animation: puppy-leg-knee var(--mascot-gait) ease-in-out infinite;
+}
+.puppy-leg--back {
+  animation-delay: calc(var(--mascot-gait) * -0.12);
+}
+.puppy-leg--back .puppy-leg-knee {
+  animation-delay: calc(var(--mascot-gait) * -0.12);
+}
+@keyframes puppy-leg-upper {
+  0%, 100% { transform: rotate(-10deg); }
+  50%      { transform: rotate(8deg); }
+}
+@keyframes puppy-leg-knee {
+  0%, 100% { transform: rotate(-55deg); }
+  50%      { transform: rotate(0deg); }
+}
+
+/* --- Goal text. JS toggles `.is-swapping` to fade out, swap content
+   mid-fade, fade back. The 320ms transition must match
+   `MASCOT_GOAL_SWAP_MS` in mascot.ts. --- */
+.mascot-goal-text {
+  fill: var(--copper-bright);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  opacity: 0.3;
+  transition: opacity 320ms ease;
+}
+.mascot--fetching  .mascot-goal-text { opacity: 0.7; }
+.mascot--sprinting .mascot-goal-text { opacity: 1;   }
+.mascot-goal-text.is-swapping        { opacity: 0;   }
+
+/* --- State: resolving. Replaces the bound + leg cycles with a
+   crouched pose. --- */
+.mascot--resolving .mascot-ground-ticks,
+.mascot--resolving .mascot-cloud,
+.mascot--resolving .puppy-ear,
+.mascot--resolving .puppy-collar-tag-wrap,
+.mascot--resolving .puppy-tongue-wrap {
+  animation-play-state: paused;
+}
+.mascot--resolving .puppy {
+  animation: puppy-crouch 1.6s ease-in-out infinite;
+}
+@keyframes puppy-crouch {
+  0%, 100% { transform: translateY(14px); }
+  50%      { transform: translateY(16px); }
+}
+.mascot--resolving .puppy-leg {
+  animation: none;
+  transform: rotate(0deg);
+}
+.mascot--resolving .puppy-leg .puppy-leg-knee {
+  animation: none;
+  transform: rotate(0deg);
+}
+/* Composes with the inline `transform-origin` on `.puppy-head-wrap`
+   so the rotation pivots at the base of the neck. */
+.mascot--resolving .puppy-head-wrap {
+  animation: puppy-head-sniff 1.6s ease-in-out infinite;
+}
+@keyframes puppy-head-sniff {
+  0%, 100% { transform: rotate(-30deg) translate(5px, 9px); }
+  50%      { transform: rotate(-32deg) translate(5px, 12px); }
+}
+.mascot--resolving .puppy-tail-wrap {
+  animation: puppy-tail-slow 1.4s ease-in-out infinite;
+}
+@keyframes puppy-tail-slow {
+  0%, 100% { transform: rotate(22deg); }
+  50%      { transform: rotate(4deg); }
+}
+.mascot--resolving .mascot-dust-puff {
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+/* --- State: sprinting. Faster cycle. --- */
+.mascot--sprinting {
+  --mascot-gait: 0.42s;
+  --mascot-ground: 0.4s;
+}
+
+/* --- One-shot animations driven by JS class toggles. --- */
+.mascot.is-ear-flicking .puppy-ear--front {
+  animation: puppy-ear-flick 0.6s ease-in-out;
+}
+@keyframes puppy-ear-flick {
+  0%   { transform: rotate(-6deg); }
+  25%  { transform: rotate(18deg); }
+  55%  { transform: rotate(-12deg); }
+  80%  { transform: rotate(8deg); }
+  100% { transform: rotate(-6deg); }
+}
+.mascot.is-head-tilting.mascot--resolving .puppy-head-wrap {
+  animation: puppy-head-tilt 0.9s ease-in-out;
+}
+/* Endpoints must match `.mascot--resolving .puppy-head-wrap` so the
+   one-shot starts and ends without snapping back to identity. */
+@keyframes puppy-head-tilt {
+  0%, 100% { transform: rotate(-30deg) translate(5px, 9px); }
+  40%, 60% { transform: rotate(-5deg) translate(0, 0); }
+}
+
+/* --- Reduced motion: stop everything that loops, keep the dog
+       drawn and visible so the user still gets the affordance. --- */
+@media (prefers-reduced-motion: reduce) {
+  .mascot * {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
+}
+
+/* M3 G3: "content blocked" card shown when the source address is on the
+   community denylist. Warm accent (--rust) signals the block without the
+   alarm of a hard error. */
+.blocked-notice {
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rust);
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+  max-width: 42rem;
+}
+.blocked-notice__title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  color: var(--rust);
+}
+.blocked-notice__reason {
+  margin: 0.5rem 0 0;
+  font-family: var(--mono, monospace);
+  font-size: 0.85rem;
+  color: var(--bone-dim);
+}
+
+/* Profile page */
+.profile-page { max-width: 720px; margin: 0 auto; padding: 24px; }
+.profile-page__band { display: flex; align-items: center; gap: 16px;
+  background: var(--bone-dim); border: 1px solid var(--line);
+  border-radius: var(--r-card); padding: 16px; box-shadow: var(--edge-highlight); }
+.profile-page__avatar { width: 64px; height: 64px; border-radius: var(--r-pill);
+  border: 2px solid var(--gold); overflow: hidden; flex: none; }
+.profile-page__avatar img { width: 100%; height: 100%; object-fit: cover; }
+.profile-page__id { flex: 1; min-width: 0; }
+.profile-page__namerow { display: flex; align-items: baseline; gap: 10px; }
+.profile-page__name { font-family: var(--font-display); font-size: 22px; color: var(--ink); }
+.profile-page__badge { color: var(--gold); font-size: 12px; font-weight: 600; }
+.profile-page__handle { color: var(--copper); font-size: 13px; }
+.profile-page__actions { display: flex; gap: 8px; }
+.profile-page__act { border: 1px solid var(--line); border-radius: var(--r-pill);
+  padding: 6px 14px; background: transparent; color: var(--ink); cursor: pointer; }
+.profile-page__act--primary { background: var(--copper); color: var(--bone); border-color: transparent; }
+.profile-page__changed, .profile-page__verify-fail { margin-top: 12px; font-size: 13px;
+  border-left: 3px solid var(--rust); padding-left: 10px; color: var(--ash); }
+.profile-page__bio { margin-top: 14px; color: var(--ink-2); }
+.profile-page__website { margin-top: 8px; background: transparent; border: none;
+  color: var(--copper); cursor: pointer; padding: 0; }
+.profile-page__error { padding: 40px; text-align: center; color: var(--ash); }
+.profile-page__label { margin: 20px 0 8px; font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--ash); }
+.profile-page__gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.profile-page__etch { text-align: left; border: 1px solid var(--line);
+  border-radius: var(--r-card); padding: 10px; background: var(--bone-dim); cursor: pointer; }
+.profile-page__etch-kind { font-size: 10px; letter-spacing: .06em; color: var(--gold); }
+.profile-page__etch-label { color: var(--ink); }
+.profile-page__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.profile-page__chip { border: 1px solid var(--line); border-radius: var(--r-pill);
+  padding: 4px 12px; background: transparent; color: var(--copper); cursor: pointer; }
+/* Dark "go create" hero: pins the dark-canvas oxidation palette so the empty/handoff
+   panel stays dramatic in every theme (a populated profile remains a light document).
+   Hexes mirror the dark :root block. */
+.profile-page__handoff, .profile-page__empty {
+  --ink: #0a0a0a; --ink-2: #141414; --line: #222;
+  --bone: #f5f2eb; --bone-dim: #d6cfc0; --ash: #8a8a8a;
+  --copper: #c9732b; --gold: #d9a440;
+  text-align: center; padding: 48px 24px; min-height: 62vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: var(--r-card);
+  background: radial-gradient(ellipse at 50% 0%,
+    color-mix(in srgb, var(--copper) 10%, var(--ink-2)), var(--ink) 70%); }
+.profile-page__empty { color: var(--ash); }
+.profile-page__handoff-title { font-family: var(--font-display); font-size: 34px; color: var(--bone); margin-bottom: 6px; }
+.profile-page__handoff-chain { color: var(--gold); font-weight: 600; font-size: 15px; margin: 12px 0; }
+.profile-page__handoff-body { color: var(--bone-dim); max-width: 460px; margin: 0 auto 24px; line-height: 1.55; }
+.profile-page__handoff .profile-page__actions { justify-content: center; }
+.profile-page__handoff .profile-page__act { color: var(--bone); border-color: var(--ash); }
+.profile-page__handoff .profile-page__act--primary { border-color: transparent; }
+.json-profile-banner { margin-bottom: 10px; color: var(--ash); }
+.json-profile-banner button { background: transparent; border: none; color: var(--copper); cursor: pointer; padding: 0; }

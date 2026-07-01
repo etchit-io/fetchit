@@ -19,10 +19,55 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      # fetchit-ffi and apps/fetchit-desktop/src-tauri are excluded from the
+      # workspace — `--all` skips them. Check their formatting explicitly.
+      - run: cargo fmt --manifest-path crates/fetchit-ffi/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml -- --check
+
+  pins:
+    # Fail CI if Cargo.lock / Cargo.toml / settings.rs drift from
+    # PINS.md. A silent crate bump can land a wire-format change
+    # between releases — historical messages stop decrypting, contact
+    # cards reject. The check is one shell script + cheap to run.
+    name: pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-pins.sh
+
+  # License-compliance gate. Runs cargo-deny against all three
+  # distributed-binary dependency graphs -- the root workspace and the two
+  # workspace-excluded units (src-tauri, fetchit-ffi), each carrying its own
+  # Cargo.lock -- against the single root deny.toml. Every crate that links
+  # into a shipped binary must carry a cleared license; a new copyleft
+  # dependency fails here instead of slipping in. The Autonomi stack pulls two
+  # GPL-3.0 crates (self_encryption, which has a linking exception, and evmlib,
+  # which does not) -- both pinned by name in deny.toml, so a third copyleft
+  # crate is rejected. cargo-deny only reads metadata, so no build/cache step.
+  licenses:
+    name: licenses (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo-deny check licenses (all three lockfiles)
+        run: |
+          for m in Cargo.toml apps/fetchit-desktop/src-tauri/Cargo.toml crates/fetchit-ffi/Cargo.toml; do
+            echo "::group::cargo-deny licenses :: $m"
+            cargo deny --manifest-path "$m" check licenses --config deny.toml
+            echo "::endgroup::"
+          done
 
   clippy:
-    name: clippy
-    runs-on: ubuntu-latest
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,6 +75,18 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # fetchit-ffi and apps/fetchit-desktop/src-tauri are excluded from the
+      # workspace — the line above skips them. Lint them explicitly so clippy
+      # drift can't accumulate unseen in the excluded crates AND so cfg(windows)
+      # / cfg(target_os = "macos") branches actually get checked on the runner
+      # where they compile.
+      - run: cargo clippy --manifest-path crates/fetchit-ffi/Cargo.toml --all-targets -- -D warnings
+      - name: Install Tauri system deps (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev
+      - run: cargo clippy --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
 
   test:
     name: test
@@ -42,7 +99,104 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      # No --all-features: it would pull fetchit-net's `devnet-tests`
+      # feature — an opt-in LocalDevnet suite that links ant-node and
+      # needs the `anvil` + `ant` binaries — into every CI build. That
+      # suite is run locally / pre-release, not here.
+      - run: cargo test --workspace
+
+  # Desktop app — runs the Vite/TS frontend suite (vitest) and the Tauri
+  # backend suite (src-tauri). src-tauri is excluded from the root
+  # workspace (it links the system webkit stack), so `cargo test
+  # --workspace` in the `test` job never sees it. Linux only; the tests
+  # are platform-agnostic logic. desktop-test.yml builds bundles — this
+  # job runs tests.
+  desktop:
+    name: desktop (vitest + src-tauri)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/fetchit-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+
+      - name: Install frontend deps
+        working-directory: apps/fetchit-desktop
+        run: npm ci
+
+      # Fast TS/Vite suite first — fails in seconds if a renderer regressed.
+      - name: Frontend unit tests (vitest)
+        working-directory: apps/fetchit-desktop
+        run: npm run test:run
+
+      - name: Install Linux webkit deps (for the src-tauri build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
+
+      - name: Backend unit tests (src-tauri)
+        run: cargo test --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
+
+  # Desktop GUI end-to-end tests — drives the real built Tauri app through
+  # tauri-driver (WebDriver) + WebdriverIO: cold launch and address-bar
+  # validation, no network. Linux only — tauri-driver has no macOS
+  # (WKWebView) support. wdio.conf.mjs's onPrepare hook builds the debug
+  # binary; xvfb supplies the headless runner a display.
+  desktop-e2e:
+    name: desktop (E2E)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/fetchit-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/fetchit-desktop/src-tauri
+
+      - name: Install Linux webkit + WebDriver deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --version 2.0.6 --locked
+
+      - name: Install frontend deps
+        working-directory: apps/fetchit-desktop
+        run: npm ci
+
+      # onPrepare builds the debug binary; xvfb-run supplies the display.
+      - name: Run desktop E2E (WebdriverIO)
+        working-directory: apps/fetchit-desktop
+        run: xvfb-run --auto-servernum npm run e2e
 
   # Cross-browser extension. Runs the address-parser unit tests under plain
   # Node (no package.json, no deps — just node --test). If you change the
@@ -78,13 +232,14 @@ jobs:
       - name: background.js parses as ES module
         run: node --input-type=module -e "import('./apps/fetchit-web/src/addr.js').then(() => console.log('addr.js OK'))"
 
-  # Builds the Android debug APK end-to-end (FFI .so via cargo-ndk +
-  # gradle assembleDebug). Catches breakage in the gradle build, the
-  # NDK toolchain, or the JNI handoff before a release tag. The
-  # signed-release path is a separate workflow (.github/workflows/
-  # release.yml) triggered only on `v*` tag pushes.
+  # Runs the Android JVM unit tests + the fetchit-ffi host unit tests,
+  # then builds the debug APK end-to-end
+  # (FFI .so via cargo-ndk + gradle assembleDebug). Catches logic
+  # regressions and breakage in the gradle build, the NDK toolchain, or
+  # the JNI handoff before a release tag. The signed-release path is a
+  # separate workflow (.github/workflows/release.yml), `v*` tags only.
   android:
-    name: android (debug APK)
+    name: android (unit tests + debug APK)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,6 +251,13 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # JVM unit tests — pure logic, no NDK / FFI needed, so they run first
+      # to fail fast before the slower native build below.
+      - name: Run Android unit tests
+        run: |
+          cd apps/fetchit-android
+          ./gradlew :app:testDebugUnitTest --no-daemon
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -103,6 +265,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/fetchit-ffi
+
+      # fetchit-ffi host unit tests — rendition-mapping logic. The crate is
+      # workspace-excluded (cdylib for the JNI build), so the `test` job's
+      # `cargo test --workspace` never runs them. Host target; no NDK needed.
+      - name: Test fetchit-ffi (host unit tests)
+        run: cargo test --manifest-path crates/fetchit-ffi/Cargo.toml
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -134,3 +302,45 @@ jobs:
           name: fetchit-debug-apk
           path: apps/fetchit-android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
+
+  # Doc-drift prevention (Phase 1): three shell guards + the rustdoc
+  # broken-intra-doc-link gate. The tripwire tests (handler order /
+  # Rendition + EnvelopeKind variants / crate list) run in the `test` job
+  # via `cargo test`; this job enforces the rest so stale docs cannot land.
+  docs-gates:
+    name: doc drift gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the stale-phrase linter can diff new doc-comments
+          # against the PR base (or the push parent).
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: crate list matches cargo metadata
+        run: sh scripts/check-crate-list.sh
+      - name: doc-comment paths resolve
+        run: sh scripts/check-doc-paths.sh
+      - name: no expiring markers in new doc-comments
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base ref (initial push); skipping stale-phrase diff"
+          else
+            sh scripts/check-stale-phrases.sh "$base"
+          fi
+      # Informational only (no --strict, plus `|| true`): surfaces sections of
+      # ARCHITECTURE.md whose globbed files changed since their `verified=`
+      # stamp, without failing CI yet. The milestone-close sweep consumes the
+      # warnings to target re-verification. Needs the full history fetched above.
+      - name: ARCHITECTURE.md stamps (informational)
+        run: sh scripts/check-arch-stamps.sh || true
+      # rustdoc broken-intra-doc-link gate. Run with fetchit-relay-server's
+      # `fediverse-inbox` feature so the inbox module docs (and server.rs
+      # references to them) are covered and resolve. NOT --all-features: that
+      # pulls fetchit-net's devnet-tests (ant-node) for zero link-coverage gain.
+      - name: rustdoc has no broken intra-doc links
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps -F fetchit-relay-server/fediverse-inbox

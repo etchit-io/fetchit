@@ -156,7 +156,8 @@ pub enum Rendition {
         title: String,
         /// Decoded content body.
         content: String,
-        /// Optional language tag (`meta.lang`), if non-empty.
+        /// Language tag from `meta.lang` if non-empty, otherwise a
+        /// markdown heuristic may supply `"markdown"`.
         language: Option<String>,
     },
     /// Bytes the registry could not classify any more specifically.
@@ -167,6 +168,59 @@ pub enum Rendition {
         /// Raw bytes, unchanged.
         data: Bytes,
     },
+    /// M3 federation core: the renderer was asked to render content
+    /// whose source identity (`XorName`, `AgentId`, `RelayUrl`, or
+    /// `ActorUrl`) is on the community-maintained denylist. Surfaces
+    /// short-circuit before any decode runs; the UI swaps in a
+    /// "blocked content" placeholder that names the reason verbatim.
+    ///
+    /// Populated by [`crate::registry::HandlerRegistry::render_with_context`]
+    /// (Phase F2) when the supplied [`fetchit_trust_types::DenylistQuery`]
+    /// matches; never returned by an individual handler's `render`.
+    Blocked {
+        /// Human-readable reason rendered into the placeholder.
+        /// Format: `"<kind>: <value>"` where `kind` is the
+        /// [`fetchit_trust_types::EntryKind`] discriminant and `value` is
+        /// the canonical-form entry that matched. Example:
+        /// `"xor_name: 4d216f18…"`.
+        reason: String,
+    },
+}
+
+/// M3 Phase F2 — runtime context the renderer consults before
+/// dispatching a payload through the handler set.
+///
+/// When `denylist` is `Some(_)` and `addr_hex` is `Some(_)`,
+/// [`crate::registry::HandlerRegistry::render_with_context`] checks
+/// `is_blocked(EntryKind::XorName, addr_hex)` before any handler is
+/// chosen. A hit short-circuits to [`Rendition::Blocked`]; a miss
+/// falls through to the normal render path. The UI shell wires up
+/// the consumer (typically the chat / trust-client's
+/// `DenylistConsumer`) and threads the user-pasted Autonomi address
+/// through `addr_hex` on every fetch.
+///
+/// Either field being `None` disables the gate. Both fields are
+/// `None` by default so REST-only / offline / test callers keep the
+/// pre-M3 behaviour without a consumer wired up.
+#[derive(Default, Clone)]
+pub struct RenderingContext {
+    /// Optional community denylist consumer. The chat / trust-client
+    /// `DenylistConsumer` is the canonical implementation; tests
+    /// inject stubs.
+    pub denylist: Option<std::sync::Arc<dyn fetchit_trust_types::DenylistQuery>>,
+    /// The 64-char lowercase hex `XorName` the caller is about to
+    /// render. Required for the short-circuit; without it, the gate
+    /// silently passes through.
+    pub addr_hex: Option<String>,
+}
+
+impl std::fmt::Debug for RenderingContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderingContext")
+            .field("denylist", &self.denylist.as_ref().map(|_| "<consumer>"))
+            .field("addr_hex", &self.addr_hex)
+            .finish()
+    }
 }
 
 /// A single member of an archive [`Rendition::Archive`].
@@ -204,4 +258,49 @@ pub trait ContentHandler: Send + Sync {
     /// are passed by `Bytes` so handlers may pass them through cheaply
     /// (image / audio / video data flows through verbatim).
     fn render(&self, bytes: Bytes, ctx: &RenderContext) -> Result<Rendition>;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rendition_blocked_carries_reason() {
+        let r = Rendition::Blocked {
+            reason: "xor_name: 4d216f18".into(),
+        };
+        match r {
+            Rendition::Blocked { reason } => assert_eq!(reason, "xor_name: 4d216f18"),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    /// Doc-invariant tripwire: an exhaustive match over every
+    /// `Rendition` variant with NO `_` arm. Adding a variant breaks
+    /// compilation here -- that IS the tripwire. It lives in-crate
+    /// (rather than in `tests/doc_invariants.rs`) because `Rendition`
+    /// is `#[non_exhaustive]`: a downstream match would be forced to
+    /// add a `_` arm and a new variant would slip through silently.
+    /// Update this match AND the architecture reference when adding a
+    /// Rendition variant.
+    #[test]
+    fn rendition_variants_match_snapshot() {
+        fn _assert(r: &Rendition) {
+            match r {
+                Rendition::Text { .. }
+                | Rendition::Image { .. }
+                | Rendition::Audio { .. }
+                | Rendition::Video { .. }
+                | Rendition::Pdf { .. }
+                | Rendition::Json { .. }
+                | Rendition::Tabular { .. }
+                | Rendition::Archive { .. }
+                | Rendition::Html { .. }
+                | Rendition::EtchitEnvelope { .. }
+                | Rendition::OpaqueBinary { .. }
+                | Rendition::Blocked { .. } => {}
+            }
+        }
+    }
 }

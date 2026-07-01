@@ -33,6 +33,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "resources/x0xd/**/*",
+      "resources/x0xd.toml.tpl"
+    ],
     "linux": {
       "deb": {
         "desktopTemplate": "desktop-entry.desktop"

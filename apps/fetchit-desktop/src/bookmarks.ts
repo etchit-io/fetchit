@@ -26,16 +26,20 @@ export function removeBookmark(address: string): Promise<void> {
   return invoke("remove_bookmark", { address });
 }
 
-/// Best-effort human-friendly title for a bookmark — falls back to a short
-/// address slug when no title is present in the rendition.
+/// Best-effort human-friendly title for a bookmark, falling back to the
+/// address verbatim for handles and profile URIs, or a short hex slug for
+/// raw content addresses.
 export function deriveLabel(rendition: Rendition | null | undefined, address: string): string {
-  return deriveTitle(rendition) ?? `${address.slice(0, 8)}…${address.slice(-4)}`;
+  const title = deriveTitle(rendition);
+  if (title) return title;
+  if (address.startsWith("@") || address.startsWith("profile:")) return address;
+  return `${address.slice(0, 8)}…${address.slice(-4)}`;
 }
 
 /// Real title only — returns `null` when the rendition has no inherent
-/// title. The QR-share modal uses this to decide whether to show a title
-/// row at all (showing the address-slug fallback there would be noise,
-/// since the abbreviated address is already on the line below).
+/// title. The QR-share modal uses this to decide whether to emit a
+/// title row; the address-slug fallback would duplicate the abbreviated
+/// address shown on the next line.
 export function deriveTitle(rendition: Rendition | null | undefined): string | null {
   if (!rendition) return null;
   if (rendition.kind === "etchitEnvelope" && rendition.title) return rendition.title.trim();

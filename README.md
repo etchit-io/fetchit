@@ -3,16 +3,18 @@
 > *etch it. **fetch it.** chain it.*
 
 A read-only viewer for content stored on the [Autonomi](https://autonomi.com)
-network. Paste a 64-hex address, see what is there — text, image, audio,
+network. Paste a 64-hex address, see what is there -- text, image, audio,
 video, PDF, archive, code with syntax highlighting, JSON, CSV, full HTML
-SPAs — without installing a wallet, signing a message, or running a node.
+SPAs -- without installing a wallet, signing a message, or running a node.
 
-fetch>it ships as a small Rust engine (`fetchit-core`), a CLI (`fetchit
-get <addr>`), a uniffi FFI surface (`fetchit-ffi`), and a native Android
-shell that gives the engine a touch UI.
+fetch>it ships as a Rust engine (`fetchit-core`), a CLI, a uniffi FFI
+surface (`fetchit-ffi`), chat/relay/fediverse/trust crates, and two
+GUI shells over the engine: a native Android app and a Tauri 2 desktop
+app. A thin browser extension routes `autonomi://` links into the
+desktop app.
 
-For end-user instructions — every gesture, address-bar format, supported
-content type, the `autonomi://` URL scheme, and honest limitations — see
+For end-user instructions -- every gesture, address-bar format, supported
+content type, the `autonomi://` URL scheme, and honest limitations -- see
 [`docs/USING.md`](docs/USING.md). For the Autonomi-native web protocol
 (loading SPAs straight off the network, the synthetic-origin trick that
 makes the full Fetch API work over content-addressed URLs), see
@@ -20,15 +22,15 @@ makes the full Fetch API work over content-addressed URLs), see
 
 ## Status
 
-`0.2.0` — **beta**. The Android shell builds and runs end-to-end against
-the live Autonomi network — the [`docs/USING.md`](docs/USING.md) guide
-describes what it currently does. CLI compiles. Desktop (Tauri 2) is in
-active development.
+**Beta.** The Rust engine, the CLI, the Android shell, and the Tauri 2
+desktop shell all build and run end-to-end against the live Autonomi
+network. [`docs/USING.md`](docs/USING.md) is the end-user guide for the
+Android app.
 
 **Dual-licensed.** Open-source under [`AGPL-3.0-only`](LICENSE);
 a commercial license is available for closed-source / proprietary use
 (see [`COMMERCIAL.md`](COMMERCIAL.md)). Provided *as-is*, no warranty,
-no liability — see sections 15 & 16 of the AGPL.
+no liability -- see sections 15 & 16 of the AGPL.
 
 ## Layout
 
@@ -39,23 +41,38 @@ fetchit/
 │   ├── fetchit-core/                # handler trait, registry, decoders
 │   ├── fetchit-net/                 # Autonomi-backed NetworkClient
 │   ├── fetchit-cli/                 # `fetchit get <addr>` binary
+│   ├── fetchit-chat/                # chat protocol layer
+│   ├── fetchit-fedi/                # fediverse bridge protocol
+│   ├── fetchit-relay-proto/         # relay wire protocol
+│   ├── fetchit-relay-server/        # relay server
+│   ├── fetchit-relay-client/        # relay client
+│   ├── fetchit-trust/               # trust service core
+│   ├── fetchit-trust-types/         # trust type definitions
+│   ├── fetchit-trust-client/        # trust service client
+│   ├── x0xd-client/                 # x0xd discovery + signer
 │   └── fetchit-ffi/                 # uniffi 0.29 bindings (workspace-excluded)
 ├── apps/
-│   └── fetchit-android/             # Material3 shell, sandboxed WebView, Media3
+│   ├── fetchit-android/             # Material3 shell, sandboxed WebView, Media3
+│   ├── fetchit-desktop/             # Tauri 2 shell -- TS/Vite frontend, Rust backend
+│   ├── fetchit-web/                 # browser extension -- routes autonomi:// links
+│   └── fetchit-bridge-worker/       # fediverse bridge Cloudflare Worker
 ├── docs/
-│   ├── USING.md                     # end-user guide
+│   ├── USING.md                     # end-user guide (Android)
 │   ├── AUTONOMI-WEB.md              # autonomi:// scheme + SPA platform
-│   └── HANDLER-AUTHORS.md           # how to add a content handler
+│   ├── HANDLER-AUTHORS.md           # how to add a content handler
+│   ├── SECURITY.md                  # threat model + sandbox architecture
+│   ├── BRAND.md                     # design tokens shared with etch/it
+│   └── QR-SHARE.md                  # QR address-sharing design spec
 ├── scripts/
 │   └── build-jni-libs.sh            # cargo ndk → jniLibs/ for the Android build
-├── .github/workflows/               # CI (fmt/clippy/test) + release (signed APK)
+├── .github/workflows/               # CI (fmt/clippy/test) + release (signed bundles)
 ├── CONTRIBUTING.md                  # DCO, quality bar
 ├── RELEASING.md                     # one-time keystore setup + per-release flow
-└── LICENSE                          # AGPL-3.0-only (+ commercial — see COMMERCIAL.md)
+└── LICENSE                          # AGPL-3.0-only (+ commercial -- see COMMERCIAL.md)
 ```
 
 `fetchit-ffi` lives outside the main Cargo workspace by deliberate choice
-— `uniffi-bindgen` walks transitive deps and fails the metadata lookup
+-- `uniffi-bindgen` walks transitive deps and fails the metadata lookup
 silently inside multi-crate workspaces.
 
 ## Building
@@ -78,6 +95,15 @@ cd apps/fetchit-android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+The desktop app (Tauri 2) builds straight from a workspace checkout:
+
+```bash
+cd apps/fetchit-desktop
+npm install
+npm run tauri dev                                   # dev shell
+npm run tauri build                                 # platform bundle
+```
+
 For signed release builds, see [`RELEASING.md`](RELEASING.md).
 
 ## Security
@@ -93,14 +119,14 @@ the link), not as public issues.
 fetch>it is **dual-licensed**:
 
 - [`AGPL-3.0-only`](LICENSE) for open-source / community use. Strong
-  copyleft including the "network use" trigger — if you run a modified
+  copyleft including the "network use" trigger -- if you run a modified
   version as a network service, the source must be available to its
   users.
 - A separate **commercial license** for closed-source / proprietary
   embedding. See [`COMMERCIAL.md`](COMMERCIAL.md) for the option and
   contact path.
 
-Either license stands alone — you do not need both. Choose whichever
+Either license stands alone -- you do not need both. Choose whichever
 fits your use. Contributions are accepted under terms that allow the
 project to offer both tracks; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

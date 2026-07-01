@@ -13,13 +13,53 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use ant_core::data::{
-    Client as CoreClient, ClientConfig, CoreNodeConfig, IPDiversityConfig, NodeMode, P2PNode,
-    MAX_WIRE_MESSAGE_SIZE,
+    Client as CoreClient, ClientConfig, CoreNodeConfig, DownloadEvent, IPDiversityConfig, NodeMode,
+    P2PNode, MAX_WIRE_MESSAGE_SIZE,
 };
 
 use fetchit_core::{Address, Error as CoreError, NetworkClient, Result as CoreResult};
 
 use crate::parse_bootstrap_peer;
+
+/// Bound on the `ant-core` progress-event channel. `ant-core` emits with
+/// `try_send`, so a full channel drops events — harmless for a coarse bar.
+const PROGRESS_CHANNEL: usize = 64;
+
+/// A coarse, UI-ready download-progress update.
+///
+/// Same shape as the etchit upload-progress struct: a `phase` plus a
+/// `done` / `total` chunk count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadProgress {
+    /// `"resolving"` while walking the data map, then `"fetching"` for
+    /// the content chunks.
+    pub phase: &'static str,
+    /// Chunks completed in the current phase.
+    pub done: u64,
+    /// Total chunks in the current phase; `0` until `ant-core` knows it.
+    pub total: u64,
+}
+
+/// Maps an `ant-core` [`DownloadEvent`] to a coarse [`DownloadProgress`].
+/// The resolve phase has no firm chunk total until it completes, so its
+/// three events all report the indeterminate `resolving` state; only
+/// `ChunksFetched` carries a real `done` / `total`.
+fn download_progress(ev: &DownloadEvent) -> DownloadProgress {
+    match ev {
+        DownloadEvent::ResolvingDataMap { .. }
+        | DownloadEvent::MapChunkFetched { .. }
+        | DownloadEvent::DataMapResolved { .. } => DownloadProgress {
+            phase: "resolving",
+            done: 0,
+            total: 0,
+        },
+        DownloadEvent::ChunksFetched { fetched, total } => DownloadProgress {
+            phase: "fetching",
+            done: *fetched as u64,
+            total: *total as u64,
+        },
+    }
+}
 
 /// Production network backend. Cheap to clone — wraps an `Arc`-shared
 /// `ant-core` client.
@@ -29,7 +69,8 @@ pub struct AutonomiClient {
 }
 
 impl AutonomiClient {
-    /// Connect to the network using the supplied bootstrap peers.
+    /// Connect to the production network using the supplied bootstrap
+    /// peers.
     ///
     /// `peers` accepts both full multiaddrs and `ip:port` shorthand —
     /// each entry is parsed via [`parse_bootstrap_peer`].
@@ -46,10 +87,34 @@ impl AutonomiClient {
     /// strings fail to parse or the underlying P2P node cannot be
     /// constructed.
     pub async fn connect(peers: &[String]) -> CoreResult<Self> {
+        Self::connect_with(peers, false).await
+    }
+
+    /// Connect with loopback peering enabled — for local-devnet testing
+    /// only.
+    ///
+    /// An `ant-core` `LocalDevnet` runs entirely on `127.0.0.1`. A
+    /// production client filters loopback addresses out of its routing
+    /// table, so it cannot peer with a devnet at all; this enables the
+    /// node's `local` mode — the toggle `ant-cli` exposes as
+    /// `--allow-loopback`. Production callers use [`Self::connect`]: real
+    /// bootstrap peers are never loopback.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::connect`].
+    pub async fn connect_local(peers: &[String]) -> CoreResult<Self> {
+        Self::connect_with(peers, true).await
+    }
+
+    /// Shared connect path. `local` enables loopback peering — `false`
+    /// for the production network, `true` for a `LocalDevnet`.
+    async fn connect_with(peers: &[String], local: bool) -> CoreResult<Self> {
         let mut builder = CoreNodeConfig::builder()
             .mode(NodeMode::Client)
             .port(0)
             .ipv6(false)
+            .local(local)
             .max_message_size(MAX_WIRE_MESSAGE_SIZE);
 
         for raw in peers {
@@ -83,6 +148,52 @@ impl AutonomiClient {
     /// indicators.
     pub async fn peer_count(&self) -> usize {
         self.inner.network().connected_peers().await.len()
+    }
+
+    /// Fetch the content at `addr`, streaming it to the file at `output`
+    /// and reporting coarse [`DownloadProgress`] through `on_progress`.
+    ///
+    /// `ant-core`'s only progress-instrumented download path is file-
+    /// based, so this streams to disk rather than holding the payload in
+    /// memory like [`NetworkClient::fetch`]. The desktop shell calls it
+    /// only when the user has enabled the on-disk cache, with `output`
+    /// pointing at the cache slot — so no fetched content reaches disk
+    /// that the cache would not have written anyway. With the cache off,
+    /// callers stay on the in-memory `fetch`.
+    ///
+    /// # Errors
+    ///
+    /// [`fetchit_core::Error::Network`] if the data-map fetch or the
+    /// download fails.
+    pub async fn fetch_with_progress(
+        &self,
+        addr: &Address,
+        output: &Path,
+        on_progress: impl Fn(DownloadProgress) + Send + 'static,
+    ) -> CoreResult<()> {
+        let key = *addr.as_bytes();
+        let data_map = self
+            .inner
+            .data_map_fetch(&key)
+            .await
+            .map_err(|e| net_err(format!("data_map_fetch: {e}")))?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DownloadEvent>(PROGRESS_CHANNEL);
+        let forward = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                on_progress(download_progress(&ev));
+            }
+        });
+
+        let result = self
+            .inner
+            .file_download_with_progress(&data_map, output, Some(tx))
+            .await
+            .map_err(|e| net_err(format!("file_download: {e}")));
+        // `file_download_with_progress` owns `tx` and drops it on return,
+        // closing the channel so the forward task drains and exits.
+        let _ = forward.await;
+        result.map(|_| ())
     }
 }
 
@@ -296,9 +407,8 @@ pub fn set_data_home(path: &Path) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
     use super::*;
 
     #[test]
@@ -312,5 +422,40 @@ mod tests {
         assert_eq!(describe_skew(60), "~1m 0s ahead of real time");
         assert_eq!(describe_skew(180), "~3m 0s ahead of real time");
         assert_eq!(describe_skew(-3661), "~61m 1s behind real time");
+    }
+
+    #[test]
+    fn resolve_events_report_indeterminate_resolving() {
+        for ev in [
+            DownloadEvent::ResolvingDataMap {
+                total_map_chunks: 3,
+            },
+            DownloadEvent::MapChunkFetched { fetched: 2 },
+            DownloadEvent::DataMapResolved { total_chunks: 128 },
+        ] {
+            assert_eq!(
+                download_progress(&ev),
+                DownloadProgress {
+                    phase: "resolving",
+                    done: 0,
+                    total: 0
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn chunks_fetched_reports_determinate_fetching() {
+        assert_eq!(
+            download_progress(&DownloadEvent::ChunksFetched {
+                fetched: 64,
+                total: 128
+            }),
+            DownloadProgress {
+                phase: "fetching",
+                done: 64,
+                total: 128
+            },
+        );
     }
 }

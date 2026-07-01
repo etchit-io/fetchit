@@ -43,9 +43,26 @@ static CSS_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static YAML_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^[\w-]+:\s+\S").unwrap());
 
+/// A byte prefix of `s` no longer than `max` bytes, clamped DOWN to the
+/// nearest UTF-8 char boundary so the result is always a valid `&str`.
+///
+/// `str` indexing panics when the index is not on a char boundary; these
+/// detection slices cap by byte length, so a multibyte character
+/// straddling the cap would otherwise crash on perfectly valid UTF-8.
+/// `floor_char_boundary` is still unstable, so this does the walk-back
+/// by hand. For ASCII (the common code-detection case) `max` is already
+/// a boundary and this returns the same slice as a raw index.
+fn prefix_on_boundary(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Best-guess language tag. `None` if nothing matches confidently.
 pub fn detect(text: &str) -> Option<&'static str> {
-    let sample = &text[..text.len().min(2000)];
+    let sample = prefix_on_boundary(text, 2000);
     if sample.trim().is_empty() {
         return None;
     }
@@ -68,7 +85,7 @@ pub fn detect(text: &str) -> Option<&'static str> {
     if (trimmed.starts_with('{') && trimmed.ends_with('}'))
         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
     {
-        let head_500 = &trimmed[..trimmed.len().min(500)];
+        let head_500 = prefix_on_boundary(trimmed, 500);
         if JSON_KEY_RE.is_match(head_500) {
             return Some("json");
         }
@@ -92,10 +109,10 @@ pub fn detect(text: &str) -> Option<&'static str> {
     if SQL_RE.is_match(first_line) {
         return Some("sql");
     }
-    if CSS_RE.is_match(&sample[..sample.len().min(800)]) {
+    if CSS_RE.is_match(prefix_on_boundary(sample, 800)) {
         return Some("css");
     }
-    if YAML_RE.is_match(&sample[..sample.len().min(500)]) {
+    if YAML_RE.is_match(prefix_on_boundary(sample, 500)) {
         return Some("yaml");
     }
 
@@ -182,5 +199,37 @@ mod tests {
     fn no_match_for_empty() {
         assert_eq!(detect(""), None);
         assert_eq!(detect("   \n  \n"), None);
+    }
+
+    #[test]
+    fn prefix_on_boundary_clamps_inside_multibyte_char() {
+        // 'é' is 2 bytes (0xC3 0xA9). Capping at byte 1 lands inside it;
+        // the prefix must clamp back to byte 0, never panic.
+        let s = "é";
+        assert_eq!(s.len(), 2);
+        assert_eq!(prefix_on_boundary(s, 1), "");
+        assert_eq!(prefix_on_boundary(s, 2), "é");
+    }
+
+    #[test]
+    fn prefix_on_boundary_is_exact_for_ascii() {
+        assert_eq!(prefix_on_boundary("abcdef", 3), "abc");
+        assert_eq!(prefix_on_boundary("abc", 10), "abc");
+        assert_eq!(prefix_on_boundary("", 5), "");
+    }
+
+    #[test]
+    fn detect_does_not_panic_on_multibyte_straddling_cap() {
+        // Regression: detect() sliced `text[..min(2000)]` by raw byte
+        // index, which panicked when a multibyte char straddled byte
+        // 2000. Build exactly that: 1999 ASCII bytes + a 2-byte char
+        // spanning bytes 1999..2001. Must return cleanly, not panic.
+        let mut s = "a".repeat(1999);
+        s.push('é');
+        s.push_str("tail");
+        assert!(s.len() > 2000);
+        // 'a'*1999 is plain prose -> no language match, but the call
+        // itself must not crash.
+        let _ = detect(&s);
     }
 }

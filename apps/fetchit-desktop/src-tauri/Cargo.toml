@@ -11,6 +11,11 @@ edition = "2021"
 name = "fetchit_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Desktop E2E build: fetch_and_render serves in-process fixtures
+# instead of fetching from the network. Never enabled by a release build.
+e2e = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -18,7 +23,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["sync", "process", "time"] }
+# `CancellationToken` for aborting in-flight fetches when the user
+# closes a tab or restarts the fetch. The token is dropped through
+# `tokio::select!` so the inner network ops cancel at their next
+# `.await`.
+tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1.7"
 infer = { version = "0.16", default-features = false }
 filetime = "0.2"
@@ -36,16 +47,63 @@ tauri-plugin-dialog = "2"
 # handler that fires on first-launch runs again and the tab strip
 # picks up a new tab.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# OS-native toast notifications for inbound DMs delivered while the
+# window is unfocused; the chat panel falls back gracefully if the
+# user hasn't granted permission.
+tauri-plugin-notification = "2"
+# Structured logging for the supervisor + boot path. The `log` feature
+# makes `tracing::warn!` etc. also emit as `log` events so they flow
+# through `tauri-plugin-log`'s `log`-crate facade without a custom
+# subscriber. Matches fetchit-chat which depends on `tracing` directly.
+tracing = { version = "0.1", features = ["log"] }
+# Wires the `log` crate facade to per-target writers (stdout in dev,
+# rotated files in prod). Picks up every `tracing::*` event because of
+# the `tracing/log` feature above.
+tauri-plugin-log = "2"
 fetchit-core = { path = "../../../crates/fetchit-core" }
 fetchit-net = { path = "../../../crates/fetchit-net" }
+fetchit-chat = { path = "../../../crates/fetchit-chat" }
+# Direct dep for the M4 compose commands: `PublicPost` (the publish
+# payload) and `parse_mention` (the mention-extraction oracle).
+fetchit-fedi = { path = "../../../crates/fetchit-fedi" }
+# Direct dep so the chat layer can name relay-proto types (e.g.
+# `AgentId`, `PresenceUpdate`) when wiring the new presence pump.
+fetchit-relay-proto = { path = "../../../crates/fetchit-relay-proto" }
+# Direct dep so the boot path can name `ReqwestClient` (the production
+# denylist HTTP poller) plus `BlockEvent` / `EntryKind` for the M3
+# denylist install + the chat:denylist-updated pump.
+fetchit-trust-client = { path = "../../../crates/fetchit-trust-client", features = ["reqwest"] }
+# Direct dep so `AppState` can name the `DenylistQuery` trait object the
+# reader-side denylist gate stores + threads into `render_with_context`.
+fetchit-trust-types = { path = "../../../crates/fetchit-trust-types" }
+x0xd-client = { path = "../../../crates/x0xd-client" }
+semver = "1"
+hex = "0.4"
+url = "2.5"
 # Used only by refresh_peers_from_upstream to GET WithAutonomi's
 # canonical bootstrap_peers.toml. rustls-tls keeps us off the system
 # OpenSSL dep tree on Linux.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Direct dep only to install the aws-lc-rs CryptoProvider as rustls'
+# process default at startup (see `run()`); both ring and aws-lc-rs are in
+# the tree transitively, so rustls 0.23 won't auto-pick one and panics
+# without this. aws-lc-rs (not ring) because it backs ant-quic's PQC.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 # Parse the upstream bootstrap_peers.toml. Tolerant scan over any TOML
 # string leaves that pass parse_bootstrap_peer, so a future minor
 # schema rotation at WithAutonomi doesn't blow up the refresh.
 toml = "0.8"
+# Portable OS config-dir lookup (XDG on Linux, APPDATA on Windows,
+# ~/Library/Application Support on macOS).
+dirs = "5"
+# Enumerate the host's non-loopback network interfaces so the LAN-direct
+# mDNS announcement can publish concrete reachable IPs. Pure-Rust,
+# no system deps.
+if-addrs = "0.13"
+# Direct dep so we can call `ServiceDaemon` / `build_service_info` /
+# `spawn_browser` to drive the mDNS lifecycle from the desktop layer;
+# fetchit-chat is the structural home of these helpers.
+mdns-sd = { version = "0.20", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
@@ -62,6 +120,10 @@ missing_docs = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Tauri command + URI-scheme handlers must take their args (State,
+# AppHandle, WebviewWindow, the IPC-deserialized String / Vec) by value —
+# the framework's macros require it; the lint can't see that contract.
+needless_pass_by_value = "allow"
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"

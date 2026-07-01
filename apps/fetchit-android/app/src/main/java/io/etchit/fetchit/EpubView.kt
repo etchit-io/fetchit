@@ -167,8 +167,9 @@ class EpubView @JvmOverloads constructor(
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
             val url = request?.url?.toString() ?: return null
             if (!url.startsWith(EPUB_PREFIX)) {
-                // 100% Autonomi: a rendered EPUB chapter reaches nothing
-                // off-device. data:/blob:/about: are page-internal.
+                // Only the EPUB-internal scheme resolves through this
+                // client; data/blob/about pass through as page-internal,
+                // everything else is refused.
                 return when (request?.url?.scheme?.lowercase()) {
                     "data", "blob", "about" -> null
                     else -> blocked()
@@ -202,8 +203,7 @@ class EpubView @JvmOverloads constructor(
                 if (target >= 0) loadChapter(target, anchor)
                 return true
             }
-            // fetch>it shows Autonomi content only — a link out of an EPUB
-            // chapter to anything else is refused, not followed.
+            // Out-of-archive http(s) links are refused, not followed.
             if (url.startsWith("http://") || url.startsWith("https://")) return true
             return false
         }

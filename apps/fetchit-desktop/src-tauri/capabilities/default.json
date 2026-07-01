@@ -7,6 +7,7 @@
     "core:default",
     "deep-link:default",
     "dialog:default",
-    "clipboard-manager:allow-write-image"
+    "clipboard-manager:allow-write-image",
+    "notification:default"
   ]
 }

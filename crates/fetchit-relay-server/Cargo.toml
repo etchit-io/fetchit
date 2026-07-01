@@ -1,0 +1,81 @@
+[package]
+name = "fetchit-relay-server"
+description = "Transient pass-through relay for the fetchit / LIT Chat protocol. RAM-only routing buffer; no disk persistence of user data."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Stage 7 of the M4 fediverse plan gates the inbox endpoint behind
+# this feature so the default relay-server build (the LIT Chat
+# pass-through) ships without any fediverse code or its dep tree.
+# Community-relay operators opting into the fediverse-inbox role
+# build with `--features fediverse-inbox`.
+default = []
+# `fetchit-trust-types` is the serde-only leaf vocabulary crate (no
+# axum/reqwest/tokio); the production delivery sink pulls it in only to
+# canonicalize a verified actor URL through the SAME
+# `TargetIdentity::try_new(EntryKind::ActorUrl, ..)` path the denylist
+# uses, so attribution matches the denylist's canonical form.
+# `fetchit-trust-client` (with its `reqwest` feature for `ReqwestClient`)
+# backs the Stage 7 operator-inbox denylist adapter — a community relay
+# acting as a fediverse inbox gates inbound actors against the same
+# signed `etchit-io` denylist clients consult.
+fediverse-inbox = [
+    "dep:fetchit-fedi",
+    "dep:rsa",
+    "dep:rusqlite",
+    "dep:fetchit-trust-types",
+    "dep:fetchit-trust-client",
+    "fetchit-trust-client/reqwest",
+]
+
+[[bin]]
+name = "fetchit-relay-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+dashmap.workspace = true
+fetchit-fedi = { path = "../fetchit-fedi", optional = true }
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+fetchit-trust-types = { path = "../fetchit-trust-types", optional = true }
+fetchit-trust-client = { path = "../fetchit-trust-client", optional = true }
+rsa = { workspace = true, optional = true }
+# M5.1 Task 13: durable, in-relay actor-registry ledger. `bundled` compiles
+# SQLite from source (no system lib); gated under `fediverse-inbox` so the
+# default + community chat relays never pull it.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+futures-util.workspace = true
+hex.workspace = true
+postcard.workspace = true
+rand.workspace = true
+saorsa-pqc.workspace = true
+serde.workspace = true
+serde_jcs = "0.2"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util", "signal", "net", "io-util"] }
+tokio-tungstenite = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

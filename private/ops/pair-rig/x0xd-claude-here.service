@@ -1,0 +1,49 @@
+[Unit]
+Description=x0xd daemon (instance: claude-here) for the Bob↔Alice pair rig
+Documentation=https://github.com/saorsa-labs/x0x
+# No After= for network — x0xd handles its own bootstrap.
+
+[Service]
+Type=simple
+# --name selects the data dir ~/.local/share/x0x-claude-here/.
+# Note: we intentionally do NOT pin --api-port here. x0xd writes
+# its current port to ~/.local/share/x0x-claude-here/api.port on
+# every start, and the chat-peer wrapper reads that file at launch
+# so the daemon-picked port is transparent. Pinning would mask the
+# consumer-side bug that initially looked like a daemon bug; see
+# [[x0xd-port-drift-on-restart]] and
+# [[upstream-issues-only-when-blocked]] for the full diagnosis.
+ExecStart=%h/.local/bin/x0xd --name claude-here
+Restart=on-failure
+RestartSec=3
+# x0xd writes its API token to ~/.local/share/x0x-claude-here/api-token
+# on first run with mode 0600. Don't override.
+
+# Resource limits: x0xd holds long-lived QUIC connections; don't
+# kill it for ordinary memory growth, but cap so a runaway can't OOM
+# the box.
+#
+# Cross-review wytufenip 2026-06-02 found live x0xd at ~70% of the
+# previous 1G cap after 53 minutes — well inside "ordinary growth"
+# territory — and noted MemoryMax= is a hard OOM-kill cap, not a
+# soft throttle. The cascade was: OOM-kill → Restart=on-failure →
+# new x0xd picks a fresh api.port → chat-peer wrapper re-resolves
+# but the in-flight session gets disconnected. Pattern documented
+# in [[x0xd-port-drift-on-restart]].
+#
+# Fix: raise MemoryMax to 2G AND add MemoryHigh=1500M as the soft
+# throttle. The kernel will memcg-throttle the cgroup at 1500M
+# (giving the daemon a chance to recover) and only kill at 2G if
+# a real leak is happening.
+MemoryHigh=1500M
+MemoryMax=2G
+# Survive logind logout (we want this running as long as the user
+# session exists).
+KillMode=control-group
+
+# Log to the journal — `journalctl --user -u x0xd-claude-here -f`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

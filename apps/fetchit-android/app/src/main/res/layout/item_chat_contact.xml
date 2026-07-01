@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:background="?android:attr/selectableItemBackground"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="14dp"
+    android:gravity="center_vertical">
+
+    <!-- Short agent id: first 8 hex + ellipsis, monospace -->
+    <TextView
+        android:id="@+id/contactShortId"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:textSize="11sp"
+        android:textColor="?attr/fetchitAsh"
+        android:layout_marginEnd="12dp" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <!-- Display name -->
+        <TextView
+            android:id="@+id/contactName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="?attr/fetchitBone"
+            android:fontFamily="monospace"
+            android:textSize="16sp"
+            android:singleLine="true"
+            android:ellipsize="end" />
+
+        <!-- Last-message preview -->
+        <TextView
+            android:id="@+id/contactPreview"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:singleLine="true"
+            android:ellipsize="end" />
+
+    </LinearLayout>
+
+    <!-- Per-row overflow: remove a chat / leave a group. Hidden on the pinned
+         fediverse row, which has no destructive action. -->
+    <ImageButton
+        android:id="@+id/contactRowMore"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginStart="8dp"
+        android:src="@drawable/ic_more_vert"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:scaleType="centerInside"
+        android:contentDescription="@string/chat_row_more" />
+
+</LinearLayout>

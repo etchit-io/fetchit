@@ -1,0 +1,33 @@
+//! Trust service: report queue + signed denylist publisher.
+//!
+//! Clients (the desktop reader, mobile reader, chat clients, the
+//! relay) poll the published denylists and apply them locally. The
+//! relay refuses to mint bearer tokens for denylisted agent ids. The
+//! reader refuses to render denylisted addresses. Reports submitted to
+//! `/v1/report` queue for moderator review, and accepted ones update
+//! the published denylist.
+
+#![forbid(unsafe_code)]
+
+pub mod config;
+pub mod consumer;
+pub mod error;
+pub mod server;
+pub mod signer;
+pub mod storage;
+pub mod types;
+
+pub use config::ServerConfig;
+pub use consumer::{signing_bytes, verify_signature, VerifiedDenylist};
+pub use error::TrustError;
+pub use server::Server;
+pub use signer::IssuerSigner;
+pub use storage::Storage;
+pub use types::{
+    DenylistEntry, DenylistResponse, DenylistToSign, EntryKind, Report, ReportKind, TargetIdentity,
+};
+
+/// The denylist query contract, defined in `fetchit-trust-types` and
+/// re-exported so `fetchit_trust::DenylistQuery` keeps resolving. See
+/// [`fetchit_trust_types::DenylistQuery`].
+pub use fetchit_trust_types::DenylistQuery;

@@ -1,13 +1,13 @@
-//! Tiny localhost HTTP server for serving Autonomi bytes to the WebView's
+//! Tiny localhost HTTP server for serving Autonomi bytes to the `WebView`'s
 //! `<audio>` / `<video>` elements at `http://127.0.0.1:<port>/<addr>`.
 //!
-//! Why this exists: WebKitGTK's media pipeline accepts only a small allowlist
+//! Why this exists: `WebKitGTK`'s media pipeline accepts only a small allowlist
 //! of URL schemes for `<video src>` (http, https, file, blob). Our custom
 //! `fetchit://` / `autonomi://` schemes resolve via Tauri's protocol handler
 //! for `fetch()` and `<img>` requests, but the video pipeline ignores them
 //! and fires `MEDIA_ERR_SRC_NOT_SUPPORTED`. The Android `HtmlView` mirror of
 //! this — `shouldInterceptRequest` against `https://aut.local/<addr>` — has
-//! no desktop equivalent; we get the same outcome by giving the WebView a
+//! no desktop equivalent; we get the same outcome by giving the `WebView` a
 //! standard `http://` URL pointing at a tiny local server.
 //!
 //! The server is bound to `127.0.0.1:0` (random free port). Same cache and
@@ -238,8 +238,14 @@ mod tests {
 
     #[test]
     fn strip_header_ci_matches_any_case() {
-        assert_eq!(strip_header_ci("Range: bytes=0-99", "range"), Some("bytes=0-99"));
-        assert_eq!(strip_header_ci("RANGE: bytes=0-99", "range"), Some("bytes=0-99"));
+        assert_eq!(
+            strip_header_ci("Range: bytes=0-99", "range"),
+            Some("bytes=0-99")
+        );
+        assert_eq!(
+            strip_header_ci("RANGE: bytes=0-99", "range"),
+            Some("bytes=0-99")
+        );
         assert_eq!(strip_header_ci("Other: x", "range"), None);
     }
 }

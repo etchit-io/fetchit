@@ -3,13 +3,13 @@ package io.etchit.fetchit
 import java.util.UUID
 
 /**
- * The only user-authored data fetch>it persists — saved addresses
- * plus labels. (Fetched network bytes are cached separately by
- * [`BytesCache`]; nothing else is stored.)
+ * User-authored persistent state — saved addresses plus labels.
+ * Fetched network bytes are cached separately by [`BytesCache`];
+ * nothing else is stored.
  *
- * Stays a plain data class — schema lives in [`BookmarkSerde`], storage
- * in [`BookmarkStore`], UI in [`BookmarkSheet`]. No network, no
- * cross-device sync, no derived state.
+ * Schema lives in [`BookmarkSerde`], storage in [`BookmarkStore`],
+ * UI in [`BookmarkSheet`]. No network, no cross-device sync, no
+ * derived state.
  */
 data class Bookmark(
     val id: String,

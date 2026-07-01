@@ -3,7 +3,11 @@ package io.etchit.fetchit
 import android.app.Application
 import android.content.Context
 import androidx.lifecycle.ProcessLifecycleOwner
+import io.etchit.fetchit.chat.ChatController
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import uniffi.fetchit_ffi.Client
 import uniffi.fetchit_ffi.setDataHome
 import uniffi.fetchit_ffi.setupLogger
@@ -13,8 +17,8 @@ import uniffi.fetchit_ffi.setupLogger
  * [`Client`].
  *
  * Why the Client lives here, not in [`MainActivity`]: it's a heavy
- * resource (DHT bootstrap, QUIC connections), and other surfaces —
- * [`SettingsActivity`] for peer count, future Tauri/web embeds — need
+ * resource (DHT bootstrap, QUIC connections), and other surfaces --
+ * [`SettingsSheet`] for peer count, future Tauri/web embeds -- need
  * to share it. The Activity is just one consumer.
  *
  * `ant-core`'s internal `data_dir()` resolution calls `home_dir().unwrap()`
@@ -24,9 +28,34 @@ import uniffi.fetchit_ffi.setupLogger
  * Pointing both at the app-private files dir before any FFI call avoids
  * the panic. Same workaround etchit-android uses.
  */
-class FetchitApplication : Application() {
+open class FetchitApplication : Application() {
 
     private var cached: Client? = null
+
+    /**
+     * Application-owned scope for coroutines that must outlive any single
+     * activity (the chat event pump, for example). [SupervisorJob] ensures
+     * one failing child does not cancel siblings.
+     */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * Backing field for [chatController]. `null` until first access so
+     * idle-disconnect callbacks can check [_chatController] directly and skip
+     * disconnecting chat if it was never started.
+     */
+    private var _chatController: ChatController? = null
+
+    /**
+     * Process-scoped chat runtime. Lazily constructed on first access so
+     * the Autonomi browse path pays no initialisation cost if the user
+     * never opens the chat mode.
+     *
+     * Lifecycle callbacks use [_chatController] (the nullable backing field)
+     * to avoid inadvertently constructing the controller from a background event.
+     */
+    val chatController: ChatController
+        get() = _chatController ?: ChatController(this, appScope).also { _chatController = it }
 
     /** Live peer-count gauge. Polls every 15s once started. */
     val peerCountTracker: PeerCountTracker by lazy { PeerCountTracker { cached } }
@@ -44,10 +73,19 @@ class FetchitApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        bootstrapFfi()
+        peerCountTracker.start()
+        ProcessLifecycleOwner.get().lifecycle.addObserver(IdleDisconnect(::disconnectAll))
+    }
+
+    /**
+     * Initialise the native FFI side: point `ant-core`'s data dir at the
+     * app-private files dir, then start the logger. Overridable so test
+     * builds can stub it — there is no `.so` off-device.
+     */
+    protected open fun bootstrapFfi() {
         setDataHome(filesDir.absolutePath)
         setupLogger()
-        peerCountTracker.start()
-        ProcessLifecycleOwner.get().lifecycle.addObserver(IdleDisconnect(this))
     }
 
     /** Returns the connected client; constructs it on first call. */
@@ -68,6 +106,20 @@ class FetchitApplication : Application() {
      */
     fun disconnect() {
         cached = null
+    }
+
+    /**
+     * Disconnect both the Autonomi browse client and the chat gateway (if chat
+     * was ever started). Called by [IdleDisconnect] on app backgrounding after
+     * the idle grace period.
+     *
+     * The `_chatController` nullable check is intentional: accessing
+     * [chatController] here would construct the controller, defeating the
+     * lazy-init contract and wasting resources on users who never open chat.
+     */
+    private fun disconnectAll() {
+        disconnect()
+        _chatController?.disconnect()
     }
 }
 

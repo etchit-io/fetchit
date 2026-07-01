@@ -5,28 +5,38 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>fetchit</title>
     <link rel="stylesheet" href="/src/styles.css" />
+    <link rel="stylesheet" href="/src/chat/styles.css" />
+    <link rel="stylesheet" href="/src/fediverse/styles.css" />
+    <link rel="stylesheet" href="/src/onboarding/styles.css" />
     <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
     <header id="bar">
-      <button id="back-toggle" type="button" title="Back (Alt+Left)" aria-label="Back" disabled>←</button>
+      <button id="back-toggle" type="button" title="Back (Alt+Left)" aria-label="Back" disabled></button>
       <span id="mark">fetch<span>&gt;</span>it</span>
-      <input
-        id="addr"
-        type="text"
-        spellcheck="false"
-        autocomplete="off"
-        placeholder="Autonomi address"
-      />
+      <div class="addr-shell">
+        <input
+          id="addr"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Autonomi address"
+        />
+      </div>
       <button id="go" type="button">fetch</button>
-      <button id="bookmark-toggle" type="button" title="Bookmark this address (Ctrl/Cmd+D)" aria-label="Bookmark" data-bookmarked="false">★</button>
-      <button id="share-toggle" type="button" title="Share QR (Ctrl/Cmd+Shift+S)" aria-label="Share QR">▦</button>
-      <button id="settings-toggle" type="button" title="Settings (Ctrl/Cmd+,)" aria-label="Settings">⚙</button>
+      <button id="bookmark-toggle" type="button" title="Bookmark this address (Ctrl/Cmd+D)" aria-label="Bookmark" data-bookmarked="false"></button>
+      <button id="share-toggle" type="button" title="Share QR (Ctrl/Cmd+Shift+S)" aria-label="Share QR"></button>
+      <button id="chat-toggle" type="button" title="Chat (Ctrl/Cmd+Shift+C)" aria-label="Chat"></button>
+      <button id="fediverse-toggle" type="button" title="Public feed" aria-label="Public feed"></button>
+      <button id="settings-toggle" type="button" title="Settings (Ctrl/Cmd+,)" aria-label="Settings"></button>
     </header>
     <nav id="tabs" role="tablist" aria-label="Open documents" data-empty="true"></nav>
     <div id="status"></div>
     <main id="stage"></main>
     <section id="settings" hidden aria-label="Settings"></section>
     <section id="qr-modal" hidden></section>
+    <section id="chat-panel" hidden aria-label="Chat"></section>
+    <section id="fediverse-panel" hidden aria-label="Public feed"></section>
+    <section id="onboarding" hidden aria-label="Welcome"></section>
   </body>
 </html>

@@ -1,0 +1,69 @@
+# cargo-deny configuration -- license-compliance gate.
+#
+# Enforced in CI (.github/workflows/ci.yml, `licenses` job) against all three
+# distributed-binary dependency graphs: the root workspace (CLI / core / net
+# plus the other published crates), the desktop backend
+# (apps/fetchit-desktop/src-tauri, workspace-excluded), and the Android FFI
+# (crates/fetchit-ffi, workspace-excluded). The two excluded units carry their
+# own Cargo.lock, so each is checked explicitly.
+#
+# Purpose: every dependency that links into a shipped binary must carry a
+# license we have cleared. A new copyleft license fails the build instead of
+# slipping in unnoticed. fetch>it itself is AGPL-3.0-only (see CONTRIBUTING.md),
+# so AGPL / GPL dependencies are compatible with the open-source distribution;
+# every GPL-family crate is still pinned by name below so a *new* one cannot
+# appear silently.
+
+[graph]
+# Check every target triple, not just the host: license exposure is
+# platform-independent and several deps (windows-*, r-efi, ...) are
+# target-gated, so a host-only scan would miss them.
+targets = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+
+# Permissive and weak-copyleft licenses cleared for linking into shipped
+# binaries, plus our own AGPL-3.0-only (and saorsa-core's AGPL-3.0). GPL-3.0 is
+# deliberately absent here -- it is granted per-crate under `exceptions` below.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "BSL-1.0",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unlicense",
+    "AGPL-3.0",       # saorsa-core (saorsa-labs upstream)
+    "AGPL-3.0-only",  # fetch>it's own workspace crates
+]
+
+# GPL-3.0 is allowed ONLY for these two upstream crates. Both are pulled
+# transitively through the Autonomi stack (self_encryption + evmlib via
+# ant-protocol / ant-core) and cannot be dropped without forking upstream:
+#
+#   self_encryption -- GPL-3.0 WITH a linking exception. Its LICENSE grants
+#       linking with independent modules and redistribution of the resulting
+#       executable under terms of our choice, so it imposes no copyleft on the
+#       combined binary (incl. a closed-source build).
+#   evmlib          -- GPL-3.0, NO linking exception. Compatible with our
+#       AGPL-3.0-only distribution; a future closed-source commercial binary
+#       would additionally need a commercial grant for it (and for AGPL
+#       saorsa-core). Tracked in private/research/competitive-sonar-ants.md.
+#
+# Pinning by name means any OTHER GPL-3.0 (or stronger) dependency appearing
+# later fails CI instead of linking in unnoticed.
+exceptions = [
+    { name = "self_encryption", allow = ["GPL-3.0"] },
+    { name = "evmlib", allow = ["GPL-3.0"] },
+]

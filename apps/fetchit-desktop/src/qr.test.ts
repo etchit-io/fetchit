@@ -68,6 +68,17 @@ describe("renderQrSvg", () => {
     expect(whiteRects.length).toBe(1);
   });
 
+  it("renders a non-empty SVG for a ~512-byte pointer-URI payload", () => {
+    // A pointer URI can run up to the 512-byte cap; the auto-version
+    // selection must pick a capacity-fitting QR version, not overflow and
+    // throw.
+    const payload = "x0x://pair/" + "ab".repeat(32) + "?r=" + "a".repeat(470);
+    expect(payload.length).toBeGreaterThanOrEqual(500);
+    const svg = renderQrSvg(payload);
+    expect(svg.tagName.toLowerCase()).toBe("svg");
+    expect(svg.querySelectorAll("rect").length).toBeGreaterThan(0);
+  });
+
   it("supports H error correction (denser matrix than M for same payload)", () => {
     const m = renderQrSvg("autonomi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd", { errorCorrectionLevel: "M" });
     const h = renderQrSvg("autonomi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd", { errorCorrectionLevel: "H" });

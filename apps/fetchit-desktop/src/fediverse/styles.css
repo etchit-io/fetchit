@@ -1,0 +1,331 @@
+/* M4 fediverse pane: a standalone overlay hosting the live public-post
+   feed. Mirrors the chat overlay pattern and uses the shared theme
+   tokens (copper on ink). Self-contained keyframes so it never depends
+   on the chat stylesheet load order. */
+
+.fediverse-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 49;
+  display: flex;
+  flex-direction: column;
+  background: var(--ink);
+  color: var(--bone);
+  animation: fediverse-slide var(--dur-trans) var(--ease-out-expo) both;
+}
+.fediverse-panel[hidden] { display: none !important; }
+
+@keyframes fediverse-slide {
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+
+.fediverse-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--ink-2);
+  flex: none;
+}
+.fediverse-panel__icon { width: 22px; height: 22px; color: var(--copper); flex: none; }
+.fediverse-panel__title {
+  font: 400 18px/1.3 var(--font-display);
+  letter-spacing: 0.02em;
+}
+.fediverse-panel__note {
+  font-size: 11px;
+  color: var(--ash);
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.fediverse-panel__spacer { flex: 1; }
+.fediverse-panel__close { color: var(--ash); }
+.fediverse-panel__close:hover { color: var(--bone); }
+
+.fediverse-panel__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.feed__empty {
+  color: var(--ash);
+  font-size: 13px;
+  text-align: center;
+  padding: 48px 16px;
+}
+.feed__list { display: flex; flex-direction: column; gap: 12px; }
+
+.feed-post {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  box-shadow: var(--edge-highlight);
+  animation: feed-post-in var(--dur-micro) var(--ease-out-expo) both;
+  transition: border-color var(--dur-micro), transform var(--dur-micro),
+    box-shadow var(--dur-micro);
+}
+.feed-post:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+  border-color: color-mix(in srgb, var(--copper) 35%, var(--line));
+}
+@keyframes feed-post-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.feed-post__badge {
+  font-size: 11px;
+  color: var(--ash);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+.feed-post__actor {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: var(--copper);
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+.feed-post__body {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--bone);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.feed-post__time {
+  display: block;
+  font-size: 11px;
+  color: var(--ash);
+  margin-top: 8px;
+}
+.feed-post__reply {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ash);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.feed-post__reply:hover { color: var(--copper); border-color: var(--copper); }
+
+/* Compose: opt-in mint onboarding, the public composer, and the
+   mandatory confirmation modal. Lives at the bottom of the pane. */
+.fediverse-compose {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--ink-2);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fediverse-compose__mint-heading { font-size: 15px; font-weight: 600; }
+.fediverse-compose__mint-help { font-size: 12px; color: var(--ash); }
+.fediverse-compose__mint-input {
+  font: inherit;
+  background: var(--ink);
+  color: var(--bone);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.fediverse-compose__mint-error { font-size: 12px; color: var(--rust); min-height: 1em; }
+.fediverse-compose__mint-btn,
+.fediverse-compose__post {
+  align-self: flex-start;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
+}
+.fediverse-compose__mint-btn:hover:not(:disabled),
+.fediverse-compose__post:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+.fediverse-compose__mint-btn:active:not(:disabled),
+.fediverse-compose__post:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
+}
+.fediverse-compose__mint-btn:disabled,
+.fediverse-compose__post:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
+.fediverse-compose__textarea {
+  font: inherit;
+  background: var(--ink);
+  color: var(--bone);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+.fediverse-compose__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.fediverse-compose__note { font-size: 11px; color: var(--ash); }
+.fediverse-compose__result { font-size: 12px; color: var(--ash); min-height: 1em; }
+.fediverse-compose__reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--copper);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  word-break: break-all;
+}
+.fediverse-compose__reply[hidden] { display: none !important; }
+.fediverse-compose__reply-clear {
+  background: none;
+  border: none;
+  color: var(--ash);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.fediverse-compose__reply-clear:hover { color: var(--bone); }
+
+.fediverse-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ink) 75%, transparent);
+}
+.fediverse-confirm__box {
+  max-width: 420px;
+  margin: 16px;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fediverse-confirm__copy { font-size: 13px; line-height: 1.55; color: var(--bone); margin: 0; }
+.fediverse-confirm__tick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ash);
+  cursor: pointer;
+}
+.fediverse-confirm__buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.fediverse-confirm__cancel {
+  font: inherit;
+  background: none;
+  color: var(--bone-dim);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.fediverse-confirm__accept {
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--copper);
+  border: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.fediverse-confirm__accept:hover { background: var(--copper-bright); }
+
+/* ---- M5.1 handle lookup + actor card ---- */
+
+.fediverse-lookup { padding: 10px 14px 12px; border-bottom: 1px solid var(--line); }
+.fediverse-lookup__form { display: flex; gap: 8px; }
+.fediverse-lookup__input {
+  flex: 1; font-size: 13px; color: var(--bone);
+  background: var(--ink-2); border: 1px solid var(--line);
+  border-radius: var(--r-ctl); padding: 6px 10px;
+}
+.fediverse-lookup__input:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.fediverse-lookup__btn {
+  font-size: 13px; color: var(--bone); cursor: pointer;
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  border: none; border-radius: var(--r-ctl); padding: 6px 14px;
+  box-shadow: var(--edge-highlight);
+  transition: filter var(--dur-micro), transform var(--dur-micro);
+}
+.fediverse-lookup__btn:hover { filter: brightness(1.08); }
+.fediverse-lookup__btn:active { transform: scale(0.98); }
+.fediverse-lookup__btn:disabled { opacity: 0.5; cursor: default; }
+.fediverse-lookup__loading, .fediverse-lookup__error { margin-top: 10px; font-size: 12px; }
+.fediverse-lookup__loading { color: var(--ash); }
+.fediverse-lookup__error { color: var(--rust); }
+
+.actor-card {
+  margin-top: 10px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--r-card);
+  background: var(--ink-2); background-image: var(--surface-grad);
+  box-shadow: var(--edge-highlight);
+}
+.actor-card__name { font-size: 15px; font-weight: 600; color: var(--bone); }
+.actor-card__handle {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px; color: var(--copper); word-break: break-all; margin-top: 2px;
+}
+.actor-card__bio { margin-top: 6px; font-size: 13px; color: var(--bone-dim); }
+.actor-card__badge { margin-top: 8px; font-size: 11px; color: var(--signal-ok); }
+.actor-card__agent {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px; color: var(--ash); margin-top: 2px;
+}
+.actor-card__note, .actor-card__status { margin-top: 8px; font-size: 12px; color: var(--ash); }
+.actor-card__warn { margin-top: 8px; font-size: 12px; color: var(--rust); }
+.actor-card__actions { display: flex; gap: 8px; margin-top: 10px; }
+.actor-card__msg-btn {
+  font-size: 12px; color: var(--bone); cursor: pointer;
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  border: none; border-radius: 999px; padding: 4px 14px;
+  box-shadow: var(--edge-highlight);
+  transition: filter var(--dur-micro), transform var(--dur-micro);
+}
+.actor-card__msg-btn:hover { filter: brightness(1.08); }
+.actor-card__msg-btn:active { transform: scale(0.98); }
+.actor-card__msg-btn:disabled { opacity: 0.5; cursor: default; }
+.actor-card__invite-btn, .actor-card__invite-send {
+  font-size: 12px; color: var(--ash); cursor: pointer;
+  background: none; border: 1px solid var(--line);
+  border-radius: 999px; padding: 4px 12px;
+  transition: color var(--dur-micro), border-color var(--dur-micro);
+}
+.actor-card__invite-btn:hover, .actor-card__invite-send:hover {
+  color: var(--copper); border-color: var(--copper);
+}
+.actor-card__invite-btn:disabled, .actor-card__invite-send:disabled {
+  opacity: 0.5; cursor: default;
+}
+.actor-card__invite-row { display: flex; gap: 8px; margin-top: 8px; }
+.actor-card__invite-select {
+  flex: 1; font-size: 12px; color: var(--bone);
+  background: var(--ink-2); border: 1px solid var(--line);
+  border-radius: var(--r-ctl); padding: 4px 8px;
+}
+.fediverse-compose__mint-pending { font-size: 12px; color: var(--ash); margin-bottom: 8px; }

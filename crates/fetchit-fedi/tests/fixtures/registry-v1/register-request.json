@@ -1,0 +1,12 @@
+{
+  "handle": "josh",
+  "rsa_spki_der": "3q2+7w==",
+  "attestation_v2": {
+    "version": 2,
+    "profile_addr": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "relay_hint": "https://relay.example:8088/",
+    "hint_epoch_ms": 1750000000000,
+    "ml_dsa_pubkey": "QkJCQg==",
+    "signature": "QUFBQQ=="
+  }
+}

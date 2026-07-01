@@ -1,0 +1,33 @@
+#!/bin/bash
+# Send a message to Box A via the chat-peer outbox file + log to
+# transcript.
+#
+# The chat-peer reads this file from a persisted byte cursor, advances
+# the cursor atomically after each acked send, and survives x0xd
+# restarts via the embedded signer's port-file self-heal. The previous
+# FIFO transport hit a wedge whenever x0xd flapped — replaced after
+# Josh's "fix it once and for all" ruling (Bob+Alice ack 2026-06-03).
+#
+# Usage: claude-tx-send <message>
+#
+# Env overrides:
+#   PEER_OUTBOX_FILE  default /tmp/claude-pair/to-alice.txt
+
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+  echo "usage: claude-tx-send <message>" >&2
+  exit 2
+fi
+
+OUTBOX="${PEER_OUTBOX_FILE:-/tmp/claude-pair/to-alice.txt}"
+TRANSCRIPT="${PEER_TRANSCRIPT:-/tmp/claude-transcript.log}"
+msg="$*"
+
+mkdir -p -- "$(dirname -- "$OUTBOX")"
+printf '%s\n' "$msg" >> "$OUTBOX"
+{
+  echo
+  echo "[$(date -Is)] [B→A] $msg"
+} >> "$TRANSCRIPT"
+echo "sent: ${#msg} chars"

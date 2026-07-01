@@ -1,0 +1,16 @@
+{
+  "name": "fetchit-bridge-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker fronting the fetch>it ActivityPub bridge on etchit.io (M4 publish-half DP2).",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8",
+    "wrangler": "^3.90.0"
+  }
+}

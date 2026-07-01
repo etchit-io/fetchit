@@ -149,14 +149,17 @@ class HtmlView @JvmOverloads constructor(
      * pattern is anchored to a real 64-hex address so prose that
      * mentions the scheme abstractly (e.g. "the autonomi:// URL
      * scheme...") is left alone.
+     *
+     * `query` (a `?…` string, or `""`) rides on the synthetic base URL
+     * so the SPA reads it as a normal `location.search`.
      */
-    fun load(html: String) {
+    fun load(html: String, query: String = "") {
         resourceCache.clear()
         val rewritten = ADDR_REWRITE.replace(html) { match ->
             "$SYNTH_PREFIX${match.groupValues[1]}"
         }
         webView.loadDataWithBaseURL(
-            SYNTH_ORIGIN,
+            SYNTH_ORIGIN + query,
             rewritten,
             "text/html",
             "UTF-8",
@@ -166,9 +169,9 @@ class HtmlView @JvmOverloads constructor(
 
     /** Stop loading and clear the page. Call from the host's clear path. */
     fun release() {
-        // If we're tearing down while a video is fullscreen, restore
-        // the layout + system UI before unloading. Otherwise the user
-        // would be left staring at hidden status bars.
+        // If a video is in fullscreen at teardown, exit fullscreen first
+        // so the activity's system bars are restored before the WebView
+        // unloads.
         if (fullscreenView != null) {
             (webView.webChromeClient as? AutonomiChromeClient)?.onHideCustomView()
         }
@@ -194,13 +197,13 @@ class HtmlView @JvmOverloads constructor(
                 Log.i(TAG, "intercept ${addr.take(10)}… range=${request.requestHeaders?.get("Range") ?: "-"}")
                 return resolveAddr(addr, request.requestHeaders)
             }
-            // 100% Autonomi: rendered content reaches the Autonomi network
-            // and nothing else. data:/blob:/about: are page-internal.
+            // Only autonomi:// resolves through the client; data/blob/about
+            // pass through as page-internal, everything else is refused.
             return when (request.url?.scheme?.lowercase()) {
                 "data", "blob", "about" -> null
                 else -> {
                     Log.w(TAG, "blocked non-Autonomi request: $url")
-                    errorResponse(403, "blocked: fetch>it loads Autonomi content only")
+                    errorResponse(403, "blocked: non-Autonomi request")
                 }
             }
         }
@@ -225,8 +228,8 @@ class HtmlView @JvmOverloads constructor(
                 onAutonomiNavigate?.invoke(addr)
                 return true
             }
-            // fetch>it shows Autonomi content only — a top-level navigation
-            // to any other URL is refused (not followed, not handed off).
+            // Top-level http(s) navigations are refused (not followed,
+            // not handed off).
             val scheme = request?.url?.scheme?.lowercase()
             if (request?.isForMainFrame == true && (scheme == "http" || scheme == "https")) {
                 return true

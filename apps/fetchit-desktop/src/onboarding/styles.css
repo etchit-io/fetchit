@@ -1,0 +1,107 @@
+/* First-run welcome overlay. Sits above the live app; dismissed only
+   via Start or Skip. Palette keys off the shared theme tokens. */
+
+.onboarding {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ink) 72%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.onboarding__card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(420px, calc(100vw - 48px));
+  padding: 28px 26px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--ink-2);
+  background-image: var(--surface-grad);
+  box-shadow: var(--elev-3), var(--edge-highlight);
+}
+
+.onboarding__title {
+  margin: 0;
+  font: 400 26px/1.25 var(--font-display);
+  color: var(--bone);
+}
+
+.onboarding__question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.95rem;
+  color: var(--bone);
+}
+
+.onboarding__name {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--ink);
+  color: var(--bone);
+  font-size: 1rem;
+}
+
+.onboarding__name:focus {
+  outline: none;
+  border-color: var(--copper);
+  box-shadow: var(--focus-ring);
+}
+
+.onboarding__honesty {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: var(--ash);
+}
+
+.onboarding__start {
+  padding: 10px 14px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: linear-gradient(180deg, var(--copper-bright), var(--copper));
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--edge-highlight), 0 1px 3px color-mix(in srgb, var(--copper) 35%, transparent);
+  transition: filter var(--dur-micro), transform var(--dur-micro), box-shadow var(--dur-micro);
+}
+
+.onboarding__start:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+
+.onboarding__start:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  filter: brightness(0.97);
+}
+
+.onboarding__start:disabled {
+  background: var(--ash);
+  box-shadow: none;
+  opacity: 0.45;
+  cursor: default;
+}
+
+.onboarding__skip {
+  align-self: center;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  color: var(--ash);
+  font-size: 0.82rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.onboarding__skip:hover {
+  color: var(--bone);
+}

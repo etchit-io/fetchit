@@ -6,7 +6,7 @@ A single `v*` tag releases every platform in one pass:
 |----------|--------------------------------------|
 | Android  | `fetchit-<ver>.apk` + `.sha256`, plus stable-named `app-release.apk` |
 | macOS    | Universal `.dmg` + `.app.tar.gz` (Apple Silicon + Intel in one bundle) |
-| Linux    | `.AppImage` + `.deb` (x86_64) |
+| Linux    | `.deb` (x86_64) |
 | Windows  | `.msi` + NSIS `.exe` (x86_64) |
 
 All five artifacts land on the same GitHub Release because both jobs
@@ -35,7 +35,7 @@ because Tauri compiles the Rust backend from scratch on each OS.
 ### 1. Generate a release keystore
 
 The keystore signs every release APK. **Lose it and you can never
-update the app** — Android refuses installs of an APK signed with a
+update the app** -- Android refuses installs of an APK signed with a
 different key than the one already installed. Back it up somewhere
 safe (encrypted volume, password manager attachment, etc.).
 
@@ -49,7 +49,7 @@ keytool -genkeypair -v \
 
 `keytool` will prompt for a keystore password, key password, and your
 identity (org name, country, etc.). Use a long randomly-generated
-password — store it in a password manager. The keystore itself is
+password -- store it in a password manager. The keystore itself is
 gitignored.
 
 ### 2. Configure local builds
@@ -86,7 +86,7 @@ New repository secret**, add four secrets:
 
 Then `rm /tmp/fetchit-keystore.b64`.
 
-### 4. Desktop code-signing (OPTIONAL — unsigned bundles still publish)
+### 4. Desktop code-signing (OPTIONAL -- unsigned bundles still publish)
 
 The desktop matrix runs without any of these secrets. Bundles publish
 unsigned and users see a one-time warning the first time they open
@@ -96,7 +96,7 @@ the app:
   Privacy & Security → "Open Anyway" once. Notarised builds skip this.
 - **Windows unsigned**: SmartScreen flags as unknown; user clicks
   "More info" → "Run anyway". Authenticode-signed builds skip this.
-- **Linux**: no equivalent gating; `.AppImage` / `.deb` run as-is.
+- **Linux**: no equivalent gating; `.deb` runs as-is.
 
 When (if) you want to remove those warnings, set up the certs and
 upload them as repo secrets.
@@ -112,7 +112,7 @@ upload them as repo secrets.
 | `APPLE_PASSWORD`             | an app-specific password from appleid.apple.com        |
 | `APPLE_TEAM_ID`              | 10-char team identifier from the Developer portal      |
 
-**Windows Authenticode** (DigiCert, Sectigo, etc. — ~$200–500/yr):
+**Windows Authenticode** (DigiCert, Sectigo, etc. -- ~$200–500/yr):
 
 | Secret                          | What                                          |
 |---------------------------------|-----------------------------------------------|
@@ -126,11 +126,11 @@ configured" and the bundle ships unsigned.
 
 ## Per-release process
 
-1. **Bump the version in all four files** (they must agree):
+1. **Bump the version in all three files** (they must agree):
 
    ```kotlin
    // apps/fetchit-android/app/build.gradle.kts
-   versionCode = 2          // monotonic — Android refuses downgrades
+   versionCode = 2          // monotonic -- Android refuses downgrades
    versionName = "0.1.0"    // semantic version (no `v` prefix)
    ```
 
@@ -166,7 +166,7 @@ configured" and the bundle ships unsigned.
    npm run tauri build
    ```
 
-   Local `tauri build` only produces a bundle for the host OS — the
+   Local `tauri build` only produces a bundle for the host OS -- the
    cross-platform fan-out is the matrix's job.
 
 3. **Commit, tag, push**:
@@ -180,7 +180,7 @@ configured" and the bundle ships unsigned.
 4. **Watch the workflow**: GitHub Actions → `release` → look for the
    tag. APK job ~5–10 min; desktop matrix ~15–25 min for all three
    runners. Output is one Release on the repo's Releases page with
-   APK + macOS .dmg + Linux .AppImage/.deb + Windows .msi/.exe.
+   APK + macOS .dmg + Linux .deb + Windows .msi/.exe.
 
 5. **Verify the downloads**: pull each artifact, compare APK sha256
    against the `.sha256` file, install on a clean device / VM /
@@ -192,7 +192,7 @@ configured" and the bundle ships unsigned.
 |---------------|----------------------------------------------------------|
 | `v0.1.0`      | Stable release (auto-published)                          |
 | `v0.1.0-rc1`  | Pre-release (workflow flags `prerelease: true`)          |
-| `v0.1.0-dev`  | Pre-release (same — anything with `-` in version)        |
+| `v0.1.0-dev`  | Pre-release (same -- anything with `-` in version)        |
 
 Workflow uses `contains(version, '-')` to flag pre-releases on the
 GitHub Releases page.
@@ -205,7 +205,7 @@ GitHub Releases is the source of truth. To unrelease:
 - **Hard delete**: also delete the tag (`git push --delete origin v0.1.0`).
   Local users with the bad APK installed are stuck on it; the next
   release with a higher `versionCode` upgrades them. Desktop users
-  who already downloaded a bad bundle keep it until they redownload —
+  who already downloaded a bad bundle keep it until they redownload --
   unlike Android there's no upgrade-refuses-downgrade enforcement, so
   bumping the version and re-releasing is the cleanest fix.
 
@@ -216,19 +216,19 @@ already.
 
 ## What this pipeline does NOT do (yet)
 
-- **x86_64 / emulator support** — disabled to keep the APK small.
+- **x86_64 / emulator support** -- disabled to keep the APK small.
   Real phones are arm64 (99%+); x86_64 is only useful in emulators.
   If we need emulator builds, add `x86_64` back to `abiFilters` in
   `app/build.gradle.kts` and to `scripts/build-jni-libs.sh`.
-- **Play Store upload** — manual for now. The signing key is
+- **Play Store upload** -- manual for now. The signing key is
   upload-key compatible if/when we go through Play App Signing.
-- **ARM Linux / ARM Windows desktop bundles** — only x86_64 today.
+- **ARM Linux / ARM Windows desktop bundles** -- only x86_64 today.
   macOS is universal so Apple Silicon is covered. Add `linux/arm64`
   or `windows-11-arm` matrix legs when there's user demand.
-- **Auto-update for desktop** — bundles are install-once. Wire
+- **Auto-update for desktop** -- bundles are install-once. Wire
   `tauri-plugin-updater` + signed update manifests when we want
   background updates.
-- **Reproducible builds** — gradle's `assembleRelease` is mostly but
+- **Reproducible builds** -- gradle's `assembleRelease` is mostly but
   not perfectly deterministic. Independent verification of a published
   APK requires the same NDK / JDK / Rust toolchain versions plus the
   keystore.

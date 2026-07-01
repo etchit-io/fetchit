@@ -1,0 +1,71 @@
+# CAPABILITIES -- what's already built
+
+> **Read this before calling anything missing, a gap, or "to build."** It is the
+> code-anchored index of capabilities that already ship, so we stop re-discovering
+> features we already wrote. Faster path: `scripts/whats-built.sh <keyword>`.
+>
+> **Contract**
+> - Every entry cites a `file:symbol` you can open right now. If you can't anchor
+>   it to code, it does not belong here.
+> - Each subsystem section ends with an `<!-- arch: ... -->` stamp.
+>   `scripts/check-arch-stamps.sh` warns when a section's implementing files have
+>   changed since its stamped commit: re-verify the entries, then bump `verified=`.
+> - **Branch caveat:** this describes the current (`chat`-line) tree. A capability
+>   may live on an unmerged branch; those are flagged inline as `[branch: NAME]`.
+>   `whats-built.sh` and your checkout only see the current branch, so also check
+>   `git branch -a` and ask the other box (Alice / Bob) before concluding absence.
+> - Seeded with the subsystems that kept getting re-discovered (chat reliability,
+>   engine, shells). Extend other subsystems only with anchors you have opened.
+
+## Engine core (read-only render pipeline)
+
+- Stateless flow `address -> NetworkClient::fetch -> bytes -> HandlerRegistry::render -> Rendition` -- `crates/fetchit-core/src/network.rs:25` (`NetworkClient`), `registry.rs:30` (`HandlerRegistry`), `handler.rs:87` (`Rendition`), `handler.rs:246` (`ContentHandler`).
+- Autonomi network client, the only crate linking `ant-core`/`self_encryption` -- `crates/fetchit-net/src` (`AutonomiClient`).
+
+<!-- arch: id=engine-core glob=crates/fetchit-core/src/network.rs crates/fetchit-core/src/registry.rs crates/fetchit-core/src/handler.rs crates/fetchit-net/src verified=2eea972 -->
+
+## Chat -- delivery and reliability
+
+- Per-message delivery state **Sending / Delivered / Not delivered**: recipient emits `EnvelopeKind::DeliveryReceipt` via `build_receipt_outbox` (`crates/fetchit-chat/src/conversation/outbound.rs:225`), sender binds it with `Conversation::apply_delivery_receipt` (`conversation/types.rs:291`), desktop UI is `BubbleStatusTag` (`apps/fetchit-desktop/src/chat/bubble.ts:249`).
+- **DM resend / engine-owned outbox** (the client carries retention past the relay's 15-min TTL): an offline->online edge re-sends in-flight/failed bubbles, a 24h sweep flips stuck sends to an honest "failed", survives app restart, double-send-guarded. Lives in the shared engine -- `crates/fetchit-chat/src/outbox/{mod,store,driver}.rs` (`OutboxStore`, presence-driven `OutboxDriver`), driven by `Client::enqueue_dm` / `start_outbox_driver` / `retry_outbox`, so BOTH shells share one loop: desktop projects each `OutboxEvent` via `ChatStore.applyOutboxEvent` (`apps/fetchit-desktop/src/chat/state.ts`), Android via the FFI outbox surface + `ConversationStore.upsertOutbox`. A `DeliveryReceipt` marks the durable bubble Delivered engine-side through `conversation::dispatch_inbound_with_outbox`, so a delivered DM is never re-sent.
+- Relay **transit buffer** (RAM-only, hard 15-min TTL, fire-and-forget), drained on every WS reconnect -- `crates/fetchit-relay-server/src/transit.rs:37` (`TransitBuffer`, `drain` at :83); replay at connect in `crates/fetchit-relay-server/src/ws.rs:94` (`replay_transit` at :398). No cursor/since/inbox query; DM catch-up is implicit on reconnect.
+- Per-group **bridge consent** (default-off, per-group opt-in), encrypted at rest and persisted across restart -- `crates/fetchit-chat/src/groups_reachability.rs:144` (`BridgeConsentStore`; `load` / `flush` seal the map to `bridge/consent.json.enc` via `at_rest::seal_to_path`, fail-safe to empty on a damaged file). The prod `Client` ctor loads it; `new()` stays in-memory.
+- Direct-gossip **reachability cache** (60s window, rebuilt from live gossip after restart) -- `crates/fetchit-chat/src/groups_reachability.rs` (`ReachabilityCache`, `STALE_AFTER_MS`).
+
+<!-- arch: id=chat-delivery glob=crates/fetchit-chat/src/conversation/outbound.rs crates/fetchit-chat/src/conversation/types.rs crates/fetchit-chat/src/outbox crates/fetchit-chat/src/groups_reachability.rs crates/fetchit-relay-server/src/transit.rs crates/fetchit-relay-server/src/ws.rs apps/fetchit-desktop/src/chat/state.ts apps/fetchit-desktop/src/chat/bubble.ts verified=6b55996 -->
+
+## Chat -- transport and groups
+
+- Message **content routing by reachability** (relay = Always, LAN-direct = IfReachable, future WebRTC = cross-NAT) -- `crates/fetchit-chat/src/transport/mod.rs` (`Router`, `Reachability`).
+- Group **MLS control-plane** (Welcome/Commit/member changes) rides x0xd gossip as PRIMARY, relay only as a cross-NAT contingency -- `crates/fetchit-chat/src/transport/mod.rs` (does NOT use the `Router`).
+- Forward-compat envelopes: the relay routes opaquely by `to` (`SendFrame.envelope_bytes`) and peers round-trip unrecognized kinds (`EnvelopeKind::Unknown(u8)`) -- `crates/fetchit-relay-proto/src/envelope.rs`.
+
+<!-- arch: id=chat-transport glob=crates/fetchit-chat/src/transport crates/fetchit-chat/src/groups crates/fetchit-relay-proto/src/envelope.rs verified=f9b9e98 -->
+
+## Chat -- cross-NAT group-join (engine A)
+
+- **Gossip-independent PQ TreeKEM group-join over the relay** (engine A): a NAT'd joiner converges into a group whose owner is also NAT'd, with no gossip/mDNS, so it holds under the v1 gossip-disabled config. Forward path -- the joiner's signed `member_joined` is bridged sealed to the owner, which applies it through `apply_metadata_event` (full ML-DSA + single-use invite + inviter gate) and publishes the authoritative `MemberAdded` -- `crates/fetchit-chat/src/client.rs:2170` (`join_group_bridged`), `crates/fetchit-chat/src/client.rs:1871` (`dispatch_inbound_bridge` forward arm), `crates/x0xd-client/src/secure.rs:574` (`apply_metadata_event`).
+- Reverse path -- the owner bridges the `MemberAdded` back sealed; the joiner self-detects it and applies it locally so its TreeKEM membership poll resolves -- `crates/fetchit-chat/src/client.rs:2012` (`reply_to_bridged_join`), `crates/fetchit-chat/src/groups/join_bridge.rs:92` (`member_added_self_target`) + `:77` (`stable_group_id_from_member_joined`), `crates/x0xd-client/src/secure.rs:631` (`apply_join_result`). The joiner daemon gates the applied event to MemberAdded-only, `member == self`, `sender == creator`, and re-verifies the signed commit (wiremock-tested 200/409/403 in `secure.rs`).
+
+<!-- arch: id=chat-engine-a glob=crates/fetchit-chat/src/client.rs crates/fetchit-chat/src/groups/join_bridge.rs crates/x0xd-client/src/secure.rs verified=42c3f0e -->
+
+## Chat -- who-is-who (per-identity color + sealed sender name)
+
+- Per-identity **bubble color + sender-name label** so group senders are scannable at a glance: a deterministic hue index off `agent_id` drives the avatar gradient, the bubble accent stripe, and the sender-name color as one identity -- `apps/fetchit-desktop/src/chat/avatarColor.ts` (`identityIndex` %8 + `avatarGradientClass` / `bubbleIdentityClass` / `senderIdentityClass`), rendered in `bubble.ts` + `conversation.ts` (`groupAttribution`). Android mirrors the same index in `IdentityColor.kt`.
+- **Sealed sender display name** rides INSIDE the encrypted private-group frame, so the relay never sees who said what: `send_private_group` encodes `{sender_name, body}` via `encode_group_plaintext` (NUL-magic-prefixed JSON) before `secure.encrypt`; `receive_private_group_envelope` recovers it via `decode_group_plaintext`, falling back to a legacy bare-body frame (name unknown) -- `crates/fetchit-chat/src/messages.rs:1043` + `:1418`, `crates/fetchit-chat/src/conversation/types.rs:393` (`GROUP_BODY_MAGIC`, `encode_group_plaintext` / `decode_group_plaintext`). The label resolves sender_name -> saved-contact -> short id on both shells (desktop `state.ts` `displayNameFor`; Android `ChatNames.groupSenderLabel`). Verified end-to-end on device 2026-06-24.
+
+<!-- arch: id=chat-who-is-who glob=crates/fetchit-chat/src/messages.rs crates/fetchit-chat/src/conversation/types.rs apps/fetchit-desktop/src/chat/avatarColor.ts apps/fetchit-desktop/src/chat/bubble.ts apps/fetchit-desktop/src/chat/conversation.ts apps/fetchit-desktop/src/chat/state.ts verified=1a57ed8 -->
+
+## Fediverse bridge (M4 / M5.1)
+
+- HTTP Signatures use **classical RSA-2048 + PKCS#1 v1.5 + SHA-256** (`rsa-v1_5-sha256`), NOT Ed25519 and NOT post-quantum -- `crates/fetchit-fedi/src/signature.rs`. The PQ binding is the ML-DSA-65 attestation in the Actor JSON-LD, not the per-POST signature. Crypto source of truth: `docs/honest-claims-crypto.md` §3.
+
+<!-- arch: id=fedi-sig glob=crates/fetchit-fedi/src/signature.rs docs/honest-claims-crypto.md verified=f9b9e98 -->
+
+## Shells
+
+- **Desktop** (Tauri 2): full reader plus the chat/relay/trust stack -- entry `apps/fetchit-desktop/src/controller.ts`, render dispatch `apps/fetchit-desktop/src/renderers/dispatch.ts`, backend `apps/fetchit-desktop/src-tauri/`.
+- **Android** (merged on `chat`): read-only Autonomi viewer PLUS the LIT chat shell. The reader FFI (`Client::{connect,fetch,fetch_and_render}` + `detect`) and the daemonless `ChatClient` chat surface both live in `crates/fetchit-ffi/src/lib.rs`; the reader renders via `RenditionRenderer.kt`, chat via `chat/ChatController` + `chat/ChatModeView`, with the engine DM outbox projected to per-bubble status (`ConversationStore.upsertOutbox`).
+- **DM catch-up parity:** desktop catches up on relay reconnect (transit replay); the Android chat shell shares the engine DM outbox (resend/retry) but full inbound DM catch-up parity is the remaining lane (task #42).
+
+<!-- arch: id=shells glob=crates/fetchit-ffi/src/lib.rs apps/fetchit-desktop/src/controller.ts apps/fetchit-desktop/src/renderers/dispatch.ts apps/fetchit-android/app/src/main/java/io/etchit/fetchit/chat verified=f9b9e98 -->

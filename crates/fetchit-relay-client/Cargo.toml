@@ -1,0 +1,45 @@
+[package]
+name = "fetchit-relay-client"
+description = "Client library for the fetchit relay protocol — handshake, reconnect, region probing, ack tracking."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license = "Apache-2.0 OR MIT"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fetchit-relay-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+dashmap.workspace = true
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+x0xd-client = { path = "../x0xd-client" }
+futures-util.workspace = true
+hex.workspace = true
+postcard.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+saorsa-pqc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util"] }
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+fetchit-relay-server = { path = "../fetchit-relay-server" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

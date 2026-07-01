@@ -12,11 +12,10 @@ import java.io.File
  * No expiry, no revalidation, no staleness rules. Anything fetched
  * once is correct forever.
  *
- * **What it gives the user**: anything fetched once is instant on
- * second load, available offline (airplane mode, no signal), and
- * survives across app restarts. SPA subresources (every
- * `<img src="autonomi://…">`, `fetch("autonomi://…")`, etc.) and
- * top-level navigations both flow through the same cache.
+ * Both top-level fetches and SPA subresources (every
+ * `<img src="autonomi://…">`, `fetch("autonomi://…")`, etc.)
+ * consult this cache before going to the network; entries survive
+ * app restarts.
  *
  * **Storage layout**: `<rootDir>/<first-2-hex-chars>/<full-64-hex>`
  * sharding so a busy directory (256 shards × thousands of entries)

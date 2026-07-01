@@ -1,19 +1,33 @@
-// Transforms an HTML document for safe in-iframe rendering:
-//   1. injects a strict Content-Security-Policy meta that allows only the
-//      fetchit:// / autonomi:// schemes (plus inline scripts/styles, which
-//      the iframe sandbox already isolates) — no network egress;
-//   2. forces <base href> to autonomi://<addr>/ so relative URLs resolve
-//      through our protocol handler regardless of any base the document
-//      tried to set (and authors' canonical scheme is autonomi://);
-//   3. injects a click interceptor + back-link handler that posts up to
-//      the parent window so it stays in sync with iframe nav;
-//   4. rewrites <audio>/<video>/<source> autonomi:// srcs to the local
-//      media server URL and stashes them in data-fetchit-src so the WebView
-//      doesn't run the media resource-selection algorithm on element setup
-//      — src is hydrated on first user interaction with the element.
-// Non-media `autonomi://` references in other attributes are left alone:
-// the WebView accepts the scheme directly because we registered it in
-// lib.rs alongside fetchit://. Both resolve to the same handler.
+// Transforms an untrusted HTML document for safe in-iframe rendering.
+// rewriteHtml() applies these passes in order (see the function body for
+// the exact call sequence):
+//
+//   ORIGIN + CSP
+//   - setBase: pin <base href> to autonomi://<addr>/ so relative URLs
+//     resolve through our protocol handler, overriding any base the doc set.
+//   - stripIncomingCsp + injectCsp: drop any attacker-supplied CSP meta
+//     (its report-uri/report-to are additive and could phone home), then
+//     install our strict policy (only fetchit:// / autonomi://, no egress).
+//   STRIP LEAK / REDIRECT / TRACKING VECTORS
+//   - stripResourceHints: drop preconnect/dns-prefetch/prefetch/preload
+//     links (they open connections before CSP can block).
+//   - stripExternalStylesheets / stripMetaRefresh / stripAnchorPing: remove
+//     external stylesheet links, <meta http-equiv=refresh>, and <a ping>.
+//   NEUTER + REWRITE THE JS SURFACE
+//   - injectNeuterScript: neuter DOM-storage + dangerous JS APIs before any
+//     SPA script runs.
+//   - injectUrlRewriter: monkeypatch setters/setAttribute/fetch/XHR so
+//     autonomi:// (and bare 64-hex) refs built at runtime route to the
+//     local media server.
+//   - injectFetchitContext: expose window.fetchit.address / query.
+//   MEDIA + LINKS
+//   - rewriteMediaSrc / rewriteImageSrc: rewrite <audio>/<video>/<source>
+//     and <img>/<picture><source> autonomi:// srcs to the media server;
+//     injectMediaHydration defers media src to first interaction (no preload).
+//   - injectLinkInterceptor: post link clicks / back-nav up to the parent.
+//
+// Non-media autonomi:// refs in other attributes are left for the WebView,
+// which accepts the scheme directly (registered in lib.rs alongside fetchit://).
 
 const LINK_INTERCEPTOR = `
 (function () {
@@ -91,7 +105,12 @@ function buildCsp(mediaBase: string): string {
   ].join("; ");
 }
 
-export function rewriteHtml(body: string, address: string, mediaBase: string): string {
+export function rewriteHtml(
+  body: string,
+  address: string,
+  mediaBase: string,
+  query = "",
+): string {
   const doc = new DOMParser().parseFromString(body, "text/html");
   setBase(doc, `autonomi://${address}/`);
   // Strip an incoming Content-Security-Policy meta tag *before* we add ours.
@@ -106,6 +125,7 @@ export function rewriteHtml(body: string, address: string, mediaBase: string): s
   stripAnchorPing(doc);
   injectNeuterScript(doc);
   injectUrlRewriter(doc, mediaBase);
+  injectFetchitContext(doc, address, query);
   rewriteMediaSrc(doc, mediaBase);
   rewriteImageSrc(doc, mediaBase);
   injectMediaHydration(doc);
@@ -567,4 +587,104 @@ function injectLinkInterceptor(doc: Document): void {
   const script = doc.createElement("script");
   script.textContent = LINK_INTERCEPTOR;
   doc.body.appendChild(script);
+}
+
+// Expose the `window.fetchit` context — `address` (always) and `query`
+// (the carried query string, possibly empty). When `query` is non-empty,
+// additionally shim `location.search` so SPAs reading the standard API
+// still see the query: `history.replaceState` in srcdoc iframes is
+// silently refused by WebKit, hence the backstop layers.
+function injectFetchitContext(
+  doc: Document,
+  address: string,
+  query: string,
+): void {
+  // JSON-encode each as a JS string literal, then defuse any `</` so
+  // the value cannot close this <script> element early.
+  const safeAddr = String(address ?? "");
+  const safeQuery = String(query ?? "");
+  const aLit = JSON.stringify(safeAddr).replace(/<\//g, "<\\/");
+  const qLit = JSON.stringify(safeQuery).replace(/<\//g, "<\\/");
+
+  const queryShim = safeQuery
+    ? `
+  // Apply the query as an ABSOLUTE same-document URL. A bare relative
+  // "?k=v" resolves against the injected <base href="autonomi://<addr>/">,
+  // making it cross-origin from the null-origin srcdoc iframe -- WebKit
+  // then throws SecurityError and the query never lands (empirically the
+  // failure mode on WebKitGTK). Anchoring to the current document URL
+  // (about:srcdoc) keeps it same-document, so location.search updates for
+  // real. This is the mechanism that actually works: location.search is
+  // [Unforgeable] on WebKit, so the defineProperty backstops below cannot
+  // fake it there -- they remain only as a cross-engine fallback, skipped
+  // once this replaceState has set the real value.
+  try {
+    history.replaceState(history.state, "", location.href.split("#")[0].split("?")[0] + q);
+  } catch (_) {}
+  // Backstop 1 — shim the prototype getter (works in Chromium).
+  if (location.search !== q) {
+    try {
+      var d = Object.getOwnPropertyDescriptor(Location.prototype, "search");
+      if (d && d.get) {
+        Object.defineProperty(Location.prototype, "search", {
+          configurable: true,
+          get: function () { return this === location ? q : d.get.call(this); },
+        });
+      }
+    } catch (_) {}
+  }
+  // Backstop 2 — shim the instance directly (WebKit may put properties
+  // on the instance rather than the prototype).
+  if (location.search !== q) {
+    try {
+      Object.defineProperty(location, "search", {
+        configurable: true,
+        get: function () { return q; },
+      });
+    } catch (_) {}
+  }
+  // Backstop 3 — wrap URLSearchParams so SPAs feeding the still-empty
+  // location.search into it still see the carried query. Narrow guard
+  // (init === "" AND location.search === "") so we don't override
+  // intentional empty-init constructions on documents that don't need us.
+  if (location.search !== q) {
+    try {
+      var O = window.URLSearchParams;
+      var W = function (init) {
+        return new O(init === "" && location.search === "" ? q : init);
+      };
+      W.prototype = O.prototype;
+      window.URLSearchParams = W;
+    } catch (_) {}
+  }`
+    : "";
+
+  const s = doc.createElement("script");
+  s.textContent = `(function(){
+  var q = ${qLit};
+  var addr = ${aLit};
+  try {
+    window.fetchit = window.fetchit || {};
+    window.fetchit.address = addr;
+    window.fetchit.query = q;
+  } catch (_) {}${queryShim}
+})();`;
+
+  // Slot in directly after the URL rewriter script so the established
+  // neuter → rewriter → context order is preserved and our script still
+  // sits before any author script in the document.
+  const rewriter = Array.from(doc.head.querySelectorAll("script")).find(
+    (sc) => sc.textContent?.includes("rewriteSrcset"),
+  );
+  if (rewriter) {
+    if (rewriter.nextSibling) doc.head.insertBefore(s, rewriter.nextSibling);
+    else doc.head.appendChild(s);
+  } else {
+    // Defensive fallback — the rewriter should always be present, but
+    // if it isn't, anchoring after CSP still puts us ahead of author
+    // scripts.
+    const csp = doc.head.querySelector('meta[http-equiv="Content-Security-Policy"]');
+    if (csp && csp.nextSibling) doc.head.insertBefore(s, csp.nextSibling);
+    else doc.head.insertBefore(s, doc.head.firstChild);
+  }
 }

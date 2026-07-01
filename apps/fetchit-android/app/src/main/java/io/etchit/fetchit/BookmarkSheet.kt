@@ -74,6 +74,9 @@ class BookmarkSheet : BottomSheetDialogFragment() {
         binding.importButton.setOnClickListener {
             importLauncher.launch(arrayOf("application/json"))
         }
+        binding.shareManyButton.setOnClickListener {
+            showBookmarkMultiShareDialog(requireContext(), host.store.bookmarks.value)
+        }
 
         viewLifecycleOwner.lifecycleScope.launch {
             host.store.bookmarks.collectLatest { list ->

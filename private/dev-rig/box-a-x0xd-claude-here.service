@@ -1,0 +1,15 @@
+[Unit]
+Description=x0xd named instance for Claude pair-rig (Alice/Box A)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/x0xd --name claude-here --skip-update-check
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/tmp/x0xd-claude-here.log
+StandardError=append:/tmp/x0xd-claude-here.log
+
+[Install]
+WantedBy=default.target

@@ -44,14 +44,14 @@ class RenditionRenderer(
      * full vertical space — caller restores the button by invoking
      * [`clear`].
      */
-    fun render(r: RenditionFfi, address: String) {
+    fun render(r: RenditionFfi, address: String, query: String = "") {
         clear()
         binding.fetchButton.visibility = View.GONE
         binding.closeButton.visibility = View.VISIBLE
         binding.shareButton.visibility = View.VISIBLE
-        // Lock pull-to-refresh while content is on screen — accidentally
-        // resetting in the middle of viewing a 5MB video is a real
-        // data-loss UX failure.
+        // Lock pull-to-refresh while content is on screen — an
+        // accidental pull would tear down an in-flight video / audio
+        // rendition.
         binding.swipeRefresh.isEnabled = false
         when (r) {
             is RenditionFfi.Text -> bindText(
@@ -69,7 +69,7 @@ class RenditionRenderer(
             is RenditionFfi.Image -> bindImage(r.mime, r.data)
             is RenditionFfi.Audio -> bindAudio(r.mime, r.data)
             is RenditionFfi.Video -> bindVideo(r.mime, r.data)
-            is RenditionFfi.Html -> bindHtml(r.body)
+            is RenditionFfi.Html -> bindHtml(r.body, query)
             is RenditionFfi.Tabular -> bindTabular(r.columns, r.rows)
             is RenditionFfi.Archive -> {
                 binding.kindText.text = "application/zip"
@@ -149,9 +149,8 @@ class RenditionRenderer(
 
     private fun bindAudio(mime: String, data: ByteArray) {
         binding.kindText.text = "$mime (${data.size} bytes)"
-        // Keep controls always visible for an audio-only rendition;
-        // the default auto-hide is right for video but feels broken
-        // with no surface to tap.
+        // Disable the auto-hide controller timeout for audio-only —
+        // no visible surface to tap to bring controls back.
         binding.playerView.controllerShowTimeoutMs = 0
         binding.playerView.controllerHideOnTouch = false
         audio.play(data, onError)
@@ -204,9 +203,9 @@ class RenditionRenderer(
         }
     }
 
-    private fun bindHtml(body: String) {
+    private fun bindHtml(body: String, query: String) {
         binding.kindText.text = "text/html"
-        binding.htmlView.load(body)
+        binding.htmlView.load(body, query)
         binding.htmlView.visibility = View.VISIBLE
     }
 

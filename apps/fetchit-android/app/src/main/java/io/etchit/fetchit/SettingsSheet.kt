@@ -16,9 +16,8 @@ import uniffi.fetchit_ffi.defaultPeers
  * `CoordinatorLayout` bottom sheet.
  *
  * Live-paints the peer count from
- * [`FetchitApplication.peerCountTracker`]: ash when ≥ 1, red when 0
- * (matches etchit's "honest dip" rule). Bootstrap-peers section starts
- * collapsed — most users never touch it.
+ * [`FetchitApplication.peerCountTracker`]: ash when ≥ 1, red when 0.
+ * Bootstrap-peers section starts collapsed.
  */
 class SettingsSheet(
     private val binding: ActivityMainBinding,
@@ -34,10 +33,12 @@ class SettingsSheet(
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
         binding.refreshPeersButton.setOnClickListener { onRefreshClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
+        binding.aboutHeader.setOnClickListener { showAboutDialog(activity) }
         binding.settingsVersionText.text =
             activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
         bindThemePicker()
         observePeerCount()
+        bindChatDisplayName()
     }
 
     private fun bindThemePicker() {
@@ -143,6 +144,24 @@ class SettingsSheet(
                     toastStr(activity.getString(R.string.settings_refresh_peers_failed, e.message ?: e.javaClass.simpleName))
                 },
             )
+        }
+    }
+
+    private fun bindChatDisplayName() {
+        binding.chatDisplayNameEdit.setText(store.chatDisplayName())
+        binding.chatDisplayNameEdit.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
+                toast(R.string.chat_display_name_saved)
+                true
+            } else {
+                false
+            }
+        }
+        binding.chatDisplayNameEdit.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
+            }
         }
     }
 

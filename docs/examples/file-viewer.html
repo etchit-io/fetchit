@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fetch&gt;it — file viewer</title>
+<style>
+  :root {
+    --ink: #17130f;
+    --ink-2: #211b15;
+    --line: #3a2f25;
+    --text: #ece4d8;
+    --muted: #9a8d7c;
+    --copper: #c9732b;
+    --copper-bright: #e58a3f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    justify-content: center;
+  }
+  main {
+    width: 100%;
+    max-width: 760px;
+    padding: 32px 24px 64px;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .wordmark { font-weight: 700; color: var(--copper); letter-spacing: 0.01em; }
+  .tagline { color: var(--muted); font-size: 13px; }
+  .addr {
+    margin-left: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--copper-bright);
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px 11px;
+  }
+  #stage { margin-top: 36px; }
+  .card {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 28px 26px;
+  }
+  .card.error { border-color: var(--copper); }
+  .card h2 { margin: 0 0 10px; font-size: 17px; font-weight: 600; }
+  .card p { margin: 0 0 12px; }
+  .card p:last-child { margin-bottom: 0; }
+  .muted { color: var(--muted); font-size: 13.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+  code.usage {
+    display: block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13.5px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 13px 15px;
+    margin: 4px 0 14px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .addr-dim { color: var(--muted); }
+  .addr-key { color: var(--copper); }
+  .addr-hot { color: var(--copper-bright); }
+  .loading {
+    color: var(--muted);
+    text-align: center;
+    padding: 48px 0;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.45; } }
+  img.viewed {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+  }
+  pre.viewed-text {
+    margin: 0;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    overflow: auto;
+    max-height: 70vh;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="wordmark">fetch&gt;it</span>
+    <span class="tagline">file viewer</span>
+    <span class="addr" id="addr" hidden></span>
+  </header>
+  <div id="stage"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var HEX64 = /^[0-9a-fA-F]{64}$/;
+  var stage = document.getElementById("stage");
+  var addrChip = document.getElementById("addr");
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function show(node) { stage.replaceChildren(node); }
+  function shortAddr(a) { return a.slice(0, 8) + "…" + a.slice(-6); }
+
+  function showError(title, detail) {
+    var box = el("div", "card error");
+    box.appendChild(el("h2", null, title));
+    if (detail) box.appendChild(el("p", "muted mono", detail));
+    show(box);
+  }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function isText(type) {
+    return type.indexOf("text/") === 0
+      || type.indexOf("json") !== -1
+      || type.indexOf("xml") !== -1
+      || type.indexOf("javascript") !== -1
+      || type.indexOf("csv") !== -1;
+  }
+
+  function render(type, blob, addr) {
+    if (type.indexOf("image/") === 0) {
+      var img = el("img", "viewed");
+      img.alt = "file " + addr;
+      img.src = URL.createObjectURL(blob);
+      show(img);
+      return;
+    }
+    if (isText(type)) {
+      blob.text().then(function (t) { show(el("pre", "viewed-text", t)); });
+      return;
+    }
+    var box = el("div", "card");
+    box.appendChild(el("h2", null, "Binary file"));
+    box.appendChild(el("p", "muted", (type || "unknown type") + " · " + fmtSize(blob.size)));
+    show(box);
+  }
+
+  function load(addr) {
+    show(el("div", "loading", "Loading " + shortAddr(addr) + "…"));
+    // Root-relative `/<addr>` — fetch>it resolves it to the file's bytes
+    // on every platform (the desktop rewriter's runtime shim, and the
+    // Android WebView's synthetic base URL, both map it to the network).
+    fetch("/" + addr).then(function (res) {
+      if (!res.ok) { showError("Couldn't load that file", "HTTP " + res.status); return; }
+      var type = (res.headers.get("content-type") || "").toLowerCase();
+      res.blob().then(function (blob) { render(type, blob, addr); });
+    }).catch(function (e) {
+      showError("Couldn't load that file", String((e && e.message) || e));
+    });
+  }
+
+  function explain() {
+    var box = el("div", "card");
+    box.appendChild(el("h2", null, "Point me at a file"));
+    box.appendChild(el("p", null,
+      "This page is a generic Autonomi file viewer. Open it with a file " +
+      "address in the query string:"));
+    var code = el("code", "usage");
+    code.append(
+      "autonomi://",
+      el("span", "addr-dim", "<this-page>"),
+      el("span", "addr-key", "?file="),
+      el("span", "addr-hot", "<file-address>"),
+    );
+    box.appendChild(code);
+    box.appendChild(el("p", "muted",
+      "It reads location.search on load and fetches whatever file you " +
+      "name — one viewer, any file, no rebuild and no new upload."));
+    show(box);
+  }
+
+  var file = new URLSearchParams(location.search).get("file");
+  if (!file) {
+    explain();
+  } else if (!HEX64.test(file)) {
+    showError("Not a 64-character Autonomi address", file);
+  } else {
+    addrChip.textContent = shortAddr(file);
+    addrChip.hidden = false;
+    load(file);
+  }
+})();
+</script>
+</body>
+</html>

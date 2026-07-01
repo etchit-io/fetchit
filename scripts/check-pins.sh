@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Verify Cargo.lock + Cargo.toml + settings.rs match PINS.md.
+# Used by CI; safe to run locally.
+#
+# Exit codes:
+#   0 — all pins match
+#   1 — drift detected; PINS.md is the source of truth
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() {
+    echo "PINS DRIFT: $1" >&2
+    exit 1
+}
+
+ok() {
+    echo "  ok: $1"
+}
+
+echo "checking pinned deps against PINS.md..."
+
+# ant-core: rev = "eeba52b"
+grep -q 'ant-core.*rev = "eeba52b"' Cargo.toml \
+    || fail "Cargo.toml ant-core rev != eeba52b"
+grep -q 'github.com/WithAutonomi/ant-client?rev=eeba52b' Cargo.lock \
+    || fail "Cargo.lock ant-core rev != eeba52b"
+ok "ant-core rev=eeba52b"
+
+# self_encryption: =0.36.0
+grep -q 'self_encryption = "=0.36.0"' Cargo.toml \
+    || fail "Cargo.toml self_encryption != =0.36.0"
+ok "self_encryption =0.36.0"
+
+# xor_name: =5.0.0
+grep -q 'xor_name = "=5.0.0"' Cargo.toml \
+    || fail "Cargo.toml xor_name != =5.0.0"
+ok "xor_name =5.0.0"
+
+# saorsa-pqc: workspace pin is "0.5"; lock should resolve to 0.5.x
+grep -q 'saorsa-pqc = "0.5"' Cargo.toml \
+    || fail "Cargo.toml saorsa-pqc != 0.5"
+grep -A1 '^name = "saorsa-pqc"$' Cargo.lock | grep -q 'version = "0.5' \
+    || fail "Cargo.lock saorsa-pqc not 0.5.x"
+ok "saorsa-pqc 0.5.x"
+
+# uniffi (workspace-excluded crates/fetchit-ffi): =0.29.5
+grep -q 'uniffi = { version = "=0.29.5"' crates/fetchit-ffi/Cargo.toml \
+    || fail "crates/fetchit-ffi/Cargo.toml uniffi != =0.29.5"
+ok "uniffi =0.29.5 (fetchit-ffi)"
+
+# Relay region defaults
+SETTINGS=apps/fetchit-desktop/src-tauri/src/settings.rs
+grep -q '67.207.94.66:8088' "$SETTINGS" \
+    || fail "$SETTINGS missing NYC default 67.207.94.66:8088"
+grep -q '159.89.11.217:8088' "$SETTINGS" \
+    || fail "$SETTINGS missing FRA default 159.89.11.217:8088"
+ok "KNOWN_RELAYS NYC + FRA defaults"
+
+echo "all pins green."

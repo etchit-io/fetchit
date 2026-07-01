@@ -106,6 +106,19 @@ describe("TabStore", () => {
     });
   });
 
+  describe("renderProfile", () => {
+    it("marks a tab rendered with a display label and no rendition", () => {
+      const tab = store.createEmpty(root());
+      store.startFetch(tab.id, `profile:${"a".repeat(64)}`);
+      store.renderProfile(tab.id, "@josh@etchit.io");
+      const t = store.active()!;
+      expect(t.status).toBe("rendered");
+      expect(t.rendition).toBeNull();
+      expect(t.display).toBe("@josh@etchit.io");
+      expect(t.shortLabel).toBe("@josh@etchit.io");
+    });
+  });
+
   describe("findByAddress", () => {
     it("returns the tab when a matching address exists", () => {
       const tab = store.createEmpty(root());

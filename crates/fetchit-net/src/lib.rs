@@ -17,5 +17,5 @@ pub mod client;
 mod clock;
 pub mod peers;
 
-pub use client::{set_data_home, AutonomiClient};
+pub use client::{set_data_home, AutonomiClient, DownloadProgress};
 pub use peers::{parse_bootstrap_peer, DEFAULT_PEERS};

@@ -16,7 +16,7 @@
         <item name="android:windowBackground">?attr/fetchitInk</item>
     </style>
 
-    <!-- Theme 1 / Dark — brand-bible canonical. Default. -->
+    <!-- Dark theme — default. -->
     <style name="Theme.Fetchit.Dark" parent="Theme.Fetchit.Base">
         <item name="fetchitInk">#0a0a0a</item>
         <item name="fetchitInk2">#141414</item>
@@ -28,27 +28,31 @@
         <item name="fetchitCopper">#c9732b</item>
         <item name="fetchitCopperBright">#e58a3f</item>
         <item name="fetchitRust">#ff8a7a</item>
-        <item name="fetchitSignalOk">#6ab04c</item>
+        <item name="fetchitSignalOk">#56b292</item>
+        <item name="fetchitGold">#d9a440</item>
+        <item name="fetchitGoldBright">#e8bc62</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
-    <!-- Theme 2 / Dim — warm-ink mid-tone; softer than full dark. -->
+    <!-- Theme 2 / Dim: warm dusk, a real mid-tone between Dark and Light. -->
     <style name="Theme.Fetchit.Dim" parent="Theme.Fetchit.Base">
-        <item name="fetchitInk">#1a1612</item>
-        <item name="fetchitInk2">#221d18</item>
-        <item name="fetchitInk3">#2a241e</item>
-        <item name="fetchitLine">#2a2520</item>
+        <item name="fetchitInk">#3a322a</item>
+        <item name="fetchitInk2">#443c33</item>
+        <item name="fetchitInk3">#4e463c</item>
+        <item name="fetchitLine">#524a40</item>
         <item name="fetchitBone">#f5f2eb</item>
-        <item name="fetchitBoneDim">#e6dfd0</item>
+        <item name="fetchitBoneDim">#d9d2c4</item>
         <item name="fetchitAsh">#a09a90</item>
         <item name="fetchitCopper">#c9732b</item>
         <item name="fetchitCopperBright">#e58a3f</item>
         <item name="fetchitRust">#ff8a7a</item>
-        <item name="fetchitSignalOk">#6ab04c</item>
+        <item name="fetchitSignalOk">#56b292</item>
+        <item name="fetchitGold">#d9a440</item>
+        <item name="fetchitGoldBright">#e8bc62</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
-    <!-- Theme 3 / Light — bone canvas, ink text (bible's inverted form). -->
+    <!-- Light theme — bone canvas, ink text (inverted from Dark). -->
     <style name="Theme.Fetchit.Light" parent="Theme.Fetchit.Base">
         <item name="fetchitInk">#f5f2eb</item>
         <item name="fetchitInk2">#faf7f2</item>
@@ -60,7 +64,9 @@
         <item name="fetchitCopper">#c9732b</item>
         <item name="fetchitCopperBright">#b86420</item>
         <item name="fetchitRust">#c0392b</item>
-        <item name="fetchitSignalOk">#3d7e2c</item>
+        <item name="fetchitSignalOk">#2f7e62</item>
+        <item name="fetchitGold">#a87a1f</item>
+        <item name="fetchitGoldBright">#8f6512</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
 
@@ -68,10 +74,8 @@
          time; MainActivity overrides to the user's chosen theme on launch. -->
     <style name="Theme.Fetchit" parent="Theme.Fetchit.Dark" />
 
-    <!-- Full-screen brand-fixed share dialog (cream / ink / copper). Used
-         for the QR share preview so the host activity's theme can't bleed
-         around the share artifact — the share screen always reads as a
-         printed card regardless of which app theme is active. -->
+    <!-- Full-screen share-dialog style with a fixed palette (cream /
+         ink / copper), independent of the host activity's theme. -->
     <style name="Theme.Fetchit.ShareDialog" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:windowBackground">#f5f2eb</item>
         <item name="android:statusBarColor">#f5f2eb</item>

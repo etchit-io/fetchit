@@ -12,6 +12,7 @@ export interface KeyboardActions {
   openSettings: () => void;
   openShare: () => void;
   toggleBookmark: () => void;
+  toggleChat: () => void;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -67,6 +68,13 @@ export function bindKeyboard(store: TabStore, actions: KeyboardActions): void {
     if (e.shiftKey && (e.key === "S" || e.key === "s")) {
       e.preventDefault();
       actions.openShare();
+      return;
+    }
+
+    // Ctrl/Cmd + Shift + C → open chat.
+    if (e.shiftKey && (e.key === "C" || e.key === "c")) {
+      e.preventDefault();
+      actions.toggleChat();
       return;
     }
 

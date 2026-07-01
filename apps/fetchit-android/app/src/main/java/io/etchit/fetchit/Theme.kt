@@ -3,7 +3,7 @@ package io.etchit.fetchit
 import androidx.annotation.StyleRes
 
 /**
- * The three brand-aligned theme palettes. Token values live in
+ * The three theme palettes. Token values live in
  * `res/values/themes.xml`; see docs/BRAND.md for the canonical
  * role / value mapping shared with the desktop app.
  *

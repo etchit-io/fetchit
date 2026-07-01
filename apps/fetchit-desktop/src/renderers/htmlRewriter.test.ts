@@ -466,6 +466,37 @@ describe("rewriteHtml — injects the media hydration script", () => {
   });
 });
 
+describe("rewriteHtml — query state", () => {
+  it("injects a history.replaceState carrying the query", () => {
+    const out = rewrite("<html><head></head><body></body></html>", ADDR, MEDIA_BASE, "?file=abc&n=2");
+    expect(out).toContain("history.replaceState");
+    expect(out).toContain('"?file=abc&n=2"');
+  });
+
+  it("does not inject history.replaceState when there is no query", () => {
+    const out = rewriteHtml("<html><head></head><body></body></html>");
+    expect(out).not.toContain("history.replaceState");
+  });
+
+  it("always exposes window.fetchit.address to author scripts", () => {
+    const out = rewrite("<html><head></head><body></body></html>", ADDR, MEDIA_BASE, "");
+    expect(out).toContain("window.fetchit.address");
+    expect(out).toContain(`"${ADDR}"`);
+  });
+
+  it("exposes window.fetchit.query alongside the address", () => {
+    const out = rewrite("<html><head></head><body></body></html>", ADDR, MEDIA_BASE, "?k=v");
+    expect(out).toContain("window.fetchit.query");
+    expect(out).toContain('"?k=v"');
+  });
+
+  it("defuses </script> inside the query so it cannot break out", () => {
+    const out = rewrite("<html><head></head><body></body></html>", ADDR, MEDIA_BASE, "?x=</script>");
+    expect(out).toContain("?x=");
+    expect(out).not.toContain("?x=</script>");
+  });
+});
+
 describe("rewriteHtml — runtime URL rewriter (dynamic resource loads)", () => {
   // `rewriteSrcset` is unique to the URL rewriter; the neuter script
   // also uses `Object.defineProperty` (to lock APIs) so we can't use
@@ -647,11 +678,13 @@ describe("rewriteHtml — injects the neuter script", () => {
     );
     const headScripts = Array.from(parse(out).head.querySelectorAll("script"));
     // Order: neuter (API lockdown), then URL rewriter (subresource
-    // scheme normalisation), then any author scripts. Both injected
-    // scripts must run before `window.spa = 1` so the SPA sees the
-    // patched globals from the start.
+    // scheme normalisation), then the fetch>it context (exposes the
+    // page's address + carried query), then any author scripts. All
+    // injected scripts must run before `window.spa = 1` so the SPA
+    // sees patched globals + context from the very first JS.
     expect(headScripts[0]?.textContent ?? "").toContain("RTCPeerConnection");
     expect(headScripts[1]?.textContent ?? "").toContain("rewriteSrcset");
-    expect(headScripts[2]?.textContent ?? "").toContain("window.spa");
+    expect(headScripts[2]?.textContent ?? "").toContain("window.fetchit.address");
+    expect(headScripts[3]?.textContent ?? "").toContain("window.spa");
   });
 });

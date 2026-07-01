@@ -1,0 +1,64 @@
+name: dco
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: every commit signed-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need both base and head to walk every PR commit.
+          fetch-depth: 0
+      - name: Verify Signed-off-by on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Defensive: GitHub's contract says these are 40-char hex
+          # commit SHAs, but assert it before letting them near git.
+          # Belt-and-braces against an event-payload injection vector.
+          for v in "$BASE_SHA" "$HEAD_SHA"; do
+            if ! printf '%s' "$v" | grep -qE '^[0-9a-f]{40}$'; then
+              echo "::error::refusing non-hex SHA from event payload"
+              exit 1
+            fi
+          done
+          # Walk every commit in the PR. Fail if ANY lacks a
+          # `Signed-off-by:` trailer whose email matches the commit
+          # author's. CONTRIBUTING.md names this as a hard requirement
+          # — DCO is what keeps the AGPL+commercial dual-license track
+          # legally coherent.
+          missing=0
+          while IFS= read -r sha; do
+            author_email=$(git log -1 --pretty=format:%ae "$sha")
+            # Escape regex metacharacters in the email so a "+" or "."
+            # is matched literally, not as a regex token. Emails like
+            # alice+ci@example.com would otherwise produce wrong matches.
+            email_escaped=$(printf '%s' "$author_email" \
+              | sed 's/[][\\.^$|?*+(){}]/\\&/g')
+            # Ghost-signing under someone else's email isn't valid DCO;
+            # require the trailer email to match the commit author's.
+            if ! git log -1 --pretty=format:%B "$sha" \
+                | grep -iE "^Signed-off-by:.* <${email_escaped}>" \
+                > /dev/null; then
+              short=$(git log -1 --pretty=format:%h "$sha")
+              subject=$(git log -1 --pretty=format:%s "$sha")
+              echo "::error::commit ${short} (${subject}) missing Signed-off-by: from ${author_email}"
+              missing=$((missing + 1))
+            fi
+          done < <(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+          if [ "$missing" -gt 0 ]; then
+            echo
+            echo "Fix with:  git commit --amend -s   (or rebase + sign every commit)"
+            echo "See CONTRIBUTING.md → 'Sign-off (DCO)' for the why."
+            exit 1
+          fi
+          echo "all PR commits carry a valid Signed-off-by trailer"

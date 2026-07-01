@@ -10,13 +10,14 @@
 // to the OS scheme handler (fetch>it desktop), which performs the actual
 // Autonomi fetch and renders the result.
 
-import { parseAutonomiInput } from "./addr.js";
+import { parseAutonomiUrl } from "./addr.js";
 
 const MENU_ID = "fetchit-open-selection";
 
 function openAutonomi(addr, options = {}) {
   if (!addr) return;
-  const url = `autonomi://${addr}`;
+  const query = typeof options.query === "string" ? options.query : "";
+  const url = `autonomi://${addr}${query}`;
   const newTab = options.newTab === true;
   const onErr = (e) => {
     // Surface to DevTools so issues are visible without firing a notification.
@@ -77,15 +78,15 @@ chrome.runtime.onStartup?.addListener(ensureContextMenu);
 
 chrome.contextMenus?.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== MENU_ID) return;
-  const addr = parseAutonomiInput(info.selectionText || "");
-  if (!addr) {
+  const parsed = parseAutonomiUrl(info.selectionText || "");
+  if (!parsed) {
     console.warn(
       "[fetch>it] selection isn't a valid 64-hex Autonomi address:",
       info.selectionText,
     );
     return;
   }
-  openAutonomi(addr, { tabId: tab?.id });
+  openAutonomi(parsed.address, { tabId: tab?.id, query: parsed.query });
 });
 
 // Omnibox: user types `fetchit ` in the URL bar, then an address. We never
@@ -98,24 +99,30 @@ if (chrome.omnibox) {
   });
 
   chrome.omnibox.onInputChanged?.addListener((text, suggest) => {
-    const addr = parseAutonomiInput(text);
+    const parsed = parseAutonomiUrl(text);
     suggest(
-      addr
-        ? [{ content: addr, description: `Open ${addr.slice(0, 12)}… in fetch>it` }]
+      parsed
+        ? [
+            {
+              content: parsed.address + parsed.query,
+              description: `Open ${parsed.address.slice(0, 12)}… in fetch>it`,
+            },
+          ]
         : [],
     );
   });
 
   chrome.omnibox.onInputEntered?.addListener((text, disposition) => {
-    const addr = parseAutonomiInput(text);
-    if (!addr) {
+    const parsed = parseAutonomiUrl(text);
+    if (!parsed) {
       console.warn(
         "[fetch>it] omnibox entry isn't a valid 64-hex Autonomi address:",
         text,
       );
       return;
     }
-    openAutonomi(addr, {
+    openAutonomi(parsed.address, {
+      query: parsed.query,
       newTab:
         disposition === "newForegroundTab" || disposition === "newBackgroundTab",
     });
