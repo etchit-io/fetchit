@@ -569,6 +569,22 @@ pub struct Endpoint<'a> {
     /// map. Never persisted: kind is cheap to re-resolve and immutable
     /// per group, so a cold restart just re-GETs once per group.
     group_kinds: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::groups::GroupKind>>>,
+    /// Optional durable-outbox sink. When wired (production, via
+    /// [`crate::Client::messages`]), a private-group send whose fanout can
+    /// reach nobody enqueues one retryable bubble per undelivered member
+    /// instead of hard-failing. `None` (tests / REST-only) preserves the
+    /// pre-durability behavior: total delivery failure returns `Err`.
+    outbox: Option<GroupOutboxSink<'a>>,
+}
+
+/// Borrowed handle the private-group send path uses to durably enqueue
+/// undelivered fan-out copies and broadcast their bubble events. Bundled so
+/// [`Endpoint`] gains a single optional field rather than two, and borrowed
+/// (not owned) exactly like the other `Client`-owned handles the endpoint
+/// threads (`neg_resolve_cache`, `primary_relay_url`).
+pub(crate) struct GroupOutboxSink<'a> {
+    store: &'a Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>,
+    events: &'a tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>,
 }
 
 /// Upper bound on [`Endpoint::neg_resolve_cache`] entries. Past this the
@@ -660,7 +676,23 @@ impl<'a> Endpoint<'a> {
             primary_relay_url,
             neg_resolve_cache,
             group_kinds,
+            outbox: None,
         }
+    }
+
+    /// Attach a durable-outbox sink so a private-group send that reaches no
+    /// member enqueues a retryable bubble per undelivered member (carrying
+    /// the sealed frame) rather than returning `Err`. Builder-style so the
+    /// existing constructors and their many test call sites stay unchanged;
+    /// production attaches it in [`crate::Client::messages`].
+    #[must_use]
+    pub(crate) fn with_outbox(
+        mut self,
+        store: &'a Arc<tokio::sync::Mutex<crate::outbox::store::OutboxStore>>,
+        events: &'a tokio::sync::broadcast::Sender<crate::outbox::OutboxEvent>,
+    ) -> Self {
+        self.outbox = Some(GroupOutboxSink { store, events });
+        self
     }
 
     /// M3 R-tail-5 helper: resolve `recipient_agent_id_hex`'s
@@ -1137,9 +1169,15 @@ impl<'a> Endpoint<'a> {
         // UI bubble anchor, minted once so the persisted row and the
         // returned id are the same.
         let message_id = random_message_id();
+        // Encode the sealed frame ONCE for durable re-send: each undelivered
+        // member's retry bubble carries these exact bytes. Re-sealing on
+        // retry would ratchet the TreeKEM epoch and duplicate at the
+        // receiver, so the outbox stores the frame, never the plaintext.
+        let sealed_frame = postcard::to_allocvec(&envelope).ok();
         let mut first_err: Option<ChatError> = None;
         let mut delivered = 0usize;
         let mut attempted = 0usize;
+        let mut enqueued = 0usize;
         for member in roster {
             // `identity.agent_id_hex()` is lowercase by construction
             // but `AgentId` is `#[serde(transparent)]`, so roster
@@ -1180,21 +1218,48 @@ impl<'a> Endpoint<'a> {
                     delivered += 1;
                 }
                 Err(e) => {
+                    let reason = e.to_string();
                     eprintln!(
-                        "[chat] private-group fanout: recipient {} failed: {e}",
+                        "[chat] private-group fanout: recipient {} failed: {reason}",
                         &member.0[..8.min(member.0.len())],
                     );
+                    // Durability: queue a retryable bubble carrying the sealed
+                    // frame so a reconnect flush re-sends it verbatim. No sink
+                    // wired (tests / REST-only) falls through to the hard-fail
+                    // path below.
+                    if let (Some(sink), Some(frame)) = (self.outbox.as_ref(), sealed_frame.as_ref())
+                    {
+                        let bubble = crate::outbox::OutboxBubble {
+                            id: crate::outbox::new_bubble_id(),
+                            peer: member.clone(),
+                            body: body.to_owned(),
+                            status: crate::outbox::OutboxStatus::Failed,
+                            message_id: None,
+                            enqueued_at_ms: timestamp_ms,
+                            last_error: Some(reason),
+                            group: Some(crate::outbox::GroupOutbound {
+                                group_id: group_id.to_owned(),
+                                envelope: frame.clone(),
+                            }),
+                        };
+                        sink.store.lock().await.upsert(bubble.clone());
+                        let _ = sink.events.send(crate::outbox::OutboxEvent { bubble });
+                        enqueued += 1;
+                    }
                     if first_err.is_none() {
                         first_err = Some(e);
                     }
                 }
             }
         }
-        // Every recipient failed: surface the first per-recipient error
-        // verbatim and do NOT persist, since nothing went out. (First
-        // because failures often correlate on one router-wide cause.)
-        if delivered == 0 && attempted > 0 {
-            // Safety: attempted > 0 && delivered == 0 => first_err set.
+        // Every recipient failed AND nothing could be queued for retry (no
+        // outbox wired): surface the first per-recipient error verbatim and
+        // do NOT persist, since nothing went out and nothing will. (First
+        // because failures often correlate on one router-wide cause.) When a
+        // sink IS wired, each undelivered member was enqueued above, so the
+        // send is durably accepted -- fall through to persist + Ok.
+        if delivered == 0 && enqueued == 0 && attempted > 0 {
+            // Safety: attempted > 0 && delivered == 0 && enqueued == 0 => first_err set.
             return Err(first_err.unwrap_or_else(|| {
                 ChatError::MessageTransport("fanout: every recipient failed".into())
             }));
@@ -3359,6 +3424,119 @@ mod tests {
                 ChatError::MessageTransport(ref m) if m.contains("synthetic failure"),
             ),
             "expected MessageTransport(synthetic failure), got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_private_group_enqueues_undelivered_members_when_the_outbox_is_wired() {
+        // Josh's restart-to-send fix: when the relay is down and every
+        // fanout send fails, the message must NOT hard-fail. With an outbox
+        // wired, each undelivered member is enqueued as a durable group
+        // bubble carrying the sealed frame, so a reconnect flush re-sends it.
+        // The send returns Ok (durably accepted) and the sender's own copy
+        // still persists.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let local_hex = rig.agent_hex().to_owned();
+        let signer_arc = rig.signer_arc();
+        let peer1 = "b".repeat(64);
+        let peer2 = "c".repeat(64);
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y3Q=",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [
+                    {"agent_id": local_hex, "state": "active"},
+                    {"agent_id": peer1, "state": "active"},
+                    {"agent_id": peer2, "state": "active"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let mut fail_for = std::collections::HashSet::new();
+        fail_for.insert(peer1.clone());
+        fail_for.insert(peer2.clone());
+        let (transport, _captured) = SelectiveFailureTransport::new(fail_for);
+        let mut router = Router::new();
+        router.add(transport);
+
+        let outbox = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::outbox::store::OutboxStore::new(),
+        ));
+        let (outbox_tx, _outbox_rx) = tokio::sync::broadcast::channel(16);
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+        )
+        .with_outbox(&outbox, &outbox_tx);
+
+        let msg_id = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hello group", "Alice")
+            .await
+            .expect("a durably queued send returns Ok, not Err");
+        assert!(
+            msg_id.is_some(),
+            "a queued send still surfaces a message id"
+        );
+
+        // Both undelivered members are enqueued as retryable group bubbles.
+        let bubbles = outbox.lock().await.snapshot();
+        assert_eq!(
+            bubbles.len(),
+            2,
+            "one durable bubble per undelivered member"
+        );
+        let mut peers: Vec<String> = bubbles.iter().map(|b| b.peer.0.clone()).collect();
+        peers.sort();
+        assert_eq!(peers, vec![peer1.clone(), peer2.clone()]);
+        for b in &bubbles {
+            assert_eq!(
+                b.status,
+                crate::outbox::OutboxStatus::Failed,
+                "a failed send is retryable"
+            );
+            let g = b
+                .group
+                .as_ref()
+                .expect("enqueued as a group bubble, not a DM");
+            assert_eq!(g.group_id, TEST_GROUP_HEX);
+            // The stored frame decodes back to a private-group envelope.
+            let env: TransitEnvelope =
+                postcard::from_bytes(&g.envelope).expect("sealed frame decodes");
+            assert_eq!(env.kind, EnvelopeKind::PrivateGroupChat);
+        }
+
+        // The sender's own transcript entry still persists (persist-fix intact).
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        let own = conv
+            .history
+            .iter()
+            .filter(|e| e.sender_agent_id_hex.eq_ignore_ascii_case(&local_hex))
+            .count();
+        assert_eq!(
+            own, 1,
+            "sender's own copy persists even when all sends queued"
         );
     }
 
