@@ -1178,7 +1178,9 @@ class ChatModeView(
         rv.adapter = adapter
 
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
-        view.findViewById<View>(R.id.sendButton).setOnClickListener {
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
             val body = messageInput.text.toString().trim()
             if (body.isEmpty()) return@setOnClickListener
             messageInput.text.clear()
@@ -1285,7 +1287,9 @@ class ChatModeView(
         rv.adapter = adapter
 
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
-        view.findViewById<View>(R.id.sendButton).setOnClickListener {
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
             val body = messageInput.text.toString().trim()
             if (body.isEmpty()) return@setOnClickListener
             messageInput.text.clear()
@@ -1558,6 +1562,25 @@ class ChatModeView(
         val contactName = controller.contacts.contacts.value
             .find { it.agentIdHex == agentIdHex }?.displayName
         return io.etchit.fetchit.chat.groupSenderLabel(senderName, contactName, agentIdHex)
+    }
+
+    /**
+     * Enable the send button only while [input] holds non-blank text, so an
+     * empty tap can't silently no-op; dim it when disabled for a clear
+     * affordance.
+     */
+    private fun bindSendEnabled(input: EditText, button: View) {
+        fun sync() {
+            val on = input.text.isNotBlank()
+            button.isEnabled = on
+            button.alpha = if (on) 1f else 0.4f
+        }
+        sync()
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { sync() }
+        })
     }
 
     /** Flush the outbox now, in response to a tap on a failed message bubble. */

@@ -211,8 +211,8 @@
     <string name="chat_uri_copied">copied</string>
     <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
-    <string name="chat_feed_title">fediverse</string>
-    <string name="chat_feed_subtitle">bridged public posts</string>
+    <string name="chat_feed_title">Public posts</string>
+    <string name="chat_feed_subtitle">read-only</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are
          public and not post-quantum. Middle dot separates from any actor line. -->
     <string name="chat_feed_post_public_badge">from the fediverse · public, non-PQ</string>
