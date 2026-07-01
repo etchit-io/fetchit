@@ -250,6 +250,8 @@
     <string name="chat_invalid_invite_uri">that doesn\'t look like a valid group invite</string>
     <string name="chat_group_created">created %1$s</string>
     <string name="chat_group_joined">joined %1$s</string>
+    <string name="chat_contact_removed">removed %1$s</string>
+    <string name="chat_group_left">left %1$s</string>
     <string name="chat_group_share_invite">invite copied for one person</string>
     <string name="chat_group_invite_copied">invite copied</string>
     <string name="chat_group_new_invite">new invite</string>

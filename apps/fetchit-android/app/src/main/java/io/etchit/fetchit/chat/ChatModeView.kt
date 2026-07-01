@@ -583,7 +583,13 @@ class ChatModeView(
             .setTitle(context.getString(R.string.chat_remove_chat_title))
             .setMessage(context.getString(R.string.chat_remove_chat_message, name))
             .setPositiveButton(context.getString(R.string.chat_remove_chat_confirm)) { _, _ ->
-                lifecycleScope.launch { controller.removeContact(contact.agentIdHex) }
+                lifecycleScope.launch {
+                    runCatching { controller.removeContact(contact.agentIdHex) }
+                        .onSuccess { snackbar(context.getString(R.string.chat_contact_removed, name)) }
+                        .onFailure { e ->
+                            snackbar(userFacingError(e, "removeContact", R.string.chat_error_generic))
+                        }
+                }
             }
             .setNegativeButton(context.getString(R.string.action_cancel), null)
             .show()
@@ -600,7 +606,13 @@ class ChatModeView(
             .setTitle(context.getString(R.string.chat_leave_group_title))
             .setMessage(context.getString(R.string.chat_leave_group_message, title))
             .setPositiveButton(context.getString(R.string.chat_leave_group_confirm)) { _, _ ->
-                lifecycleScope.launch { controller.leaveGroup(group.groupId) }
+                lifecycleScope.launch {
+                    runCatching { controller.leaveGroup(group.groupId) }
+                        .onSuccess { snackbar(context.getString(R.string.chat_group_left, title)) }
+                        .onFailure { e ->
+                            snackbar(userFacingError(e, "leaveGroup", R.string.chat_error_generic))
+                        }
+                }
             }
             .setNegativeButton(context.getString(R.string.action_cancel), null)
             .show()
