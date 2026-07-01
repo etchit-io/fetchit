@@ -203,9 +203,13 @@ impl OutboxStore {
     /// the Delivered-guard live in ONE place.
     ///
     /// `error.is_some()` -> the send failed (`Failed` + `last_error`);
-    /// otherwise it succeeded (`Sending`, recording `message_id` when the
-    /// relay assigned one). A bubble already `Delivered` (a receipt landed
-    /// during the send await) is never clobbered -- on either arm.
+    /// otherwise it succeeded, recording `message_id` when the relay assigned
+    /// one: a DM becomes `Sending` (awaiting its `DeliveryReceipt`), while a
+    /// group fan-out copy -- which gets no receipt -- becomes `Delivered`,
+    /// its terminal state (relay-accept is the client-side durability
+    /// guarantee, and re-firing would duplicate at the receiver). A bubble
+    /// already `Delivered` (a receipt landed during the send await) is never
+    /// clobbered -- on either arm.
     pub fn record_send_outcome(
         &mut self,
         bubble_id: &str,
@@ -224,7 +228,17 @@ impl OutboxStore {
                 if message_id.is_some() {
                     bubble.message_id = message_id;
                 }
-                bubble.status = OutboxStatus::Sending;
+                // A group fan-out copy has no delivery receipt to close it (a
+                // receipt carries the receiver's message id, not the relay
+                // dedup key stored here), so a relay-accepted (re)send is
+                // terminal -- Delivered, so it never re-fires and duplicates
+                // at the receiver. A DM stays Sending until its
+                // DeliveryReceipt marks it Delivered.
+                bubble.status = if bubble.group.is_some() {
+                    OutboxStatus::Delivered
+                } else {
+                    OutboxStatus::Sending
+                };
                 bubble.last_error = None;
             }
             bubble.clone()
@@ -510,5 +524,38 @@ mod tests {
     fn record_send_outcome_absent_bubble_is_none() {
         let mut s = OutboxStore::new();
         assert!(s.record_send_outcome("nope", None, None).is_none());
+    }
+
+    #[test]
+    fn record_send_outcome_marks_a_group_bubble_delivered_on_success() {
+        // A group fan-out copy has no delivery receipt to confirm it (a
+        // receipt carries the receiver's message id, never the relay dedup
+        // key the bubble stores), so a relay-accepted (re)send IS its
+        // terminal success: Delivered, not Sending. Otherwise it would stay
+        // retryable and re-fire on every reconnect -- a duplicate at the
+        // receiver. A DM stays Sending until its DeliveryReceipt lands.
+        let mut s = OutboxStore::new();
+        let mut g = bubble("g1", "b");
+        g.group = Some(crate::outbox::GroupOutbound {
+            group_id: "aa".repeat(32),
+            envelope: postcard::to_allocvec(&test_envelope()).unwrap(),
+        });
+        s.upsert(g);
+        let updated = s
+            .record_send_outcome("g1", Some("relay-9".into()), None)
+            .expect("bubble present");
+        assert_eq!(
+            updated.status,
+            OutboxStatus::Delivered,
+            "a relay-accepted group resend is terminal"
+        );
+        assert!(!crate::outbox::is_retryable(&updated), "and never re-fires");
+
+        // A DM with the same successful outcome stays Sending (awaits receipt).
+        s.upsert(sending("d1", 0, None));
+        let dm = s
+            .record_send_outcome("d1", Some("relay-10".into()), None)
+            .expect("bubble present");
+        assert_eq!(dm.status, OutboxStatus::Sending);
     }
 }
