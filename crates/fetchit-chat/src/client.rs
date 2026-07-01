@@ -4187,6 +4187,65 @@ impl Client {
         })
     }
 
+    /// Run the v2 upgrade + re-register pass for the active `handle` (called
+    /// when the fedi hub opens). Transparently upgrades a pre-M5 (v1-only)
+    /// identity to v2 and re-asserts the directory record. NEVER errors the
+    /// pass for upgrade blockers -- no published profile, bridge unreachable
+    /// -- those land in [`EnsureV2Outcome::pending`]. Shares one path with
+    /// the desktop `fediverse_ensure_v2` command.
+    ///
+    /// # Errors
+    /// The vault/mint machinery failing (chat state missing, vault access) or
+    /// a minted identity that unexpectedly cannot be reloaded.
+    pub async fn ensure_actor_v2_and_register(
+        &self,
+        handle: &str,
+        passphrase: Option<&str>,
+        relay: &url::Url,
+        registry_base: &url::Url,
+        now_ms: u64,
+    ) -> Result<EnsureV2Outcome> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+        let http = crate::relay_http::guarded_client();
+        let record = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // No published profile / relay unreachable is a pending state
+                // on hub open, not a failure.
+                return Ok(EnsureV2Outcome {
+                    upgraded: false,
+                    registered: false,
+                    pending: Some(e.to_string()),
+                });
+            }
+        };
+        let upgraded = self
+            .upgrade_actor_attestation_v2(
+                handle,
+                passphrase,
+                &record.profile_addr,
+                relay.as_str(),
+                now_ms,
+            )
+            .await?;
+        let identity = self
+            .load_actor_identity(handle, passphrase)
+            .await?
+            .ok_or_else(|| ChatError::Invalid(format!("no actor identity for {handle}")))?;
+        let (registered, pending) =
+            crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        Ok(EnsureV2Outcome {
+            upgraded,
+            registered,
+            pending,
+        })
+    }
+
     /// Re-sign the v2 attestation in place: same handle, same actor
     /// URL, SAME RSA keypair (HTTP-Signature key continuity is the
     /// invariant; this function never regenerates RSA material).
@@ -4419,6 +4478,19 @@ pub struct MintOutcome {
     pub registered: bool,
     /// Why registration is pending, when it is (bridge unreachable, etc.).
     pub registration_error: Option<String>,
+}
+
+/// Outcome of [`Client::ensure_actor_v2_and_register`]: a hub-open upgrade
+/// pass that never errors for blockers -- they land in `pending`.
+#[derive(Clone, Debug)]
+pub struct EnsureV2Outcome {
+    /// True when a fresh v2 attestation was signed + stored this pass.
+    pub upgraded: bool,
+    /// True when the directory holds the current record.
+    pub registered: bool,
+    /// Why the pass could not complete (profile unpublished, bridge
+    /// unreachable); user-facing copy.
+    pub pending: Option<String>,
 }
 
 /// Outcome of [`Client::publish_public_post`]: which recipient inboxes
@@ -6020,6 +6092,29 @@ mod tests {
             matches!(err, ChatError::Invalid(ref m) if m.contains("profile record")),
             "expected a profile-record error, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_actor_v2_and_register_reports_pending_when_no_profile() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // On hub open with no published profile (relay 404), the pass must
+        // NOT error -- it reports a pending state so the pane stays usable.
+        let (client, _dir) = test_client_no_denylist();
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&relay_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = "http://unused.invalid/".parse().unwrap();
+        let outcome = client
+            .ensure_actor_v2_and_register("alice", None, &relay, &registry, 1)
+            .await
+            .expect("ensure pass reports pending, never errors on a blocker");
+        assert!(!outcome.upgraded);
+        assert!(!outcome.registered);
+        assert!(outcome.pending.is_some());
     }
 
     #[test]

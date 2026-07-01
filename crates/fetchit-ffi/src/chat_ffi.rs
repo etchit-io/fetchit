@@ -450,6 +450,18 @@ pub struct PublishReportFfi {
     pub failed: Vec<FailedDeliveryFfi>,
 }
 
+/// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
+/// errors for blockers -- those land in `pending`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EnsureV2Ffi {
+    /// True when a fresh v2 attestation was signed + stored this pass.
+    pub upgraded: bool,
+    /// True when the directory holds the current record.
+    pub registered: bool,
+    /// Why the pass could not complete (profile unpublished, bridge down).
+    pub pending: Option<String>,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -990,6 +1002,45 @@ impl ChatClient {
                 .into_iter()
                 .map(|(target, error)| FailedDeliveryFfi { target, error })
                 .collect(),
+        })
+    }
+
+    /// Run the v2 upgrade + re-register pass, called when the fedi hub opens
+    /// for an already-minted handle. Never errors for blockers -- they land
+    /// in [`EnsureV2Ffi::pending`]. A no-op (all false) when no handle is
+    /// minted yet.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL or a vault
+    /// access failure.
+    pub async fn fedi_ensure_v2(&self) -> Result<EnsureV2Ffi, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(EnsureV2Ffi {
+                upgraded: false,
+                registered: false,
+                pending: None,
+            });
+        };
+        let relay = url::Url::parse(&self.relay_url).map_err(|e| ChatFfiError::Invalid {
+            reason: format!("relay url: {e}"),
+        })?;
+        let registry_base = url::Url::parse(&format!("https://{FEDI_DOMAIN}/")).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: format!("registry url: {e}"),
+            }
+        })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let outcome = self
+            .inner
+            .ensure_actor_v2_and_register(&handle, None, &relay, &registry_base, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(EnsureV2Ffi {
+            upgraded: outcome.upgraded,
+            registered: outcome.registered,
+            pending: outcome.pending,
         })
     }
 
