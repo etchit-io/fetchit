@@ -261,6 +261,7 @@ mod tests {
             message_id: message_id.map(Into::into),
             enqueued_at_ms,
             last_error: None,
+            group: None,
         }
     }
 

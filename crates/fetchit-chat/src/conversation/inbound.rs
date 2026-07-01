@@ -1973,6 +1973,7 @@ mod tests {
             message_id: Some("deadbeef".into()),
             enqueued_at_ms: 1_700_000_000_000,
             last_error: None,
+            group: None,
         });
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
 

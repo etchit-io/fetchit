@@ -282,6 +282,7 @@ mod tests {
             message_id: None,
             enqueued_at_ms: 1,
             last_error: None,
+            group: None,
         }
     }
 
@@ -296,6 +297,57 @@ mod tests {
         let s2 = OutboxStore::load(&layout, &m, 0, None);
         assert_eq!(s2.snapshot().len(), 1);
         assert_eq!(s2.get("b1").unwrap().peer.0, "a".repeat(64));
+    }
+
+    /// A minimal sealed envelope for the group-bubble durability tests. The
+    /// bytes are arbitrary -- the point is that the whole envelope round-trips
+    /// through the vault seal so a queued group send survives a restart and
+    /// re-sends verbatim (MLS seals must never be re-sealed on retry).
+    fn test_envelope() -> fetchit_relay_proto::TransitEnvelope {
+        use fetchit_relay_proto::{AgentId, EnvelopeKind, MachineId, TransitEnvelope};
+        TransitEnvelope {
+            version: 3,
+            kind: EnvelopeKind::PrivateGroupChat,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: AgentId::from_bytes([1u8; 32]),
+            sender_machine_id: MachineId::from_bytes([2u8; 32]),
+            timestamp_ms: 1,
+            epoch: 0,
+            ciphertext: vec![9, 9, 9],
+            nonce: vec![0u8; 12],
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn outbox_persists_group_context_across_reload() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let m = test_master();
+        let mut s = OutboxStore::load(&layout, &m, 0, None);
+        let mut b = bubble("g1", "b");
+        b.group = Some(crate::outbox::GroupOutbound {
+            group_id: "aa".repeat(32),
+            envelope: postcard::to_allocvec(&test_envelope()).unwrap(),
+        });
+        s.upsert(b);
+        drop(s);
+        // Reload from the sealed vault: the group id AND the sealed envelope
+        // bytes must both survive so the retry driver re-sends the exact
+        // frame -- and the bytes must still decode to a valid envelope.
+        let s2 = OutboxStore::load(&layout, &m, 0, None);
+        let g = s2
+            .get("g1")
+            .unwrap()
+            .group
+            .as_ref()
+            .expect("group context survives reload");
+        assert_eq!(g.group_id, "aa".repeat(32));
+        let decoded: fetchit_relay_proto::TransitEnvelope =
+            postcard::from_bytes(&g.envelope).expect("sealed envelope bytes decode after reload");
+        assert_eq!(decoded.ciphertext, vec![9, 9, 9]);
     }
 
     #[test]
@@ -363,6 +415,7 @@ mod tests {
             message_id: message_id.map(Into::into),
             enqueued_at_ms,
             last_error: None,
+            group: None,
         }
     }
 

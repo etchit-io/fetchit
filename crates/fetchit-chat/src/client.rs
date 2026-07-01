@@ -1688,6 +1688,7 @@ impl Client {
             message_id: None,
             enqueued_at_ms: now_ms,
             last_error: None,
+            group: None,
         };
         // Optimistic echo: persist + broadcast BEFORE the send so the UI
         // shows the bubble the instant the user hits enter (desktop parity).
@@ -5477,6 +5478,7 @@ mod tests {
             message_id: Some("m1".into()),
             enqueued_at_ms: 1,
             last_error: None,
+            group: None,
         };
 
         // The returned sender feeds the channel subscribe_outbox reads.

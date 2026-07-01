@@ -25,20 +25,48 @@ pub enum OutboxStatus {
     Failed,
 }
 
-/// One outbound DM, tracked from enqueue through delivery.
+/// Group-send context attached to a bubble that carries one fan-out copy of
+/// an MLS-sealed private-group message.
+///
+/// A bubble's `group` is `None` for a DM (whose plaintext `body` is
+/// re-encrypted on every send) and `Some` for a per-member group fan-out
+/// copy. The already-sealed `envelope` is re-sent **verbatim** on retry:
+/// x0xd's TreeKEM seal ratchets, so re-sealing the same plaintext would mint
+/// a distinct frame -- a duplicate at the receiver and a wasted epoch step.
+/// Storing the sealed bytes is what lets a group send survive the sender
+/// being offline and flush intact on reconnect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupOutbound {
+    /// Daemon-side group id, hex-encoded (the receiver's conversation key).
+    pub group_id: String,
+    /// The sealed transit envelope, postcard-encoded, re-sent byte-for-byte
+    /// on every retry.
+    ///
+    /// Stored as postcard bytes -- the wire format -- rather than a typed
+    /// `TransitEnvelope` because the vault seals bubbles with `serde_json`,
+    /// and `EnvelopeKind`'s serde impl is postcard-only (it serializes the
+    /// variant index, which `serde_json` cannot round-trip). A `Vec<u8>`
+    /// round-trips through any format; the transport decodes it back with
+    /// `postcard::from_bytes` just before the send.
+    pub envelope: Vec<u8>,
+}
+
+/// One outbound message, tracked from enqueue through delivery.
 ///
 /// `message_id` carries the relay's dedupe-key hex once the initial send
 /// is acked (`Some`); a `Sending` bubble with `None` is still in flight
 /// and must not be re-fired (double-send guard -- see [`is_retryable`]).
-/// DM-only today; a future conversation/group key would generalize `peer`
-/// additively.
+/// A DM leaves `group` `None` and re-encrypts `body` per send; a private
+/// group fan-out copy sets `group` and re-sends its sealed frame verbatim
+/// (see [`GroupOutbound`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxBubble {
     /// Client-assigned bubble id (stable across retries).
     pub id: String,
-    /// Recipient agent.
+    /// Recipient agent (for a group bubble, the single fan-out member).
     pub peer: AgentId,
-    /// Plaintext body.
+    /// Plaintext body (the UI echo; the wire payload for a group bubble is
+    /// the sealed `group.envelope`, not this).
     pub body: String,
     /// Delivery state.
     pub status: OutboxStatus,
@@ -48,6 +76,10 @@ pub struct OutboxBubble {
     pub enqueued_at_ms: u64,
     /// Last send error, populated on [`OutboxStatus::Failed`].
     pub last_error: Option<String>,
+    /// Private-group fan-out context; `None` for a DM. Additive so vaults
+    /// sealed before group durability landed load with `None`.
+    #[serde(default)]
+    pub group: Option<GroupOutbound>,
 }
 
 /// A single outbox change broadcast to shells (upsert by `bubble.id`).
@@ -94,6 +126,7 @@ mod tests {
             message_id: message_id.map(Into::into),
             enqueued_at_ms: 1_000,
             last_error: None,
+            group: None,
         }
     }
 
