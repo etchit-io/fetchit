@@ -217,6 +217,21 @@
          public and not post-quantum. Middle dot separates from any actor line. -->
     <string name="chat_feed_post_public_badge">from the fediverse · public, non-PQ</string>
 
+    <!-- Fediverse: opt-in mint (Phase 2 onboarding). The hub header shows the
+         minted handle or a tappable "create" prompt. -->
+    <string name="fedi_hub_join">tap to create your @handle</string>
+    <string name="fedi_hub_handle">\@%1$s@etchit.io</string>
+    <string name="fedi_mint_title">Join the fediverse</string>
+    <string name="fedi_mint_message">Create a public @handle so people across the fediverse can find and follow you. This just claims your handle — posting comes next.</string>
+    <string name="fedi_mint_handle_hint">your handle (letters, numbers, - _)</string>
+    <string name="fedi_mint_create">create</string>
+    <string name="fedi_mint_done">You\'re @%1$s — you\'re on the fediverse!</string>
+    <string name="fedi_mint_done_pending">Created @%1$s — directory registration is pending, it\'ll retry.</string>
+    <string name="fedi_mint_failed">couldn\'t create your handle — try again</string>
+    <string name="fedi_handle_err_empty">enter a handle</string>
+    <string name="fedi_handle_err_long">too long — 64 characters max</string>
+    <string name="fedi_handle_err_chars">letters, numbers, - and _ only</string>
+
     <!-- Chat: add-contact name prompt -->
     <string name="chat_contact_name_title">name this contact</string>
     <string name="chat_contact_name_save">save</string>

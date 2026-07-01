@@ -23,6 +23,7 @@ import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 import java.io.File
@@ -179,6 +180,21 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         val gw = gateway ?: return
         loadGroups(gw)
     }
+
+    /**
+     * The active minted fediverse @handle, or `null` when the user has not
+     * opted in to public posting. Reads the local vault via the connected
+     * gateway; `null` when chat isn't connected yet, so the onboarding prompt
+     * shows until then.
+     */
+    fun fediActorStatus(): String? = gateway?.fediActorStatus()
+
+    /**
+     * Opt in to public posting: mint + register the actor identity for
+     * [handle]. Connects the gateway if needed. Directory-registration failure
+     * is reported in the returned [MintOutcomeFfi], not thrown.
+     */
+    suspend fun fediMint(handle: String): MintOutcomeFfi = ensureGateway().fediMint(handle)
 
     /**
      * Remove a contact from the conversation list. Asks the engine to forget

@@ -429,6 +429,95 @@ class ChatModeView(
     }
 
     /**
+     * Opt-in fediverse mint dialog: pick a public @handle, validate it
+     * client-side ([fediHandleError], mirroring desktop's rule), then mint +
+     * register via [ChatController.fediMint]. Invalid input keeps the dialog
+     * open with an inline error. On success [onMinted] refreshes the hub with
+     * the new handle and the directory outcome is surfaced honestly
+     * (registered vs pending).
+     */
+    private fun showFediMintDialog(onMinted: (String) -> Unit) {
+        val editText = EditText(context).apply {
+            hint = context.getString(R.string.fedi_mint_handle_hint)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            maxLines = 1
+            filters = arrayOf(android.text.InputFilter.LengthFilter(64))
+        }
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(editText)
+        }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.fedi_mint_title))
+            .setMessage(context.getString(R.string.fedi_mint_message))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.fedi_mint_create), null)
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .create()
+        // Positive handler set after show() so an invalid handle keeps the
+        // dialog open (an inline error) instead of dismissing.
+        dialog.setOnShowListener {
+            val createBtn = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+            createBtn.setOnClickListener {
+                val err = fediHandleError(editText.text.toString())
+                if (err != null) {
+                    editText.error = context.getString(fediHandleErrorMessage(err))
+                    return@setOnClickListener
+                }
+                val handle = editText.text.toString().trim().lowercase()
+                createBtn.isEnabled = false
+                lifecycleScope.launch {
+                    runCatching { controller.fediMint(handle) }
+                        .onSuccess { outcome ->
+                            dialog.dismiss()
+                            onMinted(handle)
+                            snackbar(
+                                context.getString(
+                                    if (outcome.registered) R.string.fedi_mint_done
+                                    else R.string.fedi_mint_done_pending,
+                                    handle,
+                                ),
+                            )
+                        }
+                        .onFailure { e ->
+                            createBtn.isEnabled = true
+                            snackbar(userFacingError(e, "fediMint", R.string.fedi_mint_failed))
+                        }
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun fediHandleErrorMessage(err: FediHandleError): Int = when (err) {
+        FediHandleError.EMPTY -> R.string.fedi_handle_err_empty
+        FediHandleError.TOO_LONG -> R.string.fedi_handle_err_long
+        FediHandleError.INVALID_CHARS -> R.string.fedi_handle_err_chars
+    }
+
+    /**
+     * Header subtitle on the fediverse hub: the user's `@handle@etchit.io` when
+     * minted (ash), else a tappable "create your @handle" prompt (copper) that
+     * opens the opt-in mint dialog and re-renders itself on a successful mint.
+     */
+    private fun renderFediHubHeader(shortId: TextView) {
+        val handle = controller.fediActorStatus()
+        if (handle != null) {
+            shortId.text = context.getString(R.string.fedi_hub_handle, handle)
+            shortId.setTextColor(themeColor(R.attr.fetchitAsh))
+            shortId.setOnClickListener(null)
+            shortId.isClickable = false
+        } else {
+            shortId.text = context.getString(R.string.fedi_hub_join)
+            shortId.setTextColor(themeColor(R.attr.fetchitCopper))
+            shortId.setOnClickListener { showFediMintDialog { renderFediHubHeader(shortId) } }
+        }
+    }
+
+    /**
      * Popup menu off the list FAB: add a DM contact, create a new group, join
      * a group from a pasted invite, or scan a code. Each entry opens its own
      * dialog (or the scanner), mirroring [showAddContactDialog].
@@ -1260,7 +1349,7 @@ class ChatModeView(
 
         view.findViewById<TextView>(R.id.threadPeerName).text =
             context.getString(R.string.chat_feed_title)
-        view.findViewById<TextView>(R.id.threadPeerShortId).text = ""
+        renderFediHubHeader(view.findViewById(R.id.threadPeerShortId))
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
         // Feed is read-only — hide the send row and the (group-only) members button.
         view.findViewById<View>(R.id.threadSendRow).visibility = View.GONE

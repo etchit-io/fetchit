@@ -5,6 +5,7 @@ import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
@@ -69,6 +70,21 @@ interface ChatGateway {
 
     /** Fresh `x0x://invite/...` link for [groupId]. */
     suspend fun groupInvite(groupId: String): String
+
+    /**
+     * The active minted fediverse @handle, or `null` when the user has not
+     * opted in to public posting. Local vault read (no network), safe to call
+     * before anything connects — drives the onboarding gate.
+     */
+    fun fediActorStatus(): String?
+
+    /**
+     * Opt in to public posting: mint the actor identity for [handle] and
+     * register it with the directory. Requires a published profile (throws
+     * otherwise); directory-registration failure is reported in the result,
+     * not thrown.
+     */
+    suspend fun fediMint(handle: String): MintOutcomeFfi
 
     /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
@@ -145,6 +161,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.sendGroupMessage(groupId, body, senderName)
     override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
+    override fun fediActorStatus(): String? = inner.fediActorStatus()
+    override suspend fun fediMint(handle: String): MintOutcomeFfi = inner.fediMint(handle)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

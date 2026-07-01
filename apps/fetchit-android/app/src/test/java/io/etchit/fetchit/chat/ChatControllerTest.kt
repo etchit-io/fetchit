@@ -9,6 +9,7 @@ import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 
@@ -54,6 +55,8 @@ class FakeGateway : ChatGateway {
     var history: Map<String, List<ChatHistoryMessageFfi>> = emptyMap()
     val requestedHistory = mutableListOf<String>()
     var conversationHistoryThrows = false
+    var fediHandle: String? = null
+    val mintedHandles = mutableListOf<String>()
 
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
@@ -79,6 +82,12 @@ class FakeGateway : ChatGateway {
     override suspend fun listGroups(): List<GroupFfi> = groups
     override suspend fun groupInvite(groupId: String): String {
         invitesRequested += groupId; return "x0x://invite/$groupId"
+    }
+    override fun fediActorStatus(): String? = fediHandle
+    override suspend fun fediMint(handle: String): MintOutcomeFfi {
+        mintedHandles += handle
+        fediHandle = handle
+        return MintOutcomeFfi("https://etchit.io/actors/$handle", true, null)
     }
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
@@ -423,6 +432,9 @@ class ChatControllerTest {
             override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? = null
             override suspend fun listGroups(): List<GroupFfi> = emptyList()
             override suspend fun groupInvite(groupId: String): String = ""
+            override fun fediActorStatus(): String? = null
+            override suspend fun fediMint(handle: String): MintOutcomeFfi =
+                MintOutcomeFfi("", true, null)
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
