@@ -46,6 +46,12 @@ export function mountNewGroup(
   root.replaceChildren();
   root.className = "chat-dialog";
 
+  // Group id from a successful create, so the post-create "New invite"
+  // button can mint a FRESH single-use invite per invitee. x0xd invites
+  // are single-use (the owner consumes the secret on apply), so one invite
+  // admits only the first joiner -- each member needs their own.
+  let createdGroupId: string | null = null;
+
   const inner = document.createElement("div");
   inner.className = "chat-dialog__panel";
 
@@ -102,6 +108,14 @@ export function mountNewGroup(
   copyBtn.textContent = "Copy invite";
   copyBtn.hidden = true;
 
+  // Each press mints a FRESH single-use invite for the next person, so a
+  // group can grow past two members. Shown after the group is created.
+  const newInviteBtn = document.createElement("button");
+  newInviteBtn.type = "button";
+  newInviteBtn.className = "chat-dialog__btn";
+  newInviteBtn.textContent = "New invite";
+  newInviteBtn.hidden = true;
+
   const createBtn = document.createElement("button");
   createBtn.type = "button";
   createBtn.className = "chat-dialog__btn";
@@ -115,6 +129,7 @@ export function mountNewGroup(
   closeBtn.addEventListener("click", handlers.onClose);
 
   actions.appendChild(copyBtn);
+  actions.appendChild(newInviteBtn);
   actions.appendChild(createBtn);
   actions.appendChild(closeBtn);
 
@@ -157,6 +172,23 @@ export function mountNewGroup(
     }
   });
 
+  newInviteBtn.addEventListener("click", async () => {
+    if (!createdGroupId) return;
+    newInviteBtn.disabled = true;
+    status.textContent = "Generating a fresh invite…";
+    try {
+      const invite = await groupInvite(createdGroupId);
+      inviteBox.value = invite;
+      copyBtn.textContent = "Copy invite";
+      status.textContent = "Fresh invite ready. Send it to one more person.";
+      setTimeout(() => copyBtn.focus(), 0);
+    } catch (e) {
+      status.textContent = `Failed: ${friendlyError(e)}`;
+    } finally {
+      newInviteBtn.disabled = false;
+    }
+  });
+
   createBtn.addEventListener("click", async () => {
     const name = nameInput.value.trim();
     if (!name) return;
@@ -172,15 +204,17 @@ export function mountNewGroup(
       nameInput.hidden = true;
       presetFieldset.hidden = true;
       createBtn.hidden = true;
+      createdGroupId = group.group_id;
       inviteBox.value = invite;
       inviteBox.hidden = false;
       copyBtn.hidden = false;
+      newInviteBtn.hidden = false;
       const label = group.name ?? group.group_id.slice(0, 8);
       title.textContent
         = preset === "private_secure"
           ? `Group "${label}" created — PQ-encrypted via x0x MLS`
           : `Group "${label}" created — public room (plaintext on relay)`;
-      help.textContent = "Share this invite with members. They'll join when they paste it.";
+      help.textContent = "Each invite is single-use, so send every person their own. Tap New invite for the next member.";
       status.textContent = "";
       handlers.onCreated();
       setTimeout(() => copyBtn.focus(), 0);

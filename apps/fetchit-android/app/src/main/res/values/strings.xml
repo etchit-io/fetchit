@@ -227,8 +227,9 @@
     <string name="chat_invalid_invite_uri">that doesn\'t look like a valid group invite</string>
     <string name="chat_group_created">created %1$s</string>
     <string name="chat_group_joined">joined %1$s</string>
-    <string name="chat_group_share_invite">share invite</string>
+    <string name="chat_group_share_invite">invite copied for one person</string>
     <string name="chat_group_invite_copied">invite copied</string>
+    <string name="chat_group_new_invite">new invite</string>
     <string name="chat_group_create_failed">couldn\'t create the group — try again in a moment</string>
     <string name="chat_group_join_failed">couldn\'t join the group — check the invite and try again</string>
     <string name="chat_group_sender_unknown">someone</string>
