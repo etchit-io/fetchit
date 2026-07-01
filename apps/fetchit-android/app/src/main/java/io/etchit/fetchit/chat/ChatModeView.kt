@@ -1608,33 +1608,7 @@ class ChatModeView(
                     }
                     meta.text = time
                     // Linkify autonomi:// addresses in inbound text.
-                    val addresses = ChatUris.autonomiAddresses(msg.body)
-                    if (addresses.isEmpty()) {
-                        bubble.text = msg.body
-                        bubble.movementMethod = null
-                    } else {
-                        val spannable = SpannableString(msg.body)
-                        addresses.forEach { addr ->
-                            val fullLink = "autonomi://$addr"
-                            var start = msg.body.indexOf(fullLink)
-                            while (start >= 0) {
-                                val end = start + fullLink.length
-                                spannable.setSpan(
-                                    object : ClickableSpan() {
-                                        override fun onClick(widget: View) {
-                                            onLinkTap(addr)
-                                        }
-                                    },
-                                    start,
-                                    end,
-                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                                )
-                                start = msg.body.indexOf(fullLink, end)
-                            }
-                        }
-                        bubble.text = spannable
-                        bubble.movementMethod = LinkMovementMethod.getInstance()
-                    }
+                    applyAutonomiLinkedText(bubble, msg.body, onLinkTap)
                     // Clear any retry listener left by a recycled outbound bubble.
                     itemView.setOnClickListener(null)
                 }
@@ -1650,14 +1624,54 @@ class ChatModeView(
                 bubble.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
-                // Feed body is already plain text (HTML was stripped by the pump).
-                bubble.text = post.body
-                bubble.movementMethod = null
+                // Feed body is plain text (HTML stripped by the pump); linkify any
+                // autonomi:// addresses so they open in the reader, like DM bubbles.
+                applyAutonomiLinkedText(bubble, post.body, onLinkTap)
                 meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                 (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                     android.view.Gravity.START
                 // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
                 meta.text = context.getString(R.string.chat_feed_post_public_badge)
+            }
+
+            /**
+             * Set [bubble]'s text with any `autonomi://<addr>` occurrences turned
+             * into tappable spans that open the address via [onLink]; plain text
+             * (no movement method) when there are none. Shared by inbound DM/group
+             * bubbles and fediverse feed posts.
+             */
+            private fun applyAutonomiLinkedText(
+                bubble: TextView,
+                body: String,
+                onLink: (String) -> Unit,
+            ) {
+                val addresses = ChatUris.autonomiAddresses(body)
+                if (addresses.isEmpty()) {
+                    bubble.text = body
+                    bubble.movementMethod = null
+                    return
+                }
+                val spannable = SpannableString(body)
+                addresses.forEach { addr ->
+                    val fullLink = "autonomi://$addr"
+                    var start = body.indexOf(fullLink)
+                    while (start >= 0) {
+                        val end = start + fullLink.length
+                        spannable.setSpan(
+                            object : ClickableSpan() {
+                                override fun onClick(widget: View) {
+                                    onLink(addr)
+                                }
+                            },
+                            start,
+                            end,
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                        start = body.indexOf(fullLink, end)
+                    }
+                }
+                bubble.text = spannable
+                bubble.movementMethod = LinkMovementMethod.getInstance()
             }
 
             /**
