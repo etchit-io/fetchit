@@ -8,4 +8,7 @@
     <color name="ash">#8a8a8a</color>
     <color name="copper">#c9732b</color>
     <color name="copper_bright">#e58a3f</color>
+    <!-- Brand signal green (etchit-website/brand.html signal-ok). A constant for
+         the chat connection dot so it reads the same across themes. -->
+    <color name="signal_green">#6ab04c</color>
 </resources>

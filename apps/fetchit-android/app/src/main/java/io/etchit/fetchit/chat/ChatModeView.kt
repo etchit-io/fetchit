@@ -108,6 +108,7 @@ class ChatModeView(
     // any future re-inflation path must cancel them first.
     private var listContactsJob: Job? = null
     private var listPumpStateJob: Job? = null
+    private var listConnStatusJob: Job? = null
 
     // Job for the active DM send; cancelled wherever threadCollectJob is cancelled.
     private var sendJob: Job? = null
@@ -274,6 +275,7 @@ class ChatModeView(
         val identityBadge = view.findViewById<View>(R.id.chatIdentityBadge)
         val identityAvatar = view.findViewById<TextView>(R.id.chatIdentityAvatar)
         val identityName = view.findViewById<TextView>(R.id.chatIdentityName)
+        val connStatus = view.findViewById<TextView>(R.id.chatConnectionStatus)
         val addPersonBtn = view.findViewById<View>(R.id.onboardAddPersonButton)
         val createGroupBtn = view.findViewById<View>(R.id.onboardCreateGroupButton)
 
@@ -326,6 +328,15 @@ class ChatModeView(
             controller.pumpState.collect { state ->
                 lostBanner.visibility =
                     if (state == PumpState.STOPPED_ERROR) View.VISIBLE else View.GONE
+            }
+        }
+
+        // Live connection dot in the identity header: connected / connecting… /
+        // offline. StateFlow replays its current value to this collector on
+        // subscribe, so the dot paints immediately on entering the list screen.
+        listConnStatusJob = lifecycleScope.launch {
+            controller.connectionStatus.collect { status ->
+                renderConnectionStatus(connStatus, status)
             }
         }
 
@@ -1295,6 +1306,38 @@ class ChatModeView(
                 }
                 .show()
         }.getOrThrow()
+    }
+
+    /**
+     * Paint the header connection dot from [ChatController.connectionStatus]
+     * in the brand palette (etchit-website/brand.html): connected on the brand
+     * green (#6ab04c), connecting on the copper accent (#c9732b), offline on
+     * the theme's rust. Green + copper are brand constants so the dot reads the
+     * same warm green/orange across the dark/dim/light themes; only the offline
+     * rust tracks the theme. The label carries the leading ● glyph so it
+     * inherits the colour; the TalkBack description drops the glyph.
+     */
+    private fun renderConnectionStatus(view: TextView, status: ChatConnectionStatus) {
+        val labelRes: Int
+        val color: Int
+        when (status) {
+            ChatConnectionStatus.CONNECTED -> {
+                labelRes = R.string.chat_conn_connected
+                color = context.getColor(R.color.signal_green)
+            }
+            ChatConnectionStatus.CONNECTING -> {
+                labelRes = R.string.chat_conn_connecting
+                color = context.getColor(R.color.copper)
+            }
+            ChatConnectionStatus.OFFLINE -> {
+                labelRes = R.string.chat_conn_offline
+                color = themeColor(R.attr.fetchitRust)
+            }
+        }
+        val label = context.getString(labelRes)
+        view.text = label
+        view.setTextColor(color)
+        view.contentDescription = label.removePrefix("● ")
     }
 
     /**

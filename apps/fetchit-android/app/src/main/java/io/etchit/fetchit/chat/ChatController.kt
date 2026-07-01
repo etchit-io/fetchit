@@ -8,8 +8,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -84,6 +87,20 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     /** Observable pump lifecycle; see [PumpState] for the contract. */
     val pumpState: StateFlow<PumpState> = _pumpState.asStateFlow()
 
+    private val _connecting = MutableStateFlow(false)
+
+    /**
+     * UI-facing chat connection status (the header dot): CONNECTED when the
+     * pump is RUNNING, CONNECTING while an [ensureGateway] attempt is in flight
+     * (the slow initial dial keeps the pump IDLE until it lands), OFFLINE
+     * otherwise. Combines [pumpState] with the in-flight-connect flag via the
+     * pure [chatConnectionStatus] mapping.
+     */
+    val connectionStatus: StateFlow<ChatConnectionStatus> =
+        combine(_pumpState, _connecting) { pump, connecting ->
+            chatConnectionStatus(pump, connecting)
+        }.stateIn(scope, SharingStarted.Eagerly, ChatConnectionStatus.OFFLINE)
+
     /** Returns the cached gateway without connecting, or `null` if not yet connected. */
     fun gateway(): ChatGateway? = gateway
 
@@ -98,48 +115,57 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         gateway?.let { if (_pumpState.value == PumpState.RUNNING) return it }
         connectMutex.withLock {
             gateway?.let { if (_pumpState.value == PumpState.RUNNING) return it }
-            // A cached gateway whose pump has stopped (relay drop -> STOPPED_ERROR,
-            // or a prior clean stop) is dead for inbound -- there is no in-pump
-            // reconnect in v1, so reusing it would silently deliver nothing. Tear
-            // the dead one down and rebuild here, so nav-away+back recovers inbound
-            // after a relay drop instead of needing an app kill.
-            if (gateway != null) disconnect()
-            val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
-            val client = ChatClient.connect(
-                DEFAULT_RELAY,
-                dataDir.absolutePath,
-                ChatSecrets(appContext).vaultPass(),
-            )
-            val gw = FfiChatGateway(client)
-            gateway = gw
-            _pumpState.value = PumpState.RUNNING
-            pump = pumpEvents(
-                gw,
-                conversations,
-                feed,
-                scope,
-                onStopped = { error ->
-                    _pumpState.value =
-                        if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
-                },
-            )
-            // Subscribe-first: the pump above is already draining outbox events.
-            // Now start the retry driver and hydrate any bubbles that were
-            // enqueued (and vault-persisted) before this process subscribed.
-            startOutboxAndHydrate(gw)
-            // Seed the group list so the conversation screen can show existing
-            // groups (and their threads) immediately after connect. loadGroups
-            // also hydrates each group's persisted transcript.
-            loadGroups(gw)
-            // Hydrate known contacts' DM threads from the persisted vault so the
-            // list shows previews and threads are not empty on reopen.
-            hydrateContacts(gw)
-            // Surface the connect-time pair-record publish outcome. On Android
-            // its failure is otherwise invisible (fetchit_chat log records do not
-            // reach logcat), so a relay/TLS failure would look like a phantom
-            // "connected". Best-effort + off the connect path; never blocks.
-            surfacePairPublishOutcome(gw)
-            return gw
+            // Signal the in-flight connect so the header dot reads "connecting…"
+            // for the whole slow dial (the pump stays IDLE until the connect
+            // lands) rather than "offline". Cleared in the finally whether the
+            // connect succeeds, throws, or is cancelled.
+            _connecting.value = true
+            try {
+                // A cached gateway whose pump has stopped (relay drop -> STOPPED_ERROR,
+                // or a prior clean stop) is dead for inbound -- there is no in-pump
+                // reconnect in v1, so reusing it would silently deliver nothing. Tear
+                // the dead one down and rebuild here, so nav-away+back recovers inbound
+                // after a relay drop instead of needing an app kill.
+                if (gateway != null) disconnect()
+                val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
+                val client = ChatClient.connect(
+                    DEFAULT_RELAY,
+                    dataDir.absolutePath,
+                    ChatSecrets(appContext).vaultPass(),
+                )
+                val gw = FfiChatGateway(client)
+                gateway = gw
+                _pumpState.value = PumpState.RUNNING
+                pump = pumpEvents(
+                    gw,
+                    conversations,
+                    feed,
+                    scope,
+                    onStopped = { error ->
+                        _pumpState.value =
+                            if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
+                    },
+                )
+                // Subscribe-first: the pump above is already draining outbox events.
+                // Now start the retry driver and hydrate any bubbles that were
+                // enqueued (and vault-persisted) before this process subscribed.
+                startOutboxAndHydrate(gw)
+                // Seed the group list so the conversation screen can show existing
+                // groups (and their threads) immediately after connect. loadGroups
+                // also hydrates each group's persisted transcript.
+                loadGroups(gw)
+                // Hydrate known contacts' DM threads from the persisted vault so the
+                // list shows previews and threads are not empty on reopen.
+                hydrateContacts(gw)
+                // Surface the connect-time pair-record publish outcome. On Android
+                // its failure is otherwise invisible (fetchit_chat log records do not
+                // reach logcat), so a relay/TLS failure would look like a phantom
+                // "connected". Best-effort + off the connect path; never blocks.
+                surfacePairPublishOutcome(gw)
+                return gw
+            } finally {
+                _connecting.value = false
+            }
         }
     }
 

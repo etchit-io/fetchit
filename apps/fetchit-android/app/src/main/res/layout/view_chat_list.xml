@@ -47,6 +47,18 @@
                 android:maxLines="1"
                 android:ellipsize="end" />
 
+            <!-- Live chat-connection dot: connected (green) / connecting…
+                 (copper) / offline (rust). Text + color set from code off
+                 ChatController.connectionStatus. -->
+            <TextView
+                android:id="@+id/chatConnectionStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:maxLines="1" />
+
         </LinearLayout>
 
         <!-- Persistent offline-reassurance banner — visible while the chat

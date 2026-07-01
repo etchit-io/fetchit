@@ -165,6 +165,11 @@
     <!-- Banner content-description: the banner is a persistent status line,
          labelled for TalkBack as a reassurance, not an alarm. -->
     <string name="chat_offline_reassurance_desc">offline — your messages are saved</string>
+    <!-- Header connection dot: leading ● glyph inherits the state colour set
+         from code (green / copper / rust). Lowercase to match the chat header. -->
+    <string name="chat_conn_connected">● connected</string>
+    <string name="chat_conn_connecting">● connecting…</string>
+    <string name="chat_conn_offline">● offline</string>
     <string name="chat_empty_hint">Add someone to start chatting</string>
     <!-- First-run onboarding (mirrors desktop sidebar.ts): the welcome
          title, one plain body sentence (verbatim from the desktop source),
