@@ -34,7 +34,7 @@ The engine already does all of this. This is **new FFI surface + Android UI**, n
 
 ## Architecture — the split
 
-- **Alice (engine/FFI):** 5 per-op uniffi wrappers on `ChatClient` exposing existing engine methods. Regen `.so` + `fetchit_ffi.kt` together via `build-jni-libs.sh` (never separately).
+- **Alice (engine/FFI):** first **lift** the mint/ensure/publish orchestration (profile-record resolve + etchit.io registry `register_actor`, POST-then-PUT-on-409) into `fetchit-chat` `Client` methods (e.g. `Client::mint_and_register_actor`) — the desktop Tauri cmds already do this orchestration in the shell, so lifting it means desktop AND the FFI wrappers call **one** engine method (no duplicated registration logic, desktop/mobile lockstep). *(Alice review Finding 1.)* Then 5 thin per-op uniffi wrappers on `ChatClient`. Regen `.so` + `fetchit_ffi.kt` together via `build-jni-libs.sh` (never separately).
 - **Bob (Android UI):** a fediverse hub anchored on the existing `Screen.Feed`, plus onboarding / compose / lookup, calling those FFI methods and mirroring desktop UX with Android Views.
 
 ## FFI contract (Alice's half — per-op, mirrors desktop DTOs)
@@ -45,7 +45,9 @@ Method names illustrative; final names Alice's call. DTO **field names** the And
 2. `fediMint(handle: String) -> MintOutcomeFfi { actorUrl: String, registered: Boolean, registrationError: String? }`
 3. `fediEnsureV2() -> EnsureV2Ffi { upgraded: Boolean, registered: Boolean, pending: String? }`
 4. `fediPublish(bodyMd: String, replyToActorUrl: String?) -> PublishReportFfi { delivered: List<String>, failed: List<FailedDeliveryFfi { inbox: String, error: String }> }` *(uniffi has no tuples — `failed` is a list of structs, not `Vec<(String,String)>`)*
-5. `fediLookup(handle: String) -> LookupFfi { kind: LookupKindFfi, handle: String, actorUrl: String, agentIdHex: String?, displayName: String?, bio: String?, avatar: String?, shareUri: String?, verifyFailure: String? }` where `LookupKindFfi = Verified | PublicOnly | NotFound`
+5. `fediLookup(handle: String) -> LookupFfi { kind: LookupKindFfi, handle: String, actorUrl: String, agentIdHex: String?, displayName: String?, bio: String?, avatar: String?, shareUri: String?, verifyFailure: String?, previousAgentIdHex: String? }` where `LookupKindFfi = Verified | PublicOnly | NotFound`.
+   - **`previousAgentIdHex`** *(Alice review Finding 2)* carries the handle-changed-hands continuity signal desktop's `LookupDto` has. The UI MUST render the same **"this handle changed hands"** takeover warning when it's set — else mobile ships a weaker trust surface on the platform we're prioritizing.
+   - **Contract:** a genuine no-such-handle returns `LookupKindFfi.NotFound`; a **transport/network failure returns an FFI `Err`** (not `NotFound`). The UI distinguishes "doesn't exist" (show empty result) from "couldn't reach" (show retry).
 
 Receive side is unchanged (existing `PublicPost` event). Feed enrichment (below) parses the existing `activityJson`; **no new FFI needed for the feed**.
 
