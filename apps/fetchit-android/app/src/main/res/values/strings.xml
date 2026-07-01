@@ -247,7 +247,7 @@
     <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
     <string name="chat_feed_title">Public posts</string>
-    <string name="chat_feed_subtitle">read-only</string>
+    <string name="chat_feed_subtitle">from across the fediverse</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are
          public and not post-quantum. Middle dot separates from any actor line. -->
     <string name="chat_feed_post_public_badge">from the fediverse · public, non-PQ</string>
@@ -262,7 +262,7 @@
     <string name="fedi_mint_create">create</string>
     <string name="fedi_mint_done">You\'re @%1$s — you\'re on the fediverse!</string>
     <string name="fedi_mint_done_pending">Created @%1$s — directory registration is pending, it\'ll retry.</string>
-    <string name="fedi_mint_failed">couldn\'t create your handle — try again</string>
+    <string name="fedi_mint_failed">couldn\'t create your handle — that\'s on us, not you. handles are almost ready.</string>
     <string name="fedi_handle_err_empty">enter a handle</string>
     <string name="fedi_handle_err_long">too long — 64 characters max</string>
     <string name="fedi_handle_err_chars">letters, numbers, - and _ only</string>
