@@ -1476,6 +1476,28 @@ pub fn reveal_recovery_phrase(
     Ok(phrase.map(|p| p.to_string()))
 }
 
+/// Restore the identity from its 24-word BIP39 recovery phrase, sealing a fresh
+/// vault under `data_dir` keyed by `passphrase`. Reproduces the exact signing
+/// agent id (returned hex); the ML-KEM key and prior message history do NOT come
+/// back. Refuses if an identity already exists -- call only on a fresh install,
+/// before the first `connect`.
+///
+/// # Errors
+/// `ChatFfiError` if the phrase is not valid BIP39, an identity already exists
+/// under `data_dir`, or vault setup fails.
+#[uniffi::export]
+pub fn restore_recovery_phrase(
+    data_dir: String,
+    passphrase: String,
+    phrase: String,
+) -> Result<String, ChatFfiError> {
+    Ok(fetchit_chat::restore_identity_from_recovery_phrase(
+        std::path::Path::new(&data_dir),
+        &passphrase,
+        &phrase,
+    )?)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

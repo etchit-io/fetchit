@@ -4488,6 +4488,48 @@ pub fn provision_local_signer_keypair(
     })
 }
 
+/// Restore the chat identity from its 24-word BIP39 recovery phrase, sealing a
+/// fresh local-signer vault under `data_dir` keyed at rest by `passphrase`. The
+/// restored identity reproduces the exact ML-DSA agent id (and thus, at the
+/// next `connect`, the unified in-process x0xd id). The ML-KEM decryption key
+/// regenerates fresh: recovery restores the signing identity, not prior message
+/// history. Refuses if an identity already exists under `data_dir`, so the
+/// caller must gate this to a fresh install. Returns the restored agent id
+/// (hex), for the UI to confirm.
+///
+/// # Errors
+/// `ChatError::Invalid` if the phrase is not valid BIP39 or an identity already
+/// exists; layout / master-key / vault failures as [`ChatError`].
+pub fn restore_identity_from_recovery_phrase(
+    data_dir: &std::path::Path,
+    passphrase: &str,
+    phrase: &str,
+) -> Result<String> {
+    let seed = crate::recovery_phrase::recovery_phrase_to_seed(phrase)?;
+    let layout = StoreLayout::ensure(data_dir.to_path_buf())?;
+    let identity_vault_path = layout.root.join(IDENTITY_VAULT_FILE);
+    let (master, kdf_id, argon_salt) = resolve_master_key(&identity_vault_path, Some(passphrase))?;
+    let vault = crate::local_signer::LocalSignerVault::restore_from_seed(
+        &layout.root,
+        &master,
+        kdf_id,
+        argon_salt.as_ref(),
+        &seed,
+    )?;
+    let agent_id_hex = hex::encode(vault.signer.agent_id());
+    // Persist the KEM identity vault too (mirrors provision_local_signer_keypair)
+    // so the argon salt lands in identity.json.enc and the later Client::build
+    // resolves the SAME master instead of deriving a fresh salt.
+    let _identity = FetchitIdentity::load_or_create(
+        &layout.root,
+        &master,
+        &agent_id_hex,
+        kdf_id,
+        argon_salt.as_ref(),
+    )?;
+    Ok(agent_id_hex)
+}
+
 #[cfg(test)]
 mod provision_tests {
     #![allow(clippy::unwrap_used)]
@@ -4501,6 +4543,39 @@ mod provision_tests {
         assert!(!k1.public_key.is_empty());
         assert_eq!(k1.public_key, k2.public_key);
         assert_eq!(k1.secret_key.as_slice(), k2.secret_key.as_slice());
+    }
+
+    #[test]
+    fn restore_from_recovery_phrase_reproduces_the_identity() {
+        // Original device: mint an identity, read its backup phrase.
+        let a = tempfile::TempDir::new().unwrap();
+        let orig = provision_local_signer_keypair(a.path(), "pass-a").unwrap();
+        let phrase = crate::reveal_local_signer_recovery_phrase(a.path(), "pass-a")
+            .unwrap()
+            .unwrap();
+
+        // Fresh device with a DIFFERENT local passphrase: restore from the phrase.
+        let b = tempfile::TempDir::new().unwrap();
+        let restored_id =
+            super::restore_identity_from_recovery_phrase(b.path(), "pass-b", &phrase).unwrap();
+        assert!(!restored_id.is_empty());
+
+        // The restored vault carries the EXACT signing keypair (the passphrase
+        // only seals it at rest; the phrase carries the identity).
+        let reprov = provision_local_signer_keypair(b.path(), "pass-b").unwrap();
+        assert_eq!(reprov.public_key, orig.public_key);
+        assert_eq!(reprov.secret_key.as_slice(), orig.secret_key.as_slice());
+    }
+
+    #[test]
+    fn restore_refuses_to_overwrite_an_existing_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let _ = provision_local_signer_keypair(dir.path(), "pass").unwrap();
+        let phrase = crate::reveal_local_signer_recovery_phrase(dir.path(), "pass")
+            .unwrap()
+            .unwrap();
+        // Restore into a dir that already holds an identity must refuse, not clobber.
+        assert!(super::restore_identity_from_recovery_phrase(dir.path(), "pass", &phrase).is_err());
     }
 }
 

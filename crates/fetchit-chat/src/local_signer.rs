@@ -175,6 +175,33 @@ impl LocalSignerVault {
         }
     }
 
+    /// Seal a NEW vault whose identity is derived from a restored backup
+    /// `seed`, reproducing the exact ML-DSA agent id. Refuses (does not
+    /// overwrite) when a local signer vault already exists under `data_dir`,
+    /// so restore can never clobber a live identity.
+    ///
+    /// # Errors
+    /// `ChatError::Invalid` if a vault already exists; otherwise as
+    /// [`Self::persist_new`].
+    pub(crate) fn restore_from_seed(
+        data_dir: &Path,
+        master: &MasterKey,
+        kdf_id: u8,
+        argon_salt: Option<&[u8; crate::at_rest::ARGON_SALT_LEN]>,
+        seed: &[u8; 32],
+    ) -> Result<Self, ChatError> {
+        let path = data_dir.join(LOCAL_SIGNER_FILE);
+        if path.exists() {
+            return Err(ChatError::Invalid(
+                "a local signer identity already exists under this data dir; \
+                 refusing to overwrite it on restore"
+                    .to_owned(),
+            ));
+        }
+        let signer = MlDsaSigner::from_seed(seed);
+        Self::persist_new(&path, master, kdf_id, argon_salt, signer, seed)
+    }
+
     /// Seal a brand-new vault for `signer` derived from `seed`. Shared by
     /// fresh-identity creation and seed restore.
     fn persist_new(
