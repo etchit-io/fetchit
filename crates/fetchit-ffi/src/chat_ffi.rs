@@ -114,6 +114,11 @@ pub struct OutboxBubbleFfi {
     pub enqueued_at_ms: u64,
     /// Last send error, populated when `status` is `Failed`.
     pub last_error: Option<String>,
+    /// For a private-group fan-out bubble, the UI message anchor
+    /// (`GroupOutbound.client_message_id`) so the shell can correlate this
+    /// bubble reaching `Delivered` back to the one UI message and flip its
+    /// pending tick to sent. `None` for a DM bubble.
+    pub group_client_message_id: Option<String>,
 }
 
 impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
@@ -126,6 +131,7 @@ impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
             message_id: bubble.message_id,
             enqueued_at_ms: bubble.enqueued_at_ms,
             last_error: bubble.last_error,
+            group_client_message_id: bubble.group.map(|g| g.client_message_id),
         }
     }
 }
@@ -1744,6 +1750,7 @@ mod tests {
             message_id: Some("mid-9".into()),
             enqueued_at_ms: 1_700_000_000_000,
             last_error: Some("boom".into()),
+            group: None,
         };
         let ffi = OutboxBubbleFfi::from(bubble);
         assert_eq!(ffi.id, "bid-1");
@@ -1753,6 +1760,32 @@ mod tests {
         assert_eq!(ffi.message_id.as_deref(), Some("mid-9"));
         assert_eq!(ffi.enqueued_at_ms, 1_700_000_000_000);
         assert_eq!(ffi.last_error.as_deref(), Some("boom"));
+        // A DM bubble carries no group correlation id.
+        assert_eq!(ffi.group_client_message_id, None);
+    }
+
+    #[test]
+    fn outbox_bubble_ffi_surfaces_group_client_message_id() {
+        use fetchit_chat::identity::AgentId;
+        use fetchit_chat::outbox::{GroupOutbound, OutboxBubble, OutboxStatus};
+        let peer_hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let bubble = OutboxBubble {
+            id: "bid-2".into(),
+            peer: AgentId(peer_hex.into()),
+            body: "group hello".into(),
+            status: OutboxStatus::Sending,
+            message_id: None,
+            enqueued_at_ms: 1_700_000_000_001,
+            last_error: None,
+            group: Some(GroupOutbound {
+                group_id: "cafe".into(),
+                envelope: vec![1, 2, 3],
+                client_message_id: "ui-anchor-7".into(),
+            }),
+        };
+        let ffi = OutboxBubbleFfi::from(bubble);
+        // The fan-out bubble carries the UI anchor so the shell can flip the tick.
+        assert_eq!(ffi.group_client_message_id.as_deref(), Some("ui-anchor-7"));
     }
 
     #[test]
