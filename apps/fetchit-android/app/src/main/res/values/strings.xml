@@ -134,9 +134,44 @@
     <string name="about_preview_heading">technical preview</string>
     <string name="about_preview_body">This is an early, internal build. Expect rough edges; it is not yet a public release.</string>
     <string name="about_recovery_heading">recovery</string>
-    <string name="about_recovery_body">There is no account recovery. A new device is a new identity. Re-add your contacts by scanning their codes again.</string>
+    <string name="about_recovery_body">Your identity can be recovered with your 24-word recovery phrase — back it up from Settings. Restoring brings back your identity, but not your past messages or contacts.</string>
     <string name="about_license_body">fetch&gt;it &#xb7; beta software. Licensed AGPL-3.0-only or commercial. Provided AS IS, with no warranty.</string>
     <string name="about_license_link">view the AGPL-3.0 license</string>
+
+    <!-- Recovery phrase / identity backup (Settings). Security-critical copy:
+         the phrase IS the identity, so the reveal is device-auth + FLAG_SECURE
+         gated and the warning is deliberately blunt. -->
+    <string name="backup_section_header">recovery phrase</string>
+    <string name="backup_reveal_row">reveal recovery phrase</string>
+    <string name="backup_restore_row">restore from phrase</string>
+
+    <!-- Reveal: device re-auth prompt -->
+    <string name="backup_reveal_auth_title">confirm it\'s you</string>
+    <string name="backup_reveal_auth_subtitle">unlock to reveal your recovery phrase</string>
+    <string name="backup_reveal_auth_failed">couldn\'t confirm it\'s you — try again</string>
+
+    <!-- Reveal: no-authenticator fallbacks -->
+    <string name="backup_reveal_nolock_title">no screen lock</string>
+    <string name="backup_reveal_nolock_message">your device has no screen lock, so anyone who picks it up could read your recovery phrase. set a screen lock in your system settings for real protection.</string>
+    <string name="backup_reveal_nolock_action">reveal anyway</string>
+
+    <!-- Reveal: the phrase itself -->
+    <string name="backup_reveal_title">your recovery phrase</string>
+    <string name="backup_reveal_warning">Anyone with these words IS you. Write them on paper. Never screenshot or share them.</string>
+    <string name="backup_reveal_done">done</string>
+    <string name="backup_reveal_none_title">no recovery phrase</string>
+    <string name="backup_reveal_none_message">this identity predates backup — create a new identity to get a recovery phrase.</string>
+    <string name="backup_reveal_failed">couldn\'t read your recovery phrase — try again.</string>
+
+    <!-- Restore -->
+    <string name="backup_restore_title">restore from phrase</string>
+    <string name="backup_restore_message">This restores your identity, not your old messages.</string>
+    <string name="backup_restore_hint">your 24-word recovery phrase</string>
+    <string name="backup_restore_action">restore</string>
+    <string name="backup_restore_empty">enter your 24-word recovery phrase</string>
+    <string name="backup_restore_done">identity restored — reopen chat</string>
+    <string name="backup_restore_err_invalid">that phrase doesn\'t look right — check the words and spacing.</string>
+    <string name="backup_restore_err_exists">this phone already has an identity — restore only works on a fresh install, before chatting starts.</string>
 
     <!-- Mode switch glyphs -->
     <string name="mode_chat_glyph">✉</string>

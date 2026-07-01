@@ -112,6 +112,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-process:2.8.6")
     implementation("androidx.fragment:fragment-ktx:1.8.4")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
+
+    // Biometric — device re-auth (fingerprint / face / PIN / pattern / password)
+    // gating the recovery-phrase reveal. Uses DEVICE_CREDENTIAL fallback so the
+    // prompt works on devices without enrolled biometrics.
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 
     // Markwon — native markdown renderer for the text/markdown rendition.

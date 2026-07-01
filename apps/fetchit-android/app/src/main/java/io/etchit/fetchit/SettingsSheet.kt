@@ -33,6 +33,8 @@ class SettingsSheet(
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
         binding.refreshPeersButton.setOnClickListener { onRefreshClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
+        binding.backupRevealRow.setOnClickListener { revealRecoveryPhraseFlow(activity) }
+        binding.backupRestoreRow.setOnClickListener { restoreRecoveryPhraseFlow(activity) }
         binding.aboutHeader.setOnClickListener { showAboutDialog(activity) }
         binding.settingsVersionText.text =
             activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
