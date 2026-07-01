@@ -98,6 +98,38 @@ pub struct OutboundEnvelope {
     pub transit: Option<TransitEnvelope>,
 }
 
+/// Build the wire envelope for one fan-out copy of a durable private-group
+/// send, from the sealed frame stored on its retry bubble.
+///
+/// Decodes the postcard `sealed_envelope` (see [`crate::outbox::GroupOutbound`])
+/// and wraps it as a [`OutboundKind::Group`] [`OutboundEnvelope`] addressed via
+/// `group_id`. The sealed frame is forwarded **verbatim**: a durable group
+/// send never re-seals, because x0xd's TreeKEM seal ratchets -- re-sealing the
+/// same plaintext would mint a distinct frame (a duplicate at the receiver and
+/// a wasted epoch step). Retrying therefore re-sends exactly what the first
+/// attempt sealed.
+///
+/// # Errors
+/// [`ChatError::Invalid`] if `sealed_envelope` is not a decodable
+/// [`TransitEnvelope`] (a corrupt vault entry).
+pub fn group_resend_envelope(
+    group_id: &str,
+    sealed_envelope: &[u8],
+    from_machine_id: [u8; 32],
+) -> Result<OutboundEnvelope> {
+    let envelope: TransitEnvelope = postcard::from_bytes(sealed_envelope)
+        .map_err(|e| ChatError::Invalid(format!("group outbox envelope decode: {e}")))?;
+    Ok(OutboundEnvelope {
+        kind: OutboundKind::Group {
+            group_id: group_id.to_owned(),
+        },
+        from_machine_id: Some(from_machine_id),
+        payload: Vec::new(),
+        timestamp_ms: envelope.timestamp_ms,
+        transit: Some(envelope),
+    })
+}
+
 /// One inbound message decoded enough for the chat layer to route.
 #[derive(Clone, Debug)]
 pub struct InboundEnvelope {
@@ -300,6 +332,54 @@ mod tests {
             timestamp_ms: 1,
             transit: None,
         }
+    }
+
+    fn sealed_group_frame(timestamp_ms: u64) -> Vec<u8> {
+        use fetchit_relay_proto::{
+            AgentId as ProtoAgentId, EnvelopeKind, MachineId, TransitEnvelope,
+        };
+        let env = TransitEnvelope {
+            version: 3,
+            kind: EnvelopeKind::PrivateGroupChat,
+            group_id: None,
+            tenant_id: None,
+            sender_agent_id: ProtoAgentId::from_bytes([1u8; 32]),
+            sender_machine_id: MachineId::from_bytes([2u8; 32]),
+            timestamp_ms,
+            epoch: 0,
+            ciphertext: vec![9, 9, 9],
+            nonce: vec![0u8; 12],
+            kem_ciphertext: Vec::new(),
+            sender_signature: Vec::new(),
+        };
+        postcard::to_allocvec(&env).unwrap()
+    }
+
+    #[test]
+    fn group_resend_envelope_wraps_the_stored_sealed_frame() {
+        let bytes = sealed_group_frame(4242);
+        let out = group_resend_envelope("abcd", &bytes, [7u8; 32]).expect("decodes");
+        assert_eq!(
+            out.kind,
+            OutboundKind::Group {
+                group_id: "abcd".to_owned()
+            }
+        );
+        assert_eq!(out.from_machine_id, Some([7u8; 32]));
+        // Timestamp + sealed frame are taken from the stored envelope, not
+        // re-minted -- the retry re-sends the exact original bytes.
+        assert_eq!(out.timestamp_ms, 4242);
+        assert_eq!(
+            out.transit.as_ref().expect("transit set").ciphertext,
+            vec![9, 9, 9]
+        );
+        assert!(out.payload.is_empty());
+    }
+
+    #[test]
+    fn group_resend_envelope_rejects_undecodable_bytes() {
+        let err = group_resend_envelope("abcd", &[0xff, 0xff, 0xff, 0xff], [0u8; 32]).unwrap_err();
+        assert!(matches!(err, ChatError::Invalid(_)));
     }
 
     #[tokio::test]
