@@ -1012,6 +1012,10 @@ pub async fn chat_group_send(
         .messages()
         .send_to_group(&group_id, &body, &name)
         .await
+        // Return the message id for the existing command shape. (The receipt
+        // also carries `delivered`; surfacing an honest desktop group tick
+        // from it is a separate desktop-frontend follow-up.)
+        .map(|r| r.message_id)
         .map_err(|e| e.to_string())
 }
 

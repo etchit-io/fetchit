@@ -860,7 +860,7 @@ async fn run_group_chat_loop(
             .await;
             match send_result {
                 Ok(id) => {
-                    let id_or_none = id.as_deref().unwrap_or("none");
+                    let id_or_none = id.message_id.as_deref().unwrap_or("none");
                     eprintln!(
                         "[peer] group-sent id={id_or_none} group={} members={member_count}",
                         short(group_hex),

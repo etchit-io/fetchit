@@ -412,6 +412,19 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
     })
 }
 
+/// Receipt for a group send: the message id plus whether it reached the
+/// relay. `delivered` is the honest tick signal -- `true` = relay-accepted,
+/// `false` = durably queued (relay down), which flips to delivered when the
+/// outbox flushes on reconnect. Correlate the flip by matching a group
+/// outbox event's client message id back to `message_id`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct GroupSendReceiptFfi {
+    /// Client message id (the UI bubble anchor); `None` for a public group.
+    pub message_id: Option<String>,
+    /// `true` = relay-accepted; `false` = durably queued (relay down).
+    pub delivered: bool,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -859,12 +872,17 @@ impl ChatClient {
         group_id: String,
         body: String,
         sender_name: String,
-    ) -> Result<Option<String>, ChatFfiError> {
-        self.inner
+    ) -> Result<GroupSendReceiptFfi, ChatFfiError> {
+        let receipt = self
+            .inner
             .messages()
             .send_to_group(&group_id, &body, &sender_name)
             .await
-            .map_err(ChatFfiError::from)
+            .map_err(ChatFfiError::from)?;
+        Ok(GroupSendReceiptFfi {
+            message_id: receipt.message_id,
+            delivered: receipt.delivered,
+        })
     }
 
     /// List the groups this agent belongs to.

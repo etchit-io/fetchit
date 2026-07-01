@@ -345,6 +345,7 @@ mod tests {
         b.group = Some(crate::outbox::GroupOutbound {
             group_id: "aa".repeat(32),
             envelope: postcard::to_allocvec(&test_envelope()).unwrap(),
+            client_message_id: "cmid-1".to_owned(),
         });
         s.upsert(b);
         drop(s);
@@ -539,6 +540,7 @@ mod tests {
         g.group = Some(crate::outbox::GroupOutbound {
             group_id: "aa".repeat(32),
             envelope: postcard::to_allocvec(&test_envelope()).unwrap(),
+            client_message_id: "cmid-1".to_owned(),
         });
         s.upsert(g);
         let updated = s

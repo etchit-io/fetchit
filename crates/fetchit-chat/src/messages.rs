@@ -509,6 +509,27 @@ fn card_needs_resolve(layout: &StoreLayout, agent_id_hex: &str) -> Result<bool> 
     })
 }
 
+/// Receipt for a group send: the message id plus whether it reached the
+/// relay or was durably queued.
+///
+/// `delivered` is the honest signal the delivery tick renders: `true` when
+/// the relay accepted the send (at least one member reached, or a solo group
+/// with no members to deliver to); `false` when every member's send failed
+/// and the message was durably QUEUED by the outbox (relay down) -- it will
+/// flush + flip to delivered on reconnect. A naive optimistic tick would lie
+/// here, since a queued send now returns `Ok`. `message_id` is the client UI
+/// anchor for a private group (`Some`) and `None` for a public group (a
+/// direct `SignedPublic` send that mints no anchor).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupSendReceipt {
+    /// Client message id (the UI bubble anchor); `Some` for a private group,
+    /// `None` for a public one.
+    pub message_id: Option<String>,
+    /// `true` = relay-accepted; `false` = durably queued (relay down), will
+    /// flush on reconnect.
+    pub delivered: bool,
+}
+
 /// Endpoint wrapper. Build via [`crate::Client::messages`].
 pub struct Endpoint<'a> {
     http: &'a Http,
@@ -1081,7 +1102,7 @@ impl<'a> Endpoint<'a> {
         group_id: &str,
         body: &str,
         sender_name: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<GroupSendReceipt> {
         if self.router.is_empty() {
             return Err(ChatError::NoTransportAvailable);
         }
@@ -1251,6 +1272,7 @@ impl<'a> Endpoint<'a> {
                             group: Some(crate::outbox::GroupOutbound {
                                 group_id: group_id.to_owned(),
                                 envelope: frame.clone(),
+                                client_message_id: message_id.clone(),
                             }),
                         };
                         sink.store.lock().await.upsert(bubble.clone());
@@ -1296,7 +1318,15 @@ impl<'a> Endpoint<'a> {
             };
             persist_own_group_message(registry, group_id, entry, identity, signer).await;
         }
-        Ok(Some(message_id))
+        // The delivery tick's honest signal: relay-accepted when at least one
+        // member reached the relay (or a solo group with no peers to deliver
+        // to); otherwise every member was durably queued and the tick flips
+        // from "queued" to "sent" when the outbox flushes on reconnect.
+        let delivered_to_relay = attempted == 0 || delivered > 0;
+        Ok(GroupSendReceipt {
+            message_id: Some(message_id),
+            delivered: delivered_to_relay,
+        })
     }
 
     /// Re-send one durable private-group fan-out copy: rebuild the Group
@@ -1455,7 +1485,7 @@ impl<'a> Endpoint<'a> {
         group_id: &str,
         body: &str,
         sender_name: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<GroupSendReceipt> {
         // Read the warm cache under a scoped guard -- the std::sync::Mutex
         // guard MUST be dropped before the cold-lookup `.await` below.
         let cached = {
@@ -1486,11 +1516,16 @@ impl<'a> Endpoint<'a> {
                 self.send_private_group(group_id, body, sender_name).await
             }
             crate::groups::GroupKind::Public => {
+                // A public (SignedPublic) send is a direct x0xd POST with no
+                // outbox queue and no client anchor: relay-accepted on success.
                 let gid = ChatGroupId::parse(group_id)?;
                 crate::groups::Endpoint::new(self.http)
                     .send(&gid, body)
                     .await
-                    .map(|_| None)
+                    .map(|_| GroupSendReceipt {
+                        message_id: None,
+                        delivered: true,
+                    })
             }
         }
     }
@@ -2687,7 +2722,10 @@ mod tests {
             .send_private_group(TEST_GROUP_HEX, "hello group", "Alice")
             .await
             .unwrap();
-        assert!(msg_id.is_some(), "send must surface a message id");
+        assert!(
+            msg_id.message_id.is_some(),
+            "send must surface a message id"
+        );
 
         let env = captured
             .lock()
@@ -2845,6 +2883,7 @@ mod tests {
             .send_private_group(TEST_GROUP_HEX, "hello group", "Alice")
             .await
             .unwrap()
+            .message_id
             .expect("solo send must surface a message id");
 
         let conv = rig
@@ -3381,7 +3420,11 @@ mod tests {
             .send_private_group(TEST_GROUP_HEX, "hi", "A")
             .await
             .expect("partial success must still return Ok so caller UI shows 'sent'");
-        assert!(msg_id.is_some());
+        assert!(msg_id.message_id.is_some());
+        assert!(
+            msg_id.delivered,
+            "partial success (>=1 member delivered) is relay-accepted"
+        );
 
         let captured = captured.lock().unwrap();
         let recipients: Vec<String> = captured.iter().map(|(a, _)| a.0.clone()).collect();
@@ -3465,6 +3508,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn send_private_group_enqueues_undelivered_members_when_the_outbox_is_wired() {
         // Josh's restart-to-send fix: when the relay is down and every
         // fanout send fails, the message must NOT hard-fail. With an outbox
@@ -3533,8 +3577,12 @@ mod tests {
             .await
             .expect("a durably queued send returns Ok, not Err");
         assert!(
-            msg_id.is_some(),
+            msg_id.message_id.is_some(),
             "a queued send still surfaces a message id"
+        );
+        assert!(
+            !msg_id.delivered,
+            "every member failed -> queued, not relay-accepted (the honest tick)"
         );
 
         // Both undelivered members are enqueued as retryable group bubbles.
@@ -3558,6 +3606,11 @@ mod tests {
                 .as_ref()
                 .expect("enqueued as a group bubble, not a DM");
             assert_eq!(g.group_id, TEST_GROUP_HEX);
+            assert_eq!(
+                g.client_message_id,
+                msg_id.message_id.clone().unwrap(),
+                "each fan-out bubble carries the UI message anchor for the tick flip"
+            );
             // The stored frame decodes back to a private-group envelope.
             let env: TransitEnvelope =
                 postcard::from_bytes(&g.envelope).expect("sealed frame decodes");
@@ -3829,7 +3882,7 @@ mod tests {
             .unwrap();
         // Empty roster — no transport hops. Still surface a message id
         // so caller UI state-machines have a stable anchor.
-        assert!(msg_id.is_some());
+        assert!(msg_id.message_id.is_some());
         assert!(
             captured.lock().unwrap().is_empty(),
             "0-peer fanout must NOT send any envelope",
@@ -6748,7 +6801,7 @@ mod tests {
             .unwrap();
         // groups().send returns the daemon message id; send_to_group maps
         // it to None to match send_private_group's shape.
-        assert_eq!(msg_id, None);
+        assert_eq!(msg_id.message_id, None);
 
         assert_eq!(
             count_requests_ending(&server, "/send").await,

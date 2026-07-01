@@ -49,6 +49,14 @@ pub struct GroupOutbound {
     /// round-trips through any format; the transport decodes it back with
     /// `postcard::from_bytes` just before the send.
     pub envelope: Vec<u8>,
+    /// The sender's own client message id (the UI bubble anchor minted by
+    /// `send_private_group`, NOT the relay dedupe key). Carried so the shell
+    /// can correlate this per-member bubble reaching `Delivered` back to the
+    /// ONE group message it belongs to, and flip that message's delivery tick
+    /// from "queued" to "sent". Every fan-out copy of the same message shares
+    /// this id.
+    #[serde(default)]
+    pub client_message_id: String,
 }
 
 /// One outbound message, tracked from enqueue through delivery.
