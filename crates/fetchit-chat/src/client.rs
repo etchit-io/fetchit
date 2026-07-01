@@ -4130,6 +4130,63 @@ impl Client {
         .with_attestation_v2(attestation_v2))
     }
 
+    /// Mint an actor identity for `handle` AND register it with the
+    /// fediverse directory in one engine call, so the desktop command and
+    /// the FFI mint path share this orchestration (the DRY lift). Fetches
+    /// the local profile-index record from `relay` (its `profile_addr` binds
+    /// the v2 attestation), mints + persists the RSA identity via
+    /// [`Self::mint_actor_identity_v2`], then POST-then-PUT registers it with
+    /// [`crate::fedi_identity::register_or_update_actor`] at `registry_base`
+    /// (prod `https://etchit.io/`).
+    ///
+    /// Directory registration failure is REPORTED in [`MintOutcome`], never
+    /// fatal: a bridge outage degrades to "registration pending", never a
+    /// failed mint. The three composed steps are each unit-tested on their
+    /// own (`fetch_index_record_by_id`, `mint_actor_identity_v2`,
+    /// `register_or_update_actor`); the hermetic test here covers the
+    /// no-published-profile error arm.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] when no profile is published (relay 404 /
+    ///   tombstoned) -- the user must publish their profile first.
+    /// - The mint itself failing (handle validation, key/attestation, vault).
+    pub async fn mint_and_register_actor(
+        &self,
+        handle: &str,
+        domain: &str,
+        passphrase: Option<&str>,
+        relay: &url::Url,
+        registry_base: &url::Url,
+        now_ms: u64,
+    ) -> Result<MintOutcome> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+        let http = crate::relay_http::guarded_client();
+        let record = crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("profile record: {e}")))?;
+        let identity = self
+            .mint_actor_identity_v2(
+                handle,
+                domain,
+                passphrase,
+                &record.profile_addr,
+                relay.as_str(),
+                now_ms,
+            )
+            .await?;
+        let (registered, registration_error) =
+            crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        Ok(MintOutcome {
+            actor_url: identity.actor_url.to_string(),
+            registered,
+            registration_error,
+        })
+    }
+
     /// Re-sign the v2 attestation in place: same handle, same actor
     /// URL, SAME RSA keypair (HTTP-Signature key continuity is the
     /// invariant; this function never regenerates RSA material).
@@ -4349,6 +4406,19 @@ impl Client {
                 .map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))
         }
     }
+}
+
+/// Outcome of [`Client::mint_and_register_actor`]: the identity is always
+/// created + persisted locally on success; directory registration is
+/// best-effort and reported honestly (mirrors the desktop `MintOutcomeDto`).
+#[derive(Clone, Debug)]
+pub struct MintOutcome {
+    /// Canonical actor URL of the minted identity.
+    pub actor_url: String,
+    /// True when the directory accepted the registration.
+    pub registered: bool,
+    /// Why registration is pending, when it is (bridge unreachable, etc.).
+    pub registration_error: Option<String>,
 }
 
 /// Outcome of [`Client::publish_public_post`]: which recipient inboxes
@@ -5925,6 +5995,31 @@ mod tests {
             ),
             other => panic!("expected ChatError::Invalid, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mint_and_register_actor_errors_when_no_profile_published() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // The relay has no published profile-index record for us (404), so
+        // the mint must not proceed -- the user must publish their profile
+        // first. Hermetic: the registry is never reached.
+        let (client, _dir) = test_client_no_denylist();
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&relay_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = "http://unused.invalid/".parse().unwrap();
+        let err = client
+            .mint_and_register_actor("alice", "etchit.io", None, &relay, &registry, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("profile record")),
+            "expected a profile-record error, got {err:?}"
+        );
     }
 
     #[test]
