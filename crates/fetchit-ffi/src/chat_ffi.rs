@@ -429,6 +429,27 @@ pub struct MintOutcomeFfi {
     pub registration_error: Option<String>,
 }
 
+/// One inbox that rejected a published post. uniffi has no tuples, so the
+/// engine's `(target, error)` pair is surfaced as a struct.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FailedDeliveryFfi {
+    /// The inbox URL, or the actor URL when the actor fetch itself failed.
+    pub target: String,
+    /// The failure reason.
+    pub error: String,
+}
+
+/// Result of [`ChatClient::fedi_publish`]: which inboxes accepted the post
+/// and which failed. Delivery is best-effort, so a non-empty `failed` is not
+/// itself an error -- the post still reached every inbox in `delivered`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PublishReportFfi {
+    /// Inbox URLs that accepted the activity.
+    pub delivered: Vec<String>,
+    /// Per-recipient failures.
+    pub failed: Vec<FailedDeliveryFfi>,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -926,6 +947,49 @@ impl ChatClient {
             actor_url: outcome.actor_url,
             registered: outcome.registered,
             registration_error: outcome.registration_error,
+        })
+    }
+
+    /// Publish a public post as the active minted handle. `@user@host`
+    /// mentions are extracted from `body_md`; the engine resolves them via
+    /// WebFinger and runs denylist gating before any delivery. Delivery is
+    /// best-effort: the report lists accepted + failed inboxes.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted, or the publish
+    /// fails before any delivery was attempted.
+    pub async fn fedi_publish(
+        &self,
+        body_md: String,
+        reply_to_actor_url: Option<String>,
+    ) -> Result<PublishReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let created_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let post = fetchit_fedi::PublicPost {
+            author_handle: format!("@{handle}@{FEDI_DOMAIN}"),
+            body_md: body_md.clone(),
+            created_at_ms,
+            reply_to_actor_url,
+            mentions: fetchit_fedi::extract_mentions(&body_md),
+        };
+        let report = self
+            .inner
+            .publish_public_post(&handle, None, &post)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(PublishReportFfi {
+            delivered: report.delivered,
+            failed: report
+                .failed
+                .into_iter()
+                .map(|(target, error)| FailedDeliveryFfi { target, error })
+                .collect(),
         })
     }
 

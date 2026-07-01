@@ -23,6 +23,7 @@ crate-type = ["cdylib", "staticlib", "lib"]
 fetchit-core = { path = "../fetchit-core" }
 fetchit-net = { path = "../fetchit-net" }
 fetchit-chat = { path = "../fetchit-chat" }
+fetchit-fedi = { path = "../fetchit-fedi" }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"] }
 # Embedded x0xd: connect() runs x0x::daemon::serve() in-process on a loopback

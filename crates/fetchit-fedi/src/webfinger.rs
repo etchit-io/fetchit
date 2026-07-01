@@ -348,12 +348,67 @@ async fn resolve_handle_at_endpoint(
     Err(WebFingerError::NoActorLink)
 }
 
+/// Collect well-formed `@user@host` mentions from `body`'s whitespace-split
+/// tokens, dropping wrapping punctuation and duplicates while keeping
+/// first-seen order. [`parse_mention`] is the validity oracle, so extraction
+/// never drifts from publish-time resolution. Shared by the desktop publish
+/// command and the mobile FFI so both extract mentions identically.
+#[must_use]
+pub fn extract_mentions(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in body.split_whitespace() {
+        let t = token
+            .trim_start_matches(['(', '[', '{', '"', '\''])
+            .trim_end_matches(['.', ',', '!', '?', ';', ':', ')', ']', '}', '"', '\'']);
+        if !t.starts_with('@') || parse_mention(t).is_err() {
+            continue;
+        }
+        if !out.iter().any(|m| m == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn extract_mentions_finds_a_plain_mention() {
+        assert_eq!(
+            extract_mentions("hi @bob@relay.example nice post"),
+            vec!["@bob@relay.example"]
+        );
+    }
+
+    #[test]
+    fn extract_mentions_strips_wrapping_punctuation() {
+        assert_eq!(
+            extract_mentions("(@bob@relay.example), meet @ann@x.io!"),
+            vec!["@bob@relay.example", "@ann@x.io"]
+        );
+    }
+
+    #[test]
+    fn extract_mentions_dedups_keeping_first_seen_order() {
+        assert_eq!(
+            extract_mentions("@bob@relay.example again @bob@relay.example"),
+            vec!["@bob@relay.example"]
+        );
+    }
+
+    #[test]
+    fn extract_mentions_ignores_non_mention_noise() {
+        let none: Vec<String> = Vec::new();
+        assert_eq!(
+            extract_mentions("email me @ home or user@host.com or @bare"),
+            none
+        );
+    }
 
     #[test]
     fn parse_mention_well_formed() {
