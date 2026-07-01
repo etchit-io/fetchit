@@ -4130,6 +4130,201 @@ impl Client {
         .with_attestation_v2(attestation_v2))
     }
 
+    /// Mint an actor identity for `handle` AND register it with the
+    /// fediverse directory in one engine call, so the desktop command and
+    /// the FFI mint path share this orchestration (the DRY lift). Fetches
+    /// the local profile-index record from `relay` (its `profile_addr` binds
+    /// the v2 attestation), mints + persists the RSA identity via
+    /// [`Self::mint_actor_identity_v2`], then POST-then-PUT registers it with
+    /// [`crate::fedi_identity::register_or_update_actor`] at `registry_base`
+    /// (prod `https://etchit.io/`).
+    ///
+    /// Directory registration failure is REPORTED in [`MintOutcome`], never
+    /// fatal: a bridge outage degrades to "registration pending", never a
+    /// failed mint. The three composed steps are each unit-tested on their
+    /// own (`fetch_index_record_by_id`, `mint_actor_identity_v2`,
+    /// `register_or_update_actor`); the hermetic test here covers the
+    /// no-published-profile error arm.
+    ///
+    /// # Errors
+    /// - [`ChatError::Invalid`] when no profile is published (relay 404 /
+    ///   tombstoned) -- the user must publish their profile first.
+    /// - The mint itself failing (handle validation, key/attestation, vault).
+    pub async fn mint_and_register_actor(
+        &self,
+        handle: &str,
+        domain: &str,
+        passphrase: Option<&str>,
+        relay: &url::Url,
+        registry_base: &url::Url,
+        now_ms: u64,
+    ) -> Result<MintOutcome> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+        let http = crate::relay_http::guarded_client();
+        let record = crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("profile record: {e}")))?;
+        let identity = self
+            .mint_actor_identity_v2(
+                handle,
+                domain,
+                passphrase,
+                &record.profile_addr,
+                relay.as_str(),
+                now_ms,
+            )
+            .await?;
+        let (registered, registration_error) =
+            crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        Ok(MintOutcome {
+            actor_url: identity.actor_url.to_string(),
+            registered,
+            registration_error,
+        })
+    }
+
+    /// Run the v2 upgrade + re-register pass for the active `handle` (called
+    /// when the fedi hub opens). Transparently upgrades a pre-M5 (v1-only)
+    /// identity to v2 and re-asserts the directory record. NEVER errors the
+    /// pass for upgrade blockers -- no published profile, bridge unreachable
+    /// -- those land in [`EnsureV2Outcome::pending`]. Shares one path with
+    /// the desktop `fediverse_ensure_v2` command.
+    ///
+    /// # Errors
+    /// The vault/mint machinery failing (chat state missing, vault access) or
+    /// a minted identity that unexpectedly cannot be reloaded.
+    pub async fn ensure_actor_v2_and_register(
+        &self,
+        handle: &str,
+        passphrase: Option<&str>,
+        relay: &url::Url,
+        registry_base: &url::Url,
+        now_ms: u64,
+    ) -> Result<EnsureV2Outcome> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let agent_id_hex = chat.identity.agent_id_hex().to_string();
+        let http = crate::relay_http::guarded_client();
+        let record = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // No published profile / relay unreachable is a pending state
+                // on hub open, not a failure.
+                return Ok(EnsureV2Outcome {
+                    upgraded: false,
+                    registered: false,
+                    pending: Some(e.to_string()),
+                });
+            }
+        };
+        let upgraded = self
+            .upgrade_actor_attestation_v2(
+                handle,
+                passphrase,
+                &record.profile_addr,
+                relay.as_str(),
+                now_ms,
+            )
+            .await?;
+        let identity = self
+            .load_actor_identity(handle, passphrase)
+            .await?
+            .ok_or_else(|| ChatError::Invalid(format!("no actor identity for {handle}")))?;
+        let (registered, pending) =
+            crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        Ok(EnsureV2Outcome {
+            upgraded,
+            registered,
+            pending,
+        })
+    }
+
+    /// Resolve a fediverse handle to a verified (or public-only) identity
+    /// card: `WebFinger` -> actor doc -> v2 attestation verify -> the sender's
+    /// relay profile-index (for the share URI + handle-takeover continuity).
+    /// Shared by the desktop lookup command and the FFI. The rich display
+    /// profile (name/bio/avatar) is NOT fetched here -- it lives in the
+    /// Autonomi manifest at the returned `profile_addr`, which the shell's
+    /// reader loads separately.
+    ///
+    /// A crypto/attestation failure returns a `PublicOnly` card with a
+    /// visible `verify_failure` (fail closed, visibly); a transport failure
+    /// after that point is an error.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] on a malformed handle, a `WebFinger`/actor-fetch
+    /// transport failure, or an unreachable sender relay.
+    pub async fn lookup_fedi_handle(&self, handle: &str) -> Result<FediLookup> {
+        let parsed = fetchit_fedi::parse_mention(&handle.trim().to_lowercase())
+            .map_err(|e| ChatError::Invalid(format!("handle: {e}")))?;
+        let canonical = format!("@{}@{}", parsed.local, parsed.instance);
+        let actor_url = fetchit_fedi::resolve_handle(&parsed)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("couldn't resolve {canonical}: {e}")))?;
+        let actor = fetchit_fedi::lookup::fetch_remote_actor(&actor_url)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
+        let actor_url_str = actor.id.to_string();
+
+        let Some(att) = actor.attestation_v2.clone() else {
+            return Ok(FediLookup::public_only(canonical, actor_url_str, None));
+        };
+        let agent_id_hex = match actor.verify_attestation_v2() {
+            Ok(id) => id,
+            Err(e) => {
+                return Ok(FediLookup::public_only(
+                    canonical,
+                    actor_url_str,
+                    Some(e.to_string()),
+                ))
+            }
+        };
+        // The attested relay hint is part of the verified binding; one that
+        // does not parse fails closed to public-only, like a bad signature.
+        let Ok(relay) = att.relay_hint.parse::<url::Url>() else {
+            return Ok(FediLookup::public_only(
+                canonical,
+                actor_url_str,
+                Some("attested relay hint is not a valid URL".into()),
+            ));
+        };
+        let http = crate::relay_http::guarded_client();
+        let record = crate::pair::fetch_index_record_by_id(&relay, &agent_id_hex, &http)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("couldn't reach their relay: {e}")))?;
+        let share_uri =
+            crate::profile::to_v3_share_uri(&agent_id_hex, &record.profile_addr, &relay).map_err(
+                |e| ChatError::Invalid(format!("couldn't build the contact pointer: {e}")),
+            )?;
+        // Continuity ledger: surfaces "handle changed hands". Best-effort; a
+        // layout-less (REST-only) client just skips it.
+        let previous_agent_id_hex = self.layout().and_then(|layout| {
+            match crate::fedi_resolutions::note_resolution(layout, &canonical, &agent_id_hex) {
+                Ok(crate::fedi_resolutions::ResolutionChange::Changed {
+                    previous_agent_id_hex,
+                }) => Some(previous_agent_id_hex),
+                _ => None,
+            }
+        });
+        Ok(FediLookup {
+            kind: FediLookupKind::Verified,
+            handle: canonical,
+            actor_url: actor_url_str,
+            agent_id_hex: Some(agent_id_hex),
+            profile_addr: Some(record.profile_addr),
+            share_uri: Some(share_uri),
+            previous_agent_id_hex,
+            verify_failure: None,
+        })
+    }
+
     /// Re-sign the v2 attestation in place: same handle, same actor
     /// URL, SAME RSA keypair (HTTP-Signature key continuity is the
     /// invariant; this function never regenerates RSA material).
@@ -4347,6 +4542,84 @@ impl Client {
             fetchit_fedi::resolve_handle(&parsed)
                 .await
                 .map_err(|e| ChatError::Invalid(format!("webfinger: {e}")))
+        }
+    }
+}
+
+/// Outcome of [`Client::mint_and_register_actor`]: the identity is always
+/// created + persisted locally on success; directory registration is
+/// best-effort and reported honestly (mirrors the desktop `MintOutcomeDto`).
+#[derive(Clone, Debug)]
+pub struct MintOutcome {
+    /// Canonical actor URL of the minted identity.
+    pub actor_url: String,
+    /// True when the directory accepted the registration.
+    pub registered: bool,
+    /// Why registration is pending, when it is (bridge unreachable, etc.).
+    pub registration_error: Option<String>,
+}
+
+/// Outcome of [`Client::ensure_actor_v2_and_register`]: a hub-open upgrade
+/// pass that never errors for blockers -- they land in `pending`.
+#[derive(Clone, Debug)]
+pub struct EnsureV2Outcome {
+    /// True when a fresh v2 attestation was signed + stored this pass.
+    pub upgraded: bool,
+    /// True when the directory holds the current record.
+    pub registered: bool,
+    /// Why the pass could not complete (profile unpublished, bridge
+    /// unreachable); user-facing copy.
+    pub pending: Option<String>,
+}
+
+/// Verified-vs-public classification of a [`Client::lookup_fedi_handle`]
+/// result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FediLookupKind {
+    /// The v2 attestation verified: the actor is cryptographically bound to
+    /// the returned chat `agent_id`.
+    Verified,
+    /// No attestation, or it failed to verify: display the account but do
+    /// NOT trust the identity binding.
+    PublicOnly,
+}
+
+/// One resolved fediverse account card (identity + share pointer) from
+/// [`Client::lookup_fedi_handle`]. The rich display fields (name/bio/avatar)
+/// are fetched separately from the Autonomi manifest at `profile_addr`.
+#[derive(Clone, Debug)]
+pub struct FediLookup {
+    /// Verified or public-only.
+    pub kind: FediLookupKind,
+    /// Canonical `@local@instance` handle.
+    pub handle: String,
+    /// Actor URL the handle resolved to.
+    pub actor_url: String,
+    /// Verified chat agent id (verified kind only).
+    pub agent_id_hex: Option<String>,
+    /// Autonomi profile-manifest address (verified only); the shell's reader
+    /// loads name/bio/avatar from it.
+    pub profile_addr: Option<String>,
+    /// Synthesized v3 share URI for "message privately" (verified only).
+    pub share_uri: Option<String>,
+    /// Set when this handle previously resolved to a DIFFERENT agent id on
+    /// this device (a possible handle takeover).
+    pub previous_agent_id_hex: Option<String>,
+    /// Set when an attestation was present but failed verification.
+    pub verify_failure: Option<String>,
+}
+
+impl FediLookup {
+    fn public_only(handle: String, actor_url: String, verify_failure: Option<String>) -> Self {
+        Self {
+            kind: FediLookupKind::PublicOnly,
+            handle,
+            actor_url,
+            agent_id_hex: None,
+            profile_addr: None,
+            share_uri: None,
+            previous_agent_id_hex: None,
+            verify_failure,
         }
     }
 }
@@ -6000,6 +6273,64 @@ mod tests {
             ),
             other => panic!("expected ChatError::Invalid, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mint_and_register_actor_errors_when_no_profile_published() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // The relay has no published profile-index record for us (404), so
+        // the mint must not proceed -- the user must publish their profile
+        // first. Hermetic: the registry is never reached.
+        let (client, _dir) = test_client_no_denylist();
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&relay_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = "http://unused.invalid/".parse().unwrap();
+        let err = client
+            .mint_and_register_actor("alice", "etchit.io", None, &relay, &registry, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(ref m) if m.contains("profile record")),
+            "expected a profile-record error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_actor_v2_and_register_reports_pending_when_no_profile() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // On hub open with no published profile (relay 404), the pass must
+        // NOT error -- it reports a pending state so the pane stays usable.
+        let (client, _dir) = test_client_no_denylist();
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&relay_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = "http://unused.invalid/".parse().unwrap();
+        let outcome = client
+            .ensure_actor_v2_and_register("alice", None, &relay, &registry, 1)
+            .await
+            .expect("ensure pass reports pending, never errors on a blocker");
+        assert!(!outcome.upgraded);
+        assert!(!outcome.registered);
+        assert!(outcome.pending.is_some());
+    }
+
+    #[tokio::test]
+    async fn lookup_fedi_handle_rejects_a_malformed_handle() {
+        // A handle that isn't `@user@host` fails at parse, before any network
+        // (hermetic). WebFinger/actor/verify branches are covered by the
+        // composed pieces' own tests.
+        let (client, _dir) = test_client_no_denylist();
+        let err = client.lookup_fedi_handle("not-a-handle").await.unwrap_err();
+        assert!(matches!(err, ChatError::Invalid(ref m) if m.contains("handle")));
     }
 
     #[test]

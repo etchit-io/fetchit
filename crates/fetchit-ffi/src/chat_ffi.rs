@@ -431,6 +431,92 @@ pub struct GroupSendReceiptFfi {
     pub delivered: bool,
 }
 
+/// Fediverse host whose directory serves minted actors. Mirrors the desktop
+/// `DEFAULT_FEDI_DOMAIN`; the registry base is `https://{FEDI_DOMAIN}/`.
+const FEDI_DOMAIN: &str = "etchit.io";
+
+/// Result of [`ChatClient::fedi_mint`]: the identity is always created +
+/// persisted locally on success; directory registration is best-effort and
+/// reported honestly (mirrors the desktop mint-outcome DTO).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MintOutcomeFfi {
+    /// Canonical actor URL of the minted identity.
+    pub actor_url: String,
+    /// True when the directory accepted the registration.
+    pub registered: bool,
+    /// Why registration is pending, when it is (bridge unreachable, etc.).
+    pub registration_error: Option<String>,
+}
+
+/// One inbox that rejected a published post. uniffi has no tuples, so the
+/// engine's `(target, error)` pair is surfaced as a struct.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FailedDeliveryFfi {
+    /// The inbox URL, or the actor URL when the actor fetch itself failed.
+    pub target: String,
+    /// The failure reason.
+    pub error: String,
+}
+
+/// Result of [`ChatClient::fedi_publish`]: which inboxes accepted the post
+/// and which failed. Delivery is best-effort, so a non-empty `failed` is not
+/// itself an error -- the post still reached every inbox in `delivered`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PublishReportFfi {
+    /// Inbox URLs that accepted the activity.
+    pub delivered: Vec<String>,
+    /// Per-recipient failures.
+    pub failed: Vec<FailedDeliveryFfi>,
+}
+
+/// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
+/// errors for blockers -- those land in `pending`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EnsureV2Ffi {
+    /// True when a fresh v2 attestation was signed + stored this pass.
+    pub upgraded: bool,
+    /// True when the directory holds the current record.
+    pub registered: bool,
+    /// Why the pass could not complete (profile unpublished, bridge down).
+    pub pending: Option<String>,
+}
+
+/// Verified-vs-public classification of a [`ChatClient::fedi_lookup`] result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LookupKindFfi {
+    /// The v2 attestation verified: the actor is bound to `agentIdHex`.
+    Verified,
+    /// No attestation / verification failed: display but do not trust.
+    PublicOnly,
+    /// The handle does not resolve to any account.
+    NotFound,
+}
+
+/// One resolved fediverse account card from [`ChatClient::fedi_lookup`]. The
+/// rich display fields (name/bio/avatar) are fetched separately from the
+/// Autonomi manifest at `profile_addr`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LookupFfi {
+    /// Verified, public-only, or not-found.
+    pub kind: LookupKindFfi,
+    /// Canonical `@local@instance` handle.
+    pub handle: String,
+    /// Actor URL the handle resolved to (empty for not-found).
+    pub actor_url: String,
+    /// Verified chat agent id (verified only).
+    pub agent_id_hex: Option<String>,
+    /// Autonomi profile-manifest address (verified only); load name/bio/avatar
+    /// from it via the reader.
+    pub profile_addr: Option<String>,
+    /// Synthesized v3 share URI for "message privately" (verified only).
+    pub share_uri: Option<String>,
+    /// Set when this handle previously resolved to a DIFFERENT agent id on
+    /// this device (a possible handle takeover) -- render a warning.
+    pub previous_agent_id_hex: Option<String>,
+    /// Set when an attestation was present but failed verification.
+    pub verify_failure: Option<String>,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -889,6 +975,179 @@ impl ChatClient {
             message_id: receipt.message_id,
             delivered: receipt.delivered,
         })
+    }
+
+    /// The active minted fediverse handle, or `None` when the user has not
+    /// opted in to public posting. Reads the local vault only (no network),
+    /// so the onboarding gate can query it before anything connects.
+    #[must_use]
+    pub fn fedi_actor_status(&self) -> Option<String> {
+        self.inner
+            .layout()
+            .map(fetchit_chat::fedi_vault::list_actor_handles)
+            .and_then(|handles| handles.into_iter().next())
+    }
+
+    /// Opt in to public posting: mint the actor identity for `handle` (with
+    /// its v2 attestation binding the published profile + active relay) and
+    /// register it with the directory. Requires a published profile; the
+    /// error explains how to get one. Directory-registration failure is NOT
+    /// an error -- it lands in the returned [`MintOutcomeFfi`].
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
+    /// profile, or the mint failing.
+    pub async fn fedi_mint(&self, handle: String) -> Result<MintOutcomeFfi, ChatFfiError> {
+        let handle = handle.trim().to_lowercase();
+        let relay = url::Url::parse(&self.relay_url).map_err(|e| ChatFfiError::Invalid {
+            reason: format!("relay url: {e}"),
+        })?;
+        let registry_base = url::Url::parse(&format!("https://{FEDI_DOMAIN}/")).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: format!("registry url: {e}"),
+            }
+        })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let outcome = self
+            .inner
+            .mint_and_register_actor(&handle, FEDI_DOMAIN, None, &relay, &registry_base, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(MintOutcomeFfi {
+            actor_url: outcome.actor_url,
+            registered: outcome.registered,
+            registration_error: outcome.registration_error,
+        })
+    }
+
+    /// Publish a public post as the active minted handle. `@user@host`
+    /// mentions are extracted from `body_md`; the engine resolves them via
+    /// WebFinger and runs denylist gating before any delivery. Delivery is
+    /// best-effort: the report lists accepted + failed inboxes.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted, or the publish
+    /// fails before any delivery was attempted.
+    pub async fn fedi_publish(
+        &self,
+        body_md: String,
+        reply_to_actor_url: Option<String>,
+    ) -> Result<PublishReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let created_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let post = fetchit_fedi::PublicPost {
+            author_handle: format!("@{handle}@{FEDI_DOMAIN}"),
+            body_md: body_md.clone(),
+            created_at_ms,
+            reply_to_actor_url,
+            mentions: fetchit_fedi::extract_mentions(&body_md),
+        };
+        let report = self
+            .inner
+            .publish_public_post(&handle, None, &post)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(PublishReportFfi {
+            delivered: report.delivered,
+            failed: report
+                .failed
+                .into_iter()
+                .map(|(target, error)| FailedDeliveryFfi { target, error })
+                .collect(),
+        })
+    }
+
+    /// Run the v2 upgrade + re-register pass, called when the fedi hub opens
+    /// for an already-minted handle. Never errors for blockers -- they land
+    /// in [`EnsureV2Ffi::pending`]. A no-op (all false) when no handle is
+    /// minted yet.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL or a vault
+    /// access failure.
+    pub async fn fedi_ensure_v2(&self) -> Result<EnsureV2Ffi, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(EnsureV2Ffi {
+                upgraded: false,
+                registered: false,
+                pending: None,
+            });
+        };
+        let relay = url::Url::parse(&self.relay_url).map_err(|e| ChatFfiError::Invalid {
+            reason: format!("relay url: {e}"),
+        })?;
+        let registry_base = url::Url::parse(&format!("https://{FEDI_DOMAIN}/")).map_err(|e| {
+            ChatFfiError::Invalid {
+                reason: format!("registry url: {e}"),
+            }
+        })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let outcome = self
+            .inner
+            .ensure_actor_v2_and_register(&handle, None, &relay, &registry_base, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(EnsureV2Ffi {
+            upgraded: outcome.upgraded,
+            registered: outcome.registered,
+            pending: outcome.pending,
+        })
+    }
+
+    /// Resolve a `@user@host` fediverse handle to an account card: verified
+    /// (attestation-bound to a chat agent id, with a share URI for "message
+    /// privately") or public-only. Load the rich profile (name/bio/avatar)
+    /// from `profileAddr` via the reader.
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on a transport failure (WebFinger/actor fetch,
+    /// unreachable sender relay). A handle that simply does NOT resolve is
+    /// returned as a `NotFound` card, not an error.
+    pub async fn fedi_lookup(&self, handle: String) -> Result<LookupFfi, ChatFfiError> {
+        match self.inner.lookup_fedi_handle(&handle).await {
+            Ok(l) => Ok(LookupFfi {
+                kind: match l.kind {
+                    fetchit_chat::FediLookupKind::Verified => LookupKindFfi::Verified,
+                    fetchit_chat::FediLookupKind::PublicOnly => LookupKindFfi::PublicOnly,
+                },
+                handle: l.handle,
+                actor_url: l.actor_url,
+                agent_id_hex: l.agent_id_hex,
+                profile_addr: l.profile_addr,
+                share_uri: l.share_uri,
+                previous_agent_id_hex: l.previous_agent_id_hex,
+                verify_failure: l.verify_failure,
+            }),
+            Err(e) => {
+                // Contract: a genuine "no such handle" (a resolve miss) is a
+                // NotFound card, not an FFI error; every other transport
+                // failure surfaces as an error.
+                if e.to_string().contains("couldn't resolve") {
+                    Ok(LookupFfi {
+                        kind: LookupKindFfi::NotFound,
+                        handle,
+                        actor_url: String::new(),
+                        agent_id_hex: None,
+                        profile_addr: None,
+                        share_uri: None,
+                        previous_agent_id_hex: None,
+                        verify_failure: None,
+                    })
+                } else {
+                    Err(ChatFfiError::from(e))
+                }
+            }
+        }
     }
 
     /// List the groups this agent belongs to.

@@ -193,12 +193,125 @@ pub async fn sign_actor_attestation_v2(
     })
 }
 
+/// Register (or re-assert on 409) `identity` with the fediverse directory at
+/// `base`, mirroring the desktop `register_with_directory`: POST `v1/actors`,
+/// and on a [`fetchit_fedi::registry::RegistryError::HandleTaken`] (409) fall
+/// back to PUT so re-asserting our OWN handle after an attestation refresh
+/// self-heals. A genuine squat by another agent fails the PUT's continuity
+/// check and surfaces honestly. Lifted into the engine so the desktop command
+/// and the FFI mint/ensure paths share one registration path (DRY).
+///
+/// Returns `(registered, error)`. Registration failure is REPORTED, never
+/// fatal: a mint/ensure degrades to "pending" rather than failing, so a
+/// bridge outage never blocks getting a local identity.
+pub async fn register_or_update_actor(
+    base: &url::Url,
+    identity: &fetchit_fedi::actor::ActorIdentity,
+    http: &reqwest::Client,
+) -> (bool, Option<String>) {
+    let Some(attestation_v2) = identity.ml_dsa_attestation_v2.clone() else {
+        return (false, Some("no v2 attestation on identity".into()));
+    };
+    let req = fetchit_fedi::registry::RegisterActorRequest {
+        handle: identity.handle.clone(),
+        rsa_spki_der: identity.spki_der.clone(),
+        attestation_v2,
+    };
+    match fetchit_fedi::registry::register_actor(base, &req, http).await {
+        Ok(_) => (true, None),
+        Err(fetchit_fedi::registry::RegistryError::HandleTaken) => {
+            match fetchit_fedi::registry::update_actor(base, &req, http).await {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn actor_fixture(with_v2: bool) -> fetchit_fedi::actor::ActorIdentity {
+        fetchit_fedi::actor::ActorIdentity {
+            handle: "alice".into(),
+            actor_url: "https://etchit.io/actors/alice".parse().unwrap(),
+            agent_id_hex: "aa".repeat(32),
+            rsa_priv_pem: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n".into(),
+            spki_der: vec![1, 2, 3, 4],
+            ml_dsa_attestation: MlDsaAttestation::new(vec![0xAA; 8], vec![0xBB; 8]),
+            ml_dsa_attestation_v2: with_v2.then(|| ActorAttestationV2 {
+                version: 2,
+                profile_addr: "cc".repeat(32),
+                relay_hint: "https://relay.example/".into(),
+                hint_epoch_ms: 1,
+                ml_dsa_pubkey: vec![0xAA; 8],
+                signature: vec![0xBB; 8],
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_or_update_actor_registers_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("v1/actors"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"actor_url": "https://etchit.io/actors/alice"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri()).parse().unwrap();
+        let (registered, err) =
+            register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
+        assert!(registered);
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn register_or_update_actor_falls_back_to_put_on_409() {
+        // Re-asserting our OWN handle after an attestation refresh: POST 409,
+        // then PUT self-heals (mirrors the desktop register_with_directory).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("v1/actors"))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(&server)
+            .await;
+        // update_actor PUTs to the handle-specific path v1/actors/<handle>.
+        Mock::given(method("PUT"))
+            .and(path("/v1/actors/alice"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"actor_url": "https://etchit.io/actors/alice"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri()).parse().unwrap();
+        let (registered, err) =
+            register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
+        assert!(registered, "409 on POST self-heals via PUT");
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn register_or_update_actor_reports_missing_v2_attestation() {
+        // No v2 attestation -> cannot build the request; reported, not fatal.
+        let base = "http://unused.invalid/".parse().unwrap();
+        let (registered, err) =
+            register_or_update_actor(&base, &actor_fixture(false), &reqwest::Client::new()).await;
+        assert!(!registered);
+        assert!(err.unwrap().contains("v2 attestation"));
+    }
 
     #[tokio::test]
     async fn generate_rsa_2048_produces_decodable_material() {
