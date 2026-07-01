@@ -1524,9 +1524,12 @@ class ChatModeView(
      * log the raw reason to logcat for debugging. Only the on-screen text is
      * sanitized; the raw [ffiReason] always reaches `Log.w(TAG, ...)`.
      *
-     * @param fallbackRes the path-specific friendly string to use when the
-     *   error is not a recognized [ChatFfiException] variant (e.g. the
-     *   send/group paths pass their own "couldn't send"/"couldn't join" copy).
+     * @param fallbackRes the path-specific friendly string shown for every
+     *   non-connectivity failure (the send/group/mint/moderation paths pass
+     *   their own "couldn't send"/"couldn't join"/"couldn't create your handle"
+     *   copy). Only [ChatFfiException.Network] bypasses it, with a universal
+     *   "check your internet" message; the pair-import path passes the
+     *   "scan again" copy explicitly, so it stays scoped to code scanning.
      */
     private fun userFacingError(
         e: Throwable,
@@ -1537,8 +1540,6 @@ class ChatModeView(
         return when (e) {
             is ChatFfiException.Network ->
                 context.getString(R.string.chat_connect_failed_generic)
-            is ChatFfiException.Invalid ->
-                context.getString(R.string.chat_error_invalid)
             else -> context.getString(fallbackRes)
         }
     }
