@@ -235,7 +235,7 @@ impl LocalSignerVault {
 
 /// Reveal the 32-byte identity backup seed for the local signing
 /// identity stored under `data_dir`, deriving the vault master key from
-/// `passphrase`.
+/// `passphrase` (`None` = OS-keychain custody, the desktop default).
 ///
 /// Returns `Ok(None)` for legacy identities minted before seed backup
 /// existed — those have no recoverable seed and must rotate to a fresh
@@ -248,17 +248,18 @@ impl LocalSignerVault {
 /// on filesystem errors.
 pub fn reveal_local_signer_seed(
     data_dir: &Path,
-    passphrase: &str,
+    passphrase: Option<&str>,
 ) -> Result<Option<Zeroizing<[u8; 32]>>, ChatError> {
     let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
     let (master, _kdf_id, _argon_salt) =
-        crate::client::resolve_master_key(&identity_vault, Some(passphrase))?;
+        crate::client::resolve_master_key(&identity_vault, passphrase)?;
     LocalSignerVault::reveal_identity_seed(data_dir, &master)
 }
 
 /// Reveal the local signing identity's 24-word BIP39 recovery phrase for the
 /// identity stored under `data_dir`, deriving the vault master key from
-/// `passphrase`. `Ok(None)` for legacy identities minted before seed backup
+/// `passphrase` (`None` = OS-keychain custody, the desktop default).
+/// `Ok(None)` for legacy identities minted before seed backup
 /// existed. The platform layer must gate this behind a biometric / re-auth
 /// prompt before the phrase is shown.
 ///
@@ -267,11 +268,11 @@ pub fn reveal_local_signer_seed(
 /// seed cannot be BIP39-encoded.
 pub fn reveal_local_signer_recovery_phrase(
     data_dir: &Path,
-    passphrase: &str,
+    passphrase: Option<&str>,
 ) -> Result<Option<Zeroizing<String>>, ChatError> {
     let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
     let (master, _kdf_id, _argon_salt) =
-        crate::client::resolve_master_key(&identity_vault, Some(passphrase))?;
+        crate::client::resolve_master_key(&identity_vault, passphrase)?;
     LocalSignerVault::reveal_recovery_phrase(data_dir, &master)
 }
 

@@ -577,7 +577,7 @@ impl ChatClient {
         {
             let provisioned = fetchit_chat::provision_local_signer_keypair(
                 std::path::Path::new(&data_dir),
-                &passphrase,
+                Some(&passphrase),
             )
             .map_err(ChatFfiError::from)?;
             let agent_kp = x0x::identity::AgentKeypair::from_bytes(
@@ -1736,7 +1736,7 @@ pub fn reveal_recovery_phrase(
 ) -> Result<Option<String>, ChatFfiError> {
     let phrase = fetchit_chat::reveal_local_signer_recovery_phrase(
         std::path::Path::new(&data_dir),
-        &passphrase,
+        Some(&passphrase),
     )?;
     Ok(phrase.map(|p| p.to_string()))
 }
@@ -1758,7 +1758,7 @@ pub fn restore_recovery_phrase(
 ) -> Result<String, ChatFfiError> {
     Ok(fetchit_chat::restore_identity_from_recovery_phrase(
         std::path::Path::new(&data_dir),
-        &passphrase,
+        Some(&passphrase),
         &phrase,
     )?)
 }
