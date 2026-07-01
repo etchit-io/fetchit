@@ -1040,6 +1040,10 @@ impl<'a> Endpoint<'a> {
     /// * [`ChatError::MessageTransport`] — x0xd refused `/secure/encrypt`.
     ///   Per-recipient transport errors only surface when ALL recipients
     ///   failed (see partial-delivery semantics above).
+    // Cohesive fanout: seal once, fan out N-1 excluding self, then persist
+    // the sender's own copy. The partial-delivery + denylist + dedup arms
+    // put it a few lines over the limit.
+    #[allow(clippy::too_many_lines)]
     pub async fn send_private_group(
         &self,
         group_id: &str,
@@ -1129,7 +1133,10 @@ impl<'a> Endpoint<'a> {
             }
         }
         let timestamp_ms = envelope.timestamp_ms;
-        let mut last_receipt_id: Option<String> = None;
+        // Stable id for the sender's own outbound transcript entry and the
+        // UI bubble anchor, minted once so the persisted row and the
+        // returned id are the same.
+        let message_id = random_message_id();
         let mut first_err: Option<ChatError> = None;
         let mut delivered = 0usize;
         let mut attempted = 0usize;
@@ -1169,8 +1176,7 @@ impl<'a> Endpoint<'a> {
                 .send(&member, transport_out, hints.as_ref())
                 .await
             {
-                Ok(receipt) => {
-                    last_receipt_id = receipt.message_id.or(last_receipt_id);
+                Ok(_receipt) => {
                     delivered += 1;
                 }
                 Err(e) => {
@@ -1184,25 +1190,37 @@ impl<'a> Endpoint<'a> {
                 }
             }
         }
-        // 1-member group (just the sender) is a legitimate state — no
-        // peers to address. Surface a locally-minted message id so the
-        // caller's UI bookkeeping (sending → sent state machine) still
-        // has a stable anchor.
-        if attempted == 0 {
-            return Ok(Some(random_message_id()));
-        }
-        // Every recipient failed: surface the first per-recipient
-        // error verbatim. (Picked the first because failures often
-        // correlate — one router-wide cause — and the first one is
-        // the most diagnostic.)
-        if delivered == 0 {
-            // Safety: attempted > 0 && delivered == 0 ⇒ first_err set.
+        // Every recipient failed: surface the first per-recipient error
+        // verbatim and do NOT persist, since nothing went out. (First
+        // because failures often correlate on one router-wide cause.)
+        if delivered == 0 && attempted > 0 {
+            // Safety: attempted > 0 && delivered == 0 => first_err set.
             return Err(first_err.unwrap_or_else(|| {
                 ChatError::MessageTransport("fanout: every recipient failed".into())
             }));
         }
-        // Partial success or full success: caller's UI fires "sent".
-        Ok(last_receipt_id.or_else(|| Some(random_message_id())))
+        // Success: either a 1-member group (just the sender, no peers) or
+        // at least one delivered recipient. Persist the sender's OWN
+        // outbound message onto the local group transcript. The fanout
+        // above excludes self, so the inbound receive path never records
+        // this message on the sender's device; without this persist the
+        // sender's own group messages are shell-display-only and vanish on
+        // reload. Create-if-missing so a solo sender with no inbound yet
+        // still gets a seeded transcript. Bookkeeping only: the send has
+        // already succeeded, so a persist failure is logged, not returned.
+        if let Some(registry) = self.registry {
+            let entry = HistoryEntry {
+                sender_agent_id_hex: local_agent_hex.to_owned(),
+                sender_name: Some(sender_name.to_owned()),
+                body: body.to_owned(),
+                ts_ms: timestamp_ms,
+                message_id: message_id.clone(),
+                attachment: None,
+                delivered_at_ms: None,
+            };
+            persist_own_group_message(registry, group_id, entry, identity, signer).await;
+        }
+        Ok(Some(message_id))
     }
 
     /// Pre-resolve and persist sender keys for a group's base members so
@@ -2161,6 +2179,43 @@ fn now_ms() -> u64 {
 /// fields are zero-placeholders because x0xd's `TreeKEM` owns the real
 /// key material — see [`Endpoint::create_private_group`] for the
 /// rationale.
+/// Persist the sender's OWN outbound group message onto the local
+/// transcript, creating the conversation if a solo sender has none yet.
+/// The group fanout excludes self, so the inbound receive path never
+/// records the sender's copy -- this is its only writer. Bookkeeping
+/// only: the send already succeeded, so a persist failure is logged.
+async fn persist_own_group_message(
+    registry: &Arc<ConversationRegistry>,
+    group_id: &str,
+    entry: HistoryEntry,
+    identity: &Arc<FetchitIdentity>,
+    signer: &Arc<dyn Signer>,
+) {
+    let group_id_owned = group_id.to_owned();
+    let identity_for_init = identity.clone();
+    let signer_for_init = signer.clone();
+    if let Err(e) = registry
+        .mutate_in_place_or_init(
+            group_id,
+            move || {
+                self_only_private_group_conversation(
+                    &group_id_owned,
+                    None,
+                    &identity_for_init,
+                    signer_for_init.as_ref(),
+                )
+            },
+            move |conv| {
+                conv.push_history(entry);
+                MutateAction::Persist(())
+            },
+        )
+        .await
+    {
+        log::warn!("[chat] outbound group history persist failed: {e}");
+    }
+}
+
 fn self_only_private_group_conversation<S: Signer + ?Sized>(
     group_id_hex: &str,
     name: Option<String>,
@@ -2631,6 +2686,83 @@ mod tests {
             signer,
             registry,
         }
+    }
+
+    #[tokio::test]
+    async fn send_private_group_persists_the_senders_own_outbound_history() {
+        // Regression: a solo sender (roster is self-only) fans the
+        // envelope out to nobody, but must still persist its OWN message
+        // to the local transcript so it survives a reload. Before the fix,
+        // send_private_group never recorded the sender's outbound entry --
+        // only the inbound path did -- so a solo user's group messages were
+        // shell-display-only and vanished on hydrate.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let self_hex = rig.agent_hex().to_owned();
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        Mock::given(method("POST"))
+            .and(path(&encrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ciphertext_b64": "Y2lwaGVydGV4dA==",
+                "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                "secret_epoch": 7,
+            })))
+            .mount(&server)
+            .await;
+        // Roster is self-only, so the fanout excludes everyone and
+        // `attempted == 0` -- the exact solo-user case from the field.
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [ {"agent_id": self_hex, "state": "active"} ],
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            None,
+            [0u8; 32],
+            None,
+        );
+
+        let msg_id = endpoint
+            .send_private_group(TEST_GROUP_HEX, "hello group", "Alice")
+            .await
+            .unwrap()
+            .expect("solo send must surface a message id");
+
+        let conv = rig
+            .registry
+            .get(TEST_GROUP_HEX)
+            .await
+            .unwrap()
+            .expect("send must have seeded the group conversation");
+        let outbound: Vec<_> = conv
+            .history
+            .iter()
+            .filter(|e| e.sender_agent_id_hex.eq_ignore_ascii_case(rig.agent_hex()))
+            .collect();
+        assert_eq!(outbound.len(), 1, "exactly one outbound entry must persist");
+        assert_eq!(outbound[0].body, "hello group");
+        assert_eq!(outbound[0].sender_name.as_deref(), Some("Alice"));
+        assert_eq!(
+            outbound[0].message_id, msg_id,
+            "persisted id must match the returned id"
+        );
     }
 
     /// Install `sender_signer`'s share card into `rig.layout` so that
