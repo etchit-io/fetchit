@@ -69,7 +69,9 @@ pub use group_invite_uri::{
     emit_ginvite_uri, parse_ginvite_uri, GinviteUriError, ParsedGinviteUri,
 };
 pub use client::restore_identity_from_recovery_phrase;
-pub use local_signer::{reveal_local_signer_recovery_phrase, reveal_local_signer_seed};
+pub use local_signer::{
+    discard_local_identity, reveal_local_signer_recovery_phrase, reveal_local_signer_seed,
+};
 pub use recovery_phrase::{recovery_phrase_to_seed, seed_to_recovery_phrase};
 pub use transport::{Reachability, Router, SendReceipt, Transport};
 pub use x0xd_seed::seed_x0xd_agent_key;

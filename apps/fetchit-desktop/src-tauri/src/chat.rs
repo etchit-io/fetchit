@@ -1219,6 +1219,70 @@ pub async fn chat_rekey_vault(
     Ok(())
 }
 
+/// Reveal the 24-word recovery phrase backing the chat identity, or
+/// `None` for an identity that predates seed backup (rotate to a fresh
+/// identity to gain one). A pure vault read: works before the client
+/// connects and independent of the chat feature flag, so a user who
+/// disabled chat can still retrieve their backup. The returned string
+/// is the raw backup secret — the frontend shows it only behind an
+/// explicit confirm and never persists it.
+#[tauri::command]
+pub async fn chat_reveal_recovery_phrase(
+    state: tauri::State<'_, ChatState>,
+) -> Result<Option<String>, String> {
+    let passphrase = state.passphrase.lock().await.clone();
+    let root = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        fetchit_chat::reveal_local_signer_recovery_phrase(&root, passphrase.as_deref())
+    })
+    .await
+    .map_err(|e| format!("reveal task join: {e}"))?
+    .map(|p| p.map(|z| z.to_string()))
+    .map_err(|e| e.to_string())
+}
+
+/// Restore the chat identity from a 24-word recovery phrase, replacing
+/// the auto-minted identity of a fresh install. Gated to first-run
+/// (onboarding not completed): that identity was never shown to the
+/// user, never paired, and never invited, so discarding it orphans
+/// nothing. Returns the restored agent id (hex). The frontend restarts
+/// the app afterwards so boot re-seeds the bundled daemon's agent key
+/// from the restored vault.
+#[tauri::command]
+pub async fn chat_restore_recovery_phrase(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    phrase: String,
+) -> Result<String, String> {
+    let onboarding_done = app_state
+        .settings
+        .lock()
+        .map_or(true, |s| s.onboarding_done);
+    if onboarding_done {
+        return Err(
+            "restore replaces this device's identity and is only available during first-run setup"
+                .into(),
+        );
+    }
+    let passphrase = state.passphrase.lock().await.clone();
+    let root = state.data_dir.clone();
+    let restored = tokio::task::spawn_blocking(move || {
+        // The engine refuses to overwrite an existing identity, so the
+        // virgin auto-minted one is discarded first (see the gate above).
+        fetchit_chat::discard_local_identity(&root)?;
+        fetchit_chat::restore_identity_from_recovery_phrase(
+            &root,
+            passphrase.as_deref(),
+            phrase.trim(),
+        )
+    })
+    .await
+    .map_err(|e| format!("restore task join: {e}"))?
+    .map_err(|e| e.to_string())?;
+    state.invalidate().await;
+    Ok(restored)
+}
+
 /// Flip the conversation identified by `group_id_hex` from
 /// `TrustState::Pending` to `TrustState::Confirmed` and persist.
 /// The UI calls this after the user accepts a TOFU contact request

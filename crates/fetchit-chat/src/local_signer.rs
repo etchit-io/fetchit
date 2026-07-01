@@ -256,6 +256,28 @@ pub fn reveal_local_signer_seed(
     LocalSignerVault::reveal_identity_seed(data_dir, &master)
 }
 
+/// Remove the local identity vault files under `data_dir` (the signing
+/// vault and the KEM identity), tolerating absence. For the restore flow
+/// ONLY: [`crate::restore_identity_from_recovery_phrase`] refuses to
+/// overwrite an existing identity, so the platform layer discards a
+/// provably-unused one first (e.g. the auto-minted identity of a fresh
+/// install whose onboarding has not completed). Never call this on an
+/// identity that has paired, joined groups, or published anything —
+/// discarding it orphans every record bound to the agent id.
+///
+/// # Errors
+/// `ChatError::Io` on filesystem errors other than the files being absent.
+pub fn discard_local_identity(data_dir: &Path) -> Result<(), ChatError> {
+    for file in [LOCAL_SIGNER_FILE, crate::chat_identity::IDENTITY_FILE] {
+        match std::fs::remove_file(data_dir.join(file)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 /// Reveal the local signing identity's 24-word BIP39 recovery phrase for the
 /// identity stored under `data_dir`, deriving the vault master key from
 /// `passphrase` (`None` = OS-keychain custody, the desktop default).
@@ -411,6 +433,23 @@ mod tests {
         assert_eq!(phrase.split_whitespace().count(), 24);
         let back = crate::recovery_phrase::recovery_phrase_to_seed(&phrase).unwrap();
         assert_eq!(*back, *seed);
+    }
+
+    #[test]
+    fn discard_removes_identity_files_and_tolerates_absence() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        let _ = LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+        assert!(dir.path().join(LOCAL_SIGNER_FILE).exists());
+
+        discard_local_identity(dir.path()).unwrap();
+        assert!(!dir.path().join(LOCAL_SIGNER_FILE).exists());
+        assert!(!dir.path().join(crate::chat_identity::IDENTITY_FILE).exists());
+
+        // Second call: nothing left to remove, still Ok.
+        discard_local_identity(dir.path()).unwrap();
     }
 
     #[test]

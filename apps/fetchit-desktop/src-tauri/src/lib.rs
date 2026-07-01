@@ -693,6 +693,14 @@ fn cancel_fetch(state: tauri::State<'_, AppState>, tab_id: String) {
     state.cancel_fetch(&tab_id);
 }
 
+/// Relaunch the app. Used by the restore-identity flow: boot re-seeds
+/// the bundled daemon's agent key from the (now restored) chat vault,
+/// so the daemon comes back as the restored agent.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Read-only Tauri command surfacing the resolved chat feature flag
 /// to the frontend so the chat panel + toolbar toggle can hide
 /// themselves when chat is off. Frontend queries this once at
@@ -1260,6 +1268,9 @@ pub fn run() {
             chat::chat_set_passphrase,
             chat::chat_custody_status,
             chat::chat_rekey_vault,
+            chat::chat_reveal_recovery_phrase,
+            chat::chat_restore_recovery_phrase,
+            restart_app,
             chat::chat_confirm_contact,
             chat::chat_watch_presence,
             chat::chat_unwatch_presence,
