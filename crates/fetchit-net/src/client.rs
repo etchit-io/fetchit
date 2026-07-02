@@ -265,6 +265,9 @@ impl AutonomiClient {
     /// `DataMap::original_file_size`, so the media server can send an exact
     /// `Content-Length` (and support seeking) before the first content byte.
     ///
+    /// For large files, resolves hierarchical (child) data maps so the
+    /// returned size is the true original file size.
+    ///
     /// # Errors
     /// [`fetchit_core::Error::Network`] if the data-map fetch fails.
     pub async fn content_size(&self, addr: &Address) -> CoreResult<u64> {
@@ -274,7 +277,8 @@ impl AutonomiClient {
             .data_map_fetch(&key)
             .await
             .map_err(|e| net_err(format!("data_map_fetch: {e}")))?;
-        Ok(data_map.original_file_size() as u64)
+        let root_map = resolve_data_map(&self.inner, data_map)?;
+        Ok(root_map.original_file_size() as u64)
     }
 }
 
