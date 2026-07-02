@@ -114,15 +114,24 @@ bytes here.
 
 ## Addressing
 
-Record identity is `user_id_hex`; anti-rollback (rule 2) is tracked per
-`user_id_hex`, and `issued_at_ms` stays the relay logical-clock
-tiebreaker (the V1 409 clock-bump retry carries over). A v3-only reader
-never parses v4: it resolves the primary device as a projected
-`PairRecordV1` through the existing v3 share-URI path (rule 3). The exact
-relay storage key (under `user_id_hex` versus the primary `agent_id_hex`,
-and whether a projected V1 is also served for bare-agent-id lookups) is an
-M6.2 relay-half detail to settle against the relay-server and share-URI
-code, not fixed here.
+Record identity is `user_id_hex`. The relay stores at most one current
+`PairRecordV4` per `user_id_hex`, ordered by `revision`: reject any record
+whose `revision <=` the stored value, answer 409 with `current_revision`,
+publisher retries at `+1`. This mirrors the V1 `issued_at_ms` watermark
+but on the anti-rollback field (`issued_at_ms` is still carried as a
+logical-clock timestamp). The contact-side anti-rollback (rule 2) is the
+security-critical monotonic; the relay watermark is the liveness one.
+
+**V1 readers: dual-publish, no relay-side projection.** A v3/V1 reader
+resolves a contact through the primary device's own signed `PairRecordV1`
+by `agent_id_hex`, the existing reachability path
+(`crate::pair::fetch_pair_record_by_id`, used by the v3 share-URI import in
+`pair_uri.rs`). The relay cannot synthesize a V1 projection since it holds
+no device key to sign one. So M6 is dual-publish: the primary device keeps
+publishing its V1 unchanged (serves v3 readers), and the account
+additionally publishes the `PairRecordV4` by `user_id` (serves v4-aware
+device fanout). The two relay paths are independent; v4 accept/serve is
+added without touching the V1 path.
 
 ## Consumers
 
