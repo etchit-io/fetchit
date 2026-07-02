@@ -6280,6 +6280,7 @@ mod tests {
         .unwrap();
         let sig = signer.sign(&input).await.unwrap();
         fetchit_relay_proto::pair_record::PairRecordV1 {
+            record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
             agent_id_hex: agent_hex,
             ml_dsa_pubkey_b64: B64.encode(&pk),
             kem_pubkey_b64: kem_pubkey_b64.to_owned(),
@@ -6402,6 +6403,7 @@ mod tests {
     #[test]
     fn card_from_pair_record_maps_ml_dsa_kem_relays_and_watermark() {
         let record = fetchit_relay_proto::pair_record::PairRecordV1 {
+            record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
             agent_id_hex: "d".repeat(64),
             ml_dsa_pubkey_b64: "ML".to_owned(),
             kem_pubkey_b64: "KEM".to_owned(),
@@ -6423,6 +6425,7 @@ mod tests {
     #[test]
     fn card_from_pair_record_no_relays_yields_no_hints() {
         let record = fetchit_relay_proto::pair_record::PairRecordV1 {
+            record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
             agent_id_hex: "e".repeat(64),
             ml_dsa_pubkey_b64: "ML".to_owned(),
             kem_pubkey_b64: "KEM".to_owned(),

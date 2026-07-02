@@ -113,6 +113,7 @@ pub async fn build_signed_pair_record(
         .map_err(|e| ChatError::Invalid(format!("ml-dsa sign: {e}")))?;
 
     Ok(PairRecordV1 {
+        record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
         agent_id_hex,
         ml_dsa_pubkey_b64: STANDARD.encode(&ml_dsa_pubkey),
         kem_pubkey_b64: STANDARD.encode(kem_pubkey),

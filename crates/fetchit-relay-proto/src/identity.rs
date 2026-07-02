@@ -38,6 +38,33 @@ pub fn derive_agent_id(public_key: &[u8]) -> [u8; AGENT_ID_LEN] {
     hasher.finalize().into()
 }
 
+/// Domain-separation prefix for deriving a fetchit **user id** (the M6
+/// account root) from the account's ML-DSA-65 public key. Distinct from
+/// [`AGENT_ID_DOMAIN`] so a user id and an agent id derived from the same
+/// key bytes never collide, and so the user-id namespace stays
+/// independent of the upstream peer-id convention.
+pub const USER_ID_DOMAIN: &[u8] = b"fetchit-user-id-v1:";
+
+/// Byte length of a user id (account-root ML-DSA-65 public-key hash).
+pub const USER_ID_LEN: usize = 32;
+
+/// Derive a user id from the account-root ML-DSA-65 public key:
+/// ```text
+/// user_id = SHA-256(USER_ID_DOMAIN || public_key_bytes)
+/// ```
+///
+/// The 24-word recovery phrase seeds this key, so the user id is the
+/// stable account identifier a contact pins under M6; device ids move
+/// beneath it. Certificate minting and the v4 pair record both derive
+/// through this one function so the two never disagree.
+#[must_use]
+pub fn derive_user_id(public_key: &[u8]) -> [u8; USER_ID_LEN] {
+    let mut hasher = Sha256::new();
+    hasher.update(USER_ID_DOMAIN);
+    hasher.update(public_key);
+    hasher.finalize().into()
+}
+
 /// Stable 32-byte identifier for an agent (one keypair).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -260,5 +287,24 @@ mod tests {
         let id = AgentId::from_bytes([0xab; AGENT_ID_LEN]);
         assert_eq!(id.short().len(), 8);
         assert_eq!(id.short(), "abababab");
+    }
+
+    #[test]
+    fn derive_user_id_uses_its_own_domain() {
+        let pk = b"account-root-public-key";
+        let derived = derive_user_id(pk);
+        let mut h = Sha256::new();
+        h.update(b"fetchit-user-id-v1:");
+        h.update(pk);
+        let expected: [u8; USER_ID_LEN] = h.finalize().into();
+        assert_eq!(derived, expected);
+    }
+
+    #[test]
+    fn derive_user_id_differs_from_agent_id_for_same_key() {
+        // A user id and an agent id derived from identical key bytes must
+        // never collide: distinct domains keep the namespaces separate.
+        let pk = b"same-key-bytes";
+        assert_ne!(derive_user_id(pk), derive_agent_id(pk));
     }
 }

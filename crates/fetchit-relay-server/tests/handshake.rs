@@ -772,6 +772,7 @@ fn mk_signed_pair(dsa: &MlDsa, sk: &MlDsaSecretKey, pk_bytes: &[u8], issued: u64
     let input = pair_signing_input(&id, pk_bytes, &kem, &relays, issued).unwrap();
     let sig = dsa.sign(sk, &input).unwrap().to_bytes();
     PairRecordV1 {
+        record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
         agent_id_hex: id,
         ml_dsa_pubkey_b64: B64.encode(pk_bytes),
         kem_pubkey_b64: B64.encode(kem),
