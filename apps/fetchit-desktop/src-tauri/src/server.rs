@@ -10,9 +10,11 @@
 //! no desktop equivalent; we get the same outcome by giving the `WebView` a
 //! standard `http://` URL pointing at a tiny local server.
 //!
-//! The server is bound to `127.0.0.1:0` (random free port). Same cache and
-//! `AutonomiClient` as the protocol handler — fetch-on-miss reuses the
-//! bytes a `fetch_and_render` may already have downloaded.
+//! The server is bound to `127.0.0.1:0` (random free port). On a cache miss
+//! it calls `AppState::get_or_start_stream`, which either joins an existing
+//! progressive download or starts a new feeder task and returns the shared
+//! `Arc<StreamingMedia>`. Each connection holds an `InterestGuard` for its
+//! lifetime; when the last guard drops the feeder stops early.
 
 use crate::state::AppState;
 use crate::streaming_media::await_offset;
@@ -128,6 +130,9 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
             return reply_simple(&mut stream, 502, "Bad Gateway", &msg).await;
         }
     };
+    // Hold interest for this connection's lifetime. The guard's Drop impl
+    // decrements the counter; when it hits zero the feeder pump stops.
+    let _guard = sm.add_interest();
     serve_progressive(&mut stream, method, range.as_deref(), &sm).await
 }
 

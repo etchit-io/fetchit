@@ -163,11 +163,14 @@ impl AppState {
         }
         let client = crate::state::ensure_client(self, &self.effective_peers()).await?;
         let total = client.content_size(&addr).await.map_err(|e| e.to_string())?;
+        #[cfg(not(feature = "e2e"))]
         let backing = if self.disk_cache.policy().enabled {
             crate::streaming_media::StreamBacking::File(self.disk_cache.stream_path(&addr))
         } else {
             crate::streaming_media::StreamBacking::Memory(StdMutex::new(Vec::new()))
         };
+        #[cfg(feature = "e2e")]
+        let backing = crate::streaming_media::StreamBacking::Memory(StdMutex::new(Vec::new()));
         let sm = Arc::new(crate::streaming_media::StreamingMedia::new(total, backing));
         {
             let mut map = self.streams.lock().map_err(|e| e.to_string())?;
@@ -177,7 +180,32 @@ impl AppState {
             map.insert(addr, sm.clone());
         }
         let client = Arc::new(client);
-        tokio::spawn(crate::streaming_media::feed(sm.clone(), client, addr));
+        let streams = self.streams.clone();
+        let disk_cache = self.disk_cache.clone();
+        #[cfg(not(feature = "e2e"))]
+        let cache_on = self.disk_cache.policy().enabled;
+        let sm_feeder = sm.clone();
+        tokio::spawn(async move {
+            crate::streaming_media::feed(sm_feeder.clone(), client, addr).await;
+            // Commit a complete stream to cache; discard a partial one.
+            // Both commit_stream and discard_stream are cfg(not(e2e)).
+            #[cfg(not(feature = "e2e"))]
+            {
+                let ok = matches!(sm_feeder.subscribe().borrow().terminal, Some(Ok(())));
+                if cache_on {
+                    if ok {
+                        disk_cache.commit_stream(&addr);
+                    } else {
+                        disk_cache.discard_stream(&addr);
+                    }
+                }
+            }
+            // Remove from registry so a subsequent view re-resolves
+            // (cache hit if committed, new download if discarded/absent).
+            if let Ok(mut map) = streams.lock() {
+                map.remove(&addr);
+            }
+        });
         Ok(sm)
     }
 

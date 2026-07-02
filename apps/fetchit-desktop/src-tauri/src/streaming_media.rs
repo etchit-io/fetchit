@@ -7,6 +7,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -37,6 +38,24 @@ pub struct StreamingMedia {
     backing: StreamBacking,
     tx: watch::Sender<StreamState>,
     rx: watch::Receiver<StreamState>,
+    /// Count of active HTTP connections consuming this stream. When this
+    /// drops to zero and the stream is not yet terminal, the feeder pump
+    /// should stop via [`StreamingMedia::should_abort`].
+    interest: AtomicUsize,
+}
+
+/// RAII guard that holds one unit of interest in a stream.
+///
+/// Obtained from [`StreamingMedia::add_interest`]; held for the lifetime
+/// of an HTTP connection. Dropping the guard decrements the interest
+/// counter, which may trigger feeder abort if it reaches zero while the
+/// stream is still in progress.
+pub struct InterestGuard(Arc<StreamingMedia>);
+
+impl Drop for InterestGuard {
+    fn drop(&mut self) {
+        self.0.interest.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl StreamingMedia {
@@ -46,7 +65,7 @@ impl StreamingMedia {
             downloaded: 0,
             terminal: None,
         });
-        Self { total, backing, tx, rx }
+        Self { total, backing, tx, rx, interest: AtomicUsize::new(0) }
     }
 
     /// Expected total byte count.
@@ -57,6 +76,21 @@ impl StreamingMedia {
     /// Clone the watch receiver so a caller can await watermark advances.
     pub fn subscribe(&self) -> watch::Receiver<StreamState> {
         self.rx.clone()
+    }
+
+    /// Register a connection's interest in this stream and return a guard.
+    /// Dropping the guard decrements the interest counter.
+    pub fn add_interest(self: &Arc<Self>) -> InterestGuard {
+        self.interest.fetch_add(1, Ordering::SeqCst);
+        InterestGuard(self.clone())
+    }
+
+    /// True when no connection holds interest and the stream has not yet
+    /// reached a terminal state. The feeder pump checks this after each
+    /// chunk push and stops early to free network resources.
+    pub fn should_abort(&self) -> bool {
+        self.rx.borrow().terminal.is_none()
+            && self.interest.load(Ordering::SeqCst) == 0
     }
 
     /// Append a chunk, flush it durably enough for a concurrent reader, then
@@ -85,13 +119,27 @@ impl StreamingMedia {
     }
 
     /// Signal clean EOF. Unblocks any `await_offset` waiters.
+    ///
+    /// No-op if a terminal state is already set (first writer wins), so
+    /// a pump that aborts early via [`Self::fail`] is not overwritten by
+    /// the feeder's final `finish` call.
     pub fn finish(&self) {
-        self.tx.send_modify(|s| s.terminal = Some(Ok(())));
+        self.tx.send_modify(|s| {
+            if s.terminal.is_none() {
+                s.terminal = Some(Ok(()));
+            }
+        });
     }
 
     /// Signal a feeder error. Any pending `await_offset` call returns `Err`.
+    ///
+    /// No-op if a terminal state is already set (first writer wins).
     pub fn fail(&self, msg: String) {
-        self.tx.send_modify(|s| s.terminal = Some(Err(msg)));
+        self.tx.send_modify(|s| {
+            if s.terminal.is_none() {
+                s.terminal = Some(Err(msg));
+            }
+        });
     }
 
     /// Read `[start, end_inclusive]`. Caller must have already awaited the
@@ -177,6 +225,15 @@ pub async fn feed(
                             sm.fail("write to stream backing failed".into());
                             return;
                         }
+                        // Stop downloading if no connection is watching.
+                        // Setting fail before dropping rx ensures the
+                        // terminal is marked before fetch_to_sink unwinds,
+                        // so state.rs always sees a non-Ok terminal and
+                        // calls discard_stream rather than commit_stream.
+                        if sm.should_abort() {
+                            sm.fail("download cancelled: no active readers".into());
+                            return; // dropping rx causes fetch_to_sink to get SendError
+                        }
                     }
                     Err(e) => {
                         sm.fail(e.to_string());
@@ -243,5 +300,18 @@ mod tests {
         s.finish();
         // need beyond total resolves at EOF to the available count, not a hang
         assert_eq!(await_offset(&mut rx, 99).await.unwrap(), 3);
+    }
+
+    #[test]
+    fn interest_tracks_connections_and_abort_on_last_drop() {
+        let s = Arc::new(mem(10));
+        let g1 = s.add_interest();
+        let g2 = s.add_interest();
+        drop(g1);
+        assert!(!s.should_abort()); // g2 still holds interest
+        drop(g2);
+        assert!(s.should_abort()); // no readers, not finished -> abort
+        s.finish();
+        assert!(!s.should_abort()); // finished streams are not "aborted"
     }
 }
