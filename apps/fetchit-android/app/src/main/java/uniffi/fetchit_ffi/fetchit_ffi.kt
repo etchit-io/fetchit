@@ -1209,7 +1209,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 61307.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 43138.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
@@ -1840,13 +1840,16 @@ public interface ChatClientInterface {
     /**
      * Opt in to public posting: mint the actor identity for `handle` (with
      * its v2 attestation binding the published profile + active relay) and
-     * register it with the directory. Requires a published profile; the
-     * error explains how to get one. Directory-registration failure is NOT
-     * an error -- it lands in the returned [`MintOutcomeFfi`].
+     * register it with the directory. One-tap on a fresh identity: when no
+     * profile is published yet the engine publishes a minimal handle-only
+     * profile-index record first, then mints against it. Directory-
+     * registration failure is NOT an error -- it lands in the returned
+     * [`MintOutcomeFfi`].
      *
      * # Errors
-     * [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
-     * profile, or the mint failing.
+     * [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
+     * relay failure (so a network blip is not mistaken for no-profile), or
+     * the mint failing.
      */
     suspend fun `fediMint`(`handle`: kotlin.String): MintOutcomeFfi
     
@@ -2463,13 +2466,16 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     /**
      * Opt in to public posting: mint the actor identity for `handle` (with
      * its v2 attestation binding the published profile + active relay) and
-     * register it with the directory. Requires a published profile; the
-     * error explains how to get one. Directory-registration failure is NOT
-     * an error -- it lands in the returned [`MintOutcomeFfi`].
+     * register it with the directory. One-tap on a fresh identity: when no
+     * profile is published yet the engine publishes a minimal handle-only
+     * profile-index record first, then mints against it. Directory-
+     * registration failure is NOT an error -- it lands in the returned
+     * [`MintOutcomeFfi`].
      *
      * # Errors
-     * [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
-     * profile, or the mint failing.
+     * [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
+     * relay failure (so a network blip is not mistaken for no-profile), or
+     * the mint failing.
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
