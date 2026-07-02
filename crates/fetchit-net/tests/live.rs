@@ -88,6 +88,22 @@ async fn streams_known_address_matching_fetch() {
     eprintln!("streamed {total} bytes, matching fetch()");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "hits the live Autonomi network; requires FETCHIT_LIVE_ADDR"]
+async fn content_size_matches_fetched_length() {
+    let Ok(addr_hex) = std::env::var("FETCHIT_LIVE_ADDR") else {
+        eprintln!("FETCHIT_LIVE_ADDR not set - nothing to test");
+        return;
+    };
+    let addr: Address = addr_hex.parse().expect("FETCHIT_LIVE_ADDR must be 64-hex");
+    let client = AutonomiClient::connect(&parse_peers())
+        .await
+        .expect("connect to live network");
+    let size = client.content_size(&addr).await.expect("content_size");
+    let whole = client.fetch(&addr).await.expect("fetch");
+    assert_eq!(size, whole.len() as u64, "data-map size equals fetched length");
+}
+
 fn rendition_kind(r: &Rendition) -> &'static str {
     match r {
         Rendition::Text { .. } => "text/plain",

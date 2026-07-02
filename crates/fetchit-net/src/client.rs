@@ -259,6 +259,23 @@ impl AutonomiClient {
         let _ = progress_task.await;
         result
     }
+
+    /// Resolve the content's total byte size from its data map, without
+    /// downloading the content. Backed by `self_encryption`'s
+    /// `DataMap::original_file_size`, so the media server can send an exact
+    /// `Content-Length` (and support seeking) before the first content byte.
+    ///
+    /// # Errors
+    /// [`fetchit_core::Error::Network`] if the data-map fetch fails.
+    pub async fn content_size(&self, addr: &Address) -> CoreResult<u64> {
+        let key = *addr.as_bytes();
+        let data_map = self
+            .inner
+            .data_map_fetch(&key)
+            .await
+            .map_err(|e| net_err(format!("data_map_fetch: {e}")))?;
+        Ok(data_map.original_file_size() as u64)
+    }
 }
 
 #[async_trait]
