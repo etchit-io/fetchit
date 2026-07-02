@@ -14,6 +14,8 @@
 //! only the offer **value** and its self-consistency checks; the delivery
 //! channel is a separate concern.
 
+use crate::chat_crypto::{aead_open, aead_seal, AEAD_KEY_LEN, AEAD_NONCE_LEN};
+use crate::error::ChatError;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use fetchit_relay_proto::derive_agent_id;
@@ -31,6 +33,10 @@ const ML_KEM_PUBKEY_BYTES: usize = 1184;
 /// without bloating the sealed offer.
 const NONCE_MIN_BYTES: usize = 16;
 const NONCE_MAX_BYTES: usize = 64;
+
+/// AEAD associated data binding a sealed blob to the link-device enrollment
+/// protocol, so a ciphertext sealed for another purpose can never open here.
+const LINK_OFFER_AAD: &[u8] = b"fetchit-link-offer-v1";
 
 /// A new device's link-to-account offer. Serialized (JSON) as the plaintext
 /// that the enrollment channel seals and the existing device recovers.
@@ -120,6 +126,51 @@ impl LinkDeviceOffer {
     #[must_use]
     pub fn is_expired(&self, now_ms: u64) -> bool {
         now_ms >= self.exp_ms
+    }
+
+    /// Seal this offer for relay transport: JSON-serialize, then
+    /// ChaCha20-Poly1305 under a single-use `key`. The 12-byte `nonce` is
+    /// prepended to the ciphertext so the blob is self-contained — the relay
+    /// stores exactly these opaque bytes under the pointer token.
+    ///
+    /// `key` is fresh per enrollment (it rides the QR fragment), so the
+    /// `nonce` need not be unique across offers; prepending a random one is
+    /// defence in depth against accidental key reuse.
+    ///
+    /// # Errors
+    /// [`ChatError`] on JSON serialization or AEAD failure.
+    pub fn seal(
+        &self,
+        key: &[u8; AEAD_KEY_LEN],
+        nonce: &[u8; AEAD_NONCE_LEN],
+    ) -> Result<Vec<u8>, ChatError> {
+        let plaintext = serde_json::to_vec(self)
+            .map_err(|e| ChatError::Invalid(format!("link offer serialize: {e}")))?;
+        let ct = aead_seal(key, nonce, &plaintext, LINK_OFFER_AAD)?;
+        let mut blob = Vec::with_capacity(AEAD_NONCE_LEN + ct.len());
+        blob.extend_from_slice(nonce);
+        blob.extend_from_slice(&ct);
+        Ok(blob)
+    }
+
+    /// Recover an offer from a sealed `blob` (`nonce || ciphertext`) under
+    /// `key`. The result is deserialized but NOT yet trusted — the caller must
+    /// run [`validate`](Self::validate) and [`is_expired`](Self::is_expired).
+    ///
+    /// # Errors
+    /// [`ChatError`] on a truncated blob, an AEAD tag mismatch (tampering or
+    /// the wrong key), or malformed JSON.
+    pub fn open(blob: &[u8], key: &[u8; AEAD_KEY_LEN]) -> Result<Self, ChatError> {
+        if blob.len() < AEAD_NONCE_LEN {
+            return Err(ChatError::Invalid("link offer blob is truncated".into()));
+        }
+        let (nonce_bytes, ct) = blob.split_at(AEAD_NONCE_LEN);
+        let nonce: [u8; AEAD_NONCE_LEN] = nonce_bytes
+            .try_into()
+            .map_err(|_| ChatError::Invalid("link offer nonce".into()))?;
+        let plaintext = aead_open(key, &nonce, ct, LINK_OFFER_AAD)?;
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| ChatError::Invalid(format!("link offer parse: {e}")))
     }
 }
 
@@ -240,5 +291,41 @@ mod tests {
         assert!(!offer.is_expired(999));
         assert!(offer.is_expired(1_000));
         assert!(offer.is_expired(1_001));
+    }
+
+    #[test]
+    fn seal_then_open_round_trips_and_prepends_the_nonce() {
+        let offer = valid_offer(4);
+        let key = [0x5a; AEAD_KEY_LEN];
+        let nonce = [0x11; AEAD_NONCE_LEN];
+        let blob = offer.seal(&key, &nonce).unwrap();
+        assert_eq!(&blob[..AEAD_NONCE_LEN], &nonce, "nonce must lead the blob");
+        let back = LinkDeviceOffer::open(&blob, &key).unwrap();
+        assert_eq!(offer, back);
+        back.validate().unwrap();
+    }
+
+    #[test]
+    fn open_rejects_a_tampered_blob() {
+        let offer = valid_offer(4);
+        let key = [0x5a; AEAD_KEY_LEN];
+        let mut blob = offer.seal(&key, &[0x11; AEAD_NONCE_LEN]).unwrap();
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01; // flip a ciphertext bit
+        assert!(LinkDeviceOffer::open(&blob, &key).is_err());
+    }
+
+    #[test]
+    fn open_rejects_the_wrong_key() {
+        let offer = valid_offer(4);
+        let blob = offer
+            .seal(&[0x5a; AEAD_KEY_LEN], &[0x11; AEAD_NONCE_LEN])
+            .unwrap();
+        assert!(LinkDeviceOffer::open(&blob, &[0x5b; AEAD_KEY_LEN]).is_err());
+    }
+
+    #[test]
+    fn open_rejects_a_truncated_blob() {
+        assert!(LinkDeviceOffer::open(&[0u8; 4], &[0x5a; AEAD_KEY_LEN]).is_err());
     }
 }
