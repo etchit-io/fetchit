@@ -20,6 +20,7 @@ use crate::at_rest::MasterKey;
 use crate::error::ChatError;
 use crate::fabric::{mint_agent_certificate, AgentCertificate};
 use crate::local_store::write_json_atomic;
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use std::path::{Path, PathBuf};
 
 /// Path of this device's persisted certificate. Plaintext JSON (the cert
@@ -44,14 +45,31 @@ pub fn load_device_certificate(data_dir: &Path) -> Result<Option<AgentCertificat
     }
 }
 
+/// Does `existing` already certify this device's exact identity? Compares
+/// the agent id (which pins the ML-DSA key) *and* both raw keys the cert
+/// binds. The KEM key is a distinct parameter that can rotate while the
+/// agent id stays fixed, so gating on `agent_id` alone would return a stale
+/// cert whose KEM no longer matches the device's `DeviceEntryV4.kem`.
+fn cert_matches_device(
+    existing: &AgentCertificate,
+    agent_id_hex: &str,
+    agent_ml_dsa_pubkey: &[u8],
+    kem_pubkey: &[u8],
+) -> bool {
+    existing.agent_id_hex == agent_id_hex
+        && existing.agent_ml_dsa_pubkey_b64 == B64.encode(agent_ml_dsa_pubkey)
+        && existing.kem_pubkey_b64 == B64.encode(kem_pubkey)
+}
+
 /// Ensure this device holds an [`AgentCertificate`] binding it to the
 /// account, minting and persisting one on first launch (or re-minting
 /// after an agent-id rotation).
 ///
-/// Idempotent: if a persisted cert already binds `agent_id_hex`, it is
-/// returned as-is without touching the vault — the common, passphrase-free
-/// path. Only a first mint or a rebind opens the vault (via `passphrase`,
-/// or the OS keychain when `passphrase` is `None`, as elsewhere).
+/// Idempotent: if a persisted cert already binds this exact device identity
+/// (the same agent id, ML-DSA, and KEM keys), it is returned as-is without
+/// touching the vault — the common, passphrase-free path. A first mint, an
+/// agent-id rotation, or a KEM rotation opens the vault (via `passphrase`, or
+/// the OS keychain when `passphrase` is `None`, as elsewhere) and re-mints.
 ///
 /// `agent_ml_dsa_pubkey` and `kem_pubkey` are the raw key bytes the device
 /// actually uses; the caller sources them from its loaded identity so the
@@ -69,7 +87,7 @@ pub fn ensure_device_certificate(
     added_at_ms: u64,
 ) -> Result<AgentCertificate, ChatError> {
     if let Some(existing) = load_device_certificate(data_dir)? {
-        if existing.agent_id_hex == agent_id_hex {
+        if cert_matches_device(&existing, agent_id_hex, agent_ml_dsa_pubkey, kem_pubkey) {
             return Ok(existing);
         }
     }
@@ -100,7 +118,7 @@ pub(crate) fn ensure_device_certificate_from_master(
     added_at_ms: u64,
 ) -> Result<AgentCertificate, ChatError> {
     if let Some(existing) = load_device_certificate(data_dir)? {
-        if existing.agent_id_hex == agent_id_hex {
+        if cert_matches_device(&existing, agent_id_hex, agent_ml_dsa_pubkey, kem_pubkey) {
             return Ok(existing);
         }
     }
@@ -227,6 +245,45 @@ mod tests {
         .unwrap();
         assert_eq!(second.agent_id_hex, agent_b);
         assert_ne!(agent_a, agent_b);
+    }
+
+    #[test]
+    fn remints_when_the_kem_key_rotates() {
+        let (dir, master) = seeded_vault();
+        let (agent_id, agent_pk) = device_agent(9);
+        let first = ensure_device_certificate_from_master(
+            dir.path(),
+            &master,
+            &agent_id,
+            &agent_pk,
+            &[0x11; 64],
+            1_000,
+        )
+        .unwrap();
+        // Same agent id + ML-DSA key, but a rotated KEM key. The stale cert
+        // must NOT be returned as-is, or the published DeviceEntryV4.kem
+        // (sourced from this cert) would drift from the device's live KEM key.
+        let second = ensure_device_certificate_from_master(
+            dir.path(),
+            &master,
+            &agent_id,
+            &agent_pk,
+            &[0x22; 64],
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(second.agent_id_hex, agent_id);
+        assert_ne!(first.kem_pubkey_b64, second.kem_pubkey_b64);
+        assert_eq!(second.added_at_ms, 2_000); // re-minted, not the stale cert
+                                               // The re-mint is a valid cert and is what's now persisted.
+        let user_pk =
+            with_user_key_from_master(dir.path(), &master, |u| Ok(u.public_key_bytes().to_vec()))
+                .unwrap();
+        verify_agent_certificate(&second, &user_pk).unwrap();
+        assert_eq!(
+            load_device_certificate(dir.path()).unwrap().unwrap(),
+            second
+        );
     }
 
     #[test]
