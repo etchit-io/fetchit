@@ -158,8 +158,9 @@ pub struct AgentCertificate {
     /// The device's ML-KEM-768 key (the DM-fanout target), STANDARD
     /// base64. Kept consistent with the `DeviceEntryV4` this cert rides in.
     pub kem_pubkey_b64: String,
-    /// Certification time, seconds since Unix epoch.
-    pub added_at_s: u64,
+    /// Certification time, milliseconds since Unix epoch — the same unit
+    /// as the `DeviceEntryV4::added_at_ms` this cert rides beside.
+    pub added_at_ms: u64,
     /// User-key ML-DSA-65 signature over [`cert_signing_input`], base64.
     pub sig_b64: String,
 }
@@ -184,7 +185,7 @@ fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ChatError> {
 /// AGENT_CERT_DOMAIN
 /// || lp(user_id_hex) || lp(agent_id_hex)
 /// || lp(agent_ml_dsa_pubkey raw) || lp(kem_pubkey raw)
-/// || u64_be(added_at_s)
+/// || u64_be(added_at_ms)
 /// ```
 /// `lp(x)` = `u32_be(len) || bytes`. The two pubkeys are raw bytes (the
 /// caller passes pre-decoded slices; base64 decode happens in
@@ -194,7 +195,7 @@ fn cert_signing_input(
     agent_id_hex: &str,
     agent_ml_dsa_pubkey: &[u8],
     kem_pubkey: &[u8],
-    added_at_s: u64,
+    added_at_ms: u64,
 ) -> Result<Vec<u8>, ChatError> {
     let mut out = Vec::new();
     out.extend_from_slice(AGENT_CERT_DOMAIN);
@@ -202,7 +203,7 @@ fn cert_signing_input(
     push_lp(&mut out, agent_id_hex.as_bytes())?;
     push_lp(&mut out, agent_ml_dsa_pubkey)?;
     push_lp(&mut out, kem_pubkey)?;
-    out.extend_from_slice(&added_at_s.to_be_bytes());
+    out.extend_from_slice(&added_at_ms.to_be_bytes());
     Ok(out)
 }
 
@@ -220,15 +221,23 @@ pub fn mint_agent_certificate(
     agent_id_hex: &str,
     agent_ml_dsa_pubkey: &[u8],
     kem_pubkey: &[u8],
-    added_at_s: u64,
+    added_at_ms: u64,
 ) -> Result<AgentCertificate, ChatError> {
+    // Fail fast on a minter bug: refuse to sign a cert whose agent_id does
+    // not derive from the device key — such a cert could never verify
+    // (mirrors relay-proto's validate-before-sign discipline).
+    if hex::encode(derive_agent_id(agent_ml_dsa_pubkey)) != agent_id_hex {
+        return Err(ChatError::Invalid(
+            "cert agent_id does not match the device key".into(),
+        ));
+    }
     let user_id_hex = user.user_id_hex();
     let input = cert_signing_input(
         &user_id_hex,
         agent_id_hex,
         agent_ml_dsa_pubkey,
         kem_pubkey,
-        added_at_s,
+        added_at_ms,
     )?;
     let sig = user.sign(&input)?;
     Ok(AgentCertificate {
@@ -237,7 +246,7 @@ pub fn mint_agent_certificate(
         agent_id_hex: agent_id_hex.to_owned(),
         agent_ml_dsa_pubkey_b64: B64.encode(agent_ml_dsa_pubkey),
         kem_pubkey_b64: B64.encode(kem_pubkey),
-        added_at_s,
+        added_at_ms,
         sig_b64: B64.encode(sig),
     })
 }
@@ -279,7 +288,7 @@ pub fn verify_agent_certificate(
         &cert.agent_id_hex,
         &agent_ml,
         &kem,
-        cert.added_at_s,
+        cert.added_at_ms,
     )?;
     let sig_bytes = B64
         .decode(&cert.sig_b64)
@@ -332,19 +341,17 @@ mod tests {
     }
 
     #[test]
-    fn cert_roundtrip_verifies() {
+    fn mint_rejects_unbound_agent_id() {
+        // mint fails fast when agent_id does not derive from the device
+        // key, so a minter bug cannot produce a cert that would only fail
+        // later at verify (matches relay-proto's validate-before-sign).
+        use fetchit_relay_client::{MlDsaSigner, Signer};
         let user = UserKeypair::from_seed(&[5u8; 32]);
-        let cert = mint_agent_certificate(
-            &user,
-            &"ab".repeat(32),
-            &[0x11; 96],
-            &[0x22; 64],
-            1_700_000_000,
-        );
-        // agent_id_hex "ab".repeat(32) is a placeholder; mint does not
-        // enforce the agent-id binding (the minter controls its own
-        // record), so use a bound cert for the verify assertions below.
-        assert!(cert.is_ok());
+        let device = MlDsaSigner::from_seed(&[9u8; 32]);
+        let unbound = "ab".repeat(32);
+        let result =
+            mint_agent_certificate(&user, &unbound, &device.public_key(), &[0x22; 64], 1_000);
+        assert!(result.is_err());
     }
 
     // Build a cert whose agent_id_hex correctly binds its device key, so
