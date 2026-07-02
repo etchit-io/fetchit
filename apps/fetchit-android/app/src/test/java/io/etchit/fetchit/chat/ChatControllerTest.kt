@@ -10,6 +10,8 @@ import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.GroupSendReceiptFfi
+import uniffi.fetchit_ffi.LookupFfi
+import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
@@ -58,6 +60,9 @@ class FakeGateway : ChatGateway {
     var conversationHistoryThrows = false
     var fediHandle: String? = null
     val mintedHandles = mutableListOf<String>()
+    val lookedUpHandles = mutableListOf<String>()
+    var lookupResult: LookupFfi =
+        LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
 
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
@@ -90,6 +95,10 @@ class FakeGateway : ChatGateway {
         mintedHandles += handle
         fediHandle = handle
         return MintOutcomeFfi("https://etchit.io/actors/$handle", true, null)
+    }
+    override suspend fun fediLookup(handle: String): LookupFfi {
+        lookedUpHandles += handle
+        return lookupResult
     }
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
@@ -438,6 +447,8 @@ class ChatControllerTest {
             override fun fediActorStatus(): String? = null
             override suspend fun fediMint(handle: String): MintOutcomeFfi =
                 MintOutcomeFfi("", true, null)
+            override suspend fun fediLookup(handle: String): LookupFfi =
+                LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()

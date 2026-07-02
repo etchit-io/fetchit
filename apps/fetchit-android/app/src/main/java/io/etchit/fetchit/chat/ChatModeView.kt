@@ -38,6 +38,8 @@ import kotlinx.coroutines.launch
 import uniffi.fetchit_ffi.ChatFfiException
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.LookupFfi
+import uniffi.fetchit_ffi.LookupKindFfi
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1005,9 +1007,17 @@ class ChatModeView(
             .show()
     }
 
+    /**
+     * "Add someone" — one field, two intents. Type a fediverse @name to look
+     * them up (then choose to message privately, post-quantum), or paste an
+     * `x0x://` / `fetchit://share` link to add them straight away.
+     * [classifyAddContactInput] decides which. Nothing here dead-ends: an empty
+     * box nudges, a name that resolves to nobody shows a friendly "no one found"
+     * card, and only a link goes to the import path.
+     */
     private fun showAddContactDialog() {
         val editText = EditText(context).apply {
-            hint = context.getString(R.string.chat_paste_pair_uri_hint)
+            hint = context.getString(R.string.chat_add_someone_hint)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
@@ -1018,14 +1028,104 @@ class ChatModeView(
             addView(editText)
         }
         MaterialAlertDialogBuilder(context)
-            .setTitle(context.getString(R.string.chat_add_contact_title))
+            .setTitle(context.getString(R.string.chat_add_someone_title))
+            .setMessage(context.getString(R.string.chat_add_someone_message))
             .setView(layout)
-            .setPositiveButton(context.getString(R.string.chat_add_contact_import)) { _, _ ->
-                val raw = editText.text.toString().trim()
-                importFromUri(raw)
+            .setPositiveButton(context.getString(R.string.chat_add_someone_find)) { _, _ ->
+                when (val input = classifyAddContactInput(editText.text.toString())) {
+                    is AddContactInput.PairUri -> importFromUri(input.raw)
+                    is AddContactInput.FediHandle -> findByHandle(input.handle)
+                    AddContactInput.Empty ->
+                        snackbar(context.getString(R.string.chat_add_someone_empty))
+                }
             }
             .setNegativeButton(context.getString(R.string.action_close), null)
             .show()
+    }
+
+    /**
+     * Look up a fediverse handle and present a contact card. Connects first (the
+     * lookup hits the directory + the person's relay), then routes the result to
+     * [showLookupResultDialog]. A malformed handle or a transport failure lands
+     * as a warm Snackbar, never a raw error.
+     */
+    private fun findByHandle(handle: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.fediLookup(handle) }.fold(
+                onSuccess = { showLookupResultDialog(it) },
+                onFailure = { e ->
+                    snackbar(userFacingError(e, "fediLookup", R.string.chat_find_failed))
+                },
+            )
+        }
+    }
+
+    /**
+     * Present a fediverse lookup result as a plain-language card. Verified shows
+     * a "message privately" action (post-quantum DM); public-only found the
+     * account but couldn't confirm the person, so it explains that warmly with
+     * no dead-end action; not-found nudges to check the spelling. A verified
+     * handle that changed hands carries an extra heads-up line.
+     */
+    private fun showLookupResultDialog(lookup: LookupFfi) {
+        val builder = MaterialAlertDialogBuilder(context)
+        when (lookup.kind) {
+            LookupKindFfi.VERIFIED -> {
+                val body = StringBuilder(context.getString(R.string.chat_lookup_verified_body))
+                if (lookup.previousAgentIdHex != null) {
+                    body.append("\n\n").append(context.getString(R.string.chat_lookup_changed_hands))
+                }
+                builder.setTitle(lookup.handle)
+                    .setMessage(body.toString())
+                    .setPositiveButton(context.getString(R.string.chat_lookup_message_privately)) { _, _ ->
+                        messagePrivately(lookup)
+                    }
+                    .setNegativeButton(context.getString(R.string.action_close), null)
+            }
+            LookupKindFfi.PUBLIC_ONLY ->
+                builder.setTitle(lookup.handle)
+                    .setMessage(context.getString(R.string.chat_lookup_public_only_body))
+                    .setPositiveButton(context.getString(R.string.action_close), null)
+            LookupKindFfi.NOT_FOUND ->
+                builder.setTitle(context.getString(R.string.chat_lookup_not_found_title))
+                    .setMessage(context.getString(R.string.chat_lookup_not_found_body, lookup.handle))
+                    .setPositiveButton(context.getString(R.string.action_close), null)
+        }
+        builder.show()
+    }
+
+    /**
+     * Turn a verified lookup into a private conversation: import the contact
+     * from its v3 share URI (the engine fetches + verifies the profile record),
+     * register it under the handle's name so the thread reads "alice" not a hex
+     * id, and open the DM. The share URI + agent id exist only on a verified
+     * result, so both are guarded.
+     */
+    private fun messagePrivately(lookup: LookupFfi) {
+        val shareUri = lookup.shareUri ?: return
+        val agentId = lookup.agentIdHex ?: return
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.importPairUri(shareUri.trim()) }.onFailure { e ->
+                snackbar(userFacingError(e, "importPairUri", R.string.chat_error_invalid))
+                return@launch
+            }
+            // We already know who they are (their handle), so name the contact
+            // automatically and skip the "name this contact" prompt — straight
+            // into the chat. Idempotent: re-finding an existing contact just
+            // reopens their thread.
+            if (controller.contacts.contacts.value.none { it.agentIdHex == agentId }) {
+                controller.contacts.add(
+                    ChatContact(
+                        agentIdHex = agentId,
+                        displayName = contactNameFromHandle(lookup.handle),
+                        addedAtMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
+            openThread(agentId)
+        }
     }
 
     // ── group create / join ────────────────────────────────────────────

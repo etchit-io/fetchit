@@ -238,6 +238,20 @@
          Matches the desktop add-contact placeholder verbatim. -->
     <string name="chat_paste_pair_uri_hint">Paste a share link, or @name@etchit.io</string>
     <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
+    <!-- "Add someone": one field that finds a fediverse @name or imports a pasted link. -->
+    <string name="chat_add_someone_title">add someone</string>
+    <string name="chat_add_someone_message">type a @name to find them, or paste an invite link.</string>
+    <string name="chat_add_someone_hint">@name or invite link</string>
+    <string name="chat_add_someone_find">find</string>
+    <string name="chat_add_someone_empty">type a name or paste a link first.</string>
+    <string name="chat_find_failed">couldn\'t look that up — check the name and try again.</string>
+    <!-- Fediverse lookup result card: verified / public-only / not-found. -->
+    <string name="chat_lookup_verified_body">verified — this really is them. you can message them privately, end to end.</string>
+    <string name="chat_lookup_changed_hands">heads up: this \@name used to belong to someone else.</string>
+    <string name="chat_lookup_message_privately">message privately</string>
+    <string name="chat_lookup_public_only_body">we found this account, but can\'t confirm it\'s really them yet — so you can\'t message them privately here.</string>
+    <string name="chat_lookup_not_found_title">no one found</string>
+    <string name="chat_lookup_not_found_body">we couldn\'t find anyone at %1$s. double-check the spelling?</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
     <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>

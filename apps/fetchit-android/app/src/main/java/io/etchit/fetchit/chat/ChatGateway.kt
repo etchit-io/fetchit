@@ -6,6 +6,7 @@ import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.GroupSendReceiptFfi
+import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
@@ -84,11 +85,22 @@ interface ChatGateway {
 
     /**
      * Opt in to public posting: mint the actor identity for [handle] and
-     * register it with the directory. Requires a published profile (throws
-     * otherwise); directory-registration failure is reported in the result,
-     * not thrown.
+     * register it with the directory. One-tap on a fresh identity — the engine
+     * publishes a minimal handle-only profile when none exists yet, so no
+     * pre-published profile is required. Directory-registration failure is
+     * reported in the result, not thrown.
      */
     suspend fun fediMint(handle: String): MintOutcomeFfi
+
+    /**
+     * Resolve a fediverse `@local@instance` handle to a contact card:
+     * [uniffi.fetchit_ffi.LookupKindFfi.VERIFIED] carries the chat agent id +
+     * a `shareUri` so the user can message them privately (post-quantum),
+     * `PUBLIC_ONLY` found the account but couldn't confirm the person, and
+     * `NOT_FOUND` resolved to nobody. Needs a live connection (hits the
+     * directory + the person's relay). A malformed handle throws.
+     */
+    suspend fun fediLookup(handle: String): LookupFfi
 
     /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
@@ -167,6 +179,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
     override fun fediActorStatus(): String? = inner.fediActorStatus()
     override suspend fun fediMint(handle: String): MintOutcomeFfi = inner.fediMint(handle)
+    override suspend fun fediLookup(handle: String): LookupFfi = inner.fediLookup(handle)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =
