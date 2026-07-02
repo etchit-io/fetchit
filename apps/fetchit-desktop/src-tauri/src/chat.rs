@@ -1248,6 +1248,24 @@ pub async fn chat_reveal_recovery_phrase(
     .map_err(|e| e.to_string())
 }
 
+/// Restore the local identity from a 24-word recovery `phrase`, replacing
+/// a provably-unused virgin identity under `root`. The engine refuses to
+/// overwrite an existing identity, so the virgin auto-minted one is
+/// discarded first. Returns the restored agent id (hex).
+fn restore_identity_validated(
+    root: &std::path::Path,
+    passphrase: Option<&str>,
+    phrase: &str,
+) -> fetchit_chat::Result<String> {
+    // Validate the phrase BEFORE discarding: a typo (bad word or checksum)
+    // must not cost the user their virgin vault. `recovery_phrase_to_seed`
+    // rejects invalid BIP39 without touching disk, so the discard below is
+    // reached only once the phrase is known good.
+    let _seed = fetchit_chat::recovery_phrase_to_seed(phrase)?;
+    fetchit_chat::discard_local_identity(root)?;
+    fetchit_chat::restore_identity_from_recovery_phrase(root, passphrase, phrase)
+}
+
 /// Restore the chat identity from a 24-word recovery phrase, replacing
 /// the auto-minted identity of a fresh install. Gated to first-run
 /// (onboarding not completed): that identity was never shown to the
@@ -1274,14 +1292,7 @@ pub async fn chat_restore_recovery_phrase(
     let passphrase = state.passphrase.lock().await.clone();
     let root = state.data_dir.clone();
     let restored = tokio::task::spawn_blocking(move || {
-        // The engine refuses to overwrite an existing identity, so the
-        // virgin auto-minted one is discarded first (see the gate above).
-        fetchit_chat::discard_local_identity(&root)?;
-        fetchit_chat::restore_identity_from_recovery_phrase(
-            &root,
-            passphrase.as_deref(),
-            phrase.trim(),
-        )
+        restore_identity_validated(&root, passphrase.as_deref(), phrase.trim())
     })
     .await
     .map_err(|e| format!("restore task join: {e}"))?
@@ -2686,6 +2697,59 @@ mod tests {
         assert!(super::pump_should_start(&flag));
         assert!(!super::pump_should_start(&flag));
         assert!(!super::pump_should_start(&flag));
+    }
+
+    #[test]
+    fn restore_with_a_valid_phrase_replaces_the_virgin_identity() {
+        // The happy path works end to end: a valid phrase discards the
+        // virgin identity and restores the phrase's identity in its place.
+        let src = tempfile::TempDir::new().unwrap();
+        let src_key =
+            fetchit_chat::provision_local_signer_keypair(src.path(), Some("s")).unwrap();
+        let phrase = fetchit_chat::reveal_local_signer_recovery_phrase(src.path(), Some("s"))
+            .unwrap()
+            .unwrap();
+
+        let dst = tempfile::TempDir::new().unwrap();
+        let virgin =
+            fetchit_chat::provision_local_signer_keypair(dst.path(), Some("d")).unwrap();
+        assert_ne!(src_key.public_key, virgin.public_key);
+
+        let restored =
+            super::restore_identity_validated(dst.path(), Some("d"), &phrase).unwrap();
+        assert!(!restored.is_empty());
+
+        // The restored vault now carries the source identity, not the virgin.
+        let reprov =
+            fetchit_chat::provision_local_signer_keypair(dst.path(), Some("d")).unwrap();
+        assert_eq!(reprov.public_key, src_key.public_key);
+        assert_ne!(reprov.public_key, virgin.public_key);
+    }
+
+    #[test]
+    fn restore_with_a_bad_phrase_keeps_the_existing_identity() {
+        // A mistyped recovery phrase must not cost the user their current
+        // (virgin) identity: validation has to happen before the discard.
+        let dir = tempfile::TempDir::new().unwrap();
+        fetchit_chat::provision_local_signer_keypair(dir.path(), Some("pass")).unwrap();
+        let before =
+            fetchit_chat::reveal_local_signer_recovery_phrase(dir.path(), Some("pass"))
+                .unwrap()
+                .unwrap();
+
+        // Restoring with an invalid phrase fails...
+        let bad = "zzz ".repeat(24);
+        assert!(
+            super::restore_identity_validated(dir.path(), Some("pass"), bad.trim()).is_err()
+        );
+
+        // ...and leaves the original identity intact (still revealable, same phrase).
+        let after =
+            fetchit_chat::reveal_local_signer_recovery_phrase(dir.path(), Some("pass"));
+        assert!(
+            matches!(&after, Ok(Some(p)) if **p == *before),
+            "virgin identity must survive a bad-phrase restore, got {after:?}"
+        );
     }
 
     #[test]
