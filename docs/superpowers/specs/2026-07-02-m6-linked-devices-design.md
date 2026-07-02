@@ -1,6 +1,6 @@
 # M6: Linked devices — one person, every device, one account
 
-**Status:** approved direction (Josh 2026-07-02: "lets do it right. do it"), spec draft pending Alice cross-review + Josh review
+**Status:** APPROVED — Josh 2026-07-02 ("lets do it right. do it", + spec "looks good to me" incl. all three judgment calls); Alice cross-review 2026-07-02 APPROVE with 6 convergence findings, folded below (hard requirements marked)
 **Decided:** 2026-07-02
 **Companions:** `2026-06-12-m5-discovery-design.md` (handle front door), `2026-06-11-reachability-v1-design.md` (signed PairRecord), x0x ADR-0007 (three-layer identity), x0x issue #91 (user-fabric addressing RFC)
 
@@ -132,6 +132,17 @@ schema decree:
 - **Signed by the user key** (device keys sign nothing account-scoped).
   Contacts **pin the user key** — TOFU moves up one layer. Device add/remove
   = new revision, same pinned root.
+- **HARD REQUIREMENT — revision anti-rollback (Alice finding 1):** contacts
+  MUST persist the last-seen `revision` per pinned user_id and REJECT any
+  record with `revision <=` last-seen. Without this, revoking a stolen
+  device is defeatable by replaying the older (still validly user-signed)
+  record that re-lists it. Reject-on-rollback, not warn.
+- Two schema specifics (Alice, owns the concrete schema): the record names a
+  **canonical device #1** so v3-only readers get a deterministic
+  single-device view; and the per-device `cert` is for **out-of-record**
+  contexts (sibling admission, fedi bridge) — inside the record the user-key
+  signature already covers the device list, so verifiers must not
+  double-verify certs there.
 - **Contact-scoped disclosure.** The device list travels inside the pair
   record a contact fetches — it is NOT broadcast to gossip or any global
   directory. The network sees N independent agents; only your contacts can
@@ -154,6 +165,15 @@ schema decree:
   (VI), so the conversation reads identically everywhere.
 - Delivery receipts: aggregate per-user (any-device-delivered = delivered);
   read state syncs over the devices-group, not the wire to the contact.
+  Outbox semantics confirmed (Alice): claim/ack stays **per-envelope** —
+  fanout = N independent outbox entries, one per device-agent; the
+  any-device-delivered aggregation lives in the receipt layer ABOVE the
+  durable retry outbox, which is unchanged.
+- **HARD REQUIREMENT — outbox honors pair-record revision (Alice finding
+  3):** the retry outbox must re-check the contact's current device list and
+  DROP pending entries addressed to a device that a newer revision removed.
+  Otherwise a revoked device is retried forever — revocation and fanout are
+  coupled through the revision, deliberately.
 - Cost note: fanout multiplies sends by device count (cap: see open
   questions). Relay sees more envelopes but nothing new about content or
   association (sealed as today).
@@ -185,6 +205,15 @@ Revocation — lost phone:
   revocation entry, pair record revision bumps with the device dropped,
   devices-group removes the leaf and rekeys (PCS does its job), chat groups
   remove that member-device via the admin/removal path.
+- **HARD REQUIREMENT — close the revocation-latency window (Alice finding
+  5):** group traffic stops for the stolen device at the devices-group /
+  chat-group rekey (immediate), but contacts' *DM fanout* keeps delivering
+  to it until they re-resolve the pair record. Mitigate both ways: on
+  revocation, proactively push the revised record to active contacts
+  (existing DM channel), AND give resolvers a short re-resolve cadence /
+  TTL on cached device lists so even unreachable contacts converge quickly.
+  The residual window must be bounded and stated honestly in the security
+  docs.
 - From phrase alone (all devices gone): full account recovery (I) — the
   fresh record supersedes; contacts' apps drop delivery to de-listed devices
   on next resolve.
@@ -195,15 +224,21 @@ Revocation — lost phone:
   stays convergent, per-device PCS for free. The engine's existing
   `Member.user_id_hex` placeholder finally gets populated.
 - **Sibling admission:** when a user accepts a group invite on one device,
-  their other devices must land in the group too. Joining device (now a
-  member) drives admission of its siblings automatically over the
-  devices-group signal. Mechanism is policy-dependent — invite_only groups
-  gate invite minting — so: preferred path is member-mints-sibling-invite
-  where policy allows; fallback is an automated request to the original
-  inviter/admin (surfaced as zero UI — "Josh joined" just works). Exact
-  x0xd-level mechanics = open question #1, resolved during M6.5 with a
-  possible small fork/upstream patch (fresh-invite-per-invitee groundwork
-  from `9b6119f` is directly reusable).
+  their other devices must land in the group too — automatically, zero UI
+  ("Josh joined" just works). Mechanics resolved by code probe (see open
+  question #1): the KeyPackage handshake rides the devices-group — the
+  sibling derives its per-group TreeKEM KeyPackage locally (it is derived
+  from the sibling's own secret + group id; nobody else can mint it) and
+  sends it to the in-group device over the devices-group. Then:
+  - *In-group device is admin (M6.5a, stock daemon):* it calls the
+    invite-free TreeKEM direct-add (`POST /groups/:id/members` with
+    `treekem_key_package_b64`), which creates + stages the Welcome and
+    direct-delivers `MemberAdded` + `welcome_ref` to the sibling — full
+    crypto parity with the invite flow, no invite bookkeeping at all.
+  - *In-group device is plain member (M6.5b, fork patch):* same handshake,
+    but authority requires the sibling-add capability (commit accepted when
+    the added agent's certificate chains to the member's user_id recorded
+    at join).
 - **Roster collapse:** UI groups member-devices by `user_id_hex` — one
   avatar, one name, "2 devices" only in detail view. Message attribution is
   per-user, not per-device. Group size limits count leaves (document this).
@@ -223,7 +258,15 @@ joins:
   the laptop),
 - profile + settings changes (display name, avatar pointer, preferences),
 - DM mirror copies (III) + read-state markers,
-- group-membership signals (join/leave/sibling-admission triggers, V).
+- group-membership signals (join/leave/sibling-admission triggers, V),
+- the sibling KeyPackage handshake for group admission (V).
+
+**Reliability requirement (Alice finding 6):** the devices-group is one more
+MLS group and inherits the StaleEpoch / TreeKEM catch-up failure class. It
+MUST ship with the mobile-0.27 returning-member rekey fix + epoch catch-up
+wired in, so an offline second device re-syncs on reconnect instead of
+wedging — a wedged devices-group would silently kill all cross-device sync,
+the worst possible failure for this feature.
 
 **Explicit non-goal for M6 v1: retroactive history transfer.** A newly
 linked device starts from link-time (Signal-linked-device semantics). Full
@@ -270,8 +313,10 @@ untouched.
 
 M6.1 user root + certs (re-root phrase, cert mint/verify, unit + wiremock) →
 M6.2 PairRecord v4 + pinning-on-user-key (A-lead) → M6.3 DM fanout + dedup +
-receipts → M6.4 enrollment QR flow (FFI + Android + desktop) → M6.5 group
-sibling admission + roster collapse → M6.6 devices-group sync (contacts,
+receipts → M6.4 enrollment QR flow (FFI + Android + desktop) → M6.5a
+admin-device sibling admission (stock daemon) + roster collapse → M6.5b
+member-device sibling-add capability (fork patch + upstream offer) →
+M6.6 devices-group sync (contacts,
 settings, DM mirror) → M6.7 revocation + phrase-only recovery → M6.8 fedi
 rebinding → M6.9 cross-NAT device-matrix verification (phone + laptop +
 droplet peer; enroll/revoke/recover under CGNAT). Each stage lands
@@ -279,18 +324,51 @@ feature-branch → gates → cross-review → device-verify, per house rules.
 
 ## Open questions
 
-1. **Sibling admission mechanics in invite_only groups** — member-mintable
-   invites vs automated admin request; may need an x0xd capability (small
-   fork patch, offered upstream). Resolve at M6.5 start with a code-level
-   probe.
-2. **Device cap** — proposal: 5 linked devices (Signal parity), revisit on
-   fanout cost data.
-3. **User-key custody UX** — re-prompt phrase at enroll/revoke vs unlock
-   from passphrase vault. Proposal: vault-unlock with passphrase re-prompt
-   (grandma never retypes 24 words after setup); joint call with Alice at
-   M6.1.
+1. **Sibling admission mechanics in invite_only groups** — RESOLVED
+   (code probe of mobile-0.27, 2026-07-02). Split verdict:
+   - *User's in-group device is an admin:* works **today**, zero daemon
+     changes. Invite minting is admin-gated (`create_group_invite`,
+     `src/server/mod.rs:11453`), admission is inviter-anchored to the same
+     node, and an invite-free direct-add exists
+     (`POST /groups/:id/members`, `:11987`). Personal groups where the user
+     is creator/admin get sibling admission for free → **M6.5a**.
+   - *User's in-group device is a plain member:* blocked at TWO independent
+     gates — the mint gate and the distributed commit-authority gate (every
+     peer rejects `MemberAdded` unless the actor is an active admin,
+     `src/server/mod.rs:8746-8751`). No same-user carve-out exists; x0xd
+     member records set `user_id: None` (`src/groups/mod.rs:913`).
+   - *Capability for the member case (fork patch, offered upstream — fits
+     #91):* record the joiner's `user_id` + AgentCertificate **at join** in
+     the member record; add a sibling-add commit where member A adds agent B
+     carrying `cert_B`, and every peer verifies `cert_B` chains to the
+     user_id *already recorded for A at admission time*. The
+     recorded-at-join anchor defeats the fabricated-user-key attack (a rogue
+     member minting a fresh user key to "certify" an arbitrary agent as a
+     sibling). Touches both gates + member-record schema → **M6.5b**.
+   - Residual verify item — RESOLVED (second probe, 2026-07-02): on the
+     TreeKEM plane the direct-add endpoint dispatches to
+     `add_treekem_named_group_member` (`src/server/mod.rs:12023-12026`),
+     which **requires the target's KeyPackage** (400 without it, `:12118`),
+     creates + stages the Welcome (`:12204-12241`), and direct-delivers
+     `MemberAdded` + `welcome_ref` to the added agent (`:12256-12261`); the
+     sibling pulls the Welcome over DM/QUIC and joins — identical outcome to
+     the invite flow. A read-blind roster-only member is impossible on
+     TreeKEM. The KeyPackage is derivable only by the sibling itself (own
+     secret + group id, `:19056-19059`), so M6.5a includes a small
+     KeyPackage handshake over the devices-group. Caveat: legacy `Gss`-plane
+     groups take a bare agent_id with **no Welcome** — M6 sibling admission
+     asserts `secure_plane == TreeKem` before direct-add (all new
+     MlsEncrypted groups are TreeKEM).
+2. **Device cap** — AGREED (Josh + Alice): 5 linked devices (Signal parity;
+   5× fanout acceptable, 5 leaves within group-size limits).
+3. **User-key custody UX** — AGREED direction (Josh + Alice): vault-unlock
+   with passphrase re-prompt, never 24-word retype after setup. User seed
+   lives in the passphrase-encrypted vault (same custody class as the
+   identity seed), derived on demand + zeroized (joint zeroize task).
+   Implementation detail = the joint M6.1 custody call (A + B).
 4. **Upstream #91 coordination** — comment with our fabric shape after this
    spec is approved; adopt their four-word user addressing when it lands
    (pure alias layer, no conflict).
-5. **Relay outbox interaction** — fanout × outbox lift: confirm claim/ack
-   semantics stay per-envelope (expected yes; verify at M6.3).
+5. **Relay outbox interaction** — RESOLVED (Alice): claim/ack is
+   per-envelope, fanout = N entries, aggregation is receipt-layer above the
+   outbox; see hard requirement in section III (outbox honors revision).
