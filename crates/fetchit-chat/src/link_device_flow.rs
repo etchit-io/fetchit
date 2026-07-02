@@ -125,7 +125,7 @@ pub async fn fetch_link_offer(
     Ok(offer)
 }
 
-/// PUT the sealed `blob` to `<relay>/v1/blob/<token>` (raw body).
+/// POST the sealed `blob` to `<relay>/v1/blob/<token>` (raw body).
 async fn put_blob(
     relay: &str,
     token: &str,
@@ -336,5 +336,33 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn e2e_round_trips_through_a_real_relay_server() {
+        use fetchit_relay_proto::Region;
+        use fetchit_relay_server::{Server, ServerConfig};
+
+        // Probe a free loopback port, then let the real relay re-bind it and
+        // serve the production /v1/blob route (store + serve + sweeper).
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(async move {
+            let _ = Server::new(ServerConfig::defaults(bound, Region::Nyc))
+                .run()
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // A true round-trip: publish PUTs the sealed blob to the live relay,
+        // fetch GETs it back, opens it with the fragment key, and validates.
+        let offer = sample_offer();
+        let http = crate::relay_http::guarded_client();
+        let uri = publish_link_offer(&offer, &[format!("http://{bound}")], &http)
+            .await
+            .unwrap();
+        let got = fetch_link_offer(&uri, &http).await.unwrap();
+        assert_eq!(got, offer);
     }
 }
