@@ -70,8 +70,10 @@
 ## Fediverse bridge (M4 / M5.1)
 
 - HTTP Signatures use **classical RSA-2048 + PKCS#1 v1.5 + SHA-256** (`rsa-v1_5-sha256`), NOT Ed25519 and NOT post-quantum -- `crates/fetchit-fedi/src/signature.rs`. The PQ binding is the ML-DSA-65 attestation in the Actor JSON-LD, not the per-POST signature. Crypto source of truth: `docs/honest-claims-crypto.md` §3.
+- **One-tap mint (minimal profile)**: a fresh identity with no etch/it-published profile can still mint a fediverse handle. When the relay has no profile-index record (404 / tombstoned), `Client::mint_and_register_actor` (`crates/fetchit-chat/src/client.rs`) publishes a minimal handle-only record via `Client::publish_minimal_profile` -> `pair::sign_minimal_index_record` (`crates/fetchit-chat/src/pair.rs`): a self-signed `ProfileIndexRecord` carrying the reserved `pair::MINIMAL_PROFILE_ADDR` sentinel (not the all-zeros tombstone), POSTed to `{relay}/v1/profile`, no wallet / no Autonomi write. Only a genuine 404/tombstone triggers it -- an existing real profile is used and never clobbered; a transient relay error propagates. Both shells route through this one path: desktop `fediverse_mint` (`apps/fetchit-desktop/src-tauri/src/fediverse.rs`), the mobile FFI `fediMint` (no FFI API change -- one-tap on a `.so` rebuild). The rich profile stays an optional etch/it upgrade (same-`agent_id`, not a takeover).
 
 <!-- arch: id=fedi-sig glob=crates/fetchit-fedi/src/signature.rs docs/honest-claims-crypto.md verified=f9b9e98 -->
+<!-- arch: id=fedi-mint glob=crates/fetchit-chat/src/pair.rs crates/fetchit-chat/src/client.rs apps/fetchit-desktop/src-tauri/src/fediverse.rs verified=8e0c72c -->
 
 ## Shells
 
