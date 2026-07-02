@@ -298,6 +298,55 @@ pub fn reveal_local_signer_recovery_phrase(
     LocalSignerVault::reveal_recovery_phrase(data_dir, &master)
 }
 
+/// Run `f` with the account **user key** for the identity under `data_dir`,
+/// derived on demand from the vault, then drop every intermediate.
+///
+/// Reveals the root identity seed (the one the recovery phrase restores),
+/// derives the account user seed ([`crate::fabric::derive_user_seed`]),
+/// builds the [`crate::fabric::UserKeypair`], hands it to `f`, and lets the
+/// seed and key zeroize on drop (`Zeroizing` seeds, `ZeroizeOnDrop` secret
+/// key). The user key is never retained on any long-lived struct; enroll,
+/// revoke, and recover each re-derive it and drop it. `passphrase` is `None`
+/// for OS-keychain custody (the desktop default), as in
+/// [`reveal_local_signer_seed`].
+///
+/// # Errors
+/// `ChatError::Invalid` if the identity predates seed backup (no
+/// recoverable seed) or the passphrase is wrong; propagates any error `f`
+/// returns.
+pub fn with_user_key<F, R>(data_dir: &Path, passphrase: Option<&str>, f: F) -> Result<R, ChatError>
+where
+    F: FnOnce(&crate::fabric::UserKeypair) -> Result<R, ChatError>,
+{
+    let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
+    let (master, _kdf_id, _argon_salt) =
+        crate::client::resolve_master_key(&identity_vault, passphrase)?;
+    with_user_key_from_master(data_dir, &master, f)
+}
+
+/// [`with_user_key`] with an already-resolved [`MasterKey`]: the internal
+/// seam the passphrase entry and the unit tests share.
+///
+/// # Errors
+/// As [`with_user_key`].
+pub(crate) fn with_user_key_from_master<F, R>(
+    data_dir: &Path,
+    master: &MasterKey,
+    f: F,
+) -> Result<R, ChatError>
+where
+    F: FnOnce(&crate::fabric::UserKeypair) -> Result<R, ChatError>,
+{
+    let root_seed = LocalSignerVault::reveal_identity_seed(data_dir, master)?.ok_or_else(|| {
+        ChatError::Invalid(
+            "identity has no recoverable seed and cannot derive an account key".to_owned(),
+        )
+    })?;
+    let user_seed = crate::fabric::derive_user_seed(&root_seed);
+    let user_key = crate::fabric::UserKeypair::from_seed(&user_seed);
+    f(&user_key)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -469,5 +518,51 @@ mod tests {
         assert!(LocalSignerVault::reveal_recovery_phrase(dir.path(), &master)
             .unwrap()
             .is_none());
+    }
+
+    // -- with_user_key custody helper (M6.1) ------------------------------
+
+    #[test]
+    fn with_user_key_matches_manual_derivation() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+
+        // Manual path: reveal seed -> derive_user_seed -> from_seed -> user id.
+        let seed = LocalSignerVault::reveal_identity_seed(dir.path(), &master)
+            .unwrap()
+            .unwrap();
+        let expected =
+            crate::fabric::UserKeypair::from_seed(&crate::fabric::derive_user_seed(&seed))
+                .user_id_hex();
+
+        let via_helper =
+            with_user_key_from_master(dir.path(), &master, |uk| Ok(uk.user_id_hex())).unwrap();
+        assert_eq!(via_helper, expected);
+        assert_eq!(via_helper.len(), 64);
+    }
+
+    #[test]
+    fn with_user_key_propagates_closure_error() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+        let r: Result<(), ChatError> = with_user_key_from_master(dir.path(), &master, |_| {
+            Err(ChatError::Invalid("boom".to_owned()))
+        });
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn with_user_key_errors_without_recoverable_seed() {
+        let dir = TempDir::new().unwrap();
+        let salt = fresh_argon_salt();
+        let master = test_master(&salt);
+        // No vault to reveal -> error, never a silent empty key.
+        assert!(with_user_key_from_master(dir.path(), &master, |_| Ok(())).is_err());
     }
 }
