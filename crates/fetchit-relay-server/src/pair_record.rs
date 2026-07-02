@@ -271,6 +271,7 @@ mod tests {
 
     fn mk_record(agent_hex: &str, issued: u64) -> PairRecordV1 {
         PairRecordV1 {
+            record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
             agent_id_hex: agent_hex.to_string(),
             ml_dsa_pubkey_b64: "AA".to_string(),
             kem_pubkey_b64: "AA".to_string(),

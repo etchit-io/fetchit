@@ -29,6 +29,20 @@ pub const PAIR_RECORD_DOMAIN: &[u8] = b"fetchit-pair-record-v1";
 /// **Frozen.** Same constraint as [`PAIR_RECORD_DOMAIN`].
 pub const FORWARDING_DOMAIN: &[u8] = b"fetchit-forwarding-v1";
 
+/// Wire `record_version` value carried by every [`PairRecordV1`].
+///
+/// This is an **unsigned deserialization selector**, not part of the
+/// signed canonical layout. The authoritative version binding is the
+/// domain separator baked into the signature ([`PAIR_RECORD_DOMAIN`]);
+/// `record_version` only routes wire bytes to the right record type once
+/// newer versions (a user-scoped v4 record) share the same transport.
+/// Legacy records written before the field deserialize to this value.
+pub const RECORD_VERSION_V1: u8 = 1;
+
+fn default_record_version_v1() -> u8 {
+    RECORD_VERSION_V1
+}
+
 /// Maximum number of relay URLs in either record type.
 const MAX_RELAYS: usize = 4;
 
@@ -49,6 +63,12 @@ const MAX_URL_BYTES: usize = 256;
 /// wrappers are needed because callers pass already-encoded strings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairRecordV1 {
+    /// Wire-format selector; see [`RECORD_VERSION_V1`]. Unsigned: it is
+    /// not part of [`pair_signing_input`], so carrying it leaves existing
+    /// signatures and the v1 wire byte-identical. Legacy JSON without the
+    /// field deserialises to [`RECORD_VERSION_V1`].
+    #[serde(default = "default_record_version_v1")]
+    pub record_version: u8,
     /// Lowercase 64-hex SHA-256 agent id derived from the ML-DSA-65
     /// pubkey via [`crate::derive_agent_id`].
     pub agent_id_hex: String,
@@ -495,6 +515,7 @@ mod tests {
         let sig_bytes = dsa.sign(&sk, &input).unwrap().to_bytes();
 
         let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
             agent_id_hex: agent_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
@@ -551,6 +572,7 @@ mod tests {
         let sig_bytes = dsa.sign(&sk, &input).unwrap().to_bytes();
 
         let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
             agent_id_hex: agent_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&other_pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
@@ -572,6 +594,7 @@ mod tests {
         let sig_a = dsa.sign(&sk, &input_a).unwrap().to_bytes();
         // put wrong pubkey in record (other_pk) but same sig -- id mismatch path
         let record2 = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
             agent_id_hex: agent_hex_a.clone(),
             ml_dsa_pubkey_b64: STANDARD.encode(&other_pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
@@ -606,6 +629,7 @@ mod tests {
         let sig_bytes = dsa.sign(&signing_sk, &input).unwrap().to_bytes();
 
         let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
             agent_id_hex: target_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&pk_raw),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
@@ -691,6 +715,7 @@ mod tests {
     #[test]
     fn pair_record_serde_json_round_trip() {
         let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
             agent_id_hex: fake_agent_hex(),
             ml_dsa_pubkey_b64: STANDARD.encode([0xAA_u8; 8]),
             kem_pubkey_b64: STANDARD.encode([0xBB_u8; 8]),
@@ -701,6 +726,77 @@ mod tests {
         let json = serde_json::to_string(&record).unwrap();
         let recovered: PairRecordV1 = serde_json::from_str(&json).unwrap();
         assert_eq!(record, recovered);
+    }
+
+    // -- record_version selector (M6.0) -----------------------------------
+
+    #[test]
+    fn record_version_defaults_to_one_for_legacy_json() {
+        // Legacy V1 JSON predates the record_version selector; a current
+        // reader must default it to RECORD_VERSION_V1 rather than fail.
+        let legacy = r#"{
+            "agent_id_hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "ml_dsa_pubkey_b64":"AAAA",
+            "kem_pubkey_b64":"AAAA",
+            "advertised_relays":["https://relay-a.fetchit.io"],
+            "issued_at_ms":42,
+            "sig_b64":"AAAA"
+        }"#;
+        let rec: PairRecordV1 = serde_json::from_str(legacy).unwrap();
+        assert_eq!(rec.record_version, RECORD_VERSION_V1);
+        assert_eq!(rec.record_version, 1);
+    }
+
+    #[test]
+    fn record_version_round_trips_and_serializes() {
+        let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
+            agent_id_hex: fake_agent_hex(),
+            ml_dsa_pubkey_b64: STANDARD.encode([0xAA_u8; 8]),
+            kem_pubkey_b64: STANDARD.encode([0xBB_u8; 8]),
+            advertised_relays: relays_one(),
+            issued_at_ms: 12345,
+            sig_b64: STANDARD.encode([0xCC_u8; 8]),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"record_version\":1"), "json was {json}");
+        let recovered: PairRecordV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(record, recovered);
+    }
+
+    #[test]
+    fn record_version_is_outside_the_signed_layout() {
+        // record_version is an unsigned deserialization selector, not part
+        // of the frozen canonical signing input. The authoritative version
+        // binding is the domain separator inside the signature. Flipping
+        // the selector on an otherwise-valid record must not invalidate it.
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let agent_hex = hex::encode(crate::derive_agent_id(&pk_bytes));
+        let kem_pk = vec![0x55_u8; 32];
+        let relays = relays_one();
+        let ts: u64 = 7;
+
+        let input = pair_signing_input(&agent_hex, &pk_bytes, &kem_pk, &relays, ts).unwrap();
+        let sig_bytes = dsa.sign(&sk, &input).unwrap().to_bytes();
+
+        let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
+            agent_id_hex: agent_hex,
+            ml_dsa_pubkey_b64: STANDARD.encode(&pk_bytes),
+            kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            advertised_relays: relays,
+            issued_at_ms: ts,
+            sig_b64: STANDARD.encode(&sig_bytes),
+        };
+        verify_pair_record(&record).unwrap();
+
+        let mut relabelled = record.clone();
+        relabelled.record_version = 99;
+        verify_pair_record(&relabelled).unwrap();
     }
 
     #[test]

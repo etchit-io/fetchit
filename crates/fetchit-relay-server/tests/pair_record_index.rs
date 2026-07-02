@@ -53,6 +53,7 @@ fn mk_signed_record(
         .expect("signing input");
     let sig_bytes = dsa.sign(sk, &input).unwrap().to_bytes();
     PairRecordV1 {
+        record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
         agent_id_hex,
         ml_dsa_pubkey_b64: B64.encode(pk_bytes),
         kem_pubkey_b64: B64.encode(kem_bytes),
