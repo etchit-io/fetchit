@@ -6,15 +6,20 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Pinned x0xd version we bundle. v0.23.1 carries the `send_replace`
-/// DM-capability fix (stock since v0.22.0, formerly our x0x#101 fork),
-/// the `ant-quic` `read_to_end` zero-fill fix (v0.22.1), and the detached
-/// ML-DSA verify endpoint (`POST /agent/verify`).
-const X0XD_PIN_VERSION: &str = "0.23.1";
+/// Pinned x0xd version we bundle. v0.27.0 carries ADR-0016 flat
+/// Admin/Member group authority (retiring the creator-owner role), the
+/// embeddable in-process serve entrypoint, and the `send_replace`
+/// DM-capability fix. We bundle it via the `mobile-0.27` fork, which
+/// layers the fetch>it tail onto that release: the gossip-isolated
+/// group-join apply endpoints, the peer-relay DM fallback, and the
+/// returning-member re-key fix (whose upstream bail is still present in
+/// 0.27.0). Cross-NAT DM + 2-party group verified on 0.27, both legs.
+const X0XD_PIN_VERSION: &str = "0.27.0";
 
-/// Pinned upstream tag commit in saorsa-labs/x0x — `v0.23.1`.
+/// Pinned commit: the `mobile-0.27` fork tip on josh-clsn/x0x (upstream
+/// `v0.27.0` release lineage plus the fetch>it fork tail).
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "4b09b85fc3cf74347e6471979042c0bb543c065b";
+const X0XD_PIN_SHA: &str = "ac082b9b4c2b8b516bfa4a0dbe4ce2473f5267ca";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
