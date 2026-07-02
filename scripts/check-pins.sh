@@ -20,12 +20,12 @@ ok() {
 
 echo "checking pinned deps against PINS.md..."
 
-# ant-core: rev = "eeba52b"
-grep -q 'ant-core.*rev = "eeba52b"' Cargo.toml \
-    || fail "Cargo.toml ant-core rev != eeba52b"
-grep -q 'github.com/WithAutonomi/ant-client?rev=eeba52b' Cargo.lock \
-    || fail "Cargo.lock ant-core rev != eeba52b"
-ok "ant-core rev=eeba52b"
+# ant-core: rev = "95a23be"
+grep -q 'ant-core.*rev = "95a23be"' Cargo.toml \
+    || fail "Cargo.toml ant-core rev != 95a23be"
+grep -q 'github.com/WithAutonomi/ant-client?rev=95a23be' Cargo.lock \
+    || fail "Cargo.lock ant-core rev != 95a23be"
+ok "ant-core rev=95a23be"
 
 # self_encryption: =0.36.0
 grep -q 'self_encryption = "=0.36.0"' Cargo.toml \

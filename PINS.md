@@ -12,7 +12,7 @@ CI if `Cargo.lock` drifts from any rev or version listed below.
 
 | Crate              | Pin                                                  | Why                                                                 |
 |--------------------|------------------------------------------------------|---------------------------------------------------------------------|
-| `ant-core`         | `rev = "eeba52b"` (WithAutonomi/ant-client)          | Wire shape for Autonomi address resolution. Lockstep with etch>it.  |
+| `ant-core`         | `rev = "95a23be"` (WithAutonomi/ant-client, v0.2.9)  | Wire shape for Autonomi address resolution. Lockstep with etch>it.  |
 | `self_encryption`  | `= "0.36.0"`                                          | Self-encryption chunking; rev affects renderer + relay payload size |
 | `xor_name`         | `= "5.0.0"`                                           | Autonomi address type. Wire-level breaking on bump.                 |
 | `saorsa-pqc`       | `"0.5"` (resolves to `0.5.1`)                         | ML-KEM-768 + ML-DSA-65 primitives. Affects vault + envelope crypto. |
