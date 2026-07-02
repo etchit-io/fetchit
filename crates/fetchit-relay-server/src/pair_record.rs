@@ -17,7 +17,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use dashmap::DashMap;
 use fetchit_relay_proto::identity::AGENT_ID_LEN;
-use fetchit_relay_proto::pair_record::{verify_pair_record, PairRecordError, PairRecordV1};
+use fetchit_relay_proto::pair_record::{
+    verify_pair_record, verify_pair_record_v4, PairRecordError, PairRecordV1, PairRecordV4,
+};
 use fetchit_relay_proto::AgentId;
 use std::sync::Arc;
 
@@ -27,6 +29,13 @@ use std::sync::Arc;
 /// URLs: ~11 KB in practice. 16 KB absorbs growth while keeping a garbage
 /// POST from blowing up RAM (well below axum's default).
 pub const MAX_PAIR_RECORD_BODY_BYTES: usize = 16 * 1024;
+
+/// Hard ceiling on a `/v1/pair-record-v4` POST body. A v4 record carries
+/// the account pubkey + signature plus up to five device entries, each with
+/// an ML-DSA + ML-KEM pubkey, an `AgentCertificate`, and relays — roughly
+/// 15 KB per device, so ~85 KB at the cap. 128 KB absorbs five full devices
+/// with growth while bounding a garbage POST.
+pub const MAX_PAIR_RECORD_V4_BODY_BYTES: usize = 128 * 1024;
 
 /// Per-agent publish ceiling. Publishing is rare (on connect + region
 /// change); 30/min tolerates reconnect churn while bounding a holder of a
@@ -41,6 +50,10 @@ pub const PAIR_RECORD_MAX_PER_MIN: u32 = 30;
 #[derive(Default)]
 pub struct PairRecordIndex {
     by_agent: DashMap<String, PairRecordV1>,
+    /// M6 user-scoped records, keyed by `user_id_hex`, ordered on
+    /// `revision`. Independent of `by_agent`: a device still publishes its
+    /// own `PairRecordV1` for v3 readers (dual-publish, no projection).
+    by_user: DashMap<String, PairRecordV4>,
 }
 
 impl PairRecordIndex {
@@ -50,6 +63,7 @@ impl PairRecordIndex {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             by_agent: DashMap::new(),
+            by_user: DashMap::new(),
         })
     }
 
@@ -103,6 +117,50 @@ impl PairRecordIndex {
         }
     }
 
+    // ── v4: user-scoped records, keyed by user_id, ordered on revision ──
+
+    /// Current v4 record for `user_id_hex`, if one exists.
+    #[must_use]
+    pub fn get_v4(&self, user_id_hex: &str) -> Option<PairRecordV4> {
+        self.by_user.get(user_id_hex).map(|r| r.clone())
+    }
+
+    /// Current stored `revision` for the anti-rollback ratchet.
+    #[must_use]
+    pub fn current_revision(&self, user_id_hex: &str) -> Option<u64> {
+        self.by_user.get(user_id_hex).map(|r| r.revision)
+    }
+
+    /// Store a v4 `record` keyed by its `user_id_hex`, no revision check.
+    /// For tests / callers that have already ratcheted; the write path uses
+    /// [`Self::put_if_newer_v4`].
+    pub fn put_v4(&self, record: PairRecordV4) {
+        self.by_user.insert(record.user_id_hex.clone(), record);
+    }
+
+    /// Atomically store a v4 `record` iff its `revision` is strictly greater
+    /// than any record held for the same user. Returns `Err(current)` — the
+    /// stored revision — otherwise, so the caller can surface the 409
+    /// `current_revision` contract. Same per-key entry-lock CAS as
+    /// [`Self::put_if_newer`], on the anti-rollback field.
+    pub fn put_if_newer_v4(&self, record: PairRecordV4) -> Result<(), u64> {
+        use dashmap::mapref::entry::Entry;
+        match self.by_user.entry(record.user_id_hex.clone()) {
+            Entry::Occupied(mut e) => {
+                let current = e.get().revision;
+                if record.revision <= current {
+                    return Err(current);
+                }
+                e.insert(record);
+                Ok(())
+            }
+            Entry::Vacant(e) => {
+                e.insert(record);
+                Ok(())
+            }
+        }
+    }
+
     /// Count of stored records. Test-only.
     #[must_use]
     #[allow(dead_code)]
@@ -141,6 +199,14 @@ pub enum PairRecordHttpError {
         /// `current_issued_at_ms + 1`.
         current_issued_at_ms: u64,
     },
+    /// A v4 record's `revision` was not strictly greater than the stored
+    /// value. 409 plus `{ "current_revision": <prev> }` — the v4 retry
+    /// contract, mirroring `NonMonotonic` on the anti-rollback field.
+    NonMonotonicRevision {
+        /// The relay's current stored revision; the publisher retries at
+        /// `current_revision + 1`.
+        current_revision: u64,
+    },
 }
 
 impl PairRecordHttpError {
@@ -149,7 +215,7 @@ impl PairRecordHttpError {
             Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Malformed(_) => StatusCode::BAD_REQUEST,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::NonMonotonic { .. } => StatusCode::CONFLICT,
+            Self::NonMonotonic { .. } | Self::NonMonotonicRevision { .. } => StatusCode::CONFLICT,
             Self::Verify(e) => verify_status(e),
         }
     }
@@ -162,8 +228,11 @@ impl PairRecordHttpError {
             Self::NonMonotonic {
                 current_issued_at_ms,
             } => serde_json::json!({ "current_issued_at_ms": current_issued_at_ms }),
+            Self::NonMonotonicRevision { current_revision } => {
+                serde_json::json!({ "current_revision": current_revision })
+            }
             Self::BodyTooLarge => {
-                serde_json::json!({ "ok": false, "error": "pair-record body exceeds 16 KB" })
+                serde_json::json!({ "ok": false, "error": "pair-record body too large" })
             }
             Self::RateLimited => {
                 serde_json::json!({ "ok": false, "error": "per-sender publish rate exceeded" })
@@ -265,6 +334,54 @@ pub async fn get_pair_record(
     state
         .pair_records
         .get(&agent_id.to_ascii_lowercase())
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// POST `/v1/pair-record-v4`. Body cap -> stateless proto verify (user +
+/// per-device bindings + user signature) -> per-account rate limit ->
+/// strict-greater `revision` watermark -> store by `user_id`. The v3 path
+/// is untouched: a device still POSTs its own `PairRecordV1` separately.
+pub async fn post_pair_record_v4(
+    State(state): State<Arc<ServerState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, PairRecordHttpError> {
+    if body.len() > MAX_PAIR_RECORD_V4_BODY_BYTES {
+        return Err(PairRecordHttpError::BodyTooLarge);
+    }
+    let record: PairRecordV4 = serde_json::from_slice(&body)
+        .map_err(|_| PairRecordHttpError::Malformed("invalid JSON body"))?;
+
+    // Authenticate FIRST: `user_id` is only trustworthy after the user
+    // signature + derivation checks.
+    verify_pair_record_v4(&record).map_err(PairRecordHttpError::Verify)?;
+
+    // Rate-limit per account on the verified `user_id`, decoded to its
+    // 32-byte key. Distinct keyspace from V1 agent ids (different derivation
+    // domain), so a user id and an agent id never share a rate bucket.
+    let account = agent_id_from_hex(&record.user_id_hex)?;
+    if !state.ratelimit.allow(&account, PAIR_RECORD_MAX_PER_MIN) {
+        return Err(PairRecordHttpError::RateLimited);
+    }
+
+    state
+        .pair_records
+        .put_if_newer_v4(record)
+        .map_err(
+            |current_revision| PairRecordHttpError::NonMonotonicRevision { current_revision },
+        )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET `/v1/pair-record-v4/{user_id}`. Returns the current signed v4 record
+/// verbatim (the consumer re-verifies end-to-end) or 404.
+pub async fn get_pair_record_v4(
+    State(state): State<Arc<ServerState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<PairRecordV4>, StatusCode> {
+    state
+        .pair_records
+        .get_v4(&user_id.to_ascii_lowercase())
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -446,5 +563,94 @@ mod tests {
     fn agent_id_from_hex_rejects_wrong_length() {
         let err = agent_id_from_hex(&hex::encode([0x42; 31])).unwrap_err();
         assert!(matches!(err, PairRecordHttpError::Malformed(_)));
+    }
+
+    // ── v4 store (M6.2, keyed by user_id, ordered on revision) ─────────
+
+    fn mk_record_v4(user_hex: &str, revision: u64) -> PairRecordV4 {
+        use fetchit_relay_proto::pair_record::{DeviceEntryV4, RECORD_VERSION_V4};
+        // Index-level fixture: not signed, since the store checks user_id +
+        // revision only (verify is the handler's job, tested via the proto).
+        PairRecordV4 {
+            record_version: RECORD_VERSION_V4,
+            user_id_hex: user_hex.to_string(),
+            user_ml_dsa_pubkey_b64: "AA".to_string(),
+            revision,
+            issued_at_ms: 1,
+            devices: vec![DeviceEntryV4 {
+                agent_id_hex: hex::encode([0x01; 32]),
+                ml_dsa_pubkey_b64: "AA".to_string(),
+                kem_pubkey_b64: "AA".to_string(),
+                advertised_relays: vec!["https://relay.example".to_string()],
+                cert_b64: "AA".to_string(),
+                added_at_ms: 1,
+                primary: true,
+            }],
+            user_signature_b64: "AA".to_string(),
+        }
+    }
+
+    #[test]
+    fn put_v4_then_get_v4_returns_record() {
+        let idx = PairRecordIndex::new();
+        let uid = hex::encode([0xaa; 32]);
+        idx.put_v4(mk_record_v4(&uid, 7));
+        assert_eq!(idx.get_v4(&uid).unwrap().revision, 7);
+    }
+
+    #[test]
+    fn get_v4_unknown_is_none() {
+        let idx = PairRecordIndex::new();
+        assert!(idx.get_v4(&hex::encode([0x11; 32])).is_none());
+    }
+
+    #[test]
+    fn current_revision_tracks_the_latest_put() {
+        let idx = PairRecordIndex::new();
+        let uid = hex::encode([0xbb; 32]);
+        assert_eq!(idx.current_revision(&uid), None);
+        idx.put_v4(mk_record_v4(&uid, 3));
+        idx.put_v4(mk_record_v4(&uid, 9));
+        assert_eq!(idx.current_revision(&uid), Some(9));
+    }
+
+    #[test]
+    fn put_if_newer_v4_is_a_compare_and_swap() {
+        let idx = PairRecordIndex::new();
+        let uid = hex::encode([0xcc; 32]);
+        // Vacant slot always wins.
+        assert_eq!(idx.put_if_newer_v4(mk_record_v4(&uid, 1)), Ok(()));
+        // Strictly-greater revision replaces.
+        assert_eq!(idx.put_if_newer_v4(mk_record_v4(&uid, 2)), Ok(()));
+        assert_eq!(idx.current_revision(&uid), Some(2));
+        // Equal is rejected (anti-rollback), returning the stored revision.
+        assert_eq!(idx.put_if_newer_v4(mk_record_v4(&uid, 2)), Err(2));
+        // Older is rejected; the store is unchanged.
+        assert_eq!(idx.put_if_newer_v4(mk_record_v4(&uid, 1)), Err(2));
+        assert_eq!(idx.current_revision(&uid), Some(2));
+    }
+
+    #[test]
+    fn v4_index_is_separate_from_v1() {
+        // Same 32-byte id used as both an agent id and a user id must not
+        // cross-contaminate: distinct maps, distinct keyspaces.
+        let idx = PairRecordIndex::new();
+        let id = hex::encode([0xd0; 32]);
+        idx.put(mk_record(&id, 5));
+        idx.put_v4(mk_record_v4(&id, 9));
+        assert_eq!(idx.get(&id).unwrap().issued_at_ms, 5);
+        assert_eq!(idx.get_v4(&id).unwrap().revision, 9);
+    }
+
+    #[test]
+    fn nonmonotonic_revision_is_409_with_current_revision_field() {
+        let e = PairRecordHttpError::NonMonotonicRevision {
+            current_revision: 5,
+        };
+        assert_eq!(e.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            e.json_body(),
+            serde_json::json!({ "current_revision": 5u64 })
+        );
     }
 }

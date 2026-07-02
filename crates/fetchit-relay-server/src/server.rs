@@ -7,7 +7,9 @@ use crate::forwarding::{get_forwarding, post_forwarding, ForwardingIndex};
 #[cfg(feature = "fediverse-inbox")]
 use crate::inbox::{inbox_router, InboxMetrics, InboxState};
 use crate::metrics::Metrics;
-use crate::pair_record::{get_pair_record, post_pair_record, PairRecordIndex};
+use crate::pair_record::{
+    get_pair_record, get_pair_record_v4, post_pair_record, post_pair_record_v4, PairRecordIndex,
+};
 use crate::profile::{delete_profile, get_profile, post_profile, ProfileIndex};
 use crate::ratelimit::RateLimiter;
 #[cfg(feature = "fediverse-inbox")]
@@ -225,6 +227,8 @@ impl Server {
             )
             .route("/v1/pair-record", post(post_pair_record))
             .route("/v1/pair-record/:agent_id", get(get_pair_record))
+            .route("/v1/pair-record-v4", post(post_pair_record_v4))
+            .route("/v1/pair-record-v4/:user_id", get(get_pair_record_v4))
             .route("/v1/forwarding", post(post_forwarding))
             .route("/v1/forwarding/:agent_id", get(get_forwarding))
             .with_state(state.clone());
