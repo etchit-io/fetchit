@@ -261,6 +261,15 @@ fn project_group_receive(
 pub struct ChatClient {
     inner: Client,
     relay_url: String,
+    /// Vault passphrase captured at connect. Mobile custody is always
+    /// passphrase-mode (no OS keychain), but the engine's fedi methods
+    /// (mint / publish / ensure-v2) re-resolve the master key per call and
+    /// treat a `None` passphrase as keychain custody — desktop's mode, never
+    /// mobile's. Retained so those calls can pass `Some(..)`; without it a
+    /// passphrase-mode vault fails with "vault is passphrase-mode but no
+    /// passphrase was supplied". Same custody as the engine builder holding
+    /// it: in-process memory for the client's lifetime.
+    passphrase: String,
     /// uniffi's tokio runtime handle, captured in connect (which runs on that
     /// runtime). Sync methods that spawn engine tasks (start_outbox /
     /// retry_outbox) enter() it first: they run on the Kotlin caller thread,
@@ -614,7 +623,7 @@ impl ChatClient {
             .daemonless(true)
             .relay_url(parsed_url)
             .data_dir(PathBuf::from(&data_dir))
-            .passphrase(passphrase)
+            .passphrase(passphrase.clone())
             .base_url(x0xd_base)
             .token(x0xd_token)
             .build()
@@ -748,6 +757,7 @@ impl ChatClient {
         Ok(Arc::new(Self {
             inner,
             relay_url,
+            passphrase,
             rt_handle,
             x0xd,
             events: Mutex::new(rx),
@@ -990,13 +1000,16 @@ impl ChatClient {
 
     /// Opt in to public posting: mint the actor identity for `handle` (with
     /// its v2 attestation binding the published profile + active relay) and
-    /// register it with the directory. Requires a published profile; the
-    /// error explains how to get one. Directory-registration failure is NOT
-    /// an error -- it lands in the returned [`MintOutcomeFfi`].
+    /// register it with the directory. One-tap on a fresh identity: when no
+    /// profile is published yet the engine publishes a minimal handle-only
+    /// profile-index record first, then mints against it. Directory-
+    /// registration failure is NOT an error -- it lands in the returned
+    /// [`MintOutcomeFfi`].
     ///
     /// # Errors
-    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
-    /// profile, or the mint failing.
+    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
+    /// relay failure (so a network blip is not mistaken for no-profile), or
+    /// the mint failing.
     pub async fn fedi_mint(&self, handle: String) -> Result<MintOutcomeFfi, ChatFfiError> {
         let handle = handle.trim().to_lowercase();
         let relay = url::Url::parse(&self.relay_url).map_err(|e| ChatFfiError::Invalid {
@@ -1012,7 +1025,16 @@ impl ChatClient {
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let outcome = self
             .inner
-            .mint_and_register_actor(&handle, FEDI_DOMAIN, None, &relay, &registry_base, now_ms)
+            .mint_and_register_actor(
+                &handle,
+                FEDI_DOMAIN,
+                // Mobile vaults are passphrase-mode; `None` here means keychain
+                // custody (desktop) and fails a passphrase vault's key resolve.
+                Some(self.passphrase.as_str()),
+                &relay,
+                &registry_base,
+                now_ms,
+            )
             .await
             .map_err(ChatFfiError::from)?;
         Ok(MintOutcomeFfi {
@@ -1052,7 +1074,7 @@ impl ChatClient {
         };
         let report = self
             .inner
-            .publish_public_post(&handle, None, &post)
+            .publish_public_post(&handle, Some(self.passphrase.as_str()), &post)
             .await
             .map_err(ChatFfiError::from)?;
         Ok(PublishReportFfi {
@@ -1094,7 +1116,13 @@ impl ChatClient {
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let outcome = self
             .inner
-            .ensure_actor_v2_and_register(&handle, None, &relay, &registry_base, now_ms)
+            .ensure_actor_v2_and_register(
+                &handle,
+                Some(self.passphrase.as_str()),
+                &relay,
+                &registry_base,
+                now_ms,
+            )
             .await
             .map_err(ChatFfiError::from)?;
         Ok(EnsureV2Ffi {
