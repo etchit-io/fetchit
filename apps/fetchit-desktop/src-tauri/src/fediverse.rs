@@ -112,15 +112,18 @@ async fn register_with_directory(
     }
 }
 
-/// Opt in to public posting: mint the actor identity for `handle`
-/// (with its v2 attestation binding the published profile address and
-/// active relay) and persist it as the active handle. Requires a
-/// published profile; the error copy explains how to get one.
+/// Opt in to public posting: mint the actor identity for `handle` and
+/// persist it as the active handle. **One-tap:** a fresh identity with no
+/// published profile no longer dead-ends — the engine publishes a minimal
+/// handle-only profile itself (no etch/it round-trip, no wallet) and binds
+/// it. Routes through the shared engine orchestration
+/// [`fetchit_chat::Client::mint_and_register_actor`], so desktop and the
+/// mobile FFI mint follow ONE path.
 ///
 /// # Errors
-/// Chat feature off, chat client unavailable, no published profile, or
-/// the crate-side handle validation / mint failing. Directory
-/// registration failure is NOT an error; it lands in the DTO.
+/// Chat feature off, chat client unavailable, a transient relay error, or
+/// the crate-side handle validation / mint / minimal-publish failing.
+/// Directory registration failure is NOT an error; it lands in the DTO.
 #[tauri::command]
 pub async fn fediverse_mint(
     app_state: tauri::State<'_, AppState>,
@@ -133,15 +136,20 @@ pub async fn fediverse_mint(
     // setting all agree. The crate's validate_actor_handle then rejects
     // anything still non-lowercase.
     let handle = handle.trim().to_lowercase();
-    let (record, relay) = crate::chat::self_profile_record(&chat_state).await?;
+    let relay = chat_state.relay_url();
+    let registry = url::Url::parse(&format!("https://{DEFAULT_FEDI_DOMAIN}/"))
+        .map_err(|e| format!("bad registry base URL: {e}"))?;
+    // Honour the runtime custody (keychain -> None, passphrase -> Some) so
+    // the actor vault seals under the same master as the chat identity.
+    let passphrase = chat_state.current_passphrase().await;
     let client = chat_state.get().await?;
-    let identity = client
-        .mint_actor_identity_v2(
+    let outcome = client
+        .mint_and_register_actor(
             &handle,
             DEFAULT_FEDI_DOMAIN,
-            None,
-            &record.profile_addr,
-            relay.as_str(),
+            passphrase.as_deref(),
+            &relay,
+            &registry,
             now_ms(),
         )
         .await
@@ -152,11 +160,10 @@ pub async fn fediverse_mint(
             tracing::warn!("minted handle held in memory only; settings save failed: {e}");
         }
     }
-    let (registered, registration_error) = register_with_directory(&identity).await;
     Ok(MintOutcomeDto {
-        actor_url: identity.actor_url.to_string(),
-        registered,
-        registration_error,
+        actor_url: outcome.actor_url,
+        registered: outcome.registered,
+        registration_error: outcome.registration_error,
     })
 }
 
