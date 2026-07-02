@@ -300,8 +300,11 @@ untouched.
 
 ## What must change NOW (pre-M6 future-proofing, cheap today)
 
-1. PairRecord/profile-manifest schema: version field discipline + reserved
-   `user_id` slot so v4 is additive, not breaking (A-lead).
+1. PairRecord schema: add an unsigned `record_version` serde selector to V1
+   (default 1, kept out of the signed input so v3 wire stays byte-identical).
+   v4 is a NEW `PairRecordV4` type with its own length-prefixed binary layout
+   under domain `fetchit-pair-record-v4`, NOT optional fields on V1 — an
+   unsigned `user_id` on V1 would be spoofable dead weight (A-lead).
 2. Populate `Member.user_id_hex` self-value from day one of M6.1 so rosters
    collapse without backfill.
 3. Recovery-phrase copy everywhere says "account", never "device", so the

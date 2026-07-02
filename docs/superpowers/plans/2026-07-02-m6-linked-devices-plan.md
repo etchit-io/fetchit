@@ -20,7 +20,7 @@
 self-population — B), Android `strings.xml` + desktop copy (recovery-phrase
 copy says "account" — B).
 
-- [ ] [A] PairRecord gains `record_version` + reserved `user_id` slot, additive; v3 readers unaffected (contract fixtures updated).
+- [ ] [A] V1 gains a `record_version` **unsigned serde selector** (default 1, unknown-field tolerant, kept OUT of the signed input so v3 wire stays byte-identical). No `user_id` field on V1 — an unsigned copy is spoofable dead weight; user_id lives only in the signed V4 layout (M6.2). Contract fixtures confirm v3 wire byte-identical. *(Resolution converged w/ Alice 2026-07-02: pair_record.rs signs a frozen length-prefixed binary layout per-version domain, NOT JCS and NOT additive, so v4 is a new `PairRecordV4` type, not optional fields on V1.)*
 - [ ] [B] Populate own `user_id_hex` in group member records from the fabric root once M6.1 lands (stub constant now, wired in M6.1 exit).
 - [ ] [B] Copy audit: every recovery-phrase string says it restores "your account", never "this device". Android + desktop + docs.
 - [ ] Exit gate: workspace tests green, no wire change visible to v3 peers.
@@ -32,7 +32,7 @@ copy says "account" — B).
 **Files:** new `crates/fetchit-chat/src/fabric.rs`; `crates/fetchit-chat/src/identity.rs` (re-export); vault storage in the existing local_store layout.
 
 - [ ] Write failing tests: `user_key_derives_deterministically_from_seed`, `cert_roundtrip_verifies`, `cert_rejects_tampered_agent_id`, `cert_rejects_wrong_user_key`, `existing_phrase_reroots_to_user_key_without_changing_agent_id`.
-- [ ] Implement: `UserKeypair::from_seed(&[u8;32])` (ML-DSA-65, same saorsa-pqc path as pair.rs); `AgentCertificate { user_id, agent_id, agent_mldsa_pub_b64, kem_pub_b64, added_at_s, cert_version, sig }` with JCS-canonical signing under new `SIGN_DOMAIN_CERT` (mirrors `SIGN_DOMAIN_PROFILE` discipline); `mint_agent_certificate(&UserKeypair, …)`, `verify_agent_certificate(&cert, user_pub) -> Result`.
+- [ ] Implement: `UserKeypair::from_seed(&[u8;32])` (ML-DSA-65, same saorsa-pqc path as pair.rs); `AgentCertificate { user_id, agent_id, agent_mldsa_pub_b64, kem_pub_b64, added_at_s, cert_version, sig }` signed with the length-prefixed binary ML-DSA-65 layout under a new per-version domain `fetchit-agent-cert-v1` (mirrors `pair_record.rs`'s frozen `fetchit-pair-record-v*` convention — NOT JCS; the AgentCard JCS path is x0x's format, not ours); `mint_agent_certificate(&UserKeypair, …)`, `verify_agent_certificate(&cert, user_pub) -> Result`.
 - [ ] Re-root: on first M6 launch, derive user key from the existing phrase seed, self-certify the existing agent as device #1, persist cert. agent_id unchanged.
 - [ ] Custody: user seed stored passphrase-encrypted; `with_user_key<F>(passphrase, f)` derive-use-zeroize helper; no long-lived field (extends task #277 scope).
 - [ ] Exit gate: unit tests + fmt/clippy; Alice cross-review (crypto surface = sensitive run); `user_id_hex` self-population from M6.0 wired.
