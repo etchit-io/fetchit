@@ -2988,6 +2988,28 @@ impl Client {
     pub async fn import_pair_uri(&self, uri: &str) -> Result<()> {
         use crate::pair_uri::{parse_pair_uri, PairUriError};
 
+        // v3 share URIs (`fetchit://share/v3/…`) come from a fediverse handle
+        // lookup ("message privately") or a pasted profile share link. Resolve
+        // them via the same parse → fetch → verify → persist path the desktop's
+        // pair-accept command uses, so a single call imports either a legacy
+        // `x0x://pair/` link or a v3 share URI.
+        if uri.starts_with(crate::profile::V3_SHARE_URI_PREFIX) {
+            let parsed = crate::profile::from_v3_share_uri(uri)
+                .map_err(|e| ChatError::Invalid(e.to_string()))?;
+            // Reject self-import before any network call.
+            if let Some(chat) = self.chat.as_ref() {
+                if chat.identity.agent_id_hex() == parsed.agent_id {
+                    return Err(ChatError::Invalid("that is your own pairing link".into()));
+                }
+            }
+            let layout = self.layout().ok_or_else(|| {
+                ChatError::Invalid("chat state not built; cannot import a pair URI".into())
+            })?;
+            let http = crate::relay_http::guarded_client();
+            crate::pair::pair_accept(uri, &http, layout).await?;
+            return Ok(());
+        }
+
         let parsed = parse_pair_uri(uri).map_err(|e| match e {
             PairUriError::TooLong => ChatError::Invalid("pair URI too long".into()),
             other => ChatError::Invalid(other.to_string()),
@@ -6406,6 +6428,23 @@ mod tests {
         let (client, _dir) = test_client_no_denylist();
         let err = client.lookup_fedi_handle("not-a-handle").await.unwrap_err();
         assert!(matches!(err, ChatError::Invalid(ref m) if m.contains("handle")));
+    }
+
+    #[tokio::test]
+    async fn import_pair_uri_dispatches_v3_share_uris_to_the_v3_parser() {
+        // A `fetchit://share/v3/…` URI must route to the v3 parser
+        // (`from_v3_share_uri`), not the x0x pair parser. A malformed v3 URI
+        // fails at parse before any network (hermetic), and `import_pair_uri`
+        // surfaces the v3 parser's own error — proving the dispatch, since the
+        // x0x parser would reject the scheme with a different message.
+        let (client, _dir) = test_client_no_denylist();
+        let bad = "fetchit://share/v3/deadbeef";
+        let via_import = client.import_pair_uri(bad).await.unwrap_err().to_string();
+        let via_v3 = crate::profile::from_v3_share_uri(bad).unwrap_err().to_string();
+        assert!(
+            via_import.contains(&via_v3),
+            "import error `{via_import}` should carry the v3 parse error `{via_v3}`",
+        );
     }
 
     #[test]
