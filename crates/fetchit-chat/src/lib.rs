@@ -21,6 +21,7 @@ pub mod chat_identity;
 pub mod contacts;
 pub mod conversation;
 pub mod denylist;
+pub mod device_cert;
 pub mod discovery;
 pub mod error;
 pub mod events;
@@ -70,6 +71,7 @@ pub use group_invite_uri::{
     emit_ginvite_uri, parse_ginvite_uri, GinviteUriError, ParsedGinviteUri,
 };
 pub use client::restore_identity_from_recovery_phrase;
+pub use device_cert::{ensure_device_certificate, load_device_certificate};
 pub use local_signer::{
     discard_local_identity, reveal_local_signer_recovery_phrase, reveal_local_signer_seed,
     with_user_key,
