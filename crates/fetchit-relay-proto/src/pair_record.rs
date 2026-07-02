@@ -167,6 +167,13 @@ pub struct PairRecordV4 {
 }
 
 /// One device bound under a [`PairRecordV4`].
+///
+/// `ml_dsa_pubkey_b64` and `kem_pubkey_b64` are the authoritative,
+/// signature-covered fields the resolve and DM-fanout path reads; that
+/// path never parses the opaque `cert_b64`. The minter must keep them
+/// equal to the matching fields inside the certificate so an
+/// out-of-record cert presentation can never disagree with the in-record
+/// device view.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceEntryV4 {
     /// Lowercase 64-hex agent id = `hex(crate::derive_agent_id(pubkey))`.
