@@ -211,9 +211,10 @@
          and the two action buttons. The body italic-serif copy reassures
          and teaches the next step. -->
     <string name="chat_onboard_title">Welcome to LIT Chat</string>
-    <string name="chat_onboard_body">No conversations yet. Add someone you know and say hello.</string>
+    <string name="chat_onboard_body">No conversations yet. Add someone you know — or get your @handle and browse the fediverse.</string>
     <string name="chat_onboard_add_person">Add your first person</string>
     <string name="chat_onboard_create_group">Create a group</string>
+    <string name="chat_onboard_fediverse">Get your @handle</string>
     <string name="chat_onboard_mark_desc">LIT Chat</string>
     <!-- Own-identity header badge content-description (mirrors desktop's
          "Share my code" badge label): the badge shows the user by name +

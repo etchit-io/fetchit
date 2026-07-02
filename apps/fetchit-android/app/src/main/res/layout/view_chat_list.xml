@@ -164,6 +164,19 @@
                     android:backgroundTint="?attr/fetchitInk3"
                     android:textColor="?attr/fetchitCopper" />
 
+                <!-- Fediverse is the one thing a brand-new user can do alone:
+                     get an @handle + browse public posts, no contacts needed.
+                     Always reachable from the empty state so it's never hidden
+                     behind having-a-contact. -->
+                <Button
+                    android:id="@+id/onboardFediverseButton"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="@string/chat_onboard_fediverse"
+                    android:textColor="?attr/fetchitCopper" />
+
             </LinearLayout>
 
         </FrameLayout>

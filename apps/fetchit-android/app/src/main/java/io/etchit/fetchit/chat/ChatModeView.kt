@@ -280,6 +280,7 @@ class ChatModeView(
         val connStatus = view.findViewById<TextView>(R.id.chatConnectionStatus)
         val addPersonBtn = view.findViewById<View>(R.id.onboardAddPersonButton)
         val createGroupBtn = view.findViewById<View>(R.id.onboardCreateGroupButton)
+        val fediverseBtn = view.findViewById<View>(R.id.onboardFediverseButton)
 
         // Own-identity header badge: the user sees themselves by name +
         // initials avatar on the self (copper) hue, never the 64-hex. Tapping
@@ -347,6 +348,12 @@ class ChatModeView(
 
         // Onboarding secondary action: create a group.
         createGroupBtn.setOnClickListener { showNewGroupDialog() }
+
+        // Onboarding: open the fediverse (get an @handle + see public posts).
+        // The one first-run action needing no contacts, so it lives here in the
+        // empty state, not only in the pinned list row — which the empty state
+        // hides along with the rest of the (empty) contact list.
+        fediverseBtn.setOnClickListener { showScreen(Screen.Feed, pushToStack = true) }
 
         // FAB: a popup with the list-level actions -- add a contact, start a
         // new group, join one from an invite link, or scan a code (the scan
