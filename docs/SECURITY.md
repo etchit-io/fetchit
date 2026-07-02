@@ -222,7 +222,7 @@ If you're auditing fetch>it, the load-bearing security code lives in:
 | `apps/fetchit-desktop/src/renderers/htmlRewriter.ts` | CSP construction, all rewriter strip steps, the neuter script |
 | `apps/fetchit-desktop/src/renderers/html.ts` | Iframe sandbox attribute, the `SANDBOX` constant |
 | `apps/fetchit-desktop/src-tauri/src/protocol.rs` | `autonomi://` / `fetchit://` URI scheme handler -- what gets served |
-| `apps/fetchit-desktop/src-tauri/src/server.rs` | The 127.0.0.1 media HTTP server -- bind address, range handling |
+| `apps/fetchit-desktop/src-tauri/src/server.rs` | The 127.0.0.1 media HTTP server -- bind address, range handling. The server streams its response progressively from `StreamingMedia` for uncached media; origin, CSP, CORS, and the 64-hex address validation are unchanged from the complete-buffer path. |
 | `apps/fetchit-desktop/src-tauri/tauri.conf.json` | App config, including the absence of an updater endpoint |
 | `apps/fetchit-desktop/src-tauri/capabilities/default.json` | Tauri capability surface -- what the WebView's JS side can invoke |
 | `apps/fetchit-desktop/src-tauri/src/disk_cache.rs` | On-disk cache: file-mtime LRU, policy gating, clear |
