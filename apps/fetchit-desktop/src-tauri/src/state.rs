@@ -176,6 +176,10 @@ impl AppState {
         let total = client.content_size(&addr).await.map_err(|e| e.to_string())?;
         #[cfg(not(feature = "e2e"))]
         let backing = if self.disk_cache.policy().enabled {
+            // Remove any stale partial left by a previous crash before starting
+            // to append; without this the feeder appends to the old data and
+            // commit_stream promotes a silently corrupt file to a cache entry.
+            let _ = std::fs::remove_file(self.disk_cache.stream_path(&addr));
             crate::streaming_media::StreamBacking::File(self.disk_cache.stream_path(&addr))
         } else {
             crate::streaming_media::StreamBacking::Memory(StdMutex::new(Vec::new()))

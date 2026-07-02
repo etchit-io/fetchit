@@ -190,9 +190,16 @@ async fn serve_progressive(
     let mut rx = sm.subscribe();
 
     // Sniff MIME from the first bytes: wait for a small prefix, then read it.
+    // Use the actual available count returned by await_offset to clamp the
+    // read; the feeder may end with fewer bytes than the sniff window (early
+    // network failure or 0-byte content), and slicing past the buffer panics.
     let sniff_end = total.min(4096).saturating_sub(1);
-    let _ = await_offset(&mut rx, sniff_end + 1).await;
-    let head = sm.read_range(0, sniff_end).await.unwrap_or_default();
+    let avail = await_offset(&mut rx, sniff_end + 1).await.unwrap_or(0);
+    let head = if avail == 0 {
+        Bytes::new()
+    } else {
+        sm.read_range(0, avail.min(sniff_end + 1) - 1).await.unwrap_or_default()
+    };
     let mime = sniff_mime(&head);
 
     if method == "HEAD" {
@@ -203,11 +210,12 @@ async fn serve_progressive(
     }
 
     let total_usize = usize::try_from(total).unwrap_or(usize::MAX);
-    let (start, end) = match range.and_then(|h| parse_range(h, total_usize)) {
+    let parsed = range.and_then(|h| parse_range(h, total_usize));
+    let is_partial = parsed.is_some();
+    let (start, end) = match parsed {
         Some((s, e)) => (s as u64, e as u64),
         None => (0, total.saturating_sub(1)),
     };
-    let is_partial = range.is_some();
 
     let header = if is_partial {
         let len = end - start + 1;
@@ -342,6 +350,40 @@ mod tests {
         assert!(text.contains("Content-Length: 6"), "expected Content-Length: 6 in {text}");
         assert!(text.contains("Accept-Ranges: bytes"), "expected Accept-Ranges in {text}");
         assert!(resp.ends_with(b"abcdef"), "expected body abcdef, got tail {:?}", &resp[resp.len().saturating_sub(10)..]);
+    }
+
+    /// Regression: a Memory-backed progressive stream whose feeder ends with
+    /// fewer bytes than the 4096-byte MIME sniff window must not panic when
+    /// `serve_progressive` reads back the sniff head.
+    #[tokio::test]
+    async fn serve_progressive_short_body_no_panic() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (state, _tmp) = make_test_state();
+        let addr: Address = "ef".repeat(32).parse().unwrap();
+        // total > 4096 so the sniff window is 4095 bytes; feeder sends only 50.
+        let sm = std::sync::Arc::new(crate::streaming_media::StreamingMedia::new(
+            10_000,
+            crate::streaming_media::StreamBacking::Memory(std::sync::Mutex::new(Vec::new())),
+        ));
+        state.insert_stream_for_test(addr, sm.clone());
+        let port = super::spawn(state).await.unwrap();
+
+        let mut conn =
+            tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        conn.write_all(
+            format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "ef".repeat(32)).as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        // Push far fewer bytes than the sniff window, then signal failure.
+        sm.push(&[0xFFu8; 50]).await.unwrap();
+        sm.fail("simulated early network failure".into());
+
+        let mut resp = Vec::new();
+        conn.read_to_end(&mut resp).await.unwrap();
+        // Any non-empty HTTP response means no panic.
+        assert!(!resp.is_empty());
     }
 
     #[test]

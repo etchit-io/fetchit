@@ -98,8 +98,8 @@ impl StreamingMedia {
     /// are readable, so a reader gated on `downloaded >= end` never reads a
     /// short slice.
     ///
-    /// The signature is `async` because the file-backed path will move to
-    /// `tokio::fs` I/O once that variant is exercised end-to-end.
+    /// The signature is `async` for uniformity with call sites in `feed`;
+    /// the file-backed path uses synchronous I/O in this call.
     #[allow(clippy::unused_async)]
     pub async fn push(&self, chunk: &[u8]) -> std::io::Result<()> {
         match &self.backing {
