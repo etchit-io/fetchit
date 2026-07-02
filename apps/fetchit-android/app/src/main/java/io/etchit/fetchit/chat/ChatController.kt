@@ -67,8 +67,20 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     /** In-memory per-peer message threads. */
     val conversations = ConversationStore()
 
-    /** In-memory bridged fediverse posts. */
-    val feed = FeedStore()
+    private val feedPrefs =
+        appContext.getSharedPreferences("fetchit_feed", Context.MODE_PRIVATE)
+
+    /**
+     * Fediverse posts (bridged + the user's own), persisted in plain prefs so
+     * the feed survives a restart — own posts are never re-delivered to their
+     * author, so an unpersisted feed silently loses them on process death.
+     * Public content; plain prefs are fine (the [io.etchit.fetchit.BookmarkStore]
+     * rationale).
+     */
+    val feed = FeedStore(
+        load = { FeedSerde.decode(feedPrefs.getString(FEED_KEY, null)) },
+        save = { posts -> feedPrefs.edit().putString(FEED_KEY, FeedSerde.encode(posts)).apply() },
+    )
 
     private val _groups = MutableStateFlow<List<GroupFfi>>(emptyList())
 
@@ -408,6 +420,9 @@ class ChatController(private val appContext: Context, private val scope: Corouti
          * use this. Region override is wired via the settings sheet in a later task.
          */
         const val DEFAULT_RELAY = "https://nyc-relay.etchit.io"
+
+        /** Prefs key holding the JSON-encoded persisted feed ([FeedSerde]). */
+        private const val FEED_KEY = "feed_posts_v1"
 
         /**
          * Drain [gw].[ChatGateway.nextEvent] in a loop, routing each event into
