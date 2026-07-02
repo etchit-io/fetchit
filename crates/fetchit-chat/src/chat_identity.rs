@@ -202,6 +202,31 @@ mod tests {
     }
 
     #[test]
+    fn fresh_identity_has_no_user_id_until_m6_1() {
+        // M6.0 stub contract: a device identity carries no user-root binding
+        // yet. `Member.user_id_hex` is populated from this accessor
+        // (messages.rs), so it stays None until M6.1 derives the phrase-based
+        // user key and self-certifies device #1. M6.1 must consciously flip
+        // this assertion to Some(...).
+        let dir = tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let id = FetchitIdentity::load_or_create(
+            dir.path(),
+            &master,
+            "deadbeef00000000000000000000000000000000000000000000000000000000",
+            kdf_id_argon2(),
+            Some(&salt),
+        )
+        .unwrap();
+        assert_eq!(id.user_id_hex(), None);
+    }
+
+    #[test]
     fn second_load_returns_same_identity() {
         let dir = tempdir().unwrap();
         let salt = fresh_argon_salt();

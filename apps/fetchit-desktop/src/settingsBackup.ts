@@ -1,8 +1,8 @@
 // Settings > "Identity backup" panel.
 //
 // Reveals the 24-word recovery phrase behind an explicit confirm and
-// frames exactly what the words are: the identity itself. Writing them
-// down is the ONLY way to keep an identity across a lost or replaced
+// frames exactly what the words are: the account itself. Writing them
+// down is the ONLY way to keep an account across a lost or replaced
 // computer, so this lives as a first-class section, not under Advanced.
 //
 // Kept as a sibling file rather than inlined into `settings.ts` per
@@ -23,10 +23,10 @@ export const BACKUP_IDS = {
 
 export const BACKUP_COPY = {
   intro:
-    "Your identity can be written down as 24 words. If this computer is "
-    + "lost or replaced, those words bring your identity to a new one.",
+    "Your account lives in 24 words. If this computer is lost or replaced, "
+    + "those words restore your whole account on a new one.",
   confirm:
-    "The words ARE your identity — anyone who has them can become you. "
+    "These 24 words ARE your account — anyone who has them can become you. "
     + "Make sure nobody can see your screen, and write them on paper, "
     + "not in a file or a photo.",
   reveal: "Show my 24 words",
@@ -34,10 +34,10 @@ export const BACKUP_COPY = {
   hide: "Done — hide the words",
   note:
     "Write the words down in order and keep the paper somewhere safe. "
-    + "The words restore your identity, not your message history.",
+    + "The words restore your account, not your past message history.",
   legacy:
-    "This identity was created before backups existed, so it has no "
-    + "recovery words. To get a backup, you'd need a fresh identity — "
+    "This account was created before backups existed, so it has no "
+    + "recovery words. To get a backup, you'd need a fresh account — "
     + "your current one keeps working either way.",
 } as const;
 

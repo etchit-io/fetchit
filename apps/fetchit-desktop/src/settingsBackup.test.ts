@@ -27,6 +27,21 @@ beforeEach(() => {
   (invoke as InvokeMock).mockReset();
 });
 
+describe("BACKUP_COPY account framing (M6 linked devices)", () => {
+  it("frames recovery around the account, never a single identity", () => {
+    for (const [key, value] of Object.entries(BACKUP_COPY)) {
+      expect(value.toLowerCase(), `${key} must not say "identity"`).not.toContain(
+        "identity",
+      );
+    }
+  });
+
+  it("tells the user the words restore their whole account", () => {
+    expect(BACKUP_COPY.intro.toLowerCase()).toContain("account");
+    expect(BACKUP_COPY.note.toLowerCase()).toContain("account");
+  });
+});
+
 describe("initBackupPanel", () => {
   it("first click arms with the shoulder-surfing warning, no reveal yet", () => {
     const root = mount();
