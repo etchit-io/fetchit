@@ -40,6 +40,11 @@ pub struct AppState {
     /// handler runs, even when chat ships cold. `None` when no denylist
     /// URL resolves (offline / self-host without a trust service).
     pub reader_denylist: Option<Arc<dyn fetchit_trust_types::DenylistQuery>>,
+    /// Active progressive downloads, keyed by address. At most one feeder
+    /// task runs per address; concurrent requests share the same entry.
+    /// Wired to the media HTTP server in task 4.
+    #[allow(dead_code)]
+    pub streams: Arc<StdMutex<HashMap<Address, Arc<crate::streaming_media::StreamingMedia>>>>,
 }
 
 impl AppState {
@@ -53,6 +58,7 @@ impl AppState {
             fetches: Arc::new(StdMutex::new(HashMap::new())),
             fetch_generation: Arc::new(AtomicU64::new(0)),
             reader_denylist: None,
+            streams: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -122,6 +128,58 @@ impl AppState {
                 token.cancel();
             }
         }
+    }
+
+    /// Insert a pre-built stream for testing. Guards the map and places `sm`
+    /// under `addr` so unit tests can prime the registry without going to the
+    /// network.
+    #[cfg(test)]
+    pub fn insert_stream_for_test(
+        &self,
+        addr: Address,
+        sm: Arc<crate::streaming_media::StreamingMedia>,
+    ) {
+        if let Ok(mut map) = self.streams.lock() {
+            map.insert(addr, sm);
+        }
+    }
+
+    /// Return the existing stream for `addr`, or resolve its size, allocate a
+    /// new [`StreamingMedia`], and spawn exactly one feeder task. Concurrent
+    /// callers that race a miss both see the same `Arc` because the winning
+    /// insert happens under the registry lock before the feeder is spawned.
+    #[allow(dead_code)]
+    pub async fn get_or_start_stream(
+        &self,
+        addr: Address,
+    ) -> Result<Arc<crate::streaming_media::StreamingMedia>, String> {
+        if let Some(sm) = self
+            .streams
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&addr)
+            .cloned()
+        {
+            return Ok(sm);
+        }
+        let client = crate::state::ensure_client(self, &self.effective_peers()).await?;
+        let total = client.content_size(&addr).await.map_err(|e| e.to_string())?;
+        let backing = if self.disk_cache.policy().enabled {
+            crate::streaming_media::StreamBacking::File(self.disk_cache.stream_path(&addr))
+        } else {
+            crate::streaming_media::StreamBacking::Memory(StdMutex::new(Vec::new()))
+        };
+        let sm = Arc::new(crate::streaming_media::StreamingMedia::new(total, backing));
+        {
+            let mut map = self.streams.lock().map_err(|e| e.to_string())?;
+            if let Some(existing) = map.get(&addr).cloned() {
+                return Ok(existing);
+            }
+            map.insert(addr, sm.clone());
+        }
+        let client = Arc::new(client);
+        tokio::spawn(crate::streaming_media::feed(sm.clone(), client, addr));
+        Ok(sm)
     }
 
     /// Layered cache lookup: memory hit first; on miss, consult disk and
@@ -352,6 +410,20 @@ mod tests {
             !matches!(r, Rendition::Blocked { .. }),
             "unblocked addr must not be Blocked"
         );
+    }
+
+    #[test]
+    fn get_or_start_returns_the_same_stream_for_one_address() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = make_state(tmp.path());
+        let addr: Address = "ab".repeat(32).parse().unwrap();
+        let sm = std::sync::Arc::new(crate::streaming_media::StreamingMedia::new(
+            4,
+            crate::streaming_media::StreamBacking::Memory(std::sync::Mutex::new(Vec::new())),
+        ));
+        state.insert_stream_for_test(addr, sm.clone());
+        let again = state.streams.lock().unwrap().get(&addr).cloned().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&sm, &again));
     }
 
     /// M3 #342: with no denylist installed (offline / self-host), the

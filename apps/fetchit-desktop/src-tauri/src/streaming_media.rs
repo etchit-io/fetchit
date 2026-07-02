@@ -4,12 +4,12 @@
 //! exposing a [`watch`]-based watermark so the HTTP range server can serve
 //! byte ranges as soon as they land. Task 3 wires this into the server.
 
-// Dead-code: the public API is consumed by the media server (task 3).
+// Dead-code: the public API is consumed by the media server (task 3+).
 #![allow(dead_code)]
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use tokio::sync::watch;
@@ -159,6 +159,43 @@ pub async fn await_offset(
             let s = rx.borrow();
             return Ok(s.downloaded);
         }
+    }
+}
+
+/// Drive `fetch_to_sink` into `sm`, translating chunks to [`StreamingMedia::push`]
+/// and the terminal result into [`StreamingMedia::finish`] or [`StreamingMedia::fail`].
+/// Runs as the single feeder task per address; the registry in [`crate::state::AppState`]
+/// ensures only one instance is spawned.
+pub async fn feed(
+    sm: Arc<StreamingMedia>,
+    client: Arc<fetchit_net::AutonomiClient>,
+    addr: fetchit_core::Address,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<fetchit_core::Result<Bytes>>(16);
+    let pump = {
+        let sm = sm.clone();
+        tokio::spawn(async move {
+            while let Some(item) = rx.recv().await {
+                match item {
+                    Ok(chunk) => {
+                        if sm.push(&chunk).await.is_err() {
+                            sm.fail("write to stream backing failed".into());
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        sm.fail(e.to_string());
+                        return;
+                    }
+                }
+            }
+        })
+    };
+    let result = client.fetch_to_sink(&addr, tx, |_p| {}).await;
+    let _ = pump.await;
+    match result {
+        Ok(_) => sm.finish(),
+        Err(e) => sm.fail(e.to_string()),
     }
 }
 
