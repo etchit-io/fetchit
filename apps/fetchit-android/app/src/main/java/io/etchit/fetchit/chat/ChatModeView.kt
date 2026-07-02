@@ -315,10 +315,13 @@ class ChatModeView(
                     val onboarding = showChatOnboarding(contacts.size, groups.size)
                     rv.visibility = if (onboarding) View.GONE else View.VISIBLE
                     emptyState.visibility = if (onboarding) View.VISIBLE else View.GONE
-                    // The FAB is a list-level affordance (it offers group
-                    // create/join, reachable with zero contacts), so it stays
-                    // visible whenever the list view is shown.
-                    addBtn.visibility = View.VISIBLE
+                    // The FAB duplicates the onboarding buttons on the empty
+                    // state (Josh: add-your-first-person is enough), so it only
+                    // shows once the list has content. Its remaining exclusives
+                    // stay reachable while onboarding: the add-someone box also
+                    // takes group invite links, and create-a-group has its own
+                    // button.
+                    addBtn.visibility = if (onboarding) View.GONE else View.VISIBLE
                     adapter.submit(groups, contacts)
                 }
         }
@@ -1071,7 +1074,17 @@ class ChatModeView(
             .setView(layout)
             .setPositiveButton(context.getString(R.string.chat_add_someone_find)) { _, _ ->
                 when (val input = classifyAddContactInput(editText.text.toString())) {
-                    is AddContactInput.PairUri -> importFromUri(input.raw)
+                    // A pasted link routes by kind: group invites join the
+                    // group, anything else goes to the pair-import path (which
+                    // owns its own validation + friendly errors). One box,
+                    // right thing — the onboarding empty state hides the FAB,
+                    // so this is a first-run user's only paste target.
+                    is AddContactInput.PairUri ->
+                        if (ChatUris.isInviteUri(input.raw)) {
+                            joinGroupThen(input.raw)
+                        } else {
+                            importFromUri(input.raw)
+                        }
                     is AddContactInput.FediHandle -> findByHandle(input.handle)
                     AddContactInput.Empty ->
                         snackbar(context.getString(R.string.chat_add_someone_empty))
