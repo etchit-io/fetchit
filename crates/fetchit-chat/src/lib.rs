@@ -38,6 +38,7 @@ pub mod lan_discovery;
 pub mod lan_noise;
 pub mod lan_static;
 pub mod link_device;
+pub mod link_device_uri;
 pub(crate) mod local_signer;
 pub mod local_store;
 pub mod messages;
