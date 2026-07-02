@@ -1663,6 +1663,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bip39"
+version = "2.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
+dependencies = [
+ "bitcoin_hashes",
+ "serde",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3027,6 +3039,8 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64",
+ "bincode",
+ "bip39",
  "bytes",
  "chacha20poly1305",
  "clap",
@@ -3048,6 +3062,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest 0.12.28",
  "rsa",
+ "rustls",
  "saorsa-pqc 0.5.1",
  "semver 1.0.28",
  "serde",
@@ -3106,6 +3121,7 @@ dependencies = [
  "bytes",
  "fetchit-chat",
  "fetchit-core",
+ "fetchit-fedi",
  "fetchit-net",
  "fetchit-relay-client",
  "fetchit-relay-proto",
@@ -7817,6 +7833,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"
