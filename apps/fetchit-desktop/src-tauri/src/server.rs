@@ -15,8 +15,9 @@
 //! bytes a `fetch_and_render` may already have downloaded.
 
 use crate::state::AppState;
+use crate::streaming_media::await_offset;
 use bytes::Bytes;
-use fetchit_core::{Address, NetworkClient};
+use fetchit_core::Address;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -113,24 +114,33 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
         range.as_deref().unwrap_or("")
     );
 
-    let bytes = match state.cached_bytes(&addr) {
-        Some(b) => {
-            diag!("[media-srv] cache-hit {} bytes", b.len());
-            b
-        }
-        None => match fetch_into_cache(&state, addr).await {
-            Ok(b) => {
-                diag!("[media-srv] fetched {} bytes", b.len());
-                b
-            }
-            Err(msg) => {
-                diag!("[media-srv] fetch-failed: {msg}");
-                return reply_simple(&mut stream, 502, "Bad Gateway", &msg).await;
-            }
-        },
-    };
+    // Fast path: fully cached -> serve the complete buffer as before.
+    if let Some(bytes) = state.cached_bytes(&addr) {
+        diag!("[media-srv] cache-hit {} bytes", bytes.len());
+        return serve_complete(&mut stream, method, range.as_deref(), &bytes).await;
+    }
 
-    let mime = sniff_mime(&bytes);
+    // Progressive path.
+    let sm = match state.get_or_start_stream(addr).await {
+        Ok(sm) => sm,
+        Err(msg) => {
+            diag!("[media-srv] stream-failed: {msg}");
+            return reply_simple(&mut stream, 502, "Bad Gateway", &msg).await;
+        }
+    };
+    serve_progressive(&mut stream, method, range.as_deref(), &sm).await
+}
+
+/// Serve a fully-buffered response for a cache hit. Mirrors the original
+/// complete-buffer HEAD / 206 / 200 response block verbatim so the fast
+/// path is behavior-equivalent before and after the streaming rewrite.
+async fn serve_complete(
+    stream: &mut TcpStream,
+    method: &str,
+    range: Option<&str>,
+    bytes: &Bytes,
+) -> std::io::Result<()> {
+    let mime = sniff_mime(bytes);
     let total = bytes.len();
 
     if method == "HEAD" {
@@ -141,7 +151,7 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
         return Ok(());
     }
 
-    if let Some((start, end)) = range.as_deref().and_then(|h| parse_range(h, total)) {
+    if let Some((start, end)) = range.and_then(|h| parse_range(h, total)) {
         let len = end - start + 1;
         let slice = bytes.slice(start..=end);
         let resp = format!(
@@ -155,17 +165,80 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
             "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(resp.as_bytes()).await?;
-        stream.write_all(&bytes).await?;
+        stream.write_all(bytes).await?;
         diag!("[media-srv] resp 200 bytes={total} mime={mime}");
     }
     Ok(())
 }
 
-async fn fetch_into_cache(state: &AppState, addr: Address) -> Result<Bytes, String> {
-    let client = crate::state::ensure_client(state, &state.effective_peers()).await?;
-    let bytes = client.fetch(&addr).await.map_err(|e| e.to_string())?;
-    state.cache_bytes(&addr, bytes.clone());
-    Ok(bytes)
+/// Stream a response body progressively from a [`crate::streaming_media::StreamingMedia`]
+/// instance. Sniffs the MIME type from the first arriving bytes, sends headers with
+/// a real `Content-Length`, then delivers body chunks as the watermark advances.
+/// Supports `Range` requests (206) and HEAD probes. On a TCP write error the
+/// connection is dropped cleanly.
+async fn serve_progressive(
+    stream: &mut TcpStream,
+    method: &str,
+    range: Option<&str>,
+    sm: &std::sync::Arc<crate::streaming_media::StreamingMedia>,
+) -> std::io::Result<()> {
+    let total = sm.total();
+    let mut rx = sm.subscribe();
+
+    // Sniff MIME from the first bytes: wait for a small prefix, then read it.
+    let sniff_end = total.min(4096).saturating_sub(1);
+    let _ = await_offset(&mut rx, sniff_end + 1).await;
+    let head = sm.read_range(0, sniff_end).await.unwrap_or_default();
+    let mime = sniff_mime(&head);
+
+    if method == "HEAD" {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+        );
+        return stream.write_all(resp.as_bytes()).await;
+    }
+
+    let total_usize = usize::try_from(total).unwrap_or(usize::MAX);
+    let (start, end) = match range.and_then(|h| parse_range(h, total_usize)) {
+        Some((s, e)) => (s as u64, e as u64),
+        None => (0, total.saturating_sub(1)),
+    };
+    let is_partial = range.is_some();
+
+    let header = if is_partial {
+        let len = end - start + 1;
+        format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: {mime}\r\nContent-Length: {len}\r\nContent-Range: bytes {start}-{end}/{total}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+        )
+    } else {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+        )
+    };
+    if stream.write_all(header.as_bytes()).await.is_err() {
+        return Ok(()); // client gone
+    }
+
+    // Stream the body in windows as the watermark advances.
+    let mut pos = start;
+    while pos <= end {
+        let want = (pos + 64 * 1024).min(end + 1); // 64 KiB windows
+        let Ok(available) = await_offset(&mut rx, want).await else {
+            break; // feeder failed; drop the connection
+        };
+        let ready_end = available.min(end + 1);
+        if ready_end <= pos {
+            break; // EOF before the requested end
+        }
+        let Ok(slice) = sm.read_range(pos, ready_end - 1).await else {
+            break;
+        };
+        if stream.write_all(&slice).await.is_err() {
+            break; // client disconnected mid-stream
+        }
+        pos = ready_end;
+    }
+    Ok(())
 }
 
 async fn reply_simple(
@@ -215,8 +288,57 @@ fn parse_range(header: &str, total: usize) -> Option<(usize, usize)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn make_test_state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let disk = std::sync::Arc::new(crate::disk_cache::DiskCache::new(
+            tmp.path().join("disk"),
+            crate::disk_cache::Policy::default(),
+        ));
+        let state = AppState::new(
+            disk,
+            crate::settings::Settings::default(),
+            tmp.path().join("settings.json"),
+        );
+        (state, tmp)
+    }
+
+    /// Progressive streaming: a stream pre-seeded via `insert_stream_for_test`
+    /// is fed incrementally after the request is in flight, and the server
+    /// delivers all bytes with the correct `Content-Length` header.
+    #[tokio::test]
+    async fn serve_streams_body_as_it_arrives() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (state, _tmp) = make_test_state();
+        let addr: Address = "cd".repeat(32).parse().unwrap();
+        let sm = std::sync::Arc::new(crate::streaming_media::StreamingMedia::new(
+            6,
+            crate::streaming_media::StreamBacking::Memory(std::sync::Mutex::new(Vec::new())),
+        ));
+        state.insert_stream_for_test(addr, sm.clone());
+        let port = super::spawn(state).await.unwrap();
+
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        conn.write_all(
+            format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "cd".repeat(32)).as_bytes(),
+        )
+        .await
+        .unwrap();
+        // feed after the request is in flight
+        sm.push(b"abc").await.unwrap();
+        sm.push(b"def").await.unwrap();
+        sm.finish();
+
+        let mut resp = Vec::new();
+        conn.read_to_end(&mut resp).await.unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("Content-Length: 6"), "expected Content-Length: 6 in {text}");
+        assert!(text.contains("Accept-Ranges: bytes"), "expected Accept-Ranges in {text}");
+        assert!(resp.ends_with(b"abcdef"), "expected body abcdef, got tail {:?}", &resp[resp.len().saturating_sub(10)..]);
+    }
 
     #[test]
     fn parse_range_full_explicit() {

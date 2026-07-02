@@ -1,11 +1,9 @@
 //! Per-address progressive stream backing the media server.
 //!
 //! [`StreamingMedia`] accumulates a download in a growing buffer while
-//! exposing a [`watch`]-based watermark so the HTTP range server can serve
-//! byte ranges as soon as they land. Task 3 wires this into the server.
-
-// Dead-code: the public API is consumed by the media server (task 3+).
-#![allow(dead_code)]
+//! exposing a [`watch`]-based watermark so the HTTP range server in
+//! `server.rs` can serve byte ranges as soon as they land, without waiting
+//! for the full download to complete.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -28,8 +26,6 @@ pub enum StreamBacking {
 pub struct StreamState {
     /// Bytes durably written so far (monotonically increasing).
     pub downloaded: u64,
-    /// Total expected byte count (from the network content-length).
-    pub total: u64,
     /// Set to `Some(Ok(()))` on clean EOF, `Some(Err(msg))` on feeder failure.
     pub terminal: Option<Result<(), String>>,
 }
@@ -48,7 +44,6 @@ impl StreamingMedia {
     pub fn new(total: u64, backing: StreamBacking) -> Self {
         let (tx, rx) = watch::channel(StreamState {
             downloaded: 0,
-            total,
             terminal: None,
         });
         Self { total, backing, tx, rx }

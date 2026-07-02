@@ -42,8 +42,8 @@ pub struct AppState {
     pub reader_denylist: Option<Arc<dyn fetchit_trust_types::DenylistQuery>>,
     /// Active progressive downloads, keyed by address. At most one feeder
     /// task runs per address; concurrent requests share the same entry.
-    /// Wired to the media HTTP server in task 4.
-    #[allow(dead_code)]
+    /// The media HTTP server resolves its stream from this registry via
+    /// `get_or_start_stream`.
     pub streams: Arc<StdMutex<HashMap<Address, Arc<crate::streaming_media::StreamingMedia>>>>,
 }
 
@@ -148,7 +148,6 @@ impl AppState {
     /// new [`StreamingMedia`], and spawn exactly one feeder task. Concurrent
     /// callers that race a miss both see the same `Arc` because the winning
     /// insert happens under the registry lock before the feeder is spawned.
-    #[allow(dead_code)]
     pub async fn get_or_start_stream(
         &self,
         addr: Address,
