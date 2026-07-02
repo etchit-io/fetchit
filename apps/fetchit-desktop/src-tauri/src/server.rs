@@ -122,17 +122,16 @@ async fn serve(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
         return serve_complete(&mut stream, method, range.as_deref(), &bytes).await;
     }
 
-    // Progressive path.
-    let sm = match state.get_or_start_stream(addr).await {
-        Ok(sm) => sm,
+    // Progressive path. `get_or_start_stream` returns the stream and an
+    // `InterestGuard` registered before the feeder can run, so the feeder
+    // never sees interest == 0 between spawn and this connection taking hold.
+    let (sm, _guard) = match state.get_or_start_stream(addr).await {
+        Ok(pair) => pair,
         Err(msg) => {
             diag!("[media-srv] stream-failed: {msg}");
             return reply_simple(&mut stream, 502, "Bad Gateway", &msg).await;
         }
     };
-    // Hold interest for this connection's lifetime. The guard's Drop impl
-    // decrements the counter; when it hits zero the feeder pump stops.
-    let _guard = sm.add_interest();
     serve_progressive(&mut stream, method, range.as_deref(), &sm).await
 }
 

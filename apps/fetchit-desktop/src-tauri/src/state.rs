@@ -144,14 +144,24 @@ impl AppState {
         }
     }
 
-    /// Return the existing stream for `addr`, or resolve its size, allocate a
-    /// new [`StreamingMedia`], and spawn exactly one feeder task. Concurrent
-    /// callers that race a miss both see the same `Arc` because the winning
-    /// insert happens under the registry lock before the feeder is spawned.
+    /// Return the existing stream for `addr` (or start a new one), along with
+    /// an [`crate::streaming_media::InterestGuard`] that keeps the feeder
+    /// alive for the caller's lifetime.
+    ///
+    /// Interest is registered before the feeder task is allowed to run,
+    /// closing the window where `should_abort` could see zero interest and
+    /// cancel an in-progress download that a caller is about to consume.
     pub async fn get_or_start_stream(
         &self,
         addr: Address,
-    ) -> Result<Arc<crate::streaming_media::StreamingMedia>, String> {
+    ) -> Result<
+        (
+            Arc<crate::streaming_media::StreamingMedia>,
+            crate::streaming_media::InterestGuard,
+        ),
+        String,
+    > {
+        // Fast path: attach to an existing stream.
         if let Some(sm) = self
             .streams
             .lock()
@@ -159,7 +169,8 @@ impl AppState {
             .get(&addr)
             .cloned()
         {
-            return Ok(sm);
+            let guard = sm.add_interest();
+            return Ok((sm, guard));
         }
         let client = crate::state::ensure_client(self, &self.effective_peers()).await?;
         let total = client.content_size(&addr).await.map_err(|e| e.to_string())?;
@@ -172,13 +183,18 @@ impl AppState {
         #[cfg(feature = "e2e")]
         let backing = crate::streaming_media::StreamBacking::Memory(StdMutex::new(Vec::new()));
         let sm = Arc::new(crate::streaming_media::StreamingMedia::new(total, backing));
-        {
+        let guard = {
             let mut map = self.streams.lock().map_err(|e| e.to_string())?;
             if let Some(existing) = map.get(&addr).cloned() {
-                return Ok(existing);
+                // Lost the insert race: attach to the winner's stream.
+                let g = existing.add_interest();
+                return Ok((existing, g));
             }
             map.insert(addr, sm.clone());
-        }
+            // Register interest under the map lock so the feeder cannot
+            // observe interest == 0 between insert and spawn.
+            sm.add_interest()
+        };
         let client = Arc::new(client);
         let streams = self.streams.clone();
         let disk_cache = self.disk_cache.clone();
@@ -206,7 +222,7 @@ impl AppState {
                 map.remove(&addr);
             }
         });
-        Ok(sm)
+        Ok((sm, guard))
     }
 
     /// Layered cache lookup: memory hit first; on miss, consult disk and
