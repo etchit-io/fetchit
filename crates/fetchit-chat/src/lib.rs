@@ -24,6 +24,7 @@ pub mod denylist;
 pub mod discovery;
 pub mod error;
 pub mod events;
+pub mod fabric;
 pub mod fedi_identity;
 pub mod fedi_resolutions;
 pub mod fedi_vault;
