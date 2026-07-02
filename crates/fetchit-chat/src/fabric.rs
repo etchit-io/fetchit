@@ -25,6 +25,9 @@
 
 use crate::error::ChatError;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use fetchit_relay_proto::pair_record::{
+    pair_record_v4_signing_input, DeviceEntryV4, DeviceSigningView, PairRecordV4, RECORD_VERSION_V4,
+};
 use fetchit_relay_proto::{derive_agent_id, derive_user_id};
 use hkdf::Hkdf;
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature, MlDsaVariant};
@@ -306,6 +309,78 @@ pub fn verify_agent_certificate(
     Ok(())
 }
 
+/// Mint a signed [`PairRecordV4`]: the account owner's [`UserKeypair`]
+/// signs the canonical layout over the account user id and the device
+/// list. Each device's raw pubkeys and cert are decoded from its wire
+/// entry to build the signing input; the returned record is what gets
+/// published to the relay and pinned by contacts.
+///
+/// `devices` are the wire entries, one per device, each already carrying
+/// its `cert_b64` (base64 of the serialized [`AgentCertificate`], e.g. from
+/// [`crate::device_cert::ensure_device_certificate`]), `ml_dsa`/`kem`
+/// fields consistent with that cert, and its `primary` flag (exactly one
+/// true). The structural rules (device cap, one primary, relay validity)
+/// are enforced by [`pair_record_v4_signing_input`] before signing.
+///
+/// # Errors
+/// [`ChatError`] if a device field is malformed base64, the device list
+/// fails the v4 structural rules, or the ML-DSA sign fails.
+pub fn mint_pair_record_v4(
+    user: &UserKeypair,
+    revision: u64,
+    issued_at_ms: u64,
+    devices: &[DeviceEntryV4],
+) -> Result<PairRecordV4, ChatError> {
+    // Decode each device's raw bytes for the signing view.
+    let mut decoded = Vec::with_capacity(devices.len());
+    for d in devices {
+        let ml = B64
+            .decode(&d.ml_dsa_pubkey_b64)
+            .map_err(|e| ChatError::Invalid(format!("device ml_dsa b64: {e}")))?;
+        let kem = B64
+            .decode(&d.kem_pubkey_b64)
+            .map_err(|e| ChatError::Invalid(format!("device kem b64: {e}")))?;
+        let cert = B64
+            .decode(&d.cert_b64)
+            .map_err(|e| ChatError::Invalid(format!("device cert b64: {e}")))?;
+        decoded.push((ml, kem, cert));
+    }
+    let views: Vec<DeviceSigningView<'_>> = devices
+        .iter()
+        .zip(decoded.iter())
+        .map(|(d, (ml, kem, cert))| DeviceSigningView {
+            agent_id_hex: &d.agent_id_hex,
+            ml_dsa_pubkey: ml,
+            kem_pubkey: kem,
+            relays: &d.advertised_relays,
+            cert,
+            added_at_ms: d.added_at_ms,
+            primary: d.primary,
+        })
+        .collect();
+
+    let user_id_hex = user.user_id_hex();
+    let input = pair_record_v4_signing_input(
+        &user_id_hex,
+        user.public_key_bytes(),
+        revision,
+        issued_at_ms,
+        &views,
+    )
+    .map_err(|e| ChatError::Invalid(format!("v4 signing input: {e}")))?;
+    let sig = user.sign(&input)?;
+
+    Ok(PairRecordV4 {
+        record_version: RECORD_VERSION_V4,
+        user_id_hex,
+        user_ml_dsa_pubkey_b64: B64.encode(user.public_key_bytes()),
+        revision,
+        issued_at_ms,
+        devices: devices.to_vec(),
+        user_signature_b64: B64.encode(sig),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -430,5 +505,28 @@ mod tests {
         // id: the re-root never disturbs the device identity.
         let agent_again = MlDsaSigner::from_seed(&root);
         assert_eq!(hex::encode(agent_again.agent_id()), agent_id_before);
+    }
+
+    #[test]
+    fn mint_pair_record_v4_produces_a_verifiable_record() {
+        use fetchit_relay_proto::pair_record::verify_pair_record_v4;
+        // A bound device + its cert (kem and added_at sourced from the cert
+        // so the record and cert stay consistent).
+        let (user, device_pk, cert) = bound_cert();
+        let device = DeviceEntryV4 {
+            agent_id_hex: cert.agent_id_hex.clone(),
+            ml_dsa_pubkey_b64: B64.encode(&device_pk),
+            kem_pubkey_b64: cert.kem_pubkey_b64.clone(),
+            advertised_relays: vec!["https://relay.example".to_string()],
+            cert_b64: B64.encode(serde_json::to_vec(&cert).unwrap()),
+            added_at_ms: cert.added_at_ms,
+            primary: true,
+        };
+
+        let record = mint_pair_record_v4(&user, 1, 1234, &[device]).unwrap();
+
+        verify_pair_record_v4(&record).unwrap();
+        assert_eq!(record.revision, 1);
+        assert_eq!(record.user_id_hex, user.user_id_hex());
     }
 }
