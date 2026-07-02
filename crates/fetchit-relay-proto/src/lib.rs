@@ -32,7 +32,8 @@ pub use frame::{
     SendFrame, ServerFrame, Subscribe, Throttle, ThrottleReason, WatchPresence,
 };
 pub use identity::{
-    derive_agent_id, AgentId, DedupeKey, GroupId, MachineId, TenantId, AGENT_ID_DOMAIN,
+    derive_agent_id, derive_user_id, AgentId, DedupeKey, GroupId, MachineId, TenantId,
+    AGENT_ID_DOMAIN, USER_ID_DOMAIN, USER_ID_LEN,
 };
 pub use public_post::{PublicPostPayload, FEDIVERSE_BRIDGE_SENDER};
 pub use region::Region;

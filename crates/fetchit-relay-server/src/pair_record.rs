@@ -174,15 +174,16 @@ impl PairRecordHttpError {
     }
 }
 
-/// Map a proto [`PairRecordError`] to an HTTP status. Impersonation — the
-/// claimed id does not derive from the pubkey, or the signature does not
-/// verify — is **403**; malformed fields/URLs are **400**; a backend
-/// crypto fault is **500** (the relay's problem, not the client's).
+/// Map a proto [`PairRecordError`] to an HTTP status. Impersonation (the
+/// claimed agent or user id does not derive from the pubkey, or the
+/// signature does not verify) is **403**; malformed fields/URLs/device
+/// lists are **400**; a backend crypto fault is **500** (the relay's
+/// problem, not the client's).
 pub(crate) fn verify_status(e: &PairRecordError) -> StatusCode {
     match e {
-        PairRecordError::AgentIdMismatch | PairRecordError::SignatureInvalid => {
-            StatusCode::FORBIDDEN
-        }
+        PairRecordError::AgentIdMismatch
+        | PairRecordError::UserIdMismatch
+        | PairRecordError::SignatureInvalid => StatusCode::FORBIDDEN,
         PairRecordError::VerifyBackend(_) => StatusCode::INTERNAL_SERVER_ERROR,
         PairRecordError::EmptyRelays
         | PairRecordError::TooManyRelays { .. }
@@ -190,6 +191,10 @@ pub(crate) fn verify_status(e: &PairRecordError) -> StatusCode {
         | PairRecordError::RelayUrlInvalid
         | PairRecordError::RelayUrlHasCredentials
         | PairRecordError::InvalidAgentIdHex
+        | PairRecordError::InvalidUserIdHex
+        | PairRecordError::EmptyDevices
+        | PairRecordError::TooManyDevices { .. }
+        | PairRecordError::NotExactlyOnePrimary { .. }
         | PairRecordError::Base64(_)
         | PairRecordError::PubkeyParse(_)
         | PairRecordError::SignatureParse(_)
