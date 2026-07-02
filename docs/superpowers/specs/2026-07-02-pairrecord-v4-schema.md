@@ -8,8 +8,9 @@ wire schema Bob's M6 implementation plan references. Status: proposed by Alice
 
 Current wire type (`fetchit_relay_proto::pair_record::PairRecordV1`) is
 single-agent: `{ agent_id_hex, ml_dsa_pubkey_b64, kem_pubkey_b64,
-advertised_relays: Vec<String>, issued_at_ms }`, JCS-canonicalized and signed by
-the agent's ML-DSA-65 key, with `issued_at_ms` as the relay logical-clock
+advertised_relays: Vec<String>, issued_at_ms }`, signed by the agent's ML-DSA-65 key over a frozen
+length-prefixed binary layout (domain separator `fetchit-pair-record-v1`,
+built by `pair_signing_input`), with `issued_at_ms` as the relay logical-clock
 watermark (409 clock-bump retry). v4 keeps that machinery and re-roots the record
 at the user layer.
 
@@ -63,9 +64,10 @@ cert_version)`.
    group admission (device proves it chains to the recorded `user_id`) and fedi
    publish (bridge verifies a publishing device chains to the handle's
    `user_id`). No double-verify on the resolve path.
-5. **Canonicalization + signing** reuse the existing JCS + ML-DSA-65 path;
-   relays normalized to http for signing via the existing
-   `relays_to_http_for_signing`.
+5. **Canonicalization + signing** reuse the length-prefixed ML-DSA-65
+   layout of `pair_signing_input` (NOT JCS) under a new domain separator
+   `fetchit-pair-record-v4`; relay URLs are normalized to http for signing
+   exactly as V1 does. The concrete v4 signing input is specified below.
 6. **Backward compat.** `record_version = 4`; a V1 peer falls back to the v3
    share URI which resolves to the primary device (single-device). The
    `verify_card_extension` strip-list rule applies to any future unsigned slot
@@ -76,6 +78,52 @@ cert_version)`.
    unchanged; the phrase's meaning upgrades from device-signing-key to
    account-root.
 
+## v4 signing input (canonical layout)
+
+`user_signature_b64` is an ML-DSA-65 signature by the user key over the
+byte string below, mirroring `pair_signing_input` (`lp(x)` = `u32_be(len)
+|| bytes`; multi-byte integers big-endian):
+
+```text
+PAIR_RECORD_V4_DOMAIN                 // b"fetchit-pair-record-v4"
+|| lp(user_id_hex)                    // 64 ascii hex bytes
+|| lp(user_ml_dsa_pubkey)             // raw bytes, base64-decoded
+|| u64_be(revision)
+|| u64_be(issued_at_ms)
+|| u32_be(n_devices)
+|| for each device, in listed order:
+     lp(agent_id_hex)
+     || lp(device_ml_dsa_pubkey)      // raw bytes
+     || lp(device_kem_pubkey)         // raw bytes
+     || u32_be(n_relays) || lp(relay_str) * n_relays
+     || u64_be(added_at_ms)
+     || u8(primary ? 1 : 0)
+     || lp(cert bytes)                // base64-decoded cert_b64
+```
+
+Validation mirrors V1: `user_id_hex` is lowercase 64-hex and equals
+`hex(SHA-256(user_ml_dsa_pubkey))`; each device `agent_id_hex` equals
+`hex(derive_agent_id(device_ml_dsa_pubkey))`; relays are 1..=4
+credential-free http/https URLs each <= 256 bytes, normalized to http for
+signing; exactly one device has `primary == true`; and `n_devices` is
+1..=5 (the OQ2 device cap). The device list is signed in its serialized
+order and readers must preserve it. Binding `cert bytes` into the record
+means a tampered or stripped cert invalidates the whole record; the cert
+layout itself (`SIGN_DOMAIN_CERT`) is owned by M6.1 and treated as opaque
+bytes here.
+
+## Addressing
+
+Record identity is `user_id_hex`; anti-rollback (rule 2) is tracked per
+`user_id_hex`, and `issued_at_ms` stays the relay logical-clock
+tiebreaker (the V1 409 clock-bump retry carries over). A v3-only reader
+never parses v4: it resolves the primary device as a projected
+`PairRecordV1` through the existing v3 share-URI path (rule 3). The exact
+relay storage key (under `user_id_hex` versus the primary `agent_id_hex`,
+and whether a projected V1 is also served for bare-agent-id lookups) is an
+M6.2 relay-half detail to settle against the relay-server and share-URI
+code, not fixed here.
+
 ## Consumers
 
 - **DM fanout (section III):** sender resolves the contact's v4 record, encrypts
@@ -85,9 +133,11 @@ cert_version)`.
   pending entries addressed to a device not present in the current revision, so
   a revoked device is not retried forever.
 
-## Open call for Bob
+## Resolved
 
-Naming: the existing wire struct is `PairRecordV1`; sequential versioning would
-make this `PairRecordV2`, but the milestone/spec and the `record_version = 4`
-field say "v4". Alice leans `PairRecordV4` for spec alignment. Pick one for the
-plan.
+Naming: `PairRecordV4` (Bob agreed 2026-07-02), matching the
+milestone/spec and the `record_version = 4` field. It is a new type with
+its own domain separator, not additive fields on V1, matching the
+frozen-layout V1/ForwardingV1 pattern already in `pair_record.rs`. M6.0
+(committed `9b0104d7`) added the unsigned `record_version` selector to V1
+so v4 records can share the transport.
