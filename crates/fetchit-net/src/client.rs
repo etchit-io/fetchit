@@ -195,6 +195,70 @@ impl AutonomiClient {
         let _ = forward.await;
         result.map(|_| ())
     }
+
+    /// Fetch the content at `addr`, streaming decrypted chunks to `sink`
+    /// as they arrive instead of buffering the whole payload in memory
+    /// like [`NetworkClient::fetch`]. Reports coarse [`DownloadProgress`]
+    /// through `on_progress` and returns the total bytes streamed.
+    ///
+    /// Backed by `ant-core`'s `file_download_to_sender`: chunks are
+    /// decrypted and forwarded one at a time, so a large payload never has
+    /// to be fully resident and a consumer — e.g. the desktop media server
+    /// serving progressively — can begin before the download completes.
+    /// The `ant-core` stream carries its own error type; each item is
+    /// mapped to [`fetchit_core::Error::Network`] before reaching `sink`,
+    /// so no `ant-core` type crosses the seam.
+    ///
+    /// # Errors
+    /// [`fetchit_core::Error::Network`] if the data-map fetch or the
+    /// download fails. A mid-stream chunk failure also arrives as an `Err`
+    /// item on `sink`.
+    pub async fn fetch_to_sink(
+        &self,
+        addr: &Address,
+        sink: tokio::sync::mpsc::Sender<CoreResult<Bytes>>,
+        on_progress: impl Fn(DownloadProgress) + Send + 'static,
+    ) -> CoreResult<u64> {
+        let key = *addr.as_bytes();
+        let data_map = self
+            .inner
+            .data_map_fetch(&key)
+            .await
+            .map_err(|e| net_err(format!("data_map_fetch: {e}")))?;
+
+        // Coarse progress fan-out (same pattern as `fetch_with_progress`).
+        let (ptx, mut prx) = tokio::sync::mpsc::channel::<DownloadEvent>(PROGRESS_CHANNEL);
+        let progress_task = tokio::spawn(async move {
+            while let Some(ev) = prx.recv().await {
+                on_progress(download_progress(&ev));
+            }
+        });
+
+        // `ant-core` streams `Result<Bytes, ant_core::data::Error>`; adapt
+        // each item onto the fetchit-typed `sink` so the upstream error
+        // type never leaks across the crate boundary.
+        let (atx, mut arx) =
+            tokio::sync::mpsc::channel::<Result<Bytes, ant_core::data::Error>>(PROGRESS_CHANNEL);
+        let adapt_task = tokio::spawn(async move {
+            while let Some(item) = arx.recv().await {
+                let mapped = item.map_err(|e| net_err(format!("download stream: {e}")));
+                if sink.send(mapped).await.is_err() {
+                    break; // receiver dropped; stop forwarding
+                }
+            }
+        });
+
+        let result = self
+            .inner
+            .file_download_to_sender(&data_map, atx, Some(ptx))
+            .await
+            .map_err(|e| net_err(format!("file_download_to_sender: {e}")));
+        // `file_download_to_sender` owns `atx`/`ptx` and drops them on
+        // return, closing both channels so the tasks drain and exit.
+        let _ = adapt_task.await;
+        let _ = progress_task.await;
+        result
+    }
 }
 
 #[async_trait]
