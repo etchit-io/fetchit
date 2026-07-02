@@ -17,6 +17,7 @@ mod rendition;
 mod server;
 mod settings;
 mod state;
+mod streaming_media;
 mod x0xd_supervisor;
 
 use std::sync::atomic::{AtomicBool, Ordering};
