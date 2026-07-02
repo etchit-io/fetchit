@@ -20,7 +20,7 @@ use crate::signature::{MlDsa65Verifier, SignatureVerifier};
 use crate::transit::TransitBuffer;
 use crate::ws::ws_handler;
 use anyhow::Result;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fetchit_relay_proto::{AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Region};
@@ -235,7 +235,12 @@ impl Server {
             .route("/v1/pair-record/:agent_id", get(get_pair_record))
             .route("/v1/pair-record-v4", post(post_pair_record_v4))
             .route("/v1/pair-record-v4/:user_id", get(get_pair_record_v4))
-            .route("/v1/blob/:token", post(post_blob).get(get_blob))
+            .route(
+                "/v1/blob/:token",
+                post(post_blob)
+                    .get(get_blob)
+                    .layer(DefaultBodyLimit::max(crate::blob::MAX_BLOB_BYTES)),
+            )
             .route("/v1/forwarding", post(post_forwarding))
             .route("/v1/forwarding/:agent_id", get(get_forwarding))
             .with_state(state.clone());
@@ -345,6 +350,10 @@ fn spawn_sweeper(state: Arc<ServerState>) {
             // ~30-day TTL. RAM-only, no metric — a forwarding record is a
             // transitional aid, not a tracked steady-state resource.
             let _ = state.forwarding.sweep_expired(crate::forwarding::now_ms());
+            // Reclaim expired sealed blobs whose token was never GET, so a
+            // write-only token flood cannot grow RAM unbounded (lazy
+            // expiry-on-read alone would never evict a never-read blob).
+            let _ = state.blobs.sweep_expired(crate::blob::now_ms());
             let buffered = i64::try_from(state.transit.len()).unwrap_or(i64::MAX);
             state.metrics.set_transit_buffer_envelopes(buffered);
             // Count every TTL-evicted envelope into the dropped-by-TTL

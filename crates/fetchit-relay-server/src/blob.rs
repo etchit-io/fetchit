@@ -91,6 +91,18 @@ impl BlobStore {
         None
     }
 
+    /// Evict every blob past its expiry at `now_ms`; returns the number
+    /// evicted (for the sweeper's logging). The background sweeper drives
+    /// this so a blob whose token is never GET is still reclaimed at TTL:
+    /// lazy-expiry-on-read alone would leak a write-only token flood into
+    /// unbounded RAM.
+    #[must_use]
+    pub fn sweep_expired(&self, now_ms: u64) -> usize {
+        let before = self.by_token.len();
+        self.by_token.retain(|_, b| now_ms < b.expiry_ms);
+        before.saturating_sub(self.by_token.len())
+    }
+
     /// Count of stored blobs. Test-only.
     #[must_use]
     #[allow(dead_code)]
@@ -107,7 +119,7 @@ impl BlobStore {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -207,6 +219,18 @@ mod tests {
         store.put("token-abc-0123456".to_string(), vec![1], 1_000);
         store.put("token-abc-0123456".to_string(), vec![2], 2_000);
         assert_eq!(store.get("token-abc-0123456", 1_500), Some(vec![2]));
+    }
+
+    #[test]
+    fn sweep_evicts_only_expired_without_a_read() {
+        let store = BlobStore::new();
+        store.put("live-token-0123456".to_string(), vec![1], 5_000);
+        store.put("dead-token-0123456".to_string(), vec![2], 1_000);
+        // A never-GET'd expired blob is reclaimed by the sweeper (the
+        // write-only-flood leak this guards against); the live one stays.
+        assert_eq!(store.sweep_expired(2_000), 1);
+        assert!(store.get("dead-token-0123456", 2_000).is_none());
+        assert_eq!(store.get("live-token-0123456", 2_000), Some(vec![1]));
     }
 
     #[test]
