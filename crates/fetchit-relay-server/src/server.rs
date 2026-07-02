@@ -1,6 +1,7 @@
 //! Top-level [`Server`] type — wires state, routes, and the background sweeper.
 
 use crate::auth::AuthService;
+use crate::blob::{get_blob, post_blob, BlobStore};
 use crate::capability::CapabilityResolver;
 use crate::config::ServerConfig;
 use crate::forwarding::{get_forwarding, post_forwarding, ForwardingIndex};
@@ -53,6 +54,10 @@ pub struct ServerState {
     /// In-RAM pair-record index (`agent_id` → latest signed reachability
     /// pointer). Reachability V1 / TB1.
     pub pair_records: Arc<PairRecordIndex>,
+    /// In-RAM sealed-blob store (`token` → opaque ciphertext, TTL'd) for
+    /// pointer-URI transports: link-device enrollment offers and group
+    /// invites carry a token, the sealed payload rides here.
+    pub blobs: Arc<BlobStore>,
     /// In-RAM forwarding index (`agent_id` → signed relay redirect), TTL
     /// swept. Reachability V1 / TB2.
     pub forwarding: Arc<ForwardingIndex>,
@@ -208,6 +213,7 @@ impl Server {
             metrics,
             profiles: ProfileIndex::new(),
             pair_records: PairRecordIndex::new(),
+            blobs: BlobStore::new(),
             forwarding: ForwardingIndex::new(),
             config: self.config,
             #[cfg(feature = "fediverse-inbox")]
@@ -229,6 +235,7 @@ impl Server {
             .route("/v1/pair-record/:agent_id", get(get_pair_record))
             .route("/v1/pair-record-v4", post(post_pair_record_v4))
             .route("/v1/pair-record-v4/:user_id", get(get_pair_record_v4))
+            .route("/v1/blob/:token", post(post_blob).get(get_blob))
             .route("/v1/forwarding", post(post_forwarding))
             .route("/v1/forwarding/:agent_id", get(get_forwarding))
             .with_state(state.clone());

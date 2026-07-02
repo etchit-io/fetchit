@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod blob;
 pub mod capability;
 pub mod config;
 pub mod error;
