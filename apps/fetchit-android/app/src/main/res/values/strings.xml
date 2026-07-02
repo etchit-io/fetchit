@@ -212,9 +212,13 @@
          and teaches the next step. -->
     <string name="chat_onboard_title">Welcome to LIT Chat</string>
     <string name="chat_onboard_body">No conversations yet. Add someone you know — or get your @handle and browse the fediverse.</string>
+    <!-- Post-mint variants: once a handle exists, "get your @handle" would be
+         a stale invite, so the copy flips to the destination. -->
+    <string name="chat_onboard_body_minted">No conversations yet. Add someone you know — or see what people are posting.</string>
     <string name="chat_onboard_add_person">Add your first person</string>
     <string name="chat_onboard_create_group">Create a group</string>
     <string name="chat_onboard_fediverse">Get your @handle</string>
+    <string name="chat_onboard_fediverse_minted">See public posts</string>
     <string name="chat_onboard_mark_desc">LIT Chat</string>
     <!-- Own-identity header badge content-description (mirrors desktop's
          "Share my code" badge label): the badge shows the user by name +
@@ -253,6 +257,13 @@
     <string name="chat_lookup_public_only_body">we found this account, but can\'t confirm it\'s really them yet — so you can\'t message them privately here.</string>
     <string name="chat_lookup_not_found_title">no one found</string>
     <string name="chat_lookup_not_found_body">we couldn\'t find anyone at %1$s. double-check the spelling?</string>
+    <!-- Feed compose (public posting) + hub search. The hint names the handle
+         and says "publicly" so the public/non-PQ contract is explicit at the
+         moment of typing. -->
+    <string name="feed_compose_hint">post publicly as @%1$s</string>
+    <string name="feed_posted">posted — everyone can see it</string>
+    <string name="feed_post_failed">couldn\'t post — try again in a moment</string>
+    <string name="feed_find_people_desc">find people</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
     <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>

@@ -9,6 +9,7 @@ import uniffi.fetchit_ffi.GroupSendReceiptFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.PublishReportFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
 interface ChatGateway {
@@ -103,6 +104,15 @@ interface ChatGateway {
     suspend fun fediLookup(handle: String): LookupFfi
 
     /**
+     * Publish [bodyMd] publicly as the minted @handle. The engine resolves
+     * `@user@host` mentions, runs denylist gating, and delivers best-effort;
+     * the report lists accepted + failed inboxes. Throws when no handle is
+     * minted yet — gate the compose affordance on
+     * [fediActorStatus] instead of letting that surface.
+     */
+    suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -180,6 +190,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override fun fediActorStatus(): String? = inner.fediActorStatus()
     override suspend fun fediMint(handle: String): MintOutcomeFfi = inner.fediMint(handle)
     override suspend fun fediLookup(handle: String): LookupFfi = inner.fediLookup(handle)
+    override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
+        inner.fediPublish(bodyMd, replyToActorUrl)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

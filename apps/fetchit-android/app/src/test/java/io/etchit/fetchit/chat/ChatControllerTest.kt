@@ -15,6 +15,7 @@ import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
+import uniffi.fetchit_ffi.PublishReportFfi
 
 /** Regex-based HTML stripper used in place of [android.text.Html.fromHtml] so these tests run on the plain JVM. */
 private fun stripHtml(html: String): String =
@@ -63,6 +64,7 @@ class FakeGateway : ChatGateway {
     val lookedUpHandles = mutableListOf<String>()
     var lookupResult: LookupFfi =
         LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
+    val publishedPosts = mutableListOf<Pair<String, String?>>()
 
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
@@ -99,6 +101,10 @@ class FakeGateway : ChatGateway {
     override suspend fun fediLookup(handle: String): LookupFfi {
         lookedUpHandles += handle
         return lookupResult
+    }
+    override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi {
+        publishedPosts += (bodyMd to replyToActorUrl)
+        return PublishReportFfi(delivered = emptyList(), failed = emptyList())
     }
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
@@ -449,6 +455,8 @@ class ChatControllerTest {
                 MintOutcomeFfi("", true, null)
             override suspend fun fediLookup(handle: String): LookupFfi =
                 LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
+            override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
+                PublishReportFfi(delivered = emptyList(), failed = emptyList())
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()

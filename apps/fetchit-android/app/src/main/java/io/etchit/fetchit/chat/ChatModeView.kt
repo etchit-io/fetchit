@@ -220,6 +220,10 @@ class ChatModeView(
                         slot.removeAllViews()
                         slot.addView(listView)
                     }
+                    // State the cached view can't know changed elsewhere: the
+                    // fediverse onboarding copy flips once a handle is minted
+                    // (which happens on the feed screen).
+                    listView?.let { bindOnboardFediCopy(it) }
                 }
             }
             is Screen.Thread -> {
@@ -354,11 +358,30 @@ class ChatModeView(
         // empty state, not only in the pinned list row — which the empty state
         // hides along with the rest of the (empty) contact list.
         fediverseBtn.setOnClickListener { showScreen(Screen.Feed, pushToStack = true) }
+        bindOnboardFediCopy(view)
 
         // FAB: a popup with the list-level actions -- add a contact, start a
         // new group, join one from an invite link, or scan a code (the scan
         // affordance re-homed here now the identity badge owns share-my-code).
         addBtn.setOnClickListener { anchor -> showListActionsMenu(anchor) }
+    }
+
+    /**
+     * Point the empty-state's fediverse copy at the user's actual state:
+     * before a handle exists the button invites ("Get your @handle"); after,
+     * that invite would be a stale lie, so it flips to the destination ("See
+     * public posts") and the body drops the get-a-handle nudge. Re-run on
+     * every return to the list — minting happens on the feed screen this very
+     * button leads to, and the list view is cached, not re-inflated.
+     */
+    private fun bindOnboardFediCopy(view: View) {
+        val minted = controller.fediActorStatus() != null
+        view.findViewById<TextView>(R.id.onboardFediverseButton)?.setText(
+            if (minted) R.string.chat_onboard_fediverse_minted else R.string.chat_onboard_fediverse,
+        )
+        view.findViewById<TextView>(R.id.onboardBodyText)?.setText(
+            if (minted) R.string.chat_onboard_body_minted else R.string.chat_onboard_body,
+        )
     }
 
     /**
@@ -511,8 +534,11 @@ class ChatModeView(
      * Header subtitle on the fediverse hub: the user's `@handle@etchit.io` when
      * minted (ash), else a tappable "create your @handle" prompt (copper) that
      * opens the opt-in mint dialog and re-renders itself on a successful mint.
+     * [onMinted] fires after a successful mint so the caller can reveal the
+     * affordances a handle unlocks (the feed's compose row) without leaving
+     * the screen.
      */
-    private fun renderFediHubHeader(shortId: TextView) {
+    private fun renderFediHubHeader(shortId: TextView, onMinted: () -> Unit = {}) {
         val handle = controller.fediActorStatus()
         if (handle != null) {
             shortId.text = context.getString(R.string.fedi_hub_handle, handle)
@@ -522,7 +548,12 @@ class ChatModeView(
         } else {
             shortId.text = context.getString(R.string.fedi_hub_join)
             shortId.setTextColor(themeColor(R.attr.fetchitCopper))
-            shortId.setOnClickListener { showFediMintDialog { renderFediHubHeader(shortId) } }
+            shortId.setOnClickListener {
+                showFediMintDialog {
+                    renderFediHubHeader(shortId, onMinted)
+                    onMinted()
+                }
+            }
         }
     }
 
@@ -1476,11 +1507,18 @@ class ChatModeView(
 
         view.findViewById<TextView>(R.id.threadPeerName).text =
             context.getString(R.string.chat_feed_title)
-        renderFediHubHeader(view.findViewById(R.id.threadPeerShortId))
+        // The compose row appears the moment a handle exists — including right
+        // after minting from this screen's own header prompt.
+        renderFediHubHeader(view.findViewById(R.id.threadPeerShortId)) { bindFeedCompose(view) }
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
-        // Feed is read-only — hide the send row and the (group-only) members button.
-        view.findViewById<View>(R.id.threadSendRow).visibility = View.GONE
-        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
+        bindFeedCompose(view)
+        // The (group-only) members-button slot becomes "find people" here: the
+        // same one-smart-field dialog as add-someone, so the hub can search
+        // @names without a trip back to the chat list.
+        val findBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
+        findBtn.visibility = View.VISIBLE
+        findBtn.contentDescription = context.getString(R.string.feed_find_people_desc)
+        findBtn.setOnClickListener { showAddContactDialog() }
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
@@ -1495,6 +1533,56 @@ class ChatModeView(
                 adapter.submitList(rows)
                 // Scroll only when new posts arrive, not on content-only updates.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+            }
+        }
+    }
+
+    /**
+     * Wire the feed's compose row. Posting is public and needs a minted
+     * @handle: with one, the send row appears with a "post publicly as @name"
+     * hint (the public/non-PQ contract stated at the moment of typing) and
+     * sends via [ChatGateway.fediPublish]; without one the row stays hidden —
+     * the header carries the create-your-@handle prompt, and a successful mint
+     * re-runs this binder so the row appears in place. A published post is
+     * echoed into the local feed immediately (delivery to other servers is
+     * best-effort and quiet); failure restores the draft with a warm note.
+     */
+    private fun bindFeedCompose(view: View) {
+        val sendRow = view.findViewById<View>(R.id.threadSendRow)
+        val handle = controller.fediActorStatus()
+        if (handle == null) {
+            sendRow.visibility = View.GONE
+            return
+        }
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        sendRow.visibility = View.VISIBLE
+        messageInput.hint = context.getString(R.string.feed_compose_hint, handle)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.setText("")
+            lifecycleScope.launch {
+                val gw = runCatching { connectWithFeedback() }.getOrElse {
+                    if (screenStack.lastOrNull() == Screen.Feed) messageInput.setText(body)
+                    return@launch
+                }
+                runCatching { gw.fediPublish(body, null) }
+                    .onSuccess {
+                        controller.feed.append(
+                            FeedPost(
+                                actorUrl = "@$handle@$HOME_INSTANCE",
+                                body = body,
+                                receivedAtMs = System.currentTimeMillis(),
+                            ),
+                        )
+                        snackbar(context.getString(R.string.feed_posted))
+                    }
+                    .onFailure { e ->
+                        if (screenStack.lastOrNull() == Screen.Feed) messageInput.setText(body)
+                        snackbar(userFacingError(e, "fediPublish", R.string.feed_post_failed))
+                    }
             }
         }
     }
