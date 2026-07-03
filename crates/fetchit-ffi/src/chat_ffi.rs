@@ -517,6 +517,34 @@ pub struct LookupFfi {
     pub verify_failure: Option<String>,
 }
 
+/// M6.4 new-device link offer: the QR pointer to encode plus the confirm
+/// code to show beside it plus the absolute expiry. Returned by
+/// [`ChatClient::create_link_offer`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CreatedLinkOfferFfi {
+    /// `fetchit://link/v1/…` pointer to render as the QR the new device shows.
+    pub uri: String,
+    /// Human-comparable confirm code (`XXXX-XXXX-XXXX`) shown beside the QR.
+    pub short_code: String,
+    /// Absolute expiry, milliseconds since Unix epoch.
+    pub exp_ms: u64,
+}
+
+/// M6.4 confirm-screen preview the existing device shows after scanning a
+/// link QR: the new device's agent id, the code to compare against the new
+/// device's screen, and whether the offer already expired. Returned by
+/// [`ChatClient::preview_link_offer`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LinkOfferPreviewFfi {
+    /// The new device's agent id (hex).
+    pub agent_id_hex: String,
+    /// Human-comparable confirm code (`XXXX-XXXX-XXXX`) to compare against the
+    /// new device's screen before confirming.
+    pub short_code: String,
+    /// True when the offer is past its expiry at the caller's clock.
+    pub expired: bool,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -835,6 +863,48 @@ impl ChatClient {
             .import_pair_uri(uri.trim())
             .await
             .map_err(ChatFfiError::from)
+    }
+
+    /// M6.4 new-device side: mint a link-device offer for THIS device and
+    /// publish it to the relay blob store, returning the QR pointer to encode
+    /// plus the short-code to show beside it. `ttl_secs` bounds the enrollment
+    /// window — the offer self-expires and the existing device rejects a stale
+    /// one on confirm.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] in REST-only mode (no chat state) or on a seal
+    /// failure; [`ChatFfiError::Network`] when no relay accepts the offer.
+    pub async fn create_link_offer(
+        &self,
+        ttl_secs: u64,
+    ) -> Result<CreatedLinkOfferFfi, ChatFfiError> {
+        let offer = self.inner.create_link_offer(ttl_secs).await?;
+        Ok(CreatedLinkOfferFfi {
+            uri: offer.uri,
+            short_code: offer.short_code,
+            exp_ms: offer.exp_ms,
+        })
+    }
+
+    /// M6.4 existing-device side: fetch the offer a scanned `uri` points at and
+    /// return the confirm-screen preview (the new device's agent id, the
+    /// short-code to compare, and freshness). The full offer is validated
+    /// during the fetch; mint the certificate only after the human confirms the
+    /// short-code matches the new device's screen.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] on a malformed URI or offer;
+    /// [`ChatFfiError::Network`] when no relay serves the blob.
+    pub async fn preview_link_offer(
+        &self,
+        uri: String,
+    ) -> Result<LinkOfferPreviewFfi, ChatFfiError> {
+        let preview = self.inner.preview_link_offer(uri.trim()).await?;
+        Ok(LinkOfferPreviewFfi {
+            agent_id_hex: preview.agent_id_hex,
+            short_code: preview.short_code,
+            expired: preview.expired,
+        })
     }
 
     /// Send a direct message to `to_agent_id_hex`.
