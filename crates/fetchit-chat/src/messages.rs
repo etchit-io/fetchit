@@ -690,6 +690,27 @@ fn fanout_targets_from_record(
     }
 }
 
+/// The relay's HTTP(S) REST base (scheme + authority, path reset to `/`) for a
+/// pair-record GET, derived from a rendezvous relay URL. Rendezvous hints carry
+/// the WebSocket URL (e.g. `wss://relay.example/v1/ws`), but the pair-record
+/// REST route lives under the origin -- [`crate::pair_record_v4::resolve_pair_record_v4`]
+/// joins `v1/pair-record-v4` onto this base -- so map `wss -> https` /
+/// `ws -> http` and strip the WS path. `None` for an unparseable URL or a
+/// scheme that is not a recognized relay transport.
+fn relay_rest_base(rendezvous_url: &str) -> Option<url::Url> {
+    let mut url = url::Url::parse(rendezvous_url).ok()?;
+    let http_scheme = match url.scheme() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        _ => return None,
+    };
+    url.set_scheme(http_scheme).ok()?;
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url)
+}
+
 impl<'a> Endpoint<'a> {
     /// Pre-M3 8-arg constructor, retained for the existing test suite
     /// (which builds endpoints without a denylist consumer).
@@ -917,11 +938,11 @@ impl<'a> Endpoint<'a> {
 
         // M6.3 fanout: seal one copy per listed device of the recipient and
         // deliver to each device-agent, sharing `message_id`. `fanout_targets`
-        // returns just `[to]` until `resolve_pair_record_v4` is wired in, so
-        // today this is exactly the historical single-device send. History is
-        // persisted ONCE (the primary/first conversation) so the sender keeps a
-        // single thread regardless of the recipient's device count.
-        let targets = self.fanout_targets(to);
+        // resolves the recipient's linked-device list (a pre-M6 contact, or any
+        // resolve miss, stays single-device). History is persisted ONCE (the
+        // primary/first conversation) so the sender keeps a single thread
+        // regardless of the recipient's device count.
+        let targets = self.fanout_targets(to).await;
         let mut primary_conv: Option<Conversation> = None;
         for target in &targets {
             let conv = match registry.find_dm_with(&target.0).await? {
@@ -988,16 +1009,63 @@ impl<'a> Endpoint<'a> {
     }
 
     /// M6.3 DM fanout: the recipient device-agents a DM is delivered to.
-    /// Delegates to [`fanout_targets_from_record`], which is already the real
-    /// derivation (all listed devices, else `[to]`); passes `None` today so this
-    /// is the historical single-device send. Wiring the recipient's device list
-    /// is a two-liner once `contact_user_id_hex` (the contact's `user_id`) and
-    /// `resolve_pair_record_v4` land: resolve the record, pass `Some(&record)`.
-    // `&self` is unused today but load-bearing once resolve_pair_record_v4 is
-    // wired in (it needs the vault dir + relay + http off `self`).
-    #[allow(clippy::unused_self)]
-    fn fanout_targets(&self, to: &AgentId) -> Vec<AgentId> {
-        fanout_targets_from_record(None, to)
+    ///
+    /// For a contact whose x0x card carried a `user_id` (an M6 account),
+    /// resolves their signed device list from the contact's OWN advertised relay
+    /// -- their [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4)
+    /// lives on their relay, and relays are per-relay RAM so ours may not have
+    /// it -- and fans out to every listed device via
+    /// [`fanout_targets_from_record`]. Every miss (a pre-M6 contact, no relay
+    /// configured, a resolve failure) falls back to the single conversation
+    /// agent `to`. Resolve degrades to the cached record on a relay blip, so a
+    /// transient relay problem never shrinks the fanout or fails the send.
+    ///
+    /// Loads the OLD cached record BEFORE resolving (which overwrites the cache)
+    /// so a newer revision that REVOKED a device lets us cancel that device's
+    /// pending outbox sends -- resolve-first would compare a record against
+    /// itself and never drop, leaking queued messages to a removed device.
+    async fn fanout_targets(&self, to: &AgentId) -> Vec<AgentId> {
+        // Only M6 contacts (whose imported card carried an x0x user_id) have a
+        // device fabric to resolve; everything else is single-device.
+        let Some(layout) = self.layout else {
+            return vec![to.clone()];
+        };
+        let Ok(Some(user_id_hex)) = contact_user_id_hex(layout, &to.0) else {
+            return vec![to.clone()];
+        };
+        // Resolve from the contact's advertised relay, falling back to our
+        // primary; with no relay at all there is nothing to resolve against.
+        let Some(primary) = self.primary_relay_url.read().await.clone() else {
+            return vec![to.clone()];
+        };
+        let relay = StoredContactCard::resolve_recipient_hints_or_fallback(layout, &to.0, &primary)
+            .ok()
+            .and_then(|h| h.relays.into_iter().next())
+            .and_then(|r| relay_rest_base(&r));
+        let Some(relay) = relay else {
+            return vec![to.clone()];
+        };
+        let data_dir = &layout.root;
+        let http = crate::relay_http::guarded_client();
+        // OLD record first (resolve overwrites the cache); then resolve.
+        let old = crate::pair_record_v4::load_contact_pair_record_v4(data_dir, &user_id_hex)
+            .ok()
+            .flatten();
+        let new =
+            crate::pair_record_v4::resolve_pair_record_v4(data_dir, &user_id_hex, &relay, &http)
+                .await
+                .ok()
+                .flatten();
+        // Cancel pending outbox sends to any device the newer revision revoked.
+        if let (Some(old), Some(new)) = (old.as_ref(), new.as_ref()) {
+            let removed = crate::pair_record_v4::removed_device_agents(old, new);
+            if !removed.is_empty() {
+                if let Some(sink) = &self.outbox {
+                    sink.store.lock().await.drop_bubbles_for_peers(&removed);
+                }
+            }
+        }
+        fanout_targets_from_record(new.as_ref(), to)
     }
 
     async fn bootstrap_conversation(
@@ -2661,6 +2729,141 @@ mod tests {
         assert_eq!(
             fanout_targets_from_record(Some(&record(vec![])), &to),
             vec![to.clone()]
+        );
+    }
+
+    #[test]
+    fn relay_rest_base_maps_ws_scheme_and_strips_to_origin() {
+        // Rendezvous hints carry the wss WS URL; the pair-record GET needs the
+        // https REST origin.
+        assert_eq!(
+            relay_rest_base("wss://relay.example/v1/ws")
+                .unwrap()
+                .as_str(),
+            "https://relay.example/"
+        );
+        assert_eq!(
+            relay_rest_base("ws://127.0.0.1:8088/v1/ws")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:8088/"
+        );
+        // Already-http(s) input: scheme kept, path/query stripped to origin.
+        assert_eq!(
+            relay_rest_base("https://r.example/v1/ws?x=1")
+                .unwrap()
+                .as_str(),
+            "https://r.example/"
+        );
+        assert!(relay_rest_base("ftp://r.example/").is_none());
+        assert!(relay_rest_base("not a url").is_none());
+    }
+
+    /// Minimal layout-only endpoint for the `fanout_targets` resolve tests --
+    /// it touches only `layout` + `primary_relay_url`, not the transport.
+    fn fanout_endpoint<'a>(
+        http: &'a Http,
+        router: &'a Router,
+        layout: &'a StoreLayout,
+    ) -> Endpoint<'a> {
+        Endpoint::new_with_denylist(
+            http,
+            router,
+            None,
+            None,
+            None,
+            Some(layout),
+            [0u8; 32],
+            None,
+            None,
+            primary_cell(Some("wss://127.0.0.1:9/v1/ws")),
+            neg_cache(),
+            group_kinds_cache(),
+        )
+    }
+
+    #[tokio::test]
+    async fn fanout_targets_is_single_device_for_a_pre_m6_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let to = AgentId("ab".repeat(32));
+        // A contact whose card carries no x0x user_id has no device fabric.
+        StoredContactCard {
+            agent_id_hex: to.0.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: None,
+        }
+        .save(&layout)
+        .unwrap();
+        let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = fanout_endpoint(&http, &router, &layout);
+        assert_eq!(endpoint.fanout_targets(&to).await, vec![to.clone()]);
+    }
+
+    #[tokio::test]
+    async fn fanout_targets_reaches_every_device_of_an_m6_contact() {
+        use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let to = AgentId("ab".repeat(32));
+        let user_id = "cd".repeat(32);
+        // M6 contact: card carries the x0x user_id + a loopback relay, so
+        // resolve's GET is refused instantly and it falls back to the cached
+        // record seeded below (no relay server needed).
+        StoredContactCard {
+            agent_id_hex: to.0.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://127.0.0.1:9/v1/ws".to_owned()],
+            }),
+            last_hint_epoch_ms: None,
+            user_id_hex: Some(user_id.clone()),
+        }
+        .save(&layout)
+        .unwrap();
+        // Seed the device-list cache with a 2-device record. Path mirrors
+        // `load_contact_pair_record_v4` (contact_pair_records/<user_id>.json);
+        // the cached record is returned verbatim when the relay GET fails.
+        let dev = |seed: u8| DeviceEntryV4 {
+            agent_id_hex: hex::encode([seed; 32]),
+            ml_dsa_pubkey_b64: "AA".into(),
+            kem_pubkey_b64: "AA".into(),
+            advertised_relays: vec![],
+            cert_b64: "AA".into(),
+            added_at_ms: 0,
+            primary: seed == 1,
+        };
+        let record = PairRecordV4 {
+            record_version: 4,
+            user_id_hex: user_id.clone(),
+            user_ml_dsa_pubkey_b64: "AA".into(),
+            revision: 1,
+            issued_at_ms: 1,
+            devices: vec![dev(1), dev(2)],
+            user_signature_b64: "AA".into(),
+        };
+        let cache_dir = layout.root.join("contact_pair_records");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        write_json_atomic(&cache_dir.join(format!("{user_id}.json")), &record).unwrap();
+
+        let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = fanout_endpoint(&http, &router, &layout);
+        // Fans out to BOTH cached devices, not just the conversation agent `to`.
+        assert_eq!(
+            endpoint.fanout_targets(&to).await,
+            vec![
+                AgentId(hex::encode([1u8; 32])),
+                AgentId(hex::encode([2u8; 32])),
+            ]
         );
     }
 
