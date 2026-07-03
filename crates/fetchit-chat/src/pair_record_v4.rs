@@ -360,6 +360,111 @@ pub async fn append_device_and_publish(
     .await
 }
 
+/// Remove device `agent_id_hex` from the account's own device list and mint a
+/// user-signed record at revision N+1 (the M6.7 revoke publish-side). Mirror of
+/// [`append_and_mint_from_master`]: load the cached record, drop the entry, then
+/// mint and cache. If the removed device was the primary, the first remaining
+/// device is promoted (exactly-one-primary, else the mint rejects).
+///
+/// # Errors
+/// No cached record, the device is not in the list, or removing it would leave
+/// zero devices (use account recovery for the last device), or a signing failure.
+pub(crate) fn remove_and_mint_from_master(
+    data_dir: &Path,
+    master: &MasterKey,
+    agent_id_hex: &str,
+    issued_at_ms: u64,
+) -> Result<PairRecordV4, ChatError> {
+    let Some(current) = load_pair_record_v4(data_dir)? else {
+        return Err(ChatError::Invalid(
+            "no cached device record; nothing to revoke".to_owned(),
+        ));
+    };
+    let removed_was_primary = current
+        .devices
+        .iter()
+        .find(|d| d.agent_id_hex == agent_id_hex)
+        .ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "device {agent_id_hex} is not in the account device list"
+            ))
+        })?
+        .primary;
+    let mut devices: Vec<DeviceEntryV4> = current
+        .devices
+        .into_iter()
+        .filter(|d| d.agent_id_hex != agent_id_hex)
+        .collect();
+    if devices.is_empty() {
+        return Err(ChatError::Invalid(
+            "cannot revoke the only device; use account recovery instead".to_owned(),
+        ));
+    }
+    // Removing the primary leaves the list with none; promote the first
+    // survivor so the exactly-one-primary structural rule holds at mint.
+    if removed_was_primary && !devices.iter().any(|d| d.primary) {
+        devices[0].primary = true;
+    }
+    let revision = current.revision.saturating_add(1);
+    mint_and_cache_pair_record_v4_from_master(data_dir, master, revision, issued_at_ms, &devices)
+}
+
+/// [`remove_and_mint_from_master`] plus the relay POST -- the async seam the
+/// public entry and the wiremock tests share (mirror of
+/// [`append_publish_from_master`]).
+///
+/// # Errors
+/// As [`remove_and_mint_from_master`], or a relay failure. A
+/// [`PostV4Outcome::RevisionReject`] becomes an error: the relay holds a newer
+/// revision (a sibling published concurrently), so re-run against that record.
+pub(crate) async fn revoke_publish_from_master(
+    data_dir: &Path,
+    master: &MasterKey,
+    agent_id_hex: &str,
+    relay: &url::Url,
+    http: &reqwest::Client,
+    issued_at_ms: u64,
+) -> Result<PairRecordV4, ChatError> {
+    let record = remove_and_mint_from_master(data_dir, master, agent_id_hex, issued_at_ms)?;
+    match post_pair_record_v4(relay, &record, http).await? {
+        PostV4Outcome::Accepted => Ok(record),
+        PostV4Outcome::RevisionReject { current_revision } => Err(ChatError::Invalid(format!(
+            "revoke publish rejected: relay holds a newer revision {current_revision}, re-run"
+        ))),
+    }
+}
+
+/// Revoke a device from this account and publish the smaller record (M6.7).
+///
+/// The surviving device opens its vault (`passphrase`, or the OS keychain when
+/// `None`), drops `agent_id_hex` from its device list, mints a user-signed
+/// record at revision N+1, caches it, and POSTs it. Contacts drop the revoked
+/// device on their next resolve; the anti-rollback watermark keeps the revoked
+/// device from replaying an older record. Returns the new signed record so the
+/// caller can push it to active contacts + drive the devices-group leaf removal.
+///
+/// # Errors
+/// A malformed `post_relay`, no cached record, the device is not listed, an
+/// attempt to remove the only device, a vault-unlock / signing failure, or a
+/// relay rejection.
+pub async fn revoke_device_and_publish(
+    data_dir: &Path,
+    passphrase: Option<&str>,
+    agent_id_hex: &str,
+    post_relay: &str,
+    http: &reqwest::Client,
+) -> Result<PairRecordV4, ChatError> {
+    let relay = url::Url::parse(post_relay)
+        .map_err(|e| ChatError::Invalid(format!("post relay url: {e}")))?;
+    let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
+    let (master, _kdf_id, _argon_salt) =
+        crate::client::resolve_master_key(&identity_vault, passphrase)?;
+    let issued_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+    revoke_publish_from_master(data_dir, &master, agent_id_hex, &relay, http, issued_at_ms).await
+}
+
 /// `true` when `user_id_hex` is a 64-char lowercase-hex user id. Validated
 /// before it is used as a filesystem path segment (no traversal).
 fn is_user_id_hex(user_id_hex: &str) -> bool {
@@ -826,6 +931,74 @@ mod tests {
         let out =
             append_and_mint_from_master(dir.path(), &master, &cert, vec!["https://a".into()], 1);
         assert!(out.is_err(), "cannot append to a nonexistent device list");
+    }
+
+    // ───────────────────────── M6.7 revoke publish-side ────────────────
+
+    #[test]
+    fn revoke_drops_the_device_and_bumps_revision() {
+        let (dir, master) = seeded_vault();
+        // Two-device account: dev 1 (primary) + dev 2.
+        mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            1,
+            1,
+            &[device_entry(1, true), device_entry(2, false)],
+        )
+        .unwrap();
+        let dev2 = device_entry(2, false).agent_id_hex;
+        let out = remove_and_mint_from_master(dir.path(), &master, &dev2, 2).unwrap();
+        assert_eq!(out.revision, 2, "revoke bumps the revision");
+        assert_eq!(out.devices.len(), 1, "the revoked device is gone");
+        assert!(
+            out.devices.iter().all(|d| d.agent_id_hex != dev2),
+            "dev 2 must not be in the new record",
+        );
+        verify_pair_record_v4(&out).expect("the smaller record stays user-signed + valid");
+    }
+
+    #[test]
+    fn revoke_errors_on_a_device_not_in_the_list() {
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master);
+        let stranger = device_entry(9, false).agent_id_hex;
+        assert!(
+            remove_and_mint_from_master(dir.path(), &master, &stranger, 2).is_err(),
+            "revoking a non-device must error",
+        );
+    }
+
+    #[test]
+    fn revoke_refuses_to_remove_the_only_device() {
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master); // one device (seed 1, primary)
+        let dev1 = device_entry(1, true).agent_id_hex;
+        assert!(
+            remove_and_mint_from_master(dir.path(), &master, &dev1, 2).is_err(),
+            "cannot revoke the last device; that is account recovery",
+        );
+    }
+
+    #[test]
+    fn revoke_of_the_primary_promotes_a_survivor() {
+        let (dir, master) = seeded_vault();
+        mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            1,
+            1,
+            &[device_entry(1, true), device_entry(2, false)],
+        )
+        .unwrap();
+        let dev1 = device_entry(1, true).agent_id_hex;
+        let out = remove_and_mint_from_master(dir.path(), &master, &dev1, 2).unwrap();
+        assert_eq!(out.devices.len(), 1);
+        assert!(
+            out.devices[0].primary,
+            "removing the primary must promote the survivor",
+        );
+        verify_pair_record_v4(&out).expect("exactly-one-primary must hold after promotion");
     }
 
     #[test]
