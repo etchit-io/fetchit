@@ -1267,26 +1267,34 @@ async fn decode_private_group(
                     entry.body
                 );
             }
-            // The M2 echo is opt-out: a group soak peer sets
-            // FETCHIT_PEER_ECHO=0 so the group does not self-amplify --
-            // every non-author member echoing every message (including
-            // other echoes) grows multiplicatively and drowns the
-            // coverage metric. Echo-off returns None so the reader does
-            // not print the body either; the metadata anchors above are
-            // all the soak collector needs. Default keeps M2 behavior.
-            if std::env::var("FETCHIT_PEER_ECHO").as_deref() == Ok("0") {
+            // M2 live-test echo handler — strict OPT-IN as of 2026-07-03.
+            // Soak rigs that assert an inbound from us set
+            // FETCHIT_PEER_ECHO=1; every other peer stays silent. The old
+            // opt-OUT default let two plain group-chat peers ping-pong
+            // "echo:" storms through two fresh groups (each hop freshly
+            // signed by the receiving member, so each side attributed the
+            // storm to the other) before anyone found the env var. Three
+            // independent guards so no single misconfiguration can
+            // re-create that storm: opt-in, never-echo-an-echo (kills
+            // cross-version loops), and a local per-minute budget under
+            // the relay's 60/min cap. Not-permitted returns None so the
+            // reader does not print the body — same shape (and same
+            // SECURITY.md reasoning) as the old echo-off arm.
+            let echo_env = std::env::var("FETCHIT_PEER_ECHO").ok();
+            if !group_echo_permitted(echo_env.as_deref(), &entry.body) {
                 return None;
             }
-            // M2 live-test echo handler. Bounces the body back into
-            // the same group so the test asserter sees an inbound
-            // from us. Self-source filter at the top of this fn drops
-            // our own re-receipt. Wrap as fire-and-forget — a send
-            // failure during a test run should log + continue so we
-            // don't wedge the inbound pump.
+            if !take_echo_budget() {
+                eprintln!("[peer] echo suppressed: per-minute budget exhausted");
+                return None;
+            }
+            // Self-source filter at the top of this fn drops our own
+            // re-receipt. Fire-and-forget — a send failure during a test
+            // run should log + continue so we don't wedge the inbound pump.
             let echo_body = format!("echo: {}", entry.body);
             if let Err(e) = client
                 .messages()
-                .send_private_group(&group_id_hex, &echo_body, "bob")
+                .send_private_group(&group_id_hex, &echo_body, "m2-echo")
                 .await
             {
                 eprintln!("[peer] echo send error: {e}");
@@ -1315,6 +1323,46 @@ async fn decode_private_group(
             None
         }
     }
+}
+
+/// Cap on M2 test echoes per rolling minute — comfortably under the
+/// relay's per-sender budget (60/min) so even an echo-enabled soak rig
+/// cannot trip relay throttles or flood a group.
+const GROUP_ECHO_PER_MIN_CAP: u32 = 20;
+
+/// Guards 1+2 of the M2 group echo (pure, unit-tested): strict opt-IN
+/// (`FETCHIT_PEER_ECHO=1`, anything else is off) and the loop damper
+/// (never echo an echo — kills ping-pong even against an old default-on
+/// binary on the other side). Guard 3, the rate cap, is [`admit_echo`].
+fn group_echo_permitted(env_val: Option<&str>, body: &str) -> bool {
+    env_val == Some("1") && !body.starts_with("echo: ")
+}
+
+/// Guard 3 state: (minute epoch, echoes sent that minute).
+static GROUP_ECHO_WINDOW: std::sync::Mutex<(u64, u32)> = std::sync::Mutex::new((0, 0));
+
+/// Pure per-minute window admission (unit-tested): reset on a new
+/// minute, admit below [`GROUP_ECHO_PER_MIN_CAP`], refuse at it.
+fn admit_echo(window: &mut (u64, u32), minute: u64) -> bool {
+    if window.0 != minute {
+        *window = (minute, 0);
+    }
+    if window.1 >= GROUP_ECHO_PER_MIN_CAP {
+        return false;
+    }
+    window.1 += 1;
+    true
+}
+
+/// Take one slot from the global per-minute echo budget.
+fn take_echo_budget() -> bool {
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 60);
+    let mut guard = GROUP_ECHO_WINDOW
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    admit_echo(&mut guard, minute)
 }
 
 async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<PeerInbound> {
@@ -1720,6 +1768,39 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    // --- M2 group-echo guards (the 2026-07-03 trinity-coord storm class) ---
+
+    #[test]
+    fn group_echo_is_off_by_default_and_off_for_anything_but_1() {
+        assert!(!group_echo_permitted(None, "hi"), "unset env must NOT echo");
+        assert!(!group_echo_permitted(Some("0"), "hi"));
+        assert!(!group_echo_permitted(Some("true"), "hi"));
+        assert!(!group_echo_permitted(Some(""), "hi"));
+    }
+
+    #[test]
+    fn group_echo_is_strictly_opt_in() {
+        assert!(group_echo_permitted(Some("1"), "hi"));
+    }
+
+    #[test]
+    fn group_echo_never_echoes_an_echo() {
+        // Loop damper: even against an old default-on binary on the other
+        // side, an echo of an echo is refused, so no ping-pong can sustain.
+        assert!(!group_echo_permitted(Some("1"), "echo: hi"));
+        assert!(!group_echo_permitted(Some("1"), "echo: echo: hi"));
+    }
+
+    #[test]
+    fn echo_budget_caps_per_minute_and_resets_next_minute() {
+        let mut window = (0u64, 0u32);
+        for _ in 0..GROUP_ECHO_PER_MIN_CAP {
+            assert!(admit_echo(&mut window, 7));
+        }
+        assert!(!admit_echo(&mut window, 7), "at cap: refuse");
+        assert!(admit_echo(&mut window, 8), "new minute: budget resets");
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn send_with_retry_returns_first_ok() {
