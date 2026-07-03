@@ -8,7 +8,7 @@
 //! contacts, settings, and DM mirrors.
 //!
 //! M6.4 wires enrollment all the way up to that admission boundary but does
-//! **not** perform the MLS work: the real create-or-get + TreeKEM invite is
+//! **not** perform the MLS work: the real create-or-get + `TreeKEM` invite is
 //! M6.6. The boundary is a [`DevicesGroupSink`] trait so M6.6 drops the live
 //! implementation in without touching the enrollment composition, and
 //! [`PendingDevicesGroupSink`] is the M6.4 no-op stub that lets enrollment land
@@ -41,7 +41,7 @@ pub trait DevicesGroupSink: Send + Sync {
 
 /// M6.4 devices-group stub: logs the pending admission and performs no MLS
 /// work, returning `false` (deferred). Replaced by the real create-or-get +
-/// TreeKEM invite in M6.6, so enrollment can land and device-verify (cert mint
+/// `TreeKEM` invite in M6.6, so enrollment can land and device-verify (cert mint
 /// + roster publish) before the self-sync channel exists.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PendingDevicesGroupSink;
