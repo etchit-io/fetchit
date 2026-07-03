@@ -97,22 +97,33 @@ pub enum EnvelopeKind {
     /// See `private/m2.5-bridge-collapsed-spec.md` on the `m2.5-design`
     /// branch for the full spec.
     X0xdGroupMetadataEvent,
-    /// Reserved discriminator (historically `WelcomeBlobRequest`).
+    /// M6.7 proactive revoke-push — carries a *signed*
+    /// [`PairRecordV4`](crate::pair_record::PairRecordV4) that the sender
+    /// pushes to an active contact when its device set changes (a device
+    /// is revoked or added), so the contact learns the new roster without
+    /// waiting to re-resolve.
     ///
-    /// The M2.5 Welcome-blob bridge that occupied this slot was deleted
-    /// after the v0.21.3 contract-drift audit (June 2026) confirmed the
-    /// joiner-side endpoint shape never matched the daemon contract and
-    /// David's `63b5c63b` joiner-Welcome-fetch retry in v0.21.3 closes
-    /// the underlying failure window. The slot is kept reserved so the
-    /// wire discriminator (`6`) is not silently reassigned to a new
-    /// payload type that pre-deletion clients in the wild would decode
-    /// with stale semantics. MUST NOT be reused.
-    Reserved6,
+    /// [`TransitEnvelope::ciphertext`] carries a postcard
+    /// [`PairRecordPushPayload`](crate::PairRecordPushPayload) whose
+    /// `record_bytes` are the already-signed, length-prefixed
+    /// `PairRecordV4` wire bytes. The receiver decodes the wrapper, then
+    /// verifies the record's own user signature via
+    /// [`verify_pair_record_v4`](crate::pair_record::verify_pair_record_v4)
+    /// — the envelope is pure transport; the record's ML-DSA-65 user
+    /// signature is the only authority.
+    ///
+    /// Graduated from the historical `Reserved6` slot (the deleted M2.5
+    /// Welcome-blob bridge). The wire discriminator (`6`) is UNCHANGED,
+    /// so the byte representation of every other variant is unaffected;
+    /// a pre-graduation client that still knew slot `6` as a reserved
+    /// M2.5 kind simply has no chat-layer route for it, exactly as before.
+    PairRecordPush,
     /// Reserved discriminator (historically `WelcomeBlobResponse`).
     ///
-    /// Same rationale as [`Self::Reserved6`]. The wire discriminator
-    /// (`7`) is reserved for compatibility with the M2.5 Welcome-blob
-    /// bridge that no longer ships. MUST NOT be reused.
+    /// Kept reserved so the wire discriminator (`7`) is not silently
+    /// reassigned to a payload type pre-deletion clients would decode
+    /// with stale semantics — the M2.5 Welcome-blob bridge that used it
+    /// no longer ships. MUST NOT be reused.
     Reserved7,
     /// M4 fediverse bridge — outbound public `ActivityPub` post
     /// (`Create { Note }`) leaving the chat-layer toward
@@ -162,7 +173,7 @@ const DISC_ADMIN_EVENT: u32 = 2;
 const DISC_DELIVERY_RECEIPT: u32 = 3;
 const DISC_PRIVATE_GROUP_CHAT: u32 = 4;
 const DISC_X0XD_GROUP_METADATA_EVENT: u32 = 5;
-const DISC_RESERVED_6: u32 = 6;
+const DISC_PAIR_RECORD_PUSH: u32 = 6;
 const DISC_RESERVED_7: u32 = 7;
 const DISC_PUBLIC_POST: u32 = 8;
 
@@ -179,7 +190,7 @@ impl Serialize for EnvelopeKind {
             EnvelopeKind::DeliveryReceipt => DISC_DELIVERY_RECEIPT,
             EnvelopeKind::PrivateGroupChat => DISC_PRIVATE_GROUP_CHAT,
             EnvelopeKind::X0xdGroupMetadataEvent => DISC_X0XD_GROUP_METADATA_EVENT,
-            EnvelopeKind::Reserved6 => DISC_RESERVED_6,
+            EnvelopeKind::PairRecordPush => DISC_PAIR_RECORD_PUSH,
             EnvelopeKind::Reserved7 => DISC_RESERVED_7,
             EnvelopeKind::PublicPost => DISC_PUBLIC_POST,
             EnvelopeKind::Unknown(n) => u32::from(*n),
@@ -206,7 +217,7 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                     DISC_DELIVERY_RECEIPT => EnvelopeKind::DeliveryReceipt,
                     DISC_PRIVATE_GROUP_CHAT => EnvelopeKind::PrivateGroupChat,
                     DISC_X0XD_GROUP_METADATA_EVENT => EnvelopeKind::X0xdGroupMetadataEvent,
-                    DISC_RESERVED_6 => EnvelopeKind::Reserved6,
+                    DISC_PAIR_RECORD_PUSH => EnvelopeKind::PairRecordPush,
                     DISC_RESERVED_7 => EnvelopeKind::Reserved7,
                     DISC_PUBLIC_POST => EnvelopeKind::PublicPost,
                     n => match u8::try_from(n) {
@@ -233,7 +244,7 @@ impl<'de> Deserialize<'de> for EnvelopeKind {
                 "DeliveryReceipt",
                 "PrivateGroupChat",
                 "X0xdGroupMetadataEvent",
-                "Reserved6",
+                "PairRecordPush",
                 "Reserved7",
                 "PublicPost",
                 "Unknown",
@@ -431,7 +442,7 @@ mod tests {
             (EnvelopeKind::DeliveryReceipt, 3),
             (EnvelopeKind::PrivateGroupChat, 4),
             (EnvelopeKind::X0xdGroupMetadataEvent, 5),
-            (EnvelopeKind::Reserved6, 6),
+            (EnvelopeKind::PairRecordPush, 6),
             (EnvelopeKind::Reserved7, 7),
             (EnvelopeKind::PublicPost, 8),
         ] {
@@ -524,26 +535,39 @@ mod tests {
         assert_eq!(decoded.ciphertext, vec![0xee; 1024]);
     }
 
-    /// The historical M2.5 Welcome-bridge discriminators (`6`, `7`) are
-    /// retained as `Reserved6` / `Reserved7` stubs so the wire shape is
-    /// stable for any pre-deletion client that still understands those
-    /// envelope kinds. Round-tripping the stubs pins the byte
+    /// The historical M2.5 Welcome-bridge discriminator `7` is retained
+    /// as the `Reserved7` stub so the wire shape is stable for any
+    /// pre-deletion client that still understands that envelope kind.
+    /// (Slot `6` graduated to [`EnvelopeKind::PairRecordPush`]; see its
+    /// own round-trip test below.) Round-tripping the stub pins the byte
     /// representation so a future variant can't accidentally collide.
     #[test]
     fn envelope_kind_reserved_discriminators_round_trip() {
-        for (kind, expected_disc) in [
-            (EnvelopeKind::Reserved6, 6u8),
-            (EnvelopeKind::Reserved7, 7u8),
-        ] {
-            let bytes = postcard::to_allocvec(&kind).unwrap();
-            assert_eq!(
-                bytes,
-                vec![expected_disc],
-                "{kind:?} must serialize to single varint byte {expected_disc}",
-            );
-            let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
-            assert_eq!(back, kind);
-        }
+        let bytes = postcard::to_allocvec(&EnvelopeKind::Reserved7).unwrap();
+        assert_eq!(
+            bytes,
+            vec![7u8],
+            "Reserved7 must serialize to single varint byte 7"
+        );
+        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, EnvelopeKind::Reserved7);
+    }
+
+    /// M6.7 revoke-push wire DISC graduation. Pins `PairRecordPush` at
+    /// discriminator 6 — the former `Reserved6` slot, same numeric value
+    /// — so the send/receive logic built on top can rely on the byte
+    /// representation. Mirrors `envelope_kind_public_post_round_trips`.
+    #[test]
+    fn envelope_kind_pair_record_push_round_trips() {
+        let env = EnvelopeKind::PairRecordPush;
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        assert_eq!(
+            bytes,
+            vec![6u8],
+            "PairRecordPush must serialize to single varint byte 6"
+        );
+        let back: EnvelopeKind = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, EnvelopeKind::PairRecordPush);
     }
 
     /// M4 fediverse-bridge wire DISC reservation (Stage 5.1-proto).
@@ -597,7 +621,7 @@ mod tests {
                 | EnvelopeKind::DeliveryReceipt
                 | EnvelopeKind::PrivateGroupChat
                 | EnvelopeKind::X0xdGroupMetadataEvent
-                | EnvelopeKind::Reserved6
+                | EnvelopeKind::PairRecordPush
                 | EnvelopeKind::Reserved7
                 | EnvelopeKind::PublicPost
                 | EnvelopeKind::Unknown(_) => {}

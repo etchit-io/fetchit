@@ -403,10 +403,21 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
             );
             return None;
         }
-        // Reserved6 / Reserved7 are historical M2.5 Welcome-bridge
-        // discriminators kept reserved for wire-stability. Drop here;
-        // the bridge is no longer shipped, so no chat-layer route exists.
-        RelayKind::Reserved6 | RelayKind::Reserved7 => {
+        // PairRecordPush (M6.7 revoke-push) is a relay-carried, unsealed,
+        // self-verified record: it has no LAN-direct route (revoke-pushes
+        // ride the relay, which RelayTransport forwards; LAN-direct is not
+        // a producer for them). Drop as the explicit backstop. Unlike the
+        // PublicPost arm above this is NOT an anti-injection concern — the
+        // record's own ML-DSA-65 signature + M6.7 anti-rollback are checked
+        // by the receiver regardless of transport — it is just an absent route.
+        RelayKind::PairRecordPush => {
+            log::warn!("lan-direct inbound: dropping PairRecordPush — no LAN-direct route");
+            return None;
+        }
+        // Reserved7 is a historical M2.5 Welcome-bridge discriminator kept
+        // reserved for wire-stability. Drop here; the bridge is no longer
+        // shipped, so no chat-layer route exists.
+        RelayKind::Reserved7 => {
             log::warn!(
                 "lan-direct inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind"
             );
@@ -530,6 +541,27 @@ mod tests {
         assert!(
             inbound_envelope_from_transit(aid(0x11), env).is_none(),
             "LAN-direct must NOT forward PublicPost; only the relay is a trusted bridge producer",
+        );
+    }
+
+    /// M6.7: `PairRecordPush` has no LAN-direct route — revoke-pushes ride
+    /// the relay (`RelayTransport` forwards them), and LAN-direct is not a
+    /// producer for them. Unlike `PublicPost` this is not an anti-injection
+    /// concern (the record's own signature + anti-rollback are checked by
+    /// the receiver regardless of transport); it is simply an absent route,
+    /// so the inbound mapper drops it.
+    #[test]
+    fn inbound_drops_pair_record_push_no_lan_direct_route() {
+        let env = TransitEnvelope::pair_record_push(
+            RelayAgentId::from_bytes([7u8; 32]),
+            MachineId::from_bytes([9u8; 32]),
+            b"signed-pair-record-v4-wire-bytes".to_vec(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        assert!(
+            inbound_envelope_from_transit(aid(0x11), env).is_none(),
+            "LAN-direct must drop PairRecordPush; it has no LAN-direct route",
         );
     }
 

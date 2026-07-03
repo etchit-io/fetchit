@@ -484,17 +484,21 @@ fn spawn_inbound_pump(
 /// public post to their own handlers before any DM logic runs.
 fn map_inbound_delivery(env: TransitEnvelope) -> Option<InboundEnvelope> {
     let kind = match env.kind {
-        // Dm, the M2.5 bridge metadata event, and a bridged fediverse
-        // PublicPost all ride the Dm shape; `default_dispatch_one`
-        // re-discriminates each on `transit.kind`
+        // Dm, the M2.5 bridge metadata event, a bridged fediverse
+        // PublicPost, and an M6.7 PairRecordPush all ride the Dm shape;
+        // `default_dispatch_one` re-discriminates each on `transit.kind`
         // (X0xdGroupMetadataEvent -> dispatch_inbound_bridge,
-        // PublicPost -> dispatch_inbound_public_post) before the
-        // conversation/DM path. PublicPost was previously dropped here
-        // on a stale "until Stage 5.3" comment; 5.3 is built, so it now
-        // forwards.
-        RelayKind::Dm | RelayKind::X0xdGroupMetadataEvent | RelayKind::PublicPost => {
-            OutboundKind::Dm
-        }
+        // PublicPost -> dispatch_inbound_public_post, PairRecordPush ->
+        // the M6.7 revoke-push receiver) before the conversation/DM path.
+        // PublicPost was previously dropped here on a stale "until Stage
+        // 5.3" comment; 5.3 is built, so it now forwards. PairRecordPush
+        // forwards for the same reason: it is unsealed + self-verified
+        // (the record's own ML-DSA-65 signature is the authority), so the
+        // relay carries it like a public post and the dispatcher routes it.
+        RelayKind::Dm
+        | RelayKind::X0xdGroupMetadataEvent
+        | RelayKind::PublicPost
+        | RelayKind::PairRecordPush => OutboundKind::Dm,
         // PrivateGroupChat rides the same inbound shape as GroupChat —
         // peer.rs's `is_private_group_envelope` predicate is what
         // discriminates the two downstream.
@@ -515,10 +519,11 @@ fn map_inbound_delivery(env: TransitEnvelope) -> Option<InboundEnvelope> {
             log::warn!("relay inbound: dropping envelope with unknown kind disc={disc}");
             return None;
         }
-        // Reserved6 / Reserved7 are historical M2.5 Welcome-bridge
-        // discriminators kept reserved for wire-stability. Drop here; the
-        // bridge is no longer shipped, so no chat-layer route exists.
-        RelayKind::Reserved6 | RelayKind::Reserved7 => {
+        // Reserved7 is a historical M2.5 Welcome-bridge discriminator kept
+        // reserved for wire-stability. Drop here; the bridge is no longer
+        // shipped, so no chat-layer route exists. (Slot 6 graduated from
+        // Reserved6 to PairRecordPush, which forwards above.)
+        RelayKind::Reserved7 => {
             log::warn!("relay inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind");
             return None;
         }
@@ -836,6 +841,37 @@ mod tests {
         assert!(
             matches!(transit.kind, RelayKind::PublicPost),
             "transit.kind must stay PublicPost so default_dispatch_one routes it to the public-post handler",
+        );
+    }
+
+    /// M6.7: a `PairRecordPush` is unsealed + self-verified (the record's
+    /// own ML-DSA-65 signature is the authority), so — exactly like a
+    /// bridged `PublicPost` — the relay pump MUST forward it riding the
+    /// `Dm` shape with `transit.kind` preserved. `default_dispatch_one`
+    /// re-discriminates it to the M6.7 revoke-push receiver; dropping it
+    /// here would silently break proactive roster convergence.
+    #[test]
+    fn pump_forwards_pair_record_push_riding_dm_shape() {
+        use fetchit_relay_proto::identity::MachineId;
+        let env = TransitEnvelope::pair_record_push(
+            RelayAgentId::from_bytes([7u8; 32]),
+            MachineId::from_bytes([9u8; 32]),
+            b"signed-pair-record-v4-wire-bytes".to_vec(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        let mapped =
+            map_inbound_delivery(env).expect("PairRecordPush must be forwarded, not dropped");
+        assert!(
+            matches!(mapped.kind, OutboundKind::Dm),
+            "PairRecordPush rides the Dm shape; the dispatcher re-discriminates on transit.kind",
+        );
+        let transit = mapped
+            .transit
+            .expect("a forwarded envelope must carry its TransitEnvelope");
+        assert!(
+            matches!(transit.kind, RelayKind::PairRecordPush),
+            "transit.kind must stay PairRecordPush so default_dispatch_one routes it to the revoke-push receiver",
         );
     }
 

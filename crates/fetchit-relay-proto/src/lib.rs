@@ -15,6 +15,7 @@ pub mod error;
 pub mod frame;
 pub mod identity;
 pub mod pair_record;
+pub mod pair_record_push;
 pub mod public_post;
 pub mod region;
 
@@ -35,6 +36,7 @@ pub use identity::{
     derive_agent_id, derive_user_id, AgentId, DedupeKey, GroupId, MachineId, TenantId,
     AGENT_ID_DOMAIN, USER_ID_DOMAIN, USER_ID_LEN,
 };
+pub use pair_record_push::PairRecordPushPayload;
 pub use public_post::{PublicPostPayload, FEDIVERSE_BRIDGE_SENDER};
 pub use region::Region;
 
