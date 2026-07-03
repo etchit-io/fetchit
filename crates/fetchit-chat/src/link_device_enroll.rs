@@ -239,7 +239,8 @@ mod tests {
             Some(&salt),
         )
         .unwrap();
-        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt)).unwrap();
+        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
         let d1 = MlDsaSigner::from_seed(&[1u8; 32]);
         let device1 = DeviceEntryV4 {
             agent_id_hex: hex::encode(d1.agent_id()),
@@ -308,5 +309,110 @@ mod tests {
             .find(|d| d.agent_id_hex == hex::encode(newdev.agent_id()))
             .expect("new device present in the republished roster");
         assert_eq!(new_entry.advertised_relays, new_relays);
+    }
+
+    /// M6.4 enroll end-to-end over a REAL relay-server (not a mock): the new
+    /// device publishes its offer, the existing device fetches it back and
+    /// enrolls, and the relay accepts the revision-2 roster -- exercising the
+    /// whole `/v1/blob` + `/v1/pair-record-v4` round-trip on the wire.
+    #[tokio::test]
+    async fn enroll_round_trips_through_a_real_relay_server() {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use crate::link_device_flow::{create_link_offer, fetch_link_offer};
+        use crate::local_signer::LocalSignerVault;
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        use fetchit_relay_client::{MlDsaSigner, Signer};
+        use fetchit_relay_proto::pair_record::DeviceEntryV4;
+        use fetchit_relay_proto::Region;
+        use fetchit_relay_server::{Server, ServerConfig};
+        use std::time::Duration;
+        use zeroize::Zeroizing;
+
+        // A real relay serving /v1/blob (offer) + /v1/pair-record-v4 (roster).
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(async move {
+            let _ = Server::new(ServerConfig::defaults(bound, Region::Nyc))
+                .run()
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let relay = url::Url::parse(&format!("http://{bound}/")).unwrap();
+        let relays = vec![format!("http://{bound}")];
+        let http = crate::relay_http::guarded_client();
+
+        // Existing device A: vault + cached revision-1 roster holding device #1.
+        let dir = tempfile::tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+        let d1 = MlDsaSigner::from_seed(&[1u8; 32]);
+        let device1 = DeviceEntryV4 {
+            agent_id_hex: hex::encode(d1.agent_id()),
+            ml_dsa_pubkey_b64: B64.encode(d1.public_key()),
+            kem_pubkey_b64: B64.encode([1u8; 1184]),
+            advertised_relays: relays.clone(),
+            cert_b64: B64.encode([1u8; 32]),
+            added_at_ms: 1_600_000_000_000,
+            primary: true,
+        };
+        crate::pair_record_v4::mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            1,
+            1_600_000_000_000,
+            &[device1],
+        )
+        .unwrap();
+
+        // New device B: real create_link_offer seals + PUTs the offer to the relay.
+        let newdev = MlDsaSigner::from_seed(&[2u8; 32]);
+        let created = create_link_offer(
+            hex::encode(newdev.agent_id()),
+            &newdev.public_key(),
+            &[0u8; 1184],
+            &relays,
+            1_800_000_000_000,
+            &http,
+        )
+        .await
+        .unwrap();
+
+        // Existing device A: GET the offer back off the relay, then enroll --
+        // mint the cert + POST the revision-2 roster to the real relay.
+        let offer = fetch_link_offer(&created.uri, &http).await.unwrap();
+        let outcome = enroll_from_master(
+            dir.path(),
+            &master,
+            &offer,
+            &relays,
+            &relay,
+            1_700_000_000_000,
+            &http,
+            &PendingDevicesGroupSink,
+        )
+        .await
+        .unwrap();
+
+        // An Ok outcome means the relay POST was 2xx (not a RevisionReject), so
+        // the enroll round-tripped end-to-end over the wire.
+        assert_eq!(outcome.agent_id_hex, hex::encode(newdev.agent_id()));
+        assert_eq!(outcome.record_revision, 2);
+        assert!(!outcome.devices_group_admitted);
+        let cached = crate::pair_record_v4::load_pair_record_v4(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cached.devices.len(),
+            2,
+            "both devices in the published roster"
+        );
     }
 }
