@@ -984,9 +984,13 @@ impl<'a> Endpoint<'a> {
         //
         // Threading is decoupled from delivery: the outbound `HistoryEntry` is
         // persisted ONCE, on the `to`-agent conversation (the sender's canonical
-        // DM thread with the contact), never a sibling-device conv. Sibling
-        // deliveries are sealed + dispatched but get no persisted history, so
-        // they never hit disk and never surface as extra sidebar rows -- the
+        // DM thread with the contact), never a sibling-device conv. A sibling
+        // delivery still bootstraps a conversation -- `establish_dm` persists it
+        // via `registry.save` -- but with EMPTY history: no `HistoryEntry` is
+        // pushed to it. It does not surface as an extra sidebar row because the
+        // shell's DM list is driven by peer interaction (the desktop's `loadDms`
+        // + `ensureDm` over contacted peers), not by enumerating engine convs,
+        // and the user never interacts with a sibling agent directly -- so the
         // user sees exactly one thread per contact regardless of device count.
         let targets = self.fanout_targets(to).await;
         // Per-device delivery is best-effort: a failure reaching -- or
@@ -3134,9 +3138,12 @@ mod tests {
         // the resolved record, since a sibling was never imported as a contact
         // and so has no stored card -- yet the sender's OWN transcript must show
         // exactly one thread. History is anchored on the `to`-agent
-        // conversation; sibling conversations are sealed + dispatched but carry
-        // ZERO persisted history, so a multi-device contact never fragments into
-        // N sidebar rows. Without the anchor the outbound entry would land on
+        // conversation; sibling conversations are bootstrapped + delivered (so
+        // `establish_dm` persists them) but carry ZERO persisted history -- the
+        // one-thread-per-contact anchor invariant this test locks. (The desktop
+        // single sidebar row per contact follows from its peer-interaction-driven
+        // DM list, not the history state.) Without the anchor the outbound entry
+        // would land on
         // whichever device sorted first, silently resurfacing the wrong-thread
         // bug this test locks out.
         let rig = build_rig();
