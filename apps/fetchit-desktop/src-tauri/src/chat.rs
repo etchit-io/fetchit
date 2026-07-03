@@ -1301,6 +1301,119 @@ pub async fn chat_restore_recovery_phrase(
     Ok(restored)
 }
 
+/// The QR payload + confirm code the desktop shows when it is the NEW device
+/// being linked to an existing account.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedLinkOfferDto {
+    pub uri: String,
+    pub short_code: String,
+    pub exp_ms: u64,
+}
+
+/// The confirm-screen preview the desktop shows when it is the EXISTING device
+/// scanning a new device's link URI.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkOfferPreviewDto {
+    pub agent_id_hex: String,
+    pub short_code: String,
+    pub expired: bool,
+}
+
+/// The outcome of enrolling a confirmed device into this account.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrollOutcomeDto {
+    pub agent_id_hex: String,
+    pub record_revision: u64,
+    pub devices_group_admitted: bool,
+}
+
+/// New-device side: mint + publish this device's link offer and return the QR
+/// URI + confirm code to display. `ttl_secs` bounds the enrollment window.
+#[tauri::command]
+pub async fn chat_create_link_offer(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    ttl_secs: u64,
+) -> Result<CreatedLinkOfferDto, String> {
+    ensure_chat_enabled(&app_state)?;
+    let offer = state
+        .get()
+        .await?
+        .create_link_offer(ttl_secs)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(CreatedLinkOfferDto {
+        uri: offer.uri,
+        short_code: offer.short_code,
+        exp_ms: offer.exp_ms,
+    })
+}
+
+/// Existing-device side: fetch the offer a scanned `uri` points at and return
+/// the confirm-screen preview (the new device's agent id + confirm code + a
+/// freshness flag). The user compares the code before enrolling.
+#[tauri::command]
+pub async fn chat_preview_link_offer(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    uri: String,
+) -> Result<LinkOfferPreviewDto, String> {
+    ensure_chat_enabled(&app_state)?;
+    let preview = state
+        .get()
+        .await?
+        .preview_link_offer(&uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(LinkOfferPreviewDto {
+        agent_id_hex: preview.agent_id_hex,
+        short_code: preview.short_code,
+        expired: preview.expired,
+    })
+}
+
+/// Existing-device side: after the user confirms the codes match, enroll the
+/// scanned device -- mint its account certificate and publish the new roster
+/// revision. Opens the vault (the stored passphrase, or the OS keychain when
+/// none). Devices-group admission is the M6.4 no-op stub.
+#[tauri::command]
+pub async fn chat_enroll_confirmed_device(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+    uri: String,
+) -> Result<EnrollOutcomeDto, String> {
+    ensure_chat_enabled(&app_state)?;
+    let passphrase = state.passphrase.lock().await.clone();
+    let data_dir = state.data_dir.clone();
+    let post_relay = state
+        .relay_url
+        .lock()
+        .map_err(|e| format!("relay_url lock poisoned: {e}"))?
+        .clone();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+    let sink = fetchit_chat::PendingDevicesGroupSink;
+    let outcome = fetchit_chat::enroll_confirmed_device(
+        &data_dir,
+        passphrase.as_deref(),
+        &uri,
+        &post_relay,
+        now_ms,
+        &sink,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(EnrollOutcomeDto {
+        agent_id_hex: outcome.agent_id_hex,
+        record_revision: outcome.record_revision,
+        devices_group_admitted: outcome.devices_group_admitted,
+    })
+}
+
 /// Flip the conversation identified by `group_id_hex` from
 /// `TrustState::Pending` to `TrustState::Confirmed` and persist.
 /// The UI calls this after the user accepts a TOFU contact request
