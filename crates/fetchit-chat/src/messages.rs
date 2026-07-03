@@ -939,11 +939,16 @@ impl<'a> Endpoint<'a> {
         // M6.3 fanout: seal one copy per listed device of the recipient and
         // deliver to each device-agent, sharing `message_id`. `fanout_targets`
         // resolves the recipient's linked-device list (a pre-M6 contact, or any
-        // resolve miss, stays single-device). History is persisted ONCE (the
-        // primary/first conversation) so the sender keeps a single thread
-        // regardless of the recipient's device count.
+        // resolve miss, stays single-device).
+        //
+        // Threading is decoupled from delivery: the outbound `HistoryEntry` is
+        // persisted ONCE, on the `to`-agent conversation (the sender's canonical
+        // DM thread with the contact), never a sibling-device conv. Sibling
+        // deliveries are sealed + dispatched but get no persisted history, so
+        // they never hit disk and never surface as extra sidebar rows -- the
+        // user sees exactly one thread per contact regardless of device count.
         let targets = self.fanout_targets(to).await;
-        let mut primary_conv: Option<Conversation> = None;
+        let mut anchor_conv: Option<Conversation> = None;
         for target in &targets {
             let conv = match registry.find_dm_with(&target.0).await? {
                 Some(c) => c,
@@ -974,16 +979,27 @@ impl<'a> Endpoint<'a> {
             )
             .await?;
             self.dispatch_outbox(outbox).await?;
-            if primary_conv.is_none() {
-                primary_conv = Some(conv);
+            if target == to {
+                anchor_conv = Some(conv);
             }
         }
 
-        // Persist the outbound entry once (primary conversation) so delivery
+        // Anchor outbound history on the `to`-agent conversation. If `to` was a
+        // delivery target (the common case -- the anchor device is a current
+        // device) it was captured above; otherwise (its device was revoked from
+        // the current list) fall back to the existing thread with `to` so the
+        // sender's canonical thread stays continuous. No thread means nothing to
+        // anchor to, so skip -- delivery already fanned out to the live devices.
+        let anchor_conv = match anchor_conv {
+            Some(c) => Some(c),
+            None => registry.find_dm_with(&to.0).await?,
+        };
+
+        // Persist the outbound entry once (the anchor conversation) so delivery
         // receipts have a row to mark and headless readers see sent DMs from
         // disk. Bookkeeping — the send already succeeded, so log rather than
         // fail.
-        if let Some(conv) = primary_conv {
+        if let Some(conv) = anchor_conv {
             let entry = HistoryEntry {
                 sender_agent_id_hex: identity.agent_id_hex().to_owned(),
                 sender_name: Some(sender_name.to_owned()),
