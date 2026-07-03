@@ -334,6 +334,43 @@ async fn blob_url(relay: &str, token: &str) -> Result<url::Url, ChatError> {
         .map_err(|e| ChatError::Invalid(format!("build blob url: {e}")))
 }
 
+/// Bring up a real `fetchit-relay-server` on a fresh loopback port for the
+/// crate's e2e tests, returning its bound address once it is actually serving.
+///
+/// Probes a free `:0` port, drops it, and lets the server rebind it (the relay
+/// binds a fixed `SocketAddr` and never reports a `:0`-assigned port), then
+/// polls a connect until the main listener accepts -- a readiness check rather
+/// than a blind sleep, so a slow box does not race the first request.
+///
+/// Crucially it sets `internal_bind = None`. `ServerConfig::defaults` binds a
+/// FIXED loopback internal-metrics port (127.0.0.1:9088), so two concurrent
+/// test servers collide on it: the second's `run()` returns `Err` at that bind
+/// and drops its already-bound main listener, and requests to that main port
+/// then get `ConnectionRefused`. The e2e tests never touch the internal
+/// channel, so disabling it lets any number of relays run concurrently.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) async fn spawn_ephemeral_relay(
+    region: fetchit_relay_proto::Region,
+) -> std::net::SocketAddr {
+    use fetchit_relay_server::{Server, ServerConfig};
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bound = probe.local_addr().unwrap();
+    drop(probe);
+    let mut config = ServerConfig::defaults(bound, region);
+    config.internal_bind = None;
+    tokio::spawn(async move {
+        let _ = Server::new(config).run().await;
+    });
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(bound).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    bound
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -490,19 +527,10 @@ mod tests {
     #[tokio::test]
     async fn e2e_round_trips_through_a_real_relay_server() {
         use fetchit_relay_proto::Region;
-        use fetchit_relay_server::{Server, ServerConfig};
 
-        // Probe a free loopback port, then let the real relay re-bind it and
-        // serve the production /v1/blob route (store + serve + sweeper).
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bound = probe.local_addr().unwrap();
-        drop(probe);
-        tokio::spawn(async move {
-            let _ = Server::new(ServerConfig::defaults(bound, Region::Nyc))
-                .run()
-                .await;
-        });
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Bring up the real relay serving the production /v1/blob route on a
+        // fresh loopback port (serialized to dodge the probe/rebind port race).
+        let bound = spawn_ephemeral_relay(Region::Nyc).await;
 
         // A true round-trip: publish PUTs the sealed blob to the live relay,
         // fetch GETs it back, opens it with the fragment key, and validates.

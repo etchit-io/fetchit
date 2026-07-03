@@ -325,20 +325,11 @@ mod tests {
         use fetchit_relay_client::{MlDsaSigner, Signer};
         use fetchit_relay_proto::pair_record::DeviceEntryV4;
         use fetchit_relay_proto::Region;
-        use fetchit_relay_server::{Server, ServerConfig};
-        use std::time::Duration;
         use zeroize::Zeroizing;
 
-        // A real relay serving /v1/blob (offer) + /v1/pair-record-v4 (roster).
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bound = probe.local_addr().unwrap();
-        drop(probe);
-        tokio::spawn(async move {
-            let _ = Server::new(ServerConfig::defaults(bound, Region::Nyc))
-                .run()
-                .await;
-        });
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // A real relay serving /v1/blob (offer) + /v1/pair-record-v4 (roster),
+        // on a fresh loopback port (serialized to dodge the probe/rebind race).
+        let bound = crate::link_device_flow::spawn_ephemeral_relay(Region::Nyc).await;
         let relay = url::Url::parse(&format!("http://{bound}/")).unwrap();
         let relays = vec![format!("http://{bound}")];
         let http = crate::relay_http::guarded_client();
