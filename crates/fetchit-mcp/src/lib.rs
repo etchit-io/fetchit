@@ -136,6 +136,7 @@ impl<C: NetworkClient> Server<C> {
         let outcome = match name {
             "detect" => self.tool_detect(&args),
             "fetch_render" => self.tool_fetch_render(&args).await,
+            "extract_entry" => self.tool_extract_entry(&args).await,
             _ => return error_response(id, -32602, "unknown tool"),
         };
         match outcome {
@@ -187,9 +188,48 @@ impl<C: NetworkClient> Server<C> {
             .get("address")
             .and_then(Value::as_str)
             .ok_or("missing required argument: address")?;
+        let (hex, resolved) = self.resolve_address(raw).await?;
+        let bytes = match resolved {
+            Resolved::Blocked(blocked) => return Ok(blocked),
+            Resolved::Bytes(bytes) => bytes,
+        };
+
+        let total = bytes.len();
+        // Belt-and-braces: the registry re-runs the same denylist gate and
+        // will cover further entry kinds as they land.
+        let rendering_ctx = RenderingContext {
+            denylist: self.denylist.clone(),
+            addr_hex: Some(hex.clone()),
+        };
+        let rendition = self
+            .registry
+            .render_with_context(
+                bytes,
+                &Hint::default(),
+                &RenderContext::default(),
+                &rendering_ctx,
+            )
+            .map_err(|e| format!("render failed: {e}"))?;
+        let mut summary = summarize(&rendition, total);
+        if let Some(map) = summary.as_object_mut() {
+            map.insert("address".into(), Value::String(hex));
+        }
+        Ok(summary)
+    }
+}
+
+/// Outcome of resolving an address: refused by the denylist, or bytes.
+enum Resolved {
+    Blocked(Value),
+    Bytes(Bytes),
+}
+
+impl<C: NetworkClient> Server<C> {
+    /// Denylist gate + cache + network for one address. Returns the
+    /// canonical hex alongside either the blocked summary or the bytes.
+    async fn resolve_address(&self, raw: &str) -> Result<(String, Resolved), String> {
         let normalized = normalize_address(raw);
-        // Core's parse error already reads "invalid Autonomi address: …";
-        // pass it through instead of stacking a second prefix on it.
+        // Core's parse error already reads "invalid Autonomi address: …".
         let addr: Address = normalized
             .parse()
             .map_err(|e: fetchit_core::Error| e.to_string())?;
@@ -199,11 +239,12 @@ impl<C: NetworkClient> Server<C> {
         // pull blocked content, and we should not spend bandwidth on it.
         if let Some(denylist) = &self.denylist {
             if denylist.is_blocked(EntryKind::XorName, &hex) {
-                return Ok(json!({
+                let blocked = json!({
                     "kind": "blocked",
                     "reason": format!("xor_name: {hex}"),
                     "address": hex,
-                }));
+                });
+                return Ok((hex, Resolved::Blocked(blocked)));
             }
         }
 
@@ -227,26 +268,44 @@ impl<C: NetworkClient> Server<C> {
                 .insert(addr, &fetched);
             fetched
         };
+        Ok((hex, Resolved::Bytes(bytes)))
+    }
 
-        let total = bytes.len();
-        // Belt-and-braces: the registry re-runs the same denylist gate and
-        // will cover further entry kinds as they land.
-        let rendering_ctx = RenderingContext {
-            denylist: self.denylist.clone(),
-            addr_hex: Some(hex.clone()),
+    async fn tool_extract_entry(&self, args: &Value) -> Result<Value, String> {
+        let raw = args
+            .get("address")
+            .and_then(Value::as_str)
+            .ok_or("missing required argument: address")?;
+        let entry = args
+            .get("entry_path")
+            .and_then(Value::as_str)
+            .ok_or("missing required argument: entry_path")?;
+        let (hex, resolved) = self.resolve_address(raw).await?;
+        let archive = match resolved {
+            Resolved::Blocked(blocked) => return Ok(blocked),
+            Resolved::Bytes(bytes) => bytes,
         };
+        let inner =
+            fetchit_core::handlers::extract_entry(archive, entry).map_err(|e| e.to_string())?;
+        if inner.len() > MAX_DETECT_BYTES {
+            return Err(format!(
+                "entry too large: {} bytes (cap {MAX_DETECT_BYTES})",
+                inner.len()
+            ));
+        }
+        let total = inner.len();
+        // The entry name is a real filename hint (rare on Autonomi itself),
+        // so inner READMEs, .md, .json etc. classify precisely.
+        let mut hint = Hint::default();
+        hint.filename = Some(entry.to_string());
         let rendition = self
             .registry
-            .render_with_context(
-                bytes,
-                &Hint::default(),
-                &RenderContext::default(),
-                &rendering_ctx,
-            )
+            .render(Bytes::from(inner), &hint, &RenderContext::default())
             .map_err(|e| format!("render failed: {e}"))?;
         let mut summary = summarize(&rendition, total);
         if let Some(map) = summary.as_object_mut() {
             map.insert("address".into(), Value::String(hex));
+            map.insert("entry".into(), Value::String(entry.to_string()));
         }
         Ok(summary)
     }
@@ -295,6 +354,24 @@ fn tool_definitions() -> Value {
                     },
                 },
                 "required": ["address"],
+            },
+        },
+        {
+            "name": "extract_entry",
+            "description": "Extract one file from a ZIP archive at an Autonomi address and render it text-safely. Read-only; same caps and denylist as fetch_render.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Autonomi address of the ZIP archive",
+                    },
+                    "entry_path": {
+                        "type": "string",
+                        "description": "Path of the entry inside the archive, e.g. docs/readme.md",
+                    },
+                },
+                "required": ["address", "entry_path"],
             },
         },
         {
@@ -478,6 +555,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"fetch_render"));
         assert!(names.contains(&"detect"));
+        assert!(names.contains(&"extract_entry"));
         for t in tools {
             assert_eq!(t["inputSchema"]["type"], "object");
         }
@@ -676,6 +754,107 @@ mod tests {
         let v = summarize(&r, 0);
         assert_eq!(v["kind"], "blocked");
         assert_eq!(v["reason"], "xor_name: abcd");
+    }
+
+    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write as _;
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut z = zip::ZipWriter::new(cursor);
+        let opts: zip::write::FileOptions<'static, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            z.start_file(*name, opts).unwrap();
+            z.write_all(body).unwrap();
+        }
+        z.finish().unwrap().into_inner()
+    }
+
+    fn zip_server(hex: &str, entries: &[(&str, &[u8])]) -> Server<MockClient> {
+        let addr: Address = hex.parse().unwrap();
+        let client = MockClient::new();
+        client.insert(addr, Bytes::from(build_zip(entries)));
+        Server::new(client)
+    }
+
+    fn extract_line(hex: &str, entry: &str, id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"extract_entry","arguments":{{"address":"{hex}","entry_path":"{entry}"}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn extract_entry_renders_the_inner_file() {
+        let hex = "dd".repeat(32);
+        let srv = zip_server(&hex, &[("docs/hello.md", b"# hi\n\ninner world")]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let resp: Value = serde_json::from_str(
+            &rt.block_on(srv.handle_line(&extract_line(&hex, "docs/hello.md", 20)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], false, "{resp}");
+        let summary: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(summary["entry"], "docs/hello.md");
+        assert_eq!(summary["address"], hex);
+        assert!(summary["body"].as_str().unwrap().contains("inner world"));
+    }
+
+    #[test]
+    fn extract_entry_missing_entry_is_a_tool_error() {
+        let hex = "de".repeat(32);
+        let srv = zip_server(&hex, &[("present.txt", b"x")]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let resp: Value = serde_json::from_str(
+            &rt.block_on(srv.handle_line(&extract_line(&hex, "absent.txt", 21)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("absent.txt"));
+    }
+
+    #[test]
+    fn extract_entry_on_non_zip_is_a_tool_error() {
+        let hex = "df".repeat(32);
+        let addr: Address = hex.parse().unwrap();
+        let client = MockClient::new();
+        client.insert(addr, Bytes::from_static(b"just prose, not an archive"));
+        let srv = Server::new(client);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let resp: Value = serde_json::from_str(
+            &rt.block_on(srv.handle_line(&extract_line(&hex, "a.txt", 22)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[test]
+    fn extract_entry_respects_the_denylist() {
+        let hex = "ee".repeat(32);
+        let srv =
+            zip_server(&hex, &[("a.txt", b"x")]).with_denylist(Arc::new(StubDenylist(hex.clone())));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let resp: Value = serde_json::from_str(
+            &rt.block_on(srv.handle_line(&extract_line(&hex, "a.txt", 23)))
+                .unwrap(),
+        )
+        .unwrap();
+        let summary: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(summary["kind"], "blocked");
     }
 
     #[test]

@@ -3097,6 +3097,7 @@ dependencies = [
  "fetchit-trust-types",
  "serde_json",
  "tokio",
+ "zip",
 ]
 
 [[package]]

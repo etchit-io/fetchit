@@ -22,6 +22,7 @@ JSON-RPC).
 |---|---|---|
 | `fetch_render` | `address` (64 hex, `autonomi://` prefix accepted) | Typed JSON summary: `text`/`html`/`json`/`markdown` bodies inline (capped), `image`/`audio`/`video`/`pdf`/`binary` as metadata only, `encrypted-envelope` shape, `blocked` with reason |
 | `detect` | `bytes_base64` | Same summary for local bytes; no network |
+| `extract_entry` | `address`, `entry_path` | Extracts one file from a ZIP at the address and renders it text-safely (filename hint improves detection); same caps and denylist |
 
 ## Environment
 
