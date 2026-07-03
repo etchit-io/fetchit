@@ -21,7 +21,9 @@
 
 use crate::at_rest::MasterKey;
 use crate::error::ChatError;
+use crate::fabric::AgentCertificate;
 use crate::local_store::write_json_atomic;
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
 use std::path::{Path, PathBuf};
 
@@ -216,6 +218,146 @@ pub async fn republish_cached_pair_record_v4(
     match post_pair_record_v4(relay, &record, http).await? {
         PostV4Outcome::Accepted | PostV4Outcome::RevisionReject { .. } => Ok(()),
     }
+}
+
+/// Build a [`DeviceEntryV4`] for the device certified by `cert`, reachable at
+/// `relays`. The five identity fields come off the cert; `primary` is false (a
+/// newly enrolled device is never the canonical device #1) and `cert_b64` is
+/// the STANDARD-base64 of the JSON-serialized certificate.
+fn device_entry_from_cert(
+    cert: &AgentCertificate,
+    relays: Vec<String>,
+) -> Result<DeviceEntryV4, ChatError> {
+    let cert_bytes = serde_json::to_vec(cert)
+        .map_err(|e| ChatError::Invalid(format!("serialize device cert: {e}")))?;
+    Ok(DeviceEntryV4 {
+        agent_id_hex: cert.agent_id_hex.clone(),
+        ml_dsa_pubkey_b64: cert.agent_ml_dsa_pubkey_b64.clone(),
+        kem_pubkey_b64: cert.kem_pubkey_b64.clone(),
+        advertised_relays: relays,
+        cert_b64: B64.encode(cert_bytes),
+        added_at_ms: cert.added_at_ms,
+        primary: false,
+    })
+}
+
+/// Append the device certified by `cert` to the account device list and mint
+/// the next revision, caching the result. The `_from_master` seam
+/// [`append_device_and_publish`] shares with the unit tests (already-resolved
+/// [`MasterKey`], explicit `issued_at_ms`, no relay POST).
+///
+/// Loads the cached [`PairRecordV4`] (the existing device must already hold one
+/// from its own self-cert), then REPLACES the entry for the cert's agent id if
+/// present or appends it (idempotent re-enrollment), and mints + caches at the
+/// cached revision + 1.
+///
+/// # Errors
+/// [`ChatError`] if no cached record exists, or on a signing / persistence /
+/// structural failure (e.g. exceeding the device cap).
+pub(crate) fn append_and_mint_from_master(
+    data_dir: &Path,
+    master: &MasterKey,
+    cert: &AgentCertificate,
+    relays: Vec<String>,
+    issued_at_ms: u64,
+) -> Result<PairRecordV4, ChatError> {
+    let Some(current) = load_pair_record_v4(data_dir)? else {
+        return Err(ChatError::Invalid(
+            "no cached device record; the existing device must self-cert before enrolling another"
+                .to_owned(),
+        ));
+    };
+    let entry = device_entry_from_cert(cert, relays)?;
+    let mut devices = current.devices;
+    match devices
+        .iter_mut()
+        .find(|d| d.agent_id_hex == entry.agent_id_hex)
+    {
+        Some(slot) => *slot = entry,
+        None => devices.push(entry),
+    }
+    let revision = current.revision.saturating_add(1);
+    mint_and_cache_pair_record_v4_from_master(data_dir, master, revision, issued_at_ms, &devices)
+}
+
+/// [`append_and_mint_from_master`] plus the relay POST: the async seam the
+/// public entry and the wiremock tests share.
+///
+/// # Errors
+/// As [`append_and_mint_from_master`], or a relay failure. A
+/// [`PostV4Outcome::RevisionReject`] becomes an error: the relay holds a newer
+/// revision (a sibling published concurrently), so this enroll must be re-run
+/// against that newer record rather than silently succeed.
+pub(crate) async fn append_publish_from_master(
+    data_dir: &Path,
+    master: &MasterKey,
+    cert: &AgentCertificate,
+    new_device_relays: &[String],
+    relay: &url::Url,
+    http: &reqwest::Client,
+    issued_at_ms: u64,
+) -> Result<PairRecordV4, ChatError> {
+    // The new device's own relays (the `r=` in its enrollment URI, where it
+    // published its offer) become its `DeviceEntryV4` reachability, so M6.3 DM
+    // fanout reaches it on the first resolve. Fall back to the POST relay only
+    // when the caller supplies none.
+    let relays = if new_device_relays.is_empty() {
+        vec![relay.to_string()]
+    } else {
+        new_device_relays.to_vec()
+    };
+    let record = append_and_mint_from_master(data_dir, master, cert, relays, issued_at_ms)?;
+    match post_pair_record_v4(relay, &record, http).await? {
+        PostV4Outcome::Accepted => Ok(record),
+        PostV4Outcome::RevisionReject { current_revision } => Err(ChatError::Invalid(format!(
+            "enroll publish rejected: relay holds a newer revision {current_revision}, re-run"
+        ))),
+    }
+}
+
+/// Enroll a confirmed device: append its account certificate to the device list
+/// at the next revision and publish the new record to `post_relay`.
+///
+/// The existing (enrolling) device opens its vault (`passphrase`, or the OS
+/// keychain when `None`), appends or replaces the entry for `cert`'s device,
+/// mints a user-signed record at revision N+1, caches it, and POSTs it. Returns
+/// the new signed record for the caller to hand to the devices-group invite.
+///
+/// The new device's `advertised_relays` come from `new_device_relays` (the
+/// `r=` relays in its enrollment URI, i.e. where it published its offer), so
+/// its `DeviceEntryV4` carries real reachability from day one; when that slice
+/// is empty they fall back to `post_relay`.
+///
+/// # Errors
+/// [`ChatError`] on a malformed `post_relay`, if the existing device has no
+/// cached record yet, on a vault-unlock / signing failure, or on a relay
+/// rejection.
+pub async fn append_device_and_publish(
+    data_dir: &Path,
+    passphrase: Option<&str>,
+    cert: &AgentCertificate,
+    new_device_relays: &[String],
+    post_relay: &str,
+    http: &reqwest::Client,
+) -> Result<PairRecordV4, ChatError> {
+    let relay = url::Url::parse(post_relay)
+        .map_err(|e| ChatError::Invalid(format!("post relay url: {e}")))?;
+    let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
+    let (master, _kdf_id, _argon_salt) =
+        crate::client::resolve_master_key(&identity_vault, passphrase)?;
+    let issued_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+    append_publish_from_master(
+        data_dir,
+        &master,
+        cert,
+        new_device_relays,
+        &relay,
+        http,
+        issued_at_ms,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -489,5 +631,166 @@ mod tests {
         republish_cached_pair_record_v4(dir.path(), &relay, &http)
             .await
             .unwrap();
+    }
+
+    /// Mint a real account-signed [`AgentCertificate`] for a device.
+    fn device_cert(
+        dir: &std::path::Path,
+        master: &MasterKey,
+        seed: u8,
+    ) -> crate::fabric::AgentCertificate {
+        let signer = MlDsaSigner::from_seed(&[seed; 32]);
+        crate::local_signer::with_user_key_from_master(dir, master, |user| {
+            crate::fabric::mint_agent_certificate(
+                user,
+                &hex::encode(signer.agent_id()),
+                &signer.public_key(),
+                &[seed; 1184],
+                1_700_000_000_000,
+            )
+        })
+        .unwrap()
+    }
+
+    /// A cached device-1 record at revision 1 (the enroll precondition).
+    fn seed_device_one_record(dir: &std::path::Path, master: &MasterKey) {
+        mint_and_cache_pair_record_v4_from_master(dir, master, 1, 1, &[device_entry(1, true)])
+            .unwrap();
+    }
+
+    #[test]
+    fn append_errors_without_a_cached_record() {
+        let (dir, master) = seeded_vault();
+        let cert = device_cert(dir.path(), &master, 2);
+        let out =
+            append_and_mint_from_master(dir.path(), &master, &cert, vec!["https://a".into()], 1);
+        assert!(out.is_err(), "cannot append to a nonexistent device list");
+    }
+
+    #[test]
+    fn append_and_mint_adds_a_device_and_bumps_revision() {
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master);
+        let cert = device_cert(dir.path(), &master, 2);
+        let record =
+            append_and_mint_from_master(dir.path(), &master, &cert, vec!["https://r.ex".into()], 5)
+                .unwrap();
+
+        verify_pair_record_v4(&record).unwrap();
+        assert_eq!(record.revision, 2);
+        assert_eq!(record.devices.len(), 2);
+        let entry = record
+            .devices
+            .iter()
+            .find(|d| d.agent_id_hex == cert.agent_id_hex)
+            .unwrap();
+        assert_eq!(entry.ml_dsa_pubkey_b64, cert.agent_ml_dsa_pubkey_b64);
+        assert_eq!(entry.kem_pubkey_b64, cert.kem_pubkey_b64);
+        assert!(!entry.primary);
+        assert_eq!(entry.advertised_relays, vec!["https://r.ex".to_string()]);
+        // cert_b64 round-trips back to the exact certificate.
+        let raw = B64.decode(&entry.cert_b64).unwrap();
+        let back: crate::fabric::AgentCertificate = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back, cert);
+        assert_eq!(load_pair_record_v4(dir.path()).unwrap().unwrap(), record);
+    }
+
+    #[test]
+    fn append_is_idempotent_replacing_the_same_agent() {
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master);
+        let cert = device_cert(dir.path(), &master, 2);
+        append_and_mint_from_master(dir.path(), &master, &cert, vec!["https://a".into()], 2)
+            .unwrap();
+        // Re-append the SAME agent with new relays: replace, do not duplicate.
+        let record =
+            append_and_mint_from_master(dir.path(), &master, &cert, vec!["https://b".into()], 3)
+                .unwrap();
+        assert_eq!(record.devices.len(), 2, "replaced in place, not duplicated");
+        let entry = record
+            .devices
+            .iter()
+            .find(|d| d.agent_id_hex == cert.agent_id_hex)
+            .unwrap();
+        assert_eq!(entry.advertised_relays, vec!["https://b".to_string()]);
+        assert_eq!(record.revision, 3);
+    }
+
+    #[tokio::test]
+    async fn append_publish_uses_the_new_device_relays() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master);
+        let cert = device_cert(dir.path(), &master, 2);
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let dev_relays = vec!["https://dev.ex".to_string()];
+        let record =
+            append_publish_from_master(dir.path(), &master, &cert, &dev_relays, &relay, &http, 9)
+                .await
+                .unwrap();
+        assert_eq!(record.revision, 2);
+        assert_eq!(record.devices.len(), 2);
+        // The entry carries the NEW DEVICE relays, not the POST relay.
+        let entry = record
+            .devices
+            .iter()
+            .find(|d| d.agent_id_hex == cert.agent_id_hex)
+            .unwrap();
+        assert_eq!(entry.advertised_relays, dev_relays);
+    }
+
+    #[tokio::test]
+    async fn append_publish_errors_on_revision_reject() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"current_revision": 99u64})),
+            )
+            .mount(&server)
+            .await;
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master);
+        let cert = device_cert(dir.path(), &master, 2);
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let out =
+            append_publish_from_master(dir.path(), &master, &cert, &[], &relay, &http, 9).await;
+        assert!(out.is_err(), "a revision reject on enroll is an error");
+    }
+
+    #[tokio::test]
+    async fn append_publish_falls_back_to_post_relay_when_relays_empty() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let (dir, master) = seeded_vault();
+        seed_device_one_record(dir.path(), &master);
+        let cert = device_cert(dir.path(), &master, 2);
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        let record = append_publish_from_master(dir.path(), &master, &cert, &[], &relay, &http, 9)
+            .await
+            .unwrap();
+        let entry = record
+            .devices
+            .iter()
+            .find(|d| d.agent_id_hex == cert.agent_id_hex)
+            .unwrap();
+        // Empty new-device relays fall back to the POST relay.
+        assert_eq!(entry.advertised_relays, vec![relay.to_string()]);
     }
 }

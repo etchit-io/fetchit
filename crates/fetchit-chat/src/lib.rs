@@ -77,7 +77,8 @@ pub use group_invite_uri::{
 pub use client::restore_identity_from_recovery_phrase;
 pub use device_cert::{ensure_device_certificate, load_device_certificate};
 pub use pair_record_v4::{
-    load_pair_record_v4, mint_and_cache_pair_record_v4, next_pair_record_v4_revision,
+    append_device_and_publish, load_pair_record_v4, mint_and_cache_pair_record_v4,
+    next_pair_record_v4_revision,
 };
 pub use local_signer::{
     discard_local_identity, reveal_local_signer_recovery_phrase, reveal_local_signer_seed,
