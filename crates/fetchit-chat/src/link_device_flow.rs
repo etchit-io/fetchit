@@ -19,6 +19,7 @@ use crate::chat_crypto::{random_nonce, AEAD_KEY_LEN};
 use crate::error::ChatError;
 use crate::link_device::LinkDeviceOffer;
 use crate::link_device_uri::{emit_link_device_uri, parse_link_device_uri};
+use base64::engine::general_purpose::STANDARD as B64STD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use rand::rngs::OsRng;
@@ -205,6 +206,63 @@ pub async fn preview_link_offer(
         short_code: offer.short_code(),
         expired: offer.is_expired(now_ms),
         agent_id_hex: offer.agent_id_hex,
+    })
+}
+
+/// Decode an offer's STANDARD-base64 ML-DSA + ML-KEM keys to raw bytes.
+fn decode_offer_keys(offer: &LinkDeviceOffer) -> Result<(Vec<u8>, Vec<u8>), ChatError> {
+    let ml_dsa = B64STD
+        .decode(&offer.agent_ml_dsa_pubkey_b64)
+        .map_err(|_| ChatError::Invalid("offer ml-dsa key is not base64".into()))?;
+    let kem = B64STD
+        .decode(&offer.kem_pubkey_b64)
+        .map_err(|_| ChatError::Invalid("offer ml-kem key is not base64".into()))?;
+    Ok((ml_dsa, kem))
+}
+
+/// Existing-device side: after the human confirms the short-code matches, mint
+/// the account certificate for the scanned offer's device. Fetches + validates
+/// the offer, then signs an
+/// [`AgentCertificate`](crate::fabric::AgentCertificate) with the account user
+/// key (unlocked from THIS device's vault via `passphrase`). Returns the cert
+/// for the caller to publish in the account's `PairRecordV4` (revision N+1) and
+/// deliver to the new device.
+///
+/// It does NOT persist to this device's `device_cert.json` — the cert belongs
+/// to the newly linked device, not this one.
+///
+/// # Errors
+/// [`ChatError`] on a bad URI / fetch, a wrong passphrase or missing
+/// recoverable seed, or a malformed offer.
+pub async fn confirm_link_device(
+    data_dir: &std::path::Path,
+    passphrase: Option<&str>,
+    uri: &str,
+    added_at_ms: u64,
+    http: &reqwest::Client,
+) -> Result<crate::fabric::AgentCertificate, ChatError> {
+    let offer = fetch_link_offer(uri, http).await?;
+    let identity_vault = data_dir.join(crate::chat_identity::IDENTITY_FILE);
+    let (master, _kdf_id, _argon_salt) =
+        crate::client::resolve_master_key(&identity_vault, passphrase)?;
+    confirm_offer_from_master(data_dir, &master, &offer, added_at_ms)
+}
+
+/// [`confirm_link_device`] with an already-fetched `offer` and an
+/// already-resolved [`MasterKey`](crate::at_rest::MasterKey): the internal seam
+/// the unit tests share (no relay round-trip, no passphrase prompt).
+///
+/// # Errors
+/// As [`confirm_link_device`].
+pub(crate) fn confirm_offer_from_master(
+    data_dir: &std::path::Path,
+    master: &crate::at_rest::MasterKey,
+    offer: &LinkDeviceOffer,
+    added_at_ms: u64,
+) -> Result<crate::fabric::AgentCertificate, ChatError> {
+    let (ml_dsa, kem) = decode_offer_keys(offer)?;
+    crate::local_signer::with_user_key_from_master(data_dir, master, |user| {
+        crate::fabric::mint_agent_certificate(user, &offer.agent_id_hex, &ml_dsa, &kem, added_at_ms)
     })
 }
 
@@ -501,5 +559,43 @@ mod tests {
             .await
             .unwrap();
         assert!(past.expired);
+    }
+
+    #[test]
+    fn confirm_offer_from_master_mints_a_verifiable_cert() {
+        use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+        use crate::fabric::verify_agent_certificate;
+        use crate::local_signer::{with_user_key_from_master, LocalSignerVault};
+        use zeroize::Zeroizing;
+
+        let dir = tempfile::tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
+
+        // The NEW device's offer — a different agent than this vault's identity.
+        let signer = MlDsaSigner::from_seed(&[44u8; 32]);
+        let offer = LinkDeviceOffer::mint(
+            hex::encode(signer.agent_id()),
+            &signer.public_key(),
+            &[0u8; 1184],
+            &[5u8; 16],
+            1_700_000_000_000,
+        );
+        let cert =
+            confirm_offer_from_master(dir.path(), &master, &offer, 1_700_000_000_000).unwrap();
+
+        // Binds the new device's agent, signed by the account user key derived
+        // from THIS device's vault.
+        assert_eq!(cert.agent_id_hex, offer.agent_id_hex);
+        let user_pk =
+            with_user_key_from_master(dir.path(), &master, |u| Ok(u.public_key_bytes().to_vec()))
+                .unwrap();
+        verify_agent_certificate(&cert, &user_pk).unwrap();
     }
 }
