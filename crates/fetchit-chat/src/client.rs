@@ -3014,6 +3014,20 @@ impl Client {
                 ));
             }
         }
+
+        // M6.2: also republish the account's cached user-signed device-list
+        // record (v4) to the primary, verbatim. A no-op for accounts without a
+        // minted device list, so the V1 path above is unaffected pre-M6.
+        // Best-effort: a v4 relay failure degrades per-device DIRECTNESS, not
+        // account DELIVERY (DM fanout still hits every listed device, and a
+        // failed-over device catches up via the M6.6 devices-group sync), so
+        // it must never fail the V1 publish that just succeeded.
+        if let Err(e) =
+            crate::pair_record_v4::republish_cached_pair_record_v4(&chat.layout.root, &relay, &http)
+                .await
+        {
+            log::warn!("[chat] v4 pair-record republish failed (non-fatal): {e}");
+        }
         Ok(())
     }
 
