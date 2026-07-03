@@ -1,4 +1,4 @@
-//! The account's user-signed [`PairRecordV4`] device list — minted at a
+//! The account's user-signed [`PairRecordV4`] device list -- minted at a
 //! passphrase moment, cached plaintext, and republished verbatim.
 //!
 //! M6.2 splits the v4 record's lifecycle across two custody postures:
@@ -6,14 +6,14 @@
 //! - **Minting** needs the account user key ([`crate::fabric::UserKeypair`]),
 //!   derived on demand from the vault via [`crate::local_signer::with_user_key`]
 //!   and dropped immediately (never retained). So the record is (re-)signed
-//!   ONLY at an explicit passphrase moment — a first-launch self-cert, an
-//!   enroll, or a revoke — where the `revision` steps forward.
+//!   ONLY at an explicit passphrase moment -- a first-launch self-cert, an
+//!   enroll, or a revoke -- where the `revision` steps forward.
 //! - **Republishing** needs no key: the signed record is public, cached as
 //!   plaintext JSON (`pair_record_v4.json`, the same class as
 //!   `device_cert.json`), and re-POSTed byte-for-byte on every connect /
 //!   home-relay failover. The relay's `revision` CAS makes a duplicate
 //!   re-POST a harmless 409, while a failover-target relay that lacks the
-//!   record accepts it — so reachability propagates without a re-sign.
+//!   record accepts it -- so reachability propagates without a re-sign.
 //!
 //! This is why the cache holds the SIGNED record only and the user key is
 //! never kept around to reproduce it: freshening reachability is a verbatim
@@ -26,7 +26,7 @@ use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
 use std::path::{Path, PathBuf};
 
 /// Path of the cached signed v4 record. Plaintext JSON (the record is
-/// public — it is served verbatim by the relay), 0600 like every store file.
+/// public -- it is served verbatim by the relay), 0600 like every store file.
 fn pair_record_v4_path(data_dir: &Path) -> PathBuf {
     data_dir.join("pair_record_v4.json")
 }
@@ -73,8 +73,8 @@ pub fn next_pair_record_v4_revision(data_dir: &Path) -> Result<u64, ChatError> {
 /// Opens the vault (via `passphrase`, or the OS keychain when `None`, as
 /// elsewhere), derives the account user key, signs the record, drops the key,
 /// and persists the signed record plaintext. This is an explicit
-/// passphrase-moment operation — a first-launch self-cert, an enroll, or a
-/// revoke — never a background republish.
+/// passphrase-moment operation -- a first-launch self-cert, an enroll, or a
+/// revoke -- never a background republish.
 ///
 /// `revision` should come from [`next_pair_record_v4_revision`] (or the
 /// relay's current revision + 1 on a recovery), and `issued_at_ms` is the
@@ -196,6 +196,12 @@ pub async fn post_pair_record_v4(
 /// while a failover-target relay that lacks the record accepts it. Freshening
 /// reachability therefore never needs the user key.
 ///
+/// For M6.2's single minter a `RevisionReject` cannot indicate a stale local
+/// cache, since only this device mints. Under multi-device minting a
+/// `RevisionReject` would instead mean a sibling device published a newer
+/// revision; reconciling the then-stale local cache is a separate self-sync
+/// concern, not this republish path's.
+///
 /// # Errors
 /// [`ChatError`] on a malformed cache file, or a transport / non-2xx-non-409
 /// relay failure.
@@ -235,14 +241,15 @@ mod tests {
             Some(&salt),
         )
         .unwrap();
-        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt)).unwrap();
+        LocalSignerVault::load_or_create(dir.path(), &master, kdf_id_argon2(), Some(&salt))
+            .unwrap();
         (dir, master)
     }
 
     /// A well-formed [`DeviceEntryV4`] whose `agent_id_hex` correctly binds
     /// its ML-DSA key (so the record's per-device binding check passes). The
-    /// `cert_b64` is opaque here — it is bound into the user signature but not
-    /// re-verified on resolve — so any base64 is fine.
+    /// `cert_b64` is opaque here -- it is bound into the user signature but not
+    /// re-verified on resolve -- so any base64 is fine.
     fn device_entry(seed: u8, primary: bool) -> DeviceEntryV4 {
         let signer = MlDsaSigner::from_seed(&[seed; 32]);
         DeviceEntryV4 {
@@ -292,7 +299,7 @@ mod tests {
         .unwrap();
 
         // User-signed and structurally valid (the user key from THIS vault
-        // signed it — proves the custody path derived the right key).
+        // signed it -- proves the custody path derived the right key).
         verify_pair_record_v4(&record).unwrap();
         assert_eq!(record.revision, 1);
         assert_eq!(record.devices, devices);
@@ -309,16 +316,28 @@ mod tests {
     #[test]
     fn next_revision_is_cached_plus_one() {
         let (dir, master) = seeded_vault();
-        mint_and_cache_pair_record_v4_from_master(dir.path(), &master, 4, 1, &[device_entry(3, true)])
-            .unwrap();
+        mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            4,
+            1,
+            &[device_entry(3, true)],
+        )
+        .unwrap();
         assert_eq!(next_pair_record_v4_revision(dir.path()).unwrap(), 5);
     }
 
     #[test]
     fn save_overwrites_prior_record() {
         let (dir, master) = seeded_vault();
-        mint_and_cache_pair_record_v4_from_master(dir.path(), &master, 1, 1, &[device_entry(3, true)])
-            .unwrap();
+        mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            1,
+            1,
+            &[device_entry(3, true)],
+        )
+        .unwrap();
         let second = mint_and_cache_pair_record_v4_from_master(
             dir.path(),
             &master,
@@ -328,7 +347,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_pair_record_v4(dir.path()).unwrap().unwrap(), second);
-        assert_eq!(load_pair_record_v4(dir.path()).unwrap().unwrap().revision, 2);
+        assert_eq!(
+            load_pair_record_v4(dir.path()).unwrap().unwrap().revision,
+            2
+        );
     }
 
     #[tokio::test]
@@ -424,8 +446,14 @@ mod tests {
             .mount(&server)
             .await;
         let (dir, master) = seeded_vault();
-        mint_and_cache_pair_record_v4_from_master(dir.path(), &master, 1, 1, &[device_entry(3, true)])
-            .unwrap();
+        mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            1,
+            1,
+            &[device_entry(3, true)],
+        )
+        .unwrap();
         let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let http = reqwest::Client::new();
         republish_cached_pair_record_v4(dir.path(), &relay, &http)
@@ -447,8 +475,14 @@ mod tests {
             .mount(&server)
             .await;
         let (dir, master) = seeded_vault();
-        mint_and_cache_pair_record_v4_from_master(dir.path(), &master, 1, 1, &[device_entry(3, true)])
-            .unwrap();
+        mint_and_cache_pair_record_v4_from_master(
+            dir.path(),
+            &master,
+            1,
+            1,
+            &[device_entry(3, true)],
+        )
+        .unwrap();
         let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let http = reqwest::Client::new();
         // A verbatim re-POST the relay already holds is a harmless 409.
