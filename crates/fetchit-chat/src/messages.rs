@@ -666,7 +666,26 @@ const NEG_CACHE_CAP: usize = 4096;
 /// whole session.
 const NEG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The recipient device-agents a DM fans out to, derived from the recipient's
+/// One recipient device of a DM fanout, plus how to establish its conversation:
+/// a resolved-record device (bootstrap from the signed `DeviceEntryV4`, which
+/// reaches a sibling that was never imported as a contact and so has no card),
+/// or the single-device fallback (bootstrap from the stored contact card).
+struct FanoutTarget {
+    agent: AgentId,
+    device: Option<fetchit_relay_proto::pair_record::DeviceEntryV4>,
+}
+
+impl FanoutTarget {
+    /// The single-device fallback target: bootstrap `to` from its stored card.
+    fn contact(to: &AgentId) -> Self {
+        Self {
+            agent: to.clone(),
+            device: None,
+        }
+    }
+}
+
+/// The recipient devices a DM fans out to, derived from the recipient's
 /// resolved [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4).
 ///
 /// Fans out to every listed device -- the point of the device fabric -- but
@@ -691,14 +710,17 @@ const NEG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 fn fanout_targets_from_record(
     record: Option<&fetchit_relay_proto::pair_record::PairRecordV4>,
     to: &AgentId,
-) -> Vec<AgentId> {
+) -> Vec<FanoutTarget> {
     match record {
         Some(rec) if rec.devices.iter().any(|d| d.agent_id_hex == to.0) => rec
             .devices
             .iter()
-            .map(|d| AgentId(d.agent_id_hex.clone()))
+            .map(|d| FanoutTarget {
+                agent: AgentId(d.agent_id_hex.clone()),
+                device: Some(d.clone()),
+            })
             .collect(),
-        _ => vec![to.clone()],
+        _ => vec![FanoutTarget::contact(to)],
     }
 }
 
@@ -974,31 +996,56 @@ impl<'a> Endpoint<'a> {
         let mut any_delivered = false;
         let mut last_err: Option<ChatError> = None;
         for target in &targets {
-            let conv = match registry.find_dm_with(&target.0).await {
+            let conv = match registry.find_dm_with(&target.agent.0).await {
                 Ok(Some(c)) => c,
-                Ok(None) => match self
-                    .bootstrap_conversation(target, sender_name, identity, registry, signer, layout)
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::warn!(
-                            "[chat] fanout: bootstrap for device {} failed: {e}",
-                            target.0
-                        );
-                        last_err = Some(e);
-                        continue;
+                Ok(None) => {
+                    // Bootstrap from the resolved device entry when the fanout
+                    // carried one -- a sibling device may never have been
+                    // imported as a contact, so it has no stored card; the
+                    // record's user signature over its agent_id + keys is the
+                    // authenticated source. Fall back to the card for the
+                    // single-device path (`FanoutTarget::contact`).
+                    let bootstrapped = match &target.device {
+                        Some(device) => {
+                            self.bootstrap_from_device(device, identity, registry, signer)
+                                .await
+                        }
+                        None => {
+                            self.bootstrap_conversation(
+                                &target.agent,
+                                sender_name,
+                                identity,
+                                registry,
+                                signer,
+                                layout,
+                            )
+                            .await
+                        }
+                    };
+                    match bootstrapped {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::warn!(
+                                "[chat] fanout: bootstrap for device {} failed: {e}",
+                                target.agent.0
+                            );
+                            last_err = Some(e);
+                            continue;
+                        }
                     }
-                },
+                }
                 Err(e) => {
-                    log::warn!("[chat] fanout: lookup for device {} failed: {e}", target.0);
+                    log::warn!(
+                        "[chat] fanout: lookup for device {} failed: {e}",
+                        target.agent.0
+                    );
                     last_err = Some(e);
                     continue;
                 }
             };
             // The thread anchor is `to`'s conversation regardless of this
             // device's delivery outcome (threading is decoupled from delivery).
-            if target == to {
+            if &target.agent == to {
                 anchor_group_id = Some(conv.group_id_hex.clone());
             }
             let delivered = match build_message_outbox(
@@ -1022,7 +1069,10 @@ impl<'a> Endpoint<'a> {
             match delivered {
                 Ok(_) => any_delivered = true,
                 Err(e) => {
-                    log::warn!("[chat] fanout: delivery to device {} failed: {e}", target.0);
+                    log::warn!(
+                        "[chat] fanout: delivery to device {} failed: {e}",
+                        target.agent.0
+                    );
                     last_err = Some(e);
                 }
             }
@@ -1095,26 +1145,26 @@ impl<'a> Endpoint<'a> {
     /// so a newer revision that REVOKED a device lets us cancel that device's
     /// pending outbox sends -- resolve-first would compare a record against
     /// itself and never drop, leaking queued messages to a removed device.
-    async fn fanout_targets(&self, to: &AgentId) -> Vec<AgentId> {
+    async fn fanout_targets(&self, to: &AgentId) -> Vec<FanoutTarget> {
         // Only M6 contacts (whose imported card carried an x0x user_id) have a
         // device fabric to resolve; everything else is single-device.
         let Some(layout) = self.layout else {
-            return vec![to.clone()];
+            return vec![FanoutTarget::contact(to)];
         };
         let Ok(Some(user_id_hex)) = contact_user_id_hex(layout, &to.0) else {
-            return vec![to.clone()];
+            return vec![FanoutTarget::contact(to)];
         };
         // Resolve from the contact's advertised relay, falling back to our
         // primary; with no relay at all there is nothing to resolve against.
         let Some(primary) = self.primary_relay_url.read().await.clone() else {
-            return vec![to.clone()];
+            return vec![FanoutTarget::contact(to)];
         };
         let relay = StoredContactCard::resolve_recipient_hints_or_fallback(layout, &to.0, &primary)
             .ok()
             .and_then(|h| h.relays.into_iter().next())
             .and_then(|r| relay_rest_base(&r));
         let Some(relay) = relay else {
-            return vec![to.clone()];
+            return vec![FanoutTarget::contact(to)];
         };
         let data_dir = &layout.root;
         let http = crate::relay_http::guarded_client();
@@ -1139,44 +1189,48 @@ impl<'a> Endpoint<'a> {
         fanout_targets_from_record(new.as_ref(), to)
     }
 
-    async fn bootstrap_conversation(
-        &self,
-        to: &AgentId,
-        _sender_name: &str,
-        identity: &Arc<FetchitIdentity>,
-        registry: &Arc<ConversationRegistry>,
-        signer: &Arc<dyn Signer>,
-        layout: &StoreLayout,
-    ) -> Result<Conversation> {
-        // Race guard: a concurrent inbound welcome (or a sibling
-        // outbound `send` that beat us to the punch) may have installed
-        // a DM with this peer in the window between `send`'s lookup and
-        // here. Re-resolve once more before minting a fresh group so we
-        // don't accrete a duplicate conversation in the registry.
-        if let Some(existing) = registry.find_dm_with(&to.0).await? {
-            return Ok(existing);
-        }
-        let peer_card = StoredContactCard::load(layout, &to.0)?.ok_or_else(|| {
-            ChatError::Invalid(format!(
-                "no stored card for {} — import their share card first",
-                to.short()
-            ))
-        })?;
-        let peer_member = Member {
+    /// A DM peer's [`Member`] (single device) built from its raw key fields --
+    /// the shared shape whether the source is a stored card or a resolved
+    /// [`DeviceEntryV4`](fetchit_relay_proto::pair_record::DeviceEntryV4).
+    fn dm_peer_member(
+        agent_id_hex: String,
+        kem_public_key_b64: String,
+        // Carry the peer's ML-DSA pubkey through when we have it; the peer's own
+        // welcomes self-attest anyway, but mirroring it keeps the local member
+        // list consistent with what we re-broadcast.
+        agent_public_key_b64: Option<String>,
+    ) -> Member {
+        Member {
             user_id_hex: None,
             devices: vec![MemberDevice {
-                agent_id_hex: peer_card.agent_id_hex.clone(),
-                kem_public_key_b64: peer_card.kem_public_key_b64.clone(),
-                // Carry the peer's ML-DSA pubkey through if we have it;
-                // welcomes the peer eventually sends us will self-attest
-                // anyway, but mirroring the field here keeps the local
-                // member-list consistent with what we'll re-broadcast.
-                agent_public_key_b64: peer_card.agent_public_key_b64.clone(),
+                agent_id_hex,
+                kem_public_key_b64,
+                agent_public_key_b64,
                 added_at_epoch: 0,
                 status: MemberDeviceStatus::Active,
             }],
             joined_at_epoch: 0,
-        };
+        }
+    }
+
+    /// Establish (or reuse) a DM conversation with `peer_member`'s device: mint
+    /// the group + key locally, persist it, and dispatch the welcome. Shared by
+    /// the card-based [`Self::bootstrap_conversation`] and the record-based
+    /// [`Self::bootstrap_from_device`].
+    async fn establish_dm(
+        &self,
+        peer_member: Member,
+        identity: &Arc<FetchitIdentity>,
+        registry: &Arc<ConversationRegistry>,
+        signer: &Arc<dyn Signer>,
+    ) -> Result<Conversation> {
+        // Race guard: a concurrent inbound welcome (or a sibling outbound
+        // `send`) may have installed a DM with this peer in the window between
+        // the caller's lookup and here; reuse it rather than accrete a duplicate.
+        let peer_agent = peer_member.devices[0].agent_id_hex.clone();
+        if let Some(existing) = registry.find_dm_with(&peer_agent).await? {
+            return Ok(existing);
+        }
         let local_member = Member {
             user_id_hex: identity.user_id_hex().map(str::to_owned),
             devices: vec![MemberDevice {
@@ -1197,6 +1251,59 @@ impl<'a> Endpoint<'a> {
         registry.save(&conv).await?;
         self.dispatch_outbox(welcome).await?;
         Ok(conv)
+    }
+
+    /// Card-based DM bootstrap: peer member from the stored contact card. The
+    /// single-device fallback path (pre-M6 contact, or a fanout that could not
+    /// prove the `user_id` binding).
+    async fn bootstrap_conversation(
+        &self,
+        to: &AgentId,
+        _sender_name: &str,
+        identity: &Arc<FetchitIdentity>,
+        registry: &Arc<ConversationRegistry>,
+        signer: &Arc<dyn Signer>,
+        layout: &StoreLayout,
+    ) -> Result<Conversation> {
+        if let Some(existing) = registry.find_dm_with(&to.0).await? {
+            return Ok(existing);
+        }
+        let peer_card = StoredContactCard::load(layout, &to.0)?.ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "no stored card for {} — import their share card first",
+                to.short()
+            ))
+        })?;
+        let peer_member = Self::dm_peer_member(
+            peer_card.agent_id_hex,
+            peer_card.kem_public_key_b64,
+            peer_card.agent_public_key_b64,
+        );
+        self.establish_dm(peer_member, identity, registry, signer)
+            .await
+    }
+
+    /// Record-based DM bootstrap: peer member from a resolved
+    /// [`DeviceEntryV4`](fetchit_relay_proto::pair_record::DeviceEntryV4), so a
+    /// sibling device that was never imported as a contact (and thus has no
+    /// card) is still reachable in the M6.3 fanout. The record's user signature
+    /// covers each device's `agent_id_hex` + keys, so the KEM used here is
+    /// authenticated (that binding is exactly what `fanout_targets_from_record`
+    /// verified before including the device).
+    async fn bootstrap_from_device(
+        &self,
+        device: &fetchit_relay_proto::pair_record::DeviceEntryV4,
+        identity: &Arc<FetchitIdentity>,
+        registry: &Arc<ConversationRegistry>,
+        signer: &Arc<dyn Signer>,
+    ) -> Result<Conversation> {
+        let peer_member = Self::dm_peer_member(
+            device.agent_id_hex.clone(),
+            device.kem_pubkey_b64.clone(),
+            Some(device.ml_dsa_pubkey_b64.clone()),
+        );
+        self.establish_dm(peer_member, identity, registry, signer)
+            .await
     }
 
     /// Emit a `DeliveryReceipt` envelope for a previously-decoded
@@ -2753,6 +2860,12 @@ mod tests {
         Arc::new(StdMutex::new(std::collections::HashMap::new()))
     }
 
+    /// Just the target agents (drops the per-device bootstrap source) so the
+    /// fanout tests can assert the agent set a DM reaches, in order.
+    fn agents(targets: Vec<FanoutTarget>) -> Vec<AgentId> {
+        targets.into_iter().map(|t| t.agent).collect()
+    }
+
     #[test]
     fn fanout_targets_from_record_gates_on_to_being_a_listed_device() {
         use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
@@ -2786,7 +2899,7 @@ mod tests {
         // device, in record order.
         let to_listed = AgentId("bb".repeat(32));
         assert_eq!(
-            fanout_targets_from_record(Some(&three), &to_listed),
+            agents(fanout_targets_from_record(Some(&three), &to_listed)),
             vec![
                 AgentId("aa".repeat(32)),
                 AgentId("bb".repeat(32)),
@@ -2799,19 +2912,22 @@ mod tests {
         // record), so single-device only -- the DM is never redirected.
         let to_unlisted = AgentId("11".repeat(32));
         assert_eq!(
-            fanout_targets_from_record(Some(&three), &to_unlisted),
+            agents(fanout_targets_from_record(Some(&three), &to_unlisted)),
             vec![to_unlisted.clone()]
         );
 
         // No published record (pre-M6 contact): single-device fallback.
         assert_eq!(
-            fanout_targets_from_record(None, &to_unlisted),
+            agents(fanout_targets_from_record(None, &to_unlisted)),
             vec![to_unlisted.clone()]
         );
 
         // Empty device list: same fallback -- fanout never yields zero targets.
         assert_eq!(
-            fanout_targets_from_record(Some(&record(vec![])), &to_unlisted),
+            agents(fanout_targets_from_record(
+                Some(&record(vec![])),
+                &to_unlisted
+            )),
             vec![to_unlisted]
         );
     }
@@ -2886,7 +3002,7 @@ mod tests {
         let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
         let router = Router::new();
         let endpoint = fanout_endpoint(&http, &router, &layout);
-        assert_eq!(endpoint.fanout_targets(&to).await, vec![to.clone()]);
+        assert_eq!(agents(endpoint.fanout_targets(&to).await), vec![to.clone()]);
     }
 
     #[tokio::test]
@@ -2944,7 +3060,7 @@ mod tests {
         let endpoint = fanout_endpoint(&http, &router, &layout);
         // `to` is not one of the record's devices -> single-device only, no
         // redirection to the victim's 01/02 devices.
-        assert_eq!(endpoint.fanout_targets(&to).await, vec![to.clone()]);
+        assert_eq!(agents(endpoint.fanout_targets(&to).await), vec![to.clone()]);
     }
 
     #[tokio::test]
@@ -2998,11 +3114,139 @@ mod tests {
         let endpoint = fanout_endpoint(&http, &router, &layout);
         // `to` (device 01) is a listed device -> fan out to BOTH 01 and 02.
         assert_eq!(
-            endpoint.fanout_targets(&to).await,
+            agents(endpoint.fanout_targets(&to).await),
             vec![
                 AgentId(hex::encode([1u8; 32])),
                 AgentId(hex::encode([2u8; 32])),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_anchors_history_on_to_agent_and_leaves_siblings_threadless() {
+        use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
+
+        // Regression + M6.3 model (A): a DM to a multi-device contact fans out
+        // to every listed device -- bootstrapping the siblings straight from
+        // the resolved record, since a sibling was never imported as a contact
+        // and so has no stored card -- yet the sender's OWN transcript must show
+        // exactly one thread. History is anchored on the `to`-agent
+        // conversation; sibling conversations are sealed + dispatched but carry
+        // ZERO persisted history, so a multi-device contact never fragments into
+        // N sidebar rows. Without the anchor the outbound entry would land on
+        // whichever device sorted first, silently resurfacing the wrong-thread
+        // bug this test locks out.
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+
+        // Two real peer devices (real KEM keys, so the per-device welcome seal
+        // actually succeeds). Device 01 is the contact we added (`to`); device
+        // 02 is its sibling, discovered ONLY from the signed record.
+        let dev01 = build_rig();
+        let dev02 = build_rig();
+        let to = AgentId(dev01.agent_hex().to_owned());
+        let sibling = AgentId(dev02.agent_hex().to_owned());
+        let user_id = "cd".repeat(32);
+
+        // Only `to`'s card is on disk (fanout reads its user_id + relay hint).
+        // The sibling is NEVER imported -- model (A) must still reach it.
+        StoredContactCard {
+            agent_id_hex: to.0.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(dev01.identity.kem_public_key()),
+            agent_public_key_b64: Some(B64.encode(dev01.signer.public_key())),
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://127.0.0.1:9/v1/ws".to_owned()],
+            }),
+            last_hint_epoch_ms: None,
+            user_id_hex: Some(user_id.clone()),
+        }
+        .save(&rig.layout)
+        .unwrap();
+
+        // Cached signed record listing BOTH devices, with `to` (dev01) among
+        // them so the user-signature binding holds and the fanout is
+        // authorized. The loopback relay is unreachable, so resolve degrades to
+        // this cache.
+        let entry = |peer: &PrivateGroupRig, primary: bool| DeviceEntryV4 {
+            agent_id_hex: peer.agent_hex().to_owned(),
+            ml_dsa_pubkey_b64: B64.encode(peer.signer.public_key()),
+            kem_pubkey_b64: B64.encode(peer.identity.kem_public_key()),
+            advertised_relays: vec![],
+            cert_b64: "AA".into(),
+            added_at_ms: 0,
+            primary,
+        };
+        let record = PairRecordV4 {
+            record_version: 4,
+            user_id_hex: user_id.clone(),
+            user_ml_dsa_pubkey_b64: "AA".into(),
+            revision: 1,
+            issued_at_ms: 1,
+            devices: vec![entry(&dev01, true), entry(&dev02, false)],
+            user_signature_b64: "AA".into(),
+        };
+        let cache_dir = rig.layout.root.join("contact_pair_records");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        write_json_atomic(&cache_dir.join(format!("{user_id}.json")), &record).unwrap();
+
+        let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            None,
+            primary_cell(Some("wss://127.0.0.1:9/v1/ws")),
+            neg_cache(),
+            group_kinds_cache(),
+        );
+
+        let msg_id = endpoint
+            .send(&to, "hi across your devices", "Alice", None, None)
+            .await
+            .unwrap()
+            .expect("multi-device send must surface a message id");
+
+        // The `to`-agent conversation carries the single outbound entry.
+        let to_conv = rig
+            .registry
+            .find_dm_with(&to.0)
+            .await
+            .unwrap()
+            .expect("send must have bootstrapped the to-agent conversation");
+        let to_outbound: Vec<_> = to_conv
+            .history
+            .iter()
+            .filter(|e| e.sender_agent_id_hex.eq_ignore_ascii_case(rig.agent_hex()))
+            .collect();
+        assert_eq!(
+            to_outbound.len(),
+            1,
+            "exactly one outbound entry on the to-agent thread"
+        );
+        assert_eq!(to_outbound[0].body, "hi across your devices");
+        assert_eq!(to_outbound[0].message_id, msg_id);
+
+        // The sibling device was delivered to (its conversation exists) but
+        // carries NO history -- threading is anchored on `to`, not the sibling,
+        // so the contact stays a single thread.
+        let sibling_conv = rig
+            .registry
+            .find_dm_with(&sibling.0)
+            .await
+            .unwrap()
+            .expect("model (A) must bootstrap + deliver to the sibling device");
+        assert!(
+            sibling_conv.history.is_empty(),
+            "sibling device thread must carry zero persisted history"
         );
     }
 
