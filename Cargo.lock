@@ -3093,6 +3093,8 @@ dependencies = [
  "bytes",
  "fetchit-core",
  "fetchit-net",
+ "fetchit-trust-client",
+ "fetchit-trust-types",
  "serde_json",
  "tokio",
 ]

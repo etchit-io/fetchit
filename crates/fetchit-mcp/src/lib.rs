@@ -13,7 +13,12 @@
 use base64::Engine as _;
 use bytes::Bytes;
 use fetchit_core::handlers::default_registry;
-use fetchit_core::{Address, HandlerRegistry, Hint, NetworkClient, RenderContext, Rendition};
+use std::sync::Arc;
+
+use fetchit_core::{
+    Address, HandlerRegistry, Hint, NetworkClient, RenderContext, RenderingContext, Rendition,
+};
+use fetchit_trust_types::{DenylistQuery, EntryKind};
 use serde_json::{json, Value};
 
 /// Protocol revision offered when the client requests one we don't know.
@@ -31,10 +36,54 @@ const MAX_DETECT_BYTES: usize = 32 * 1024 * 1024;
 /// Rows / entries included in tabular and archive summaries.
 const LIST_CAP: usize = 100;
 
+/// Cap on the in-memory byte cache. Addresses are immutable, so cached
+/// bytes are always correct; the cap only bounds memory.
+const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Insertion-order byte cache for immutable address content.
+struct ByteCache {
+    map: std::collections::HashMap<Address, Bytes>,
+    order: std::collections::VecDeque<Address>,
+    total: usize,
+}
+
+impl ByteCache {
+    fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            total: 0,
+        }
+    }
+
+    fn get(&self, addr: &Address) -> Option<Bytes> {
+        self.map.get(addr).cloned()
+    }
+
+    fn insert(&mut self, addr: Address, bytes: &Bytes) {
+        if bytes.len() > MAX_CACHE_BYTES || self.map.contains_key(&addr) {
+            return;
+        }
+        while self.total.saturating_add(bytes.len()) > MAX_CACHE_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.map.remove(&oldest) {
+                self.total = self.total.saturating_sub(evicted.len());
+            }
+        }
+        self.total = self.total.saturating_add(bytes.len());
+        self.order.push_back(addr);
+        self.map.insert(addr, bytes.clone());
+    }
+}
+
 /// MCP server state: a network client plus the handler registry.
 pub struct Server<C> {
     client: C,
     registry: HandlerRegistry,
+    denylist: Option<Arc<dyn DenylistQuery>>,
+    cache: std::sync::Mutex<ByteCache>,
 }
 
 impl<C: NetworkClient> Server<C> {
@@ -43,7 +92,17 @@ impl<C: NetworkClient> Server<C> {
         Self {
             client,
             registry: default_registry(),
+            denylist: None,
+            cache: std::sync::Mutex::new(ByteCache::new()),
         }
+    }
+
+    /// Install a community denylist; blocked addresses are refused before
+    /// any bytes are fetched, mirroring the human shells.
+    #[must_use]
+    pub fn with_denylist(mut self, denylist: Arc<dyn DenylistQuery>) -> Self {
+        self.denylist = Some(denylist);
+        self
     }
 
     /// Handle one newline-delimited JSON-RPC message.
@@ -134,19 +193,60 @@ impl<C: NetworkClient> Server<C> {
         let addr: Address = normalized
             .parse()
             .map_err(|e: fetchit_core::Error| e.to_string())?;
-        let bytes = self
-            .client
-            .fetch(&addr)
-            .await
-            .map_err(|e| format!("fetch failed: {e}"))?;
+        let hex = addr.to_hex();
+
+        // Denylist gate BEFORE any bytes move: an agent must not be able to
+        // pull blocked content, and we should not spend bandwidth on it.
+        if let Some(denylist) = &self.denylist {
+            if denylist.is_blocked(EntryKind::XorName, &hex) {
+                return Ok(json!({
+                    "kind": "blocked",
+                    "reason": format!("xor_name: {hex}"),
+                    "address": hex,
+                }));
+            }
+        }
+
+        // Addresses are immutable, so the cache is always correct.
+        let cached = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&addr);
+        let bytes = if let Some(bytes) = cached {
+            bytes
+        } else {
+            let fetched = self
+                .client
+                .fetch(&addr)
+                .await
+                .map_err(|e| format!("fetch failed: {e}"))?;
+            self.cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(addr, &fetched);
+            fetched
+        };
+
         let total = bytes.len();
+        // Belt-and-braces: the registry re-runs the same denylist gate and
+        // will cover further entry kinds as they land.
+        let rendering_ctx = RenderingContext {
+            denylist: self.denylist.clone(),
+            addr_hex: Some(hex.clone()),
+        };
         let rendition = self
             .registry
-            .render(bytes, &Hint::default(), &RenderContext::default())
+            .render_with_context(
+                bytes,
+                &Hint::default(),
+                &RenderContext::default(),
+                &rendering_ctx,
+            )
             .map_err(|e| format!("render failed: {e}"))?;
         let mut summary = summarize(&rendition, total);
         if let Some(map) = summary.as_object_mut() {
-            map.insert("address".into(), Value::String(addr.to_hex()));
+            map.insert("address".into(), Value::String(hex));
         }
         Ok(summary)
     }
@@ -272,6 +372,11 @@ pub fn summarize(rendition: &Rendition, total_bytes: usize) -> Value {
         Rendition::Video { mime, data } => binary_summary("video", mime, data.len()),
         Rendition::Pdf { data } => binary_summary("pdf", "application/pdf", data.len()),
         Rendition::OpaqueBinary { mime, data } => binary_summary("binary", mime, data.len()),
+        Rendition::Blocked { reason } => json!({
+            "kind": "blocked",
+            "bytes": total_bytes,
+            "reason": reason,
+        }),
         _ => json!({ "kind": "unknown", "bytes": total_bytes }),
     }
 }
@@ -478,6 +583,99 @@ mod tests {
         assert_eq!(v["ciphertext_bytes"], 1088);
         assert_eq!(v["group_hint"], "reading-club");
         assert!(v.get("body").is_none());
+    }
+
+    /// Counts fetches so cache/denylist tests can assert network use.
+    struct CountingClient {
+        inner: MockClient,
+        count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl fetchit_core::NetworkClient for CountingClient {
+        async fn fetch(&self, addr: &Address) -> fetchit_core::Result<bytes::Bytes> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.fetch(addr).await
+        }
+    }
+
+    struct StubDenylist(String);
+
+    impl DenylistQuery for StubDenylist {
+        fn is_blocked(&self, kind: EntryKind, value: &str) -> bool {
+            kind == EntryKind::XorName && value == self.0
+        }
+    }
+
+    fn fetch_line(hex: &str, id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"fetch_render","arguments":{{"address":"{hex}"}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn denylisted_address_is_blocked_before_any_fetch() {
+        let hex = "bb".repeat(32);
+        let addr: Address = hex.parse().unwrap();
+        let inner = MockClient::new();
+        inner.insert(addr, Bytes::from_static(b"should never be seen"));
+        let client = CountingClient {
+            inner,
+            count: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let srv = Server::new(client).with_denylist(Arc::new(StubDenylist(hex.clone())));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let resp: Value =
+            serde_json::from_str(&rt.block_on(srv.handle_line(&fetch_line(&hex, 10))).unwrap())
+                .unwrap();
+        let summary: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(summary["kind"], "blocked");
+        assert!(summary.get("body").is_none());
+        assert_eq!(
+            srv.client.count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "blocked address must not be fetched"
+        );
+    }
+
+    #[test]
+    fn repeat_fetches_are_served_from_cache() {
+        let hex = "cc".repeat(32);
+        let addr: Address = hex.parse().unwrap();
+        let inner = MockClient::new();
+        inner.insert(addr, Bytes::from_static(b"cache me"));
+        let client = CountingClient {
+            inner,
+            count: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let srv = Server::new(client);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for id in [11, 12] {
+            let resp: Value =
+                serde_json::from_str(&rt.block_on(srv.handle_line(&fetch_line(&hex, id))).unwrap())
+                    .unwrap();
+            assert_eq!(resp["result"]["isError"], false);
+        }
+        assert_eq!(
+            srv.client.count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "second fetch must come from the cache"
+        );
+    }
+
+    #[test]
+    fn summarize_blocked_names_the_reason() {
+        let r = Rendition::Blocked {
+            reason: "xor_name: abcd".into(),
+        };
+        let v = summarize(&r, 0);
+        assert_eq!(v["kind"], "blocked");
+        assert_eq!(v["reason"], "xor_name: abcd");
     }
 
     #[test]
