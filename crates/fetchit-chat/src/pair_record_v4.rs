@@ -1142,4 +1142,58 @@ mod tests {
             vec![crate::identity::AgentId(d1.agent_id_hex)]
         );
     }
+
+    #[tokio::test]
+    async fn removed_device_detection_needs_the_old_record_before_resolve() {
+        // The M6.7 revoke seam that fanout wires: resolve_pair_record_v4
+        // OVERWRITES the cache on accept, so the removed-device diff must
+        // capture the OLD record BEFORE calling resolve. This locks that
+        // the correct ordering surfaces a device dropped across a revision
+        // bump, and that diffing the post-resolve cache against the new
+        // record (the footgun) finds nothing.
+        let dir = tempdir().unwrap();
+        let user = user_kp(8);
+        let uid = user.user_id_hex();
+        let http = reqwest::Client::new();
+
+        let dev_a = device_entry(3, true);
+        let dev_b = device_entry(4, false);
+        let old =
+            crate::fabric::mint_pair_record_v4(&user, 2, 1_000, &[dev_a.clone(), dev_b.clone()])
+                .unwrap();
+        let new = crate::fabric::mint_pair_record_v4(&user, 3, 1_000, std::slice::from_ref(&dev_a))
+            .unwrap();
+
+        // Prime the cache as if `old` (rev 2) was the last accepted list.
+        save_contact_pair_record_v4(dir.path(), &old).unwrap();
+
+        // Correct fanout ordering: snapshot the OLD list, THEN resolve.
+        let before = load_contact_pair_record_v4(dir.path(), &uid)
+            .unwrap()
+            .unwrap();
+        let (_s, r) = serve_get(new.clone()).await;
+        let after = resolve_pair_record_v4(dir.path(), &uid, &r, &http)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.revision, 3, "the rev-3 removal record is accepted");
+
+        // Correct ordering surfaces exactly the removed device B.
+        assert_eq!(
+            removed_device_agents(&before, &after),
+            vec![crate::identity::AgentId(dev_b.agent_id_hex.clone())],
+            "load-before-resolve detects the revoked device",
+        );
+
+        // Footgun lock: resolve already overwrote the cache, so a
+        // load-AFTER-resolve yields `new`; diffing it against `after`
+        // finds nothing and a revoked device would keep receiving.
+        let post = load_contact_pair_record_v4(dir.path(), &uid)
+            .unwrap()
+            .unwrap();
+        assert!(
+            removed_device_agents(&post, &after).is_empty(),
+            "load-after-resolve misses the revocation (the ordering hazard)",
+        );
+    }
 }
