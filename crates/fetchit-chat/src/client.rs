@@ -3126,6 +3126,7 @@ impl Client {
             agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
             rendezvous_hints,
             last_hint_epoch_ms: Some(record.issued_at_ms),
+            user_id_hex: None,
         };
         // Persist under CARD_UPDATE_LOCK, preserving any newer in-band
         // relay-hint watermark already on disk so a re-import can't reset

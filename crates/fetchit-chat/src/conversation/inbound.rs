@@ -475,6 +475,7 @@ async fn dispatch_welcome(
         // an updated card.
         rendezvous_hints: None,
         last_hint_epoch_ms: None,
+        user_id_hex: None,
     });
 
     let result = install_or_rekey_conversation(
@@ -739,6 +740,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(signer.public_key())),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(layout).unwrap();
     }
@@ -998,6 +1000,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(synthetic_signer.public_key())),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         synthetic_card.save(&layout_b).unwrap();
         let registry_b =
@@ -1208,6 +1211,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         no_pk_card.save(&layout_b).unwrap();
         let registry_b =

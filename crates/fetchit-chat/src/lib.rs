@@ -64,23 +64,18 @@ mod http;
 mod members_singleflight;
 
 pub use chat_identity::FetchitIdentity;
+pub use client::restore_identity_from_recovery_phrase;
 pub use client::{
     provision_local_signer_keypair, Client, ClientBuilder, EnsureV2Outcome, FediLookup,
     FediLookupKind, MintOutcome, ProvisionedSignerKey, RelayFailoverEvent,
 };
 pub use denylist::DenylistCheck;
+pub use device_cert::{ensure_device_certificate, load_device_certificate};
 pub use discovery::{discover_local, DaemonEndpoint};
 pub use error::{ChatError, Result};
 pub use events::{Event, EventStream};
 pub use group_invite_uri::{
     emit_ginvite_uri, parse_ginvite_uri, GinviteUriError, ParsedGinviteUri,
-};
-pub use client::restore_identity_from_recovery_phrase;
-pub use device_cert::{ensure_device_certificate, load_device_certificate};
-pub use pair_record_v4::{
-    append_device_and_publish, load_contact_pair_record_v4, load_pair_record_v4,
-    mint_and_cache_pair_record_v4, next_pair_record_v4_revision, removed_device_agents,
-    resolve_pair_record_v4,
 };
 pub use link_device_enroll::{
     enroll_confirmed_device, DevicesGroupSink, EnrollOutcome, PendingDevicesGroupSink,
@@ -88,6 +83,12 @@ pub use link_device_enroll::{
 pub use local_signer::{
     discard_local_identity, reveal_local_signer_recovery_phrase, reveal_local_signer_seed,
     with_user_key,
+};
+pub use messages::contact_user_id_hex;
+pub use pair_record_v4::{
+    append_device_and_publish, load_contact_pair_record_v4, load_pair_record_v4,
+    mint_and_cache_pair_record_v4, next_pair_record_v4_revision, removed_device_agents,
+    resolve_pair_record_v4,
 };
 pub use recovery_phrase::{recovery_phrase_to_seed, seed_to_recovery_phrase};
 pub use transport::{Reachability, Router, SendReceipt, Transport};

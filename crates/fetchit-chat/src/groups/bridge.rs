@@ -825,6 +825,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
         let got = recipient_kem_key(&layout, &aid_hex).unwrap();
@@ -844,6 +845,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         }
         .save(&layout)
         .unwrap();
@@ -1039,6 +1041,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
         let err = recipient_kem_key(&layout, &aid_hex).unwrap_err();

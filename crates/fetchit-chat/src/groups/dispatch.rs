@@ -869,6 +869,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(layout).unwrap();
     }
@@ -1474,6 +1475,7 @@ mod tests {
                 relays: vec![advertised.to_owned()],
             }),
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         v2_card.save(&layout).unwrap();
 
@@ -1486,6 +1488,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         v1_card.save(&layout).unwrap();
 

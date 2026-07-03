@@ -143,6 +143,16 @@ pub struct StoredContactCard {
     /// pre-Task-6 cards (back-compat via `#[serde(default)]`).
     #[serde(default)]
     pub last_hint_epoch_ms: Option<u64>,
+    /// The peer's x0x `user_id` (hex account root) from their share
+    /// card — the M6 identity that binds all of their linked devices.
+    /// Populated by [`Self::from_share_uri`] when the share card carries
+    /// a non-null `user_id`; `None` for pre-M6 cards, for pair-record-
+    /// resolved cards ([`card_from_pair_record`] and
+    /// [`crate::pair::record_into_stored_contact`] carry no `user_id`),
+    /// and for trust-on-first-use imports. Resolve it via
+    /// [`contact_user_id_hex`] to look up the peer's device list.
+    #[serde(default)]
+    pub user_id_hex: Option<String>,
 }
 
 impl StoredContactCard {
@@ -203,6 +213,14 @@ impl StoredContactCard {
             .and_then(|v| serde_json::from_value::<crate::card::RendezvousHints>(v.clone()).ok())
             .filter(|h| h.v == 1)
             .and_then(|h| crate::card::RendezvousHintsV1::from_value(&h.data).ok());
+        // M6: capture the peer's x0x account root (`user_id`) so
+        // [`contact_user_id_hex`] can later resolve their linked-device
+        // list. Native x0x field, outside the signed fetchit card
+        // extension; `null` / absent both surface as `None`.
+        let user_id_hex = obj
+            .get("user_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         Ok(Self {
             agent_id_hex,
             display_name,
@@ -210,6 +228,7 @@ impl StoredContactCard {
             agent_public_key_b64: agent_pk_b64_opt,
             rendezvous_hints,
             last_hint_epoch_ms: None,
+            user_id_hex,
         })
     }
 
@@ -398,6 +417,12 @@ impl StoredContactCard {
             if self.display_name.is_empty() && !existing.display_name.is_empty() {
                 self.display_name = existing.display_name;
             }
+            // M6: a pair-record-resolved or pre-M6 incoming card carries no
+            // user_id; never let it wipe a user_id a prior share-card
+            // import captured (mirrors the key / name floors above).
+            if self.user_id_hex.is_none() && existing.user_id_hex.is_some() {
+                self.user_id_hex = existing.user_id_hex;
+            }
         }
         self.save(layout)
     }
@@ -418,6 +443,24 @@ impl StoredContactCard {
             .map_err(|e| ChatError::Invalid(format!("stored card parse: {e}")))?;
         Ok(Some(card))
     }
+}
+
+/// Resolve a contact's x0x `user_id` (the M6 account root that binds
+/// their linked devices) from their persisted contact card.
+///
+/// Returns `Ok(None)` when the contact is not imported, or when their
+/// card predates M6 / was resolved from a relay pair-record (which
+/// carries no `user_id`). This is the seam group and DM fanout use to
+/// look up a peer's linked-device list via
+/// [`crate::resolve_pair_record_v4`].
+///
+/// Cheap: one filesystem stat plus a single JSON deserialize, no
+/// network.
+///
+/// # Errors
+/// IO or JSON parse failures reading the on-disk card.
+pub fn contact_user_id_hex(layout: &StoreLayout, agent_id_hex: &str) -> Result<Option<String>> {
+    Ok(StoredContactCard::load(layout, agent_id_hex)?.and_then(|c| c.user_id_hex))
 }
 
 /// Build a full [`StoredContactCard`] from a relay
@@ -444,6 +487,7 @@ fn card_from_pair_record(
         agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
         rendezvous_hints,
         last_hint_epoch_ms: Some(record.issued_at_ms),
+        user_id_hex: None,
     }
 }
 
@@ -2917,6 +2961,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(sender_signer.public_key())),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&rig.layout).unwrap();
     }
@@ -5020,6 +5065,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: Some(hints.clone()),
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5048,6 +5094,7 @@ mod tests {
                 relays: vec!["http://159.89.11.217:8088".to_owned()],
             }),
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5091,6 +5138,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5118,6 +5166,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5202,6 +5251,7 @@ mod tests {
                 relays: vec![advertised.to_owned()],
             }),
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         peer_card.save(&rig.layout).unwrap();
 
@@ -5260,6 +5310,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         peer_card.save(&rig.layout).unwrap();
 
@@ -5396,6 +5447,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5474,6 +5526,7 @@ mod tests {
                 relays: vec!["http://67.207.94.66:8088".to_owned()],
             }),
             last_hint_epoch_ms: Some(1_000),
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5511,6 +5564,7 @@ mod tests {
                 relays: vec!["wss://old.example.com".to_owned()],
             }),
             last_hint_epoch_ms: Some(5_000),
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5550,6 +5604,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: Some(7_000),
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5594,6 +5649,7 @@ mod tests {
                 relays: vec!["wss://good.example.com".to_owned()],
             }),
             last_hint_epoch_ms: Some(1_000),
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5630,6 +5686,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5662,6 +5719,7 @@ mod tests {
                 relays: vec!["wss://good.example.com".to_owned()],
             }),
             last_hint_epoch_ms: Some(1_000),
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -5694,6 +5752,7 @@ mod tests {
                 relays: vec!["wss://good.example.com".to_owned()],
             }),
             last_hint_epoch_ms: Some(5_000),
+            user_id_hex: None,
         };
         original.save(&layout).unwrap();
 
@@ -5706,6 +5765,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         reimport.save_imported(&layout).unwrap();
 
@@ -5757,6 +5817,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save_imported(&layout).unwrap();
 
@@ -5899,6 +5960,7 @@ mod tests {
             agent_public_key_b64: Some(B64STD.encode(pk_bytes)),
             rendezvous_hints: hints,
             last_hint_epoch_ms: epoch,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
         let pubkey_b64 = B64STD.encode(pk_bytes);
@@ -6222,6 +6284,7 @@ mod tests {
                 relays: vec!["wss://old.example/v1/ws".to_owned()],
             }),
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         card.save(&layout).unwrap();
 
@@ -6306,6 +6369,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         full.clone().save(&layout).unwrap();
 
@@ -6317,6 +6381,7 @@ mod tests {
             agent_public_key_b64: None,
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         partial.save_imported(&layout).unwrap();
 
@@ -6344,6 +6409,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(vec![4u8; 1952])),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         full.clone().save(&layout).unwrap();
 
@@ -6354,6 +6420,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(vec![5u8; 1952])),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         };
         partial.save_imported(&layout).unwrap();
 
@@ -6379,6 +6446,7 @@ mod tests {
             agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         }
         .save(&layout)
         .unwrap();
@@ -6391,6 +6459,7 @@ mod tests {
             agent_public_key_b64: Some(new_ml.clone()),
             rendezvous_hints: None,
             last_hint_epoch_ms: None,
+            user_id_hex: None,
         }
         .save_imported(&layout)
         .unwrap();
@@ -6878,5 +6947,128 @@ mod tests {
             2,
             "both cold-then-warm sends must reach the public /send path",
         );
+    }
+
+    // ───────────────────────── M6 contact user_id ──────────────────────
+
+    #[test]
+    fn from_share_uri_captures_x0x_user_id() {
+        // A share card carrying a non-null x0x `user_id` must surface it
+        // on the stored card so fanout can resolve the peer's devices.
+        let uid = "a".repeat(64);
+        let card = serde_json::json!({
+            "agent_id": "b".repeat(64),
+            "display_name": "Peer",
+            "user_id": uid,
+            "fetchit_kem_public_key_b64": B64.encode(vec![0u8; 1184]),
+        });
+        let uri = crate::card::extended_card_to_uri(&card).unwrap();
+        let stored = StoredContactCard::from_share_uri(&uri).unwrap();
+        assert_eq!(stored.user_id_hex.as_deref(), Some(uid.as_str()));
+    }
+
+    #[test]
+    fn from_share_uri_null_or_absent_user_id_is_none() {
+        // `user_id: null` (x0x default before an account is minted) and a
+        // card with no user_id field at all both yield `None`.
+        let null_uid = serde_json::json!({
+            "agent_id": "b".repeat(64),
+            "display_name": "Peer",
+            "user_id": serde_json::Value::Null,
+            "fetchit_kem_public_key_b64": B64.encode(vec![0u8; 1184]),
+        });
+        let uri = crate::card::extended_card_to_uri(&null_uid).unwrap();
+        assert!(StoredContactCard::from_share_uri(&uri)
+            .unwrap()
+            .user_id_hex
+            .is_none());
+
+        let no_uid = serde_json::json!({
+            "agent_id": "b".repeat(64),
+            "display_name": "Peer",
+            "fetchit_kem_public_key_b64": B64.encode(vec![0u8; 1184]),
+        });
+        let uri = crate::card::extended_card_to_uri(&no_uid).unwrap();
+        assert!(StoredContactCard::from_share_uri(&uri)
+            .unwrap()
+            .user_id_hex
+            .is_none());
+    }
+
+    #[test]
+    fn contact_user_id_hex_reads_persisted_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid = "c".repeat(64);
+        let uid = "d".repeat(64);
+        StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: "Peer".to_owned(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: Some(uid.clone()),
+        }
+        .save(&layout)
+        .unwrap();
+        assert_eq!(
+            contact_user_id_hex(&layout, &aid).unwrap().as_deref(),
+            Some(uid.as_str()),
+        );
+        // An unknown contact resolves to None, never an error.
+        assert!(contact_user_id_hex(&layout, &"e".repeat(64))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn save_imported_preserves_user_id_against_none_merge() {
+        // A share-card import captures user_id; a later pair-record-
+        // resolved card (no user_id) for the same agent must NOT wipe it.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let aid = "c".repeat(64);
+        let uid = "d".repeat(64);
+        StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: "Peer".to_owned(),
+            kem_public_key_b64: B64.encode(vec![1u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(vec![2u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: Some(uid.clone()),
+        }
+        .save(&layout)
+        .unwrap();
+        StoredContactCard {
+            agent_id_hex: aid.clone(),
+            display_name: String::new(),
+            kem_public_key_b64: B64.encode(vec![3u8; 1184]),
+            agent_public_key_b64: Some(B64.encode(vec![4u8; 1952])),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: None,
+        }
+        .save_imported(&layout)
+        .unwrap();
+        assert_eq!(
+            contact_user_id_hex(&layout, &aid).unwrap().as_deref(),
+            Some(uid.as_str()),
+            "a None-user_id merge must not clobber a captured user_id",
+        );
+    }
+
+    #[test]
+    fn stored_card_without_user_id_field_deserializes_to_none() {
+        // Pre-M6 on-disk cards have no `user_id_hex` key; serde default
+        // must fill None, not fail the parse.
+        let json = serde_json::json!({
+            "agent_id_hex": "c".repeat(64),
+            "display_name": "Old",
+            "kem_public_key_b64": B64.encode(vec![0u8; 1184]),
+        });
+        let card: StoredContactCard = serde_json::from_value(json).unwrap();
+        assert!(card.user_id_hex.is_none());
     }
 }

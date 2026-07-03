@@ -22,8 +22,8 @@ use fetchit_relay_proto::derive_agent_id;
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature, MlDsaVariant};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use x0xd_client::Signer;
 use thiserror::Error;
+use x0xd_client::Signer;
 
 /// Wire shape of the relay's `GET /v1/profile/{agent_id}` response.
 /// Mirrors `fetchit_relay_server::profile::ProfileIndexRecord` —
@@ -450,6 +450,7 @@ pub fn record_into_stored_contact(record: &ProfileIndexRecord) -> StoredContactC
         // republish work in apps/fetchit-desktop/src-tauri.
         rendezvous_hints: None,
         last_hint_epoch_ms: None,
+        user_id_hex: None,
     }
 }
 
@@ -600,7 +601,10 @@ mod tests {
         }
         async fn sign(&self, message: &[u8]) -> std::result::Result<Vec<u8>, String> {
             let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
-            Ok(dsa.sign(&self.sk, message).map_err(|e| e.to_string())?.to_bytes())
+            Ok(dsa
+                .sign(&self.sk, message)
+                .map_err(|e| e.to_string())?
+                .to_bytes())
         }
     }
 
@@ -757,6 +761,7 @@ mod tests {
                 relays: vec!["wss://good.example.com".to_owned()],
             }),
             last_hint_epoch_ms: Some(9_000),
+            user_id_hex: None,
         };
         seeded.save(&layout).unwrap();
 
