@@ -261,6 +261,14 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             chatModeView.importFromUri(raw)
             return@registerForActivityResult
         }
+        // fetchit://link/ device-link offers (M6.4): the existing device scanned
+        // the new device's QR — route into the preview→confirm→enroll flow.
+        // persist = false for the same reason as the pair path.
+        if (io.etchit.fetchit.chat.ChatUris.isLinkUri(raw)) {
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.linkDeviceFromUri(raw)
+            return@registerForActivityResult
+        }
         val parsed = parseAutonomiUrl(raw)
         if (parsed == null) {
             Snackbar.make(
@@ -285,7 +293,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         audio = AudioPlayback(this)
         renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
-        settingsSheet = SettingsSheet(binding, this).also { it.bind() }
+        settingsSheet = SettingsSheet(binding, this, onLaunchScanner = ::onScanClicked).also { it.bind() }
         chatModeView = ChatModeView(
             context = this,
             container = binding.chatContainer,
@@ -429,6 +437,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         if (uri.scheme == "fetchit" && uri.host == "import") {
             val parsed = parseBookmarkImportUrl(uri.toString()) ?: return
             handleBookmarkImport(parsed)
+            return
+        }
+        // `fetchit://link/v1/<pointer>` deep links (M6.4): tapping the new
+        // device's link URL routes into the existing-device preview→confirm→
+        // enroll path. persist = false so a crafted link URI cannot overwrite
+        // the user's chosen wake-up mode (same policy as the pair path).
+        if (uri.scheme == "fetchit" && uri.host == "link") {
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.linkDeviceFromUri(uri.toString())
             return
         }
         // `x0x://pair/<agent-id>?r=<relay>` deep links: switch to chat

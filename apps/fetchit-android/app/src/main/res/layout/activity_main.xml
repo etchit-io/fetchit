@@ -652,6 +652,50 @@
                 android:padding="8dp"
                 android:imeOptions="actionDone" />
 
+            <!-- Chat: link a device (M6.4) -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="16dp"
+                android:background="?attr/fetchitInk3" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="@string/settings_link_device_title"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/settings_link_device_desc"
+                android:textColor="?attr/fetchitAsh"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/linkShowCodeButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="@string/settings_link_show_code"
+                android:backgroundTint="?attr/fetchitCopper"
+                android:textColor="?attr/fetchitInk" />
+
+            <Button
+                android:id="@+id/linkScanCodeButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/settings_link_scan_code"
+                android:backgroundTint="?attr/fetchitInk3"
+                android:textColor="?attr/fetchitCopper" />
+
             <View
                 android:layout_width="match_parent"
                 android:layout_height="1dp"

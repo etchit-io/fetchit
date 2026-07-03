@@ -1,14 +1,21 @@
 package io.etchit.fetchit
 
+import android.graphics.Typeface
+import android.view.Gravity
 import android.view.View
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.fetchit_ffi.CreatedLinkOfferFfi
 import uniffi.fetchit_ffi.defaultPeers
 
 /**
@@ -22,6 +29,7 @@ import uniffi.fetchit_ffi.defaultPeers
 class SettingsSheet(
     private val binding: ActivityMainBinding,
     private val activity: AppCompatActivity,
+    private val onLaunchScanner: () -> Unit,
 ) {
 
     private val store = SettingsStore(activity)
@@ -39,6 +47,7 @@ class SettingsSheet(
         bindThemePicker()
         observePeerCount()
         bindChatDisplayName()
+        bindLinkDevice()
     }
 
     private fun bindThemePicker() {
@@ -163,6 +172,100 @@ class SettingsSheet(
                 store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
             }
         }
+    }
+
+    /**
+     * Wire the "link a device" section (M6.4). Two entry points:
+     *  - "show my code": THIS device wants to be linked — mint + publish a link
+     *    offer and show its QR + confirm code ([showLinkThisDeviceCode], flow A).
+     *  - "scan a code": THIS device links another — launch the shared scanner;
+     *    its sniff routes a scanned `fetchit://link/…` into the existing-device
+     *    preview→confirm→enroll path ([ChatModeView.linkDeviceFromUri], flow B).
+     */
+    private fun bindLinkDevice() {
+        binding.linkShowCodeButton.setOnClickListener { showLinkThisDeviceCode() }
+        binding.linkScanCodeButton.setOnClickListener { onLaunchScanner() }
+    }
+
+    /**
+     * Flow A: mint a link offer from this device's own identity and show it.
+     * Connects the chat client (needed to publish the offer to the relay), then
+     * renders the QR pointer + the human-comparable confirm code. A connect or
+     * publish failure surfaces as a plain toast — the raw reason never reaches
+     * the user.
+     */
+    private fun showLinkThisDeviceCode() {
+        val controller = activity.fetchitApp().chatController
+        activity.lifecycleScope.launch {
+            val gw = runCatching { controller.ensureGateway() }.getOrElse {
+                toast(R.string.chat_link_connect_failed)
+                return@launch
+            }
+            // 600 s (10 min) offer window: long enough to walk to the other
+            // device, short enough that a stale QR stops working on its own.
+            val offer = runCatching { gw.createLinkOffer(600uL) }.getOrElse {
+                toast(R.string.chat_link_offer_failed)
+                return@launch
+            }
+            showLinkOfferDialog(offer)
+        }
+    }
+
+    /**
+     * The offer dialog: a scannable QR of the `fetchit://link/…` pointer above
+     * a LARGE copper confirm code. The code is the security anchor — the caption
+     * tells the user to scan on the other device and only proceed when the same
+     * code shows on both screens.
+     */
+    private fun showLinkOfferDialog(offer: CreatedLinkOfferFfi) {
+        val density = activity.resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+        val column = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(pad, pad, pad, pad)
+        }
+
+        val qrSize = (240 * density).toInt()
+        QrBitmap.renderQrWithLogo(offer.uri)?.let { bmp ->
+            column.addView(
+                ImageView(activity).apply {
+                    setImageBitmap(bmp)
+                    contentDescription = activity.getString(R.string.chat_link_qr_desc)
+                    layoutParams = LinearLayout.LayoutParams(qrSize, qrSize)
+                },
+            )
+        }
+
+        // The short code is the security anchor: large, mono, copper, spaced so
+        // it is trivially comparable against the other device across a table.
+        column.addView(
+            TextView(activity).apply {
+                text = offer.shortCode
+                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                textSize = 26f
+                letterSpacing = 0.12f
+                gravity = Gravity.CENTER
+                setTextColor(activity.themeColor(R.attr.fetchitCopper))
+                setPadding(0, (16 * density).toInt(), 0, 0)
+            },
+        )
+
+        column.addView(
+            TextView(activity).apply {
+                text = activity.getString(R.string.chat_link_show_code_caption)
+                gravity = Gravity.CENTER
+                setTextColor(activity.themeColor(R.attr.fetchitAsh))
+                textSize = 13f
+                setPadding(0, (12 * density).toInt(), 0, 0)
+            },
+        )
+
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(activity.getString(R.string.chat_link_show_code_title))
+            .setView(column)
+            .setPositiveButton(activity.getString(R.string.action_close), null)
+            .show()
     }
 
     private fun toast(@androidx.annotation.StringRes msg: Int) {

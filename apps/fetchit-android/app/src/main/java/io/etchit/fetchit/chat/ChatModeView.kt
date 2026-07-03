@@ -32,12 +32,17 @@ import io.etchit.fetchit.SettingsStore
 
 import io.etchit.fetchit.fetchitApp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.fetchit_ffi.ChatFfiException
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.enrollConfirmedDevice
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -173,6 +178,102 @@ class ChatModeView(
                 return@launch
             }
             promptDisplayName(agentId)
+        }
+    }
+
+    /**
+     * Existing-device side of "link a device" (M6.4): the user scanned (or
+     * tapped) another device's `fetchit://link/v1/…` offer. Connect, fetch the
+     * offer preview, and -- only if it has not expired -- ask the human to
+     * confirm the short code matches the OTHER device's screen before
+     * enrolling. The code comparison IS the security step, so an expired offer
+     * never reaches a confirm dialog; the user is told to ask for a fresh one.
+     *
+     * Resets to the list screen first (same reason as [importFromUri]) so a
+     * mid-session scan / deep link lands cleanly rather than stacking over an
+     * open thread.
+     */
+    fun linkDeviceFromUri(uri: String) {
+        if (!ChatUris.isLinkUri(uri)) {
+            snackbar(context.getString(R.string.chat_link_invalid_uri))
+            return
+        }
+        showList()
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return@launch
+            val preview = runCatching { gw.previewLinkOffer(uri.trim()) }.getOrElse { e ->
+                snackbar(userFacingError(e, "previewLinkOffer", R.string.chat_link_preview_failed))
+                return@launch
+            }
+            if (preview.expired) {
+                showLinkExpiredDialog()
+            } else {
+                confirmLinkDevice(uri.trim(), preview)
+            }
+        }
+    }
+
+    /**
+     * The confirm step: show the new device's short code prominently and make
+     * the security bargain explicit -- only tap Link if this code matches the
+     * one on the OTHER device's screen. The abbreviated agent id is shown as a
+     * secondary reassurance. Tapping Link runs [enrollLinkedDevice].
+     */
+    private fun confirmLinkDevice(uri: String, preview: LinkOfferPreviewFfi) {
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_link_confirm_title))
+            .setMessage(
+                context.getString(
+                    R.string.chat_link_confirm_message,
+                    preview.shortCode,
+                    "${preview.agentIdHex.take(8)}…",
+                ),
+            )
+            .setPositiveButton(context.getString(R.string.chat_link_confirm_button)) { _, _ ->
+                enrollLinkedDevice(uri)
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
+    }
+
+    /** An expired offer cannot be confirmed -- tell the user to ask for a fresh one. */
+    private fun showLinkExpiredDialog() {
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_link_expired_title))
+            .setMessage(context.getString(R.string.chat_link_expired_message))
+            .setPositiveButton(context.getString(R.string.action_close), null)
+            .show()
+    }
+
+    /**
+     * Enroll the confirmed device. Runs the top-level [enrollConfirmedDevice]
+     * FFI (not a gateway call -- it works off the on-disk account vault, no live
+     * connection needed) against the SAME chat data dir + auto-managed vault
+     * passphrase the controller connects with, publishing the account roster at
+     * the next revision. The vault read is pushed off the main thread per
+     * [ChatSecrets.vaultPass].
+     *
+     * `devicesGroupAdmitted` is the M6.6 stub (always false today): the device
+     * is on the account roster now, but the live devices-group sync channel
+     * lands later -- so success copy says linked-and-syncing rather than a bare
+     * "done".
+     */
+    private fun enrollLinkedDevice(uri: String) {
+        lifecycleScope.launch {
+            val dataDir = File(context.filesDir, "chat").absolutePath
+            val passphrase = withContext(Dispatchers.IO) { ChatSecrets(context).vaultPass() }
+            val outcome = runCatching {
+                enrollConfirmedDevice(dataDir, passphrase, uri, ChatController.DEFAULT_RELAY)
+            }.getOrElse { e ->
+                snackbar(userFacingError(e, "enrollConfirmedDevice", R.string.chat_link_enroll_failed))
+                return@launch
+            }
+            val msg = if (outcome.devicesGroupAdmitted) {
+                context.getString(R.string.chat_link_enrolled)
+            } else {
+                context.getString(R.string.chat_link_enrolled_syncing)
+            }
+            snackbar(msg)
         }
     }
 

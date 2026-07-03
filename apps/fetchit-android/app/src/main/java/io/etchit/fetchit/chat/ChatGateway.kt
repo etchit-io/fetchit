@@ -3,8 +3,10 @@ package io.etchit.fetchit.chat
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
+import uniffi.fetchit_ffi.CreatedLinkOfferFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
@@ -116,6 +118,25 @@ interface ChatGateway {
     suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi>
 
     /**
+     * Mint a device-link offer from this device's own identity and publish it
+     * to the relay (M6.4). Called by the device that wants to BE linked (the
+     * "new" device): it returns a `fetchit://link/v1/…` QR pointer plus a short
+     * human-comparable confirm code and an absolute expiry [ttlSecs] seconds
+     * out. The existing device scans the pointer and confirms the code.
+     */
+    suspend fun createLinkOffer(ttlSecs: ULong): CreatedLinkOfferFfi
+
+    /**
+     * Fetch and preview a scanned device-link offer (M6.4). Called by the
+     * EXISTING (already-connected) device after scanning the new device's QR:
+     * returns the new device's agent id, the short code to compare against the
+     * new device's screen, and whether the offer has expired. Preview never
+     * mutates state -- enrollment happens only after the human confirms the
+     * code via [enrollConfirmedDevice].
+     */
+    suspend fun previewLinkOffer(uri: String): LinkOfferPreviewFfi
+
+    /**
      * Block until the next [ChatEventFfi] arrives from the relay, or return
      * `null` when the client has been disconnected and the event queue is
      * drained.
@@ -142,7 +163,11 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
         inner.joinGroup(invite, displayName)
     override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? =
-        inner.sendGroupMessage(groupId, body, senderName)
+        // The regenerated bindings return a richer GroupSendReceiptFfi
+        // (messageId + delivered); the gateway keeps its String? message-id
+        // contract, so extract the id here. Surfacing `delivered` is a separate
+        // group-send task, not M6.4.
+        inner.sendGroupMessage(groupId, body, senderName).messageId
     override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
@@ -157,6 +182,10 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.renameGroup(groupId, newName)
     override suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi> =
         inner.conversationHistory(convKey)
+    override suspend fun createLinkOffer(ttlSecs: ULong): CreatedLinkOfferFfi =
+        inner.createLinkOffer(ttlSecs)
+    override suspend fun previewLinkOffer(uri: String): LinkOfferPreviewFfi =
+        inner.previewLinkOffer(uri)
     override suspend fun nextEvent(): ChatEventFfi? = inner.nextEvent()
     override fun disconnect() = inner.disconnect()
 }

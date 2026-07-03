@@ -87,6 +87,55 @@ class ChatUrisTest {
         assertFalse(ChatUris.isInviteUri(""))
     }
 
+    // ── isLinkUri (device-link offers) ─────────────────────────────────
+    // Like an invite, the body is an opaque relay pointer, so only the
+    // scheme+host+version prefix is validated and the body must be non-empty.
+
+    @Test
+    fun validLinkUriAccepted() {
+        assertTrue(ChatUris.isLinkUri("fetchit://link/v1/AAAAbbbbCCCC=="))
+    }
+
+    @Test
+    fun linkUriWithSurroundingWhitespaceAccepted() {
+        assertTrue(ChatUris.isLinkUri("  fetchit://link/v1/pointer  "))
+    }
+
+    @Test
+    fun linkSchemeIsCaseInsensitive() {
+        // A hand-typed or pasted uri may carry an uppercase scheme/host; only
+        // the prefix is normalised (the case-sensitive pointer body is intact).
+        assertTrue(ChatUris.isLinkUri("FETCHIT://LINK/V1/SomePointer"))
+    }
+
+    @Test
+    fun pairAndInviteUrisAreNotLinkUris() {
+        assertFalse(ChatUris.isLinkUri("x0x://pair/$validHex"))
+        assertFalse(ChatUris.isLinkUri("x0x://invite/blob"))
+    }
+
+    @Test
+    fun wrongSchemeIsNotALinkUri() {
+        assertFalse(ChatUris.isLinkUri("https://link/v1/pointer"))
+    }
+
+    @Test
+    fun bookmarkImportIsNotALinkUri() {
+        // Shares the fetchit:// scheme but a different host — must not match.
+        assertFalse(ChatUris.isLinkUri("fetchit://import?v=1&data=abc"))
+    }
+
+    @Test
+    fun emptyLinkBodyRejected() {
+        assertFalse(ChatUris.isLinkUri("fetchit://link/v1/"))
+        assertFalse(ChatUris.isLinkUri("fetchit://link/v1/   "))
+    }
+
+    @Test
+    fun blankStringIsNotALinkUri() {
+        assertFalse(ChatUris.isLinkUri(""))
+    }
+
     // ── autonomiAddresses ─────────────────────────────────────────────
 
     private val addr1 = "a".repeat(64)

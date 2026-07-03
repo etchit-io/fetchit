@@ -289,6 +289,34 @@
     <!-- Chat: label printed on the branded pair-code QR card. -->
     <string name="chat_pair_card_label">fetch&gt;it chat</string>
 
+    <!-- Chat: link a device (M6.4). Settings-section labels: "show my code"
+         mints an offer on THIS device; "scan a code" links another device. -->
+    <string name="settings_link_device_title">link a device</string>
+    <string name="settings_link_device_desc">Use this account on another phone or computer.</string>
+    <string name="settings_link_show_code">show my code</string>
+    <string name="settings_link_scan_code">scan a code</string>
+
+    <!-- Chat: link-a-device flow A (this device shows its code). -->
+    <string name="chat_link_show_code_title">Link a device</string>
+    <string name="chat_link_show_code_caption">On your other device, scan this code — then check that the same code appears on both screens before you confirm.</string>
+    <string name="chat_link_qr_desc">your device-link QR code</string>
+    <string name="chat_link_connect_failed">couldn\'t connect — check your internet and try again</string>
+    <string name="chat_link_offer_failed">couldn\'t create a link code — try again in a moment</string>
+
+    <!-- Chat: link-a-device flow B (this device links another). The confirm
+         message names the short code and explains WHY matching it matters —
+         the code comparison is the security step. -->
+    <string name="chat_link_invalid_uri">that doesn\'t look like a valid device-link code</string>
+    <string name="chat_link_preview_failed">couldn\'t read that link code — try scanning it again</string>
+    <string name="chat_link_confirm_title">Link this device?</string>
+    <string name="chat_link_confirm_message">The other device shows the code %1$s.\n\nOnly link if that very same code is showing on the other device — matching codes are what keep your account safe. (device %2$s)</string>
+    <string name="chat_link_confirm_button">link</string>
+    <string name="chat_link_expired_title">Code expired</string>
+    <string name="chat_link_expired_message">This code has expired — ask for a fresh one on the other device, then scan it again.</string>
+    <string name="chat_link_enroll_failed">couldn\'t link the device — try again with a fresh code</string>
+    <string name="chat_link_enrolled">Device linked.</string>
+    <string name="chat_link_enrolled_syncing">Device linked — it will finish syncing in a moment.</string>
+
     <!-- Browse-to-chat share bridge -->
     <string name="share_send_in_chat">send in chat</string>
     <string name="share_no_contacts">no chat contacts yet - pair in chat mode first</string>

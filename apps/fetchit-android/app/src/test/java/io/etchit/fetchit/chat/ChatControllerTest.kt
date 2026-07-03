@@ -7,8 +7,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
+import uniffi.fetchit_ffi.CreatedLinkOfferFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 
@@ -108,6 +110,21 @@ class FakeGateway : ChatGateway {
         requestedHistory += convKey
         if (conversationHistoryThrows) throw RuntimeException("history boom")
         return history[convKey].orEmpty()
+    }
+
+    // Device-link recorders (M6.4). `linkOfferTtls` records createLinkOffer
+    // requests; `previewedLinkUris` records previewLinkOffer lookups; the canned
+    // returns let a caller drive the offer/preview dialogs without a relay.
+    val linkOfferTtls = mutableListOf<ULong>()
+    val previewedLinkUris = mutableListOf<String>()
+    var linkPreviewExpired = false
+    override suspend fun createLinkOffer(ttlSecs: ULong): CreatedLinkOfferFfi {
+        linkOfferTtls += ttlSecs
+        return CreatedLinkOfferFfi("fetchit://link/v1/offer", "ABCD-EFGH-JKLM", 0uL)
+    }
+    override suspend fun previewLinkOffer(uri: String): LinkOfferPreviewFfi {
+        previewedLinkUris += uri
+        return LinkOfferPreviewFfi("a".repeat(64), "ABCD-EFGH-JKLM", linkPreviewExpired)
     }
     override suspend fun nextEvent(): ChatEventFfi? = events.receive()
     override fun disconnect() { events.trySend(null) }
@@ -430,6 +447,10 @@ class ChatControllerTest {
             override suspend fun banMember(groupId: String, agentIdHex: String) {}
             override suspend fun renameGroup(groupId: String, newName: String) {}
             override suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi> = emptyList()
+            override suspend fun createLinkOffer(ttlSecs: ULong): CreatedLinkOfferFfi =
+                throw UnsupportedOperationException()
+            override suspend fun previewLinkOffer(uri: String): LinkOfferPreviewFfi =
+                throw UnsupportedOperationException()
             override suspend fun nextEvent(): ChatEventFfi? = throw RuntimeException("boom")
             override fun disconnect() {}
         }
@@ -643,5 +664,8 @@ class ChatControllerTest {
         messageId = messageId,
         enqueuedAtMs = 1uL,
         lastError = lastError,
+        // Pre-existing bindings drift: OutboxBubbleFfi gained a trailing
+        // group-fanout anchor; these DM-bubble tests leave it null.
+        groupClientMessageId = null,
     )
 }

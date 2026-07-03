@@ -72,4 +72,25 @@ object ChatUris {
         if (!trimmed.take(prefix.length).lowercase().startsWith(prefix)) return false
         return trimmed.substring(prefix.length).isNotBlank()
     }
+
+    /**
+     * Return `true` if [uri] is a `fetchit://link/v1/<pointer>` device-link
+     * offer with a non-empty body (M6.4 "link a device").
+     *
+     * Like a group invite -- and unlike a pair URI -- the body is an opaque
+     * relay pointer, not a fixed 64-hex shape, so only the scheme + host +
+     * version prefix is validated (case-insensitively) and the body is required
+     * to be non-blank. The engine re-validates the offer on preview/enroll; this
+     * is just the client-side gate that decides which scanned/tapped URIs enter
+     * the link flow.
+     */
+    fun isLinkUri(uri: String): Boolean {
+        val trimmed = uri.trim()
+        // Lowercase only for the prefix check: the pointer body is
+        // case-sensitive and must reach the engine untouched.
+        val prefix = "fetchit://link/v1/"
+        if (trimmed.length <= prefix.length) return false
+        if (!trimmed.take(prefix.length).lowercase().startsWith(prefix)) return false
+        return trimmed.substring(prefix.length).isNotBlank()
+    }
 }
