@@ -101,7 +101,11 @@ async fn content_size_matches_fetched_length() {
         .expect("connect to live network");
     let size = client.content_size(&addr).await.expect("content_size");
     let whole = client.fetch(&addr).await.expect("fetch");
-    assert_eq!(size, whole.len() as u64, "data-map size equals fetched length");
+    assert_eq!(
+        size,
+        whole.len() as u64,
+        "data-map size equals fetched length"
+    );
 }
 
 fn rendition_kind(r: &Rendition) -> &'static str {

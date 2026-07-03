@@ -170,7 +170,9 @@ impl LocalSignerVault {
         master: &MasterKey,
     ) -> Result<Option<Zeroizing<String>>, ChatError> {
         match Self::reveal_identity_seed(data_dir, master)? {
-            Some(seed) => Ok(Some(crate::recovery_phrase::seed_to_recovery_phrase(&seed)?)),
+            Some(seed) => Ok(Some(crate::recovery_phrase::seed_to_recovery_phrase(
+                &seed,
+            )?)),
             None => Ok(None),
         }
     }
@@ -495,7 +497,10 @@ mod tests {
 
         discard_local_identity(dir.path()).unwrap();
         assert!(!dir.path().join(LOCAL_SIGNER_FILE).exists());
-        assert!(!dir.path().join(crate::chat_identity::IDENTITY_FILE).exists());
+        assert!(!dir
+            .path()
+            .join(crate::chat_identity::IDENTITY_FILE)
+            .exists());
 
         // Second call: nothing left to remove, still Ok.
         discard_local_identity(dir.path()).unwrap();
@@ -515,9 +520,11 @@ mod tests {
         let plaintext = serde_json::to_vec(&legacy).unwrap();
         let path = dir.path().join(LOCAL_SIGNER_FILE);
         seal_to_path(&path, &plaintext, &master, kdf_id_argon2(), Some(&salt)).unwrap();
-        assert!(LocalSignerVault::reveal_recovery_phrase(dir.path(), &master)
-            .unwrap()
-            .is_none());
+        assert!(
+            LocalSignerVault::reveal_recovery_phrase(dir.path(), &master)
+                .unwrap()
+                .is_none()
+        );
     }
 
     // -- with_user_key custody helper (M6.1) ------------------------------
