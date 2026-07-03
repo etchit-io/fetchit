@@ -37,12 +37,28 @@ pub trait DevicesGroupSink: Send + Sync {
     /// [`ChatError`] when the (M6.6) MLS create-or-get / invite fails. The M6.4
     /// stub never errors.
     async fn admit_device(&self, cert: &AgentCertificate) -> Result<bool, ChatError>;
+
+    /// Remove device `agent_id_hex` from the account devices-group and rekey
+    /// (post-compromise security) -- the inverse of [`Self::admit_device`].
+    /// Driven by the M6.7 revocation orchestration: the pair record is the
+    /// source of truth, and its revoke path calls in here for the MLS
+    /// leaf-removal + rekey.
+    ///
+    /// Takes the bare `agent_id_hex` because the leaf to drop is all MLS needs,
+    /// and the revoke path already has it from `removed_device_agents` (no cert
+    /// re-parse). Returns `true` when the removal + rekey was performed (the
+    /// M6.6 live impl) and `false` when deferred (the M6.4 stub).
+    ///
+    /// # Errors
+    /// [`ChatError`] when the (M6.6) MLS remove / rekey fails. The M6.4 stub
+    /// never errors.
+    async fn remove_device(&self, agent_id_hex: &str) -> Result<bool, ChatError>;
 }
 
-/// M6.4 devices-group stub: logs the pending admission and performs no MLS
-/// work, returning `false` (deferred). Replaced by the real create-or-get +
-/// `TreeKEM` invite in M6.6, so enrollment can land and device-verify (cert mint
-/// + roster publish) before the self-sync channel exists.
+/// M6.4 devices-group stub: logs the pending admission/removal and performs no
+/// MLS work, returning `false` (deferred). Replaced by the real create-or-get +
+/// `TreeKEM` invite/remove in M6.6, so enrollment can land and device-verify
+/// (cert mint + roster publish) before the self-sync channel exists.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PendingDevicesGroupSink;
 
@@ -53,6 +69,11 @@ impl DevicesGroupSink for PendingDevicesGroupSink {
             "enroll: devices-group admission for device {} deferred to M6.6",
             cert.agent_id_hex
         );
+        Ok(false)
+    }
+
+    async fn remove_device(&self, agent_id_hex: &str) -> Result<bool, ChatError> {
+        log::info!("revoke: devices-group removal for device {agent_id_hex} deferred to M6.6");
         Ok(false)
     }
 }
@@ -202,6 +223,15 @@ mod tests {
             .await
             .unwrap();
         assert!(!admitted, "the M6.4 stub defers admission to M6.6");
+    }
+
+    #[tokio::test]
+    async fn stub_defers_removal() {
+        let removed = PendingDevicesGroupSink
+            .remove_device(&"aa".repeat(32))
+            .await
+            .unwrap();
+        assert!(!removed, "the M6.4 stub defers removal to M6.6");
     }
 
     #[tokio::test]
