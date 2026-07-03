@@ -15,6 +15,7 @@ import { fetchProfile, fetchAvatar, pairAccept, identity as chatIdentity } from 
 import { chatConfirm } from "./chat/confirmDialog";
 import { mountSettings } from "./settings";
 import { mountQrModal } from "./ui/qrModal";
+import { mountLinkDeviceModal } from "./linkDevice";
 import { mountDownloadProgress } from "./ui/downloadProgress";
 import { findMascotIn, mountMascot } from "./ui/mascot";
 import { icon } from "./ui/icons";
@@ -77,6 +78,7 @@ export async function init(): Promise<void> {
     .catch(() => {});
 
   const qrModal = mountQrModal(qrHost);
+  const linkDeviceModal = mountLinkDeviceModal(need<HTMLElement>("link-device-modal"));
 
   const settings = mountSettings(settingsHost, {
     onNavigate: (addr) => {
@@ -104,6 +106,10 @@ export async function init(): Promise<void> {
       void chatIdentity()
         .then((id) => openProfile({ kind: "agentId", agentId: id.agent_id, isSelf: true }))
         .catch((e) => { statusEl.textContent = errorMessage(e); });
+    },
+    onLinkDevice: () => {
+      settings.close();
+      linkDeviceModal.open();
     },
   });
   settingsBtn.addEventListener("click", () => void settings.toggle());

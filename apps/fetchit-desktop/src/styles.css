@@ -568,6 +568,127 @@ body:not([data-view="settings"]) #settings {
   color: var(--copper);
   font-weight: 600;
 }
+
+/* ---- Link-device modal ------------------------------------------------ */
+.link-device-card {
+  position: relative;
+  background: var(--ink-2);
+  color: var(--bone);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  padding: 1.25rem 1.5rem 1.5rem;
+  width: min(520px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  box-shadow: var(--elev-3);
+}
+.link-device-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+.link-device-heading {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--bone);
+  letter-spacing: -0.005em;
+}
+.link-device-section {
+  margin: 0.5rem 0 0;
+}
+.link-device-section-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ash);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.link-device-desc {
+  margin: 0 0 0.85rem;
+  color: var(--ash);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.link-device-divider {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.25rem 0;
+}
+/* The pairing code -- must be unmissable on both sides of the flow. */
+.link-device-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--copper);
+  text-align: center;
+  margin: 0.15rem 0 0.25rem;
+}
+.link-device-code-label {
+  font-size: 0.8rem;
+  color: var(--ash);
+  text-align: center;
+  margin: 0.85rem 0 0.15rem;
+}
+.link-device-confirm-q {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--bone);
+  text-align: center;
+  margin: 0.85rem 0 0.65rem;
+}
+.link-device-confirm-row {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.link-device-qr-slot {
+  display: flex;
+  justify-content: center;
+  padding: 0.75rem;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 0.5rem 0;
+  color: #000000;
+}
+.link-device-qr-slot svg {
+  width: 100%;
+  max-width: 200px;
+  height: auto;
+}
+.link-device-expiry {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--ash);
+  margin: 0.15rem 0 0.5rem;
+}
+.link-device-uri-input {
+  margin-top: 0.25rem;
+}
+.link-device-status {
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 1.4em;
+  margin: 0.35rem 0;
+  color: var(--ash);
+  word-break: break-word;
+}
+.link-device-status[data-error] {
+  color: var(--rust);
+}
+.link-device-success {
+  font-size: 14px;
+  color: var(--signal-ok);
+  font-weight: 600;
+  margin: 0.5rem 0;
+}
+
 #settings {
   flex: 1;
   overflow: auto;

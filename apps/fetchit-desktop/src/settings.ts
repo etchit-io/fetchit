@@ -62,6 +62,9 @@ export interface SettingsHooks {
   /** Fired when the user clicks "View my profile". Controller closes
    *  settings and opens the own-profile page (isSelf:true). */
   onViewMyProfile?: () => void;
+  /** Fired when the user clicks "Link a device". Controller opens the
+   *  link-device modal. */
+  onLinkDevice?: () => void;
 }
 
 export interface IdlePolicy {
@@ -435,6 +438,9 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   const viewMyProfileBtn = root.querySelector<HTMLButtonElement>("[data-act=view-my-profile]");
   viewMyProfileBtn?.addEventListener("click", () => hooks.onViewMyProfile?.());
 
+  const linkDeviceBtn = root.querySelector<HTMLButtonElement>("[data-act=link-device]");
+  linkDeviceBtn?.addEventListener("click", () => hooks.onLinkDevice?.());
+
   enabledBox.addEventListener("change", () => {
     applyPolicy(readPolicy({ enabledBox, modeSelect, maxMb }));
   });
@@ -693,6 +699,10 @@ function buildPage(): HTMLElement {
     <section class="setting-group" id="group-backup">
       <h2>Identity backup</h2>
       ${BACKUP_PANEL_HTML}
+      <div class="setting-row">
+        <span>Use this account on another device</span>
+        <button type="button" class="setting-action setting-action-ghost" data-act="link-device">Link a device</button>
+      </div>
     </section>
     <section class="setting-group" id="group-advanced">
       <h2>Advanced</h2>
