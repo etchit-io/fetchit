@@ -238,6 +238,16 @@ pub fn summarize(rendition: &Rendition, total_bytes: usize) -> Value {
             let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
             text_summary("json", None, &pretty, total_bytes)
         }
+        Rendition::EncryptedEnvelope {
+            group_hint,
+            ciphertext_len,
+        } => json!({
+            "kind": "encrypted-envelope",
+            "bytes": total_bytes,
+            "ciphertext_bytes": ciphertext_len,
+            "group_hint": group_hint,
+            "note": "saorsa-mls/v1 envelope; fetch>it does not hold keys and cannot decrypt",
+        }),
         Rendition::Tabular { columns, rows } => json!({
             "kind": "tabular",
             "bytes": total_bytes,
@@ -447,6 +457,19 @@ mod tests {
         assert!(v["body"].as_str().unwrap().len() <= TEXT_CAP);
         // still valid UTF-8 by construction; parse proves it round-trips
         assert!(v["body"].as_str().is_some());
+    }
+
+    #[test]
+    fn summarize_encrypted_envelope_reports_shape_without_payload() {
+        let r = Rendition::EncryptedEnvelope {
+            group_hint: Some("reading-club".into()),
+            ciphertext_len: 1088,
+        };
+        let v = summarize(&r, 1200);
+        assert_eq!(v["kind"], "encrypted-envelope");
+        assert_eq!(v["ciphertext_bytes"], 1088);
+        assert_eq!(v["group_hint"], "reading-club");
+        assert!(v.get("body").is_none());
     }
 
     #[test]
