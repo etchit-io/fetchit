@@ -115,6 +115,103 @@ pub(crate) fn mint_and_cache_pair_record_v4_from_master(
     Ok(record)
 }
 
+/// Outcome of a single `POST /v1/pair-record-v4` attempt, mirroring
+/// [`crate::pair_record::PostOutcome`] on the anti-rollback `revision`.
+#[derive(Debug)]
+pub enum PostV4Outcome {
+    /// The relay accepted the record (2xx).
+    Accepted,
+    /// The relay rejected with 409 Conflict: our `revision` was not strictly
+    /// greater than the relay's stored revision for this `user_id`. The body
+    /// carries the value a fresh mint must exceed.
+    RevisionReject {
+        /// The relay's current stored `revision` for this account.
+        current_revision: u64,
+    },
+}
+
+/// 409 response body from the relay's v4 anti-rollback guard.
+#[derive(serde::Deserialize)]
+struct RevisionRejectBody {
+    current_revision: u64,
+}
+
+/// `POST <relay>/v1/pair-record-v4` with a 10-second timeout.
+///
+/// - 2xx -> [`PostV4Outcome::Accepted`].
+/// - 409 -> parse the `{"current_revision": N}` body ->
+///   [`PostV4Outcome::RevisionReject`].
+/// - Any other non-2xx -> [`ChatError::Invalid`] with the status code.
+///
+/// # Errors
+/// A transport failure, or [`ChatError::Invalid`] for a non-2xx other than
+/// 409.
+pub async fn post_pair_record_v4(
+    relay: &url::Url,
+    record: &PairRecordV4,
+    http: &reqwest::Client,
+) -> Result<PostV4Outcome, ChatError> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("relay blocked: {e}")))?;
+    let url = relay
+        .join("v1/pair-record-v4")
+        .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.post(url.clone())
+            .json(record)
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(PostV4Outcome::Accepted);
+    }
+    if status.as_u16() == 409 {
+        // The real 409 body is a few bytes of JSON; the cap guards a
+        // hostile/buggy relay. Shares the V1 body cap.
+        let raw =
+            crate::relay_http::read_body_capped(resp, crate::pair_record::MAX_RELAY_BODY_BYTES)
+                .await
+                .map_err(|e| ChatError::Invalid(e.to_string()))?;
+        let body: RevisionRejectBody = serde_json::from_slice(&raw)
+            .map_err(|e| ChatError::Invalid(format!("409 body decode: {e}")))?;
+        return Ok(PostV4Outcome::RevisionReject {
+            current_revision: body.current_revision,
+        });
+    }
+    Err(ChatError::Invalid(format!(
+        "relay returned {s} publishing pair record v4",
+        s = status.as_u16()
+    )))
+}
+
+/// Republish the cached signed v4 record to `relay` verbatim, if one exists.
+///
+/// A no-op when no record has been minted (a pre-M6 identity, or before the
+/// first self-cert), so the V1 publish path is unaffected for accounts
+/// without a device list. The record is re-POSTed byte-for-byte with NO
+/// re-sign: the relay's `revision` CAS makes a duplicate a harmless 409
+/// (treated as success here, since the relay already holds this-or-newer),
+/// while a failover-target relay that lacks the record accepts it. Freshening
+/// reachability therefore never needs the user key.
+///
+/// # Errors
+/// [`ChatError`] on a malformed cache file, or a transport / non-2xx-non-409
+/// relay failure.
+pub async fn republish_cached_pair_record_v4(
+    data_dir: &Path,
+    relay: &url::Url,
+    http: &reqwest::Client,
+) -> Result<(), ChatError> {
+    let Some(record) = load_pair_record_v4(data_dir)? else {
+        return Ok(());
+    };
+    match post_pair_record_v4(relay, &record, http).await? {
+        PostV4Outcome::Accepted | PostV4Outcome::RevisionReject { .. } => Ok(()),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -156,6 +253,20 @@ mod tests {
             cert_b64: B64.encode([seed; 32]),
             added_at_ms: 1_700_000_000_000,
             primary,
+        }
+    }
+
+    /// A minimal [`PairRecordV4`] for the HTTP-outcome tests, which exercise
+    /// status mapping only (the relay POST does not verify the body).
+    fn bare_record() -> PairRecordV4 {
+        PairRecordV4 {
+            record_version: 4,
+            user_id_hex: "ab".repeat(32),
+            user_ml_dsa_pubkey_b64: "AA".to_string(),
+            revision: 1,
+            issued_at_ms: 1,
+            devices: vec![],
+            user_signature_b64: "AA".to_string(),
         }
     }
 
@@ -218,5 +329,131 @@ mod tests {
         .unwrap();
         assert_eq!(load_pair_record_v4(dir.path()).unwrap().unwrap(), second);
         assert_eq!(load_pair_record_v4(dir.path()).unwrap().unwrap().revision, 2);
+    }
+
+    #[tokio::test]
+    async fn post_v4_accepted_on_200() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match post_pair_record_v4(&relay, &bare_record(), &http)
+            .await
+            .unwrap()
+        {
+            PostV4Outcome::Accepted => {}
+            other @ PostV4Outcome::RevisionReject { .. } => {
+                panic!("expected Accepted, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_v4_revision_reject_on_409() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"current_revision": 42u64})),
+            )
+            .mount(&server)
+            .await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        match post_pair_record_v4(&relay, &bare_record(), &http)
+            .await
+            .unwrap()
+        {
+            PostV4Outcome::RevisionReject { current_revision } => {
+                assert_eq!(current_revision, 42);
+            }
+            other @ PostV4Outcome::Accepted => panic!("expected RevisionReject, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_v4_errors_on_other_non_2xx() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        assert!(post_pair_record_v4(&relay, &bare_record(), &http)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn republish_is_noop_without_a_cached_record() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // A 500 that must never be hit: no cache -> no POST.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempdir().unwrap();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        republish_cached_pair_record_v4(dir.path(), &relay, &http)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn republish_posts_the_cached_record() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (dir, master) = seeded_vault();
+        mint_and_cache_pair_record_v4_from_master(dir.path(), &master, 1, 1, &[device_entry(3, true)])
+            .unwrap();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        republish_cached_pair_record_v4(dir.path(), &relay, &http)
+            .await
+            .unwrap();
+        // .expect(1) verifies exactly one POST fired (checked on server drop).
+    }
+
+    #[tokio::test]
+    async fn republish_treats_409_as_success() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"current_revision": 7u64})),
+            )
+            .mount(&server)
+            .await;
+        let (dir, master) = seeded_vault();
+        mint_and_cache_pair_record_v4_from_master(dir.path(), &master, 1, 1, &[device_entry(3, true)])
+            .unwrap();
+        let relay = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let http = reqwest::Client::new();
+        // A verbatim re-POST the relay already holds is a harmless 409.
+        republish_cached_pair_record_v4(dir.path(), &relay, &http)
+            .await
+            .unwrap();
     }
 }
