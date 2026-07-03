@@ -696,14 +696,17 @@ impl FanoutTarget {
 /// signed `to` as one of its devices.
 ///
 /// That check is confidentiality-load-bearing: the card `user_id` is an
-/// UNVERIFIED claim at the fetchit layer (`from_share_uri` captures it, but
-/// `verify_card_extension` signs only the fetchit extension, not the embedded
-/// x0x cert), so without it a spoofed card (`agent=Mallory`, `user_id=Victim`)
-/// would resolve Victim's genuine record and redirect the DM to Victim's
-/// devices. `to` absent -- a spoofed binding, an unpublished / empty record, or
-/// a device revoked from the account -- falls back to the single conversation
-/// agent `to`, so fanout never yields zero targets and never leaks to a third
-/// party.
+/// UNVERIFIED claim at the fetchit layer. The x0x share card carries NO
+/// user-signed certificate -- `user_id` is a bare field the AGENT self-signs
+/// (so a spoofer self-signs a forged `user_id` just as validly), and
+/// `verify_card_extension` covers only the fetchit KEM/agent extension. So
+/// without this gate a spoofed card (`agent=Mallory`, `user_id=Victim`) would
+/// resolve Victim's genuine record and redirect the DM to Victim's devices. The
+/// only real `user_id -> agent` proof is the relay-resolved, USER-signed
+/// `PairRecordV4` this gate checks. `to` absent -- a spoofed binding, an
+/// unpublished / empty record, or a device revoked from the account -- falls
+/// back to the single conversation agent `to`, so fanout never yields zero
+/// targets and never leaks to a third party.
 ///
 /// Pure and independent of the resolve / `user_id` plumbing: the M6.3 send loop
 /// derives its target set from an already-resolved record.

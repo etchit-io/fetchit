@@ -243,6 +243,34 @@ Code: `crates/fetchit-chat/src/pair_record_v4.rs` --
 and minting is gated behind `with_user_key` (derive-use-drop, so the
 account key is never held to re-sign on the reachability path).
 
+### 10. A contact card's `user_id` is an agent-asserted claim, not a user-proven binding
+
+The share card you import (an `x0x://agent/...` link) is an x0x `AgentCard`: a
+`user_id` field sitting beside the agent's ML-DSA key, the whole card signed by
+the **agent** key. That signature proves the agent authored the card and binds
+`agent_public_key` to `agent_id` -- but it does **not** bind the agent to the
+`user_id`, because the agent signs its own claimed `user_id`. There is no
+user-signed certificate on the card (the account key never touches it), so a
+hostile card can assert `agent=Mallory, user_id=Victim` and still verify.
+fetchit captures `user_id` from the card **unverified**; `verify_card_extension`
+covers only the fetchit KEM/agent extension, not the `user_id`.
+
+The only place an account actually proves it owns a device is the `PairRecord`
+v4 (caveat 9): the **account key** signs a signing-input that covers every
+device's `agent_id`, KEM key, and ML-DSA key. So a DM to an M6 contact fans out
+to the account's devices **only when** the agent the contact was added as
+(`to`) is itself one of the devices in that account's relay-resolved,
+account-signed record -- the `to`-in-devices gate. A spoofed `user_id` resolves
+the victim's genuine record, but `to` (Mallory) is not in it, so the fanout
+falls back to a single-device send to `to` and never seals the DM to the
+victim's devices. The card `user_id` is thus only ever a **lookup hint**; the
+account signature on the resolved record is the trust anchor.
+
+Code: `crates/fetchit-chat/src/messages.rs` -- `fanout_targets_from_record`
+returns the device list only when `rec.devices` contains `to`, else `[to]`;
+`StoredContactCard::from_share_uri` captures `user_id` as an unverified
+`Option<String>`.
+
 ## What we promise
 
 - **fetch>it never holds a wallet, never signs Autonomi transactions,
