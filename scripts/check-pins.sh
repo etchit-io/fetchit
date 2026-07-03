@@ -27,6 +27,13 @@ grep -q 'github.com/WithAutonomi/ant-client?rev=95a23be' Cargo.lock \
     || fail "Cargo.lock ant-core rev != 95a23be"
 ok "ant-core rev=95a23be"
 
+# ant-core in the workspace-EXCLUDED fetchit-ffi crate: it keeps its OWN
+# Cargo.lock, which a root `cargo update` does NOT touch, so a root ant-core
+# bump can silently leave the APK linking a stale ant-core. Assert it here too.
+grep -q 'github.com/WithAutonomi/ant-client?rev=95a23be' crates/fetchit-ffi/Cargo.lock \
+    || fail "crates/fetchit-ffi/Cargo.lock ant-core rev != 95a23be (excluded-crate lock drift)"
+ok "ant-core rev=95a23be (fetchit-ffi excluded lock)"
+
 # self_encryption: =0.36.0
 grep -q 'self_encryption = "=0.36.0"' Cargo.toml \
     || fail "Cargo.toml self_encryption != =0.36.0"
