@@ -500,6 +500,27 @@ pub async fn resolve_pair_record_v4(
     Ok(Some(fetched))
 }
 
+/// The device agents present in `old` but absent from `new` -- the devices a
+/// newer `PairRecordV4` revision removed. Feed these to
+/// `OutboxStore::drop_bubbles_for_peers` to cancel their pending outbox sends,
+/// so a message is never retried at a device no longer in the account.
+#[must_use]
+pub fn removed_device_agents(
+    old: &PairRecordV4,
+    new: &PairRecordV4,
+) -> Vec<crate::identity::AgentId> {
+    let kept: std::collections::HashSet<&str> = new
+        .devices
+        .iter()
+        .map(|d| d.agent_id_hex.as_str())
+        .collect();
+    old.devices
+        .iter()
+        .filter(|d| !kept.contains(d.agent_id_hex.as_str()))
+        .map(|d| crate::identity::AgentId(d.agent_id_hex.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1100,5 +1121,25 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn removed_device_agents_lists_only_the_dropped_devices() {
+        let d1 = device_entry(1, true);
+        let d2 = device_entry(2, false);
+        let d3 = device_entry(3, false);
+        let old = PairRecordV4 {
+            devices: vec![d1.clone(), d2.clone()],
+            ..bare_record()
+        };
+        let new = PairRecordV4 {
+            devices: vec![d2, d3],
+            ..bare_record()
+        };
+        // Only d1 was dropped; d2 kept, d3 added.
+        assert_eq!(
+            removed_device_agents(&old, &new),
+            vec![crate::identity::AgentId(d1.agent_id_hex)]
+        );
     }
 }

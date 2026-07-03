@@ -114,6 +114,30 @@ impl OutboxStore {
         self.flush();
     }
 
+    /// Remove every bubble targeting a peer in `peers` and persist, returning
+    /// the dropped bubble ids. `peers` is the set of device agents a contact's
+    /// newer `PairRecordV4` revision removed; a device agent id is unique to
+    /// one device, so this drops only the removed devices' pending sends, never
+    /// a live sibling's.
+    pub fn drop_bubbles_for_peers(&mut self, peers: &[crate::identity::AgentId]) -> Vec<String> {
+        if peers.is_empty() {
+            return Vec::new();
+        }
+        let dropped: Vec<String> = self
+            .inner
+            .values()
+            .filter(|b| peers.contains(&b.peer))
+            .map(|b| b.id.clone())
+            .collect();
+        for id in &dropped {
+            self.inner.remove(id);
+        }
+        if !dropped.is_empty() {
+            self.flush();
+        }
+        dropped
+    }
+
     /// Claim `id` as in-flight. Returns `true` if newly claimed, `false`
     /// if a send for it is already in progress (double-send guard). Not
     /// persisted -- in-flight tasks die with the process; the boot sweep
@@ -311,6 +335,23 @@ mod tests {
         let s2 = OutboxStore::load(&layout, &m, 0, None);
         assert_eq!(s2.snapshot().len(), 1);
         assert_eq!(s2.get("b1").unwrap().peer.0, "a".repeat(64));
+    }
+
+    #[test]
+    fn drop_bubbles_for_peers_removes_only_matching_peers() {
+        let mut s = OutboxStore::new();
+        s.upsert(bubble("b1", "a"));
+        s.upsert(bubble("b2", "b"));
+        s.upsert(bubble("b3", "a"));
+        // Drop peer "a" (two bubbles); peer "b" survives.
+        let mut dropped = s.drop_bubbles_for_peers(&[AgentId("a".repeat(64))]);
+        dropped.sort();
+        assert_eq!(dropped, vec!["b1".to_string(), "b3".to_string()]);
+        assert!(s.get("b1").is_none());
+        assert!(s.get("b3").is_none());
+        assert!(s.get("b2").is_some());
+        // Empty peer set is a no-op.
+        assert!(s.drop_bubbles_for_peers(&[]).is_empty());
     }
 
     /// A minimal sealed envelope for the group-bubble durability tests. The
