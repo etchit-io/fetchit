@@ -872,14 +872,8 @@ impl<'a> Endpoint<'a> {
             .layout
             .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
 
-        let conv = match registry.find_dm_with(&to.0).await? {
-            Some(c) => c,
-            None => {
-                self.bootstrap_conversation(to, sender_name, identity, registry, signer, layout)
-                    .await?
-            }
-        };
-
+        // One message id shared across every device copy, so the recipient's
+        // devices dedup to a single message (M6.3 DM fanout).
         let message_id = random_message_id();
         // Stamp the sender's current relay list and pair-record watermark so
         // the receiver can heal its stored contact card when we move relays.
@@ -896,45 +890,89 @@ impl<'a> Endpoint<'a> {
         } else {
             None
         };
-        let outbox = build_message_outbox(
-            &conv,
-            body,
-            sender_name,
-            &message_id,
-            reply_to_message_id,
-            attachment,
-            identity,
-            self.local_machine_id,
-            signer.as_ref(),
-            advertised_relays,
-            hint_epoch_ms,
-        )
-        .await?;
-        self.dispatch_outbox(outbox).await?;
-        // Persist the outbound entry so delivery receipts have a row to
-        // mark and headless readers see sent DMs from disk. Bookkeeping —
-        // the send already succeeded, so log rather than fail.
-        let entry = HistoryEntry {
-            sender_agent_id_hex: identity.agent_id_hex().to_owned(),
-            sender_name: Some(sender_name.to_owned()),
-            body: body.to_owned(),
-            ts_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
-            message_id: message_id.clone(),
-            attachment: attachment.cloned(),
-            delivered_at_ms: None,
-        };
-        if let Err(e) = registry
-            .mutate_in_place(&conv.group_id_hex, |c| {
-                c.push_history(entry);
-                MutateAction::Persist(())
-            })
-            .await
-        {
-            log::warn!("[chat] outbound history persist failed: {e}");
+
+        // M6.3 fanout: seal one copy per listed device of the recipient and
+        // deliver to each device-agent, sharing `message_id`. `fanout_targets`
+        // returns just `[to]` until `resolve_pair_record_v4` is wired in, so
+        // today this is exactly the historical single-device send. History is
+        // persisted ONCE (the primary/first conversation) so the sender keeps a
+        // single thread regardless of the recipient's device count.
+        let targets = self.fanout_targets(to);
+        let mut primary_conv: Option<Conversation> = None;
+        for target in &targets {
+            let conv = match registry.find_dm_with(&target.0).await? {
+                Some(c) => c,
+                None => {
+                    self.bootstrap_conversation(
+                        target,
+                        sender_name,
+                        identity,
+                        registry,
+                        signer,
+                        layout,
+                    )
+                    .await?
+                }
+            };
+            let outbox = build_message_outbox(
+                &conv,
+                body,
+                sender_name,
+                &message_id,
+                reply_to_message_id,
+                attachment,
+                identity,
+                self.local_machine_id,
+                signer.as_ref(),
+                advertised_relays.clone(),
+                hint_epoch_ms,
+            )
+            .await?;
+            self.dispatch_outbox(outbox).await?;
+            if primary_conv.is_none() {
+                primary_conv = Some(conv);
+            }
+        }
+
+        // Persist the outbound entry once (primary conversation) so delivery
+        // receipts have a row to mark and headless readers see sent DMs from
+        // disk. Bookkeeping — the send already succeeded, so log rather than
+        // fail.
+        if let Some(conv) = primary_conv {
+            let entry = HistoryEntry {
+                sender_agent_id_hex: identity.agent_id_hex().to_owned(),
+                sender_name: Some(sender_name.to_owned()),
+                body: body.to_owned(),
+                ts_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                message_id: message_id.clone(),
+                attachment: attachment.cloned(),
+                delivered_at_ms: None,
+            };
+            if let Err(e) = registry
+                .mutate_in_place(&conv.group_id_hex, |c| {
+                    c.push_history(entry);
+                    MutateAction::Persist(())
+                })
+                .await
+            {
+                log::warn!("[chat] outbound history persist failed: {e}");
+            }
         }
         Ok(Some(message_id))
+    }
+
+    /// M6.3 DM fanout: the recipient device-agents a DM is delivered to.
+    /// Returns just `[to]` today; once `resolve_pair_record_v4` lands this
+    /// resolves the recipient's account device list (via their `user_id`) so a
+    /// DM reaches every linked device, falling back to `[to]` for a contact with
+    /// no published v4 record. A seam so the send loop is already fanout-shaped.
+    // `&self` is unused today but load-bearing once resolve_pair_record_v4 is
+    // wired in (it needs the vault dir + relay + http off `self`).
+    #[allow(clippy::unused_self)]
+    fn fanout_targets(&self, to: &AgentId) -> Vec<AgentId> {
+        vec![to.clone()]
     }
 
     async fn bootstrap_conversation(
