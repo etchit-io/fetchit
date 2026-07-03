@@ -260,6 +260,14 @@ pub(crate) fn confirm_offer_from_master(
     offer: &LinkDeviceOffer,
     added_at_ms: u64,
 ) -> Result<crate::fabric::AgentCertificate, ChatError> {
+    // Self-guard (Alice finding A): reject a stale offer BEFORE minting, so the
+    // QR-swap short-code grind window is the offer's own short expiry, not the
+    // ~1h relay blob TTL. `added_at_ms` is the confirm-time clock.
+    if offer.is_expired(added_at_ms) {
+        return Err(ChatError::Invalid(
+            "link offer has expired; ask the new device for a fresh QR".into(),
+        ));
+    }
     let (ml_dsa, kem) = decode_offer_keys(offer)?;
     crate::local_signer::with_user_key_from_master(data_dir, master, |user| {
         crate::fabric::mint_agent_certificate(user, &offer.agent_id_hex, &ml_dsa, &kem, added_at_ms)
@@ -531,7 +539,7 @@ mod tests {
             "{}",
             created.uri
         );
-        assert_eq!(created.short_code.len(), 9, "XXXX-XXXX");
+        assert_eq!(created.short_code.len(), 14, "XXXX-XXXX-XXXX");
         assert_eq!(created.exp_ms, 1_800_000_000_000);
     }
 
@@ -587,8 +595,9 @@ mod tests {
             &[5u8; 16],
             1_700_000_000_000,
         );
+        // Confirm clock (1.6e12) precedes the offer expiry (1.7e12): not expired.
         let cert =
-            confirm_offer_from_master(dir.path(), &master, &offer, 1_700_000_000_000).unwrap();
+            confirm_offer_from_master(dir.path(), &master, &offer, 1_600_000_000_000).unwrap();
 
         // Binds the new device's agent, signed by the account user key derived
         // from THIS device's vault.
@@ -597,5 +606,30 @@ mod tests {
             with_user_key_from_master(dir.path(), &master, |u| Ok(u.public_key_bytes().to_vec()))
                 .unwrap();
         verify_agent_certificate(&cert, &user_pk).unwrap();
+    }
+
+    #[test]
+    fn confirm_rejects_an_expired_offer() {
+        use crate::at_rest::{fresh_argon_salt, MasterKey, MasterKeySource};
+        use zeroize::Zeroizing;
+
+        // No vault load: the expiry check fires before any user-key use.
+        let dir = tempfile::tempdir().unwrap();
+        let salt = fresh_argon_salt();
+        let master = MasterKey::resolve(
+            &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+            Some(&salt),
+        )
+        .unwrap();
+        let signer = MlDsaSigner::from_seed(&[44u8; 32]);
+        let offer = LinkDeviceOffer::mint(
+            hex::encode(signer.agent_id()),
+            &signer.public_key(),
+            &[0u8; 1184],
+            &[5u8; 16],
+            1_000,
+        );
+        // The confirm clock (2_000) is past the offer's exp (1_000): reject.
+        assert!(confirm_offer_from_master(dir.path(), &master, &offer, 2_000).is_err());
     }
 }

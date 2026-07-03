@@ -157,13 +157,21 @@ impl LinkDeviceOffer {
         }
     }
 
-    /// A human-comparable confirmation code for this offer, e.g. `K7QM-9XPR`.
+    /// A human-comparable confirmation code for this offer, e.g.
+    /// `K7QM-9XPR-4TZB`.
     ///
     /// Deterministic over the offer's identity — a domain-separated SHA-256,
-    /// 40 bits rendered as 8 Crockford base32 chars (no I/L/O/U), grouped. Both
-    /// devices compute the SAME code from the same offer, so a QR-swap attack
-    /// (a MITM substituting a different device's offer) yields a mismatched
-    /// code the human catches on the confirm screen.
+    /// 60 bits rendered as 12 Crockford base32 chars (no I/L/O/U), grouped in
+    /// threes. Both devices compute the SAME code from the same offer, so a
+    /// QR-swap (a MITM substituting a different device's offer) yields a
+    /// mismatched code the human catches on the confirm screen.
+    ///
+    /// It is a **backstop** to the visual QR channel (you scan your own trusted
+    /// device's screen), NOT a standalone active-MITM defence: 60 bits resists
+    /// an offline grind well past any enrollment window, but the code is only
+    /// meaningful while the offer is unexpired, so
+    /// [`confirm_link_device`](crate::link_device_flow::confirm_link_device)
+    /// must reject an expired offer before minting.
     #[must_use]
     pub fn short_code(&self) -> String {
         const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -183,15 +191,16 @@ impl LinkDeviceOffer {
 
         let digest = Sha256::digest(&input);
         let mut acc = 0u64;
-        for &b in &digest[..5] {
+        for &b in &digest[..8] {
             acc = (acc << 8) | u64::from(b);
         }
-        let mut code = String::with_capacity(9);
-        for i in 0..8u32 {
-            if i == 4 {
+        // 12 groups of 5 bits = 60 bits, from the top of the 64 loaded.
+        let mut code = String::with_capacity(14);
+        for i in 0..12u32 {
+            if i > 0 && i % 4 == 0 {
                 code.push('-');
             }
-            let idx = usize::try_from((acc >> (5 * (7 - i))) & 0x1f).unwrap_or(0);
+            let idx = usize::try_from((acc >> (4 + 5 * (11 - i))) & 0x1f).unwrap_or(0);
             code.push(char::from(ALPHABET[idx]));
         }
         code
@@ -403,8 +412,9 @@ mod tests {
         let offer = valid_offer(7);
         let code = offer.short_code();
         assert_eq!(code, offer.short_code(), "deterministic");
-        assert_eq!(code.len(), 9, "XXXX-XXXX");
+        assert_eq!(code.len(), 14, "XXXX-XXXX-XXXX");
         assert_eq!(&code[4..5], "-");
+        assert_eq!(&code[9..10], "-");
         // Both devices compute the same code — survives a JSON round-trip.
         let back: LinkDeviceOffer =
             serde_json::from_slice(&serde_json::to_vec(&offer).unwrap()).unwrap();
