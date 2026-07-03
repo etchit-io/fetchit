@@ -942,6 +942,55 @@ impl Client {
         .await
     }
 
+    /// M6.4 new-device side: mint a link offer for THIS device and publish it,
+    /// returning the QR pointer + short-code to show. `ttl_secs` bounds the
+    /// enrollment window.
+    ///
+    /// # Errors
+    /// [`ChatError`] when chat state is absent (REST-only mode), or sealing /
+    /// publishing fails.
+    pub async fn create_link_offer(
+        &self,
+        ttl_secs: u64,
+    ) -> Result<crate::link_device_flow::CreatedLinkOffer> {
+        let chat = self.chat.as_ref().ok_or_else(|| {
+            ChatError::Invalid("chat state not built; cannot link a device".into())
+        })?;
+        let agent_id = chat.identity.agent_id_hex().to_owned();
+        let ml_dsa = chat.signer.public_key();
+        let kem = chat.identity.kem_public_key().to_vec();
+        let relays = self.advertised_relays.read().await.clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let exp_ms = now.saturating_add(ttl_secs.saturating_mul(1000));
+        crate::link_device_flow::create_link_offer(
+            agent_id,
+            &ml_dsa,
+            &kem,
+            &relays,
+            exp_ms,
+            &crate::relay_http::guarded_client(),
+        )
+        .await
+    }
+
+    /// M6.4 existing-device side: fetch a scanned link `uri` and return the
+    /// confirm-screen preview (agent id + short-code + freshness).
+    ///
+    /// # Errors
+    /// [`ChatError`] on a bad URI / fetch or a malformed offer.
+    pub async fn preview_link_offer(
+        &self,
+        uri: &str,
+    ) -> Result<crate::link_device_flow::LinkOfferPreview> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        crate::link_device_flow::preview_link_offer(uri, now, &crate::relay_http::guarded_client())
+            .await
+    }
+
     /// M3 G1: register a callback the multi-home transport invokes
     /// when the user's primary relay (slot 0) is added to the
     /// community denylist mid-session. Slot 0 is NOT dropped — that's
@@ -4234,15 +4283,16 @@ impl Client {
         // genuine "no profile" (404 / tombstoned) triggers the fallback — a
         // transient relay error propagates, and an EXISTING real profile is
         // used as-is and never clobbered.
-        let profile_addr =
-            match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http).await {
-                Ok(record) => record.profile_addr,
-                Err(crate::pair::PairError::RelayStatus(404) | crate::pair::PairError::Tombstoned) => {
-                    self.publish_minimal_profile(relay, now_ms).await?;
-                    crate::pair::MINIMAL_PROFILE_ADDR.to_owned()
-                }
-                Err(e) => return Err(ChatError::Invalid(format!("profile record: {e}"))),
-            };
+        let profile_addr = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http)
+            .await
+        {
+            Ok(record) => record.profile_addr,
+            Err(crate::pair::PairError::RelayStatus(404) | crate::pair::PairError::Tombstoned) => {
+                self.publish_minimal_profile(relay, now_ms).await?;
+                crate::pair::MINIMAL_PROFILE_ADDR.to_owned()
+            }
+            Err(e) => return Err(ChatError::Invalid(format!("profile record: {e}"))),
+        };
         let identity = self
             .mint_actor_identity_v2(
                 handle,
@@ -6440,7 +6490,9 @@ mod tests {
         let (client, _dir) = test_client_no_denylist();
         let bad = "fetchit://share/v3/deadbeef";
         let via_import = client.import_pair_uri(bad).await.unwrap_err().to_string();
-        let via_v3 = crate::profile::from_v3_share_uri(bad).unwrap_err().to_string();
+        let via_v3 = crate::profile::from_v3_share_uri(bad)
+            .unwrap_err()
+            .to_string();
         assert!(
             via_import.contains(&via_v3),
             "import error `{via_import}` should carry the v3 parse error `{via_v3}`",
