@@ -3084,6 +3084,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fetchit-mcp"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "fetchit-core",
+ "fetchit-net",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fetchit-net"
 version = "0.2.0"
 dependencies = [

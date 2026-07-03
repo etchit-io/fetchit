@@ -12,6 +12,7 @@ members = [
     "crates/fetchit-trust-types",
     "crates/fetchit-trust-client",
     "crates/fetchit-words",
+    "crates/fetchit-mcp",
     "crates/x0xd-client",
 ]
 exclude = ["crates/fetchit-ffi", "apps/fetchit-desktop/src-tauri"]
