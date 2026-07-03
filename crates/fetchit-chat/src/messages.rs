@@ -668,20 +668,32 @@ const NEG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The recipient device-agents a DM fans out to, derived from the recipient's
 /// resolved [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4).
-/// Every listed device receives its own sealed copy -- that is the point of the
-/// device fabric, reaching all of a contact's linked devices. A contact with no
-/// published v4 record (`None`, i.e. pre-M6) or an empty device list falls back
-/// to the single conversation agent `to`, so fanout never yields zero targets.
+///
+/// Fans out to every listed device -- the point of the device fabric -- but
+/// ONLY when `to` (the agent the contact was added as) is itself one of the
+/// listed devices. The record's USER signature covers each device's
+/// `agent_id_hex` (via `pair_record_v4_signing_input`), so `to`-among-the-
+/// devices proves the account whose `user_id` the contact card claimed actually
+/// signed `to` as one of its devices.
+///
+/// That check is confidentiality-load-bearing: the card `user_id` is an
+/// UNVERIFIED claim at the fetchit layer (`from_share_uri` captures it, but
+/// `verify_card_extension` signs only the fetchit extension, not the embedded
+/// x0x cert), so without it a spoofed card (`agent=Mallory`, `user_id=Victim`)
+/// would resolve Victim's genuine record and redirect the DM to Victim's
+/// devices. `to` absent -- a spoofed binding, an unpublished / empty record, or
+/// a device revoked from the account -- falls back to the single conversation
+/// agent `to`, so fanout never yields zero targets and never leaks to a third
+/// party.
 ///
 /// Pure and independent of the resolve / `user_id` plumbing: the M6.3 send loop
-/// derives its target set from an already-resolved record. [`Endpoint::fanout_targets`]
-/// passes `None` until `contact_user_id_hex` + `resolve_pair_record_v4` wire in.
+/// derives its target set from an already-resolved record.
 fn fanout_targets_from_record(
     record: Option<&fetchit_relay_proto::pair_record::PairRecordV4>,
     to: &AgentId,
 ) -> Vec<AgentId> {
     match record {
-        Some(rec) if !rec.devices.is_empty() => rec
+        Some(rec) if rec.devices.iter().any(|d| d.agent_id_hex == to.0) => rec
             .devices
             .iter()
             .map(|d| AgentId(d.agent_id_hex.clone()))
@@ -878,6 +890,10 @@ impl<'a> Endpoint<'a> {
     /// REST-only mode without chat-encryption state;
     /// [`ChatError::Denied`] when the recipient is on the wired
     /// denylist (M3 federation core).
+    // Cohesive DM fanout: seal once, deliver best-effort per device, anchor the
+    // thread once on the to-agent conversation; the per-device error handling +
+    // anchor logic put it a few lines over the limit.
+    #[allow(clippy::too_many_lines)]
     pub async fn send(
         &self,
         to: &AgentId,
@@ -948,23 +964,44 @@ impl<'a> Endpoint<'a> {
         // they never hit disk and never surface as extra sidebar rows -- the
         // user sees exactly one thread per contact regardless of device count.
         let targets = self.fanout_targets(to).await;
-        let mut anchor_conv: Option<Conversation> = None;
+        // Per-device delivery is best-effort: a failure reaching -- or
+        // establishing the conversation for -- one device must NOT abort the
+        // fanout to the others. With history anchored on `to`, a fail-fast on a
+        // sibling that sorts before `to` in the device list would otherwise skip
+        // the primary contact entirely. Track the anchor's group id and whether
+        // ANY device was reached; surface an error only if none were.
+        let mut anchor_group_id: Option<String> = None;
+        let mut any_delivered = false;
+        let mut last_err: Option<ChatError> = None;
         for target in &targets {
-            let conv = match registry.find_dm_with(&target.0).await? {
-                Some(c) => c,
-                None => {
-                    self.bootstrap_conversation(
-                        target,
-                        sender_name,
-                        identity,
-                        registry,
-                        signer,
-                        layout,
-                    )
-                    .await?
+            let conv = match registry.find_dm_with(&target.0).await {
+                Ok(Some(c)) => c,
+                Ok(None) => match self
+                    .bootstrap_conversation(target, sender_name, identity, registry, signer, layout)
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!(
+                            "[chat] fanout: bootstrap for device {} failed: {e}",
+                            target.0
+                        );
+                        last_err = Some(e);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    log::warn!("[chat] fanout: lookup for device {} failed: {e}", target.0);
+                    last_err = Some(e);
+                    continue;
                 }
             };
-            let outbox = build_message_outbox(
+            // The thread anchor is `to`'s conversation regardless of this
+            // device's delivery outcome (threading is decoupled from delivery).
+            if target == to {
+                anchor_group_id = Some(conv.group_id_hex.clone());
+            }
+            let delivered = match build_message_outbox(
                 &conv,
                 body,
                 sender_name,
@@ -977,29 +1014,47 @@ impl<'a> Endpoint<'a> {
                 advertised_relays.clone(),
                 hint_epoch_ms,
             )
-            .await?;
-            self.dispatch_outbox(outbox).await?;
-            if target == to {
-                anchor_conv = Some(conv);
+            .await
+            {
+                Ok(outbox) => self.dispatch_outbox(outbox).await,
+                Err(e) => Err(e),
+            };
+            match delivered {
+                Ok(_) => any_delivered = true,
+                Err(e) => {
+                    log::warn!("[chat] fanout: delivery to device {} failed: {e}", target.0);
+                    last_err = Some(e);
+                }
             }
         }
 
-        // Anchor outbound history on the `to`-agent conversation. If `to` was a
-        // delivery target (the common case -- the anchor device is a current
-        // device) it was captured above; otherwise (its device was revoked from
-        // the current list) fall back to the existing thread with `to` so the
-        // sender's canonical thread stays continuous. No thread means nothing to
-        // anchor to, so skip -- delivery already fanned out to the live devices.
-        let anchor_conv = match anchor_conv {
-            Some(c) => Some(c),
-            None => registry.find_dm_with(&to.0).await?,
+        // No device reached at all: surface the failure (a single-device send
+        // that fails still errors, exactly as before the fanout).
+        if !any_delivered {
+            return Err(last_err
+                .unwrap_or_else(|| ChatError::Invalid("DM fanout reached no device".into())));
+        }
+
+        // Anchor outbound history on the `to`-agent thread. If `to` was a
+        // delivery target (the common case) its group id was captured above;
+        // otherwise (its device was revoked from the current list) fall back to
+        // the existing thread with `to`. No thread means nothing to anchor to,
+        // so skip -- history is bookkeeping, not a delivery gate.
+        let anchor_group_id = match anchor_group_id {
+            Some(g) => Some(g),
+            None => registry
+                .find_dm_with(&to.0)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.group_id_hex),
         };
 
         // Persist the outbound entry once (the anchor conversation) so delivery
         // receipts have a row to mark and headless readers see sent DMs from
         // disk. Bookkeeping — the send already succeeded, so log rather than
         // fail.
-        if let Some(conv) = anchor_conv {
+        if let Some(gid) = anchor_group_id {
             let entry = HistoryEntry {
                 sender_agent_id_hex: identity.agent_id_hex().to_owned(),
                 sender_name: Some(sender_name.to_owned()),
@@ -1012,7 +1067,7 @@ impl<'a> Endpoint<'a> {
                 delivered_at_ms: None,
             };
             if let Err(e) = registry
-                .mutate_in_place(&conv.group_id_hex, |c| {
+                .mutate_in_place(&gid, |c| {
                     c.push_history(entry);
                     MutateAction::Persist(())
                 })
@@ -2699,10 +2754,9 @@ mod tests {
     }
 
     #[test]
-    fn fanout_targets_from_record_covers_all_devices_then_falls_back() {
+    fn fanout_targets_from_record_gates_on_to_being_a_listed_device() {
         use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
 
-        let to = AgentId("11".repeat(32));
         let dev = |aid: String, primary: bool| DeviceEntryV4 {
             agent_id_hex: aid,
             ml_dsa_pubkey_b64: "AA".to_string(),
@@ -2721,16 +2775,18 @@ mod tests {
             devices,
             user_signature_b64: "AA".to_string(),
         };
-
-        // Three linked devices: fan out to every one, in record order,
-        // regardless of which agent `to` names.
         let three = record(vec![
             dev("aa".repeat(32), true),
             dev("bb".repeat(32), false),
             dev("cc".repeat(32), false),
         ]);
+
+        // `to` IS one of the listed devices: the account's signature over the
+        // record proves it signed `to` as one of its own, so fan out to every
+        // device, in record order.
+        let to_listed = AgentId("bb".repeat(32));
         assert_eq!(
-            fanout_targets_from_record(Some(&three), &to),
+            fanout_targets_from_record(Some(&three), &to_listed),
             vec![
                 AgentId("aa".repeat(32)),
                 AgentId("bb".repeat(32)),
@@ -2738,13 +2794,25 @@ mod tests {
             ]
         );
 
-        // No published record (pre-M6 contact): single-device fallback to `to`.
-        assert_eq!(fanout_targets_from_record(None, &to), vec![to.clone()]);
+        // `to` is NOT in the resolved device list: the card's user_id -> agent
+        // binding is unproven (a spoofed card would resolve someone else's
+        // record), so single-device only -- the DM is never redirected.
+        let to_unlisted = AgentId("11".repeat(32));
+        assert_eq!(
+            fanout_targets_from_record(Some(&three), &to_unlisted),
+            vec![to_unlisted.clone()]
+        );
+
+        // No published record (pre-M6 contact): single-device fallback.
+        assert_eq!(
+            fanout_targets_from_record(None, &to_unlisted),
+            vec![to_unlisted.clone()]
+        );
 
         // Empty device list: same fallback -- fanout never yields zero targets.
         assert_eq!(
-            fanout_targets_from_record(Some(&record(vec![])), &to),
-            vec![to.clone()]
+            fanout_targets_from_record(Some(&record(vec![])), &to_unlisted),
+            vec![to_unlisted]
         );
     }
 
@@ -2822,16 +2890,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fanout_targets_reaches_every_device_of_an_m6_contact() {
+    async fn fanout_targets_blocks_redirection_when_to_is_not_a_listed_device() {
         use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
 
         let dir = tempfile::tempdir().unwrap();
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        // Spoofed binding: the contact was added as agent `to`, but the card
+        // claims a user_id whose signed record lists OTHER devices -- `to` is
+        // not among them. This is the redirection attack (a hostile card
+        // pointing user_id at a victim). Fanout must fall back to single-device
+        // and NEVER seal the DM to the victim's devices.
         let to = AgentId("ab".repeat(32));
         let user_id = "cd".repeat(32);
-        // M6 contact: card carries the x0x user_id + a loopback relay, so
-        // resolve's GET is refused instantly and it falls back to the cached
-        // record seeded below (no relay server needed).
         StoredContactCard {
             agent_id_hex: to.0.clone(),
             display_name: "Peer".into(),
@@ -2845,9 +2915,8 @@ mod tests {
         }
         .save(&layout)
         .unwrap();
-        // Seed the device-list cache with a 2-device record. Path mirrors
-        // `load_contact_pair_record_v4` (contact_pair_records/<user_id>.json);
-        // the cached record is returned verbatim when the relay GET fails.
+        // Cached record for the claimed user_id lists devices 01 + 02 -- NOT
+        // `to` (abab..). Loopback relay so resolve degrades to this cache.
         let dev = |seed: u8| DeviceEntryV4 {
             agent_id_hex: hex::encode([seed; 32]),
             ml_dsa_pubkey_b64: "AA".into(),
@@ -2873,7 +2942,61 @@ mod tests {
         let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
         let router = Router::new();
         let endpoint = fanout_endpoint(&http, &router, &layout);
-        // Fans out to BOTH cached devices, not just the conversation agent `to`.
+        // `to` is not one of the record's devices -> single-device only, no
+        // redirection to the victim's 01/02 devices.
+        assert_eq!(endpoint.fanout_targets(&to).await, vec![to.clone()]);
+    }
+
+    #[tokio::test]
+    async fn fanout_targets_reaches_every_device_when_to_is_a_listed_device() {
+        use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let user_id = "cd".repeat(32);
+        // Legit M6 contact: `to` is device 01, one of the record's own devices,
+        // so the account signature over the record proves the binding and the
+        // DM fans out to every device.
+        let to = AgentId(hex::encode([1u8; 32]));
+        StoredContactCard {
+            agent_id_hex: to.0.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(vec![0u8; 1184]),
+            agent_public_key_b64: None,
+            rendezvous_hints: Some(crate::card::RendezvousHintsV1 {
+                relays: vec!["wss://127.0.0.1:9/v1/ws".to_owned()],
+            }),
+            last_hint_epoch_ms: None,
+            user_id_hex: Some(user_id.clone()),
+        }
+        .save(&layout)
+        .unwrap();
+        let dev = |seed: u8| DeviceEntryV4 {
+            agent_id_hex: hex::encode([seed; 32]),
+            ml_dsa_pubkey_b64: "AA".into(),
+            kem_pubkey_b64: "AA".into(),
+            advertised_relays: vec![],
+            cert_b64: "AA".into(),
+            added_at_ms: 0,
+            primary: seed == 1,
+        };
+        let record = PairRecordV4 {
+            record_version: 4,
+            user_id_hex: user_id.clone(),
+            user_ml_dsa_pubkey_b64: "AA".into(),
+            revision: 1,
+            issued_at_ms: 1,
+            devices: vec![dev(1), dev(2)],
+            user_signature_b64: "AA".into(),
+        };
+        let cache_dir = layout.root.join("contact_pair_records");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        write_json_atomic(&cache_dir.join(format!("{user_id}.json")), &record).unwrap();
+
+        let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
+        let router = Router::new();
+        let endpoint = fanout_endpoint(&http, &router, &layout);
+        // `to` (device 01) is a listed device -> fan out to BOTH 01 and 02.
         assert_eq!(
             endpoint.fanout_targets(&to).await,
             vec![
