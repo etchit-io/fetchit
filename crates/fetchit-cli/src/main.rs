@@ -262,6 +262,18 @@ fn print_rendition(r: &Rendition) {
             println!("---");
             println!("{}", preview_text(body, 4_000));
         }
+        Rendition::EncryptedEnvelope {
+            group_hint,
+            ciphertext_len,
+        } => {
+            println!("kind: saorsa-mls/envelope-v1");
+            if let Some(hint) = group_hint {
+                println!("group hint: {hint}");
+            }
+            println!("ciphertext bytes: {ciphertext_len}");
+            println!("---");
+            println!("encrypted content; fetch>it holds no keys and cannot decrypt");
+        }
         // Rendition is #[non_exhaustive]; future variants print a
         // generic header so the CLI never panics on a new kind.
         _ => println!("kind: (unknown rendition variant)"),

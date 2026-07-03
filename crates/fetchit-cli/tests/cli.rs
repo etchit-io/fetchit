@@ -19,6 +19,20 @@ fn fixture(bytes: &[u8]) -> NamedTempFile {
 }
 
 #[test]
+fn detects_mls_envelope_without_decrypting() {
+    let f = fixture(b"saorsa-mls/v1\ngroup=reading-club\n\n\x00\x01\x02");
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .args(["detect", f.path().to_str().expect("path")])
+        .assert()
+        .success()
+        .stdout(contains("kind: saorsa-mls/envelope-v1"))
+        .stdout(contains("group hint: reading-club"))
+        .stdout(contains("ciphertext bytes: 3"))
+        .stdout(contains("encrypted"));
+}
+
+#[test]
 fn detects_etchit_envelope() {
     let f = fixture(br#"{"v":1,"meta":{"title":"hi","lang":""},"content":"hello"}"#);
     Command::cargo_bin("fetchit")
