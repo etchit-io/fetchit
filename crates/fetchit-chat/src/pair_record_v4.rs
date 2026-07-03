@@ -24,7 +24,7 @@ use crate::error::ChatError;
 use crate::fabric::AgentCertificate;
 use crate::local_store::write_json_atomic;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
+use fetchit_relay_proto::pair_record::{verify_pair_record_v4, DeviceEntryV4, PairRecordV4};
 use std::path::{Path, PathBuf};
 
 /// Path of the cached signed v4 record. Plaintext JSON (the record is
@@ -358,6 +358,146 @@ pub async fn append_device_and_publish(
         issued_at_ms,
     )
     .await
+}
+
+/// `true` when `user_id_hex` is a 64-char lowercase-hex user id. Validated
+/// before it is used as a filesystem path segment (no traversal).
+fn is_user_id_hex(user_id_hex: &str) -> bool {
+    user_id_hex.len() == 64
+        && user_id_hex
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Path of a cached CONTACT's last-accepted signed v4 record, keyed by their
+/// `user_id_hex`. Public plaintext (the record is public), under a per-account
+/// subdir so contacts do not collide with this device's own record.
+fn contact_pair_record_v4_path(data_dir: &Path, user_id_hex: &str) -> PathBuf {
+    data_dir
+        .join("contact_pair_records")
+        .join(format!("{user_id_hex}.json"))
+}
+
+/// Load a contact's last-accepted [`PairRecordV4`] from the local cache.
+///
+/// # Errors
+/// A malformed `user_id_hex`, an I/O error other than "not found", or a
+/// malformed cache file.
+pub fn load_contact_pair_record_v4(
+    data_dir: &Path,
+    user_id_hex: &str,
+) -> Result<Option<PairRecordV4>, ChatError> {
+    if !is_user_id_hex(user_id_hex) {
+        return Err(ChatError::Invalid("user id is not 64-hex".to_owned()));
+    }
+    match std::fs::read(contact_pair_record_v4_path(data_dir, user_id_hex)) {
+        Ok(bytes) => {
+            let record = serde_json::from_slice(&bytes)
+                .map_err(|e| ChatError::Invalid(format!("contact pair record v4 parse: {e}")))?;
+            Ok(Some(record))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Cache a contact's accepted [`PairRecordV4`], keyed by its own `user_id_hex`.
+fn save_contact_pair_record_v4(data_dir: &Path, record: &PairRecordV4) -> Result<(), ChatError> {
+    if !is_user_id_hex(&record.user_id_hex) {
+        return Err(ChatError::Invalid(
+            "record user id is not 64-hex".to_owned(),
+        ));
+    }
+    write_json_atomic(
+        &contact_pair_record_v4_path(data_dir, &record.user_id_hex),
+        record,
+    )
+}
+
+/// `GET <relay>/v1/pair-record-v4/<user_id>` with a 10-second timeout.
+/// `Some(record)` on 2xx, `None` on 404, [`ChatError`] otherwise. The record
+/// is NOT verified here -- [`resolve_pair_record_v4`] does that.
+async fn get_pair_record_v4(
+    relay: &url::Url,
+    user_id_hex: &str,
+    http: &reqwest::Client,
+) -> Result<Option<PairRecordV4>, ChatError> {
+    crate::relay_http::guard_relay_url(relay)
+        .await
+        .map_err(|e| ChatError::Invalid(format!("relay blocked: {e}")))?;
+    let url = relay
+        .join(&format!("v1/pair-record-v4/{user_id_hex}"))
+        .map_err(|e| ChatError::Invalid(format!("build relay url: {e}")))?;
+    let resp = crate::relay_http::relay_send_with_retry(|| {
+        http.get(url.clone())
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await?;
+    let status = resp.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(ChatError::Invalid(format!(
+            "relay returned {s} resolving pair record v4",
+            s = status.as_u16()
+        )));
+    }
+    let raw = crate::relay_http::read_body_capped(resp, crate::pair_record::MAX_RELAY_BODY_BYTES)
+        .await
+        .map_err(|e| ChatError::Invalid(e.to_string()))?;
+    let record = serde_json::from_slice(&raw)
+        .map_err(|e| ChatError::Invalid(format!("pair record v4 body decode: {e}")))?;
+    Ok(Some(record))
+}
+
+/// Resolve a contact's current device list from `relay`, applying the
+/// anti-rollback defense (M6 design hard-req 1).
+///
+/// GETs the contact's [`PairRecordV4`], verifies it end-to-end
+/// ([`verify_pair_record_v4`]: user signature + per-device bindings +
+/// structural rules) AND that it is FOR the requested `user_id_hex`, then
+/// compares its `revision` against the last accepted for this contact (the
+/// cached record's revision, the anti-rollback watermark). A record whose
+/// revision is strictly greater is accepted and cached; anything else -- a
+/// rollback, a stale copy, a wrong-user record, a bad signature, or an
+/// unreachable relay -- is REJECTED and the last-accepted cached record is
+/// returned unchanged. `None` only when the contact has never published and
+/// nothing is cached, so DM fanout falls back to the single-device path.
+///
+/// # Errors
+/// [`ChatError`] on a malformed `user_id_hex` or a local cache read/write
+/// failure. A relay-side failure degrades to the cached record, never an error.
+pub async fn resolve_pair_record_v4(
+    data_dir: &Path,
+    user_id_hex: &str,
+    relay: &url::Url,
+    http: &reqwest::Client,
+) -> Result<Option<PairRecordV4>, ChatError> {
+    let cached = load_contact_pair_record_v4(data_dir, user_id_hex)?;
+    let last_seen = cached.as_ref().map_or(0, |r| r.revision);
+
+    // A transient relay problem (unreachable, non-2xx, malformed body) must not
+    // break fanout: keep the cached last-accepted device list.
+    let fetched = match get_pair_record_v4(relay, user_id_hex, http).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return Ok(cached),
+        Err(e) => {
+            log::debug!("resolve_pair_record_v4: relay fetch failed, using cached: {e}");
+            return Ok(cached);
+        }
+    };
+
+    // Accept only a record that is FOR this contact, verifies end-to-end, and
+    // strictly beats the watermark; otherwise reject and keep the cached copy.
+    let acceptable = fetched.user_id_hex == user_id_hex
+        && verify_pair_record_v4(&fetched).is_ok()
+        && fetched.revision > last_seen;
+    if !acceptable {
+        return Ok(cached);
+    }
+    save_contact_pair_record_v4(data_dir, &fetched)?;
+    Ok(Some(fetched))
 }
 
 #[cfg(test)]
@@ -792,5 +932,173 @@ mod tests {
             .unwrap();
         // Empty new-device relays fall back to the POST relay.
         assert_eq!(entry.advertised_relays, vec![relay.to_string()]);
+    }
+
+    fn user_kp(seed: u8) -> crate::fabric::UserKeypair {
+        crate::fabric::UserKeypair::from_seed(&[seed; 32])
+    }
+
+    fn valid_record(user: &crate::fabric::UserKeypair, revision: u64) -> PairRecordV4 {
+        crate::fabric::mint_pair_record_v4(user, revision, 1_000, &[device_entry(3, true)]).unwrap()
+    }
+
+    /// A GET mock serving `record` at any path, plus the relay URL to hit it.
+    async fn serve_get(record: PairRecordV4) -> (wiremock::MockServer, url::Url) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record))
+            .mount(&server)
+            .await;
+        let url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        (server, url)
+    }
+
+    /// A GET mock returning `code` (no body).
+    async fn serve_status(code: u16) -> (wiremock::MockServer, url::Url) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        let url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        (server, url)
+    }
+
+    #[test]
+    fn contact_record_cache_round_trips() {
+        let dir = tempdir().unwrap();
+        let user = user_kp(8);
+        let rec = valid_record(&user, 3);
+        let uid = user.user_id_hex();
+        assert!(load_contact_pair_record_v4(dir.path(), &uid)
+            .unwrap()
+            .is_none());
+        save_contact_pair_record_v4(dir.path(), &rec).unwrap();
+        assert_eq!(
+            load_contact_pair_record_v4(dir.path(), &uid)
+                .unwrap()
+                .unwrap(),
+            rec
+        );
+    }
+
+    #[test]
+    fn load_contact_rejects_a_non_hex_user_id() {
+        let dir = tempdir().unwrap();
+        assert!(load_contact_pair_record_v4(dir.path(), "../evil").is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_accepts_first_then_rejects_a_rollback() {
+        let dir = tempdir().unwrap();
+        let user = user_kp(8);
+        let uid = user.user_id_hex();
+        let http = reqwest::Client::new();
+
+        let (_s2, r2) = serve_get(valid_record(&user, 2)).await;
+        let got = resolve_pair_record_v4(dir.path(), &uid, &r2, &http)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.revision, 2);
+
+        // A rollback to rev-1 is rejected; the cached rev-2 stands.
+        let (_s1, r1) = serve_get(valid_record(&user, 1)).await;
+        let got = resolve_pair_record_v4(dir.path(), &uid, &r1, &http)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.revision, 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_accepts_a_newer_revision() {
+        let dir = tempdir().unwrap();
+        let user = user_kp(8);
+        let uid = user.user_id_hex();
+        let http = reqwest::Client::new();
+        save_contact_pair_record_v4(dir.path(), &valid_record(&user, 2)).unwrap();
+        let (_s, r) = serve_get(valid_record(&user, 3)).await;
+        let got = resolve_pair_record_v4(dir.path(), &uid, &r, &http)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.revision, 3);
+    }
+
+    #[tokio::test]
+    async fn resolve_falls_back_to_cached_on_404_and_on_error() {
+        let dir = tempdir().unwrap();
+        let user = user_kp(8);
+        let uid = user.user_id_hex();
+        let http = reqwest::Client::new();
+        save_contact_pair_record_v4(dir.path(), &valid_record(&user, 2)).unwrap();
+
+        let (_s404, r404) = serve_status(404).await;
+        assert_eq!(
+            resolve_pair_record_v4(dir.path(), &uid, &r404, &http)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
+
+        let (_s500, r500) = serve_status(500).await;
+        assert_eq!(
+            resolve_pair_record_v4(dir.path(), &uid, &r500, &http)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_is_none_when_never_published() {
+        let dir = tempdir().unwrap();
+        let uid = user_kp(8).user_id_hex();
+        let http = reqwest::Client::new();
+        let (_s, r) = serve_status(404).await;
+        assert!(resolve_pair_record_v4(dir.path(), &uid, &r, &http)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_a_record_for_a_different_user() {
+        let dir = tempdir().unwrap();
+        let alice = user_kp(8);
+        let bob = user_kp(9);
+        let http = reqwest::Client::new();
+        // The relay serves Bob's record when we asked for Alice: reject it.
+        let (_s, r) = serve_get(valid_record(&bob, 5)).await;
+        assert!(
+            resolve_pair_record_v4(dir.path(), &alice.user_id_hex(), &r, &http)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_a_bad_signature() {
+        let dir = tempdir().unwrap();
+        let user = user_kp(8);
+        let uid = user.user_id_hex();
+        let http = reqwest::Client::new();
+        let mut tampered = valid_record(&user, 2);
+        tampered.user_signature_b64 = B64.encode([0u8; 64]); // not a valid signature
+        let (_s, r) = serve_get(tampered).await;
+        assert!(resolve_pair_record_v4(dir.path(), &uid, &r, &http)
+            .await
+            .unwrap()
+            .is_none());
     }
 }
