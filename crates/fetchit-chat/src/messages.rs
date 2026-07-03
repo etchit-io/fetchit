@@ -666,6 +666,30 @@ const NEG_CACHE_CAP: usize = 4096;
 /// whole session.
 const NEG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The recipient device-agents a DM fans out to, derived from the recipient's
+/// resolved [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4).
+/// Every listed device receives its own sealed copy -- that is the point of the
+/// device fabric, reaching all of a contact's linked devices. A contact with no
+/// published v4 record (`None`, i.e. pre-M6) or an empty device list falls back
+/// to the single conversation agent `to`, so fanout never yields zero targets.
+///
+/// Pure and independent of the resolve / `user_id` plumbing: the M6.3 send loop
+/// derives its target set from an already-resolved record. [`Endpoint::fanout_targets`]
+/// passes `None` until `contact_user_id_hex` + `resolve_pair_record_v4` wire in.
+fn fanout_targets_from_record(
+    record: Option<&fetchit_relay_proto::pair_record::PairRecordV4>,
+    to: &AgentId,
+) -> Vec<AgentId> {
+    match record {
+        Some(rec) if !rec.devices.is_empty() => rec
+            .devices
+            .iter()
+            .map(|d| AgentId(d.agent_id_hex.clone()))
+            .collect(),
+        _ => vec![to.clone()],
+    }
+}
+
 impl<'a> Endpoint<'a> {
     /// Pre-M3 8-arg constructor, retained for the existing test suite
     /// (which builds endpoints without a denylist consumer).
@@ -964,15 +988,16 @@ impl<'a> Endpoint<'a> {
     }
 
     /// M6.3 DM fanout: the recipient device-agents a DM is delivered to.
-    /// Returns just `[to]` today; once `resolve_pair_record_v4` lands this
-    /// resolves the recipient's account device list (via their `user_id`) so a
-    /// DM reaches every linked device, falling back to `[to]` for a contact with
-    /// no published v4 record. A seam so the send loop is already fanout-shaped.
+    /// Delegates to [`fanout_targets_from_record`], which is already the real
+    /// derivation (all listed devices, else `[to]`); passes `None` today so this
+    /// is the historical single-device send. Wiring the recipient's device list
+    /// is a two-liner once `contact_user_id_hex` (the contact's `user_id`) and
+    /// `resolve_pair_record_v4` land: resolve the record, pass `Some(&record)`.
     // `&self` is unused today but load-bearing once resolve_pair_record_v4 is
     // wired in (it needs the vault dir + relay + http off `self`).
     #[allow(clippy::unused_self)]
     fn fanout_targets(&self, to: &AgentId) -> Vec<AgentId> {
-        vec![to.clone()]
+        fanout_targets_from_record(None, to)
     }
 
     async fn bootstrap_conversation(
@@ -2587,6 +2612,56 @@ mod tests {
     /// `Endpoint::new_with_denylist` test call sites. Test-only.
     fn group_kinds_cache() -> Arc<StdMutex<std::collections::HashMap<String, GroupKind>>> {
         Arc::new(StdMutex::new(std::collections::HashMap::new()))
+    }
+
+    #[test]
+    fn fanout_targets_from_record_covers_all_devices_then_falls_back() {
+        use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
+
+        let to = AgentId("11".repeat(32));
+        let dev = |aid: String, primary: bool| DeviceEntryV4 {
+            agent_id_hex: aid,
+            ml_dsa_pubkey_b64: "AA".to_string(),
+            kem_pubkey_b64: "AA".to_string(),
+            advertised_relays: vec![],
+            cert_b64: "AA".to_string(),
+            added_at_ms: 0,
+            primary,
+        };
+        let record = |devices| PairRecordV4 {
+            record_version: 4,
+            user_id_hex: "ab".repeat(32),
+            user_ml_dsa_pubkey_b64: "AA".to_string(),
+            revision: 1,
+            issued_at_ms: 1,
+            devices,
+            user_signature_b64: "AA".to_string(),
+        };
+
+        // Three linked devices: fan out to every one, in record order,
+        // regardless of which agent `to` names.
+        let three = record(vec![
+            dev("aa".repeat(32), true),
+            dev("bb".repeat(32), false),
+            dev("cc".repeat(32), false),
+        ]);
+        assert_eq!(
+            fanout_targets_from_record(Some(&three), &to),
+            vec![
+                AgentId("aa".repeat(32)),
+                AgentId("bb".repeat(32)),
+                AgentId("cc".repeat(32)),
+            ]
+        );
+
+        // No published record (pre-M6 contact): single-device fallback to `to`.
+        assert_eq!(fanout_targets_from_record(None, &to), vec![to.clone()]);
+
+        // Empty device list: same fallback -- fanout never yields zero targets.
+        assert_eq!(
+            fanout_targets_from_record(Some(&record(vec![])), &to),
+            vec![to.clone()]
+        );
     }
 
     /// Capturing transport: stores the most recent `TransitEnvelope` it
