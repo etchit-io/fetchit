@@ -49,6 +49,7 @@ pub mod pair;
 pub mod pair_record;
 pub mod pair_record_v4;
 pub mod pair_uri;
+pub mod pairing_words;
 pub mod presence;
 pub mod profile;
 pub mod public;

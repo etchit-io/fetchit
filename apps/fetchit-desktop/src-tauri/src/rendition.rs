@@ -56,6 +56,14 @@ pub enum RenditionDto {
         mime: String,
         byte_len: usize,
     },
+    /// A recognised `saorsa-mls/v1` encrypted envelope. Serializes as
+    /// `{ kind: "encryptedEnvelope", groupHint, ciphertextLen }`; the
+    /// frontend renders an "encrypted content" card. No decrypt path
+    /// exists in the engine; keys never enter fetch>it.
+    EncryptedEnvelope {
+        group_hint: Option<String>,
+        ciphertext_len: usize,
+    },
     /// M3 G3: the source address is on the community denylist. Serializes
     /// as `{ kind: "blocked", reason }`; the frontend renders a
     /// "content blocked" card naming the reason instead of the payload.
@@ -120,6 +128,13 @@ impl From<Rendition> for RenditionDto {
                 mime,
                 byte_len: data.len(),
             },
+            Rendition::EncryptedEnvelope {
+                group_hint,
+                ciphertext_len,
+            } => Self::EncryptedEnvelope {
+                group_hint,
+                ciphertext_len,
+            },
             Rendition::Blocked { reason } => Self::Blocked { reason },
             // `Rendition` is `#[non_exhaustive]`.
             other => Self::Text {
@@ -134,6 +149,18 @@ impl From<Rendition> for RenditionDto {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_envelope_maps_to_first_class_dto_not_text_fallthrough() {
+        let dto = RenditionDto::from(Rendition::EncryptedEnvelope {
+            group_hint: Some("reading-club".into()),
+            ciphertext_len: 1088,
+        });
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["kind"], "encryptedEnvelope");
+        assert_eq!(json["groupHint"], "reading-club");
+        assert_eq!(json["ciphertextLen"], 1088);
+    }
 
     #[test]
     fn blocked_maps_to_blocked_dto_not_text_fallthrough() {
