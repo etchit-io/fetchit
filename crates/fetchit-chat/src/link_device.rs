@@ -20,6 +20,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use fetchit_relay_proto::derive_agent_id;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Raw length of an ML-DSA-65 public key. Matches the value hard-coded across
@@ -37,6 +38,11 @@ const NONCE_MAX_BYTES: usize = 64;
 /// AEAD associated data binding a sealed blob to the link-device enrollment
 /// protocol, so a ciphertext sealed for another purpose can never open here.
 const LINK_OFFER_AAD: &[u8] = b"fetchit-link-offer-v1";
+
+/// Domain separator for the human-comparable [`short_code`].
+///
+/// [`short_code`]: LinkDeviceOffer::short_code
+const SHORT_CODE_DOMAIN: &[u8] = b"fetchit-link-short-code-v1";
 
 /// A new device's link-to-account offer. Serialized (JSON) as the plaintext
 /// that the enrollment channel seals and the existing device recovers.
@@ -126,6 +132,69 @@ impl LinkDeviceOffer {
     #[must_use]
     pub fn is_expired(&self, now_ms: u64) -> bool {
         now_ms >= self.exp_ms
+    }
+
+    /// Mint an offer for THIS device, base64-encoding the raw identity keys.
+    /// The caller supplies a fresh random `nonce` and `exp_ms` (now + a short
+    /// enrollment window); `agent_id_hex` must be
+    /// `hex(derive_agent_id(agent_ml_dsa_pubkey))` (re-checked by [`validate`]).
+    ///
+    /// [`validate`]: Self::validate
+    #[must_use]
+    pub fn mint(
+        agent_id_hex: String,
+        agent_ml_dsa_pubkey: &[u8],
+        kem_pubkey: &[u8],
+        nonce: &[u8],
+        exp_ms: u64,
+    ) -> Self {
+        Self {
+            agent_id_hex,
+            agent_ml_dsa_pubkey_b64: B64.encode(agent_ml_dsa_pubkey),
+            kem_pubkey_b64: B64.encode(kem_pubkey),
+            nonce_b64: B64.encode(nonce),
+            exp_ms,
+        }
+    }
+
+    /// A human-comparable confirmation code for this offer, e.g. `K7QM-9XPR`.
+    ///
+    /// Deterministic over the offer's identity — a domain-separated SHA-256,
+    /// 40 bits rendered as 8 Crockford base32 chars (no I/L/O/U), grouped. Both
+    /// devices compute the SAME code from the same offer, so a QR-swap attack
+    /// (a MITM substituting a different device's offer) yields a mismatched
+    /// code the human catches on the confirm screen.
+    #[must_use]
+    pub fn short_code(&self) -> String {
+        const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        let mut input = Vec::new();
+        input.extend_from_slice(SHORT_CODE_DOMAIN);
+        for field in [
+            &self.agent_id_hex,
+            &self.agent_ml_dsa_pubkey_b64,
+            &self.kem_pubkey_b64,
+            &self.nonce_b64,
+        ] {
+            let n = u32::try_from(field.len()).unwrap_or(u32::MAX);
+            input.extend_from_slice(&n.to_be_bytes());
+            input.extend_from_slice(field.as_bytes());
+        }
+        input.extend_from_slice(&self.exp_ms.to_be_bytes());
+
+        let digest = Sha256::digest(&input);
+        let mut acc = 0u64;
+        for &b in &digest[..5] {
+            acc = (acc << 8) | u64::from(b);
+        }
+        let mut code = String::with_capacity(9);
+        for i in 0..8u32 {
+            if i == 4 {
+                code.push('-');
+            }
+            let idx = usize::try_from((acc >> (5 * (7 - i))) & 0x1f).unwrap_or(0);
+            code.push(char::from(ALPHABET[idx]));
+        }
+        code
     }
 
     /// Seal this offer for relay transport: JSON-serialize, then
@@ -327,5 +396,42 @@ mod tests {
     #[test]
     fn open_rejects_a_truncated_blob() {
         assert!(LinkDeviceOffer::open(&[0u8; 4], &[0x5a; AEAD_KEY_LEN]).is_err());
+    }
+
+    #[test]
+    fn short_code_is_deterministic_and_formatted() {
+        let offer = valid_offer(7);
+        let code = offer.short_code();
+        assert_eq!(code, offer.short_code(), "deterministic");
+        assert_eq!(code.len(), 9, "XXXX-XXXX");
+        assert_eq!(&code[4..5], "-");
+        // Both devices compute the same code — survives a JSON round-trip.
+        let back: LinkDeviceOffer =
+            serde_json::from_slice(&serde_json::to_vec(&offer).unwrap()).unwrap();
+        assert_eq!(back.short_code(), code);
+        // Crockford alphabet only (no I/L/O/U, no lowercase).
+        assert!(code
+            .chars()
+            .all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ-".contains(c)));
+    }
+
+    #[test]
+    fn short_code_differs_for_a_different_device() {
+        // QR-swap defense: a substituted offer gets a different code.
+        assert_ne!(valid_offer(7).short_code(), valid_offer(8).short_code());
+    }
+
+    #[test]
+    fn mint_produces_a_validating_offer() {
+        let signer = MlDsaSigner::from_seed(&[12u8; 32]);
+        let offer = LinkDeviceOffer::mint(
+            hex::encode(signer.agent_id()),
+            &signer.public_key(),
+            &[0u8; ML_KEM_PUBKEY_BYTES],
+            &[3u8; 16],
+            1_800_000_000_000,
+        );
+        offer.validate().unwrap();
+        assert_eq!(offer.nonce_b64, B64.encode([3u8; 16]));
     }
 }
