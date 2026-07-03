@@ -81,6 +81,9 @@ pub use pair_record_v4::{
     append_device_and_publish, load_pair_record_v4, mint_and_cache_pair_record_v4,
     next_pair_record_v4_revision,
 };
+pub use link_device_enroll::{
+    enroll_confirmed_device, DevicesGroupSink, EnrollOutcome, PendingDevicesGroupSink,
+};
 pub use local_signer::{
     discard_local_identity, reveal_local_signer_recovery_phrase, reveal_local_signer_seed,
     with_user_key,
