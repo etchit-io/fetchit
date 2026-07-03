@@ -135,7 +135,7 @@ impl ReachabilityCache {
 /// Per-group consent state for the metadata bridge.
 ///
 /// Held in memory for the session. When constructed via [`Self::load`]
-/// it also carries a [`ConsentPersist`] handle and re-seals the whole
+/// it also carries a `ConsentPersist` handle and re-seals the whole
 /// map to `bridge/consent.json.enc` on every mutation, so the user's
 /// per-group opt-in / opt-out decisions survive restart. Constructed via
 /// [`Self::new`] it stays purely in memory (tests and any caller without

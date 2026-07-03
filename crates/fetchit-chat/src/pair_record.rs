@@ -77,7 +77,7 @@ fn relays_to_http_for_signing(relays: &[String]) -> Vec<String> {
 ///
 /// `advertised_relays` may arrive in `wss://` / `ws://` transport form (the
 /// shape advertised to peers); it is normalized to the http/https form the
-/// signing input requires via [`relays_to_http_for_signing`] before signing.
+/// signing input requires via `relays_to_http_for_signing` before signing.
 /// The returned record's `advertised_relays` carries that normalized form,
 /// matching the bytes actually signed.
 ///
@@ -127,7 +127,7 @@ pub async fn build_signed_pair_record(
 ///
 /// `moved_to_relays` may arrive in `wss://` / `ws://` transport form; it is
 /// normalized to the http/https form the signing input requires via
-/// [`relays_to_http_for_signing`] before signing, and the returned record
+/// `relays_to_http_for_signing` before signing, and the returned record
 /// carries that normalized form.
 ///
 /// # Errors

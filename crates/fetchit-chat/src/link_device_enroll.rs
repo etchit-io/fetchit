@@ -1,7 +1,7 @@
 //! M6.4 enrollment completion (existing-device side).
 //!
 //! After the existing device confirms a scanned link offer and mints the new
-//! device's [`AgentCertificate`](crate::fabric::AgentCertificate), and after
+//! device's [`AgentCertificate`], and after
 //! the account roster is republished at revision N+1 (M6.2), the new device
 //! must be admitted into the account's private **devices-group** -- the
 //! invisible MLS self-sync channel (design section VI) that later carries

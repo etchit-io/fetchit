@@ -469,7 +469,7 @@ impl<'a> Endpoint<'a> {
     /// Bare `POST /groups/join` with no membership wait, returning the
     /// joined [`Group`] plus the joiner's own freshly-minted, signed
     /// `member_joined` event when the patched daemon hands it back inline
-    /// ([`SelfJoinEvent`]). The cross-NAT join
+    /// (`SelfJoinEvent`). The cross-NAT join
     /// ([`crate::Client::join_group_bridged`]) bridges that event to the
     /// owner instead of capturing it off the gossip SSE — which is
     /// unreliable when the joiner's gossip mesh has not formed. The

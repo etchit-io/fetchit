@@ -7,13 +7,10 @@
 //! token, opens it, and structurally validates the offer. The relay only ever
 //! holds opaque bytes under an opaque token — the blind-relay posture.
 //!
-//! The HTTP shape mirrors [`crate::pair_record`]: [`guard_relay_url`] gates the
-//! URL, [`relay_send_with_retry`] wraps the request, and the offer's own
+//! The HTTP shape mirrors [`crate::pair_record`]: `guard_relay_url` gates the
+//! URL, `relay_send_with_retry` wraps the request, and the offer's own
 //! `exp_ms` (checked client-side on open, not by the relay) is the real
 //! freshness gate.
-//!
-//! [`guard_relay_url`]: crate::relay_http::guard_relay_url
-//! [`relay_send_with_retry`]: crate::relay_http::relay_send_with_retry
 
 use crate::chat_crypto::{random_nonce, AEAD_KEY_LEN};
 use crate::error::ChatError;

@@ -14,7 +14,7 @@
 //! it here rather than linking the full `x0x` daemon library into the
 //! desktop app; the format is pinned against the BUNDLED x0xd version the
 //! desktop ships (same deliberate-bump policy as the `ant-core` pin), and
-//! [`tests::agent_key_bytes_pin_the_upstream_bincode_layout`] locks the
+//! `tests::agent_key_bytes_pin_the_upstream_bincode_layout` locks the
 //! exact byte layout so a silent drift fails the suite.
 
 use std::path::Path;

@@ -70,7 +70,7 @@ pub fn group_id_from_member_joined(payload: &[u8]) -> Option<String> {
 /// Extract the STABLE group id (x0xd's `stable_group_id`, the
 /// `event_group_id` the join-result is keyed by) from a captured
 /// `member_joined` payload. The owner-side reply
-/// ([`crate::Client::reply_to_bridged_join`]) polls the local
+/// (`crate::Client::reply_to_bridged_join`) polls the local
 /// join-result by THIS stable id, not the mls `group_id`: x0xd keys
 /// `pending_join_results` as `{stable_group_id}:{member}`.
 #[must_use]

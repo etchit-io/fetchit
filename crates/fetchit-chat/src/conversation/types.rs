@@ -421,7 +421,7 @@ pub fn encode_group_plaintext(sender_name: &str, body: &str) -> Vec<u8> {
 }
 
 /// Decode a decrypted private-group plaintext into `(body, sender_name)`.
-/// New frames carry [`GROUP_BODY_MAGIC`] + JSON; legacy frames are a
+/// New frames carry `GROUP_BODY_MAGIC` + JSON; legacy frames are a
 /// bare UTF-8 body with no name. The magic prefix is the only
 /// discriminator, so a legacy body that happens to be valid JSON is
 /// returned verbatim.

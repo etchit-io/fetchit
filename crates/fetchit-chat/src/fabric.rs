@@ -164,7 +164,7 @@ pub struct AgentCertificate {
     /// Certification time, milliseconds since Unix epoch — the same unit
     /// as the `DeviceEntryV4::added_at_ms` this cert rides beside.
     pub added_at_ms: u64,
-    /// User-key ML-DSA-65 signature over [`cert_signing_input`], base64.
+    /// User-key ML-DSA-65 signature over `cert_signing_input`, base64.
     pub sig_b64: String,
 }
 

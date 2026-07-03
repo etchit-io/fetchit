@@ -147,7 +147,7 @@ pub struct StoredContactCard {
     /// card — the M6 identity that binds all of their linked devices.
     /// Populated by [`Self::from_share_uri`] when the share card carries
     /// a non-null `user_id`; `None` for pre-M6 cards, for pair-record-
-    /// resolved cards ([`card_from_pair_record`] and
+    /// resolved cards (`card_from_pair_record` and
     /// [`crate::pair::record_into_stored_contact`] carry no `user_id`),
     /// and for trust-on-first-use imports. Resolve it via
     /// [`contact_user_id_hex`] to look up the peer's device list.
@@ -297,7 +297,7 @@ impl StoredContactCard {
     /// The load-modify-save is serialised under `CARD_UPDATE_LOCK` so a
     /// concurrent `import_pair_uri` write cannot race it to a lost update.
     ///
-    /// Each relay is run through [`migrate_known_bare_ip_relay`] before
+    /// Each relay is run through `migrate_known_bare_ip_relay` before
     /// persisting, so a card paired against a fetch>it bare-IP relay heals
     /// to that relay's TLS hostname form -- the bare-IP endpoints are being
     /// locked to Cloudflare-only and no longer accept a direct wss dial.
@@ -377,7 +377,7 @@ impl StoredContactCard {
     /// 3. **Display name.** If the incoming card's `display_name` is
     ///    empty but the on-disk card already carries one, the on-disk
     ///    value is kept. A pair-record-resolved card carries no name
-    ///    ([`card_from_pair_record`] sets it empty), so without this
+    ///    (`card_from_pair_record` sets it empty), so without this
     ///    floor a group join's member-card prefetch would wipe the name
     ///    a prior DM pairing saved.
     ///
@@ -1792,7 +1792,7 @@ impl<'a> Endpoint<'a> {
         Ok((resolved, skipped))
     }
 
-    /// Warm the [`Self::group_kinds`] cache for `group_id`. Called from
+    /// Warm the `Self::group_kinds` cache for `group_id`. Called from
     /// the create/join paths (which know the kind locally) so the first
     /// [`Self::send_to_group`] skips the cold `GET /groups/<id>` lookup.
     ///
@@ -1812,7 +1812,7 @@ impl<'a> Endpoint<'a> {
     /// public rooms post plaintext via
     /// [`crate::groups::Endpoint::send`] (`/groups/<id>/send`,
     /// `SignedPublic`). Kind is resolved from the warm
-    /// [`Self::group_kinds`] cache (populated by create/join via
+    /// `Self::group_kinds` cache (populated by create/join via
     /// [`Self::note_group_kind`]) or, on a cold miss, one
     /// `GET /groups/<id>` against x0xd whose result is then cached.
     ///

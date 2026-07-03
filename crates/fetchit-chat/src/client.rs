@@ -2429,7 +2429,7 @@ impl Client {
     /// roster-active but keyless and unable to encrypt (a tracked x0x
     /// limitation, api-reference.md ADR-0012). x0xd exposes no keys-ready
     /// signal to poll, so rather than guess, the join always re-delivers the
-    /// Welcome over the relay ([`Self::bridge_captured_join`]) -- the
+    /// Welcome over the relay (`Self::bridge_captured_join`) -- the
     /// sanctioned workaround -- which guarantees the joiner can encrypt.
     ///
     /// The native [`crate::groups::Endpoint::join`] membership wait still

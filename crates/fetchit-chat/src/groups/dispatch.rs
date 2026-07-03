@@ -192,14 +192,14 @@ where
 /// Unlike the other builders, this takes the authoritative
 /// `event` (the owner's already-staged, signed `MemberAdded`, with the
 /// joiner-only Welcome fields stripped by
-/// [`crate::groups::bridge_member_added::commit_only_member_added`])
+/// `crate::groups::bridge_member_added::commit_only_member_added`)
 /// directly rather than reconstructing it from inputs — the staged event
 /// is the cryptographic source of truth and must not be rebuilt.
 ///
 /// Filters `actor_agent_id` (owner / self) and `joiner_agent_id` out of
 /// `active_member_aids`. The joiner is excluded because it already
 /// receives the full Welcome-bearing event from
-/// [`crate::Client::reply_to_bridged_join`]. Recipients missing a
+/// `crate::Client::reply_to_bridged_join`. Recipients missing a
 /// share-card are skipped (logged at `WARN`); any other error
 /// propagates.
 ///
@@ -256,7 +256,7 @@ where
 /// member except the actor (owner) and the new joiner (R3).
 ///
 /// The joiner already gets the full Welcome-bearing event from
-/// [`crate::Client::reply_to_bridged_join`]; this advances the EXISTING
+/// `crate::Client::reply_to_bridged_join`; this advances the EXISTING
 /// members' `TreeKEM` epoch so they learn the new leaf and the group
 /// grows past two cross-NAT.
 ///

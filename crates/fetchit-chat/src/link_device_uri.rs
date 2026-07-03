@@ -44,7 +44,7 @@ pub enum LinkDeviceUriError {
     #[error("link URI scheme/host/path is malformed")]
     BadUri,
 
-    /// The version path segment is not [`VERSION_SEGMENT`].
+    /// The version path segment is not `VERSION_SEGMENT`.
     #[error("link URI version segment must be {VERSION_SEGMENT}")]
     BadVersion,
 
