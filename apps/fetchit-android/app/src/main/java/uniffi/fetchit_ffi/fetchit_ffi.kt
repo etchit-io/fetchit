@@ -807,6 +807,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -825,6 +827,8 @@ internal interface IntegrityCheckingUniffiLib : Library {
     fun uniffi_fetchit_ffi_checksum_func_default_peers(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_detect(
+): Short
+fun uniffi_fetchit_ffi_checksum_func_enroll_confirmed_device(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_extract_archive_entry(
 ): Short
@@ -1037,6 +1041,8 @@ fun uniffi_fetchit_ffi_fn_func_default_peers(uniffi_out_err: UniffiRustCallStatu
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_detect(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_func_enroll_confirmed_device(`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`uri`: RustBuffer.ByValue,`postRelay`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_func_extract_archive_entry(`archiveBytes`: RustBuffer.ByValue,`entryPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_restore_recovery_phrase(`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`phrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1177,6 +1183,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_func_detect() != 20870.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_func_enroll_confirmed_device() != 7989.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_func_extract_archive_entry() != 6186.toShort()) {
@@ -3740,6 +3749,56 @@ public object FfiConverterTypeCreatedLinkOfferFfi: FfiConverterRustBuffer<Create
 
 
 /**
+ * M6.4 outcome of a completed enrollment (existing-device side), returned by
+ * [`enroll_confirmed_device`].
+ */
+data class EnrollOutcomeFfi (
+    /**
+     * The newly linked device's agent id (hex).
+     */
+    var `agentIdHex`: kotlin.String, 
+    /**
+     * The account roster revision published for this enrollment (N+1).
+     */
+    var `recordRevision`: kotlin.ULong, 
+    /**
+     * True once the devices-group admission is live (M6.6); false while it is
+     * the M6.4 stub -- lets the shell show "linked, syncing" vs "linked".
+     */
+    var `devicesGroupAdmitted`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEnrollOutcomeFfi: FfiConverterRustBuffer<EnrollOutcomeFfi> {
+    override fun read(buf: ByteBuffer): EnrollOutcomeFfi {
+        return EnrollOutcomeFfi(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EnrollOutcomeFfi) = (
+            FfiConverterString.allocationSize(value.`agentIdHex`) +
+            FfiConverterULong.allocationSize(value.`recordRevision`) +
+            FfiConverterBoolean.allocationSize(value.`devicesGroupAdmitted`)
+    )
+
+    override fun write(value: EnrollOutcomeFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`agentIdHex`, buf)
+            FfiConverterULong.write(value.`recordRevision`, buf)
+            FfiConverterBoolean.write(value.`devicesGroupAdmitted`, buf)
+    }
+}
+
+
+
+/**
  * Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
  * errors for blockers -- those land in `pending`.
  */
@@ -5679,6 +5738,36 @@ public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<Li
     )
     }
     
+
+        /**
+         * M6.4 existing-device side: complete a scanned link enrollment. Fetches +
+         * validates the offer at `uri`, mints the new device's account certificate
+         * under a single vault unlock (`passphrase`, or the OS keychain when `None`),
+         * republishes the account roster to `post_relay` at the next revision with the
+         * new device (its own advertised relays read from the URI), and returns the
+         * outcome. A free function, not a `ChatClient` method, because the account
+         * vault lives under `data_dir` -- no live connection is required. The
+         * devices-group admission is deferred to M6.6 (`devices_group_admitted` is
+         * currently always false).
+         *
+         * # Errors
+         * `ChatFfiError` on an expired / malformed offer, a wrong passphrase, no
+         * cached account record, or a relay rejection.
+         */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `enrollConfirmedDevice`(`dataDir`: kotlin.String, `passphrase`: kotlin.String?, `uri`: kotlin.String, `postRelay`: kotlin.String) : EnrollOutcomeFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_enroll_confirmed_device(FfiConverterString.lower(`dataDir`),FfiConverterOptionalString.lower(`passphrase`),FfiConverterString.lower(`uri`),FfiConverterString.lower(`postRelay`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeEnrollOutcomeFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
 
         /**
          * Read one named entry's decompressed bytes out of a ZIP archive.

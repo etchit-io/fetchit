@@ -545,6 +545,19 @@ pub struct LinkOfferPreviewFfi {
     pub expired: bool,
 }
 
+/// M6.4 outcome of a completed enrollment (existing-device side), returned by
+/// [`enroll_confirmed_device`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EnrollOutcomeFfi {
+    /// The newly linked device's agent id (hex).
+    pub agent_id_hex: String,
+    /// The account roster revision published for this enrollment (N+1).
+    pub record_revision: u64,
+    /// True once the devices-group admission is live (M6.6); false while it is
+    /// the M6.4 stub -- lets the shell show "linked, syncing" vs "linked".
+    pub devices_group_admitted: bool,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ChatClient {
     /// Connect to the relay and build a daemonless chat client.
@@ -1831,6 +1844,48 @@ pub fn restore_recovery_phrase(
         Some(&passphrase),
         &phrase,
     )?)
+}
+
+/// M6.4 existing-device side: complete a scanned link enrollment. Fetches +
+/// validates the offer at `uri`, mints the new device's account certificate
+/// under a single vault unlock (`passphrase`, or the OS keychain when `None`),
+/// republishes the account roster to `post_relay` at the next revision with the
+/// new device (its own advertised relays read from the URI), and returns the
+/// outcome. A free function, not a `ChatClient` method, because the account
+/// vault lives under `data_dir` -- no live connection is required. The
+/// devices-group admission is deferred to M6.6 (`devices_group_admitted` is
+/// currently always false).
+///
+/// # Errors
+/// `ChatFfiError` on an expired / malformed offer, a wrong passphrase, no
+/// cached account record, or a relay rejection.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn enroll_confirmed_device(
+    data_dir: String,
+    passphrase: Option<String>,
+    uri: String,
+    post_relay: String,
+) -> Result<EnrollOutcomeFfi, ChatFfiError> {
+    let relay = url::Url::parse(post_relay.trim()).map_err(|e| ChatFfiError::Invalid {
+        reason: format!("relay url: {e}"),
+    })?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let outcome = fetchit_chat::enroll_confirmed_device(
+        std::path::Path::new(&data_dir),
+        passphrase.as_deref(),
+        uri.trim(),
+        &relay,
+        now_ms,
+        &fetchit_chat::PendingDevicesGroupSink,
+    )
+    .await?;
+    Ok(EnrollOutcomeFfi {
+        agent_id_hex: outcome.agent_id_hex,
+        record_revision: outcome.record_revision,
+        devices_group_admitted: outcome.devices_group_admitted,
+    })
 }
 
 #[cfg(test)]
