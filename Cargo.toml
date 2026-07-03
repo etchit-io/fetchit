@@ -11,6 +11,7 @@ members = [
     "crates/fetchit-trust",
     "crates/fetchit-trust-types",
     "crates/fetchit-trust-client",
+    "crates/fetchit-words",
     "crates/x0xd-client",
 ]
 exclude = ["crates/fetchit-ffi", "apps/fetchit-desktop/src-tauri"]
@@ -72,6 +73,9 @@ tower-http = { version = "0.5", default-features = false, features = ["trace", "
 rsa = "0.9"
 saorsa-pqc = "0.5"
 sha2 = "0.10"
+# Exact-pinned: word rendering must match across fetch>it / etch>it / x0x tooling
+# (a dictionary change upstream would make the same id read as different words).
+four-word-networking = "=2.7.0"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
