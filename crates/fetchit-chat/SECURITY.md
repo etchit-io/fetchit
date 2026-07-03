@@ -214,6 +214,35 @@ to `verified_actor_url`, never as a contact DM bubble. Code:
 `crates/fetchit-relay-server/src/inbox/sink.rs`, and the `/inbox` HTTP
 Signature gates in `crates/fetchit-relay-server/src/inbox/`.
 
+### 9. Linked-device reachability is only as fresh as the last account re-sign
+
+An account's device list ships as a `PairRecord` v4 signed by the
+**account key**, which is derived on demand from the 24-word recovery
+phrase at an explicit passphrase moment -- a device enroll, a revoke, or
+the first-launch self-cert -- and dropped immediately, never retained.
+Between those moments the signed record is cached as plaintext (it is
+public: the relay serves it verbatim) and republished to relays
+byte-for-byte on every connect and home-relay failover, with **no
+re-sign**.
+
+The cost of never keeping the account key hot: each device's
+advertised-relay hint inside the record is only as current as that last
+passphrase-moment mint. If a device fails its home relay over to a new
+one between mints, the relay hint published for that device in the
+account record stays stale until the next mint. Account-level message
+**delivery** is unaffected -- a DM fans out to every device the record
+lists, and a contact reaching a device on a stale hint falls back to the
+account's other listed devices -- but per-device **directness** for a
+migrated device can lag its live relay. The mitigation is the next
+passphrase-moment re-sign, which republishes that device's current
+relay; a background cross-device reconciliation is a separate, later part
+of the linked-devices work.
+
+Code: `crates/fetchit-chat/src/pair_record_v4.rs` --
+`republish_cached_pair_record_v4` re-POSTs the cached record verbatim,
+and minting is gated behind `with_user_key` (derive-use-drop, so the
+account key is never held to re-sign on the reachability path).
+
 ## What we promise
 
 - **fetch>it never holds a wallet, never signs Autonomi transactions,
