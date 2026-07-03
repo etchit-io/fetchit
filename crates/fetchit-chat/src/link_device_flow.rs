@@ -38,6 +38,35 @@ const BLOB_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// relay streaming unbounded bytes.
 const MAX_LINK_BLOB_BYTES: usize = 256 * 1024;
 
+/// Bytes of random in a fresh offer's one-time nonce (within the offer's
+/// 16..=64-byte decoded bound).
+const LINK_OFFER_NONCE_BYTES: usize = 16;
+
+/// The new device's published link offer: the QR pointer to encode, plus the
+/// short-code to show beside it for the human comparison, plus the expiry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedLinkOffer {
+    /// `fetchit://link/v1/…` pointer to encode as the QR.
+    pub uri: String,
+    /// Human-comparable confirm code (`XXXX-XXXX`) shown beside the QR.
+    pub short_code: String,
+    /// Absolute expiry, epoch milliseconds.
+    pub exp_ms: u64,
+}
+
+/// What the existing device shows on its confirm screen after scanning: the
+/// new device's agent id, the short-code to compare against the new device's
+/// screen, and whether the offer has already expired.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkOfferPreview {
+    /// The new device's agent id (hex).
+    pub agent_id_hex: String,
+    /// Human-comparable confirm code (`XXXX-XXXX`).
+    pub short_code: String,
+    /// `true` when the offer is past its expiry at the caller's clock.
+    pub expired: bool,
+}
+
 /// Seal `offer` and publish it, returning the pointer URI to encode in the QR.
 ///
 /// Generates a fresh single-use seal key, nonce, and storage token; seals the
@@ -123,6 +152,60 @@ pub async fn fetch_link_offer(
         .validate()
         .map_err(|e| ChatError::Invalid(format!("invalid link offer: {e}")))?;
     Ok(offer)
+}
+
+/// New-device side: mint an offer for this device (`agent_id_hex` + its raw
+/// ML-DSA and ML-KEM keys), publish it, and return the QR pointer + the
+/// short-code to display. Generates a fresh single-use nonce; `exp_ms` is the
+/// offer's absolute expiry (the caller passes now + a short enrollment window).
+///
+/// # Errors
+/// [`ChatError`] if sealing fails or no relay accepts the offer.
+pub async fn create_link_offer(
+    agent_id_hex: String,
+    agent_ml_dsa_pubkey: &[u8],
+    kem_pubkey: &[u8],
+    relays: &[String],
+    exp_ms: u64,
+    http: &reqwest::Client,
+) -> Result<CreatedLinkOffer, ChatError> {
+    let mut nonce = [0u8; LINK_OFFER_NONCE_BYTES];
+    OsRng.fill_bytes(&mut nonce);
+    let offer = LinkDeviceOffer::mint(
+        agent_id_hex,
+        agent_ml_dsa_pubkey,
+        kem_pubkey,
+        &nonce,
+        exp_ms,
+    );
+    let short_code = offer.short_code();
+    let uri = publish_link_offer(&offer, relays, http).await?;
+    Ok(CreatedLinkOffer {
+        uri,
+        short_code,
+        exp_ms,
+    })
+}
+
+/// Existing-device side: fetch the offer a scanned `uri` points at and return
+/// the confirm-screen preview (agent id + short-code + freshness at `now_ms`).
+/// The full offer is validated during the fetch; the caller mints the cert
+/// only after the human confirms the short-code matches.
+///
+/// # Errors
+/// [`ChatError`] on a malformed URI, no relay serving the blob, a decrypt
+/// failure, or a structurally invalid offer.
+pub async fn preview_link_offer(
+    uri: &str,
+    now_ms: u64,
+    http: &reqwest::Client,
+) -> Result<LinkOfferPreview, ChatError> {
+    let offer = fetch_link_offer(uri, http).await?;
+    Ok(LinkOfferPreview {
+        short_code: offer.short_code(),
+        expired: offer.is_expired(now_ms),
+        agent_id_hex: offer.agent_id_hex,
+    })
 }
 
 /// POST the sealed `blob` to `<relay>/v1/blob/<token>` (raw body).
@@ -364,5 +447,59 @@ mod tests {
             .unwrap();
         let got = fetch_link_offer(&uri, &http).await.unwrap();
         assert_eq!(got, offer);
+    }
+
+    #[tokio::test]
+    async fn create_link_offer_publishes_and_returns_a_short_code() {
+        let signer = MlDsaSigner::from_seed(&[21u8; 32]);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v1/blob/.+"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let created = create_link_offer(
+            hex::encode(signer.agent_id()),
+            &signer.public_key(),
+            &[0u8; 1184],
+            &[server.uri()],
+            1_800_000_000_000,
+            &crate::relay_http::guarded_client(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            created.uri.starts_with("fetchit://link/v1/"),
+            "{}",
+            created.uri
+        );
+        assert_eq!(created.short_code.len(), 9, "XXXX-XXXX");
+        assert_eq!(created.exp_ms, 1_800_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn preview_link_offer_returns_identity_and_freshness() {
+        let offer = sample_offer();
+        let key = [0x71; AEAD_KEY_LEN];
+        let blob = offer.seal(&key, &[0x99; AEAD_NONCE_LEN]).unwrap();
+        let tok = token();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/blob/{tok}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(blob))
+            .mount(&server)
+            .await;
+        let uri = emit_link_device_uri(&tok, &[server.uri()], &key).unwrap();
+        let http = crate::relay_http::guarded_client();
+
+        let fresh = preview_link_offer(&uri, 1_000, &http).await.unwrap();
+        assert_eq!(fresh.agent_id_hex, offer.agent_id_hex);
+        assert_eq!(fresh.short_code, offer.short_code());
+        assert!(!fresh.expired);
+
+        let past = preview_link_offer(&uri, offer.exp_ms + 1, &http)
+            .await
+            .unwrap();
+        assert!(past.expired);
     }
 }
