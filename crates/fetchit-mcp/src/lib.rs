@@ -129,9 +129,11 @@ impl<C: NetworkClient> Server<C> {
             .and_then(Value::as_str)
             .ok_or("missing required argument: address")?;
         let normalized = normalize_address(raw);
+        // Core's parse error already reads "invalid Autonomi address: …";
+        // pass it through instead of stacking a second prefix on it.
         let addr: Address = normalized
             .parse()
-            .map_err(|e| format!("invalid Autonomi address: {e}"))?;
+            .map_err(|e: fetchit_core::Error| e.to_string())?;
         let bytes = self
             .client
             .fetch(&addr)
@@ -434,6 +436,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("invalid Autonomi address: invalid Autonomi address"),
+            "error prefix doubled: {text}"
+        );
+        assert!(text.contains("invalid Autonomi address"));
     }
 
     #[test]
