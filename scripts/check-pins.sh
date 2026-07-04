@@ -69,4 +69,22 @@ grep -q '159.89.11.217:8088' "$SETTINGS" \
     || fail "$SETTINGS missing FRA default 159.89.11.217:8088"
 ok "KNOWN_RELAYS NYC + FRA defaults"
 
+# Bundled-x0xd pin lockstep: build.rs is the source of truth; both
+# workflow files must carry the identical sha and version (a drift here
+# ships a mislabeled daemon inside released bundles).
+BUILD_RS=apps/fetchit-desktop/src-tauri/build.rs
+X0XD_SHA=$(grep -oE 'X0XD_PIN_SHA: &str = "[0-9a-f]{40}"' "$BUILD_RS" | grep -oE '[0-9a-f]{40}')
+[ -n "$X0XD_SHA" ] || fail "$BUILD_RS X0XD_PIN_SHA const not found"
+grep -q "X0XD_PIN_SHA: \"$X0XD_SHA\"" .github/workflows/release.yml \
+    || fail "release.yml X0XD_PIN_SHA != build.rs ($X0XD_SHA)"
+grep -q "X0XD_PIN_SHA: \"$X0XD_SHA\"" .github/workflows/bundled-x0xd.yml \
+    || fail "bundled-x0xd.yml X0XD_PIN_SHA != build.rs ($X0XD_SHA)"
+X0XD_VER=$(grep -oE 'X0XD_PIN_VERSION: &str = "[^"]+"' "$BUILD_RS" | cut -d'"' -f2)
+[ -n "$X0XD_VER" ] || fail "$BUILD_RS X0XD_PIN_VERSION const not found"
+grep -q "X0XD_PIN_VERSION: \"$X0XD_VER\"" .github/workflows/release.yml \
+    || fail "release.yml X0XD_PIN_VERSION != build.rs ($X0XD_VER)"
+grep -q "FETCHIT_BUNDLED_X0XD_VERSION: \"$X0XD_VER\"" .github/workflows/bundled-x0xd.yml \
+    || fail "bundled-x0xd.yml FETCHIT_BUNDLED_X0XD_VERSION != build.rs ($X0XD_VER)"
+ok "x0xd pin lockstep (build.rs == workflows @ ${X0XD_SHA:0:7} / $X0XD_VER)"
+
 echo "all pins green."

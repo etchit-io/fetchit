@@ -33,11 +33,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned upstream saorsa-labs/x0x sha for the bundled x0xd. Mirrors
-  # bundled-x0xd.yml and apps/fetchit-desktop/src-tauri/build.rs.
-  # Bump in lockstep with build.rs::X0XD_PIN_SHA and X0XD_PIN_VERSION.
-  X0XD_PIN_SHA: "aec35ab25b64374539ffeaa205a57d983e027226"
-  X0XD_PIN_VERSION: "0.21.3"
+  # Pinned josh-clsn/x0x sha for the bundled x0xd (fork carries the
+  # X0X-0070b peer-relay wiring; upstream inclusion tracked in x0x#158).
+  # Mirrors bundled-x0xd.yml and apps/fetchit-desktop/src-tauri/build.rs.
+  # Bump in lockstep with build.rs::X0XD_PIN_SHA and X0XD_PIN_VERSION;
+  # scripts/check-pins.sh enforces the lockstep.
+  X0XD_PIN_SHA: "b19f8c171831c535f44b31d28e0f19b61469b813"
+  X0XD_PIN_VERSION: "0.27.0"
 
 jobs:
   release-apk:
@@ -267,7 +269,7 @@ jobs:
           ) | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       # ── Bundled x0xd: clone, build per-platform, codesign on macOS ───
-      # Layers the pinned saorsa-labs/x0x x0xd binary into the Tauri
+      # Layers the pinned josh-clsn/x0x x0xd binary into the Tauri
       # bundle so installs work without requiring users to side-load a
       # daemon. The src-tauri build.rs reads FETCHIT_BUNDLED_X0XD_PATH
       # and copies the binary into resources/x0xd/{os}-{arch}/, which
@@ -278,10 +280,10 @@ jobs:
       # restore step computes its key; otherwise the restore key is
       # empty/fallback and never matches the save key (cache miss every
       # run).
-      - name: Clone pinned saorsa-labs/x0x
+      - name: Clone pinned josh-clsn/x0x
         shell: bash
         run: |
-          git clone https://github.com/saorsa-labs/x0x "${{ runner.temp }}/x0x"
+          git clone https://github.com/josh-clsn/x0x "${{ runner.temp }}/x0x"
           cd "${{ runner.temp }}/x0x"
           git checkout "$X0XD_PIN_SHA"
 
