@@ -1,0 +1,378 @@
+//! Durable pending-join driver: re-drives a saved join to convergence.
+//!
+//! The driver's dependency set contains **no** `join_post` — it can only
+//! re-bridge the already-captured event and probe membership. That is the
+//! structural guarantee that a retry never spends a second invite (G1). It
+//! runs on client startup and on a capped backoff while the client lives,
+//! turning "owner offline" into an auto-completing pending state (G3). See
+//! `docs/superpowers/specs/2026-07-04-durable-join-design.md`.
+
+use std::future::Future;
+
+use crate::error::ChatError;
+use crate::groups::pending_join::{PendingJoin, PendingJoinState, PendingJoinStore};
+
+/// Where the joiner stands relative to the group roster + its own keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipStatus {
+    /// Not in the roster yet — the owner has not applied our join.
+    Absent,
+    /// In the roster AND we hold the group key — fully joined.
+    ActiveKeyed,
+    /// In the roster but we hold no group key (Welcome lost); recoverable
+    /// by re-requesting the staged join-result, never a new invite.
+    ListedButUnkeyed,
+}
+
+/// Re-sends the saved captured `member_joined` to the owner over the relay.
+/// Implementations MUST NOT call `join_post`.
+pub trait JoinBridge {
+    /// Re-bridge the saved event so the owner (re-)applies our join.
+    fn rebridge(&self, record: &PendingJoin) -> impl Future<Output = Result<(), ChatError>> + Send;
+    /// Re-request the staged join-result (Welcome) for the unkeyed case.
+    fn request_join_result(
+        &self,
+        record: &PendingJoin,
+    ) -> impl Future<Output = Result<(), ChatError>> + Send;
+}
+
+/// Probes whether the joiner has converged into the group.
+pub trait MembershipProbe {
+    fn status(
+        &self,
+        group_id: &str,
+    ) -> impl Future<Output = Result<MembershipStatus, ChatError>> + Send;
+}
+
+/// Monotonic clock (injectable for tests).
+pub trait Clock {
+    fn now_ms(&self) -> u64;
+}
+
+/// Result of driving one record one step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriveOutcome {
+    /// Fully joined; the record has been removed.
+    Converged,
+    /// Still working; record persisted with bumped attempt state.
+    Pending,
+    /// Terminally failed; the record has been removed.
+    Failed { reason: String },
+}
+
+/// Drives durable pending joins to completion.
+pub struct PendingJoinDriver<B, P, C> {
+    store: PendingJoinStore,
+    bridge: B,
+    probe: P,
+    clock: C,
+}
+
+impl<B: JoinBridge + Sync, P: MembershipProbe + Sync, C: Clock + Sync> PendingJoinDriver<B, P, C> {
+    #[must_use]
+    pub fn new(store: PendingJoinStore, bridge: B, probe: P, clock: C) -> Self {
+        Self {
+            store,
+            bridge,
+            probe,
+            clock,
+        }
+    }
+
+    /// Drive a single record one step. Terminal outcomes remove the record.
+    ///
+    /// # Errors
+    /// Propagates a store I/O error. A bridge/probe *network* error is not
+    /// fatal — it leaves the record `Pending` for the next tick.
+    pub async fn drive_once(&self, mut record: PendingJoin) -> Result<DriveOutcome, ChatError> {
+        if record.is_terminal() {
+            return Ok(DriveOutcome::Failed {
+                reason: match record.state {
+                    PendingJoinState::Failed { reason } => reason,
+                    _ => String::new(),
+                },
+            });
+        }
+
+        match self.probe.status(&record.group_id).await {
+            Ok(MembershipStatus::ActiveKeyed) => {
+                self.store.remove(&record.group_id)?;
+                Ok(DriveOutcome::Converged)
+            }
+            Ok(MembershipStatus::ListedButUnkeyed) => {
+                record.state = PendingJoinState::KeyedButUnverified;
+                record.last_attempt_ms = self.clock.now_ms();
+                record.attempts = record.attempts.saturating_add(1);
+                self.store.upsert(&record)?;
+                // Re-request the Welcome; a failure just retries next tick.
+                let _ = self.bridge.request_join_result(&record).await;
+                Ok(DriveOutcome::Pending)
+            }
+            Ok(MembershipStatus::Absent) => {
+                record.state = PendingJoinState::Bridged;
+                record.last_attempt_ms = self.clock.now_ms();
+                record.attempts = record.attempts.saturating_add(1);
+                self.store.upsert(&record)?;
+                // Re-bridge the SAVED event — never a join_post. A network
+                // error is non-fatal; the record stays Pending.
+                let _ = self.bridge.rebridge(&record).await;
+                Ok(DriveOutcome::Pending)
+            }
+            // A probe network error is not terminal — try again next tick.
+            Err(_) => Ok(DriveOutcome::Pending),
+        }
+    }
+
+    /// Drive every non-terminal record one step. Returns per-group outcomes.
+    ///
+    /// # Errors
+    /// Propagates a store listing error.
+    pub async fn drive_all(&self) -> Result<Vec<(String, DriveOutcome)>, ChatError> {
+        let mut out = Vec::new();
+        for record in self.store.list()? {
+            let gid = record.group_id.clone();
+            let outcome = self.drive_once(record).await?;
+            out.push((gid, outcome));
+        }
+        Ok(out)
+    }
+
+    /// Mark a record terminally failed and remove it (malformed/consumed
+    /// invite). Exposed so the submit path can retire a doomed intent.
+    ///
+    /// # Errors
+    /// Propagates a store removal error.
+    pub fn fail(&self, group_id: &str) -> Result<(), ChatError> {
+        self.store.remove(group_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn record(group: &str) -> PendingJoin {
+        PendingJoin::new(
+            group.into(),
+            "Y2FwdHVyZWQ=".into(),
+            "aa".repeat(32),
+            "b3duZXJrZW0=".into(),
+            "am9pbmVya2Vt".into(),
+            100,
+        )
+    }
+
+    fn store() -> (PendingJoinStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = PendingJoinStore::open(dir.path().join("pj")).unwrap();
+        (s, dir)
+    }
+
+    struct FixedClock(u64);
+    impl Clock for FixedClock {
+        fn now_ms(&self) -> u64 {
+            self.0
+        }
+    }
+
+    /// Owner that is Absent for the first `flip_at` probes, then ActiveKeyed.
+    struct FlipProbe {
+        flip_at: u32,
+        calls: AtomicU32,
+    }
+    impl MembershipProbe for FlipProbe {
+        fn status(
+            &self,
+            _g: &str,
+        ) -> impl Future<Output = Result<MembershipStatus, ChatError>> + Send {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(if n < self.flip_at {
+                    MembershipStatus::Absent
+                } else {
+                    MembershipStatus::ActiveKeyed
+                })
+            }
+        }
+    }
+
+    struct FixedProbe(MembershipStatus);
+    impl MembershipProbe for FixedProbe {
+        fn status(
+            &self,
+            _g: &str,
+        ) -> impl Future<Output = Result<MembershipStatus, ChatError>> + Send {
+            let s = self.0;
+            async move { Ok(s) }
+        }
+    }
+
+    /// Counts rebridge + join-result calls. There is NO join_post here or
+    /// anywhere in the driver's reachable surface.
+    #[derive(Clone, Default)]
+    struct CountingBridge {
+        rebridges: Arc<AtomicUsize>,
+        join_results: Arc<AtomicUsize>,
+    }
+    impl JoinBridge for CountingBridge {
+        fn rebridge(&self, _r: &PendingJoin) -> impl Future<Output = Result<(), ChatError>> + Send {
+            self.rebridges.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        }
+        fn request_join_result(
+            &self,
+            _r: &PendingJoin,
+        ) -> impl Future<Output = Result<(), ChatError>> + Send {
+            self.join_results.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_owner_stays_pending_then_auto_converges() {
+        // G3: Absent for 2 ticks, then the owner applies -> ActiveKeyed.
+        let (s, _d) = store();
+        let r = record(&"11".repeat(32));
+        s.upsert(&r).unwrap();
+        let bridge = CountingBridge::default();
+        let driver = PendingJoinDriver::new(
+            s,
+            bridge.clone(),
+            FlipProbe {
+                flip_at: 2,
+                calls: AtomicU32::new(0),
+            },
+            FixedClock(500),
+        );
+
+        assert_eq!(
+            driver.drive_once(r.clone()).await.unwrap(),
+            DriveOutcome::Pending
+        );
+        assert_eq!(
+            driver.drive_once(r.clone()).await.unwrap(),
+            DriveOutcome::Pending
+        );
+        assert_eq!(
+            driver.drive_once(r.clone()).await.unwrap(),
+            DriveOutcome::Converged
+        );
+
+        // G1: re-bridged exactly on the two Absent ticks; never on convergence.
+        assert_eq!(bridge.rebridges.load(Ordering::SeqCst), 2);
+        // record removed on convergence.
+        assert!(driver.store.get(&r.group_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn converged_record_is_removed() {
+        let (s, _d) = store();
+        let r = record(&"22".repeat(32));
+        s.upsert(&r).unwrap();
+        let driver = PendingJoinDriver::new(
+            s,
+            CountingBridge::default(),
+            FixedProbe(MembershipStatus::ActiveKeyed),
+            FixedClock(1),
+        );
+        assert_eq!(
+            driver.drive_once(r.clone()).await.unwrap(),
+            DriveOutcome::Converged
+        );
+        assert!(driver.store.get(&r.group_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn absent_bumps_attempts_and_rebridges_the_saved_event() {
+        let (s, _d) = store();
+        let r = record(&"33".repeat(32));
+        s.upsert(&r).unwrap();
+        let bridge = CountingBridge::default();
+        let driver = PendingJoinDriver::new(
+            s,
+            bridge.clone(),
+            FixedProbe(MembershipStatus::Absent),
+            FixedClock(777),
+        );
+        assert_eq!(
+            driver.drive_once(r.clone()).await.unwrap(),
+            DriveOutcome::Pending
+        );
+        let saved = driver.store.get(&r.group_id).unwrap().unwrap();
+        assert_eq!(saved.attempts, 1);
+        assert_eq!(saved.last_attempt_ms, 777);
+        assert_eq!(saved.state, PendingJoinState::Bridged);
+        assert_eq!(bridge.rebridges.load(Ordering::SeqCst), 1);
+        // the captured event is unchanged — we re-send the SAME bytes.
+        assert_eq!(saved.captured_event_b64, r.captured_event_b64);
+    }
+
+    #[tokio::test]
+    async fn unkeyed_requests_join_result_not_a_new_invite() {
+        // Split-brain: listed but no key -> re-request Welcome, no rebridge-as-join.
+        let (s, _d) = store();
+        let r = record(&"44".repeat(32));
+        s.upsert(&r).unwrap();
+        let bridge = CountingBridge::default();
+        let driver = PendingJoinDriver::new(
+            s,
+            bridge.clone(),
+            FixedProbe(MembershipStatus::ListedButUnkeyed),
+            FixedClock(9),
+        );
+        assert_eq!(
+            driver.drive_once(r.clone()).await.unwrap(),
+            DriveOutcome::Pending
+        );
+        assert_eq!(bridge.join_results.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            driver.store.get(&r.group_id).unwrap().unwrap().state,
+            PendingJoinState::KeyedButUnverified
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_record_reports_failed_without_touching_network() {
+        let (s, _d) = store();
+        let mut r = record(&"55".repeat(32));
+        r.state = PendingJoinState::Failed {
+            reason: "invite already used".into(),
+        };
+        s.upsert(&r).unwrap();
+        let bridge = CountingBridge::default();
+        let driver = PendingJoinDriver::new(
+            s,
+            bridge.clone(),
+            FixedProbe(MembershipStatus::Absent),
+            FixedClock(1),
+        );
+        assert_eq!(
+            driver.drive_once(r).await.unwrap(),
+            DriveOutcome::Failed {
+                reason: "invite already used".into()
+            }
+        );
+        assert_eq!(bridge.rebridges.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn drive_all_walks_every_record() {
+        let (s, _d) = store();
+        s.upsert(&record(&"66".repeat(32))).unwrap();
+        s.upsert(&record(&"77".repeat(32))).unwrap();
+        let driver = PendingJoinDriver::new(
+            s,
+            CountingBridge::default(),
+            FixedProbe(MembershipStatus::Absent),
+            FixedClock(1),
+        );
+        let outcomes = driver.drive_all().await.unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|(_, o)| *o == DriveOutcome::Pending));
+    }
+}

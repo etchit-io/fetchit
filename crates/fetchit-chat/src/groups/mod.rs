@@ -39,6 +39,8 @@ pub mod bridge_policy_updated;
 pub mod dispatch;
 pub mod join_bridge;
 pub mod membership;
+pub mod pending_join;
+pub mod pending_join_driver;
 
 use std::time::Duration;
 
