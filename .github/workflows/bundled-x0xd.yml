@@ -65,7 +65,8 @@ jobs:
       - name: Build x0xd
         run: |
           cd "$HOME/x0x"
-          cargo build --release --bin x0xd
+          # jemalloc: fixes glibc malloc arena/RSS amplification (Linux runner).
+          cargo build --release --bin x0xd --features jemalloc
 
       - name: Build fetchit-desktop with bundled binary
         env:

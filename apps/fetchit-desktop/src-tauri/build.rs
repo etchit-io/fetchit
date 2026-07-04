@@ -78,13 +78,17 @@ fn build_locally_or_skip() -> PathBuf {
     let Ok(x0x_repo) = std::env::var("FETCHIT_X0X_REPO") else {
         return PathBuf::new(); // empty path => doesn't exist
     };
-    let status = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .arg("--bin")
-        .arg("x0xd")
-        .current_dir(&x0x_repo)
-        .status();
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--release").arg("--bin").arg("x0xd");
+    // jemalloc fixes glibc malloc arena/RSS amplification; enable it only on
+    // glibc-Linux hosts (not musl/macOS/Windows/Android, where it is unneeded
+    // or where jemalloc-sys does not build).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
+    {
+        cmd.arg("--features").arg("jemalloc");
+    }
+    let status = cmd.current_dir(&x0x_repo).status();
     let Ok(status) = status else {
         return PathBuf::new();
     };

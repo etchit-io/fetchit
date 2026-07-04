@@ -292,8 +292,18 @@ jobs:
           shared-key: x0x-${{ matrix.label }}
           cache-on-failure: true
 
-      - name: Build x0xd (Linux + Windows native)
-        if: matrix.platform != 'macos-latest'
+      - name: Build x0xd (Linux native + jemalloc)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          cd "${{ runner.temp }}/x0x"
+          # jemalloc: fixes glibc malloc arena/RSS amplification. Linux/glibc
+          # only -- jemalloc-sys does not build on MSVC, so the Windows leg
+          # below stays on the default allocator.
+          cargo build --release --bin x0xd --features jemalloc
+
+      - name: Build x0xd (Windows native)
+        if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
           cd "${{ runner.temp }}/x0x"
