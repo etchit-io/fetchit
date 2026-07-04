@@ -626,6 +626,40 @@ pub fn removed_device_agents(
         .collect()
 }
 
+/// Accept a proactively-pushed [`PairRecordV4`] (M6.7 revoke-push receive).
+///
+/// Mirrors the acceptance gate of [`resolve_pair_record_v4`] but takes the
+/// record straight from the push instead of fetching it from the relay. A
+/// `PairRecordPush` is unsealed and public, so the record's OWN user
+/// signature plus the anti-rollback revision check are the only authority a
+/// contact trusts. Accepts iff the record is for `expected_user_id_hex` (the
+/// pushing contact -- never cache under a different contact's key), its user
+/// signature verifies, AND its `revision` STRICTLY beats the cached
+/// watermark. On accept, caches it and returns `(old_cached, new)` so the
+/// caller can diff removed devices via [`removed_device_agents`] and cancel
+/// their pending outbox sends; on reject, returns `None` and leaves the
+/// cache untouched.
+///
+/// # Errors
+/// A malformed `expected_user_id_hex`, a malformed record user id, or a
+/// cache I/O error.
+pub fn accept_pushed_pair_record_v4(
+    data_dir: &Path,
+    expected_user_id_hex: &str,
+    record: PairRecordV4,
+) -> Result<Option<(Option<PairRecordV4>, PairRecordV4)>, ChatError> {
+    let cached = load_contact_pair_record_v4(data_dir, expected_user_id_hex)?;
+    let last_seen = cached.as_ref().map_or(0, |r| r.revision);
+    let acceptable = record.user_id_hex == expected_user_id_hex
+        && verify_pair_record_v4(&record).is_ok()
+        && record.revision > last_seen;
+    if !acceptable {
+        return Ok(None);
+    }
+    save_contact_pair_record_v4(data_dir, &record)?;
+    Ok(Some((cached, record)))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -713,6 +747,84 @@ mod tests {
         assert_eq!(record.devices, devices);
         // Persisted verbatim.
         assert_eq!(load_pair_record_v4(dir.path()).unwrap().unwrap(), record);
+    }
+
+    #[test]
+    fn accept_pushed_record_gates_on_user_verify_and_strictly_newer_revision() {
+        let (contact_dir, contact_master) = seeded_vault();
+        let (my_dir, _me) = seeded_vault();
+        let ts = 1_700_000_000_000;
+
+        // The contact's rev-1 record (two devices), signed by the contact's key.
+        let devices_v1 = vec![device_entry(3, true), device_entry(4, false)];
+        let rec_v1 = mint_and_cache_pair_record_v4_from_master(
+            contact_dir.path(),
+            &contact_master,
+            1,
+            ts,
+            &devices_v1,
+        )
+        .unwrap();
+        let cuid = rec_v1.user_id_hex.clone();
+
+        // First push accepted (no cache yet): returns (None, new) and caches.
+        let (old0, new0) = accept_pushed_pair_record_v4(my_dir.path(), &cuid, rec_v1.clone())
+            .unwrap()
+            .expect("first push accepted");
+        assert!(old0.is_none());
+        assert_eq!(new0.revision, 1);
+        assert_eq!(
+            load_contact_pair_record_v4(my_dir.path(), &cuid)
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
+
+        // Replay of the same revision is rejected (must be STRICTLY newer).
+        assert!(
+            accept_pushed_pair_record_v4(my_dir.path(), &cuid, rec_v1.clone())
+                .unwrap()
+                .is_none()
+        );
+
+        // Rev-2 removing device 4: accepted, returns the old cached + new so the
+        // caller can diff the removed device.
+        let devices_v2 = vec![device_entry(3, true)];
+        let rec_v2 = mint_and_cache_pair_record_v4_from_master(
+            contact_dir.path(),
+            &contact_master,
+            2,
+            ts + 1,
+            &devices_v2,
+        )
+        .unwrap();
+        let (old1, new1) = accept_pushed_pair_record_v4(my_dir.path(), &cuid, rec_v2.clone())
+            .unwrap()
+            .expect("newer push accepted");
+        let old1 = old1.expect("prior cached record present");
+        assert_eq!(old1.revision, 1);
+        assert_eq!(new1.revision, 2);
+        assert_eq!(
+            removed_device_agents(&old1, &new1),
+            vec![crate::identity::AgentId(devices_v1[1].agent_id_hex.clone())]
+        );
+
+        // A record whose user_id is not the expected contact is rejected even
+        // though it verifies -- never cache under the wrong contact's key.
+        assert!(
+            accept_pushed_pair_record_v4(my_dir.path(), &"ff".repeat(32), rec_v2.clone())
+                .unwrap()
+                .is_none()
+        );
+
+        // A tampered record (revision bumped without re-signing) fails verify
+        // and is rejected, proving verify gates BEFORE the revision compare.
+        let mut tampered = rec_v2.clone();
+        tampered.revision = 99;
+        assert!(accept_pushed_pair_record_v4(my_dir.path(), &cuid, tampered)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

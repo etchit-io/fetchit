@@ -86,9 +86,9 @@ pub use local_signer::{
 };
 pub use messages::contact_user_id_hex;
 pub use pair_record_v4::{
-    append_device_and_publish, load_contact_pair_record_v4, load_pair_record_v4,
-    mint_and_cache_pair_record_v4, next_pair_record_v4_revision, removed_device_agents,
-    resolve_pair_record_v4, revoke_device_and_publish,
+    accept_pushed_pair_record_v4, append_device_and_publish, load_contact_pair_record_v4,
+    load_pair_record_v4, mint_and_cache_pair_record_v4, next_pair_record_v4_revision,
+    removed_device_agents, resolve_pair_record_v4, revoke_device_and_publish,
 };
 pub use recovery_phrase::{recovery_phrase_to_seed, seed_to_recovery_phrase};
 pub use transport::{Reachability, Router, SendReceipt, Transport};
