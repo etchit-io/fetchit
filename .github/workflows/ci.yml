@@ -87,7 +87,13 @@ jobs:
       # drift can't accumulate unseen in the excluded crates AND so cfg(windows)
       # / cfg(target_os = "macos") branches actually get checked on the runner
       # where they compile.
-      - run: cargo clippy --manifest-path crates/fetchit-ffi/Cargo.toml --all-targets -- -D warnings
+      # RUSTFLAGS emptied so the x0x-fork path dep (and other deps) aren't gated
+      # on -D warnings: a dependency's warning under a newer rustc must not fail
+      # our CI. `-- -D warnings` still gates fetchit-ffi's OWN code strictly.
+      - name: Clippy fetchit-ffi
+        env:
+          RUSTFLAGS: ""
+        run: cargo clippy --manifest-path crates/fetchit-ffi/Cargo.toml --all-targets -- -D warnings
       - name: Install Tauri system deps (Linux only)
         if: runner.os == 'Linux'
         run: |
@@ -290,6 +296,11 @@ jobs:
         run: cargo install cargo-ndk --locked
 
       - name: Install uniffi-bindgen (version must match crates/fetchit-ffi)
+        # RUSTFLAGS emptied: this compiles an external tool whose transitive deps
+        # must not be gated on our -D warnings (a newer rustc warns inside
+        # uniffi_internal_macros, which would otherwise fail the install).
+        env:
+          RUSTFLAGS: ""
         run: cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.5
 
       - name: Set up Android NDK r27
