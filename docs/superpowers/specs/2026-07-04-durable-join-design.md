@@ -260,6 +260,37 @@ render the spinner. Follow the `OutboxDriver` spawn pattern (`outbox/driver.rs`)
 `fetchit-chat-peer group-chat --invite-file` calls `join_group_durable`; on
 `Pending` it logs `join pending — auto-completing` and lets the driver finish.
 
+## Wiring integration details (resolved while implementing, 2026-07-05)
+
+Three specifics the wiring pass must handle, each verified against `3eb7034`:
+
+1. **group_id before `join_post` (for the belt-and-braces resume pre-check).**
+   `GroupInvite(pub String)` is an opaque base64-JSON blob whose decoded body
+   carries `group_id`. The primary anti-re-spend defense is UX (after `Pending`
+   the shell shows "joining…" and never re-calls join; the spawned driver
+   completes it), so the pre-check is secondary. If cheap, decode the invite to
+   read `group_id` and short-circuit when a record exists; otherwise rely on the
+   driver + a UX that doesn't re-invoke join.
+2. **Owned handles for the spawned driver.** `self.groups()` borrows `self`; a
+   spawned loop needs *owned* clones. Capture: `chat.signer: Arc<dyn Signer>`,
+   `self.router: Arc<Router>`, `chat.identity: Arc<FetchitIdentity>`,
+   `chat.local_machine_id: [u8;32]` (Copy), `chat.layout: StoreLayout` (clone),
+   `self.primary_relay_url` snapshot, and an `Http`/token handle for `members`.
+   `ClientJoinBridge` / `ClientMembershipProbe` structs hold these clones and
+   impl the driver traits; `start_pending_join_driver` constructs
+   `PendingJoinDriver` + spawns the `is_due`-gated loop (N1).
+3. **The keyed vs listed probe (`MembershipStatus`).** `Absent` = not in
+   `groups().members()`. Keyed vs `ListedButUnkeyed`: attempt a `/secure/decrypt`
+   (or the cheapest available "do I hold the group secret" x0xd call, per
+   `mod.rs:422`'s note) — success ⇒ `ActiveKeyed`, failure-while-listed ⇒
+   `ListedButUnkeyed`.
+
+`rebridge` reproduces `bridge_captured_join` (`client.rs:2350`) verbatim:
+reconstruct `CapturedSelfJoin { topic, payload }` from `captured_event_b64`,
+resolve owner-KEM via `resolve_owner_kem_with_fallback`, call
+`emit_self_join_bridge(captured, &owner_hex, &owner_kem, identity.kem_public_key(),
+&local_agent_id, &local_machine_id, signer, &router, hints)`.
+
 ## Coordination
 
 New files (`groups/pending_join*.rs`) are additive and already landed on the
