@@ -188,6 +188,15 @@ struct CreatePrivateSecureRequest<'a> {
     discoverability: &'static str,
 }
 
+/// Request body for `POST /groups/:id/members` — the invite-free `TreeKEM`
+/// direct-add. Field names match x0xd's `AddNamedGroupMemberRequest`
+/// (`display_name` is omitted; x0xd defaults it to `None`).
+#[derive(Serialize)]
+struct AddTreekemMemberRequest<'a> {
+    agent_id: &'a str,
+    treekem_key_package_b64: &'a str,
+}
+
 #[derive(Serialize)]
 struct EncryptRequest<'a> {
     payload_b64: &'a str,
@@ -338,6 +347,49 @@ impl SecureGroupsEndpoint {
             group_id,
             chat_topic,
         })
+    }
+
+    /// Invite-free `TreeKEM` direct-add: add `agent_id_hex` to `group_id`
+    /// with its `treekem_key_package_b64` via `POST /groups/:id/members`.
+    /// x0xd stages the Welcome and direct-delivers it to the added agent,
+    /// which pulls it over its own direct-delivery path. This is the M6.5a
+    /// sibling-admission call — an in-group admin device adds the account
+    /// owner's other device. A 2xx response means x0xd accepted the add
+    /// (Welcome staged); the caller does not wait for the sibling to pull it.
+    ///
+    /// # Errors
+    /// [`X0xdError::Invalid`] if `group_id` is not 64-hex (before any HTTP);
+    /// [`X0xdError::Url`] if it fails to join the base; [`X0xdError::Http`]
+    /// on transport failure; [`X0xdError::Rejected`] on a non-2xx response.
+    pub async fn add_treekem_member(
+        &self,
+        group_id: &str,
+        agent_id_hex: &str,
+        treekem_key_package_b64: &str,
+    ) -> Result<(), X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
+        let url = self
+            .base_url
+            .join(&format!("groups/{group_id}/members"))
+            .map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .post(url)
+            .bearer_auth(&self.api_token)
+            .json(&AddTreekemMemberRequest {
+                agent_id: agent_id_hex,
+                treekem_key_package_b64,
+            })
+            .send()
+            .await?;
+        if !raw.status().is_success() {
+            let status = raw.status();
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd POST /groups/{group_id}/members returned {status}: {body}"
+            )));
+        }
+        Ok(())
     }
 
     /// Encrypt one application frame under the group's current MLS
@@ -697,6 +749,56 @@ mod tests {
             .await
             .unwrap();
         assert!(applied);
+    }
+
+    #[tokio::test]
+    async fn add_treekem_member_posts_body_and_succeeds_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{TEST_GROUP_HEX}/members")))
+            .and(body_partial_json(serde_json::json!({
+                "agent_id": "aa",
+                "treekem_key_package_b64": "kp",
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        endpoint
+            .add_treekem_member(TEST_GROUP_HEX, "aa", "kp")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_treekem_member_rejects_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{TEST_GROUP_HEX}/members")))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad key package"))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .add_treekem_member(TEST_GROUP_HEX, "aa", "kp")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, X0xdError::Rejected(_)));
+    }
+
+    #[tokio::test]
+    async fn add_treekem_member_rejects_bad_group_id_before_http() {
+        // A malformed group_id must never reach HTTP (path-traversal guard).
+        let server = MockServer::start().await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let err = endpoint
+            .add_treekem_member("not-hex", "aa", "kp")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, X0xdError::Invalid(_)));
     }
 
     #[tokio::test]
