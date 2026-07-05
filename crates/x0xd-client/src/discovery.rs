@@ -160,6 +160,9 @@ pub fn base_url_from_api_port_line(raw: &str) -> String {
 }
 
 fn default_data_dir() -> Result<PathBuf, DiscoveryError> {
+    // Windows resolves via APPDATA below and never reads $HOME, so declaring
+    // `home` there is an unused-variable error under `-D warnings`.
+    #[cfg(not(target_os = "windows"))]
     let home = std::env::var_os("HOME").map(PathBuf::from);
     #[cfg(target_os = "linux")]
     {
