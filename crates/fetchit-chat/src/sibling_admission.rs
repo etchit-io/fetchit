@@ -85,9 +85,12 @@ pub fn authorize_sibling_admission(
 /// concrete impl.
 #[async_trait]
 pub trait SiblingGroupAdder: Send + Sync {
-    /// Direct-add the sibling identified by `treekem_key_package_b64` into
-    /// `group_id_hex`, so `x0xd` stages the Welcome and direct-delivers
-    /// `MemberAdded` + the welcome ref to the sibling.
+    /// Direct-add sibling `agent_id_hex` into `group_id_hex` with its
+    /// `treekem_key_package_b64`, so `x0xd` stages the Welcome and
+    /// direct-delivers `MemberAdded` + the welcome ref to the sibling. The
+    /// three map onto `x0xd`'s `POST /groups/:id/members` body — `agent_id`
+    /// (required) plus `treekem_key_package_b64` (required for a `TreeKEM`
+    /// group).
     ///
     /// # Errors
     /// [`ChatError`] when the `x0xd` direct-add fails (e.g. the group is gone
@@ -95,6 +98,7 @@ pub trait SiblingGroupAdder: Send + Sync {
     async fn direct_add(
         &self,
         group_id_hex: &str,
+        agent_id_hex: &str,
         treekem_key_package_b64: &str,
     ) -> Result<(), ChatError>;
 }
@@ -138,7 +142,11 @@ pub async fn handle_sibling_join_request(
         return Ok(AdmitOutcome::AlreadyAdmitted);
     }
     adder
-        .direct_add(&request.group_id_hex, &request.treekem_key_package_b64)
+        .direct_add(
+            &request.group_id_hex,
+            &request.cert.agent_id_hex,
+            &request.treekem_key_package_b64,
+        )
         .await?;
     Ok(AdmitOutcome::Admitted)
 }
@@ -181,7 +189,7 @@ mod tests {
     /// perform, so a test can assert both the outcome and that (for a refusal)
     /// no `x0xd` call happened.
     struct RecordingAdder {
-        calls: std::sync::Mutex<Vec<(String, String)>>,
+        calls: std::sync::Mutex<Vec<(String, String, String)>>,
     }
     impl RecordingAdder {
         fn new() -> Self {
@@ -189,17 +197,17 @@ mod tests {
                 calls: std::sync::Mutex::new(Vec::new()),
             }
         }
-        fn calls(&self) -> Vec<(String, String)> {
+        fn calls(&self) -> Vec<(String, String, String)> {
             self.calls.lock().unwrap().clone()
         }
     }
     #[async_trait]
     impl SiblingGroupAdder for RecordingAdder {
-        async fn direct_add(&self, group: &str, kp: &str) -> Result<(), ChatError> {
+        async fn direct_add(&self, group: &str, agent: &str, kp: &str) -> Result<(), ChatError> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((group.to_string(), kp.to_string()));
+                .push((group.to_string(), agent.to_string(), kp.to_string()));
             Ok(())
         }
     }
@@ -254,9 +262,10 @@ mod tests {
             adder.calls(),
             vec![(
                 req.group_id_hex.clone(),
+                req.cert.agent_id_hex.clone(),
                 req.treekem_key_package_b64.clone()
             )],
-            "the sibling's group + KeyPackage are what we direct-add"
+            "the sibling's group + agent id + KeyPackage are what we direct-add"
         );
     }
 
