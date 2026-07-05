@@ -1577,6 +1577,19 @@ impl Client {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
+        // M6.7: a contact proactively pushing its re-signed device roster
+        // (after revoking/adding a device). Gated on `kind` after the
+        // denylist so a blocked sender's push is dropped like their content;
+        // the record's own signature + anti-rollback are the authority.
+        if matches!(
+            transit.kind,
+            fetchit_relay_proto::EnvelopeKind::PairRecordPush
+        ) {
+            if let Err(e) = self.dispatch_inbound_pair_record_push(&transit).await {
+                log::warn!("pair-record-push dispatch dropped envelope: {e}");
+            }
+            return;
+        }
         if messages::is_private_group_envelope(&transit) {
             let group_id_hex = transit
                 .group_id
@@ -2600,6 +2613,60 @@ impl Client {
         // Err(SendError), intentionally ignored (no UI attached yet).
         let _ = chat.public_post_tx.send(delivery.clone());
         Ok(delivery)
+    }
+
+    /// M6.7: apply a proactively-pushed [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4)
+    /// from a contact whose device set changed (revoke/add).
+    ///
+    /// The push is unsealed and public, so the record's OWN user signature
+    /// plus the anti-rollback revision check are the only authority (see
+    /// [`crate::pair_record_v4::accept_pushed_pair_record_v4`]). The pushing
+    /// contact must be a known M6 contact — the sender's `user_id` is resolved
+    /// from their stored card, and an unknown sender is ignored so a stranger
+    /// cannot fill the cache with records for users we do not track. On an
+    /// accepted (strictly-newer, verified) record, cancels any pending outbox
+    /// sends to a device the new revision revoked, mirroring the M6.3
+    /// `fanout_targets` cleanup.
+    ///
+    /// # Errors
+    /// A malformed sender id, a wrapper/record decode failure, or a cache I/O
+    /// error. A push from a non-contact or an unaccepted revision is a
+    /// success (`Ok(())`) with no state change.
+    async fn dispatch_inbound_pair_record_push(
+        &self,
+        transit: &fetchit_relay_proto::TransitEnvelope,
+    ) -> Result<()> {
+        let Some(chat) = self.chat.as_ref() else {
+            return Ok(());
+        };
+        let layout = &chat.layout;
+        let data_dir = &layout.root;
+
+        // Only a known M6 contact (whose imported card carried an x0x user_id)
+        // has a device fabric to converge; ignore anyone else.
+        let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
+        let Some(user_id_hex) = messages::contact_user_id_hex(layout, &sender_hex)? else {
+            return Ok(());
+        };
+
+        let payload =
+            fetchit_relay_proto::PairRecordPushPayload::from_ciphertext(&transit.ciphertext)
+                .map_err(|e| ChatError::Invalid(format!("pair-record-push wrapper decode: {e}")))?;
+        let record: fetchit_relay_proto::pair_record::PairRecordV4 =
+            serde_json::from_slice(&payload.record_bytes)
+                .map_err(|e| ChatError::Invalid(format!("pushed pair record decode: {e}")))?;
+
+        // Verify + anti-rollback + cache. On accept over an existing record,
+        // cancel pending sends to any device the new revision revoked.
+        if let Some((Some(old), new)) =
+            crate::pair_record_v4::accept_pushed_pair_record_v4(data_dir, &user_id_hex, record)?
+        {
+            let removed = crate::pair_record_v4::removed_device_agents(&old, &new);
+            if !removed.is_empty() {
+                chat.outbox.lock().await.drop_bubbles_for_peers(&removed);
+            }
+        }
+        Ok(())
     }
 
     /// Spawn the M2.5 SSE reachability recorder: a background task that
@@ -5850,6 +5917,35 @@ mod tests {
         env.kind = fetchit_relay_proto::EnvelopeKind::Dm;
         let err = client.dispatch_inbound_public_post(&env).unwrap_err();
         assert!(matches!(err, ChatError::Invalid(_)));
+    }
+
+    // ── M6.7 PairRecordPush receive path ─────────────────────────
+
+    #[tokio::test]
+    async fn pair_record_push_from_unknown_sender_is_ignored() {
+        let (client, dir) = test_client_no_denylist();
+        // A push from an agent we hold no contact card for.
+        let unknown = fetchit_relay_proto::identity::AgentId::from_bytes([0x11u8; 32]);
+        let machine = fetchit_relay_proto::identity::MachineId::from_bytes([0x22u8; 32]);
+        let env = fetchit_relay_proto::TransitEnvelope::pair_record_push(
+            unknown,
+            machine,
+            b"unused-record-bytes".to_vec(),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        // No contact card for the sender: the known-contact gate returns a
+        // no-op success BEFORE the record is even decoded (the bytes above are
+        // deliberately not a valid record), so a stranger cannot fill the cache.
+        client
+            .dispatch_inbound_pair_record_push(&env)
+            .await
+            .expect("unknown-sender push is a no-op success");
+        let cache_dir = dir.path().join("contact_pair_records");
+        assert!(
+            !cache_dir.exists() || std::fs::read_dir(&cache_dir).unwrap().next().is_none(),
+            "no contact record should be cached from an unknown sender"
+        );
     }
 
     // ── M3 D9 regenerate_card_with_relays ────────────────────────
