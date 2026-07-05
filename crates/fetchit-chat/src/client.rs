@@ -2669,6 +2669,111 @@ impl Client {
         Ok(())
     }
 
+    /// M6.7 SEND: proactively push our freshly re-signed
+    /// [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4) to
+    /// every active contact after our own device set changes (a device was
+    /// revoked or added), so contacts converge on the new roster without
+    /// waiting to re-resolve us.
+    ///
+    /// Recipients are the distinct active peer devices across every cached
+    /// conversation (own device and revoked devices excluded, cross-conversation
+    /// duplicates collapsed). Each push rides an
+    /// [`crate::transport::OutboundKind::Dm`]-shaped envelope whose transit
+    /// `kind` stays [`fetchit_relay_proto::EnvelopeKind::PairRecordPush`], so a
+    /// relay forwards it and the receiver re-discriminates it back into
+    /// [`Self::dispatch_inbound_pair_record_push`]. The record carries its own
+    /// user signature and is public, so the push travels UNSEALED — there is no
+    /// per-recipient seal (see [`fetchit_relay_proto::pair_record_push`]).
+    ///
+    /// Best-effort: a transport failure to one contact is logged and skipped.
+    /// Returns the number of recipients the router accepted the push for.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] when the client was built without chat state or
+    /// the record cannot be JSON-encoded. A per-recipient transport failure is
+    /// NOT an error — it is counted out of the returned total.
+    pub async fn push_pair_record_to_active_contacts(
+        &self,
+        record: &fetchit_relay_proto::pair_record::PairRecordV4,
+    ) -> Result<usize> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+
+        // Serialize once: the record carries its own user signature, so every
+        // recipient re-verifies these exact bytes (matches the receive-side
+        // serde_json decode in `dispatch_inbound_pair_record_push`).
+        let record_bytes = serde_json::to_vec(record)
+            .map_err(|e| ChatError::Invalid(format!("encode pair record for push: {e}")))?;
+
+        let local_agent_hex = chat.identity.agent_id_hex().to_owned();
+        let sender_agent_id =
+            fetchit_relay_proto::identity::AgentId::from_bytes(chat.signer.agent_id());
+        let sender_machine_id =
+            fetchit_relay_proto::identity::MachineId::from_bytes(chat.local_machine_id);
+
+        let conversations = chat.registry.snapshot_cached().await;
+        let recipients = pair_record_push_recipients(&conversations, &local_agent_hex);
+        if recipients.is_empty() {
+            return Ok(0);
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        // Snapshot the live primary once so the per-recipient fallback hint
+        // tracks slot 0 across a mid-loop failover (same pattern as the bridge
+        // send path).
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
+
+        let mut sent = 0usize;
+        for recipient_hex in recipients {
+            let transit = match fetchit_relay_proto::TransitEnvelope::pair_record_push(
+                sender_agent_id,
+                sender_machine_id,
+                record_bytes.clone(),
+                now_ms,
+            ) {
+                Ok(env) => env,
+                Err(e) => {
+                    log::warn!("pair-record-push encode for {recipient_hex}: {e}");
+                    continue;
+                }
+            };
+            let transport_out = crate::transport::OutboundEnvelope {
+                kind: crate::transport::OutboundKind::Dm,
+                from_machine_id: Some(chat.local_machine_id),
+                payload: Vec::new(),
+                timestamp_ms: now_ms,
+                transit: Some(transit),
+            };
+            let recipient = crate::identity::AgentId(recipient_hex.clone());
+            let hints = crate::messages::StoredContactCard::resolve_recipient_hints(
+                &chat.layout,
+                &recipient_hex,
+            )
+            .ok()
+            .flatten()
+            .or_else(|| {
+                primary_snapshot
+                    .as_deref()
+                    .map(|url| crate::card::RendezvousHintsV1 {
+                        relays: vec![url.to_owned()],
+                    })
+            });
+            match self
+                .router
+                .send(&recipient, transport_out, hints.as_ref())
+                .await
+            {
+                Ok(_) => sent += 1,
+                Err(e) => log::debug!("pair-record-push to {recipient_hex}: {e}"),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Spawn the M2.5 SSE reachability recorder: a background task that
     /// consumes `/events`, watches for `NamedGroupMetadataEvent` gossip
     /// frames, and records direct-gossip reachability into
@@ -4049,6 +4154,26 @@ async fn try_rekey_and_build_welcomes(
         return Ok(None);
     }
     Ok(Some(welcomes))
+}
+
+/// Distinct active peer-device agent ids to push a pair-record to, across
+/// every cached conversation. [`Conversation::fanout_devices`] already
+/// excludes our own device and any inactive (revoked) device; this dedupes a
+/// contact device we share across several conversations so the push reaches
+/// it exactly once.
+fn pair_record_push_recipients(
+    conversations: &[Conversation],
+    local_agent_hex: &str,
+) -> Vec<String> {
+    let mut recipients: Vec<String> = Vec::new();
+    for conv in conversations {
+        for device in conv.fanout_devices(local_agent_hex) {
+            if !recipients.iter().any(|r| r == &device.agent_id_hex) {
+                recipients.push(device.agent_id_hex.clone());
+            }
+        }
+    }
+    recipients
 }
 
 /// Walk the in-memory conversation cache, rotating every Admin
@@ -6029,6 +6154,120 @@ mod tests {
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (client, dir)
+    }
+
+    // ── M6.7 PairRecordPush send path ────────────────────────────
+
+    /// A syntactically-valid `PairRecordV4` for wire/enumeration tests. The
+    /// signature is a placeholder -- these tests exercise serde framing and
+    /// fanout shape, not signature verification (that lives in
+    /// `pair_record_v4`).
+    fn sample_pair_record_v4() -> fetchit_relay_proto::pair_record::PairRecordV4 {
+        use fetchit_relay_proto::pair_record::{DeviceEntryV4, PairRecordV4};
+        PairRecordV4 {
+            record_version: 4,
+            user_id_hex: "aa".repeat(32),
+            user_ml_dsa_pubkey_b64: "dXNlcg==".to_owned(),
+            revision: 7,
+            issued_at_ms: 1_700_000_000_000,
+            devices: vec![DeviceEntryV4 {
+                agent_id_hex: "bb".repeat(32),
+                ml_dsa_pubkey_b64: "ZGV2".to_owned(),
+                kem_pubkey_b64: "a2Vt".to_owned(),
+                advertised_relays: vec!["wss://relay.example/ws".to_owned()],
+                cert_b64: "Y2VydA==".to_owned(),
+                added_at_ms: 1_700_000_000_001,
+                primary: true,
+            }],
+            user_signature_b64: "c2ln".to_owned(),
+        }
+    }
+
+    fn push_member_device(agent_hex: &str, status: MemberDeviceStatus) -> MemberDevice {
+        MemberDevice {
+            agent_id_hex: agent_hex.to_owned(),
+            kem_public_key_b64: String::new(),
+            agent_public_key_b64: None,
+            added_at_epoch: 0,
+            status,
+        }
+    }
+
+    fn push_member(devices: Vec<MemberDevice>) -> Member {
+        Member {
+            user_id_hex: None,
+            devices,
+            joined_at_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn pair_record_push_recipients_excludes_self_dedupes_and_drops_revoked() {
+        let me = "aa".repeat(32);
+        let peer_a = "bb".repeat(32);
+        let peer_b = "cc".repeat(32);
+        let peer_c = "dd".repeat(32);
+
+        // DM 1: our device + a peer with one active (peer_a) and one revoked
+        // (peer_b) device.
+        let dm1 = Conversation::new_dm(
+            push_member(vec![push_member_device(&me, MemberDeviceStatus::Active)]),
+            push_member(vec![
+                push_member_device(&peer_a, MemberDeviceStatus::Active),
+                push_member_device(&peer_b, MemberDeviceStatus::Revoked),
+            ]),
+            None,
+        )
+        .unwrap();
+        // DM 2: our device again + a peer that re-lists peer_a (must dedupe)
+        // plus a fresh active device peer_c.
+        let dm2 = Conversation::new_dm(
+            push_member(vec![push_member_device(&me, MemberDeviceStatus::Active)]),
+            push_member(vec![
+                push_member_device(&peer_a, MemberDeviceStatus::Active),
+                push_member_device(&peer_c, MemberDeviceStatus::Active),
+            ]),
+            None,
+        )
+        .unwrap();
+
+        let recipients = pair_record_push_recipients(&[dm1, dm2], &me);
+        // self dropped, peer_b (revoked) dropped, peer_a deduped across DMs.
+        assert_eq!(recipients, vec![peer_a, peer_c]);
+    }
+
+    #[test]
+    fn pair_record_push_record_bytes_round_trip_matches_receive_decode() {
+        // SEND encodes the record with serde_json into the push wrapper;
+        // RECEIVE (dispatch_inbound_pair_record_push) postcard-decodes the
+        // wrapper then serde_json-decodes the record. Lock that agreement so
+        // the two halves never drift on the record framing.
+        let record = sample_pair_record_v4();
+        let record_bytes = serde_json::to_vec(&record).unwrap();
+        let transit = fetchit_relay_proto::TransitEnvelope::pair_record_push(
+            fetchit_relay_proto::identity::AgentId::from_bytes([3u8; 32]),
+            fetchit_relay_proto::identity::MachineId::from_bytes([4u8; 32]),
+            record_bytes,
+            123,
+        )
+        .unwrap();
+        let payload =
+            fetchit_relay_proto::PairRecordPushPayload::from_ciphertext(&transit.ciphertext)
+                .unwrap();
+        let decoded: fetchit_relay_proto::pair_record::PairRecordV4 =
+            serde_json::from_slice(&payload.record_bytes).unwrap();
+        assert_eq!(decoded, record);
+    }
+
+    #[tokio::test]
+    async fn push_pair_record_to_active_contacts_with_no_conversations_sends_nothing() {
+        let (client, _dir) = test_client_no_denylist();
+        let record = sample_pair_record_v4();
+        let sent = client
+            .push_pair_record_to_active_contacts(&record)
+            .await
+            .unwrap();
+        assert_eq!(sent, 0, "no conversations -> no pushes attempted");
     }
 
     #[tokio::test]
