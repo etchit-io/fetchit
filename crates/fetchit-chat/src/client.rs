@@ -2504,6 +2504,244 @@ impl Client {
         Ok(group)
     }
 
+    /// Open the durable pending-join store under the chat data dir.
+    fn pending_join_store(&self) -> Result<crate::groups::pending_join::PendingJoinStore> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("durable join requires chat state".into()))?;
+        crate::groups::pending_join::PendingJoinStore::open(chat.layout.root.join("pending_joins"))
+    }
+
+    /// Group ids with a durable pending join still in progress — shells show
+    /// these as "joining…" rather than a failure.
+    ///
+    /// # Errors
+    /// Propagates a store listing error.
+    pub fn pending_joins(&self) -> Result<Vec<String>> {
+        Ok(self
+            .pending_join_store()?
+            .list()?
+            .into_iter()
+            .filter(|r| !r.is_terminal())
+            .map(|r| r.group_id)
+            .collect())
+    }
+
+    /// Build a persistable pending-join record from the one captured event,
+    /// caching the owner + own KEM keys so a re-bridge needs no re-resolution.
+    async fn build_pending_join(
+        &self,
+        gid_hex: &str,
+        captured: &crate::groups::join_bridge::CapturedSelfJoin,
+    ) -> Result<crate::groups::pending_join::PendingJoin> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("durable join requires chat state".into()))?;
+        let owner_hex =
+            crate::groups::join_bridge::inviter_agent_id_from_member_joined(&captured.payload)
+                .ok_or_else(|| {
+                    ChatError::Invalid("durable join: captured event has no inviter".into())
+                })?;
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
+        let relay = primary_snapshot
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok());
+        let http = crate::relay_http::guarded_client();
+        let owner_kem = crate::groups::bridge::resolve_owner_kem_with_fallback(
+            &chat.layout,
+            relay.as_ref(),
+            &http,
+            &owner_hex,
+        )
+        .await?;
+        Ok(crate::groups::pending_join::PendingJoin::new(
+            gid_hex.to_owned(),
+            b64.encode(&captured.payload),
+            captured.topic.clone(),
+            owner_hex,
+            b64.encode(&owner_kem),
+            b64.encode(chat.identity.kem_public_key()),
+            crate::groups::pending_join_driver::now_ms(),
+        ))
+    }
+
+    /// Re-bridge a saved pending-join to its owner — byte-identical to the
+    /// first bridge, using the record's cached KEM keys, and NEVER
+    /// `join_post`. The driver's re-drive primitive.
+    async fn rebridge_pending(
+        &self,
+        record: &crate::groups::pending_join::PendingJoin,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("durable join requires chat state".into()))?;
+        let payload = b64
+            .decode(&record.captured_event_b64)
+            .map_err(|e| ChatError::Invalid(format!("pending-join payload b64: {e}")))?;
+        let owner_kem = b64
+            .decode(&record.owner_kem_pubkey_b64)
+            .map_err(|e| ChatError::Invalid(format!("pending-join owner_kem b64: {e}")))?;
+        let joiner_kem = b64
+            .decode(&record.joiner_kem_pubkey_b64)
+            .map_err(|e| ChatError::Invalid(format!("pending-join joiner_kem b64: {e}")))?;
+        let captured = crate::groups::join_bridge::CapturedSelfJoin {
+            topic: record.captured_topic.clone(),
+            payload,
+        };
+        let local_agent_id = chat.signer.agent_id();
+        crate::groups::join_bridge::emit_self_join_bridge(
+            &captured,
+            &record.owner_agent_id,
+            &owner_kem,
+            &joiner_kem,
+            &local_agent_id,
+            &chat.local_machine_id,
+            chat.signer.as_ref(),
+            &self.router,
+            None,
+        )
+        .await
+    }
+
+    /// Durable join: `join_post` once, persist the intent, and return
+    /// [`groups::JoinOutcome`]. `Pending` is NOT an error — the persisted
+    /// record is completed by [`Self::drive_pending_joins_once`] (shell-pumped)
+    /// when the owner's daemon is next reachable, with no user action and no
+    /// second `join_post` (the single-use invite is spent at most once, G1).
+    /// This is the INITIAL-join entrypoint; resume is the driver, not a
+    /// re-call of this method.
+    ///
+    /// # Errors
+    /// Propagates `join_post` errors (malformed invite, self-join). A
+    /// non-convergence is returned as `Pending`, never an error.
+    pub async fn join_group_durable(
+        &self,
+        invite: &groups::GroupInvite,
+        display_name: Option<&str>,
+    ) -> Result<groups::JoinOutcome> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let self_id = crate::identity::AgentId(chat.identity.agent_id_hex().to_owned());
+        let store = self.pending_join_store()?;
+
+        // Exactly one join_post; the captured event is reused by the bridge
+        // and persisted so a resume never re-`join_post`s (G1).
+        let (group, captured) = self.groups().join_post(invite, display_name).await?;
+        let gid_hex = group.group_id.as_str().to_owned();
+
+        // Persist the intent BEFORE the wait so a timeout leaves a durable
+        // record the driver completes. Needs the inline captured event; an
+        // unpatched daemon that returns none just gets the plain wait below.
+        if let Some(cap) = &captured {
+            if let Ok(record) = self.build_pending_join(&gid_hex, cap).await {
+                let _ = store.upsert(&record);
+            }
+        }
+
+        let native_wait = crate::groups::membership::native_first_wait();
+        let outcome = Self::run_native_then_bridge(
+            captured,
+            {
+                let gid = group.group_id.clone();
+                let self_id = self_id.clone();
+                move || async move {
+                    self.groups()
+                        .wait_membership(
+                            &gid,
+                            &self_id,
+                            native_wait,
+                            crate::groups::membership::MEMBERSHIP_POLL_INTERVAL,
+                        )
+                        .await
+                }
+            },
+            |cap| {
+                let group = &group;
+                async move { self.bridge_captured_join(group, &cap).await }
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(()) => {
+                let _ = store.remove(&gid_hex);
+                Ok(groups::JoinOutcome::Converged(group))
+            }
+            Err(ChatError::JoinerNotConverged { .. }) => {
+                Ok(groups::JoinOutcome::Pending { group_id: gid_hex })
+            }
+            Err(e) => {
+                // Terminal (malformed/already-consumed invite) — retire the
+                // intent so the driver won't retry a doomed join.
+                let _ = store.remove(&gid_hex);
+                Err(e)
+            }
+        }
+    }
+
+    /// Pump the durable pending-join resume once: for each record DUE for a
+    /// retry ([`is_due`](crate::groups::pending_join_driver::is_due), N1),
+    /// probe membership and either converge (remove) or re-bridge the SAVED
+    /// event (never `join_post`). Shells call this on startup and on a timer /
+    /// presence-online, mirroring the outbox driver.
+    ///
+    /// # Errors
+    /// Propagates a store listing error.
+    pub async fn drive_pending_joins_once(
+        &self,
+    ) -> Result<Vec<(String, crate::groups::pending_join_driver::DriveOutcome)>> {
+        use crate::groups::pending_join_driver::{is_due, now_ms, DriveOutcome};
+        let store = self.pending_join_store()?;
+        let self_hex = match self.chat.as_ref() {
+            Some(c) => c.identity.agent_id_hex().to_owned(),
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::new();
+        for mut record in store.list()? {
+            if record.is_terminal() {
+                continue;
+            }
+            let now = now_ms();
+            if !is_due(&record, now) {
+                out.push((record.group_id.clone(), DriveOutcome::Pending));
+                continue;
+            }
+            let Ok(gid) = crate::groups::GroupId::parse(&record.group_id) else {
+                continue;
+            };
+            match self.groups().members(&gid).await {
+                Ok(list) if list.iter().any(|a| a.0 == self_hex) => {
+                    // In the roster ⇒ converged. (v1 treats in-roster as keyed;
+                    // the roster-active-but-keyless split-brain is a documented
+                    // follow-up needing a /secure/decrypt probe.)
+                    let _ = store.remove(&record.group_id);
+                    out.push((record.group_id.clone(), DriveOutcome::Converged));
+                }
+                Ok(_) => {
+                    // Absent ⇒ re-bridge the saved event; bump attempt state.
+                    record.state = crate::groups::pending_join::PendingJoinState::Bridged;
+                    record.last_attempt_ms = now;
+                    record.attempts = record.attempts.saturating_add(1);
+                    let _ = store.upsert(&record);
+                    let _ = self.rebridge_pending(&record).await;
+                    out.push((record.group_id.clone(), DriveOutcome::Pending));
+                }
+                // Probe network error: not terminal, try again next pump.
+                Err(_) => out.push((record.group_id.clone(), DriveOutcome::Pending)),
+            }
+        }
+        Ok(out)
+    }
+
     /// Pure native-best-effort-then-always-bridge orchestration over a
     /// single `join_post`. Factored from [`Self::join_group_auto`] so the
     /// policy is unit-testable without a live daemon or relay.

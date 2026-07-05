@@ -38,6 +38,7 @@ pub trait JoinBridge {
 
 /// Probes whether the joiner has converged into the group.
 pub trait MembershipProbe {
+    /// Current membership status of the joiner in `group_id`.
     fn status(
         &self,
         group_id: &str,
@@ -46,6 +47,7 @@ pub trait MembershipProbe {
 
 /// Monotonic clock (injectable for tests).
 pub trait Clock {
+    /// Milliseconds since an arbitrary fixed epoch (monotonic within a run).
     fn now_ms(&self) -> u64;
 }
 
@@ -57,7 +59,10 @@ pub enum DriveOutcome {
     /// Still working; record persisted with bumped attempt state.
     Pending,
     /// Terminally failed; the record has been removed.
-    Failed { reason: String },
+    Failed {
+        /// Human-readable failure reason.
+        reason: String,
+    },
 }
 
 /// Exponential backoff (capped) for the spawn loop's re-bridge cadence.
@@ -86,6 +91,16 @@ pub fn is_due(record: &PendingJoin, now_ms: u64) -> bool {
             .saturating_add(backoff_ms(record.attempts))
 }
 
+/// Wall-clock ms since the epoch (saturating), for the production driver.
+#[must_use]
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(u64::MAX)
+}
+
 /// Drives durable pending joins to completion.
 pub struct PendingJoinDriver<B, P, C> {
     store: PendingJoinStore,
@@ -95,6 +110,7 @@ pub struct PendingJoinDriver<B, P, C> {
 }
 
 impl<B: JoinBridge + Sync, P: MembershipProbe + Sync, C: Clock + Sync> PendingJoinDriver<B, P, C> {
+    /// Construct a driver over a store + injected bridge/probe/clock.
     #[must_use]
     pub fn new(store: PendingJoinStore, bridge: B, probe: P, clock: C) -> Self {
         Self {
@@ -186,6 +202,7 @@ mod tests {
         PendingJoin::new(
             group.into(),
             "Y2FwdHVyZWQ=".into(),
+            "x0x.group.test.metadata".into(),
             "aa".repeat(32),
             "b3duZXJrZW0=".into(),
             "am9pbmVya2Vt".into(),

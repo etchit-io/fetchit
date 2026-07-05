@@ -7,7 +7,7 @@
 //! most once — exactly when the join truly converges. See
 //! `docs/superpowers/specs/2026-07-04-durable-join-design.md`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,8 +28,11 @@ pub enum PendingJoinState {
     /// driver re-requests the staged join-result — never a new invite.
     KeyedButUnverified,
     /// Terminally failed (malformed invite, or invite already consumed by
-    /// another agent). Carries a human-readable reason.
-    Failed { reason: String },
+    /// another agent).
+    Failed {
+        /// Human-readable failure reason.
+        reason: String,
+    },
 }
 
 /// A persisted join intent, one per group being joined.
@@ -40,24 +43,33 @@ pub struct PendingJoin {
     /// The ONE signed `member_joined` from `join_post`, base64. Load-bearing:
     /// re-bridging these bytes is what avoids a second `join_post` (G1).
     pub captured_event_b64: String,
+    /// The captured event's gossip topic — `emit_self_join_bridge` sends it
+    /// verbatim, so a re-bridge must carry the same topic as the first.
+    pub captured_topic: String,
     /// 64-hex inviter/owner agent id, parsed from the captured event.
     pub owner_agent_id: String,
     /// Owner ML-KEM pubkey, base64 — resolved once, cached for re-bridges.
     pub owner_kem_pubkey_b64: String,
     /// Our own ML-KEM pubkey hint, base64, for the owner's reply seal.
     pub joiner_kem_pubkey_b64: String,
+    /// Epoch ms when the intent was first submitted.
     pub created_at_ms: u64,
+    /// Epoch ms of the most recent drive attempt (0 = never driven yet).
     pub last_attempt_ms: u64,
+    /// Number of drive attempts so far; feeds the backoff gate.
     pub attempts: u32,
+    /// Current lifecycle state.
     pub state: PendingJoinState,
 }
 
 impl PendingJoin {
     /// A freshly submitted intent (state `Submitted`, zero attempts).
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         group_id: String,
         captured_event_b64: String,
+        captured_topic: String,
         owner_agent_id: String,
         owner_kem_pubkey_b64: String,
         joiner_kem_pubkey_b64: String,
@@ -66,6 +78,7 @@ impl PendingJoin {
         Self {
             group_id,
             captured_event_b64,
+            captured_topic,
             owner_agent_id,
             owner_kem_pubkey_b64,
             joiner_kem_pubkey_b64,
@@ -180,6 +193,7 @@ mod tests {
         PendingJoin::new(
             group.into(),
             "Y2FwdHVyZWQ=".into(),
+            "x0x.group.test.metadata".into(),
             "aa".repeat(32),
             "b3duZXJrZW0=".into(),
             "am9pbmVya2Vt".into(),

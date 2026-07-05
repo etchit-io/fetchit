@@ -184,6 +184,24 @@ fn default_kind() -> String {
 #[serde(transparent)]
 pub struct GroupInvite(pub String);
 
+/// Outcome of a durable join ([`Client::join_group_durable`]).
+///
+/// `Pending` is NOT an error: the join is persisted and the background
+/// pending-join driver completes it automatically when the owner's daemon
+/// is next reachable, without the user re-acting or the single-use invite
+/// being spent a second time. Shells render `Pending` as "joining…", never
+/// a failure. See `docs/superpowers/specs/2026-07-04-durable-join-design.md`.
+#[derive(Debug, Clone)]
+pub enum JoinOutcome {
+    /// The joiner converged into the group and holds its keys.
+    Converged(Group),
+    /// Persisted and in progress; the driver will complete it.
+    Pending {
+        /// 64-hex group id the pending join targets.
+        group_id: String,
+    },
+}
+
 /// Endpoint wrapper. Build via [`Client::groups`](crate::Client::groups).
 #[derive(Debug)]
 pub struct Endpoint<'a> {
