@@ -60,6 +60,32 @@ pub enum DriveOutcome {
     Failed { reason: String },
 }
 
+/// Exponential backoff (capped) for the spawn loop's re-bridge cadence.
+/// N1 (Bob's PR #7 review): `drive_once` re-bridges on every Absent tick, so
+/// the LOOP must gate the tick — a record is due only once
+/// `last_attempt_ms + backoff_ms(attempts)` has passed. Pure + unit-tested.
+#[must_use]
+pub fn backoff_ms(attempts: u32) -> u64 {
+    const BASE_MS: u64 = 2_000;
+    const CAP_MS: u64 = 5 * 60 * 1_000; // 5 min
+                                        // First attempt (attempts==0) is immediate; then 2s,4s,8s,… capped.
+    if attempts == 0 {
+        return 0;
+    }
+    BASE_MS.saturating_mul(1u64 << attempts.min(20)).min(CAP_MS)
+}
+
+/// True when `record` is due for another drive tick at `now_ms`. Jitter is
+/// applied by the caller (the spawn loop) via its own sleep, not here, so
+/// this stays deterministic for tests.
+#[must_use]
+pub fn is_due(record: &PendingJoin, now_ms: u64) -> bool {
+    now_ms
+        >= record
+            .last_attempt_ms
+            .saturating_add(backoff_ms(record.attempts))
+}
+
 /// Drives durable pending joins to completion.
 pub struct PendingJoinDriver<B, P, C> {
     store: PendingJoinStore,
@@ -358,6 +384,27 @@ mod tests {
             }
         );
         assert_eq!(bridge.rebridges.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn backoff_is_immediate_then_exponential_then_capped() {
+        assert_eq!(backoff_ms(0), 0, "first attempt is immediate");
+        assert_eq!(backoff_ms(1), 4_000);
+        assert_eq!(backoff_ms(2), 8_000);
+        assert!(backoff_ms(30) <= 5 * 60 * 1_000, "capped at 5 min");
+        assert_eq!(backoff_ms(30), 5 * 60 * 1_000);
+    }
+
+    #[test]
+    fn is_due_gates_ticks_by_backoff() {
+        let mut r = record(&"ab".repeat(32));
+        // fresh (attempts 0): due immediately.
+        assert!(is_due(&r, 0));
+        // after one attempt at t=1000, next due at 1000+4000.
+        r.attempts = 1;
+        r.last_attempt_ms = 1_000;
+        assert!(!is_due(&r, 4_000), "not yet due");
+        assert!(is_due(&r, 5_000), "due at last+backoff");
     }
 
     #[tokio::test]
