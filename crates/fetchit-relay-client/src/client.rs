@@ -222,6 +222,12 @@ enum SupervisorCmd {
         reason: String,
     },
     Shutdown,
+    /// Re-arm the reconnect loop. If the supervisor is in backoff, reset the
+    /// backoff to the floor and retry immediately instead of waiting out the
+    /// exponential delay. The in-process hook a foreground / network-change
+    /// trigger (or the wedge-watchdog) pulls so a returning connection
+    /// recovers fast. A no-op when already connected.
+    ReconnectNow,
 }
 
 /// Per-connection state owned by the supervisor.
@@ -446,6 +452,18 @@ impl Client {
             .map_err(|_| ClientError::InboxClosed)
     }
 
+    /// Re-arm the reconnect loop: if the client is currently reconnecting,
+    /// reset the backoff to the floor and retry immediately instead of waiting
+    /// out the exponential delay. Call this on app-foreground or a
+    /// network-regain event (or from a wedge-watchdog) so a returning
+    /// connection recovers in ~1 s rather than up to [`MAX_BACKOFF`]. A no-op
+    /// when already connected or after the supervisor has stopped; pairs with
+    /// [`ClientConfig::with_unbounded_reconnect`] (retry forever) to give
+    /// "retry forever, and retry NOW when connectivity returns".
+    pub fn reconnect_now(&self) {
+        let _ = self.cmd_tx.send(SupervisorCmd::ReconnectNow);
+    }
+
     /// Receive the next presence transition pushed by the relay, if any.
     ///
     /// Mirrors [`Self::next_delivery`]: the channel is owned by the
@@ -581,6 +599,9 @@ impl Supervisor {
                     drop(inner.take());
                     break;
                 }
+                // Already connected — a re-arm is a no-op here; it only
+                // matters while reconnecting (see `reconnect`).
+                SupervisorCmd::ReconnectNow => {}
                 SupervisorCmd::Send {
                     to,
                     envelope,
@@ -735,6 +756,13 @@ impl Supervisor {
                         // Spurious Disconnected from a previous WS;
                         // already handled — ignore.
                         Some(SupervisorCmd::Disconnected { .. }) => {}
+                        // Re-arm: skip the rest of the backoff and retry
+                        // now, resetting to the floor so a later failure
+                        // backs off from scratch.
+                        Some(SupervisorCmd::ReconnectNow) => {
+                            *backoff = INITIAL_BACKOFF;
+                            break;
+                        }
                     }
                 }
             }
@@ -1082,6 +1110,52 @@ mod tests {
         cfg.auth_timeout = Duration::from_millis(200);
         cfg.max_reconnect_attempts = Some(3);
         cfg
+    }
+
+    #[tokio::test]
+    async fn reconnect_now_short_circuits_the_backoff() {
+        // Against a refusing relay the supervisor backs off exponentially
+        // (1s, 2s, 4s, ...). `reconnect_now` must reset to the floor and retry
+        // immediately, so a re-armed Connecting appears well before the grown
+        // backoff would have fired.
+        let addr = reserve_then_release().await;
+        let base = Url::parse(&format!("http://{addr}/")).unwrap();
+        let signer = Arc::new(StaticKeySigner::from_public_key(b"rearm-key".to_vec()));
+        let mut cfg = ClientConfig::new(base);
+        cfg.auth_timeout = Duration::from_millis(100);
+        cfg.max_reconnect_attempts = None; // retry forever so the backoff keeps growing
+        let client = Client::connect(cfg, signer).await.unwrap();
+        let mut state = client.connection_state();
+
+        // Wait until the next natural retry is >= 3s out (backoff has grown to
+        // ~4s after a few failed attempts).
+        loop {
+            state.changed().await.unwrap();
+            let deep_backoff = matches!(
+                &*state.borrow(),
+                ConnState::Disconnected { retry_at: Some(at), .. }
+                    if at.saturating_duration_since(Instant::now()) >= Duration::from_secs(3)
+            );
+            if deep_backoff {
+                break;
+            }
+        }
+
+        // Re-arm: a Connecting must appear well inside that 3s+ window.
+        client.reconnect_now();
+        let reconnected = tokio::time::timeout(Duration::from_millis(1200), async {
+            loop {
+                state.changed().await.unwrap();
+                if matches!(&*state.borrow(), ConnState::Connecting) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            reconnected.is_ok(),
+            "reconnect_now must trigger a reconnect well before the grown backoff elapses"
+        );
     }
 
     #[tokio::test]
