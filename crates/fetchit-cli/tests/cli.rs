@@ -19,6 +19,19 @@ fn fixture(bytes: &[u8]) -> NamedTempFile {
 }
 
 #[test]
+fn help_points_to_the_app_for_non_cli_users() {
+    // The builder who ran `cargo build` and got the CLI must be told the
+    // browser is a separate download, right in the help they land on.
+    Command::cargo_bin("fetchit")
+        .expect("binary built")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("etchit.io/fetch"))
+        .stdout(contains("app"));
+}
+
+#[test]
 fn detects_mls_envelope_without_decrypting() {
     let f = fixture(b"saorsa-mls/v1\ngroup=reading-club\n\n\x00\x01\x02");
     Command::cargo_bin("fetchit")

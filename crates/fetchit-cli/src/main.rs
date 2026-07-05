@@ -31,6 +31,10 @@ use fetchit_net::{set_data_home, AutonomiClient, DEFAULT_PEERS};
     version,
     about = "fetch>it — read-only viewer for the Autonomi network.",
     long_about = None,
+    after_help = "This is the fetch>it command-line tool. Most people want the \
+                  desktop or mobile app instead — download it for Mac, Windows, \
+                  Linux, or Android at https://etchit.io/fetch (or build it from \
+                  apps/fetchit-desktop, not the workspace root).",
 )]
 struct Cli {
     #[command(subcommand)]
