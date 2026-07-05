@@ -65,7 +65,13 @@ impl StreamingMedia {
             downloaded: 0,
             terminal: None,
         });
-        Self { total, backing, tx, rx, interest: AtomicUsize::new(0) }
+        Self {
+            total,
+            backing,
+            tx,
+            rx,
+            interest: AtomicUsize::new(0),
+        }
     }
 
     /// Expected total byte count.
@@ -89,8 +95,7 @@ impl StreamingMedia {
     /// reached a terminal state. The feeder pump checks this after each
     /// chunk push and stops early to free network resources.
     pub fn should_abort(&self) -> bool {
-        self.rx.borrow().terminal.is_none()
-            && self.interest.load(Ordering::SeqCst) == 0
+        self.rx.borrow().terminal.is_none() && self.interest.load(Ordering::SeqCst) == 0
     }
 
     /// Append a chunk, flush it durably enough for a concurrent reader, then
@@ -109,7 +114,10 @@ impl StreamingMedia {
                     .extend_from_slice(chunk);
             }
             StreamBacking::File(path) => {
-                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
                 f.write_all(chunk)?;
                 f.flush()?;
             }
@@ -152,13 +160,11 @@ impl StreamingMedia {
     pub async fn read_range(&self, start: u64, end_inclusive: u64) -> std::io::Result<Bytes> {
         let len = usize::try_from(end_inclusive - start + 1)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let start_usize = usize::try_from(start)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let start_usize =
+            usize::try_from(start).map_err(|e| std::io::Error::other(e.to_string()))?;
         match &self.backing {
             StreamBacking::Memory(m) => {
-                let g = m
-                    .lock()
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let g = m.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
                 Ok(Bytes::copy_from_slice(&g[start_usize..start_usize + len]))
             }
             StreamBacking::File(path) => {
@@ -180,10 +186,7 @@ impl StreamingMedia {
 /// Await until `downloaded >= need` or the stream ends. Returns the bytes
 /// available at that point (clamped to EOF), or `Err` if the feeder reported
 /// a failure.
-pub async fn await_offset(
-    rx: &mut watch::Receiver<StreamState>,
-    need: u64,
-) -> Result<u64, String> {
+pub async fn await_offset(rx: &mut watch::Receiver<StreamState>, need: u64) -> Result<u64, String> {
     loop {
         {
             let s = rx.borrow();
@@ -257,7 +260,10 @@ mod tests {
     use super::*;
 
     fn mem(total: u64) -> StreamingMedia {
-        StreamingMedia::new(total, StreamBacking::Memory(std::sync::Mutex::new(Vec::new())))
+        StreamingMedia::new(
+            total,
+            StreamBacking::Memory(std::sync::Mutex::new(Vec::new())),
+        )
     }
 
     #[tokio::test]

@@ -173,7 +173,10 @@ impl AppState {
             return Ok((sm, guard));
         }
         let client = crate::state::ensure_client(self, &self.effective_peers()).await?;
-        let total = client.content_size(&addr).await.map_err(|e| e.to_string())?;
+        let total = client
+            .content_size(&addr)
+            .await
+            .map_err(|e| e.to_string())?;
         #[cfg(not(feature = "e2e"))]
         let backing = if self.disk_cache.policy().enabled {
             // Remove any stale partial left by a previous crash before starting

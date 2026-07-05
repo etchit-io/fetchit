@@ -764,10 +764,7 @@ fn bundled_x0xd_toml_path(identity_dir: &std::path::Path) -> std::path::PathBuf 
                 .lines()
                 .any(|l| l.trim_start().starts_with("identity_dir"));
             if !has_identity_dir {
-                let _ = std::fs::write(
-                    &dst,
-                    format!("{body}\nidentity_dir = \"{id_dir_toml}\"\n"),
-                );
+                let _ = std::fs::write(&dst, format!("{body}\nidentity_dir = \"{id_dir_toml}\"\n"));
             }
         }
     } else {
