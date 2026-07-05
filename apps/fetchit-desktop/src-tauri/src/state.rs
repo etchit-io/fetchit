@@ -204,6 +204,7 @@ impl AppState {
         };
         let client = Arc::new(client);
         let streams = self.streams.clone();
+        #[cfg(not(feature = "e2e"))]
         let disk_cache = self.disk_cache.clone();
         #[cfg(not(feature = "e2e"))]
         let cache_on = self.disk_cache.policy().enabled;

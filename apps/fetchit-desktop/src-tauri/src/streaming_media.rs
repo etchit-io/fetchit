@@ -18,7 +18,10 @@ use tokio::sync::watch;
 pub enum StreamBacking {
     /// In-memory accumulation buffer.
     Memory(Mutex<Vec<u8>>),
-    /// Append-only file for cache-enabled sessions.
+    /// Append-only file for cache-enabled sessions. Never constructed under
+    /// the `e2e` feature (that build forces in-memory backing), but still
+    /// matched in the read paths, so silence the dead-variant lint there.
+    #[cfg_attr(feature = "e2e", allow(dead_code))]
     File(PathBuf),
 }
 
