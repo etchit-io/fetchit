@@ -172,10 +172,98 @@ design.)
 - No relay-side durable mailbox for fully-closed-app completion (north star).
 - No change to x0xd single-use semantics; we rely on x0xd consuming exactly once.
 
+## Implementation status (2026-07-04)
+
+- **DONE + tested (commit `4a1793a`, branch `fable/durable-join`):** the two
+  isolated core units — `groups/pending_join.rs` (record + `PendingJoinStore`)
+  and `groups/pending_join_driver.rs` (`PendingJoinDriver` + `JoinBridge` /
+  `MembershipProbe` / `Clock` traits + `MembershipStatus` / `DriveOutcome`). 14
+  tests, mutation-checked. These are additive new files and carry the guarantees
+  G1 (structural: driver has no `join_post`), G2, G3, G4.
+- **TODO — client wiring (below), coordinated with Bob's M6 lane** because it
+  edits `client.rs` (his most-active file) and must reproduce the bridge byte
+  format exactly.
+
+## Client wiring spec (implementable as written)
+
+All seams verified against trunk `29b2e20`.
+
+### Store accessor
+`StoreLayout.root` is `pub` (`local_store.rs:33`). Add:
+```
+fn pending_join_store(&self) -> Result<PendingJoinStore> {
+    let layout = self.layout().ok_or_else(|| ChatError::Invalid(
+        "durable join requires a data_dir".into()))?;
+    PendingJoinStore::open(layout.root.join("pending_joins"))
+}
+```
+
+### New entrypoint `join_group_durable`
+Returns a new `JoinOutcome { Converged(Group), Pending { group_id: String } }`
+(add to `groups`). Leaves `join_group_auto` untouched — this is additive.
+
+```
+pub async fn join_group_durable(&self, invite, display_name) -> Result<JoinOutcome> {
+    let store = self.pending_join_store()?;
+    let group_id = /* invite.group_id hex */;
+    // RESUME: a saved intent exists -> drive it, NEVER join_post (G1).
+    if store.get(&group_id)?.is_some() {
+        return self.drive_pending_once(&group_id).await; // Converged | Pending
+    }
+    // FIRST ATTEMPT: exactly one join_post, persist BEFORE the wait.
+    let (group, captured) = self.groups().join_post(invite, display_name).await?;
+    let record = self.build_pending_join(&group, &captured).await?;
+    store.upsert(&record)?;                       // persisted before any wait
+    match Self::run_native_then_bridge(Some(captured), native_wait_fn,
+                                       bridge_fn).await {
+        Ok(())                              => { store.remove(&group_id)?;
+                                                Ok(JoinOutcome::Converged(group)) }
+        Err(ChatError::JoinerNotConverged{..}) => Ok(JoinOutcome::Pending{ group_id }),
+        Err(e) if is_terminal_invite_error(&e)  => { store.remove(&group_id)?; Err(e) }
+        Err(_transient)                    => Ok(JoinOutcome::Pending{ group_id }),
+    }
+}
+```
+This reuses the already-factored `run_native_then_bridge` (`client.rs:2467`), so
+no existing function is modified — only ~20 new lines + the persist-before-wait.
+
+### `build_pending_join` — field sources (all verified)
+- `captured_event_b64` = base64(`captured.payload`) — `CapturedSelfJoin.payload`
+  is the signed `member_joined` (`join_bridge.rs:25-29`).
+- `owner_agent_id` = `inviter_agent_id_from_member_joined(&captured.payload)`
+  (`join_bridge.rs:36`).
+- `owner_kem_pubkey_b64` = base64(`resolve_owner_kem_with_fallback(...)`)
+  (`bridge.rs:291`, already called by `bridge_captured_join`).
+- `joiner_kem_pubkey_b64` = base64(our ML-KEM pub from `chat.identity`).
+
+### Concrete trait impls for the driver
+- `JoinBridge::rebridge(record)` = decode `captured_event_b64` +
+  `owner_kem_pubkey_b64` + `joiner_kem_pubkey_b64` and call the SAME
+  `emit_self_join_bridge(signer, owner_kem, joiner_kem, &payload, relay)`
+  (`join_bridge.rs:131`) that the first bridge used — byte-identical, no
+  `join_post`.
+- `JoinBridge::request_join_result(record)` = the reverse-request that makes the
+  owner re-serve the staged join-result (owner side: `GET /groups/:id/join-result/:member`).
+- `MembershipProbe::status(group_id)`:
+  - not in `groups().members(group)` (`mod.rs:612`) → `Absent`.
+  - in members AND a `/secure/decrypt` probe succeeds → `ActiveKeyed`.
+  - in members but the decrypt probe fails → `ListedButUnkeyed`.
+- `Clock::now_ms()` = `SystemTime::now()` epoch ms (saturating).
+
+### Driver lifecycle on the Client
+Spawn a `PendingJoinDriver` sweep on client build (drain existing records on
+startup — this is what makes a join survive an app restart) and on a capped
+backoff tick; also expose `pending_joins() -> Vec<PendingJoinView>` for shells to
+render the spinner. Follow the `OutboxDriver` spawn pattern (`outbox/driver.rs`).
+
+### Peer/FFI surface
+`fetchit-chat-peer group-chat --invite-file` calls `join_group_durable`; on
+`Pending` it logs `join pending — auto-completing` and lets the driver finish.
+
 ## Coordination
 
-The changed files (`client.rs`, `groups/*`, `error.rs`) are Bob's active M6
-lane. New files (`groups/pending_join*.rs`) are additive; the `client.rs` change
-is a new entrypoint + a demoted error. Coordinate the merge over coord-v1 to
-avoid colliding with in-flight M6 work; land behind the same review discipline as
-the rest of the branch.
+New files (`groups/pending_join*.rs`) are additive and already landed on the
+branch. The `client.rs` edits above are additive (new methods + a new
+`JoinOutcome`; `join_group_auto` untouched), but `client.rs` is Bob's active M6
+file — the wiring will be implemented against his current head and merged over
+coord-v1 to avoid colliding with in-flight work.
