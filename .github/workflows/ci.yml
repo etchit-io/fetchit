@@ -278,6 +278,8 @@ jobs:
         with:
           workspaces: crates/fetchit-ffi
 
+      - name: Install libdbus (keyring→secret-service, host build)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # fetchit-ffi host unit tests — rendition-mapping logic. The crate is
       # workspace-excluded (cdylib for the JNI build), so the `test` job's
       # `cargo test --workspace` never runs them. Host target; no NDK needed.

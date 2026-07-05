@@ -99,6 +99,10 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), TrustError> {
 }
 
 /// Tighten directory permissions to owner-only (0700) on Unix.
+// On non-unix the body is a no-op so clippy sees the `Result` as redundant;
+// it is real on unix (the `?`s below can fail) and the signature must stay
+// uniform across platforms.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn set_dir_perms_0700(path: &Path) -> Result<(), TrustError> {
     #[cfg(unix)]
     {

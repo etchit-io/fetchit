@@ -112,8 +112,10 @@ fn bundle_handler_present(dirs: &[PathBuf], runtime_handler_name: &str) -> bool 
 }
 
 /// No-op shim on non-Linux targets so the call site can stay
-/// platform-agnostic.
+/// platform-agnostic. The caller is Linux-gated, so on other targets the
+/// shim is deliberately unused.
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub(crate) fn register_or_cleanup<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) {}
 
 #[cfg(all(test, target_os = "linux"))]
