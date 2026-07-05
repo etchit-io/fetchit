@@ -184,7 +184,7 @@ fn default_kind() -> String {
 #[serde(transparent)]
 pub struct GroupInvite(pub String);
 
-/// Outcome of a durable join ([`Client::join_group_durable`]).
+/// Outcome of a durable join ([`crate::Client::join_group_durable`]).
 ///
 /// `Pending` is NOT an error: the join is persisted and the background
 /// pending-join driver completes it automatically when the owner's daemon
