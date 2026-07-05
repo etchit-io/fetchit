@@ -15,7 +15,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # Do NOT set a global RUSTFLAGS: "-D warnings" here. It forces -D warnings onto
+  # UPSTREAM dependency builds (bypassing cargo's default --cap-lints allow for
+  # non-workspace crates) and onto `cargo install` tool builds -- turning THEIR
+  # lints fatal on a newer toolchain: the x0x sibling on windows-clippy, the
+  # uniffi-bindgen-cli install (android job), and the E2E onPrepare desktop build
+  # (missing binary). Our own warning gate is clippy's explicit `-- -D warnings`
+  # (see the clippy jobs below), which caps dependency lints at allow.
 
 jobs:
   fmt:
