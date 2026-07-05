@@ -46,6 +46,11 @@ pub struct PendingJoin {
     /// The captured event's gossip topic — `emit_self_join_bridge` sends it
     /// verbatim, so a re-bridge must carry the same topic as the first.
     pub captured_topic: String,
+    /// `sha256_hex(invite.0)` — the resume key. `join_group_durable`
+    /// pre-checks this BEFORE `join_post` so a deep-link re-tap or a
+    /// replayed intent drives the existing record instead of spending the
+    /// single-use invite twice (G1 at the entry, not just in the driver).
+    pub invite_hash: String,
     /// 64-hex inviter/owner agent id, parsed from the captured event.
     pub owner_agent_id: String,
     /// Owner ML-KEM pubkey, base64 — resolved once, cached for re-bridges.
@@ -70,6 +75,7 @@ impl PendingJoin {
         group_id: String,
         captured_event_b64: String,
         captured_topic: String,
+        invite_hash: String,
         owner_agent_id: String,
         owner_kem_pubkey_b64: String,
         joiner_kem_pubkey_b64: String,
@@ -79,6 +85,7 @@ impl PendingJoin {
             group_id,
             captured_event_b64,
             captured_topic,
+            invite_hash,
             owner_agent_id,
             owner_kem_pubkey_b64,
             joiner_kem_pubkey_b64,
@@ -194,6 +201,7 @@ mod tests {
             group.into(),
             "Y2FwdHVyZWQ=".into(),
             "x0x.group.test.metadata".into(),
+            "invitehash".into(),
             "aa".repeat(32),
             "b3duZXJrZW0=".into(),
             "am9pbmVya2Vt".into(),

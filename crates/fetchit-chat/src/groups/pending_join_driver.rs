@@ -203,6 +203,7 @@ mod tests {
             group.into(),
             "Y2FwdHVyZWQ=".into(),
             "x0x.group.test.metadata".into(),
+            "invitehash".into(),
             "aa".repeat(32),
             "b3duZXJrZW0=".into(),
             "am9pbmVya2Vt".into(),

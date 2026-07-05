@@ -2533,6 +2533,7 @@ impl Client {
     async fn build_pending_join(
         &self,
         gid_hex: &str,
+        invite_hash: &str,
         captured: &crate::groups::join_bridge::CapturedSelfJoin,
     ) -> Result<crate::groups::pending_join::PendingJoin> {
         use base64::Engine as _;
@@ -2562,6 +2563,7 @@ impl Client {
             gid_hex.to_owned(),
             b64.encode(&captured.payload),
             captured.topic.clone(),
+            invite_hash.to_owned(),
             owner_hex,
             b64.encode(&owner_kem),
             b64.encode(chat.identity.kem_public_key()),
@@ -2633,6 +2635,28 @@ impl Client {
         let self_id = crate::identity::AgentId(chat.identity.agent_id_hex().to_owned());
         let store = self.pending_join_store()?;
 
+        // Resume pre-check (PR #7 #1): `GroupInvite` is opaque, so key the
+        // guard on `sha256(invite)`. If a non-terminal intent already exists
+        // for this exact invite, a second `join_post` would spend the
+        // single-use secret again — the bug this method exists to prevent. So
+        // return the in-progress `Pending` and let the driver finish it. This
+        // makes G1 structural at the ENTRY, not just inside the driver.
+        let invite_hash = {
+            use sha2::Digest as _;
+            let mut h = sha2::Sha256::new();
+            h.update(invite.0.as_bytes());
+            hex::encode(h.finalize())
+        };
+        if let Some(existing) = store
+            .list()?
+            .into_iter()
+            .find(|r| !r.is_terminal() && r.invite_hash == invite_hash)
+        {
+            return Ok(groups::JoinOutcome::Pending {
+                group_id: existing.group_id,
+            });
+        }
+
         // Exactly one join_post; the captured event is reused by the bridge
         // and persisted so a resume never re-`join_post`s (G1).
         let (group, captured) = self.groups().join_post(invite, display_name).await?;
@@ -2641,10 +2665,12 @@ impl Client {
         // Persist the intent BEFORE the wait so a timeout leaves a durable
         // record the driver completes. Needs the inline captured event; an
         // unpatched daemon that returns none just gets the plain wait below.
+        // PR #7 #2: a persist failure must PROPAGATE — returning `Pending`
+        // with no record on disk means the invite is spent but the driver has
+        // nothing to resume (the pre-PR silent-never-completes failure).
         if let Some(cap) = &captured {
-            if let Ok(record) = self.build_pending_join(&gid_hex, cap).await {
-                let _ = store.upsert(&record);
-            }
+            let record = self.build_pending_join(&gid_hex, &invite_hash, cap).await?;
+            store.upsert(&record)?;
         }
 
         let native_wait = crate::groups::membership::native_first_wait();
