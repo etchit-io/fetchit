@@ -151,6 +151,25 @@ pub async fn handle_sibling_join_request(
     Ok(AdmitOutcome::Admitted)
 }
 
+/// Production [`SiblingGroupAdder`]: the x0xd secure-groups endpoint performs
+/// the direct-add over HTTP (`add_treekem_member`). The M6.6 devices-group
+/// dispatch constructs one from the account's x0xd handle and hands it to
+/// [`handle_sibling_join_request`]. `X0xdError` folds into [`ChatError`] via
+/// the crate's existing `From` impl.
+#[async_trait]
+impl SiblingGroupAdder for x0xd_client::SecureGroupsEndpoint {
+    async fn direct_add(
+        &self,
+        group_id_hex: &str,
+        agent_id_hex: &str,
+        treekem_key_package_b64: &str,
+    ) -> Result<(), ChatError> {
+        self.add_treekem_member(group_id_hex, agent_id_hex, treekem_key_package_b64)
+            .await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
