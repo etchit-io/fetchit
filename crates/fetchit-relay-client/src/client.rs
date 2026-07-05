@@ -145,6 +145,19 @@ impl ClientConfig {
             max_reconnect_elapsed: None,
         }
     }
+
+    /// Reconnect FOREVER: never surface [`ConnState::PermanentlyDisconnected`].
+    ///
+    /// The always-on chat message pump uses this so a relay outage longer
+    /// than the default attempt cap can never leave the pump permanently
+    /// dead. It keeps retrying at the `MAX_BACKOFF` floor (one attempt/min)
+    /// until connectivity returns, so the client self-heals without the app
+    /// having to rebuild it.
+    #[must_use]
+    pub fn with_unbounded_reconnect(mut self) -> Self {
+        self.max_reconnect_attempts = None;
+        self
+    }
 }
 
 /// Coarse-grained state of the supervisor's live WebSocket.

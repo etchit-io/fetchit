@@ -87,6 +87,16 @@ pub struct RelayTransport {
     own_relay_keys: Vec<String>,
 }
 
+/// Relay-client config for the always-on chat message pump.
+///
+/// The pump reconnects FOREVER ([`ClientConfig::with_unbounded_reconnect`])
+/// so a relay outage longer than the default attempt cap can never leave the
+/// pump permanently dead: it self-heals when connectivity returns instead of
+/// requiring the app to rebuild the client. Chat-resilience win #1.
+fn chat_pump_config(url: Url) -> ClientConfig {
+    ClientConfig::new(url).with_unbounded_reconnect()
+}
+
 impl RelayTransport {
     /// Connect to a single relay at `base_url`. Convenience wrapper
     /// over [`Self::connect_multi`] that wraps the URL in a one-entry
@@ -119,7 +129,7 @@ impl RelayTransport {
             .iter()
             .filter_map(|u| https_url_to_wss_key(u).ok())
             .collect();
-        let configs: Vec<ClientConfig> = base_urls.into_iter().map(ClientConfig::new).collect();
+        let configs: Vec<ClientConfig> = base_urls.into_iter().map(chat_pump_config).collect();
         let relay_set = RelaySet::connect(configs, signer.clone())
             .await
             .map_err(|e| ChatError::MessageTransport(format!("relay connect: {e}")))?;
@@ -266,7 +276,7 @@ impl RelayTransport {
         // its supervisor shuts down cleanly. First-contact races are
         // rare and self-healing, so this is accepted over per-key
         // locking that would reintroduce the across-await hold.
-        let config = ClientConfig::new(https_url);
+        let config = chat_pump_config(https_url);
         let client = Client::connect(config, self.signer.clone())
             .await
             .map_err(|e| ChatError::MessageTransport(format!("pool connect {wss_key}: {e}")))?;
@@ -653,6 +663,18 @@ fn https_url_to_wss_key(https_url: &Url) -> std::result::Result<String, ChatErro
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_pump_config_reconnects_forever() {
+        // Chat-resilience win #1: the always-on message pump must never
+        // permanently give up reconnecting (Some(20) would leave the pump
+        // dead after ~20 min of outage until the app rebuilds the client).
+        let cfg = chat_pump_config("https://relay.example".parse().unwrap());
+        assert!(
+            cfg.max_reconnect_attempts.is_none(),
+            "chat pump must reconnect forever, not surface PermanentlyDisconnected"
+        );
+    }
 
     #[test]
     fn parse_hex_32_accepts_64_chars() {
