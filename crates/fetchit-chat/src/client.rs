@@ -6080,6 +6080,10 @@ mod tests {
     /// reachable x0xd). The HTTP, router, and transports are stubbed
     /// to whatever a hermetic test needs.
     fn test_client_no_denylist() -> (Client, tempfile::TempDir) {
+        test_client_with_router(Router::new())
+    }
+
+    fn test_client_with_router(router: Router) -> (Client, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
         let salt = fresh_argon_salt();
@@ -6135,7 +6139,7 @@ mod tests {
         let http = Arc::new(Http::new("http://127.0.0.1:1".into(), "tok".into()).unwrap());
         let client = Client {
             http,
-            router: Arc::new(Router::new()),
+            router: Arc::new(router),
             chat: Some(chat),
             relay: None,
             lan: None,
@@ -6268,6 +6272,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sent, 0, "no conversations -> no pushes attempted");
+    }
+
+    /// Transport stub that records every `(recipient, envelope)` it is asked to
+    /// send and always reports the peer reachable, so a push actually fires.
+    struct RecordingTransport {
+        sent: Arc<
+            std::sync::Mutex<Vec<(crate::identity::AgentId, crate::transport::OutboundEnvelope)>>,
+        >,
+    }
+
+    #[async_trait]
+    impl crate::transport::Transport for RecordingTransport {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        fn reachability(&self, _to: &crate::identity::AgentId) -> crate::transport::Reachability {
+            crate::transport::Reachability::Always
+        }
+        async fn send(
+            &self,
+            to: &crate::identity::AgentId,
+            envelope: crate::transport::OutboundEnvelope,
+            _hints: Option<&crate::card::RendezvousHintsV1>,
+        ) -> Result<crate::transport::SendReceipt> {
+            self.sent.lock().unwrap().push((to.clone(), envelope));
+            Ok(crate::transport::SendReceipt {
+                accepted_at_ms: 0,
+                message_id: None,
+                transport_name: "recording",
+            })
+        }
+        fn take_inbound(
+            &self,
+        ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::transport::InboundEnvelope>>
+        {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn push_pair_record_fires_dm_shaped_pairrecordpush_to_each_active_peer_device() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut router = Router::new();
+        router.add(Arc::new(RecordingTransport { sent: sent.clone() }));
+        let (client, _dir) = test_client_with_router(router);
+
+        // Seed one DM: our own device + a peer with one active device (peer_a)
+        // and one revoked device (peer_b, which must NOT receive a push).
+        let me = client.local_agent_id_hex().expect("chat state present");
+        let peer_a = "bb".repeat(32);
+        let peer_b = "cc".repeat(32);
+        let dm = Conversation::new_dm(
+            push_member(vec![push_member_device(&me, MemberDeviceStatus::Active)]),
+            push_member(vec![
+                push_member_device(&peer_a, MemberDeviceStatus::Active),
+                push_member_device(&peer_b, MemberDeviceStatus::Revoked),
+            ]),
+            None,
+        )
+        .unwrap();
+        client
+            .registry_arc()
+            .expect("chat state present")
+            .save(&dm)
+            .await
+            .unwrap();
+
+        let record = sample_pair_record_v4();
+        let count = client
+            .push_pair_record_to_active_contacts(&record)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "exactly the one active peer device is pushed");
+
+        let sends = sent.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let (to, env) = &sends[0];
+        assert_eq!(
+            to,
+            &crate::identity::AgentId(peer_a),
+            "addressed to the active peer device, not the revoked one or self"
+        );
+        assert_eq!(
+            env.kind,
+            crate::transport::OutboundKind::Dm,
+            "the push rides the Dm envelope shape"
+        );
+        let transit = env.transit.as_ref().expect("carries the pre-built transit");
+        assert_eq!(
+            transit.kind,
+            fetchit_relay_proto::EnvelopeKind::PairRecordPush,
+            "transit kind stays PairRecordPush so the receiver re-discriminates it"
+        );
+        // The carried record round-trips back to exactly what we pushed.
+        let payload =
+            fetchit_relay_proto::PairRecordPushPayload::from_ciphertext(&transit.ciphertext)
+                .unwrap();
+        let decoded: fetchit_relay_proto::pair_record::PairRecordV4 =
+            serde_json::from_slice(&payload.record_bytes).unwrap();
+        assert_eq!(decoded, record);
     }
 
     #[tokio::test]
