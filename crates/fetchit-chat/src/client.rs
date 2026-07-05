@@ -2649,12 +2649,7 @@ impl Client {
             return Ok(());
         };
 
-        let payload =
-            fetchit_relay_proto::PairRecordPushPayload::from_ciphertext(&transit.ciphertext)
-                .map_err(|e| ChatError::Invalid(format!("pair-record-push wrapper decode: {e}")))?;
-        let record: fetchit_relay_proto::pair_record::PairRecordV4 =
-            serde_json::from_slice(&payload.record_bytes)
-                .map_err(|e| ChatError::Invalid(format!("pushed pair record decode: {e}")))?;
+        let record = decode_pushed_pair_record_v4(&transit.ciphertext)?;
 
         // Verify + anti-rollback + cache. On accept over an existing record,
         // cancel pending sends to any device the new revision revoked.
@@ -4174,6 +4169,35 @@ fn pair_record_push_recipients(
         }
     }
     recipients
+}
+
+/// Decode a pushed [`PairRecordV4`](fetchit_relay_proto::pair_record::PairRecordV4)
+/// from the unsealed `PairRecordPush` ciphertext: postcard wrapper, then the
+/// inner JSON record.
+///
+/// The `record_bytes` are size-capped at
+/// [`crate::pair_record::MAX_RELAY_BODY_BYTES`] before the JSON parse, mirroring
+/// the `read_body_capped` cap the HTTP resolve path applies to the same record
+/// shape, so a known contact cannot deliver an oversized blob the relay
+/// envelope cap permits but the fetch path would reject.
+///
+/// # Errors
+/// [`ChatError::Invalid`] on a wrapper decode failure, an over-cap
+/// `record_bytes`, or a record JSON decode failure.
+fn decode_pushed_pair_record_v4(
+    ciphertext: &[u8],
+) -> Result<fetchit_relay_proto::pair_record::PairRecordV4> {
+    let payload = fetchit_relay_proto::PairRecordPushPayload::from_ciphertext(ciphertext)
+        .map_err(|e| ChatError::Invalid(format!("pair-record-push wrapper decode: {e}")))?;
+    if payload.record_bytes.len() > crate::pair_record::MAX_RELAY_BODY_BYTES {
+        return Err(ChatError::Invalid(format!(
+            "pushed pair record too large: {} bytes (cap {})",
+            payload.record_bytes.len(),
+            crate::pair_record::MAX_RELAY_BODY_BYTES
+        )));
+    }
+    serde_json::from_slice(&payload.record_bytes)
+        .map_err(|e| ChatError::Invalid(format!("pushed pair record decode: {e}")))
 }
 
 /// Walk the in-memory conversation cache, rotating every Admin
@@ -6272,6 +6296,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sent, 0, "no conversations -> no pushes attempted");
+    }
+
+    #[test]
+    fn decode_pushed_pair_record_v4_accepts_a_valid_record() {
+        let record = sample_pair_record_v4();
+        let record_bytes = serde_json::to_vec(&record).unwrap();
+        let ciphertext =
+            postcard::to_allocvec(&fetchit_relay_proto::PairRecordPushPayload { record_bytes })
+                .unwrap();
+        let decoded = decode_pushed_pair_record_v4(&ciphertext).unwrap();
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn decode_pushed_pair_record_v4_rejects_oversized_record_bytes() {
+        // A known contact must not be able to deliver a record_bytes blob the
+        // relay envelope cap permits but the HTTP-fetch path would reject: cap
+        // it before the JSON parse, matching the read_body_capped cap.
+        let oversized = fetchit_relay_proto::PairRecordPushPayload {
+            record_bytes: vec![0u8; crate::pair_record::MAX_RELAY_BODY_BYTES + 1],
+        };
+        let ciphertext = postcard::to_allocvec(&oversized).unwrap();
+        let err = decode_pushed_pair_record_v4(&ciphertext).unwrap_err();
+        assert!(
+            matches!(err, ChatError::Invalid(_)),
+            "oversized record_bytes is rejected before the JSON parse"
+        );
     }
 
     /// Transport stub that records every `(recipient, envelope)` it is asked to
