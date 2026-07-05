@@ -57,6 +57,7 @@ pub mod recovery_phrase;
 pub mod rekey;
 pub mod relay_http;
 pub mod relay_transport;
+pub mod sibling_admission;
 pub mod transport;
 pub mod x0xd_seed;
 
