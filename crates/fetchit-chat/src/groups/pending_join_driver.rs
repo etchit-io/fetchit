@@ -101,6 +101,18 @@ pub fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Production [`Clock`] over the wall clock via [`now_ms`]. The unit type is
+/// `Sync`, so the driver satisfies its `C: Clock + Sync` bound with a borrow
+/// of the live client for the bridge/probe.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        now_ms()
+    }
+}
+
 /// Drives durable pending joins to completion.
 pub struct PendingJoinDriver<B, P, C> {
     store: PendingJoinStore,
@@ -224,7 +236,7 @@ mod tests {
         }
     }
 
-    /// Owner that is Absent for the first `flip_at` probes, then ActiveKeyed.
+    /// Owner that is Absent for the first `flip_at` probes, then `ActiveKeyed`.
     struct FlipProbe {
         flip_at: u32,
         calls: AtomicU32,
@@ -256,7 +268,7 @@ mod tests {
         }
     }
 
-    /// Counts rebridge + join-result calls. There is NO join_post here or
+    /// Counts rebridge + join-result calls. There is NO `join_post` here or
     /// anywhere in the driver's reachable surface.
     #[derive(Clone, Default)]
     struct CountingBridge {

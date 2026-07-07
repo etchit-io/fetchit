@@ -2056,6 +2056,16 @@ impl Client {
                 .apply_join_result(&stable_group_id, &member, &wrapper.payload_b64, &owner_hex)
                 .await
                 .map_err(ChatError::from)?;
+            // Applying the owner's join-result IS the keying event: this
+            // durable pending-join has converged. Remove the intent so the
+            // resume driver stops re-pulling it. This is the authoritative
+            // `ActiveKeyed` signal -- a read-only keyed probe on `/members`
+            // is the deferred x0xd ask, so until it lands convergence is
+            // observed here at the apply site, not by polling. Best-effort:
+            // a stale record only costs one idempotent re-bridge next tick.
+            if let Ok(store) = self.pending_join_store() {
+                let _ = store.remove(&stable_group_id);
+            }
             return Ok(());
         }
 
@@ -2725,45 +2735,107 @@ impl Client {
     pub async fn drive_pending_joins_once(
         &self,
     ) -> Result<Vec<(String, crate::groups::pending_join_driver::DriveOutcome)>> {
-        use crate::groups::pending_join_driver::{is_due, now_ms, DriveOutcome};
-        let store = self.pending_join_store()?;
-        let self_hex = match self.chat.as_ref() {
-            Some(c) => c.identity.agent_id_hex().to_owned(),
-            None => return Ok(Vec::new()),
+        use std::future::Future;
+
+        use crate::groups::pending_join::PendingJoin;
+        use crate::groups::pending_join_driver::{
+            is_due, now_ms, DriveOutcome, JoinBridge, MembershipProbe, MembershipStatus,
+            PendingJoinDriver, SystemClock,
         };
+
+        // Production probe: read the roster over the client's `Groups` view.
+        // `Absent` (owner has not applied our join) => re-bridge the saved
+        // event; anything in the roster => `ListedButUnkeyed` => re-request the
+        // Welcome. It never returns `ActiveKeyed`: fetchit has no read-only
+        // keyed check yet (the deferred x0xd `keyed_epoch` ask), so convergence
+        // is signalled authoritatively at the inbound apply site
+        // (`dispatch_inbound_bridge`), which removes the record. Erring toward
+        // `ListedButUnkeyed` is the safe direction -- at worst one idempotent
+        // re-bridge per tick, never the false `Converged` that stranded a
+        // keyless member in the old roster-only loop (PR #7 review #3).
+        struct Probe<'a> {
+            client: &'a Client,
+        }
+        impl MembershipProbe for Probe<'_> {
+            fn status(
+                &self,
+                group_id: &str,
+            ) -> impl Future<Output = std::result::Result<MembershipStatus, ChatError>> + Send
+            {
+                let client = self.client;
+                let gid = group_id.to_owned();
+                async move {
+                    let self_hex = client
+                        .chat
+                        .as_ref()
+                        .map(|c| c.identity.agent_id_hex().to_owned())
+                        .ok_or_else(|| {
+                            ChatError::Invalid("durable join requires chat state".into())
+                        })?;
+                    let parsed = crate::groups::GroupId::parse(&gid)?;
+                    let list = client.groups().members(&parsed).await?;
+                    Ok(if list.iter().any(|a| a.0 == self_hex) {
+                        MembershipStatus::ListedButUnkeyed
+                    } else {
+                        MembershipStatus::Absent
+                    })
+                }
+            }
+        }
+
+        // Production bridge: both arms re-emit the SAVED event (never
+        // `join_post`, G1). The owner's `reply_to_bridged_join` re-applies the
+        // member_joined and re-stages+re-bridges the Welcome on every received
+        // bridge, so re-bridging IS the Welcome re-request. `request_join_result`
+        // is kept a distinct entrypoint (Bob's Decision 3) so the warm
+        // epoch-catch-up recovery can extend it without touching the cold path.
+        struct Bridge<'a> {
+            client: &'a Client,
+        }
+        impl JoinBridge for Bridge<'_> {
+            fn rebridge(
+                &self,
+                record: &PendingJoin,
+            ) -> impl Future<Output = std::result::Result<(), ChatError>> + Send {
+                let client = self.client;
+                let record = record.clone();
+                async move { client.rebridge_pending(&record).await }
+            }
+            fn request_join_result(
+                &self,
+                record: &PendingJoin,
+            ) -> impl Future<Output = std::result::Result<(), ChatError>> + Send {
+                let client = self.client;
+                let record = record.clone();
+                async move { client.rebridge_pending(&record).await }
+            }
+        }
+
+        if self.chat.is_none() {
+            return Ok(Vec::new());
+        }
+        let store = self.pending_join_store()?;
+        let driver = PendingJoinDriver::new(
+            self.pending_join_store()?,
+            Bridge { client: self },
+            Probe { client: self },
+            SystemClock,
+        );
+
+        // N1: the LOOP gates by `is_due`; `drive_once` acts on every call, so
+        // only hand it records past their backoff. A not-yet-due record stays
+        // Pending, untouched.
         let mut out = Vec::new();
-        for mut record in store.list()? {
+        for record in store.list()? {
             if record.is_terminal() {
                 continue;
             }
-            let now = now_ms();
-            if !is_due(&record, now) {
+            if !is_due(&record, now_ms()) {
                 out.push((record.group_id.clone(), DriveOutcome::Pending));
                 continue;
             }
-            let Ok(gid) = crate::groups::GroupId::parse(&record.group_id) else {
-                continue;
-            };
-            match self.groups().members(&gid).await {
-                Ok(list) if list.iter().any(|a| a.0 == self_hex) => {
-                    // In the roster ⇒ converged. (v1 treats in-roster as keyed;
-                    // the roster-active-but-keyless split-brain is a documented
-                    // follow-up needing a /secure/decrypt probe.)
-                    let _ = store.remove(&record.group_id);
-                    out.push((record.group_id.clone(), DriveOutcome::Converged));
-                }
-                Ok(_) => {
-                    // Absent ⇒ re-bridge the saved event; bump attempt state.
-                    record.state = crate::groups::pending_join::PendingJoinState::Bridged;
-                    record.last_attempt_ms = now;
-                    record.attempts = record.attempts.saturating_add(1);
-                    let _ = store.upsert(&record);
-                    let _ = self.rebridge_pending(&record).await;
-                    out.push((record.group_id.clone(), DriveOutcome::Pending));
-                }
-                // Probe network error: not terminal, try again next pump.
-                Err(_) => out.push((record.group_id.clone(), DriveOutcome::Pending)),
-            }
+            let gid = record.group_id.clone();
+            out.push((gid, driver.drive_once(record).await?));
         }
         Ok(out)
     }
