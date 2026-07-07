@@ -2,7 +2,7 @@
 
 use crate::auth::AuthTokenState;
 use crate::server::ServerState;
-use crate::transit::{StoredEntry, TransitStore};
+use crate::transit::StoredEntry;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};

@@ -42,6 +42,12 @@ pub struct ServerConfig {
     /// starts — the kernel-level loopback bind is the security boundary,
     /// not a request-time check.
     pub internal_bind: Option<SocketAddr>,
+    /// Path of the durable `SQLite` transit store. `None` (the default)
+    /// keeps the in-RAM buffer: undelivered envelopes are lost on
+    /// restart. `Some` makes buffered envelopes survive a process
+    /// restart (still ciphertext-only — the store is as blind as the
+    /// RAM buffer).
+    pub transit_db_path: Option<std::path::PathBuf>,
 }
 
 impl ServerConfig {
@@ -64,6 +70,7 @@ impl ServerConfig {
             bearer_ttl: Duration::from_secs(15 * 60),
             issuer_keys: HashMap::new(),
             internal_bind: Some(SocketAddr::from(([127, 0, 0, 1], 9088))),
+            transit_db_path: None,
         }
     }
 
@@ -73,7 +80,10 @@ impl ServerConfig {
     /// `FETCHIT_RELAY_REGION` (default `nyc`),
     /// `FETCHIT_RELAY_INTERNAL_BIND` (default `127.0.0.1:9088`; literal
     /// `none` / `disabled` / empty turns the internal channel off; any
-    /// non-loopback address is rejected).
+    /// non-loopback address is rejected),
+    /// `FETCHIT_RELAY_TRANSIT_DB` (default unset = in-RAM transit buffer;
+    /// a path enables the durable `SQLite` store; literal `none` /
+    /// `disabled` / empty keeps RAM).
     ///
     /// # Errors
     /// Returns `ServerError::Config` if any variable is malformed.
@@ -88,8 +98,25 @@ impl ServerConfig {
         if let Ok(raw) = std::env::var("FETCHIT_RELAY_INTERNAL_BIND") {
             cfg.internal_bind = parse_internal_bind(&raw)?;
         }
+        if let Ok(raw) = std::env::var("FETCHIT_RELAY_TRANSIT_DB") {
+            cfg.transit_db_path = parse_transit_db(&raw);
+        }
         Ok(cfg)
     }
+}
+
+/// Parse the `FETCHIT_RELAY_TRANSIT_DB` override. An empty string or
+/// the literals `none` / `disabled` (case-insensitive) keep the in-RAM
+/// buffer; anything else is taken as the `SQLite` store path.
+fn parse_transit_db(raw: &str) -> Option<std::path::PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("disabled")
+    {
+        return None;
+    }
+    Some(std::path::PathBuf::from(trimmed))
 }
 
 /// Parse the `FETCHIT_RELAY_INTERNAL_BIND` override, enforcing the
@@ -121,8 +148,28 @@ pub fn parse_internal_bind(raw: &str) -> Result<Option<SocketAddr>, ServerError>
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{parse_internal_bind, Region, ServerConfig};
+    use super::{parse_internal_bind, parse_transit_db, Region, ServerConfig};
     use std::net::SocketAddr;
+
+    #[test]
+    fn parse_transit_db_takes_a_path_and_off_literals_keep_ram() {
+        assert_eq!(
+            parse_transit_db("/var/lib/fetchit-relay/transit.db"),
+            Some(std::path::PathBuf::from(
+                "/var/lib/fetchit-relay/transit.db"
+            ))
+        );
+        assert_eq!(parse_transit_db(""), None);
+        assert_eq!(parse_transit_db("  "), None);
+        assert_eq!(parse_transit_db("none"), None);
+        assert_eq!(parse_transit_db("Disabled"), None);
+    }
+
+    #[test]
+    fn transit_db_defaults_to_ram() {
+        let cfg = ServerConfig::defaults(SocketAddr::from(([127, 0, 0, 1], 0)), Region::Nyc);
+        assert!(cfg.transit_db_path.is_none());
+    }
 
     #[test]
     fn server_version_carries_semver_and_git_short() {

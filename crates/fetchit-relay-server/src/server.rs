@@ -36,8 +36,10 @@ pub struct ServerState {
     pub config: ServerConfig,
     /// Challenge / bearer service.
     pub auth: Arc<AuthService>,
-    /// In-RAM transit buffer.
-    pub transit: Arc<TransitBuffer>,
+    /// Undelivered-envelope store: the in-RAM [`TransitBuffer`] by
+    /// default, or the durable `SQLite` backend when the operator
+    /// injects one via [`Server::with_transit_store`].
+    pub transit: Arc<dyn TransitStore + Send + Sync>,
     /// Live-connection registry.
     pub sessions: Arc<SessionRegistry>,
     /// ML-DSA-65 signature backend.
@@ -94,6 +96,11 @@ pub struct Server {
     /// (POST/PUT `/v1/actors`, `WebFinger` server, actor-doc GET).
     #[cfg(feature = "fediverse-inbox")]
     registry: Option<RegistryState>,
+    /// Transit store override. `None` (the default) builds the in-RAM
+    /// [`TransitBuffer`] from config at [`Server::router`] time; the
+    /// binary injects a [`crate::SqliteTransitStore`] here when the
+    /// operator configures a durable path.
+    transit_store: Option<Arc<dyn TransitStore + Send + Sync>>,
 }
 
 impl Server {
@@ -110,7 +117,17 @@ impl Server {
             inbox: None,
             #[cfg(feature = "fediverse-inbox")]
             registry: None,
+            transit_store: None,
         }
+    }
+
+    /// Inject the transit store (e.g. the durable
+    /// [`crate::SqliteTransitStore`]) instead of the default in-RAM
+    /// [`TransitBuffer`].
+    #[must_use]
+    pub fn with_transit_store(mut self, store: Arc<dyn TransitStore + Send + Sync>) -> Self {
+        self.transit_store = Some(store);
+        self
     }
 
     /// The live-connection registry this server registers WebSocket
@@ -201,11 +218,13 @@ impl Server {
                 self.config.challenge_ttl,
                 self.config.bearer_ttl,
             )),
-            transit: Arc::new(TransitBuffer::new(
-                self.config.transit_ttl,
-                self.config.transit_per_recipient,
-                self.config.transit_total_bytes_cap,
-            )),
+            transit: self.transit_store.unwrap_or_else(|| {
+                Arc::new(TransitBuffer::new(
+                    self.config.transit_ttl,
+                    self.config.transit_per_recipient,
+                    self.config.transit_total_bytes_cap,
+                ))
+            }),
             sessions: self.sessions,
             verifier: self.verifier,
             capability_resolver: Arc::new(CapabilityResolver::new(self.config.issuer_keys.clone())),

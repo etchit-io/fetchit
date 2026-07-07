@@ -419,6 +419,76 @@ async fn assert_no_deliver(ws: &mut WsStream, window: Duration) {
     }
 }
 
+/// Spin up a server whose transit store is the `SQLite` durable backend
+/// at `db`, so tests can prove buffered envelopes survive a process
+/// restart (modelled as a second instance opening the same file).
+async fn start_test_server_with_transit_db(db: &std::path::Path) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = ServerConfig::defaults(addr, Region::Nyc);
+    let store = fetchit_relay_server::SqliteTransitStore::open(
+        db,
+        cfg.transit_ttl,
+        cfg.transit_per_recipient,
+        cfg.transit_total_bytes_cap,
+    )
+    .unwrap();
+    let server = Server::new(cfg)
+        .with_verifier(Arc::new(AcceptAllVerifier))
+        .with_transit_store(Arc::new(store));
+    let (router, _state) = server.router();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    addr
+}
+
+/// Durable floor: an envelope buffered for an offline recipient by one
+/// server instance is replayed by a DIFFERENT instance opening the
+/// same `SQLite` store — the restart-survival contract the RAM buffer
+/// cannot give.
+#[tokio::test]
+async fn buffered_envelope_survives_server_restart_with_sqlite_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("transit.db");
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let frank_pk = b"frank-pubkey-bytes-here";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let frank_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(frank_pk));
+
+    // Instance 1: alice deposits for offline frank, then the
+    // "process" goes away (we simply stop using it).
+    let addr1 = start_test_server_with_transit_db(&db).await;
+    let alice_tok = obtain_bearer(addr1, alice_pk).await;
+    let mut alice = connect_ws(addr1, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+    let payload = b"outlives the process";
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: frank_id,
+        envelope: envelope_from(alice_id, payload),
+        dedupe_key: DedupeKey::from_bytes([0xdd; 16]),
+    });
+    alice
+        .send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+    wait_for_ack(&mut alice).await;
+    drop(alice);
+
+    // Instance 2: fresh ServerState, same durable store.
+    let addr2 = start_test_server_with_transit_db(&db).await;
+    let frank_tok = obtain_bearer(addr2, frank_pk).await;
+    let mut frank = connect_ws(addr2, &frank_tok).await;
+    send_hello(&mut frank).await;
+    let _ = expect_ready(&mut frank).await;
+    let d = wait_for_deliver(&mut frank).await;
+    assert_eq!(d.envelope.ciphertext, payload);
+    assert!(d.transit_seq > 0, "durable replay carries its store id");
+}
+
 /// At-least-once delivery: a buffered envelope replayed to a client
 /// that disconnects without acking must be replayed again on the next
 /// connect (not lost with the dead socket); a `TransitAck` reclaims it
