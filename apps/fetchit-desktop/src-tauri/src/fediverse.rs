@@ -139,19 +139,12 @@ pub async fn fediverse_mint(
     let relay = chat_state.relay_url();
     let registry = url::Url::parse(&format!("https://{DEFAULT_FEDI_DOMAIN}/"))
         .map_err(|e| format!("bad registry base URL: {e}"))?;
-    // Honour the runtime custody (keychain -> None, passphrase -> Some) so
-    // the actor vault seals under the same master as the chat identity.
-    let passphrase = chat_state.current_passphrase().await;
+    // The engine client retains the runtime custody it was built with
+    // (keychain or passphrase), so the actor vault seals under the same
+    // master as the chat identity with no per-call threading.
     let client = chat_state.get().await?;
     let outcome = client
-        .mint_and_register_actor(
-            &handle,
-            DEFAULT_FEDI_DOMAIN,
-            passphrase.as_deref(),
-            &relay,
-            &registry,
-            now_ms(),
-        )
+        .mint_and_register_actor(&handle, DEFAULT_FEDI_DOMAIN, &relay, &registry, now_ms())
         .await
         .map_err(|e| e.to_string())?;
     if let Ok(mut s) = app_state.settings.lock() {
@@ -205,17 +198,11 @@ pub async fn fediverse_ensure_v2(
     };
     let client = chat_state.get().await?;
     let upgraded = client
-        .upgrade_actor_attestation_v2(
-            &handle,
-            None,
-            &record.profile_addr,
-            relay.as_str(),
-            now_ms(),
-        )
+        .upgrade_actor_attestation_v2(&handle, &record.profile_addr, relay.as_str(), now_ms())
         .await
         .map_err(|e| e.to_string())?;
     let identity = client
-        .load_actor_identity(&handle, None)
+        .load_actor_identity(&handle)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no actor identity for {handle}"))?;
@@ -263,7 +250,7 @@ pub async fn fediverse_publish(
     };
     let client = chat_state.get().await?;
     let report = client
-        .publish_public_post(&handle, None, &post)
+        .publish_public_post(&handle, &post)
         .await
         .map_err(|e| e.to_string())?;
     Ok(PublishReportDto {

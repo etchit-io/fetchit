@@ -281,13 +281,6 @@ impl ChatState {
             .map_or_else(|p| p.into_inner().clone(), |g| g.clone())
     }
 
-    /// The active at-rest custody passphrase (`None` = OS-keychain mode).
-    /// Lets sibling command modules seal new vaults under the same master
-    /// the chat client uses, without exposing the inner lock.
-    pub(crate) async fn current_passphrase(&self) -> Option<String> {
-        self.passphrase.lock().await.clone()
-    }
-
     /// The chat data-dir root. Used by the profile commands to read and
     /// write the per-contact downgrade watermark.
     #[must_use]
