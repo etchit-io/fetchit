@@ -129,26 +129,6 @@ impl TransitBuffer {
         }
     }
 
-    /// Remove and return every envelope currently buffered for `to`
-    /// (destructive).
-    ///
-    /// Retained for the legacy reconnect-drain path; superseded by
-    /// [`TransitStore::read_all`] + [`TransitStore::delete`], which do
-    /// not lose messages on a mid-delivery disconnect.
-    #[must_use]
-    pub fn drain(&self, to: &AgentId) -> Vec<Entry> {
-        let Some((_, q)) = self.by_recipient.remove(to) else {
-            return Vec::new();
-        };
-        let out: Vec<Entry> = q.into_iter().map(|(_, e)| e).collect();
-        let mut freed = 0usize;
-        for entry in &out {
-            freed = freed.saturating_add(envelope_size(&entry.envelope));
-        }
-        self.total_bytes.fetch_sub(freed, Ordering::Relaxed);
-        out
-    }
-
     fn reserve_bytes(&self, size: usize) -> Result<(), ServerError> {
         let mut current = self.total_bytes.load(Ordering::Relaxed);
         loop {
@@ -276,19 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_then_drain_returns_in_fifo_order() {
+    fn enqueue_then_read_all_returns_in_fifo_order() {
         let b = TransitBuffer::new(Duration::from_secs(60), 10, usize::MAX);
         let to = AgentId::from_bytes([9u8; 32]);
         b.enqueue(to, env_for(1)).unwrap();
         b.enqueue(to, env_for(2)).unwrap();
-        let drained = b.drain(&to);
-        assert_eq!(drained.len(), 2);
+        let stored = b.read_all(&to);
+        assert_eq!(stored.len(), 2);
         assert_eq!(
-            drained[0].envelope.sender_agent_id,
+            stored[0].envelope.sender_agent_id,
             AgentId::from_bytes([1; 32])
         );
         assert_eq!(
-            drained[1].envelope.sender_agent_id,
+            stored[1].envelope.sender_agent_id,
             AgentId::from_bytes([2; 32])
         );
     }
@@ -319,12 +299,12 @@ mod tests {
     }
 
     #[test]
-    fn drain_clears_the_buffer() {
+    fn delete_all_ids_empties_the_buffer() {
         let b = TransitBuffer::new(Duration::from_secs(60), 10, usize::MAX);
         let to = AgentId::from_bytes([9u8; 32]);
-        b.enqueue(to, env_for(1)).unwrap();
-        let _ = b.drain(&to);
-        assert!(b.drain(&to).is_empty());
+        let id = b.enqueue(to, env_for(1)).unwrap();
+        b.delete(&to, &[id]);
+        assert!(b.read_all(&to).is_empty());
         assert!(b.is_empty());
     }
 

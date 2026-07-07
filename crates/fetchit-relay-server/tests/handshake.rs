@@ -16,7 +16,8 @@ use fetchit_relay_proto::pair_record::{
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
     ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, PresenceUpdate,
-    Ready, Region, SendFrame, ServerFrame, TenantId, TransitEnvelope, WatchPresence, WIRE_VERSION,
+    Ready, Region, SendFrame, ServerFrame, TenantId, TransitAck, TransitEnvelope, WatchPresence,
+    WIRE_VERSION,
 };
 use fetchit_relay_server::server::ServerState;
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
@@ -359,6 +360,137 @@ async fn offline_recipient_gets_buffered_message_on_connect() {
         other => panic!("expected Deliver, got {other:?}"),
     };
     assert_eq!(d.envelope.ciphertext, payload);
+}
+
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn wait_for_ack(ws: &mut WsStream) {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("ack timed out")
+            .unwrap()
+            .unwrap();
+        if let Message::Binary(b) = msg {
+            if matches!(
+                from_bytes::<ServerFrame>(&b).unwrap(),
+                ServerFrame::Ack(Ack { .. })
+            ) {
+                break;
+            }
+        }
+    }
+}
+
+async fn wait_for_deliver(ws: &mut WsStream) -> Deliver {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("deliver timed out")
+            .unwrap()
+            .unwrap();
+        if let Message::Binary(b) = msg {
+            if let ServerFrame::Deliver(d) = from_bytes::<ServerFrame>(&b).unwrap() {
+                return d;
+            }
+        }
+    }
+}
+
+/// Read frames for `window`, panicking if a `Deliver` shows up.
+/// Non-Deliver frames (presence updates etc.) are ignored.
+async fn assert_no_deliver(ws: &mut WsStream, window: Duration) {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let Ok(next) = tokio::time::timeout(remaining, ws.next()).await else {
+            return; // window elapsed with no Deliver
+        };
+        let Some(Ok(Message::Binary(b))) = next else {
+            continue;
+        };
+        if let ServerFrame::Deliver(d) = from_bytes::<ServerFrame>(&b).unwrap() {
+            panic!("expected no Deliver after ack, got {d:?}");
+        }
+    }
+}
+
+/// At-least-once delivery: a buffered envelope replayed to a client
+/// that disconnects without acking must be replayed again on the next
+/// connect (not lost with the dead socket); a `TransitAck` reclaims it
+/// so later connects stay silent.
+#[tokio::test]
+async fn unacked_delivery_replays_on_reconnect_until_acked() {
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let erin_pk = b"erin-pubkey-bytes-here";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let erin_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(erin_pk));
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    let payload = b"survives a flaky socket";
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: erin_id,
+        envelope: envelope_from(alice_id, payload),
+        dedupe_key: DedupeKey::from_bytes([0xcc; 16]),
+    });
+    alice
+        .send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+    wait_for_ack(&mut alice).await;
+
+    // First connect: the buffered envelope arrives with a durable id…
+    let erin_tok = obtain_bearer(addr, erin_pk).await;
+    let mut erin = connect_ws(addr, &erin_tok).await;
+    send_hello(&mut erin).await;
+    let _ = expect_ready(&mut erin).await;
+    let first = wait_for_deliver(&mut erin).await;
+    assert_eq!(first.envelope.ciphertext, payload);
+    assert!(
+        first.transit_seq > 0,
+        "durable replay must carry a non-zero transit id"
+    );
+    // …but erin drops without acking.
+    drop(erin);
+
+    // Second connect: the same envelope must be replayed, not lost.
+    let erin_tok = obtain_bearer(addr, erin_pk).await;
+    let mut erin = connect_ws(addr, &erin_tok).await;
+    send_hello(&mut erin).await;
+    let _ = expect_ready(&mut erin).await;
+    let second = wait_for_deliver(&mut erin).await;
+    assert_eq!(second.envelope.ciphertext, payload);
+    assert_eq!(
+        second.transit_seq, first.transit_seq,
+        "durable id is stable across replays"
+    );
+
+    // Ack it; a fresh connect must now be silent.
+    let ack = ClientFrame::TransitAck(TransitAck {
+        acked_ids: vec![second.transit_seq],
+    });
+    erin.send(Message::Binary(to_bytes(&ack).unwrap()))
+        .await
+        .unwrap();
+    // Let the server process the ack before tearing the socket down.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(erin);
+
+    let erin_tok = obtain_bearer(addr, erin_pk).await;
+    let mut erin = connect_ws(addr, &erin_tok).await;
+    send_hello(&mut erin).await;
+    let _ = expect_ready(&mut erin).await;
+    assert_no_deliver(&mut erin, Duration::from_millis(400)).await;
 }
 
 #[tokio::test]

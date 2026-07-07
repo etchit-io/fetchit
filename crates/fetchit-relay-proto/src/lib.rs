@@ -30,7 +30,7 @@ pub use envelope::{EnvelopeKind, TransitEnvelope, WIRE_VERSION};
 pub use error::ProtoError;
 pub use frame::{
     Ack, Bye, ByeReason, ClientFrame, Deliver, Hello, Moved, Ping, Pong, PresenceUpdate, Ready,
-    SendFrame, ServerFrame, Subscribe, Throttle, ThrottleReason, WatchPresence,
+    SendFrame, ServerFrame, Subscribe, Throttle, ThrottleReason, TransitAck, WatchPresence,
 };
 pub use identity::{
     derive_agent_id, derive_user_id, AgentId, DedupeKey, GroupId, MachineId, TenantId,

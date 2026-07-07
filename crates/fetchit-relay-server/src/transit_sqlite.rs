@@ -87,8 +87,8 @@ impl SqliteTransitStore {
 
 impl TransitStore for SqliteTransitStore {
     fn enqueue(&self, to: AgentId, envelope: TransitEnvelope) -> Result<u64, ServerError> {
-        let bytes =
-            postcard::to_allocvec(&envelope).map_err(|e| ServerError::TransitStore(e.to_string()))?;
+        let bytes = postcard::to_allocvec(&envelope)
+            .map_err(|e| ServerError::TransitStore(e.to_string()))?;
         let size = row_size(&envelope);
         let rid: &[u8] = to.as_bytes();
         let conn = self
@@ -112,7 +112,11 @@ impl TransitStore for SqliteTransitStore {
                 |r| r.get(0),
             )
             .map_err(|e| ServerError::TransitStore(e.to_string()))?;
-        if usize::try_from(total).unwrap_or(usize::MAX).saturating_add(size) > self.max_total_bytes {
+        if usize::try_from(total)
+            .unwrap_or(usize::MAX)
+            .saturating_add(size)
+            > self.max_total_bytes
+        {
             return Err(ServerError::TransitBufferFull);
         }
         conn.execute(
@@ -236,7 +240,8 @@ mod tests {
         let path = dir.path().join("transit.db");
         let to = AgentId::from_bytes([9u8; 32]);
         let id = {
-            let s = SqliteTransitStore::open(&path, Duration::from_secs(3600), 256, 1 << 30).unwrap();
+            let s =
+                SqliteTransitStore::open(&path, Duration::from_secs(3600), 256, 1 << 30).unwrap();
             let id = s.enqueue(to, env()).unwrap();
             assert_eq!(s.read_all(&to).len(), 1);
             id
