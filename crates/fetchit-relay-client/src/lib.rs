@@ -16,5 +16,5 @@ pub use client::{Client, ClientConfig, ConnState};
 pub use error::ClientError;
 pub use outbox::Receipt;
 pub use region_probe::{default_relay_urls, probe, ProbeResult, RelayDescriptor, DEFAULT_RELAYS};
-pub use relay_set::RelaySet;
+pub use relay_set::{RelaySet, SetDelivery};
 pub use signer::{MlDsaSigner, Signer, StaticKeySigner, X0xdSigner};

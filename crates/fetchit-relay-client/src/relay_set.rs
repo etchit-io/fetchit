@@ -23,6 +23,19 @@ use fetchit_relay_proto::{AgentId, DedupeKey, Deliver, PresenceUpdate, TransitEn
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, Mutex};
 
+/// A delivery from the merged inbox, tagged with the index of the
+/// relay that delivered it (positions match the `configs` order given
+/// to [`RelaySet::connect`]). The tag is what makes acking safe:
+/// `Deliver::transit_seq` ids are relay-local, so a
+/// [`RelaySet::ack_transit`] must go back to exactly this relay.
+#[derive(Debug)]
+pub struct SetDelivery {
+    /// Index of the delivering relay within the set.
+    pub relay: usize,
+    /// The delivered envelope frame.
+    pub deliver: Deliver,
+}
+
 /// One per-relay session a peer maintains concurrently with N-1 others.
 ///
 /// All sessions share the same [`Signer`] (identity is per-peer, not
@@ -37,10 +50,12 @@ pub struct RelaySet {
     states_rx: watch::Receiver<Vec<ConnState>>,
     /// Merged inbox: every relay's `Client::next_delivery` stream is
     /// forwarded into this single channel by a per-relay task spawned
-    /// in `connect`. Caller-side dedupe (when needed) lives at the
+    /// in `connect`, tagged with the delivering relay's index so
+    /// transit acks can be routed back to the SAME relay (transit ids
+    /// are relay-local). Caller-side dedupe (when needed) lives at the
     /// chat layer keyed off the envelope's `message_id`; the recipient's
     /// x0xd is the source-of-truth dedupe via canonical event hash.
-    inbox_rx: Mutex<mpsc::UnboundedReceiver<Deliver>>,
+    inbox_rx: Mutex<mpsc::UnboundedReceiver<SetDelivery>>,
     /// Merged presence: every relay's `Client::next_presence` stream
     /// is forwarded into this single channel. Same per-relay forwarder
     /// pattern as `inbox_rx`. Duplicates absorb at the chat layer.
@@ -119,12 +134,18 @@ impl RelaySet {
         // (the chat layer) handles dedupe via `message_id`; x0xd at the
         // recipient is the canonical-event-hash source of truth.
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
-        for relay in &relays {
+        for (idx, relay) in relays.iter().enumerate() {
             let r = Arc::clone(relay);
             let tx = inbox_tx.clone();
             tokio::spawn(async move {
                 while let Some(d) = r.next_delivery().await {
-                    if tx.send(d).is_err() {
+                    if tx
+                        .send(SetDelivery {
+                            relay: idx,
+                            deliver: d,
+                        })
+                        .is_err()
+                    {
                         // Receiver was dropped — RelaySet is being torn
                         // down. Exit cleanly so the per-relay task
                         // doesn't leak across the rest of the process
@@ -279,7 +300,33 @@ impl RelaySet {
     /// Returns `None` once every relay has shut down — useful for the
     /// orderly-drain shutdown path.
     pub async fn next_delivery(&self) -> Option<Deliver> {
+        self.next_delivery_tagged().await.map(|t| t.deliver)
+    }
+
+    /// Like [`Self::next_delivery`] but tagged with the index of the
+    /// relay that delivered, so the caller can route a
+    /// [`Self::ack_transit`] back to the SAME relay after it has
+    /// durably processed the envelope. Consumers that ack must use
+    /// this variant — the untagged one discards the routing needed to
+    /// ack safely.
+    pub async fn next_delivery_tagged(&self) -> Option<SetDelivery> {
         self.inbox_rx.lock().await.recv().await
+    }
+
+    /// Confirm durable transit ids to the relay at index `relay` (as
+    /// tagged on the [`SetDelivery`] the ids came from). Ids are
+    /// relay-local: acking them on any other relay could reclaim
+    /// unrelated entries, so out-of-range indices are rejected rather
+    /// than broadcast.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when `relay` is out of
+    /// range or that relay's supervisor has shut down.
+    pub fn ack_transit(&self, relay: usize, acked_ids: Vec<u64>) -> Result<(), ClientError> {
+        let Some(client) = self.relays.get(relay) else {
+            return Err(ClientError::InboxClosed);
+        };
+        client.ack_transit(acked_ids)
     }
 
     /// Fan-out send to every relay in the set.

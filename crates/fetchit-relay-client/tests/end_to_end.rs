@@ -86,6 +86,69 @@ async fn client_round_trip_send_and_receive() {
     assert_eq!(delivery.envelope.sender_agent_id, alice_id);
 }
 
+/// Client half of the at-least-once contract: a durable replay left
+/// unacked redelivers on the next connect; `Client::ack_transit`
+/// reclaims it so later connects are silent.
+#[tokio::test]
+async fn ack_transit_stops_redelivery_across_reconnects() {
+    let addr = start_server().await;
+    let base = Url::parse(&format!("http://{addr}/")).unwrap();
+
+    let alice_signer = Arc::new(StaticKeySigner::from_public_key(
+        b"alice-public-key".to_vec(),
+    ));
+    let carol_signer = Arc::new(StaticKeySigner::from_public_key(
+        b"carol-public-key-x".to_vec(),
+    ));
+    let alice_id = AgentId::from_bytes(alice_signer.agent_id());
+    let carol_id = AgentId::from_bytes(carol_signer.agent_id());
+
+    // Buffer an envelope for offline carol.
+    let alice = Client::connect(ClientConfig::new(base.clone()), alice_signer)
+        .await
+        .unwrap();
+    alice
+        .send(
+            carol_id,
+            envelope_from(alice_id, b"ack me"),
+            DedupeKey::from_bytes([0xa1; 16]),
+        )
+        .await
+        .unwrap();
+
+    // First connect: durable replay arrives; carol drops WITHOUT acking.
+    let carol = Client::connect(ClientConfig::new(base.clone()), carol_signer.clone())
+        .await
+        .unwrap();
+    let d1 = tokio::time::timeout(Duration::from_secs(2), carol.next_delivery())
+        .await
+        .expect("first delivery timed out")
+        .unwrap();
+    assert!(d1.transit_seq > 0, "durable replay carries its store id");
+    carol.shutdown().await;
+
+    // Second connect: redelivered with the same id; ack it this time.
+    let carol = Client::connect(ClientConfig::new(base.clone()), carol_signer.clone())
+        .await
+        .unwrap();
+    let d2 = tokio::time::timeout(Duration::from_secs(2), carol.next_delivery())
+        .await
+        .expect("redelivery timed out")
+        .unwrap();
+    assert_eq!(d2.transit_seq, d1.transit_seq);
+    carol.ack_transit(vec![d2.transit_seq]).unwrap();
+    // Give the fire-and-forget ack a beat to land server-side.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    carol.shutdown().await;
+
+    // Third connect: the entry is reclaimed — silence.
+    let carol = Client::connect(ClientConfig::new(base), carol_signer)
+        .await
+        .unwrap();
+    let res = tokio::time::timeout(Duration::from_millis(400), carol.next_delivery()).await;
+    assert!(res.is_err(), "expected no redelivery after ack");
+}
+
 #[tokio::test]
 async fn real_pq_signatures_authenticate_against_the_real_verifier() {
     use fetchit_relay_server::MlDsa65Verifier;
