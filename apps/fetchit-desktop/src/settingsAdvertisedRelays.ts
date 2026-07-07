@@ -127,8 +127,10 @@ export const ADVERTISED_RELAYS_HTML = `
   <details class="setting-collapsible" id="advertised-relays-details">
     <summary>Advertise relays in my contact card</summary>
     <p class="setting-desc">
-      Other agents will dial you through these relays.
-      <code>wss://</code> only.
+      Contacts dial you through these relays. The list is published in your
+      contact card, so anyone you share it with sees which relays you use;
+      a relay that is down or wrong makes you unreachable until contacts
+      receive your next card. <code>wss://</code> only.
     </p>
     <div id="${ADVERTISED_RELAYS_IDS.list}"></div>
     <div class="setting-actions">

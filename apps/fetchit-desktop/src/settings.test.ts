@@ -182,6 +182,40 @@ describe("relay region picker", () => {
     );
   });
 
+  it("keeps every power control inside the collapsed Advanced section", () => {
+    // Grandma bar: the primary settings surface carries only simple,
+    // safe items. Relay/network config, bootstrap peers, the byte
+    // cache, and advertised relays all live under Advanced; identity
+    // backup deliberately stays first-class (recovery is critical
+    // path).
+    mountSettings(host, defaultHooks());
+    const advanced = host.querySelector<HTMLElement>("#group-advanced")!;
+    for (const id of [
+      "relay-region",
+      "relay-custom-url",
+      "idle-timeout",
+      "lan-direct-enabled",
+      "advertised-relays-details",
+      "peers-editor",
+      "cache-enabled",
+      "clear-cache",
+    ]) {
+      const el = host.querySelector(`#${id}`);
+      expect(el, `#${id} must exist`).toBeTruthy();
+      expect(advanced.contains(el), `#${id} must be inside Advanced`).toBe(true);
+    }
+    for (const id of ["group-backup", "group-bookmarks"]) {
+      const el = host.querySelector(`#${id}`);
+      expect(el, `#${id} must exist`).toBeTruthy();
+      expect(advanced.contains(el), `#${id} must stay primary`).toBe(false);
+    }
+    const details = advanced.querySelector<HTMLDetailsElement>(
+      ":scope > details.setting-collapsible",
+    );
+    expect(details, "Advanced must be collapsible").toBeTruthy();
+    expect(details!.open, "Advanced must start collapsed").toBe(false);
+  });
+
   it("invokes set_relay_url with the canonical URL when a region is picked", async () => {
     (invoke as unknown as InvokeMock).mockImplementation(makeRouter());
     const api = mountSettings(host, defaultHooks());
