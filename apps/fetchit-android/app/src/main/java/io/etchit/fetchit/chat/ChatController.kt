@@ -75,8 +75,18 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      */
     val groups: StateFlow<List<GroupFfi>> = _groups.asStateFlow()
 
+    private val _pendingJoins = MutableStateFlow<List<String>>(emptyList())
+
+    /**
+     * Group ids with a durable join still completing. The list screen draws
+     * these as "joining…"; they clear themselves when the resume pump
+     * ([startPendingJoinPump]) converges the join -- no user action needed.
+     */
+    val pendingJoins: StateFlow<List<String>> = _pendingJoins.asStateFlow()
+
     @Volatile private var gateway: ChatGateway? = null
     private var pump: Job? = null
+    private var pendingJoinPump: Job? = null
     private val connectMutex = Mutex()
 
     private val _pumpState = MutableStateFlow(PumpState.IDLE)
@@ -123,6 +133,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                         if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
                 },
             )
+            // Durable-join resume pump: advance any pending join on a timer so a
+            // join that could not converge now (owner offline) auto-completes
+            // when the owner returns -- no user action, no re-spent invite.
+            pendingJoinPump = startPendingJoinPump(gw)
             // Subscribe-first: the pump above is already draining outbox events.
             // Now start the retry driver and hydrate any bubbles that were
             // enqueued (and vault-persisted) before this process subscribed.
@@ -152,6 +166,45 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     suspend fun refreshGroups() {
         val gw = gateway ?: return
         loadGroups(gw)
+    }
+
+    /**
+     * Re-read the pending-join set so a freshly-`Pending` join shows "joining…"
+     * immediately, without waiting for the next pump tick. No-op when not
+     * connected; a read failure leaves the set unchanged.
+     */
+    fun refreshPendingJoins() {
+        val gw = gateway ?: return
+        _pendingJoins.value = runCatching { gw.pendingJoins() }.getOrDefault(_pendingJoins.value)
+    }
+
+    /**
+     * Launch the durable-join resume pump on the controller scope: every few
+     * seconds advance any pending join one step and publish the still-pending
+     * set. A join that could not converge at submit time (owner offline)
+     * auto-completes here when the owner returns -- no user action, no re-spent
+     * invite. When a group leaves the pending set (converged) the group list is
+     * refreshed so it surfaces. A no-op tick when nothing is pending.
+     */
+    private fun startPendingJoinPump(gw: ChatGateway): Job = scope.launch {
+        while (true) {
+            val stillPending = try {
+                gw.drivePendingJoins()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("fetchit.chat", "pending-join pump tick failed", e)
+                _pendingJoins.value
+            }
+            val converged = _pendingJoins.value.any { it !in stillPending }
+            _pendingJoins.value = stillPending
+            if (converged) {
+                runCatching { refreshGroups() }
+            }
+            // 3s: fast enough that a returning owner converges the join within a
+            // few seconds, cheap enough to idle-poll for the session's life.
+            delay(3_000L)
+        }
     }
 
     /**
@@ -347,6 +400,9 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         gateway = null
         pump?.cancel()
         pump = null
+        pendingJoinPump?.cancel()
+        pendingJoinPump = null
+        _pendingJoins.value = emptyList()
         // A deliberate teardown reads as clean even after an error stop, but
         // a controller that never connected stays IDLE.
         if (_pumpState.value != PumpState.IDLE) {

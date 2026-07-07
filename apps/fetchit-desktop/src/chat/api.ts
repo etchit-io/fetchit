@@ -224,14 +224,39 @@ export async function groupInvite(groupId: string): Promise<string> {
   return invoke<string>("chat_group_invite", { groupId });
 }
 
+/**
+ * Outcome of a durable group join. `pending` is NOT an error -- the join is a
+ * resumable intent the resume pump completes when the owner is reachable, so
+ * the invite is never wasted and no scary error shows just because the owner
+ * is offline.
+ */
+export type GroupJoinOutcome =
+  | { status: "converged"; group: Group }
+  | { status: "pending"; group_id: string };
+
 export async function joinGroup(
   invite: string,
   displayName?: string,
-): Promise<Group> {
-  return invoke<Group>("chat_group_join", {
+): Promise<GroupJoinOutcome> {
+  return invoke<GroupJoinOutcome>("chat_group_join", {
     invite,
     displayName: displayName ?? null,
   });
+}
+
+/** Group ids with a durable join still in progress (draw "joining…"). */
+export async function pendingJoins(): Promise<string[]> {
+  return invoke<string[]>("chat_pending_joins");
+}
+
+/**
+ * Advance every due durable join one step; returns the group ids STILL
+ * pending, so a timer can refresh "joining…" state and detect convergence (a
+ * group leaving the set). Idempotent; a no-op when nothing is pending, and
+ * never a second join_post.
+ */
+export async function drivePendingJoins(): Promise<string[]> {
+  return invoke<string[]>("chat_drive_pending_joins");
 }
 
 export async function sendGroupMessage(

@@ -36,7 +36,7 @@ pub use chat_ffi::{
     ChatClient, ChatEventFfi, ChatHistoryMessageFfi, OutboxBubbleFfi, OutboxStatusFfi,
 };
 pub use error::FetchitError;
-pub use group_ffi::GroupFfi;
+pub use group_ffi::{GroupFfi, JoinOutcomeFfi};
 pub use member_ffi::GroupMemberFfi;
 pub use rendition_ffi::{ArchiveEntryFFI, RenditionFFI};
 

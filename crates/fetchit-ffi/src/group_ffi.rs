@@ -40,6 +40,28 @@ impl From<fetchit_chat::groups::Group> for GroupFfi {
     }
 }
 
+/// Outcome of a durable join, surfaced to Android
+/// ([`crate::ChatClient::join_group_durable`]). `Converged` carries the live
+/// group; `Pending` carries only the group id -- the join is a durable intent
+/// the resume pump completes when the owner is next reachable, so the shell
+/// draws "joining…" instead of a failure. Mirrors
+/// [`fetchit_chat::groups::JoinOutcome`].
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum JoinOutcomeFfi {
+    /// Fully joined and keyed -- usable immediately.
+    Converged {
+        /// The joined group.
+        group: GroupFfi,
+    },
+    /// Join accepted but not yet converged; the resume pump
+    /// ([`crate::ChatClient::drive_pending_joins_once`]) finishes it with no
+    /// user action and no re-spent invite. Draw "joining…".
+    Pending {
+        /// 64-hex group id being joined.
+        group_id: String,
+    },
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

@@ -232,6 +232,7 @@
     <string name="chat_group_new_invite">new invite</string>
     <string name="chat_group_create_failed">couldn\'t create the group — try again in a moment</string>
     <string name="chat_group_join_failed">couldn\'t join the group — check the invite and try again</string>
+    <string name="chat_group_join_pending">joining the group… this finishes on its own when the owner is back online</string>
     <string name="chat_group_sender_unknown">someone</string>
     <string name="chat_group_lock_glyph">🔒</string>
 

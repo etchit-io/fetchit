@@ -977,24 +977,82 @@ pub async fn chat_group_invite(
     Ok(invite.0)
 }
 
+/// Outcome of a durable group join, sent to the frontend as an internally-
+/// tagged JSON object: `{status:"converged", group:{…}}` or
+/// `{status:"pending", group_id:"…"}`. Mirrors
+/// [`fetchit_chat::groups::JoinOutcome`] -- `Pending` is NOT an error, it is a
+/// resumable intent the resume pump completes when the owner is reachable.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum GroupJoinOutcome {
+    /// Fully joined and keyed -- usable immediately.
+    Converged {
+        /// The joined group.
+        group: fetchit_chat::groups::Group,
+    },
+    /// Join accepted but not yet converged; the resume pump finishes it.
+    Pending {
+        /// 64-hex group id being joined.
+        group_id: String,
+    },
+}
+
 #[tauri::command]
 pub async fn chat_group_join(
     app_state: tauri::State<'_, AppState>,
     state: tauri::State<'_, ChatState>,
     invite: String,
     display_name: Option<String>,
-) -> Result<fetchit_chat::groups::Group, String> {
+) -> Result<GroupJoinOutcome, String> {
     ensure_chat_enabled(&app_state)?;
-    // Native warm-gossip join first (so existing members converge via
-    // gossip against the gossip-on x0xd this shell spawns), with the
-    // engine-A relay bridge as the dual-NAT fallback. join_group_auto
-    // consumes the single-use invite exactly once across both paths.
-    state
+    // Durable join: best-effort native warm-gossip + engine-A relay bridge as
+    // before, but a join that cannot converge now (owner offline) returns a
+    // resumable `Pending` instead of erroring. The single-use invite is spent
+    // at most once, and `chat_drive_pending_joins` completes a `Pending` when
+    // the owner is next reachable -- no user action, no re-spent invite.
+    let outcome = state
         .get()
         .await?
-        .join_group_auto(&GroupInvite(invite), display_name.as_deref())
+        .join_group_durable(&GroupInvite(invite), display_name.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(match outcome {
+        fetchit_chat::groups::JoinOutcome::Converged(group) => {
+            GroupJoinOutcome::Converged { group }
+        }
+        fetchit_chat::groups::JoinOutcome::Pending { group_id } => {
+            GroupJoinOutcome::Pending { group_id }
+        }
+    })
+}
+
+/// Group ids with a durable join still in progress -- the frontend draws these
+/// as "joining…" rather than a failure.
+#[tauri::command]
+pub async fn chat_pending_joins(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<Vec<String>, String> {
+    ensure_chat_enabled(&app_state)?;
+    state.get().await?.pending_joins().map_err(|e| e.to_string())
+}
+
+/// Advance every due durable join one step and return the group ids STILL
+/// pending, so the frontend's timer can refresh "joining…" state and detect
+/// convergence (a group leaving the set). Idempotent, a no-op when nothing is
+/// pending, and never a second `join_post`.
+#[tauri::command]
+pub async fn chat_drive_pending_joins(
+    app_state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, ChatState>,
+) -> Result<Vec<String>, String> {
+    ensure_chat_enabled(&app_state)?;
+    let client = state.get().await?;
+    client
+        .drive_pending_joins_once()
+        .await
+        .map_err(|e| e.to_string())?;
+    client.pending_joins().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

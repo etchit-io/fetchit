@@ -1271,6 +1271,8 @@ pub fn run() {
             chat::chat_group_create,
             chat::chat_group_invite,
             chat::chat_group_join,
+            chat::chat_pending_joins,
+            chat::chat_drive_pending_joins,
             chat::chat_group_send,
             chat::chat_group_messages,
             chat::chat_group_leave,

@@ -4,6 +4,7 @@
 // initial state from the daemon.
 
 import {
+  drivePendingJoins,
   getDisplayName,
   health,
   identity,
@@ -454,6 +455,14 @@ export function mountChatPanel(
             void refreshGroups();
             store.setActive({ kind: "group", groupId: group.group_id });
           },
+          onPending: (groupId) => {
+            // Durable join accepted but not converged yet (owner offline). Keep
+            // the invite alive and start the resume pump; the group surfaces in
+            // the list on its own when the owner returns. No error shown.
+            hideDialog();
+            ensurePendingJoinPump(groupId);
+            void refreshGroups();
+          },
         },
         initialUri,
       );
@@ -581,6 +590,41 @@ export function mountChatPanel(
     } catch (e) {
       console.warn("[chat] groups refresh failed:", e);
     }
+  };
+
+  // Durable-join resume pump: while any join is pending (the owner was offline
+  // at join time), advance it every few seconds until it converges, then
+  // refresh the group list so it surfaces — no user action, no re-spent
+  // invite. Self-stopping when nothing is pending; re-armed on the next
+  // Pending join.
+  let pendingJoinTimer: ReturnType<typeof setInterval> | undefined;
+  let lastPending: string[] = [];
+  const stopPendingJoinPump = (): void => {
+    if (pendingJoinTimer !== undefined) {
+      clearInterval(pendingJoinTimer);
+      pendingJoinTimer = undefined;
+    }
+  };
+  const ensurePendingJoinPump = (groupId?: string): void => {
+    if (groupId && !lastPending.includes(groupId)) {
+      lastPending = [...lastPending, groupId];
+    }
+    if (pendingJoinTimer !== undefined) return;
+    pendingJoinTimer = setInterval(() => {
+      void (async () => {
+        let stillPending: string[];
+        try {
+          stillPending = await drivePendingJoins();
+        } catch (e) {
+          console.warn("[chat] pending-join pump:", e);
+          return;
+        }
+        const converged = lastPending.some((id) => !stillPending.includes(id));
+        lastPending = stillPending;
+        if (converged) void refreshGroups();
+        if (stillPending.length === 0) stopPendingJoinPump();
+      })();
+    }, 3000);
   };
 
   let docked = readDockPref();
@@ -718,6 +762,7 @@ export function mountChatPanel(
     document.body.classList.remove("chat-docked");
     store.setPanelVisible(false);
     stopStalenessTick();
+    stopPendingJoinPump();
     if (bootstrapRetryTimer !== null) {
       clearTimeout(bootstrapRetryTimer);
       bootstrapRetryTimer = null;

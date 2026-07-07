@@ -4,7 +4,10 @@ import { mountJoinGroup } from "./joinGroup";
 const joinGroupMock =
   vi.fn<
     (invite: string, displayName?: string) =>
-      Promise<{ group_id: string; name: string }>
+      Promise<
+        | { status: "converged"; group: { group_id: string; name: string } }
+        | { status: "pending"; group_id: string }
+      >
   >();
 
 vi.mock("./api", () => ({
@@ -55,8 +58,11 @@ describe("mountJoinGroup", () => {
     expect(btn.disabled).toBe(false);
   });
 
-  it("calls the API and onJoined on submit", async () => {
-    joinGroupMock.mockResolvedValueOnce({ group_id: "g1", name: "fam" });
+  it("calls the API and onJoined on a converged submit", async () => {
+    joinGroupMock.mockResolvedValueOnce({
+      status: "converged",
+      group: { group_id: "g1", name: "fam" },
+    });
     const onJoined = vi.fn();
     mountJoinGroup(host, "me", { onClose: () => {}, onJoined }, VALID);
     const btn = host.querySelector<HTMLButtonElement>(".chat-dialog__btn")!;
@@ -65,6 +71,26 @@ describe("mountJoinGroup", () => {
     await Promise.resolve();
     expect(joinGroupMock).toHaveBeenCalledWith(VALID, "me");
     expect(onJoined).toHaveBeenCalledWith({ group_id: "g1", name: "fam" });
+  });
+
+  it("treats a Pending outcome as joining, not a failure", async () => {
+    joinGroupMock.mockResolvedValueOnce({ status: "pending", group_id: "g2" });
+    const onJoined = vi.fn();
+    const onPending = vi.fn();
+    mountJoinGroup(
+      host,
+      "me",
+      { onClose: () => {}, onJoined, onPending },
+      VALID,
+    );
+    const btn = host.querySelector<HTMLButtonElement>(".chat-dialog__btn")!;
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const status = host.querySelector<HTMLElement>(".chat-dialog__status")!;
+    expect(status.textContent).toContain("Joining…");
+    expect(onPending).toHaveBeenCalledWith("g2");
+    expect(onJoined).not.toHaveBeenCalled();
   });
 
   it("surfaces daemon errors in the status row and re-enables Join", async () => {

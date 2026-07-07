@@ -40,6 +40,7 @@ import kotlinx.coroutines.withContext
 import uniffi.fetchit_ffi.ChatFfiException
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.enrollConfirmedDevice
 import java.io.File
@@ -1118,13 +1119,33 @@ class ChatModeView(
         lifecycleScope.launch {
             val gw = runCatching { connectWithFeedback() }.getOrNull() ?: return@launch
             val senderName = displayNameOrDefault(gw)
-            val group = runCatching { gw.joinGroup(inviteUri, senderName) }.getOrElse { e ->
+            // Durable join: a genuinely bad invite still errors, but an owner
+            // being offline now returns Pending (a resumable intent), NOT a
+            // failure -- so the join is never wasted and never shows the scary
+            // "couldn't join" error just because the owner is asleep.
+            val outcome = runCatching { gw.joinGroupDurable(inviteUri, senderName) }.getOrElse { e ->
                 snackbar(userFacingError(e, "joinGroup", R.string.chat_group_join_failed))
                 return@launch
             }
             controller.refreshGroups()
-            snackbar(context.getString(R.string.chat_group_joined, groupTitle(group, group.groupId)))
-            openGroupThread(group.groupId)
+            when (outcome) {
+                is JoinOutcomeFfi.Converged -> {
+                    snackbar(
+                        context.getString(
+                            R.string.chat_group_joined,
+                            groupTitle(outcome.group, outcome.group.groupId),
+                        ),
+                    )
+                    openGroupThread(outcome.group.groupId)
+                }
+                is JoinOutcomeFfi.Pending -> {
+                    // Owner not reachable yet: the record is durable and the
+                    // controller's resume pump completes it with no user action.
+                    // Surface "joining…" and let the list show it converge.
+                    controller.refreshPendingJoins()
+                    snackbar(context.getString(R.string.chat_group_join_pending))
+                }
+            }
         }
     }
 

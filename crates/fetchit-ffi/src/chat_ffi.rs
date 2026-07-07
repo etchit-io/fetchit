@@ -6,7 +6,7 @@
 //! fediverse public posts through a single [`ChatEventFfi`] stream.
 
 use crate::chat_error::ChatFfiError;
-use crate::group_ffi::GroupFfi;
+use crate::group_ffi::{GroupFfi, JoinOutcomeFfi};
 use crate::member_ffi::GroupMemberFfi;
 use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
 use fetchit_chat::messages::is_private_group_envelope;
@@ -1031,6 +1031,86 @@ impl ChatClient {
             }
         }
         Ok(GroupFfi::from(group))
+    }
+
+    /// Durable join: like [`Self::join_group`], but a join that cannot
+    /// converge now (owner offline) is a resumable [`JoinOutcomeFfi::Pending`]
+    /// the resume pump completes when the owner is next reachable -- never a
+    /// hard error, never a re-spent single-use invite. The shell draws
+    /// "joining…" on `Pending`, calls [`Self::drive_pending_joins_once`] on a
+    /// timer to advance it, and lists in-flight joins via
+    /// [`Self::pending_joins`]. `Converged` warms member cards exactly like
+    /// [`Self::join_group`] so the first inbound frame decrypts without a lazy
+    /// fetch.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Network`] on relay or x0xd failure.
+    /// [`ChatFfiError::Invalid`] for a malformed invite or self-join.
+    pub async fn join_group_durable(
+        &self,
+        invite: String,
+        display_name: Option<String>,
+    ) -> Result<JoinOutcomeFfi, ChatFfiError> {
+        let inv = fetchit_chat::groups::GroupInvite(invite);
+        match self
+            .inner
+            .join_group_durable(&inv, display_name.as_deref())
+            .await
+            .map_err(ChatFfiError::from)?
+        {
+            fetchit_chat::groups::JoinOutcome::Converged(group) => {
+                // Warm member cards so the first inbound private-group frame
+                // decrypts without a lazy fetch (mirrors join_group). Non-fatal.
+                if let Ok(members) = self.inner.groups().members(&group.group_id).await {
+                    if let Some(identity) = self.inner.identity_arc() {
+                        if let Ok(me) =
+                            fetchit_chat::identity::AgentId::parse(identity.agent_id_hex())
+                        {
+                            let _ = self
+                                .inner
+                                .messages()
+                                .prefetch_group_member_cards(&members, &me)
+                                .await;
+                        }
+                    }
+                }
+                Ok(JoinOutcomeFfi::Converged {
+                    group: GroupFfi::from(group),
+                })
+            }
+            fetchit_chat::groups::JoinOutcome::Pending { group_id } => {
+                Ok(JoinOutcomeFfi::Pending { group_id })
+            }
+        }
+    }
+
+    /// Group ids with a durable join still in progress -- the shell draws
+    /// these as "joining…" rather than a failure.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError`] on a pending-join store read error.
+    pub fn pending_joins(&self) -> Result<Vec<String>, ChatFfiError> {
+        self.inner.pending_joins().map_err(ChatFfiError::from)
+    }
+
+    /// Advance every due durable join one step (re-bridge the saved event or
+    /// re-request the Welcome; a fully-keyed one is retired). Returns the
+    /// group ids STILL pending after this pass, so a shell timer can refresh
+    /// "joining…" badges and detect convergence (a group leaving the set).
+    /// Idempotent, cheap, and a no-op when nothing is pending; spends no
+    /// second invite (a resume never calls `join_post`).
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError`] on a pending-join store error.
+    pub async fn drive_pending_joins_once(&self) -> Result<Vec<String>, ChatFfiError> {
+        self.inner
+            .drive_pending_joins_once()
+            .await
+            .map_err(ChatFfiError::from)?;
+        self.inner.pending_joins().map_err(ChatFfiError::from)
     }
 
     /// Send a message to a group, routing private/public via the engine's
