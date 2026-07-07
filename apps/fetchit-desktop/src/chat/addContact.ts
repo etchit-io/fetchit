@@ -3,10 +3,14 @@
 // share URI, or a fediverse handle (`@name@domain`, M5.1) and forwards
 // it to the matching daemon command. A handle resolves through
 // `fediverse_lookup`; only a verified fetch>it identity imports.
+// A "Scan a QR code" affordance fills the same box from the camera;
+// the decoded text runs through the identical validation and routing.
 
 import { lookupHandle } from "../fediverse/api";
 import { importCard, importPairUri, pairAccept } from "./api";
 import { friendlyError } from "./errors";
+import { scanErrorCopy } from "./qrScan";
+import { openQrScanModal } from "./qrScanModal";
 
 export interface AddContactHandlers {
   onClose: () => void;
@@ -64,6 +68,13 @@ export function mountAddContact(
   input.wrap = "soft";
   input.setAttribute("aria-label", "Share link");
 
+  const scanBtn = document.createElement("button");
+  scanBtn.type = "button";
+  // Deliberately NOT chat-dialog__btn: this is a secondary text
+  // affordance under the paste box, not a dialog action.
+  scanBtn.className = "chat-dialog__scan";
+  scanBtn.textContent = "Scan a QR code";
+
   const status = document.createElement("p");
   status.className = "chat-dialog__status";
 
@@ -88,6 +99,7 @@ export function mountAddContact(
   inner.appendChild(title);
   inner.appendChild(help);
   inner.appendChild(input);
+  inner.appendChild(scanBtn);
   inner.appendChild(status);
   inner.appendChild(actions);
   root.appendChild(inner);
@@ -99,6 +111,27 @@ export function mountAddContact(
   input.addEventListener("input", () => {
     addBtn.disabled = detectInputKind(input.value) === null;
     status.textContent = "";
+  });
+
+  scanBtn.addEventListener("click", () => {
+    void (async () => {
+      scanBtn.disabled = true;
+      status.textContent = "";
+      try {
+        const text = await openQrScanModal();
+        if (text !== null) {
+          input.value = text;
+          // Re-run the existing validation so Add enables (or stays
+          // off for a QR that isn't a share link).
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.focus();
+        }
+      } catch (e) {
+        status.textContent = scanErrorCopy(e);
+      } finally {
+        scanBtn.disabled = false;
+      }
+    })();
   });
 
   addBtn.addEventListener("click", async () => {

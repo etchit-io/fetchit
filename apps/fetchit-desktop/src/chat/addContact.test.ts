@@ -30,6 +30,12 @@ vi.mock("../fediverse/api", () => ({
   lookupHandle: (handle: string) => lookupHandleMock(handle),
 }));
 
+const openQrScanModalMock = vi.fn<() => Promise<string | null>>();
+
+vi.mock("./qrScanModal", () => ({
+  openQrScanModal: () => openQrScanModalMock(),
+}));
+
 const VALID = "x0x://agent/abcdefghijklmnop";
 const VALID_V3
   = "fetchit://share/v3/"
@@ -47,6 +53,7 @@ beforeEach(() => {
   pairAcceptMock.mockReset();
   importPairUriMock.mockReset();
   lookupHandleMock.mockReset();
+  openQrScanModalMock.mockReset();
   host = document.createElement("div");
   document.body.appendChild(host);
 });
@@ -422,6 +429,105 @@ describe("mountAddContact", () => {
     expect(status).toMatch(/re-share/i);
     expect(btn.disabled).toBe(false);
     expect(onImported).not.toHaveBeenCalled();
+  });
+});
+
+describe("mountAddContact — QR scan", () => {
+  function getScanBtn(): HTMLButtonElement {
+    return host.querySelector<HTMLButtonElement>(".chat-dialog__scan")!;
+  }
+
+  it("renders a Scan a QR code button that is not a dialog action", () => {
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+    const scanBtn = getScanBtn();
+    expect(scanBtn).not.toBeNull();
+    expect(scanBtn.textContent).toBe("Scan a QR code");
+    // Existing selectors index .chat-dialog__btn for Add/Cancel; the
+    // scan affordance must not shift them.
+    expect(scanBtn.classList.contains("chat-dialog__btn")).toBe(false);
+    expect(getAddBtn().textContent).toBe("Add");
+  });
+
+  it("populates the textarea from a decoded QR and runs validation", async () => {
+    openQrScanModalMock.mockResolvedValueOnce(VALID_V3);
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+
+    getScanBtn().click();
+    await vi.waitFor(() => {
+      expect(getInput().value).toBe(VALID_V3);
+    });
+    expect(getAddBtn().disabled).toBe(false);
+  });
+
+  it("leaves Add disabled when the QR is not a share link", async () => {
+    openQrScanModalMock.mockResolvedValueOnce("https://example.com/");
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+
+    getScanBtn().click();
+    await vi.waitFor(() => {
+      expect(getInput().value).toBe("https://example.com/");
+    });
+    expect(getAddBtn().disabled).toBe(true);
+  });
+
+  it("changes nothing on cancel", async () => {
+    openQrScanModalMock.mockResolvedValueOnce(null);
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+
+    getScanBtn().click();
+    await vi.waitFor(() => {
+      expect(getScanBtn().disabled).toBe(false);
+    });
+    expect(getInput().value).toBe("");
+    expect(getAddBtn().disabled).toBe(true);
+    expect(getStatus().textContent).toBe("");
+  });
+
+  it("shows the no-camera copy inline when the scanner has no device", async () => {
+    const { QrScanError } = await import("./qrScan");
+    openQrScanModalMock.mockRejectedValueOnce(new QrScanError("no-camera", "x"));
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+
+    getScanBtn().click();
+    await vi.waitFor(() => {
+      expect(getStatus().textContent).toBe(
+        "No camera found on this computer. Paste the invite link instead.",
+      );
+    });
+    expect(getScanBtn().disabled).toBe(false);
+  });
+
+  it("shows the blocked-permission copy when access is denied", async () => {
+    const { QrScanError } = await import("./qrScan");
+    openQrScanModalMock.mockRejectedValueOnce(new QrScanError("denied", "x"));
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+
+    getScanBtn().click();
+    await vi.waitFor(() => {
+      expect(getStatus().textContent).toBe(
+        "Camera access was blocked. You can paste the invite link instead.",
+      );
+    });
+  });
+
+  it("locks the scan button while the modal is open", async () => {
+    let resolveScan: ((v: string | null) => void) | undefined;
+    openQrScanModalMock.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveScan = resolve;
+        }),
+    );
+    mountAddContact(host, { onClose: () => {}, onImported: () => {} });
+
+    getScanBtn().click();
+    await Promise.resolve();
+    expect(getScanBtn().disabled).toBe(true);
+
+    resolveScan?.(null);
+    await vi.waitFor(() => {
+      expect(getScanBtn().disabled).toBe(false);
+    });
   });
 });
 
