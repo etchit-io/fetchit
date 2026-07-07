@@ -3326,6 +3326,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "url",
+ "webkit2gtk",
  "x0xd-client",
 ]
 
