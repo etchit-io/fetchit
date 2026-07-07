@@ -16,8 +16,8 @@ import java.util.concurrent.TimeUnit
 /**
  * Unit tests for [IdleDisconnect]. Robolectric-run so the main-thread
  * `Looper` can be advanced without real wall-clock waits; the disconnect
- * action is a recording lambda, so the scheduled task body is observed
- * directly.
+ * and foreground actions are recording lambdas, so the scheduled task
+ * body is observed directly.
  *
  * `application = Application::class` keeps Robolectric off the manifest's
  * `FetchitApplication`, whose `onCreate` calls the `fetchit_ffi` native
@@ -37,10 +37,15 @@ class IdleDisconnectTest {
 
     private fun mainLooper() = shadowOf(Looper.getMainLooper())
 
+    private fun idleDisconnect(
+        onIdle: () -> Unit,
+        onForeground: () -> Unit = {},
+    ) = IdleDisconnect(onIdle = onIdle, onForeground = onForeground)
+
     @Test
     fun onStop_schedules_a_disconnect_after_the_grace_period() {
         var disconnects = 0
-        val idle = IdleDisconnect({ disconnects++ }, {})
+        val idle = idleDisconnect({ disconnects++ })
         idle.onStop(owner)
         mainLooper().idleFor(graceMs - 1, TimeUnit.MILLISECONDS)
         assertEquals("must not fire before the grace period", 0, disconnects)
@@ -51,7 +56,7 @@ class IdleDisconnectTest {
     @Test
     fun onStart_cancels_a_pending_disconnect() {
         var disconnects = 0
-        val idle = IdleDisconnect({ disconnects++ }, {})
+        val idle = idleDisconnect({ disconnects++ })
         idle.onStop(owner)
         idle.onStart(owner) // user returned before the grace period
         mainLooper().idleFor(graceMs * 2, TimeUnit.MILLISECONDS)
@@ -61,7 +66,7 @@ class IdleDisconnectTest {
     @Test
     fun background_foreground_background_reschedules_cleanly() {
         var disconnects = 0
-        val idle = IdleDisconnect({ disconnects++ }, {})
+        val idle = idleDisconnect({ disconnects++ })
         idle.onStop(owner)
         idle.onStart(owner) // cancels the first schedule
         idle.onStop(owner)  // schedules a fresh one
@@ -72,7 +77,7 @@ class IdleDisconnectTest {
     @Test
     fun repeated_onStop_fires_the_disconnect_only_once() {
         var disconnects = 0
-        val idle = IdleDisconnect({ disconnects++ }, {})
+        val idle = idleDisconnect({ disconnects++ })
         idle.onStop(owner)
         idle.onStop(owner) // removeCallbacks then re-post — still a single task
         idle.onStop(owner)
@@ -83,7 +88,7 @@ class IdleDisconnectTest {
     @Test
     fun onStart_on_a_clean_observer_is_harmless() {
         var disconnects = 0
-        IdleDisconnect({ disconnects++ }, {}).onStart(owner) // nothing queued
+        idleDisconnect({ disconnects++ }).onStart(owner) // nothing queued
         mainLooper().idleFor(graceMs * 2, TimeUnit.MILLISECONDS)
         assertEquals(0, disconnects)
     }
@@ -91,8 +96,23 @@ class IdleDisconnectTest {
     @Test
     fun onStart_invokes_onForeground_so_a_returned_app_rehydrates() {
         var foregrounds = 0
-        val idle = IdleDisconnect({ }, { foregrounds++ })
+        val idle = idleDisconnect({ }, { foregrounds++ })
         idle.onStart(owner)
         assertEquals("onStart must fire onForeground to reconnect on return", 1, foregrounds)
+    }
+
+    @Test
+    fun every_onStart_fires_the_foreground_rehydrate() {
+        // The chat client has no lazy reconnect trigger, so onStart must
+        // invoke onForeground even when no disconnect is pending — the
+        // callee decides whether a rebuild is needed.
+        var foregrounds = 0
+        val idle = idleDisconnect({}, { foregrounds++ })
+        idle.onStart(owner) // cold start, nothing queued
+        assertEquals(1, foregrounds)
+        idle.onStop(owner)
+        mainLooper().idleFor(graceMs, TimeUnit.MILLISECONDS) // idle fired
+        idle.onStart(owner) // return after teardown
+        assertEquals(2, foregrounds)
     }
 }
