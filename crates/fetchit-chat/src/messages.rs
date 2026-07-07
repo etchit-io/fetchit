@@ -2755,6 +2755,8 @@ fn self_only_private_group_conversation<S: Signer + ?Sized>(
         trust_state: TrustState::Confirmed,
         seen_nonces: BTreeMap::new(),
         history: VecDeque::new(),
+        own_group_send_seq: 0,
+        group_seq_windows: BTreeMap::new(),
     }
 }
 

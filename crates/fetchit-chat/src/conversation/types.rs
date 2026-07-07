@@ -1,6 +1,7 @@
 //! Pure conversation state: types, constants, and inherent methods that
 //! never touch I/O or the network.
 
+use super::seq_gap::{SenderSeqState, SeqObservation};
 use crate::chat_crypto::AEAD_KEY_LEN;
 use crate::error::ChatError;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -137,6 +138,17 @@ pub struct Conversation {
     /// `#[serde(default)]` for backward compat with pre-M2 vault files.
     #[serde(default)]
     pub history: VecDeque<HistoryEntry>,
+    /// Last per-group send counter this device sealed into an outbound
+    /// private-group frame (the next send uses `+1`). Zero on
+    /// conversations that have never counted a send. `#[serde(default)]`
+    /// for pre-gap-detection vault files.
+    #[serde(default)]
+    pub own_group_send_seq: u64,
+    /// Receive-side per-sender sequence ledgers for missed-message
+    /// detection, keyed like `seen_nonces` by hex `sender_agent_id`.
+    /// `#[serde(default)]` for pre-gap-detection vault files.
+    #[serde(default)]
+    pub group_seq_windows: BTreeMap<String, SenderSeqState>,
 }
 
 impl Conversation {
@@ -170,6 +182,8 @@ impl Conversation {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         })
     }
 
@@ -195,7 +209,26 @@ impl Conversation {
             trust_state,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         }
+    }
+
+    /// Record an inbound per-sender group counter and classify it
+    /// (first / consecutive / gap / filled hole / duplicate). Keyed
+    /// like the replay window by hex `sender_agent_id`. The caller is
+    /// responsible for persisting via the registry, in the same locked
+    /// mutation as the dedup check.
+    pub fn record_group_seq(
+        &mut self,
+        sender_agent_id_hex: &str,
+        seq: u64,
+        now_ms: u64,
+    ) -> SeqObservation {
+        self.group_seq_windows
+            .entry(sender_agent_id_hex.to_owned())
+            .or_default()
+            .record(seq, now_ms)
     }
 
     /// Flip `TrustState::Pending` to `TrustState::Confirmed`.
@@ -564,6 +597,57 @@ pub(super) fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    fn test_member() -> Member {
+        Member {
+            user_id_hex: None,
+            devices: Vec::new(),
+            joined_at_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn record_group_seq_windows_are_independent_per_sender() {
+        let mut conv = Conversation::new_dm(test_member(), test_member(), None).unwrap();
+        assert_eq!(conv.record_group_seq("bb", 1, 10), SeqObservation::First);
+        assert_eq!(
+            conv.record_group_seq("bb", 2, 11),
+            SeqObservation::Consecutive
+        );
+        // A second sender starts its own ledger; no cross-talk.
+        assert_eq!(conv.record_group_seq("cc", 1, 12), SeqObservation::First);
+        assert_eq!(
+            conv.record_group_seq("bb", 4, 13),
+            SeqObservation::Gap { missing: vec![3] }
+        );
+        assert_eq!(conv.group_seq_windows.len(), 2);
+    }
+
+    #[test]
+    fn conversation_json_without_seq_fields_deserializes_with_defaults() {
+        // A vault sealed before gap detection has neither field; it must
+        // come back with a zero counter and empty ledgers.
+        let conv = Conversation::new_dm(test_member(), test_member(), None).unwrap();
+        let mut v: serde_json::Value = serde_json::to_value(&conv).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        assert!(obj.remove("own_group_send_seq").is_some());
+        assert!(obj.remove("group_seq_windows").is_some());
+        let back: Conversation = serde_json::from_value(v).unwrap();
+        assert_eq!(back.own_group_send_seq, 0);
+        assert!(back.group_seq_windows.is_empty());
+    }
+
+    #[test]
+    fn conversation_seq_state_round_trips_through_json() {
+        let mut conv = Conversation::new_dm(test_member(), test_member(), None).unwrap();
+        conv.own_group_send_seq = 7;
+        conv.record_group_seq("bb", 1, 10);
+        conv.record_group_seq("bb", 5, 20);
+        let json = serde_json::to_string(&conv).unwrap();
+        let back: Conversation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.own_group_send_seq, 7);
+        assert_eq!(back.group_seq_windows, conv.group_seq_windows);
+    }
+
     #[test]
     fn group_plaintext_round_trips_name_and_body() {
         let enc = encode_group_plaintext("Alice", "hi there", None);
@@ -749,6 +833,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -775,6 +861,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -796,6 +884,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         assert!(conv.auto_rekey_due());
     }
@@ -816,6 +906,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -836,6 +928,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -863,6 +957,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         let nonce = [0xAB; 12];
         assert!(!conv.check_and_record_nonce("alice", nonce));
@@ -896,6 +992,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         for i in 0..64u8 {
             assert!(!conv.check_and_record_nonce("alice", [i; 12]));
@@ -927,6 +1025,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         // Fill Alice's window completely.
         for i in 0..64u8 {
@@ -978,6 +1078,8 @@ mod tests {
             trust_state: TrustState::Pending,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         };
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);
@@ -1001,6 +1103,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: BTreeMap::new(),
             history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
         }
     }
 
