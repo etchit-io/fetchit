@@ -1475,11 +1475,28 @@ impl<'a> Endpoint<'a> {
 
         let group_id_bytes = parse_group_id_hex(group_id)?;
         let secure = self.secure_groups()?;
-        // Seal the sender display name alongside the body so receivers can
-        // attribute the message by name (who-is-who). Legacy receivers
-        // that predate this format read the bare body via the fallback in
+        // Optimistic counter allocation for receive-side gap detection:
+        // read the last persisted counter and seal +1. The bump persists
+        // only when the send is accepted (delivered or enqueued), so a
+        // total failure reuses the counter instead of burning it -- a
+        // burned counter would be a permanent phantom hole on every
+        // receiver. The cost is that two concurrent sends on one group
+        // can seal the same counter (receivers absorb duplicates as
+        // no-ops); a vault read error degrades to an uncounted frame
+        // rather than failing the send.
+        let send_seq = match self.registry {
+            Some(registry) => match registry.get(group_id).await {
+                Ok(conv) => Some(conv.map_or(0, |c| c.own_group_send_seq) + 1),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        // Seal the sender display name and counter alongside the body so
+        // receivers can attribute the message by name (who-is-who) and
+        // detect missed messages. Legacy receivers that predate this
+        // format read the bare body via the fallback in
         // `decode_group_plaintext`.
-        let plaintext = encode_group_plaintext(sender_name, body, None);
+        let plaintext = encode_group_plaintext(sender_name, body, send_seq);
         let frame = secure.encrypt(group_id, &plaintext).await?;
         let envelope = build_private_group_envelope(
             &frame,
@@ -1676,7 +1693,7 @@ impl<'a> Endpoint<'a> {
                 attachment: None,
                 delivered_at_ms: None,
             };
-            persist_own_group_message(registry, group_id, entry, identity, signer).await;
+            persist_own_group_message(registry, group_id, entry, send_seq, identity, signer).await;
         }
         // The delivery tick's honest signal: relay-accepted when at least one
         // member reached the relay (or a solo group with no peers to deliver
@@ -2679,12 +2696,17 @@ fn now_ms() -> u64 {
 /// Persist the sender's OWN outbound group message onto the local
 /// transcript, creating the conversation if a solo sender has none yet.
 /// The group fanout excludes self, so the inbound receive path never
-/// records the sender's copy -- this is its only writer. Bookkeeping
-/// only: the send already succeeded, so a persist failure is logged.
+/// records the sender's copy -- this is its only writer. `sealed_seq`
+/// is the counter sealed into the frame; it max-merges into
+/// `own_group_send_seq` so concurrent send completions never regress
+/// the counter. Bookkeeping only: the send already succeeded, so a
+/// persist failure is logged (a lost bump means the next send reuses
+/// the counter, which receivers absorb as a duplicate).
 async fn persist_own_group_message(
     registry: &Arc<ConversationRegistry>,
     group_id: &str,
     entry: HistoryEntry,
+    sealed_seq: Option<u64>,
     identity: &Arc<FetchitIdentity>,
     signer: &Arc<dyn Signer>,
 ) {
@@ -2704,6 +2726,9 @@ async fn persist_own_group_message(
             },
             move |conv| {
                 conv.push_history(entry);
+                if let Some(seq) = sealed_seq {
+                    conv.own_group_send_seq = conv.own_group_send_seq.max(seq);
+                }
                 MutateAction::Persist(())
             },
         )
@@ -3659,6 +3684,72 @@ mod tests {
             outbound[0].message_id, msg_id,
             "persisted id must match the returned id"
         );
+    }
+
+    #[tokio::test]
+    async fn send_private_group_seals_an_incrementing_seq_and_persists_the_counter() {
+        // Gap detection: with a registry wired, each send seals
+        // own_group_send_seq + 1 into the plaintext and the accepted
+        // send max-merges the bump back, so consecutive sends carry
+        // 1 then 2. The encrypt mounts match on the EXACT sealed
+        // payload; a wrong/missing counter fails the send with a 404.
+        let server = MockServer::start().await;
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let self_hex = rig.agent_hex().to_owned();
+
+        let encrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/encrypt");
+        for (body, seq) in [("first", 1u64), ("second", 2u64)] {
+            Mock::given(method("POST"))
+                .and(path(&encrypt_path))
+                .and(body_partial_json(serde_json::json!({
+                    "payload_b64": B64.encode(encode_group_plaintext("Alice", body, Some(seq))),
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true,
+                    "ciphertext_b64": "Y2lwaGVydGV4dA==",
+                    "nonce_b64": "MTIzNDU2Nzg5MGFi",
+                    "secret_epoch": 7,
+                })))
+                .mount(&server)
+                .await;
+        }
+        let members_path = format!("/groups/{TEST_GROUP_HEX}/members");
+        Mock::given(method("GET"))
+            .and(path(&members_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "members": [ {"agent_id": self_hex, "state": "active"} ],
+            })))
+            .mount(&server)
+            .await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let (transport, _captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            None,
+            [0u8; 32],
+            None,
+        );
+
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "first", "Alice")
+            .await
+            .expect("first send must seal seq 1");
+        endpoint
+            .send_private_group(TEST_GROUP_HEX, "second", "Alice")
+            .await
+            .expect("second send must seal seq 2");
+
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        assert_eq!(conv.own_group_send_seq, 2, "counter must persist the bump");
     }
 
     /// Install `sender_signer`'s share card into `rig.layout` so that
