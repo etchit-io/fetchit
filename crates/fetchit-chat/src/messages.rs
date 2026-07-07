@@ -1479,7 +1479,7 @@ impl<'a> Endpoint<'a> {
         // attribute the message by name (who-is-who). Legacy receivers
         // that predate this format read the bare body via the fallback in
         // `decode_group_plaintext`.
-        let plaintext = encode_group_plaintext(sender_name, body);
+        let plaintext = encode_group_plaintext(sender_name, body, None);
         let frame = secure.encrypt(group_id, &plaintext).await?;
         let envelope = build_private_group_envelope(
             &frame,
@@ -2131,12 +2131,12 @@ impl<'a> Endpoint<'a> {
         // New senders seal {sender_name, body}; legacy senders sealed the
         // bare body. `decode_group_plaintext` handles both, so a received
         // group message is attributed by name when the sender provided one.
-        let (body, sender_name) = decode_group_plaintext(&plaintext).map_err(ChatError::Invalid)?;
+        let decoded = decode_group_plaintext(&plaintext).map_err(ChatError::Invalid)?;
 
         let entry = HistoryEntry {
             sender_agent_id_hex: sender_agent_id_hex.clone(),
-            sender_name,
-            body,
+            sender_name: decoded.sender_name,
+            body: decoded.body,
             ts_ms: env.timestamp_ms,
             message_id: hex::encode(envelope_dedupe_bytes(env)),
             attachment: None,
@@ -3442,7 +3442,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(&encrypt_path))
             .and(body_partial_json(serde_json::json!({
-                "payload_b64": B64.encode(encode_group_plaintext("Alice", "hello group")),
+                "payload_b64": B64.encode(encode_group_plaintext("Alice", "hello group", None)),
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
@@ -4945,7 +4945,11 @@ mod tests {
         let server = MockServer::start().await;
         // A new-format sender seals {sender_name, body}; the receiver must
         // surface the name on the HistoryEntry (who-is-who).
-        mount_decrypt(&server, &encode_group_plaintext("Alice", "hi from peer")).await;
+        mount_decrypt(
+            &server,
+            &encode_group_plaintext("Alice", "hi from peer", None),
+        )
+        .await;
         let rig = build_rig();
         mount_members_with_self_only(&server, rig.identity.agent_id_hex()).await;
         let sender_signer = MlDsaSigner::generate().unwrap();

@@ -402,41 +402,69 @@ pub struct GroupBodyV1 {
     pub sender_name: Option<String>,
     /// Plaintext message body.
     pub body: String,
+    /// Per-sender monotonic send counter for this group (starts at 1),
+    /// sealed inside the frame so the relay never sees it. Receivers
+    /// use it to detect missed messages (a hole in the sequence).
+    /// Absent on frames from senders that predate gap detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+}
+
+/// A decoded private-group plaintext.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedGroupBody {
+    /// Plaintext message body.
+    pub body: String,
+    /// Sender display name, when the sender published one.
+    pub sender_name: Option<String>,
+    /// Per-sender monotonic send counter, when the sender sealed one.
+    pub seq: Option<u64>,
 }
 
 /// Encode a private-group plaintext that carries the sender display
-/// name alongside the body. An empty `sender_name` is encoded as
-/// absent. Round-trips through [`decode_group_plaintext`].
+/// name and per-sender send counter alongside the body. An empty
+/// `sender_name` is encoded as absent. Round-trips through
+/// [`decode_group_plaintext`].
 #[must_use]
-pub fn encode_group_plaintext(sender_name: &str, body: &str) -> Vec<u8> {
+pub fn encode_group_plaintext(sender_name: &str, body: &str, seq: Option<u64>) -> Vec<u8> {
     let payload = GroupBodyV1 {
         sender_name: (!sender_name.is_empty()).then(|| sender_name.to_owned()),
         body: body.to_owned(),
+        seq,
     };
     let mut out = GROUP_BODY_MAGIC.to_vec();
-    // Serializing a String + Option<String> cannot fail; default to the
+    // Serializing a String + Option fields cannot fail; default to the
     // bare magic only on the impossible error so the frame stays valid.
     out.extend_from_slice(&serde_json::to_vec(&payload).unwrap_or_default());
     out
 }
 
-/// Decode a decrypted private-group plaintext into `(body, sender_name)`.
+/// Decode a decrypted private-group plaintext.
 /// New frames carry `GROUP_BODY_MAGIC` + JSON; legacy frames are a
-/// bare UTF-8 body with no name. The magic prefix is the only
-/// discriminator, so a legacy body that happens to be valid JSON is
-/// returned verbatim.
+/// bare UTF-8 body with no name and no counter. The magic prefix is
+/// the only discriminator, so a legacy body that happens to be valid
+/// JSON is returned verbatim. Unknown JSON fields from newer senders
+/// are ignored, so additive payload evolution stays compatible.
 ///
 /// # Errors
 /// Returns a message when a magic-prefixed frame fails to JSON-parse,
 /// or a legacy frame is not valid UTF-8.
-pub fn decode_group_plaintext(plaintext: &[u8]) -> Result<(String, Option<String>), String> {
+pub fn decode_group_plaintext(plaintext: &[u8]) -> Result<DecodedGroupBody, String> {
     if let Some(rest) = plaintext.strip_prefix(GROUP_BODY_MAGIC) {
         let payload: GroupBodyV1 =
             serde_json::from_slice(rest).map_err(|e| format!("group payload json: {e}"))?;
-        Ok((payload.body, payload.sender_name))
+        Ok(DecodedGroupBody {
+            body: payload.body,
+            sender_name: payload.sender_name,
+            seq: payload.seq,
+        })
     } else {
         let body = String::from_utf8(plaintext.to_vec()).map_err(|e| format!("body utf8: {e}"))?;
-        Ok((body, None))
+        Ok(DecodedGroupBody {
+            body,
+            sender_name: None,
+            seq: None,
+        })
     }
 }
 
@@ -538,44 +566,73 @@ mod tests {
 
     #[test]
     fn group_plaintext_round_trips_name_and_body() {
-        let enc = encode_group_plaintext("Alice", "hi there");
-        let (body, name) = decode_group_plaintext(&enc).unwrap();
-        assert_eq!(body, "hi there");
-        assert_eq!(name.as_deref(), Some("Alice"));
+        let enc = encode_group_plaintext("Alice", "hi there", None);
+        let d = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(d.body, "hi there");
+        assert_eq!(d.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(d.seq, None);
+    }
+
+    #[test]
+    fn group_plaintext_round_trips_seq() {
+        let enc = encode_group_plaintext("Alice", "counted", Some(42));
+        let d = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(d.body, "counted");
+        assert_eq!(d.seq, Some(42));
+    }
+
+    #[test]
+    fn group_plaintext_absent_seq_is_not_serialized() {
+        // skip_serializing_if keeps seq-less frames byte-identical to the
+        // pre-gap-detection format, so old receivers parse them unchanged.
+        let enc = encode_group_plaintext("Alice", "plain", None);
+        let json = std::str::from_utf8(&enc[GROUP_BODY_MAGIC.len()..]).unwrap();
+        assert!(!json.contains("seq"), "unexpected seq key in {json}");
+    }
+
+    #[test]
+    fn group_plaintext_ignores_unknown_future_fields() {
+        // A newer sender may add fields; decode must not reject them.
+        let mut frame = GROUP_BODY_MAGIC.to_vec();
+        frame.extend_from_slice(br#"{"body":"hi","seq":7,"future_field":true}"#);
+        let d = decode_group_plaintext(&frame).unwrap();
+        assert_eq!(d.body, "hi");
+        assert_eq!(d.seq, Some(7));
     }
 
     #[test]
     fn group_plaintext_empty_name_encodes_absent() {
-        let enc = encode_group_plaintext("", "no name");
-        let (body, name) = decode_group_plaintext(&enc).unwrap();
-        assert_eq!(body, "no name");
-        assert_eq!(name, None);
+        let enc = encode_group_plaintext("", "no name", None);
+        let d = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(d.body, "no name");
+        assert_eq!(d.sender_name, None);
     }
 
     #[test]
     fn group_plaintext_legacy_bare_body_decodes_with_no_name() {
         // A pre-upgrade sender encrypts the raw body with no magic prefix.
-        let (body, name) = decode_group_plaintext(b"plain old body").unwrap();
-        assert_eq!(body, "plain old body");
-        assert_eq!(name, None);
+        let d = decode_group_plaintext(b"plain old body").unwrap();
+        assert_eq!(d.body, "plain old body");
+        assert_eq!(d.sender_name, None);
+        assert_eq!(d.seq, None);
     }
 
     #[test]
     fn group_plaintext_body_with_unicode_and_json_chars_survives() {
         let tricky = r#"{"not":"a payload"} literal, with emoji"#;
-        let enc = encode_group_plaintext("Bob", tricky);
-        let (body, name) = decode_group_plaintext(&enc).unwrap();
-        assert_eq!(body, tricky);
-        assert_eq!(name.as_deref(), Some("Bob"));
+        let enc = encode_group_plaintext("Bob", tricky, None);
+        let d = decode_group_plaintext(&enc).unwrap();
+        assert_eq!(d.body, tricky);
+        assert_eq!(d.sender_name.as_deref(), Some("Bob"));
     }
 
     #[test]
     fn group_plaintext_legacy_body_that_looks_like_json_is_kept_verbatim() {
         // A legacy body that happens to be JSON must NOT be mis-parsed —
         // the magic prefix is the only discriminator.
-        let (body, name) = decode_group_plaintext(br#"{"body":"x"}"#).unwrap();
-        assert_eq!(body, r#"{"body":"x"}"#);
-        assert_eq!(name, None);
+        let d = decode_group_plaintext(br#"{"body":"x"}"#).unwrap();
+        assert_eq!(d.body, r#"{"body":"x"}"#);
+        assert_eq!(d.sender_name, None);
     }
 
     #[test]
