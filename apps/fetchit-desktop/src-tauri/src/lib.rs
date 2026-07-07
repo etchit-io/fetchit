@@ -424,6 +424,21 @@ fn set_display_name(state: tauri::State<'_, AppState>, name: String) {
 }
 
 /// Read the first-run onboarding marker.
+///
+/// In `e2e` builds this always reports done: the first-run welcome overlay is
+/// a `position: fixed; inset: 0` full-viewport modal (`z-index: 60`) that would
+/// otherwise intercept every `WebDriver` click and fail the click-based specs.
+/// The `e2e` feature already makes the backend test-friendly (fixtures instead
+/// of network); suppressing the first-run gate keeps the shell interactable.
+/// Production builds are unaffected.
+#[cfg(feature = "e2e")]
+#[tauri::command]
+fn onboarding_done(_state: tauri::State<'_, AppState>) -> bool {
+    true
+}
+
+/// Read the first-run onboarding marker.
+#[cfg(not(feature = "e2e"))]
 #[tauri::command]
 fn onboarding_done(state: tauri::State<'_, AppState>) -> bool {
     state.settings.lock().is_ok_and(|s| s.onboarding_done)
