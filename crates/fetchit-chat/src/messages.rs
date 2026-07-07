@@ -2149,6 +2149,7 @@ impl<'a> Endpoint<'a> {
         // bare body. `decode_group_plaintext` handles both, so a received
         // group message is attributed by name when the sender provided one.
         let decoded = decode_group_plaintext(&plaintext).map_err(ChatError::Invalid)?;
+        let sealed_seq = decoded.seq;
 
         let entry = HistoryEntry {
             sender_agent_id_hex: sender_agent_id_hex.clone(),
@@ -2209,13 +2210,28 @@ impl<'a> Endpoint<'a> {
                         return MutateAction::Skip(None);
                     }
                     conv.push_history(entry_for_closure.clone());
-                    MutateAction::Persist(Some(entry_for_closure.clone()))
+                    // Gap detection rides the same locked mutation as the
+                    // dedup check so the per-sender ledger and the replay
+                    // window can never diverge under concurrent receives.
+                    let gap = sealed_seq.and_then(|seq| {
+                        match conv.record_group_seq(&sender_agent_id_hex, seq, now_ms()) {
+                            crate::conversation::SeqObservation::Gap { missing } => {
+                                Some(Box::new(GapReport {
+                                    sender_agent_id_hex: sender_agent_id_hex.clone(),
+                                    missing_seqs: missing,
+                                    epoch: env.epoch,
+                                }))
+                            }
+                            _ => None,
+                        }
+                    });
+                    MutateAction::Persist(Some(gap))
                 },
             )
             .await?;
 
         match outcome {
-            Some(_persisted) => Ok(PrivateGroupReceive::Persisted(entry)),
+            Some(gap) => Ok(PrivateGroupReceive::Persisted { entry, gap }),
             None => Ok(PrivateGroupReceive::Replay),
         }
     }
@@ -2807,6 +2823,22 @@ pub fn is_private_group_envelope(env: &TransitEnvelope) -> bool {
     matches!(env.kind, EnvelopeKind::PrivateGroupChat)
 }
 
+/// Newly detected missed messages from one sender in one group,
+/// surfaced when a frame's sealed per-sender counter jumps past that
+/// sender's high-water mark. The input contract for recovery
+/// (catch-up re-fetch) and shell "messages missing" affordances.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GapReport {
+    /// Hex agent id of the sender whose messages are missing.
+    pub sender_agent_id_hex: String,
+    /// Newly recorded missing counters, ascending, bounded by
+    /// [`crate::conversation::MISSING_CAP`].
+    pub missing_seqs: Vec<u64>,
+    /// Envelope epoch of the message that revealed the gap; a hint
+    /// for recovery queries.
+    pub epoch: u32,
+}
+
 /// Outcome of [`Endpoint::receive_private_group_envelope`]: either a
 /// freshly-decoded entry that was appended to the conversation's
 /// history, or a replay (same envelope seen before this conversation's
@@ -2815,8 +2847,18 @@ pub fn is_private_group_envelope(env: &TransitEnvelope) -> bool {
 pub enum PrivateGroupReceive {
     /// Envelope was fresh: decrypted, verified, dedup-recorded, history
     /// extended, vault persisted. Carries the `HistoryEntry` so callers
-    /// can surface it to the UI.
-    Persisted(HistoryEntry),
+    /// can surface it to the UI, plus any gap the frame's sealed
+    /// counter revealed.
+    Persisted {
+        /// The decoded entry appended to the conversation history.
+        entry: HistoryEntry,
+        /// Newly detected missing messages from this sender, when the
+        /// sealed counter jumped past the high-water mark. `None` on
+        /// consecutive, duplicate, hole-filling, and counter-less
+        /// (legacy) frames. Boxed to keep the variant near `Replay`'s
+        /// size (gaps are the rare case).
+        gap: Option<Box<GapReport>>,
+    },
     /// Envelope's outer nonce was already in the conversation's
     /// per-sender sliding window. No state change; caller MUST NOT
     /// surface anything.
@@ -3778,9 +3820,16 @@ mod tests {
         body: &[u8],
         timestamp_ms: u64,
     ) -> TransitEnvelope {
+        // Derive the 12-byte outer nonce from the body so distinct
+        // envelopes clear the per-sender replay window while a re-sent
+        // identical envelope still trips it.
+        let mut nonce12 = [0u8; 12];
+        for (i, b) in body.iter().take(12).enumerate() {
+            nonce12[i] = *b;
+        }
         let frame = EncryptedFrame {
             ciphertext_b64: B64.encode(body),
-            nonce_b64: Some("MTIzNDU2Nzg5MGFi".to_owned()),
+            nonce_b64: Some(B64.encode(nonce12)),
             secret_epoch: 9,
             plane: None,
         };
@@ -3799,7 +3848,7 @@ mod tests {
             timestamp_ms,
             epoch: 9,
             ciphertext: frame_bytes,
-            nonce: B64.decode("MTIzNDU2Nzg5MGFi").unwrap(),
+            nonce: nonce12.to_vec(),
             kem_ciphertext: Vec::new(),
             sender_signature: Vec::new(),
         };
@@ -3821,6 +3870,21 @@ mod tests {
                 "ok": true,
                 "payload_b64": B64.encode(plaintext),
             })))
+            .mount(server)
+            .await;
+    }
+
+    /// Like [`mount_decrypt`] but the mock expires after one match, so
+    /// sequential receives can decrypt to different plaintexts.
+    async fn mount_decrypt_once(server: &MockServer, plaintext: &[u8]) {
+        let decrypt_path = format!("/groups/{TEST_GROUP_HEX}/secure/decrypt");
+        Mock::given(method("POST"))
+            .and(path(&decrypt_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "payload_b64": B64.encode(plaintext),
+            })))
+            .up_to_n_times(1)
             .mount(server)
             .await;
     }
@@ -4843,7 +4907,7 @@ mod tests {
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
             .await
             .unwrap();
-        assert!(matches!(first, PrivateGroupReceive::Persisted(_)));
+        assert!(matches!(first, PrivateGroupReceive::Persisted { .. }));
         let second = endpoint
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
             .await
@@ -5019,7 +5083,7 @@ mod tests {
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
             .await
             .unwrap();
-        let PrivateGroupReceive::Persisted(entry) = out else {
+        let PrivateGroupReceive::Persisted { entry, .. } = out else {
             panic!("expected Persisted, got {out:?}");
         };
         assert_eq!(entry.body, "hi from peer");
@@ -5070,11 +5134,74 @@ mod tests {
             .receive_private_group_envelope(&env, TEST_GROUP_HEX)
             .await
             .unwrap();
-        let PrivateGroupReceive::Persisted(entry) = out else {
+        let PrivateGroupReceive::Persisted { entry, .. } = out else {
             panic!("expected Persisted, got {out:?}");
         };
         assert_eq!(entry.body, "hi from peer");
         assert_eq!(entry.sender_name.as_deref(), Some("Alice"));
+    }
+
+    #[tokio::test]
+    async fn receive_private_group_envelope_reports_a_gap_on_seq_jump() {
+        let server = MockServer::start().await;
+        // The sender's first frame seals counter 1, the next observed
+        // frame seals 3: the receive path must surface the skipped
+        // counter as a GapReport on the second receive and none on the
+        // first, and the hole must persist on the conversation for
+        // recovery to consume.
+        mount_decrypt_once(&server, &encode_group_plaintext("Alice", "one", Some(1))).await;
+        mount_decrypt_once(&server, &encode_group_plaintext("Alice", "three", Some(3))).await;
+        let rig = build_rig();
+        mount_members_with_self_only(&server, rig.identity.agent_id_hex()).await;
+        let sender_signer = MlDsaSigner::generate().unwrap();
+        let sender_aid = hex::encode(fetchit_relay_proto::derive_agent_id(
+            &sender_signer.public_key(),
+        ));
+        install_card_for(&rig, &sender_signer, &sender_aid);
+        let env1 = craft_inbound_envelope(&sender_signer, &sender_aid, b"c1", 555).await;
+        let env2 = craft_inbound_envelope(&sender_signer, &sender_aid, b"c2", 556).await;
+
+        let http = Http::new(server.uri(), "tok".to_owned()).unwrap();
+        let router = Router::new();
+        let signer_arc = rig.signer_arc();
+        let endpoint = Endpoint::new(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+        );
+
+        let first = endpoint
+            .receive_private_group_envelope(&env1, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        let PrivateGroupReceive::Persisted { gap: first_gap, .. } = first else {
+            panic!("expected Persisted, got {first:?}");
+        };
+        assert_eq!(
+            first_gap, None,
+            "a sender's first counted frame is never a gap"
+        );
+
+        let second = endpoint
+            .receive_private_group_envelope(&env2, TEST_GROUP_HEX)
+            .await
+            .unwrap();
+        let PrivateGroupReceive::Persisted { gap, .. } = second else {
+            panic!("expected Persisted, got {second:?}");
+        };
+        let gap = gap.expect("counter jump 1 -> 3 must report a gap");
+        assert_eq!(gap.missing_seqs, vec![2]);
+        assert_eq!(gap.sender_agent_id_hex, sender_aid);
+
+        let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
+        let window = conv.group_seq_windows.get(&sender_aid).unwrap();
+        assert_eq!(window.high_water, 3);
+        assert_eq!(window.missing.keys().copied().collect::<Vec<_>>(), vec![2]);
     }
 
     #[tokio::test]
@@ -5186,7 +5313,7 @@ mod tests {
             .await
             .expect("receive must succeed without a /members mock — gate is bootstrap-only");
         assert!(
-            matches!(out, PrivateGroupReceive::Persisted(_)),
+            matches!(out, PrivateGroupReceive::Persisted { .. }),
             "existing-conv path: expected Persisted, got {out:?}",
         );
         let conv = rig.registry.get(TEST_GROUP_HEX).await.unwrap().unwrap();
@@ -5411,7 +5538,7 @@ mod tests {
         let mut persisted = 0usize;
         for h in handles {
             let outcome = h.await.unwrap().unwrap();
-            if matches!(outcome, PrivateGroupReceive::Persisted(_)) {
+            if matches!(outcome, PrivateGroupReceive::Persisted { .. }) {
                 persisted += 1;
             }
         }
@@ -5558,7 +5685,7 @@ mod tests {
             .receive_private_group_envelope(&envelope, TEST_GROUP_HEX)
             .await
             .unwrap();
-        let PrivateGroupReceive::Persisted(entry) = out else {
+        let PrivateGroupReceive::Persisted { entry, .. } = out else {
             panic!("expected Persisted, got {out:?}");
         };
         assert_eq!(entry.body, "hello bob");
@@ -5685,7 +5812,7 @@ mod tests {
             .receive_private_group_envelope(&envelope, TEST_GROUP_HEX)
             .await
             .unwrap();
-        let PrivateGroupReceive::Persisted(entry) = out else {
+        let PrivateGroupReceive::Persisted { entry, .. } = out else {
             panic!("expected Persisted, got {out:?}");
         };
         assert_eq!(entry.body, "pq hello");

@@ -1210,7 +1210,7 @@ async fn decode_private_group(
         .receive_private_group_envelope(transit, &group_id_hex)
         .await
     {
-        Ok(PrivateGroupReceive::Persisted(entry)) => {
+        Ok(PrivateGroupReceive::Persisted { entry, gap }) => {
             // Soak-collector receive anchor. Metadata only (message id +
             // group/receiver/sender prefixes) -- never the body; see the
             // SECURITY.md note on the body_len line below. `message_id`
@@ -1229,6 +1229,16 @@ async fn decode_private_group(
                 short(&self_hex),
                 short(&entry.sender_agent_id_hex),
             );
+            // Missed-message detection anchor: counter jump = messages
+            // this peer never received. Counts only, never content.
+            if let Some(g) = &gap {
+                eprintln!(
+                    "[peer] group-gap group={} sender={} missing={}",
+                    short(&group_id_hex),
+                    short(&g.sender_agent_id_hex),
+                    g.missing_seqs.len(),
+                );
+            }
             // Logs metadata only — sender + group prefixes + payload
             // size. Printing the plaintext body would land in stderr
             // which the systemd unit pipes to journalctl AND the

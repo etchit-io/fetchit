@@ -2459,7 +2459,7 @@ async fn handle_inbound(
                 .receive_private_group_envelope(&transit, &group_id_hex)
                 .await
             {
-                Ok(PrivateGroupReceive::Persisted(entry)) => {
+                Ok(PrivateGroupReceive::Persisted { entry, gap }) => {
                     let _ = app.emit(
                         "chat:group-message",
                         serde_json::json!({
@@ -2472,6 +2472,27 @@ async fn handle_inbound(
                             "attachment": entry.attachment,
                         }),
                     );
+                    // A sealed-counter jump means messages from this
+                    // sender never arrived here. Surface it as its own
+                    // event so the UI can mark the spot; recovery
+                    // (catch-up re-fetch) hangs off the same signal.
+                    if let Some(g) = gap {
+                        log_pump(&format!(
+                            "[relay] group {} gap: {} missing from {}",
+                            &group_id_hex[..8.min(group_id_hex.len())],
+                            g.missing_seqs.len(),
+                            &g.sender_agent_id_hex[..8.min(g.sender_agent_id_hex.len())],
+                        ));
+                        let _ = app.emit(
+                            "chat:group-gap",
+                            serde_json::json!({
+                                "group_id": group_id_hex,
+                                "from": g.sender_agent_id_hex,
+                                "missing_count": g.missing_seqs.len(),
+                                "epoch": g.epoch,
+                            }),
+                        );
+                    }
                 }
                 // Replayed envelope (already in the per-sender sliding
                 // window). No state change; surface nothing.
