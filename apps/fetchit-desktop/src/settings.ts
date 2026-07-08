@@ -657,45 +657,6 @@ function buildPage(): HTMLElement {
         <div class="settings-theme-options" role="radiogroup" aria-label="Theme"></div>
       </details>
     </section>
-    <section class="setting-group" id="group-network">
-      <h2>Network</h2>
-      <div class="setting-row">
-        <span>Connected peers</span>
-        <span id="net-peers" data-state="off">—</span>
-      </div>
-      <label class="setting-row">
-        <span>Chat relay region</span>
-        <select id="relay-region"></select>
-      </label>
-      <p class="setting-desc" id="relay-region-desc"></p>
-      <p class="setting-desc">Moving relays republishes your reachability record; your contacts update automatically.</p>
-      <details class="setting-collapsible" id="relay-custom-details">
-        <summary>Use a custom relay</summary>
-        <p class="setting-desc">
-          Point chat at your own relay. The URL must be the base (no path), e.g.
-          <code>http://relay.example:8088</code>.
-        </p>
-        <div class="setting-row setting-row--stack">
-          <input type="text" id="relay-custom-url" spellcheck="false"
-                 placeholder="http://relay.example:8088"
-                 aria-label="Custom relay URL">
-          <button type="button" class="setting-action" id="relay-custom-save">Use this relay</button>
-        </div>
-        <p class="setting-error" id="relay-custom-error" role="alert" hidden></p>
-      </details>
-      <label class="setting-row">
-        <span>Disconnect when idle</span>
-        <select id="idle-timeout"></select>
-      </label>
-<label class="setting-row">
-        <span>Enable LAN delivery <em class="setting-pill">experimental</em></span>
-        <input type="checkbox" id="lan-direct-enabled">
-      </label>
-      <p class="setting-desc">
-        Send chat directly between devices on the same network. Falls back to relay automatically.
-      </p>
-      ${ADVERTISED_RELAYS_HTML}
-    </section>
     <section class="setting-group" id="group-backup">
       <h2>Identity backup</h2>
       ${BACKUP_PANEL_HTML}
@@ -705,49 +666,100 @@ function buildPage(): HTMLElement {
       </div>
     </section>
     <section class="setting-group" id="group-advanced">
-      <h2>Advanced</h2>
-      <div class="setting-row">
-        <span>Your profile</span>
-        <button type="button" class="setting-action setting-action-ghost" data-act="view-my-profile">View my profile</button>
-      </div>
-      ${CUSTODY_PANEL_HTML}
-      ${EXTENDED_CARD_HTML}
-    </section>
-    <section class="setting-group" id="group-peers">
       <details class="setting-collapsible">
-        <summary><h2>Bootstrap peers</h2></summary>
-        <textarea id="peers-editor" rows="6" spellcheck="false" aria-label="Bootstrap peers"></textarea>
-        <p class="setting-error" id="peers-error" role="alert" hidden></p>
-        <div class="setting-actions">
-          <button type="button" class="setting-action" id="peers-save">Save</button>
-          <button type="button" class="setting-action setting-action-ghost" id="peers-reset">Reset to defaults</button>
-          <button type="button" class="setting-action setting-action-ghost" id="peers-refresh">Refresh from upstream</button>
+        <summary><h2>Advanced</h2></summary>
+        <p class="setting-desc">Power-user controls. Nothing in here is needed for everyday use.</p>
+        <div class="setting-row">
+          <span>Your profile</span>
+          <button type="button" class="setting-action setting-action-ghost" data-act="view-my-profile">View my profile</button>
+        </div>
+        ${CUSTODY_PANEL_HTML}
+        ${EXTENDED_CARD_HTML}
+        <div class="setting-subgroup" id="group-network">
+          <h3>Network</h3>
+          <div class="setting-row">
+            <span>Connected peers</span>
+            <span id="net-peers" data-state="off">—</span>
+          </div>
+          <label class="setting-row">
+            <span>Chat relay region</span>
+            <select id="relay-region"></select>
+          </label>
+          <p class="setting-desc" id="relay-region-desc"></p>
+          <p class="setting-desc">Moving relays republishes your reachability record; your contacts update automatically.</p>
+          <details class="setting-collapsible" id="relay-custom-details">
+            <summary>Use a custom relay</summary>
+            <p class="setting-desc">
+              Point chat at your own relay. The URL must be the base (no path), e.g.
+              <code>http://relay.example:8088</code>.
+            </p>
+            <div class="setting-row setting-row--stack">
+              <input type="text" id="relay-custom-url" spellcheck="false"
+                     placeholder="http://relay.example:8088"
+                     aria-label="Custom relay URL">
+              <button type="button" class="setting-action" id="relay-custom-save">Use this relay</button>
+            </div>
+            <p class="setting-error" id="relay-custom-error" role="alert" hidden></p>
+          </details>
+          <label class="setting-row">
+            <span>Disconnect when idle</span>
+            <select id="idle-timeout"></select>
+          </label>
+          <label class="setting-row">
+            <span>Enable LAN delivery <em class="setting-pill">experimental</em></span>
+            <input type="checkbox" id="lan-direct-enabled">
+          </label>
+          <p class="setting-desc">
+            Send chat directly between devices on the same network instead of
+            through the relay. Still being tested, so it stays off unless you
+            turn it on; delivery falls back to the relay automatically.
+          </p>
+          ${ADVERTISED_RELAYS_HTML}
+        </div>
+        <div class="setting-subgroup" id="group-peers">
+          <details class="setting-collapsible">
+            <summary><h3>Bootstrap peers</h3></summary>
+            <p class="setting-desc">
+              The Autonomi nodes this app first dials. A wrong entry here can
+              stop content loading until you reset to defaults.
+            </p>
+            <textarea id="peers-editor" rows="6" spellcheck="false" aria-label="Bootstrap peers"></textarea>
+            <p class="setting-error" id="peers-error" role="alert" hidden></p>
+            <div class="setting-actions">
+              <button type="button" class="setting-action" id="peers-save">Save</button>
+              <button type="button" class="setting-action setting-action-ghost" id="peers-reset">Reset to defaults</button>
+              <button type="button" class="setting-action setting-action-ghost" id="peers-refresh">Refresh from upstream</button>
+            </div>
+          </details>
+        </div>
+        <div class="setting-subgroup" id="group-cache">
+          <h3>On-disk byte cache</h3>
+          <p class="setting-desc">
+            Off by default. When on, pages and files you open are kept on this
+            device so they re-open instantly. They are stored unencrypted, so
+            anyone who can use this computer account could open them until
+            cleared.
+          </p>
+          <label class="setting-row">
+            <span>Enable on-disk cache</span>
+            <input type="checkbox" id="cache-enabled">
+          </label>
+          <label class="setting-row">
+            <span>When to clear</span>
+            <select id="cache-mode">
+              <option value="persist">Persist across sessions</option>
+              <option value="on-close">Clear when the app closes</option>
+              <option value="on-idle">Clear after idle disconnect</option>
+            </select>
+          </label>
+          <label class="setting-row">
+            <span>Maximum size (MB)</span>
+            <input type="number" id="cache-max-mb" min="1" step="1" value="500">
+          </label>
+          <div class="setting-stats" id="cache-stats" aria-live="polite"></div>
+          <button type="button" class="setting-action" id="clear-cache">Clear cache now</button>
         </div>
       </details>
-    </section>
-    <section class="setting-group" id="group-cache">
-      <h2>On-disk byte cache</h2>
-      <p class="setting-desc">
-        Off by default. When on, fetched bytes stay on disk for instant re-open.
-      </p>
-      <label class="setting-row">
-        <span>Enable on-disk cache</span>
-        <input type="checkbox" id="cache-enabled">
-      </label>
-      <label class="setting-row">
-        <span>When to clear</span>
-        <select id="cache-mode">
-          <option value="persist">Persist across sessions</option>
-          <option value="on-close">Clear when the app closes</option>
-          <option value="on-idle">Clear after idle disconnect</option>
-        </select>
-      </label>
-      <label class="setting-row">
-        <span>Maximum size (MB)</span>
-        <input type="number" id="cache-max-mb" min="1" step="1" value="500">
-      </label>
-      <div class="setting-stats" id="cache-stats" aria-live="polite"></div>
-      <button type="button" class="setting-action" id="clear-cache">Clear cache now</button>
     </section>
     <section class="setting-group" id="group-bookmarks">
       <h2>Bookmarks</h2>

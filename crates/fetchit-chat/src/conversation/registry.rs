@@ -669,6 +669,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: std::collections::BTreeMap::new(),
             history: std::collections::VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: std::collections::BTreeMap::new(),
         }
     }
 
@@ -819,6 +821,8 @@ mod tests {
             trust_state: TrustState::Confirmed,
             seen_nonces: std::collections::BTreeMap::new(),
             history: std::collections::VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: std::collections::BTreeMap::new(),
         }
     }
 

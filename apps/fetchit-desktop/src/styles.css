@@ -747,6 +747,17 @@ body:not([data-view="settings"]) #settings {
   font-weight: 600;
   color: var(--bone);
 }
+.setting-subgroup {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.setting-subgroup h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  font-weight: 600;
+  color: var(--bone);
+}
 .setting-desc {
   margin: 0 0 18px;
   color: var(--ash);

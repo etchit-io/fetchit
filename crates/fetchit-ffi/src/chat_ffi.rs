@@ -223,15 +223,17 @@ fn route_envelope(
 /// fields mapped straight through (`sender_agent_id_hex` -> `from_agent_id_hex`,
 /// the `String` `message_id` wrapped in `Some`); a
 /// [`PrivateGroupReceive::Replay`] surfaces nothing, matching the engine's
-/// "caller MUST NOT surface anything" replay contract. Pure so the projection
-/// is unit-tested without a live x0xd; the inbound pump calls it on the same
-/// path it ships.
+/// "caller MUST NOT surface anything" replay contract. The engine-detected
+/// `gap` is dropped here: the FFI event enum has no gap variant yet, so the
+/// Android shell does not surface missed-message detection. Pure so the
+/// projection is unit-tested without a live x0xd; the inbound pump calls it
+/// on the same path it ships.
 fn project_group_receive(
     group_id: String,
     outcome: fetchit_chat::messages::PrivateGroupReceive,
 ) -> Option<ChatEventFfi> {
     match outcome {
-        fetchit_chat::messages::PrivateGroupReceive::Persisted(entry) => {
+        fetchit_chat::messages::PrivateGroupReceive::Persisted { entry, .. } => {
             Some(ChatEventFfi::GroupMessage {
                 group_id,
                 from_agent_id_hex: entry.sender_agent_id_hex,
@@ -2198,8 +2200,10 @@ mod tests {
             attachment: None,
             delivered_at_ms: None,
         };
-        let projected =
-            project_group_receive(group_id.clone(), PrivateGroupReceive::Persisted(entry));
+        let projected = project_group_receive(
+            group_id.clone(),
+            PrivateGroupReceive::Persisted { entry, gap: None },
+        );
         match projected {
             Some(ChatEventFfi::GroupMessage {
                 group_id: gid,
