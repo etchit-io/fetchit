@@ -5,6 +5,7 @@ use crate::blob::{get_blob, post_blob, BlobStore};
 use crate::capability::CapabilityResolver;
 use crate::config::ServerConfig;
 use crate::forwarding::{get_forwarding, post_forwarding, ForwardingIndex};
+use crate::group_log::{GroupLogStore, RamGroupLog};
 #[cfg(feature = "fediverse-inbox")]
 use crate::inbox::{inbox_router, InboxMetrics, InboxState};
 use crate::metrics::Metrics;
@@ -40,6 +41,11 @@ pub struct ServerState {
     /// default, or the durable `SQLite` backend when the operator
     /// injects one via [`Server::with_transit_store`].
     pub transit: Arc<dyn TransitStore + Send + Sync>,
+    /// Per-group append-only record log (epoch catch-up, join-result
+    /// re-staging, cold group reconstruction): the in-RAM
+    /// [`RamGroupLog`] by default, or the durable `SQLite` backend when
+    /// the operator injects one via [`Server::with_group_log_store`].
+    pub group_log: Arc<dyn GroupLogStore + Send + Sync>,
     /// Live-connection registry.
     pub sessions: Arc<SessionRegistry>,
     /// ML-DSA-65 signature backend.
@@ -101,6 +107,11 @@ pub struct Server {
     /// binary injects a [`crate::SqliteTransitStore`] here when the
     /// operator configures a durable path.
     transit_store: Option<Arc<dyn TransitStore + Send + Sync>>,
+    /// Group-log store override. `None` (the default) builds the in-RAM
+    /// [`RamGroupLog`] from config at [`Server::router`] time; the
+    /// binary injects a [`crate::SqliteGroupLog`] here when the
+    /// operator configures a durable path.
+    group_log_store: Option<Arc<dyn GroupLogStore + Send + Sync>>,
 }
 
 impl Server {
@@ -118,6 +129,7 @@ impl Server {
             #[cfg(feature = "fediverse-inbox")]
             registry: None,
             transit_store: None,
+            group_log_store: None,
         }
     }
 
@@ -127,6 +139,15 @@ impl Server {
     #[must_use]
     pub fn with_transit_store(mut self, store: Arc<dyn TransitStore + Send + Sync>) -> Self {
         self.transit_store = Some(store);
+        self
+    }
+
+    /// Inject the group-log store (e.g. the durable
+    /// [`crate::SqliteGroupLog`]) instead of the default in-RAM
+    /// [`RamGroupLog`].
+    #[must_use]
+    pub fn with_group_log_store(mut self, store: Arc<dyn GroupLogStore + Send + Sync>) -> Self {
+        self.group_log_store = Some(store);
         self
     }
 
@@ -223,6 +244,13 @@ impl Server {
                     self.config.transit_ttl,
                     self.config.transit_per_recipient,
                     self.config.transit_total_bytes_cap,
+                ))
+            }),
+            group_log: self.group_log_store.unwrap_or_else(|| {
+                Arc::new(RamGroupLog::new(
+                    self.config.group_log_window,
+                    self.config.group_log_per_group_cap,
+                    self.config.group_log_total_bytes_cap,
                 ))
             }),
             sessions: self.sessions,
@@ -363,6 +391,9 @@ fn spawn_sweeper(state: Arc<ServerState>) {
         loop {
             interval.tick().await;
             let evicted = state.transit.sweep_expired();
+            // Group-log retention window: serve-to-many means only this
+            // sweep (or the append-time caps) ever removes a record.
+            let _ = state.group_log.sweep_expired(crate::group_log::now_ms());
             let _ = state.auth.sweep_expired();
             state.ratelimit.sweep_idle(Duration::from_secs(3600));
             // Reachability V1 / TB2: drop forwarding pointers past their

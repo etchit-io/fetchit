@@ -28,6 +28,18 @@ pub struct ServerConfig {
     /// this caps the total so a fanned-out attacker can't push the
     /// process toward OOM.
     pub transit_total_bytes_cap: usize,
+    /// How long group-log records are retained before the sweeper
+    /// evicts them. Retention is serve-to-many: fetches never delete a
+    /// record, only this window (or the caps below) bounds the log.
+    pub group_log_window: Duration,
+    /// Per-group record cap on the group log. An append past it evicts
+    /// the group's OLDEST record — the newest records are the ones
+    /// members need to catch up.
+    pub group_log_per_group_cap: usize,
+    /// Global cap on bytes the group log may hold across all groups.
+    /// Appends past it are rejected (typed error → `Throttle` on the
+    /// wire), bounding worst-case RAM/disk like the transit byte cap.
+    pub group_log_total_bytes_cap: usize,
     /// Lifetime of an issued auth challenge before it must be redeemed.
     pub challenge_ttl: Duration,
     /// Lifetime of a minted bearer token for the WebSocket upgrade.
@@ -66,6 +78,9 @@ impl ServerConfig {
             transit_ttl: Duration::from_secs(15 * 60),
             transit_per_recipient: 256,
             transit_total_bytes_cap: 1 << 30,
+            group_log_window: Duration::from_secs(30 * 24 * 60 * 60),
+            group_log_per_group_cap: 4096,
+            group_log_total_bytes_cap: 1 << 30,
             challenge_ttl: Duration::from_secs(60),
             bearer_ttl: Duration::from_secs(15 * 60),
             issuer_keys: HashMap::new(),

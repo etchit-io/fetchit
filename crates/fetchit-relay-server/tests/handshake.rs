@@ -15,9 +15,9 @@ use fetchit_relay_proto::pair_record::{
 };
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest, AuthVerifyResponse, Bye,
-    ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, Hello, MachineId, PresenceUpdate,
-    Ready, Region, SendFrame, ServerFrame, TenantId, TransitAck, TransitEnvelope, WatchPresence,
-    WIRE_VERSION,
+    ByeReason, ClientFrame, DedupeKey, Deliver, EnvelopeKind, GroupId, Hello, LogAppend, LogFetch,
+    LogRecordKind, LogRecordWire, MachineId, PresenceUpdate, Ready, Region, SendFrame, ServerFrame,
+    TenantId, TransitAck, TransitEnvelope, WatchPresence, WIRE_VERSION,
 };
 use fetchit_relay_server::server::ServerState;
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
@@ -955,6 +955,211 @@ async fn relay_rejects_unknown_wire_version() {
             }
         }
     }
+}
+
+// ---- Durable group log (LogAppend / LogFetch) ----
+
+/// Connect + handshake one agent, returning its id and ready WS stream.
+async fn connect_agent(addr: SocketAddr, pk: &[u8]) -> (AgentId, WsStream) {
+    let id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(pk));
+    let tok = obtain_bearer(addr, pk).await;
+    let mut ws = connect_ws(addr, &tok).await;
+    send_hello(&mut ws).await;
+    let _ = expect_ready(&mut ws).await;
+    (id, ws)
+}
+
+async fn send_log_append(
+    ws: &mut WsStream,
+    group: GroupId,
+    kind: LogRecordKind,
+    recipient: Option<AgentId>,
+    payload: &[u8],
+) {
+    let frame = ClientFrame::LogAppend(LogAppend {
+        group_id: group,
+        kind,
+        recipient,
+        payload: payload.to_vec(),
+    });
+    ws.send(Message::Binary(to_bytes(&frame).unwrap()))
+        .await
+        .unwrap();
+}
+
+/// Send a `LogFetch` and collect `LogRecords` chunks until `done`.
+async fn log_fetch_collect(
+    ws: &mut WsStream,
+    group: GroupId,
+    since_seq: u64,
+) -> Vec<LogRecordWire> {
+    let frame = ClientFrame::LogFetch(LogFetch {
+        group_id: group,
+        since_seq,
+    });
+    ws.send(Message::Binary(to_bytes(&frame).unwrap()))
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    loop {
+        match next_server_frame(ws, Duration::from_secs(2)).await {
+            Some(ServerFrame::LogRecords(lr)) => {
+                assert_eq!(lr.group_id, group, "records tagged with fetched group");
+                out.extend(lr.records);
+                if lr.done {
+                    return out;
+                }
+            }
+            Some(_) => {}
+            None => panic!("log fetch timed out before a done=true LogRecords frame"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn group_log_append_then_fetch_returns_ordered_commits() {
+    let addr = start_test_server().await;
+    let (_, mut alice) = connect_agent(addr, b"alice-pubkey-bytes").await;
+
+    let group = GroupId::from_bytes([0x33; 32]);
+    for payload in [b"c1".as_slice(), b"c2", b"c3"] {
+        send_log_append(&mut alice, group, LogRecordKind::Commit, None, payload).await;
+    }
+    // Frames on one connection are processed in order, so this fetch is
+    // handled after all three appends.
+    let records = log_fetch_collect(&mut alice, group, 0).await;
+    assert_eq!(
+        records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "relay-assigned seqs start at 1 and arrive ascending"
+    );
+    assert_eq!(records[0].payload, b"c1");
+    assert_eq!(records[1].payload, b"c2");
+    assert_eq!(records[2].payload, b"c3");
+    assert!(records
+        .iter()
+        .all(|r| r.kind == LogRecordKind::Commit && r.recipient.is_none()));
+}
+
+#[tokio::test]
+async fn group_log_fetch_since_returns_only_newer_records() {
+    let addr = start_test_server().await;
+    let (_, mut alice) = connect_agent(addr, b"alice-pubkey-bytes").await;
+
+    let group = GroupId::from_bytes([0x34; 32]);
+    for payload in [b"c1".as_slice(), b"c2", b"c3"] {
+        send_log_append(&mut alice, group, LogRecordKind::Commit, None, payload).await;
+    }
+    let records = log_fetch_collect(&mut alice, group, 2).await;
+    assert_eq!(records.len(), 1, "only seq > 2 returned");
+    assert_eq!(records[0].seq, 3);
+    assert_eq!(records[0].payload, b"c3");
+}
+
+#[tokio::test]
+async fn join_result_served_only_to_its_addressed_agent() {
+    let addr = start_test_server().await;
+    let (_, mut alice) = connect_agent(addr, b"alice-pubkey-bytes").await;
+    let (bob_id, mut bob) = connect_agent(addr, b"bob-pubkey-bytes-here").await;
+    let (_, mut carol) = connect_agent(addr, b"carol-pubkey-bytes-here").await;
+
+    let group = GroupId::from_bytes([0x35; 32]);
+    send_log_append(&mut alice, group, LogRecordKind::Commit, None, b"commit-1").await;
+    send_log_append(
+        &mut alice,
+        group,
+        LogRecordKind::JoinResult,
+        Some(bob_id),
+        b"welcome-bob",
+    )
+    .await;
+    // Order the appends before any fetch: alice's own fetch completes
+    // only after her appends were handled.
+    let _ = log_fetch_collect(&mut alice, group, 0).await;
+
+    // Bob (the addressed joiner) sees the commit AND his join result.
+    let bob_records = log_fetch_collect(&mut bob, group, 0).await;
+    assert_eq!(
+        bob_records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(bob_records[1].kind, LogRecordKind::JoinResult);
+    assert_eq!(bob_records[1].recipient, Some(bob_id));
+
+    // Carol holds the group id, so she gets commits — but NEVER another
+    // agent's join result.
+    let carol_records = log_fetch_collect(&mut carol, group, 0).await;
+    assert_eq!(
+        carol_records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![1],
+        "another agent's JoinResult must be filtered out"
+    );
+    assert_eq!(carol_records[0].kind, LogRecordKind::Commit);
+}
+
+/// Spin up a server with BOTH durable `SQLite` stores (transit + group
+/// log) on the one database file at `db` — the same wiring the daemon
+/// uses for `FETCHIT_RELAY_TRANSIT_DB`.
+async fn start_test_server_with_durable_stores(db: &std::path::Path) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = ServerConfig::defaults(addr, Region::Nyc);
+    let transit = fetchit_relay_server::SqliteTransitStore::open(
+        db,
+        cfg.transit_ttl,
+        cfg.transit_per_recipient,
+        cfg.transit_total_bytes_cap,
+    )
+    .unwrap();
+    let group_log = fetchit_relay_server::SqliteGroupLog::open(
+        db,
+        cfg.group_log_window,
+        cfg.group_log_per_group_cap,
+        cfg.group_log_total_bytes_cap,
+    )
+    .unwrap();
+    let server = Server::new(cfg)
+        .with_verifier(Arc::new(AcceptAllVerifier))
+        .with_transit_store(Arc::new(transit))
+        .with_group_log_store(Arc::new(group_log));
+    let (router, _state) = server.router();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    addr
+}
+
+/// Durable floor: group-log records appended through one server
+/// instance are served by a DIFFERENT instance opening the same
+/// `SQLite` file — cold group reconstruction survives a relay restart.
+#[tokio::test]
+async fn group_log_survives_server_restart_with_sqlite_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("relay.db");
+    let group = GroupId::from_bytes([0x36; 32]);
+
+    // Instance 1: alice deposits two commits and confirms they landed
+    // (the fetch orders after the appends on her connection).
+    let addr1 = start_test_server_with_durable_stores(&db).await;
+    let (_, mut alice) = connect_agent(addr1, b"alice-pubkey-bytes").await;
+    send_log_append(&mut alice, group, LogRecordKind::Commit, None, b"epoch-1").await;
+    send_log_append(&mut alice, group, LogRecordKind::Commit, None, b"epoch-2").await;
+    assert_eq!(log_fetch_collect(&mut alice, group, 0).await.len(), 2);
+    drop(alice);
+
+    // Instance 2: fresh ServerState, same durable file. A different
+    // agent holding the group id reads the full log from seq 0.
+    let addr2 = start_test_server_with_durable_stores(&db).await;
+    let (_, mut bob) = connect_agent(addr2, b"bob-pubkey-bytes-here").await;
+    let records = log_fetch_collect(&mut bob, group, 0).await;
+    assert_eq!(
+        records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![1, 2],
+        "records survived the restart with stable seqs"
+    );
+    assert_eq!(records[0].payload, b"epoch-1");
+    assert_eq!(records[1].payload, b"epoch-2");
 }
 
 // ---- T7b: deposit-path Moved emit (departed-recipient signal) ----

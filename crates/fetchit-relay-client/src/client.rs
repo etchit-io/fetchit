@@ -1041,6 +1041,11 @@ fn spawn_reader(
                             // forwarding record and retry at the new relay.
                             let _ = outbox.moved(&dedupe_key);
                         }
+                        ServerFrame::LogRecords(_) => {
+                            // Answers a LogFetch, which this supervisor
+                            // connection never issues — a stray frame is
+                            // dropped.
+                        }
                         ServerFrame::Bye(b) => break format!("relay sent Bye: {:?}", b.reason),
                     }
                 }

@@ -31,6 +31,15 @@ fn record_size(payload_len: usize) -> usize {
     RECORD_FIXED_OVERHEAD.saturating_add(payload_len)
 }
 
+/// Milliseconds since the Unix epoch, saturating on the rare clock error.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(u64::MAX)
+}
+
 /// One stored group-log record.
 #[derive(Clone, Debug)]
 pub struct StoredLogRecord {
