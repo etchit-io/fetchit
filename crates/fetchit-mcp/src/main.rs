@@ -10,6 +10,8 @@
 //! Denylist: set `FETCHIT_MCP_TRUST_URL` (e.g. `https://etchit.io/v1`) to
 //! fetch the signed community denylist at startup and refuse blocked
 //! addresses, same as the human shells. Unset = no denylist (local use).
+//! Fail-closed: a set-but-unreachable denylist aborts startup unless
+//! `FETCHIT_MCP_TRUST_OPTIONAL=1`.
 
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -57,24 +59,58 @@ fn peers_from_env() -> Vec<String> {
 ///
 /// One verified refresh at startup; MCP sessions are short-lived, so a
 /// background poll loop buys nothing here.
-fn denylist_from_env(runtime: &tokio::runtime::Runtime) -> Option<Arc<dyn DenylistQuery>> {
-    let url = std::env::var("FETCHIT_MCP_TRUST_URL").ok()?;
+///
+/// FAIL-CLOSED: setting `FETCHIT_MCP_TRUST_URL` is an explicit request to
+/// gate reads on the community denylist. If the startup refresh cannot
+/// complete (network blocked, bad response, HTTP client failure), the
+/// gate would be EMPTY — admitting every address, silently — which is the
+/// opposite of what the operator asked for. So a failed refresh is a hard
+/// startup error. An operator who genuinely wants "gate when reachable,
+/// open otherwise" opts into that explicitly with
+/// `FETCHIT_MCP_TRUST_OPTIONAL=1`.
+///
+/// # Errors
+/// Returns an error (aborting startup) when the denylist is requested via
+/// `FETCHIT_MCP_TRUST_URL` but cannot be loaded and the operator has not
+/// set `FETCHIT_MCP_TRUST_OPTIONAL=1`.
+fn denylist_from_env(
+    runtime: &tokio::runtime::Runtime,
+) -> anyhow::Result<Option<Arc<dyn DenylistQuery>>> {
+    let Some(url) = std::env::var("FETCHIT_MCP_TRUST_URL").ok() else {
+        return Ok(None);
+    };
     let url = url.trim().to_string();
     if url.is_empty() {
-        return None;
+        return Ok(None);
     }
+    let optional = std::env::var("FETCHIT_MCP_TRUST_OPTIONAL").as_deref() == Ok("1");
     let consumer = Arc::new(DenylistConsumer::new(etchitio_pubkey(), url, None));
-    match ReqwestClient::new() {
-        Ok(http) => {
-            if let Err(e) = runtime.block_on(consumer.refresh(&http)) {
-                eprintln!("fetchit-mcp: denylist refresh failed (continuing unblocked): {e}");
-            } else {
-                eprintln!("fetchit-mcp: community denylist active");
-            }
+
+    let load_err: Option<String> = match ReqwestClient::new() {
+        Ok(http) => runtime
+            .block_on(consumer.refresh(&http))
+            .err()
+            .map(|e| e.to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+
+    if let Some(e) = load_err {
+        if optional {
+            eprintln!(
+                "fetchit-mcp: denylist load failed; continuing UNBLOCKED per \
+                 FETCHIT_MCP_TRUST_OPTIONAL=1: {e}"
+            );
+        } else {
+            anyhow::bail!(
+                "denylist requested via FETCHIT_MCP_TRUST_URL could not be loaded: {e}. \
+                 Refusing to start with the gate open. Set FETCHIT_MCP_TRUST_OPTIONAL=1 \
+                 to run unblocked when the denylist is unreachable."
+            );
         }
-        Err(e) => eprintln!("fetchit-mcp: denylist http client failed: {e}"),
+    } else {
+        eprintln!("fetchit-mcp: community denylist active");
     }
-    Some(consumer as Arc<dyn DenylistQuery>)
+    Ok(Some(consumer as Arc<dyn DenylistQuery>))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -85,7 +121,7 @@ fn main() -> anyhow::Result<()> {
         peers: peers_from_env(),
         cell: tokio::sync::OnceCell::new(),
     });
-    if let Some(denylist) = denylist_from_env(&runtime) {
+    if let Some(denylist) = denylist_from_env(&runtime)? {
         server = server.with_denylist(denylist);
     }
 

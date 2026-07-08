@@ -18,6 +18,16 @@ const KIND: &str = "application/zip";
 const LFH_MAGIC: &[u8] = &[0x50, 0x4B, 0x03, 0x04]; // "PK\x03\x04" — local file header
 const EOCD_MAGIC: &[u8] = &[0x50, 0x4B, 0x05, 0x06]; // "PK\x05\x06" — end-of-central-directory
 
+/// Hard cap on a single extracted entry's decompressed size (256 MiB).
+///
+/// A ZIP entry's compressed size can be tiny while its decompressed size
+/// is many GiB (a "zip bomb"). Extraction buffers the whole entry into
+/// memory, so an unbounded read is an out-of-memory vector for untrusted
+/// archives — acute now that unattended MCP agents call this. Entries
+/// that decompress past this cap are rejected. Generous enough for real
+/// archived media.
+pub const MAX_EXTRACT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Read one named entry's decompressed bytes out of a ZIP archive.
 ///
 /// Pure extraction — given the archive bytes and an entry path (as
@@ -26,26 +36,50 @@ const EOCD_MAGIC: &[u8] = &[0x50, 0x4B, 0x05, 0x06]; // "PK\x05\x06" — end-of-
 /// entries; the surface decides what to do with the bytes (render
 /// inline, save to disk, hand off to another app).
 ///
+/// Entries decompressing past [`MAX_EXTRACT_BYTES`] are rejected rather
+/// than buffered, and the decompressed-size header is never trusted for
+/// pre-allocation (a forged value would abort on allocation before a
+/// byte is read).
+///
 /// # Errors
 ///
 /// Returns [`Error::Render`] when the archive bytes don't parse, when
-/// the named entry is missing, or when decompression fails.
+/// the named entry is missing, when decompression fails, or when the
+/// entry exceeds [`MAX_EXTRACT_BYTES`].
 pub fn extract_entry(archive_bytes: Bytes, entry_path: &str) -> Result<Vec<u8>> {
+    extract_entry_capped(archive_bytes, entry_path, MAX_EXTRACT_BYTES)
+}
+
+/// [`extract_entry`] with an explicit decompressed-size cap (in bytes).
+/// The public entry point pins `max` to [`MAX_EXTRACT_BYTES`]; the seam
+/// exists so the cap is exercisable in tests without a multi-GiB fixture.
+fn extract_entry_capped(archive_bytes: Bytes, entry_path: &str, max: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let cursor = Cursor::new(archive_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| Error::Render {
         kind: KIND,
         reason: format!("zip parse failed: {e}"),
     })?;
-    let mut file = archive.by_name(entry_path).map_err(|e| Error::Render {
+    let file = archive.by_name(entry_path).map_err(|e| Error::Render {
         kind: KIND,
         reason: format!("entry {entry_path:?}: {e}"),
     })?;
-    let mut out = Vec::with_capacity(usize::try_from(file.size()).unwrap_or(usize::MAX));
-    file.read_to_end(&mut out).map_err(|e| Error::Render {
+    // Start empty — NEVER pre-allocate from `file.size()`, the
+    // attacker-controlled uncompressed-size header. Bound the read to
+    // `max + 1` so a deflate bomb can't inflate past the cap into
+    // memory; if it produces more than `max`, reject.
+    let mut out = Vec::new();
+    let mut limited = file.take(max + 1);
+    limited.read_to_end(&mut out).map_err(|e| Error::Render {
         kind: KIND,
         reason: format!("entry read failed: {e}"),
     })?;
+    if out.len() as u64 > max {
+        return Err(Error::Render {
+            kind: KIND,
+            reason: format!("entry {entry_path:?} exceeds the {max}-byte extract cap"),
+        });
+    }
     Ok(out)
 }
 
@@ -154,6 +188,33 @@ mod tests {
         let zip = build_zip(&[("hello.txt", b"world")]);
         let out = extract_entry(Bytes::from(zip), "hello.txt").expect("extract");
         assert_eq!(out, b"world");
+    }
+
+    #[test]
+    fn extract_entry_rejects_an_entry_past_the_cap() {
+        // An entry whose decompressed size exceeds the cap is rejected,
+        // not buffered — the zip-bomb guard. Drive the seam with a tiny
+        // cap so no multi-GiB fixture is needed.
+        let zip = build_zip(&[("big.bin", &[0u8; 4096])]);
+        let err = extract_entry_capped(Bytes::from(zip), "big.bin", 100)
+            .expect_err("entry over the cap must be rejected");
+        match err {
+            Error::Render { reason, .. } => assert!(
+                reason.contains("exceeds"),
+                "expected a cap error, got {reason:?}"
+            ),
+            other => panic!("expected Error::Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_entry_accepts_an_entry_at_the_cap() {
+        // Exactly at the cap still extracts (the +1 take headroom means
+        // the boundary is inclusive of `max`).
+        let payload = [0u8; 100];
+        let zip = build_zip(&[("edge.bin", &payload)]);
+        let out = extract_entry_capped(Bytes::from(zip), "edge.bin", 100).expect("at-cap extract");
+        assert_eq!(out.len(), 100);
     }
 
     #[test]
