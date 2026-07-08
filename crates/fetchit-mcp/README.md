@@ -29,7 +29,8 @@ JSON-RPC).
 | Var | Effect |
 |---|---|
 | `FETCHIT_MCP_PEERS` | Comma-separated bootstrap peers; default = bundled `DEFAULT_PEERS` |
-| `FETCHIT_MCP_TRUST_URL` | e.g. `https://etchit.io/v1` — fetches the signed community denylist at startup and refuses blocked addresses before any bytes move. Unset = no denylist (personal use) |
+| `FETCHIT_MCP_TRUST_URL` | e.g. `https://etchit.io/v1` — fetches the signed community denylist at startup and refuses blocked addresses before any bytes move. Unset = no denylist (personal use). FAIL-CLOSED: if set but the denylist can't be loaded, startup aborts (refusing to run with the gate open) unless `FETCHIT_MCP_TRUST_OPTIONAL=1` |
+| `FETCHIT_MCP_TRUST_OPTIONAL` | Set to `1` to run UNBLOCKED when the denylist is requested but unreachable, instead of aborting. Only meaningful with `FETCHIT_MCP_TRUST_URL` |
 
 ## Behavior notes
 
