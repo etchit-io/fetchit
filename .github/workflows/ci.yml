@@ -310,35 +310,27 @@ jobs:
           ndk-version: r27
           add-to-path: true
 
-      # The android job died at step 14 ("Build fetchit-ffi for arm64-v8a")
-      # with "the hosted runner lost communication with the server", burning a
-      # full ~65-minute run. Measured directly: the arm64 cross-compile alone
-      # peaks at only ~4.6 GB RAM / ~2 GB disk — well inside the private
-      # runner's 7 GB / 14 GB. So it is not a runaway build; it is that a
-      # 2-job compile pegging both of the runner's 2 cores at ~4.6 GB, stacked
-      # on the runner's own resident memory (OS + agent + restored caches),
-      # tips a 7 GB box over and starves the runner agent's heartbeat. Fix:
-      # build SINGLE-JOB (below) so one core stays free for the agent and the
-      # peak drops to ~2.5 GB, plus this swapfile for headroom. Both are
-      # reliability-only — neither changes what is built.
-      - name: Add swap for the arm64 cross-compile
+      # The android job died with "No space left on device" (System.IOException
+      # in the runner agent). It's DISK, not memory/CPU: the arm64 cross-compile
+      # lands on top of the earlier host-target `fetchit-ffi` build, the NDK, and
+      # the gradle caches, and together they exhaust the private runner's ~14 GB
+      # root disk. (Measured build peak is only ~4.6 GB RAM — an earlier swap
+      # step was the wrong fix and its 12 GB swapfile only made the fill worse.)
+      # Reclaim the large unused pre-installed toolchains before the compile —
+      # none of them are needed by the Rust or Android build. `df -h` brackets
+      # the reclaim so the log shows the headroom won.
+      - name: Free disk space for the arm64 build
         run: |
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile
-          sudo fallocate -l 12G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell 2>/dev/null || true
+          echo "after:"; df -h /
 
       - name: Build fetchit-ffi for arm64-v8a
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          # Single-job keeps one core free for the runner's heartbeat agent
-          # and caps the cross-compile's memory peak (~4.6 GB → ~2.5 GB) so it
-          # can't tip the 7 GB runner over. Slower, but reliably completes.
-          CARGO_BUILD_JOBS: "1"
         run: ./scripts/build-jni-libs.sh
 
       - name: Build debug APK
