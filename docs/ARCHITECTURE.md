@@ -39,8 +39,8 @@ wallet lives in the sibling etch>it). To onboard, read in order: `fetchit-core`,
 **Key entry points:** `fetchit_core::Address`, `fetchit_core::NetworkClient`,
 `fetchit_core::HandlerRegistry`, `fetchit_core::Rendition`.
 
-<!-- arch: id=overview glob=crates/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=overview glob=crates/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-core (engine)
 
@@ -66,8 +66,8 @@ in-crate exhaustive-match tripwire, because `Rendition` is `#[non_exhaustive]`):
 tie-break behavior: `ties_broken_by_registration_order` in
 `crates/fetchit-core/src/registry.rs`.
 
-<!-- arch: id=fetchit-core glob=crates/fetchit-core/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-core glob=crates/fetchit-core/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-net (Autonomi backend)
 
@@ -86,8 +86,8 @@ this step large content silently returns garbage.
 bootstrap list (kept in sync by hand, with the source noted in
 `crates/fetchit-net/src/peers.rs`).
 
-<!-- arch: id=fetchit-net glob=crates/fetchit-net/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-net glob=crates/fetchit-net/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-ffi (uniffi)
 
@@ -96,10 +96,12 @@ Kotlin/Swift, plus the daemonless chat surface the Android shell drives. Free
 functions export via `#[uniffi::export]`; a `#[uniffi::Object] Client` wraps
 `AutonomiClient` with async methods, and a `RenditionFFI` enum maps each
 `fetchit_core::Rendition` variant for host-language pattern-matching. A second
-`#[uniffi::Object] ChatClient` is the daemonless `fetchit-chat` surface
-(LocalSigner identity, no x0xd); it carries the DM outbox (`enqueue_dm`,
-`start_outbox`, `outbox_snapshot`, `retry_outbox`) and drains `ChatEventFfi`
-(incl. `Outbox` bubbles) through one `next_event` pump. This crate is
+`#[uniffi::Object] ChatClient` is the daemonless `fetchit-chat` surface: DMs are
+signed by a local ML-DSA-65 vault signer with no separate daemon, while group
+TreeKEM (the x0xd `/secure` surface) is served by an x0xd embedded in-process. It
+carries the DM outbox (`enqueue_dm`, `start_outbox`, `outbox_snapshot`,
+`retry_outbox`) plus a group create/join/send/moderate surface, and drains
+`ChatEventFfi` (incl. `Outbox` bubbles) through one `next_event` pump. This crate is
 **workspace-excluded** (its own `Cargo.lock`) because `uniffi-bindgen` walks
 transitive deps and fails its metadata lookup silently inside a multi-crate
 workspace; the reason is recorded in its `Cargo.toml`. The `.so` and the
@@ -112,8 +114,8 @@ launch.
 `fetchit_ffi::ChatClient`, `fetchit_ffi::setup_logger`.
 **Locked by:** uniffi pin: `PINS.md` + `scripts/check-pins.sh`.
 
-<!-- arch: id=fetchit-ffi glob=crates/fetchit-ffi/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=fetchit-ffi glob=crates/fetchit-ffi/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-cli
 
@@ -127,8 +129,8 @@ engine and the fastest way to reproduce a handler dispatch in isolation.
 **Locked by:** the handler set it dispatches:
 `crates/fetchit-core/tests/doc_invariants.rs`.
 
-<!-- arch: id=fetchit-cli glob=crates/fetchit-cli/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-cli glob=crates/fetchit-cli/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-chat
 
@@ -144,15 +146,22 @@ Router: they ride x0xd gossip as primary with the relay only as a cross-NAT
 contingency (`crate::groups_reachability`). A durable, vault-persisted **DM
 outbox** (`crate::outbox`) owns resend: a presence-edge retry loop, a 24h
 timeout sweep, a boot/restart orphan reclaim, and a double-send guard, surfaced
-as `OutboxEvent`s so both shells render one shared delivery state.
+as `OutboxEvent`s so both shells render one shared delivery state. Group receive
+additionally runs **missed-message detection** (`crate::conversation::seq_gap`):
+senders seal a monotonic per-group counter inside the encrypted frame and the
+receive-side ledger flags a skipped one as a gap (detection only; recovery
+layers on top). **Sibling-device admission** (`crate::sibling_admission`) lands a
+user's other devices in a group they join with zero UI -- the sibling mints its
+own per-group `TreeKEM` `KeyPackage` and an already-in-group device verifies the
+request chains to the account and admits it via x0xd's invite-free direct-add.
 
 **Key entry points:** `fetchit_chat::Client`, `fetchit_chat::ClientBuilder`,
 `fetchit_chat::Client::enqueue_dm`.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
 schema it gates on: `crates/fetchit-trust-types/**`.
 
-<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-relay-proto
 
@@ -167,15 +176,21 @@ or the session. `WIRE_VERSION` gates accepted frames during version transitions.
 **Key entry points:** `fetchit_relay_proto::TransitEnvelope`,
 `fetchit_relay_proto::EnvelopeKind`, `fetchit_relay_proto::WIRE_VERSION`.
 
-<!-- arch: id=fetchit-relay-proto glob=crates/fetchit-relay-proto/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-relay-proto glob=crates/fetchit-relay-proto/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-relay-server
 
 The operator-run relay: it routes opaque envelopes between connected clients
-over WebSocket and buffers undelivered ones in RAM only, under a hard TTL (no
-user data on disk). WS upgrades authenticate with a bearer token presented in
-the `Authorization` header (case-insensitive scheme). Built with the
+over WebSocket and buffers undelivered ones under a hard TTL -- in RAM by
+default, or in an operator-selected durable `SQLite` store
+(`FETCHIT_RELAY_TRANSIT_DB`) so a recipient's messages survive a relay restart
+and a multi-day offline window. Either way the relay holds only opaque
+ciphertext and never inspects the payload (stays blind); at-rest protection is
+the operator's full-disk encryption, not relay-side. A parallel durable
+group-log store keeps opaque per-group records for epoch catch-up, join-result
+re-staging, and cold group reconstruction. WS upgrades authenticate with a
+bearer token presented in the `Authorization` header (case-insensitive scheme). Built with the
 `fediverse-inbox` feature it also hosts the
 M4 ActivityPub `/inbox`, which verifies the HTTP Signature, applies the denylist
 and per-actor rate limits, and fans valid posts into the relay as
@@ -186,8 +201,8 @@ enable the feature.
 `fetchit_relay_server::ServerConfig`, `fetchit_relay_server::Metrics`.
 **Locked by:** wire types: `crates/fetchit-relay-proto/**`.
 
-<!-- arch: id=fetchit-relay-server glob=crates/fetchit-relay-server/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=fetchit-relay-server glob=crates/fetchit-relay-server/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-relay-client
 
@@ -202,8 +217,8 @@ and the etch>it side for envelope delivery.
 `fetchit_relay_client::ClientConfig`, `fetchit_relay_client::ConnState`.
 **Locked by:** wire types: `crates/fetchit-relay-proto/**`.
 
-<!-- arch: id=fetchit-relay-client glob=crates/fetchit-relay-client/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=fetchit-relay-client glob=crates/fetchit-relay-client/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-trust (+ -types / -client)
 
@@ -221,8 +236,8 @@ load-bearing invariant so a blocked value matches regardless of formatting.
 `fetchit_trust_types::DenylistQuery`,
 `fetchit_trust_client::DenylistConsumer`.
 
-<!-- arch: id=fetchit-trust glob=crates/fetchit-trust*/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-trust glob=crates/fetchit-trust*/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## x0xd-client
 
@@ -238,8 +253,8 @@ key never leaves the daemon; this client only ever holds the public half.
 `x0xd_client::DaemonEndpoint`, `x0xd_client::X0xdSigner`.
 **Locked by:** x0xd pin: `PINS.md` + `scripts/check-pins.sh`.
 
-<!-- arch: id=x0xd-client glob=crates/x0xd-client/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=x0xd-client glob=crates/x0xd-client/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## fetchit-fedi
 
@@ -257,8 +272,8 @@ fediverse and other outbound dial paths.
 `fetchit_fedi::webfinger::resolve_handle`, `fetchit_fedi::actor::fetch_actor`,
 `fetchit_fedi::signature::HttpSignatureKey`.
 
-<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## Android shell
 
@@ -267,9 +282,10 @@ viewer plus the LIT chat shell, wrapping `fetchit-core` + `fetchit-net` + the
 daemonless `fetchit-chat` `ChatClient` through the uniffi JNI layer.
 `RenditionRenderer` dispatches the FFI rendition enum into per-type views (HTML,
 PDF, audio, video, images, archives, tabular, syntax-highlighted text). The chat
-side (`chat/ChatController`, `chat/ChatModeView`) drains `ChatEventFfi` and
-projects the engine DM outbox into per-bubble send status
-(`ConversationStore.upsertOutbox`). The load-bearing security invariant is in the
+side (`chat/ChatController`, `chat/ChatModeView`) drains `ChatEventFfi`, projects
+the engine DM outbox into per-bubble send status
+(`ConversationStore.upsertOutbox`), and drives group create/join, the group
+thread, and member moderation. The load-bearing security invariant is in the
 HTML WebView: **DOM storage is disabled** (`domStorageEnabled = false`) because
 every fetched page shares one synthetic origin, so a shared `localStorage` would
 leak across SPAs; SPAs must treat DOM storage as optional. The generated uniffi
@@ -281,8 +297,8 @@ not hand-edited.
 `apps/fetchit-android/app/src/main/java/io/etchit/fetchit/RenditionRenderer.kt`,
 `apps/fetchit-android/app/src/main/java/io/etchit/fetchit/chat/ChatController.kt`.
 
-<!-- arch: id=android glob=apps/fetchit-android/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=android glob=apps/fetchit-android/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## Desktop shell (Tauri 2)
 
@@ -302,8 +318,8 @@ enforced. It bundles a pinned x0xd via `build.rs`.
 **Locked by:** bundled x0xd + relay-region pins: `PINS.md` +
 `scripts/check-pins.sh`.
 
-<!-- arch: id=desktop glob=apps/fetchit-desktop/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=desktop glob=apps/fetchit-desktop/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## Browser extension
 
@@ -341,7 +357,8 @@ _Last verified: 2026-06-14 (`c9bf634`) -- bob._
 
 CI enforces the safety bar and the doc gates on every push and PR. `ci.yml` runs
 `fmt`, `clippy` (with `-D warnings`), and `test` across Linux/macOS/Windows,
-plus a `pins` job, a `docs-gates` job (crate-list, doc-path, stale-phrase, and
+plus a `pins` job, a `licenses` job (cargo-deny license compliance across all
+three lockfiles), a `docs-gates` job (crate-list, doc-path, stale-phrase, and
 an informational ARCHITECTURE.md-stamp check), desktop and web-extension jobs,
 and an Android debug-APK build (FFI to
 cargo-ndk to uniffi-bindgen to gradle). `release.yml` triggers on `v*` tags and
@@ -354,8 +371,8 @@ explicit manifest paths so they are not silently skipped.
 `scripts/check-doc-paths.sh`, `scripts/check-stale-phrases.sh`,
 `scripts/check-pins.sh`, `scripts/check-arch-stamps.sh`.
 
-<!-- arch: id=ci glob=.github/workflows/** verified=7a05b8b -->
-_Last verified: 2026-06-14 (`7a05b8b`) -- alice._
+<!-- arch: id=ci glob=.github/workflows/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## Production invariants
 
@@ -363,14 +380,16 @@ The cross-cutting promises the whole tree must keep. fetch>it is **read-only**:
 no wallet, no Autonomi signing, no content writes (non-wallet writes like chat
 are a separate stack, but Autonomi publishing never happens here). Rendered HTML
 runs under one synthetic origin, so DOM storage is treated as cross-SPA-leaky
-and disabled. Relay servers hold user envelopes in RAM under a TTL, never on
-disk. Forward-compatibility shims (`Unknown` variants) and the pinned wire
+and disabled. Relay servers hold only opaque envelope ciphertext (never the
+plaintext) under a TTL -- in RAM, or in an operator-selected durable store that
+keeps that ciphertext on disk across a restart, with at-rest protection
+delegated to operator full-disk encryption. Forward-compatibility shims (`Unknown` variants) and the pinned wire
 deps together protect historical messages from a silent format break. The lints
 ban (`unsafe_code` forbidden; unwrap/expect/panic warned) holds even in the
 workspace-excluded crates, which re-state it locally.
 
-<!-- arch: id=production-invariants glob=crates/** apps/** verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=production-invariants glob=crates/** apps/** verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
 
 ## Pinned dependencies
 
@@ -379,7 +398,7 @@ etch>it / fetch>it trinity, because each is wire-level: a silent bump can stop
 historical messages from decrypting or break address resolution. `ant-core`
 (WithAutonomi) is pinned by git rev; `self_encryption` and `xor_name` to exact
 versions; `saorsa-pqc` to its minor; `uniffi` to an exact version that must
-equal the `uniffi-bindgen` CLI; plus the out-of-tree x0xd tag and the relay
+equal the `uniffi-bindgen` CLI; plus the out-of-tree x0xd pin and the relay
 region defaults. `PINS.md` is the source of truth and the check fails CI on any
 drift.
 
@@ -388,5 +407,5 @@ drift.
 `.github/workflows/ci.yml`) asserts `Cargo.toml` / `Cargo.lock` against
 `PINS.md`.
 
-<!-- arch: id=pins glob=PINS.md Cargo.lock verified=f9b9e98 -->
-_Last verified: 2026-06-14 (`f9b9e98`) -- bob._
+<!-- arch: id=pins glob=PINS.md Cargo.lock verified=6321a28 -->
+_Last verified: 2026-07-08 (`6321a28`) -- bob._
