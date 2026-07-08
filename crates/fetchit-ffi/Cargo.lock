@@ -3050,6 +3050,7 @@ dependencies = [
  "fetchit-relay-proto",
  "fetchit-trust",
  "fetchit-trust-client",
+ "fetchit-words",
  "flate2",
  "futures-util",
  "hex",
@@ -3236,6 +3237,15 @@ name = "fetchit-trust-types"
 version = "0.2.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "fetchit-words"
+version = "0.2.0"
+dependencies = [
+ "four-word-networking",
+ "sha2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
