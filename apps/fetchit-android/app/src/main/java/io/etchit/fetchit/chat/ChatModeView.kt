@@ -42,6 +42,8 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.LookupFfi
+import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.enrollConfirmedDevice
 import java.io.File
 import java.text.SimpleDateFormat
@@ -114,6 +116,7 @@ class ChatModeView(
     // any future re-inflation path must cancel them first.
     private var listContactsJob: Job? = null
     private var listPumpStateJob: Job? = null
+    private var listConnStatusJob: Job? = null
 
     // Job for the active DM send; cancelled wherever threadCollectJob is cancelled.
     private var sendJob: Job? = null
@@ -319,6 +322,10 @@ class ChatModeView(
                         slot.removeAllViews()
                         slot.addView(listView)
                     }
+                    // State the cached view can't know changed elsewhere: the
+                    // fediverse onboarding copy flips once a handle is minted
+                    // (which happens on the feed screen).
+                    listView?.let { bindOnboardFediCopy(it) }
                 }
             }
             is Screen.Thread -> {
@@ -376,8 +383,10 @@ class ChatModeView(
         val identityBadge = view.findViewById<View>(R.id.chatIdentityBadge)
         val identityAvatar = view.findViewById<TextView>(R.id.chatIdentityAvatar)
         val identityName = view.findViewById<TextView>(R.id.chatIdentityName)
+        val connStatus = view.findViewById<TextView>(R.id.chatConnectionStatus)
         val addPersonBtn = view.findViewById<View>(R.id.onboardAddPersonButton)
         val createGroupBtn = view.findViewById<View>(R.id.onboardCreateGroupButton)
+        val fediverseBtn = view.findViewById<View>(R.id.onboardFediverseButton)
 
         // Own-identity header badge: the user sees themselves by name +
         // initials avatar on the self (copper) hue, never the 64-hex. Tapping
@@ -408,10 +417,13 @@ class ChatModeView(
                     val onboarding = showChatOnboarding(contacts.size, groups.size)
                     rv.visibility = if (onboarding) View.GONE else View.VISIBLE
                     emptyState.visibility = if (onboarding) View.VISIBLE else View.GONE
-                    // The FAB is a list-level affordance (it offers group
-                    // create/join, reachable with zero contacts), so it stays
-                    // visible whenever the list view is shown.
-                    addBtn.visibility = View.VISIBLE
+                    // The FAB duplicates the onboarding buttons on the empty
+                    // state (Josh: add-your-first-person is enough), so it only
+                    // shows once the list has content. Its remaining exclusives
+                    // stay reachable while onboarding: the add-someone box also
+                    // takes group invite links, and create-a-group has its own
+                    // button.
+                    addBtn.visibility = if (onboarding) View.GONE else View.VISIBLE
                     adapter.submit(groups, contacts)
                 }
         }
@@ -431,16 +443,50 @@ class ChatModeView(
             }
         }
 
+        // Live connection dot in the identity header: connected / connecting… /
+        // offline. StateFlow replays its current value to this collector on
+        // subscribe, so the dot paints immediately on entering the list screen.
+        listConnStatusJob = lifecycleScope.launch {
+            controller.connectionStatus.collect { status ->
+                renderConnectionStatus(connStatus, status)
+            }
+        }
+
         // Onboarding primary action: add your first person.
         addPersonBtn.setOnClickListener { showAddContactDialog() }
 
         // Onboarding secondary action: create a group.
         createGroupBtn.setOnClickListener { showNewGroupDialog() }
 
+        // Onboarding: open the fediverse (get an @handle + see public posts).
+        // The one first-run action needing no contacts, so it lives here in the
+        // empty state, not only in the pinned list row — which the empty state
+        // hides along with the rest of the (empty) contact list.
+        fediverseBtn.setOnClickListener { showScreen(Screen.Feed, pushToStack = true) }
+        bindOnboardFediCopy(view)
+
         // FAB: a popup with the list-level actions -- add a contact, start a
         // new group, join one from an invite link, or scan a code (the scan
         // affordance re-homed here now the identity badge owns share-my-code).
         addBtn.setOnClickListener { anchor -> showListActionsMenu(anchor) }
+    }
+
+    /**
+     * Point the empty-state's fediverse copy at the user's actual state:
+     * before a handle exists the button invites ("Get your @handle"); after,
+     * that invite would be a stale lie, so it flips to the destination ("See
+     * public posts") and the body drops the get-a-handle nudge. Re-run on
+     * every return to the list — minting happens on the feed screen this very
+     * button leads to, and the list view is cached, not re-inflated.
+     */
+    private fun bindOnboardFediCopy(view: View) {
+        val minted = controller.fediActorStatus() != null
+        view.findViewById<TextView>(R.id.onboardFediverseButton)?.setText(
+            if (minted) R.string.chat_onboard_fediverse_minted else R.string.chat_onboard_fediverse,
+        )
+        view.findViewById<TextView>(R.id.onboardBodyText)?.setText(
+            if (minted) R.string.chat_onboard_body_minted else R.string.chat_onboard_body,
+        )
     }
 
     /**
@@ -520,6 +566,103 @@ class ChatModeView(
     }
 
     /**
+     * Opt-in fediverse mint dialog: pick a public @handle, validate it
+     * client-side ([fediHandleError], mirroring desktop's rule), then mint +
+     * register via [ChatController.fediMint]. Invalid input keeps the dialog
+     * open with an inline error. On success [onMinted] refreshes the hub with
+     * the new handle and the directory outcome is surfaced honestly
+     * (registered vs pending).
+     */
+    private fun showFediMintDialog(onMinted: (String) -> Unit) {
+        val editText = EditText(context).apply {
+            hint = context.getString(R.string.fedi_mint_handle_hint)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            maxLines = 1
+            filters = arrayOf(android.text.InputFilter.LengthFilter(64))
+        }
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(editText)
+        }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.fedi_mint_title))
+            .setMessage(context.getString(R.string.fedi_mint_message))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.fedi_mint_create), null)
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .create()
+        // Positive handler set after show() so an invalid handle keeps the
+        // dialog open (an inline error) instead of dismissing.
+        dialog.setOnShowListener {
+            val createBtn = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+            createBtn.setOnClickListener {
+                val err = fediHandleError(editText.text.toString())
+                if (err != null) {
+                    editText.error = context.getString(fediHandleErrorMessage(err))
+                    return@setOnClickListener
+                }
+                val handle = editText.text.toString().trim().lowercase()
+                createBtn.isEnabled = false
+                lifecycleScope.launch {
+                    runCatching { controller.fediMint(handle) }
+                        .onSuccess { outcome ->
+                            dialog.dismiss()
+                            onMinted(handle)
+                            snackbar(
+                                context.getString(
+                                    if (outcome.registered) R.string.fedi_mint_done
+                                    else R.string.fedi_mint_done_pending,
+                                    handle,
+                                ),
+                            )
+                        }
+                        .onFailure { e ->
+                            createBtn.isEnabled = true
+                            snackbar(userFacingError(e, "fediMint", R.string.fedi_mint_failed))
+                        }
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun fediHandleErrorMessage(err: FediHandleError): Int = when (err) {
+        FediHandleError.EMPTY -> R.string.fedi_handle_err_empty
+        FediHandleError.TOO_LONG -> R.string.fedi_handle_err_long
+        FediHandleError.INVALID_CHARS -> R.string.fedi_handle_err_chars
+    }
+
+    /**
+     * Header subtitle on the fediverse hub: the user's `@handle@etchit.io` when
+     * minted (ash), else a tappable "create your @handle" prompt (copper) that
+     * opens the opt-in mint dialog and re-renders itself on a successful mint.
+     * [onMinted] fires after a successful mint so the caller can reveal the
+     * affordances a handle unlocks (the feed's compose row) without leaving
+     * the screen.
+     */
+    private fun renderFediHubHeader(shortId: TextView, onMinted: () -> Unit = {}) {
+        val handle = controller.fediActorStatus()
+        if (handle != null) {
+            shortId.text = context.getString(R.string.fedi_hub_handle, handle)
+            shortId.setTextColor(themeColor(R.attr.fetchitAsh))
+            shortId.setOnClickListener(null)
+            shortId.isClickable = false
+        } else {
+            shortId.text = context.getString(R.string.fedi_hub_join)
+            shortId.setTextColor(themeColor(R.attr.fetchitCopper))
+            shortId.setOnClickListener {
+                showFediMintDialog {
+                    renderFediHubHeader(shortId, onMinted)
+                    onMinted()
+                }
+            }
+        }
+    }
+
+    /**
      * Popup menu off the list FAB: add a DM contact, create a new group, join
      * a group from a pasted invite, or scan a code. Each entry opens its own
      * dialog (or the scanner), mirroring [showAddContactDialog].
@@ -585,7 +728,13 @@ class ChatModeView(
             .setTitle(context.getString(R.string.chat_remove_chat_title))
             .setMessage(context.getString(R.string.chat_remove_chat_message, name))
             .setPositiveButton(context.getString(R.string.chat_remove_chat_confirm)) { _, _ ->
-                lifecycleScope.launch { controller.removeContact(contact.agentIdHex) }
+                lifecycleScope.launch {
+                    runCatching { controller.removeContact(contact.agentIdHex) }
+                        .onSuccess { snackbar(context.getString(R.string.chat_contact_removed, name)) }
+                        .onFailure { e ->
+                            snackbar(userFacingError(e, "removeContact", R.string.chat_error_generic))
+                        }
+                }
             }
             .setNegativeButton(context.getString(R.string.action_cancel), null)
             .show()
@@ -602,7 +751,13 @@ class ChatModeView(
             .setTitle(context.getString(R.string.chat_leave_group_title))
             .setMessage(context.getString(R.string.chat_leave_group_message, title))
             .setPositiveButton(context.getString(R.string.chat_leave_group_confirm)) { _, _ ->
-                lifecycleScope.launch { controller.leaveGroup(group.groupId) }
+                lifecycleScope.launch {
+                    runCatching { controller.leaveGroup(group.groupId) }
+                        .onSuccess { snackbar(context.getString(R.string.chat_group_left, title)) }
+                        .onFailure { e ->
+                            snackbar(userFacingError(e, "leaveGroup", R.string.chat_error_generic))
+                        }
+                }
             }
             .setNegativeButton(context.getString(R.string.action_cancel), null)
             .show()
@@ -995,9 +1150,17 @@ class ChatModeView(
             .show()
     }
 
+    /**
+     * "Add someone" — one field, two intents. Type a fediverse @name to look
+     * them up (then choose to message privately, post-quantum), or paste an
+     * `x0x://` / `fetchit://share` link to add them straight away.
+     * [classifyAddContactInput] decides which. Nothing here dead-ends: an empty
+     * box nudges, a name that resolves to nobody shows a friendly "no one found"
+     * card, and only a link goes to the import path.
+     */
     private fun showAddContactDialog() {
         val editText = EditText(context).apply {
-            hint = context.getString(R.string.chat_paste_pair_uri_hint)
+            hint = context.getString(R.string.chat_add_someone_hint)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
@@ -1008,14 +1171,114 @@ class ChatModeView(
             addView(editText)
         }
         MaterialAlertDialogBuilder(context)
-            .setTitle(context.getString(R.string.chat_add_contact_title))
+            .setTitle(context.getString(R.string.chat_add_someone_title))
+            .setMessage(context.getString(R.string.chat_add_someone_message))
             .setView(layout)
-            .setPositiveButton(context.getString(R.string.chat_add_contact_import)) { _, _ ->
-                val raw = editText.text.toString().trim()
-                importFromUri(raw)
+            .setPositiveButton(context.getString(R.string.chat_add_someone_find)) { _, _ ->
+                when (val input = classifyAddContactInput(editText.text.toString())) {
+                    // A pasted link routes by kind: group invites join the
+                    // group, anything else goes to the pair-import path (which
+                    // owns its own validation + friendly errors). One box,
+                    // right thing — the onboarding empty state hides the FAB,
+                    // so this is a first-run user's only paste target.
+                    is AddContactInput.PairUri ->
+                        if (ChatUris.isInviteUri(input.raw)) {
+                            joinGroupThen(input.raw)
+                        } else {
+                            importFromUri(input.raw)
+                        }
+                    is AddContactInput.FediHandle -> findByHandle(input.handle)
+                    AddContactInput.Empty ->
+                        snackbar(context.getString(R.string.chat_add_someone_empty))
+                }
             }
             .setNegativeButton(context.getString(R.string.action_close), null)
             .show()
+    }
+
+    /**
+     * Look up a fediverse handle and present a contact card. Connects first (the
+     * lookup hits the directory + the person's relay), then routes the result to
+     * [showLookupResultDialog]. A malformed handle or a transport failure lands
+     * as a warm Snackbar, never a raw error.
+     */
+    private fun findByHandle(handle: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.fediLookup(handle) }.fold(
+                onSuccess = { showLookupResultDialog(it) },
+                onFailure = { e ->
+                    snackbar(userFacingError(e, "fediLookup", R.string.chat_find_failed))
+                },
+            )
+        }
+    }
+
+    /**
+     * Present a fediverse lookup result as a plain-language card. Verified shows
+     * a "message privately" action (post-quantum DM); public-only found the
+     * account but couldn't confirm the person, so it explains that warmly with
+     * no dead-end action; not-found nudges to check the spelling. A verified
+     * handle that changed hands carries an extra heads-up line.
+     */
+    private fun showLookupResultDialog(lookup: LookupFfi) {
+        val builder = MaterialAlertDialogBuilder(context)
+        when (lookup.kind) {
+            LookupKindFfi.VERIFIED -> {
+                val body = StringBuilder(context.getString(R.string.chat_lookup_verified_body))
+                if (lookup.previousAgentIdHex != null) {
+                    body.append("\n\n").append(context.getString(R.string.chat_lookup_changed_hands))
+                }
+                builder.setTitle(lookup.handle)
+                    .setMessage(body.toString())
+                    .setPositiveButton(context.getString(R.string.chat_lookup_message_privately)) { _, _ ->
+                        messagePrivately(lookup)
+                    }
+                    .setNegativeButton(context.getString(R.string.action_close), null)
+            }
+            LookupKindFfi.PUBLIC_ONLY ->
+                builder.setTitle(lookup.handle)
+                    .setMessage(context.getString(R.string.chat_lookup_public_only_body))
+                    .setPositiveButton(context.getString(R.string.action_close), null)
+            LookupKindFfi.NOT_FOUND ->
+                builder.setTitle(context.getString(R.string.chat_lookup_not_found_title))
+                    .setMessage(context.getString(R.string.chat_lookup_not_found_body, lookup.handle))
+                    .setPositiveButton(context.getString(R.string.action_close), null)
+        }
+        builder.show()
+    }
+
+    /**
+     * Turn a verified lookup into a private conversation: import the contact
+     * from its v3 share URI (the engine fetches + verifies the profile record),
+     * register it under the handle's name so the thread reads "alice" not a hex
+     * id, and open the DM. The share URI + agent id exist only on a verified
+     * result, so both are guarded.
+     */
+    private fun messagePrivately(lookup: LookupFfi) {
+        val shareUri = lookup.shareUri ?: return
+        val agentId = lookup.agentIdHex ?: return
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.importPairUri(shareUri.trim()) }.onFailure { e ->
+                snackbar(userFacingError(e, "importPairUri", R.string.chat_error_invalid))
+                return@launch
+            }
+            // We already know who they are (their handle), so name the contact
+            // automatically and skip the "name this contact" prompt — straight
+            // into the chat. Idempotent: re-finding an existing contact just
+            // reopens their thread.
+            if (controller.contacts.contacts.value.none { it.agentIdHex == agentId }) {
+                controller.contacts.add(
+                    ChatContact(
+                        agentIdHex = agentId,
+                        displayName = contactNameFromHandle(lookup.handle),
+                        addedAtMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
+            openThread(agentId)
+        }
     }
 
     // ── group create / join ────────────────────────────────────────────
@@ -1200,7 +1463,9 @@ class ChatModeView(
         rv.adapter = adapter
 
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
-        view.findViewById<View>(R.id.sendButton).setOnClickListener {
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
             val body = messageInput.text.toString().trim()
             if (body.isEmpty()) return@setOnClickListener
             messageInput.text.clear()
@@ -1307,7 +1572,9 @@ class ChatModeView(
         rv.adapter = adapter
 
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
-        view.findViewById<View>(R.id.sendButton).setOnClickListener {
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
             val body = messageInput.text.toString().trim()
             if (body.isEmpty()) return@setOnClickListener
             messageInput.text.clear()
@@ -1371,11 +1638,18 @@ class ChatModeView(
 
         view.findViewById<TextView>(R.id.threadPeerName).text =
             context.getString(R.string.chat_feed_title)
-        view.findViewById<TextView>(R.id.threadPeerShortId).text = ""
+        // The compose row appears the moment a handle exists — including right
+        // after minting from this screen's own header prompt.
+        renderFediHubHeader(view.findViewById(R.id.threadPeerShortId)) { bindFeedCompose(view) }
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
-        // Feed is read-only — hide the send row and the (group-only) members button.
-        view.findViewById<View>(R.id.threadSendRow).visibility = View.GONE
-        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
+        bindFeedCompose(view)
+        // The (group-only) members-button slot becomes "find people" here: the
+        // same one-smart-field dialog as add-someone, so the hub can search
+        // @names without a trip back to the chat list.
+        val findBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
+        findBtn.visibility = View.VISIBLE
+        findBtn.contentDescription = context.getString(R.string.feed_find_people_desc)
+        findBtn.setOnClickListener { showAddContactDialog() }
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
@@ -1390,6 +1664,56 @@ class ChatModeView(
                 adapter.submitList(rows)
                 // Scroll only when new posts arrive, not on content-only updates.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+            }
+        }
+    }
+
+    /**
+     * Wire the feed's compose row. Posting is public and needs a minted
+     * @handle: with one, the send row appears with a "post publicly as @name"
+     * hint (the public/non-PQ contract stated at the moment of typing) and
+     * sends via [ChatGateway.fediPublish]; without one the row stays hidden —
+     * the header carries the create-your-@handle prompt, and a successful mint
+     * re-runs this binder so the row appears in place. A published post is
+     * echoed into the local feed immediately (delivery to other servers is
+     * best-effort and quiet); failure restores the draft with a warm note.
+     */
+    private fun bindFeedCompose(view: View) {
+        val sendRow = view.findViewById<View>(R.id.threadSendRow)
+        val handle = controller.fediActorStatus()
+        if (handle == null) {
+            sendRow.visibility = View.GONE
+            return
+        }
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        sendRow.visibility = View.VISIBLE
+        messageInput.hint = context.getString(R.string.feed_compose_hint, handle)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.setText("")
+            lifecycleScope.launch {
+                val gw = runCatching { connectWithFeedback() }.getOrElse {
+                    if (screenStack.lastOrNull() == Screen.Feed) messageInput.setText(body)
+                    return@launch
+                }
+                runCatching { gw.fediPublish(body, null) }
+                    .onSuccess {
+                        controller.feed.append(
+                            FeedPost(
+                                actorUrl = "@$handle@$HOME_INSTANCE",
+                                body = body,
+                                receivedAtMs = System.currentTimeMillis(),
+                            ),
+                        )
+                        snackbar(context.getString(R.string.feed_posted))
+                    }
+                    .onFailure { e ->
+                        if (screenStack.lastOrNull() == Screen.Feed) messageInput.setText(body)
+                        snackbar(userFacingError(e, "fediPublish", R.string.feed_post_failed))
+                    }
             }
         }
     }
@@ -1417,6 +1741,38 @@ class ChatModeView(
                 }
                 .show()
         }.getOrThrow()
+    }
+
+    /**
+     * Paint the header connection dot from [ChatController.connectionStatus]
+     * in the brand palette (etchit-website/brand.html): connected on the brand
+     * green (#6ab04c), connecting on the copper accent (#c9732b), offline on
+     * the theme's rust. Green + copper are brand constants so the dot reads the
+     * same warm green/orange across the dark/dim/light themes; only the offline
+     * rust tracks the theme. The label carries the leading ● glyph so it
+     * inherits the colour; the TalkBack description drops the glyph.
+     */
+    private fun renderConnectionStatus(view: TextView, status: ChatConnectionStatus) {
+        val labelRes: Int
+        val color: Int
+        when (status) {
+            ChatConnectionStatus.CONNECTED -> {
+                labelRes = R.string.chat_conn_connected
+                color = context.getColor(R.color.signal_green)
+            }
+            ChatConnectionStatus.CONNECTING -> {
+                labelRes = R.string.chat_conn_connecting
+                color = context.getColor(R.color.copper)
+            }
+            ChatConnectionStatus.OFFLINE -> {
+                labelRes = R.string.chat_conn_offline
+                color = themeColor(R.attr.fetchitRust)
+            }
+        }
+        val label = context.getString(labelRes)
+        view.text = label
+        view.setTextColor(color)
+        view.contentDescription = label.removePrefix("● ")
     }
 
     /**
@@ -1514,9 +1870,12 @@ class ChatModeView(
      * log the raw reason to logcat for debugging. Only the on-screen text is
      * sanitized; the raw [ffiReason] always reaches `Log.w(TAG, ...)`.
      *
-     * @param fallbackRes the path-specific friendly string to use when the
-     *   error is not a recognized [ChatFfiException] variant (e.g. the
-     *   send/group paths pass their own "couldn't send"/"couldn't join" copy).
+     * @param fallbackRes the path-specific friendly string shown for every
+     *   non-connectivity failure (the send/group/mint/moderation paths pass
+     *   their own "couldn't send"/"couldn't join"/"couldn't create your handle"
+     *   copy). Only [ChatFfiException.Network] bypasses it, with a universal
+     *   "check your internet" message; the pair-import path passes the
+     *   "scan again" copy explicitly, so it stays scoped to code scanning.
      */
     private fun userFacingError(
         e: Throwable,
@@ -1527,8 +1886,6 @@ class ChatModeView(
         return when (e) {
             is ChatFfiException.Network ->
                 context.getString(R.string.chat_connect_failed_generic)
-            is ChatFfiException.Invalid ->
-                context.getString(R.string.chat_error_invalid)
             else -> context.getString(fallbackRes)
         }
     }
@@ -1547,6 +1904,25 @@ class ChatModeView(
         val contactName = controller.contacts.contacts.value
             .find { it.agentIdHex == agentIdHex }?.displayName
         return io.etchit.fetchit.chat.groupSenderLabel(senderName, contactName, agentIdHex)
+    }
+
+    /**
+     * Enable the send button only while [input] holds non-blank text, so an
+     * empty tap can't silently no-op; dim it when disabled for a clear
+     * affordance.
+     */
+    private fun bindSendEnabled(input: EditText, button: View) {
+        fun sync() {
+            val on = input.text.isNotBlank()
+            button.isEnabled = on
+            button.alpha = if (on) 1f else 0.4f
+        }
+        sync()
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { sync() }
+        })
     }
 
     /** Flush the outbox now, in response to a tap on a failed message bubble. */
@@ -1687,50 +2063,70 @@ class ChatModeView(
                     }
                     meta.text = time
                     // Linkify autonomi:// addresses in inbound text.
-                    val addresses = ChatUris.autonomiAddresses(msg.body)
-                    if (addresses.isEmpty()) {
-                        bubble.text = msg.body
-                        bubble.movementMethod = null
-                    } else {
-                        val spannable = SpannableString(msg.body)
-                        addresses.forEach { addr ->
-                            val fullLink = "autonomi://$addr"
-                            var start = msg.body.indexOf(fullLink)
-                            while (start >= 0) {
-                                val end = start + fullLink.length
-                                spannable.setSpan(
-                                    object : ClickableSpan() {
-                                        override fun onClick(widget: View) {
-                                            onLinkTap(addr)
-                                        }
-                                    },
-                                    start,
-                                    end,
-                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                                )
-                                start = msg.body.indexOf(fullLink, end)
-                            }
-                        }
-                        bubble.text = spannable
-                        bubble.movementMethod = LinkMovementMethod.getInstance()
-                    }
+                    applyAutonomiLinkedText(bubble, msg.body, onLinkTap)
                     // Clear any retry listener left by a recycled outbound bubble.
                     itemView.setOnClickListener(null)
                 }
             }
 
             fun bindPost(post: FeedPost) {
-                sender.visibility = View.GONE
+                // Actor attribution from the relay-verified URL (never a
+                // body-asserted actor), formatted as a readable @user@domain in
+                // the fediverse (copper) hue.
+                sender.visibility = View.VISIBLE
+                sender.text = fediActorDisplay(post.actorUrl)
+                sender.setTextColor(themeColor(R.attr.fetchitCopper))
                 bubble.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
-                // Feed body is already plain text (HTML was stripped by the pump).
-                bubble.text = post.body
-                bubble.movementMethod = null
+                // Feed body is plain text (HTML stripped by the pump); linkify any
+                // autonomi:// addresses so they open in the reader, like DM bubbles.
+                applyAutonomiLinkedText(bubble, post.body, onLinkTap)
                 meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                 (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
                     android.view.Gravity.START
-                meta.text = post.actorUrl
+                // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
+                meta.text = context.getString(R.string.chat_feed_post_public_badge)
+            }
+
+            /**
+             * Set [bubble]'s text with any `autonomi://<addr>` occurrences turned
+             * into tappable spans that open the address via [onLink]; plain text
+             * (no movement method) when there are none. Shared by inbound DM/group
+             * bubbles and fediverse feed posts.
+             */
+            private fun applyAutonomiLinkedText(
+                bubble: TextView,
+                body: String,
+                onLink: (String) -> Unit,
+            ) {
+                val addresses = ChatUris.autonomiAddresses(body)
+                if (addresses.isEmpty()) {
+                    bubble.text = body
+                    bubble.movementMethod = null
+                    return
+                }
+                val spannable = SpannableString(body)
+                addresses.forEach { addr ->
+                    val fullLink = "autonomi://$addr"
+                    var start = body.indexOf(fullLink)
+                    while (start >= 0) {
+                        val end = start + fullLink.length
+                        spannable.setSpan(
+                            object : ClickableSpan() {
+                                override fun onClick(widget: View) {
+                                    onLink(addr)
+                                }
+                            },
+                            start,
+                            end,
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                        start = body.indexOf(fullLink, end)
+                    }
+                }
+                bubble.text = spannable
+                bubble.movementMethod = LinkMovementMethod.getInstance()
             }
 
             /**

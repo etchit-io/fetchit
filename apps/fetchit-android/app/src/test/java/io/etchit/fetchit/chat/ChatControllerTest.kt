@@ -12,8 +12,12 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.LookupFfi
+import uniffi.fetchit_ffi.LookupKindFfi
+import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
+import uniffi.fetchit_ffi.PublishReportFfi
 
 /** Regex-based HTML stripper used in place of [android.text.Html.fromHtml] so these tests run on the plain JVM. */
 private fun stripHtml(html: String): String =
@@ -58,6 +62,12 @@ class FakeGateway : ChatGateway {
     var history: Map<String, List<ChatHistoryMessageFfi>> = emptyMap()
     val requestedHistory = mutableListOf<String>()
     var conversationHistoryThrows = false
+    var fediHandle: String? = null
+    val mintedHandles = mutableListOf<String>()
+    val lookedUpHandles = mutableListOf<String>()
+    var lookupResult: LookupFfi =
+        LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
+    val publishedPosts = mutableListOf<Pair<String, String?>>()
 
     override fun agentIdHex() = "f".repeat(64)
     override fun pairPublishOutcome(): String? = "ok"
@@ -91,6 +101,20 @@ class FakeGateway : ChatGateway {
     override suspend fun listGroups(): List<GroupFfi> = groups
     override suspend fun groupInvite(groupId: String): String {
         invitesRequested += groupId; return "x0x://invite/$groupId"
+    }
+    override fun fediActorStatus(): String? = fediHandle
+    override suspend fun fediMint(handle: String): MintOutcomeFfi {
+        mintedHandles += handle
+        fediHandle = handle
+        return MintOutcomeFfi("https://etchit.io/actors/$handle", true, null)
+    }
+    override suspend fun fediLookup(handle: String): LookupFfi {
+        lookedUpHandles += handle
+        return lookupResult
+    }
+    override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi {
+        publishedPosts += (bodyMd to replyToActorUrl)
+        return PublishReportFfi(delivered = emptyList(), failed = emptyList())
     }
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
@@ -454,6 +478,13 @@ class ChatControllerTest {
             override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? = null
             override suspend fun listGroups(): List<GroupFfi> = emptyList()
             override suspend fun groupInvite(groupId: String): String = ""
+            override fun fediActorStatus(): String? = null
+            override suspend fun fediMint(handle: String): MintOutcomeFfi =
+                MintOutcomeFfi("", true, null)
+            override suspend fun fediLookup(handle: String): LookupFfi =
+                LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
+            override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
+                PublishReportFfi(delivered = emptyList(), failed = emptyList())
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
@@ -541,6 +572,39 @@ class ChatControllerTest {
         val msg = convo.messagesFor("a".repeat(64)).value.single()
         assertTrue(msg.failed)
         assertEquals("no route", msg.lastError)
+    }
+
+    @Test
+    fun groupFanoutBubbleFlipsGroupTickAndCreatesNoDmRow() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val gid = "c".repeat(64)
+        val gkey = ConversationStore.convKeyGroup(gid)
+        // The send path appended the outbound group message with the receipt's
+        // client message id and a queued (undelivered) tick.
+        convo.append(
+            gkey,
+            ChatMessage(outbound = true, body = "hi all", sentAtMs = 1L, messageId = "cm-1"),
+        )
+        val member = "b".repeat(64)
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        // A queued fan-out copy still in flight must NOT fabricate a DM row
+        // with the member, and must not flip the tick yet.
+        gw.events.send(
+            ChatEventFfi.Outbox(
+                bubble("ob-1", peer = member, status = OutboxStatusFfi.SENDING, groupClientMessageId = "cm-1"),
+            ),
+        )
+        // The first copy reaching the relay flips the ONE group message.
+        gw.events.send(
+            ChatEventFfi.Outbox(
+                bubble("ob-1", peer = member, status = OutboxStatusFfi.DELIVERED, groupClientMessageId = "cm-1"),
+            ),
+        )
+        gw.events.send(null)
+        pump.join()
+        assertTrue(convo.messagesFor(member).value.isEmpty())
+        assertTrue(convo.messagesFor(gkey).value.single().delivered)
     }
 
     @Test
@@ -670,6 +734,7 @@ class ChatControllerTest {
         status: OutboxStatusFfi = OutboxStatusFfi.SENDING,
         messageId: String? = null,
         lastError: String? = null,
+        groupClientMessageId: String? = null,
     ) = OutboxBubbleFfi(
         id = id,
         peerAgentIdHex = peer,
@@ -678,8 +743,6 @@ class ChatControllerTest {
         messageId = messageId,
         enqueuedAtMs = 1uL,
         lastError = lastError,
-        // Pre-existing bindings drift: OutboxBubbleFfi gained a trailing
-        // group-fanout anchor; these DM-bubble tests leave it null.
-        groupClientMessageId = null,
+        groupClientMessageId = groupClientMessageId,
     )
 }

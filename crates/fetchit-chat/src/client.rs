@@ -3810,7 +3810,12 @@ impl Client {
         let card = crate::identity::AgentCard {
             agent_id,
             display_name: String::new(),
-            created_at: None,
+            // x0xd's AgentCard requires `created_at` as a real u64 (Unix
+            // seconds); `None` serialises to JSON `null` and x0x >= 0.24's
+            // stricter card import (ADR-0017) rejects it with "expected u64".
+            // Carry the pair record's issued_at (ms -> s) so the mirror card
+            // reflects the record it's derived from.
+            created_at: Some(record.issued_at_ms / 1000),
             addresses: Vec::new(),
             extra: serde_json::Value::Null,
         };

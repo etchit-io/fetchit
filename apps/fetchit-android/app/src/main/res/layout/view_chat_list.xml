@@ -47,6 +47,18 @@
                 android:maxLines="1"
                 android:ellipsize="end" />
 
+            <!-- Live chat-connection dot: connected (green) / connecting…
+                 (copper) / offline (rust). Text + color set from code off
+                 ChatController.connectionStatus. -->
+            <TextView
+                android:id="@+id/chatConnectionStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:maxLines="1" />
+
         </LinearLayout>
 
         <!-- Persistent offline-reassurance banner — visible while the chat
@@ -124,6 +136,7 @@
                     android:gravity="center" />
 
                 <TextView
+                    android:id="@+id/onboardBodyText"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
@@ -150,6 +163,19 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/chat_onboard_create_group"
                     android:backgroundTint="?attr/fetchitInk3"
+                    android:textColor="?attr/fetchitCopper" />
+
+                <!-- Fediverse is the one thing a brand-new user can do alone:
+                     get an @handle + browse public posts, no contacts needed.
+                     Always reachable from the empty state so it's never hidden
+                     behind having-a-contact. -->
+                <Button
+                    android:id="@+id/onboardFediverseButton"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="@string/chat_onboard_fediverse"
                     android:textColor="?attr/fetchitCopper" />
 
             </LinearLayout>

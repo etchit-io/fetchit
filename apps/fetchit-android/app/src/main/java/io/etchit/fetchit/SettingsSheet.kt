@@ -41,6 +41,8 @@ class SettingsSheet(
         binding.resetPeersButton.setOnClickListener { onResetClicked() }
         binding.refreshPeersButton.setOnClickListener { onRefreshClicked() }
         binding.peersHeader.setOnClickListener { togglePeersBody() }
+        binding.backupRevealRow.setOnClickListener { revealRecoveryPhraseFlow(activity) }
+        binding.backupRestoreRow.setOnClickListener { restoreRecoveryPhraseFlow(activity) }
         binding.aboutHeader.setOnClickListener { showAboutDialog(activity) }
         binding.settingsVersionText.text =
             activity.getString(R.string.settings_version, BuildConfig.VERSION_NAME)
@@ -48,6 +50,7 @@ class SettingsSheet(
         observePeerCount()
         bindChatDisplayName()
         bindLinkDevice()
+        bindChatKeepConnected()
     }
 
     private fun bindThemePicker() {
@@ -266,6 +269,19 @@ class SettingsSheet(
             .setView(column)
             .setPositiveButton(activity.getString(R.string.action_close), null)
             .show()
+    }
+
+    private fun bindChatKeepConnected() {
+        // Set the initial state before attaching the listener so opening
+        // Settings does not fire a spurious toast.
+        binding.chatKeepConnectedSwitch.isChecked = store.chatKeepConnected()
+        binding.chatKeepConnectedSwitch.setOnCheckedChangeListener { _, isChecked ->
+            store.saveChatKeepConnected(isChecked)
+            toast(
+                if (isChecked) R.string.settings_chat_keepalive_on
+                else R.string.settings_chat_keepalive_off,
+            )
+        }
     }
 
     private fun toast(@androidx.annotation.StringRes msg: Int) {

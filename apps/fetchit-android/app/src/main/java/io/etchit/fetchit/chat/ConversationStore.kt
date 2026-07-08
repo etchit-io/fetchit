@@ -170,31 +170,3 @@ class ConversationStore {
         fun convKeyDm(agentIdHex: String): String = agentIdHex
     }
 }
-
-/**
- * In-memory store of bridged fediverse posts.
- *
- * Capped at [MAX_POSTS] newest entries so unbounded relay traffic cannot
- * exhaust memory. StateFlow observers receive every update.
- */
-class FeedStore {
-
-    private val _posts = MutableStateFlow<List<FeedPost>>(emptyList())
-
-    /** All received posts, newest-last (append order). */
-    val posts: StateFlow<List<FeedPost>> = _posts.asStateFlow()
-
-    /** Append [post], dropping the oldest entry if the cap is exceeded. */
-    fun append(post: FeedPost) {
-        val current = _posts.value
-        _posts.value = if (current.size >= MAX_POSTS) {
-            current.drop(1) + post
-        } else {
-            current + post
-        }
-    }
-
-    private companion object {
-        const val MAX_POSTS = 200
-    }
-}

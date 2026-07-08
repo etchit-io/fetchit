@@ -652,13 +652,54 @@
                 android:padding="8dp"
                 android:imeOptions="actionDone" />
 
-            <!-- Chat: link a device (M6.4) -->
+            <!-- Keep chat connected in the background -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:baselineAligned="false">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:paddingStart="0dp"
+                    android:paddingEnd="12dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_chat_keepalive_title"
+                        android:textColor="?attr/fetchitBone"
+                        android:fontFamily="monospace"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="@string/settings_chat_keepalive_summary"
+                        android:textColor="?attr/fetchitAsh"
+                        android:fontFamily="monospace"
+                        android:textSize="11sp" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/chatKeepConnectedSwitch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
             <View
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
                 android:layout_marginTop="16dp"
                 android:background="?attr/fetchitInk3" />
 
+            <!-- Chat: link a device (M6.4) -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -695,6 +736,56 @@
                 android:text="@string/settings_link_scan_code"
                 android:backgroundTint="?attr/fetchitInk3"
                 android:textColor="?attr/fetchitCopper" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="16dp"
+                android:background="?attr/fetchitInk3" />
+
+            <!-- Recovery phrase (identity backup) -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/backup_section_header"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
+
+            <TextView
+                android:id="@+id/backupRevealRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"
+                android:text="@string/backup_reveal_row"
+                android:textColor="?attr/fetchitCopper"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:background="?android:attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:id="@+id/backupRestoreRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"
+                android:text="@string/backup_restore_row"
+                android:textColor="?attr/fetchitCopper"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:background="?android:attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true" />
 
             <View
                 android:layout_width="match_parent"

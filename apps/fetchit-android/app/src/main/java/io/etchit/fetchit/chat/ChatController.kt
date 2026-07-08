@@ -8,8 +8,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -20,6 +23,7 @@ import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 import java.io.File
@@ -63,8 +67,20 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     /** In-memory per-peer message threads. */
     val conversations = ConversationStore()
 
-    /** In-memory bridged fediverse posts. */
-    val feed = FeedStore()
+    private val feedPrefs =
+        appContext.getSharedPreferences("fetchit_feed", Context.MODE_PRIVATE)
+
+    /**
+     * Fediverse posts (bridged + the user's own), persisted in plain prefs so
+     * the feed survives a restart — own posts are never re-delivered to their
+     * author, so an unpersisted feed silently loses them on process death.
+     * Public content; plain prefs are fine (the [io.etchit.fetchit.BookmarkStore]
+     * rationale).
+     */
+    val feed = FeedStore(
+        load = { FeedSerde.decode(feedPrefs.getString(FEED_KEY, null)) },
+        save = { posts -> feedPrefs.edit().putString(FEED_KEY, FeedSerde.encode(posts)).apply() },
+    )
 
     private val _groups = MutableStateFlow<List<GroupFfi>>(emptyList())
 
@@ -94,6 +110,20 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     /** Observable pump lifecycle; see [PumpState] for the contract. */
     val pumpState: StateFlow<PumpState> = _pumpState.asStateFlow()
 
+    private val _connecting = MutableStateFlow(false)
+
+    /**
+     * UI-facing chat connection status (the header dot): CONNECTED when the
+     * pump is RUNNING, CONNECTING while an [ensureGateway] attempt is in flight
+     * (the slow initial dial keeps the pump IDLE until it lands), OFFLINE
+     * otherwise. Combines [pumpState] with the in-flight-connect flag via the
+     * pure [chatConnectionStatus] mapping.
+     */
+    val connectionStatus: StateFlow<ChatConnectionStatus> =
+        combine(_pumpState, _connecting) { pump, connecting ->
+            chatConnectionStatus(pump, connecting)
+        }.stateIn(scope, SharingStarted.Eagerly, ChatConnectionStatus.OFFLINE)
+
     /** Returns the cached gateway without connecting, or `null` if not yet connected. */
     fun gateway(): ChatGateway? = gateway
 
@@ -108,52 +138,61 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         gateway?.let { if (_pumpState.value == PumpState.RUNNING) return it }
         connectMutex.withLock {
             gateway?.let { if (_pumpState.value == PumpState.RUNNING) return it }
-            // A cached gateway whose pump has stopped (relay drop -> STOPPED_ERROR,
-            // or a prior clean stop) is dead for inbound -- there is no in-pump
-            // reconnect in v1, so reusing it would silently deliver nothing. Tear
-            // the dead one down and rebuild here, so nav-away+back recovers inbound
-            // after a relay drop instead of needing an app kill.
-            if (gateway != null) disconnect()
-            val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
-            val client = ChatClient.connect(
-                DEFAULT_RELAY,
-                dataDir.absolutePath,
-                ChatSecrets(appContext).vaultPass(),
-            )
-            val gw = FfiChatGateway(client)
-            gateway = gw
-            _pumpState.value = PumpState.RUNNING
-            pump = pumpEvents(
-                gw,
-                conversations,
-                feed,
-                scope,
-                onStopped = { error ->
-                    _pumpState.value =
-                        if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
-                },
-            )
-            // Durable-join resume pump: advance any pending join on a timer so a
-            // join that could not converge now (owner offline) auto-completes
-            // when the owner returns -- no user action, no re-spent invite.
-            pendingJoinPump = startPendingJoinPump(gw)
-            // Subscribe-first: the pump above is already draining outbox events.
-            // Now start the retry driver and hydrate any bubbles that were
-            // enqueued (and vault-persisted) before this process subscribed.
-            startOutboxAndHydrate(gw)
-            // Seed the group list so the conversation screen can show existing
-            // groups (and their threads) immediately after connect. loadGroups
-            // also hydrates each group's persisted transcript.
-            loadGroups(gw)
-            // Hydrate known contacts' DM threads from the persisted vault so the
-            // list shows previews and threads are not empty on reopen.
-            hydrateContacts(gw)
-            // Surface the connect-time pair-record publish outcome. On Android
-            // its failure is otherwise invisible (fetchit_chat log records do not
-            // reach logcat), so a relay/TLS failure would look like a phantom
-            // "connected". Best-effort + off the connect path; never blocks.
-            surfacePairPublishOutcome(gw)
-            return gw
+            // Signal the in-flight connect so the header dot reads "connecting…"
+            // for the whole slow dial (the pump stays IDLE until the connect
+            // lands) rather than "offline". Cleared in the finally whether the
+            // connect succeeds, throws, or is cancelled.
+            _connecting.value = true
+            try {
+                // A cached gateway whose pump has stopped (relay drop -> STOPPED_ERROR,
+                // or a prior clean stop) is dead for inbound -- there is no in-pump
+                // reconnect in v1, so reusing it would silently deliver nothing. Tear
+                // the dead one down and rebuild here, so nav-away+back recovers inbound
+                // after a relay drop instead of needing an app kill.
+                if (gateway != null) disconnect()
+                val dataDir = File(appContext.filesDir, "chat").apply { mkdirs() }
+                val client = ChatClient.connect(
+                    DEFAULT_RELAY,
+                    dataDir.absolutePath,
+                    ChatSecrets(appContext).vaultPass(),
+                )
+                val gw = FfiChatGateway(client)
+                gateway = gw
+                _pumpState.value = PumpState.RUNNING
+                pump = pumpEvents(
+                    gw,
+                    conversations,
+                    feed,
+                    scope,
+                    onStopped = { error ->
+                        _pumpState.value =
+                            if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
+                    },
+                )
+                // Durable-join resume pump: advance any pending join on a timer so a
+                // join that could not converge now (owner offline) auto-completes
+                // when the owner returns -- no user action, no re-spent invite.
+                pendingJoinPump = startPendingJoinPump(gw)
+                // Subscribe-first: the pump above is already draining outbox events.
+                // Now start the retry driver and hydrate any bubbles that were
+                // enqueued (and vault-persisted) before this process subscribed.
+                startOutboxAndHydrate(gw)
+                // Seed the group list so the conversation screen can show existing
+                // groups (and their threads) immediately after connect. loadGroups
+                // also hydrates each group's persisted transcript.
+                loadGroups(gw)
+                // Hydrate known contacts' DM threads from the persisted vault so the
+                // list shows previews and threads are not empty on reopen.
+                hydrateContacts(gw)
+                // Surface the connect-time pair-record publish outcome. On Android
+                // its failure is otherwise invisible (fetchit_chat log records do not
+                // reach logcat), so a relay/TLS failure would look like a phantom
+                // "connected". Best-effort + off the connect path; never blocks.
+                surfacePairPublishOutcome(gw)
+                return gw
+            } finally {
+                _connecting.value = false
+            }
         }
     }
 
@@ -206,6 +245,21 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             delay(3_000L)
         }
     }
+
+    /**
+     * The active minted fediverse @handle, or `null` when the user has not
+     * opted in to public posting. Reads the local vault via the connected
+     * gateway; `null` when chat isn't connected yet, so the onboarding prompt
+     * shows until then.
+     */
+    fun fediActorStatus(): String? = gateway?.fediActorStatus()
+
+    /**
+     * Opt in to public posting: mint + register the actor identity for
+     * [handle]. Connects the gateway if needed. Directory-registration failure
+     * is reported in the returned [MintOutcomeFfi], not thrown.
+     */
+    suspend fun fediMint(handle: String): MintOutcomeFfi = ensureGateway().fediMint(handle)
 
     /**
      * Remove a contact from the conversation list. Asks the engine to forget
@@ -422,6 +476,9 @@ class ChatController(private val appContext: Context, private val scope: Corouti
          * use this. Region override is wired via the settings sheet in a later task.
          */
         const val DEFAULT_RELAY = "https://nyc-relay.etchit.io"
+
+        /** Prefs key holding the JSON-encoded persisted feed ([FeedSerde]). */
+        private const val FEED_KEY = "feed_posts_v1"
 
         /**
          * Drain [gw].[ChatGateway.nextEvent] in a loop, routing each event into
@@ -676,8 +733,23 @@ class ChatController(private val appContext: Context, private val scope: Corouti
          * Project an FFI outbox [bubble] into [convo], upserting by bubble id.
          * Maps the FFI status enum to the [ChatMessage] delivered/failed flags
          * so [ConversationStore] stays free of any uniffi types.
+         *
+         * A bubble carrying a [OutboxBubbleFfi.groupClientMessageId] is one
+         * per-member fan-out copy of a queued GROUP message, not a DM —
+         * upserting it by `peerAgentIdHex` would fabricate a phantom DM thread
+         * with that member. Instead it backs the ONE message in the group
+         * thread: the first copy to reach the relay flips that message's
+         * delivery tick (honest "sent"); Sending/Failed copies leave the
+         * queued clock in place while the engine outbox keeps retrying.
          */
         fun projectOutbox(convo: ConversationStore, bubble: OutboxBubbleFfi) {
+            val groupAnchor = bubble.groupClientMessageId
+            if (groupAnchor != null) {
+                if (bubble.status == OutboxStatusFfi.DELIVERED) {
+                    convo.markDelivered(groupAnchor)
+                }
+                return
+            }
             convo.upsertOutbox(
                 peerAgentIdHex = bubble.peerAgentIdHex,
                 outboxId = bubble.id,

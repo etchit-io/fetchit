@@ -134,9 +134,44 @@
     <string name="about_preview_heading">technical preview</string>
     <string name="about_preview_body">This is an early, internal build. Expect rough edges; it is not yet a public release.</string>
     <string name="about_recovery_heading">recovery</string>
-    <string name="about_recovery_body">There is no account recovery. A new device is a new identity. Re-add your contacts by scanning their codes again.</string>
+    <string name="about_recovery_body">Your account can be recovered with your 24-word recovery phrase — back it up from Settings. Restoring brings back your account, but not your past messages or contacts.</string>
     <string name="about_license_body">fetch&gt;it &#xb7; beta software. Licensed AGPL-3.0-only or commercial. Provided AS IS, with no warranty.</string>
     <string name="about_license_link">view the AGPL-3.0 license</string>
+
+    <!-- Recovery phrase / identity backup (Settings). Security-critical copy:
+         the phrase IS the identity, so the reveal is device-auth + FLAG_SECURE
+         gated and the warning is deliberately blunt. -->
+    <string name="backup_section_header">recovery phrase</string>
+    <string name="backup_reveal_row">reveal recovery phrase</string>
+    <string name="backup_restore_row">restore from phrase</string>
+
+    <!-- Reveal: device re-auth prompt -->
+    <string name="backup_reveal_auth_title">confirm it\'s you</string>
+    <string name="backup_reveal_auth_subtitle">unlock to reveal your recovery phrase</string>
+    <string name="backup_reveal_auth_failed">couldn\'t confirm it\'s you — try again</string>
+
+    <!-- Reveal: no-authenticator fallbacks -->
+    <string name="backup_reveal_nolock_title">no screen lock</string>
+    <string name="backup_reveal_nolock_message">your device has no screen lock, so anyone who picks it up could read your recovery phrase. set a screen lock in your system settings for real protection.</string>
+    <string name="backup_reveal_nolock_action">reveal anyway</string>
+
+    <!-- Reveal: the phrase itself -->
+    <string name="backup_reveal_title">your recovery phrase</string>
+    <string name="backup_reveal_warning">Anyone with these words IS you. Write them on paper. Never screenshot or share them.</string>
+    <string name="backup_reveal_done">done</string>
+    <string name="backup_reveal_none_title">no recovery phrase</string>
+    <string name="backup_reveal_none_message">this account predates backup — create a new account to get a recovery phrase.</string>
+    <string name="backup_reveal_failed">couldn\'t read your recovery phrase — try again.</string>
+
+    <!-- Restore -->
+    <string name="backup_restore_title">restore from phrase</string>
+    <string name="backup_restore_message">This restores your account, not your old messages.</string>
+    <string name="backup_restore_hint">your 24-word recovery phrase</string>
+    <string name="backup_restore_action">restore</string>
+    <string name="backup_restore_empty">enter your 24-word recovery phrase</string>
+    <string name="backup_restore_done">account restored — reopen chat</string>
+    <string name="backup_restore_err_invalid">that phrase doesn\'t look right — check the words and spacing.</string>
+    <string name="backup_restore_err_exists">this phone is already set up — restore only works on a fresh install, before chatting starts.</string>
 
     <!-- Mode switch glyphs -->
     <string name="mode_chat_glyph">✉</string>
@@ -165,15 +200,25 @@
     <!-- Banner content-description: the banner is a persistent status line,
          labelled for TalkBack as a reassurance, not an alarm. -->
     <string name="chat_offline_reassurance_desc">offline — your messages are saved</string>
+    <!-- Header connection dot: leading ● glyph inherits the state colour set
+         from code (green / copper / rust). Lowercase to match the chat header. -->
+    <string name="chat_conn_connected">● connected</string>
+    <string name="chat_conn_connecting">● connecting…</string>
+    <string name="chat_conn_offline">● offline</string>
     <string name="chat_empty_hint">Add someone to start chatting</string>
     <!-- First-run onboarding (mirrors desktop sidebar.ts): the welcome
          title, one plain body sentence (verbatim from the desktop source),
          and the two action buttons. The body italic-serif copy reassures
          and teaches the next step. -->
     <string name="chat_onboard_title">Welcome to LIT Chat</string>
-    <string name="chat_onboard_body">No conversations yet. Add someone you know and say hello.</string>
+    <string name="chat_onboard_body">No conversations yet. Add someone you know — or get your @handle and browse the fediverse.</string>
+    <!-- Post-mint variants: once a handle exists, "get your @handle" would be
+         a stale invite, so the copy flips to the destination. -->
+    <string name="chat_onboard_body_minted">No conversations yet. Add someone you know — or see what people are posting.</string>
     <string name="chat_onboard_add_person">Add your first person</string>
     <string name="chat_onboard_create_group">Create a group</string>
+    <string name="chat_onboard_fediverse">Get your @handle</string>
+    <string name="chat_onboard_fediverse_minted">See public posts</string>
     <string name="chat_onboard_mark_desc">LIT Chat</string>
     <!-- Own-identity header badge content-description (mirrors desktop's
          "Share my code" badge label): the badge shows the user by name +
@@ -198,6 +243,27 @@
          Matches the desktop add-contact placeholder verbatim. -->
     <string name="chat_paste_pair_uri_hint">Paste a share link, or @name@etchit.io</string>
     <string name="chat_invalid_pair_uri">that doesn\'t look like a valid pair code</string>
+    <!-- "Add someone": one field that finds a fediverse @name or imports a pasted link. -->
+    <string name="chat_add_someone_title">add someone</string>
+    <string name="chat_add_someone_message">type a @name to find them, or paste an invite link.</string>
+    <string name="chat_add_someone_hint">@name or invite link</string>
+    <string name="chat_add_someone_find">find</string>
+    <string name="chat_add_someone_empty">type a name or paste a link first.</string>
+    <string name="chat_find_failed">couldn\'t look that up — check the name and try again.</string>
+    <!-- Fediverse lookup result card: verified / public-only / not-found. -->
+    <string name="chat_lookup_verified_body">verified — this really is them. you can message them privately, end to end.</string>
+    <string name="chat_lookup_changed_hands">heads up: this \@name used to belong to someone else.</string>
+    <string name="chat_lookup_message_privately">message privately</string>
+    <string name="chat_lookup_public_only_body">we found this account, but can\'t confirm it\'s really them yet — so you can\'t message them privately here.</string>
+    <string name="chat_lookup_not_found_title">no one found</string>
+    <string name="chat_lookup_not_found_body">we couldn\'t find anyone at %1$s. double-check the spelling?</string>
+    <!-- Feed compose (public posting) + hub search. The hint names the handle
+         and says "publicly" so the public/non-PQ contract is explicit at the
+         moment of typing. -->
+    <string name="feed_compose_hint">post publicly as @%1$s</string>
+    <string name="feed_posted">posted — everyone can see it</string>
+    <string name="feed_post_failed">couldn\'t post — try again in a moment</string>
+    <string name="feed_find_people_desc">find people</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
     <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>
@@ -206,8 +272,26 @@
     <string name="chat_uri_copied">copied</string>
     <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
-    <string name="chat_feed_title">fediverse</string>
-    <string name="chat_feed_subtitle">bridged public posts</string>
+    <string name="chat_feed_title">Public posts</string>
+    <string name="chat_feed_subtitle">from across the fediverse</string>
+    <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are
+         public and not post-quantum. Middle dot separates from any actor line. -->
+    <string name="chat_feed_post_public_badge">from the fediverse · public, non-PQ</string>
+
+    <!-- Fediverse: opt-in mint (Phase 2 onboarding). The hub header shows the
+         minted handle or a tappable "create" prompt. -->
+    <string name="fedi_hub_join">tap to create your @handle</string>
+    <string name="fedi_hub_handle">\@%1$s@etchit.io</string>
+    <string name="fedi_mint_title">Join the fediverse</string>
+    <string name="fedi_mint_message">Create a public @handle so people across the fediverse can find and follow you. This just claims your handle — posting comes next.</string>
+    <string name="fedi_mint_handle_hint">your handle (letters, numbers, - _)</string>
+    <string name="fedi_mint_create">create</string>
+    <string name="fedi_mint_done">You\'re @%1$s — you\'re on the fediverse!</string>
+    <string name="fedi_mint_done_pending">Created @%1$s — directory registration is pending, it\'ll retry.</string>
+    <string name="fedi_mint_failed">couldn\'t create your handle — that\'s on us, not you. handles are almost ready.</string>
+    <string name="fedi_handle_err_empty">enter a handle</string>
+    <string name="fedi_handle_err_long">too long — 64 characters max</string>
+    <string name="fedi_handle_err_chars">letters, numbers, - and _ only</string>
 
     <!-- Chat: add-contact name prompt -->
     <string name="chat_contact_name_title">name this contact</string>
@@ -227,6 +311,8 @@
     <string name="chat_invalid_invite_uri">that doesn\'t look like a valid group invite</string>
     <string name="chat_group_created">created %1$s</string>
     <string name="chat_group_joined">joined %1$s</string>
+    <string name="chat_contact_removed">removed %1$s</string>
+    <string name="chat_group_left">left %1$s</string>
     <string name="chat_group_share_invite">invite copied for one person</string>
     <string name="chat_group_invite_copied">invite copied</string>
     <string name="chat_group_new_invite">new invite</string>
@@ -286,6 +372,12 @@
 
     <!-- Chat: settings section header -->
     <string name="settings_chat_title">chat</string>
+
+    <!-- Chat: keep-connected setting -->
+    <string name="settings_chat_keepalive_title">keep chat connected</string>
+    <string name="settings_chat_keepalive_summary">stays online in the background so messages send instantly. uses more battery.</string>
+    <string name="settings_chat_keepalive_on">chat stays connected</string>
+    <string name="settings_chat_keepalive_off">chat disconnects when idle · saves battery</string>
 
     <!-- Chat: label printed on the branded pair-code QR card. -->
     <string name="chat_pair_card_label">fetch&gt;it chat</string>

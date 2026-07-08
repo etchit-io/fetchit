@@ -657,7 +657,7 @@ impl ChatClient {
             .daemonless(true)
             .relay_url(parsed_url)
             .data_dir(PathBuf::from(&data_dir))
-            .passphrase(passphrase)
+            .passphrase(passphrase.clone())
             .base_url(x0xd_base)
             .token(x0xd_token)
             .build()
@@ -1155,13 +1155,16 @@ impl ChatClient {
 
     /// Opt in to public posting: mint the actor identity for `handle` (with
     /// its v2 attestation binding the published profile + active relay) and
-    /// register it with the directory. Requires a published profile; the
-    /// error explains how to get one. Directory-registration failure is NOT
-    /// an error -- it lands in the returned [`MintOutcomeFfi`].
+    /// register it with the directory. One-tap on a fresh identity: when no
+    /// profile is published yet the engine publishes a minimal handle-only
+    /// profile-index record first, then mints against it. Directory-
+    /// registration failure is NOT an error -- it lands in the returned
+    /// [`MintOutcomeFfi`].
     ///
     /// # Errors
-    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, no published
-    /// profile, or the mint failing.
+    /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
+    /// relay failure (so a network blip is not mistaken for no-profile), or
+    /// the mint failing.
     pub async fn fedi_mint(&self, handle: String) -> Result<MintOutcomeFfi, ChatFfiError> {
         let handle = handle.trim().to_lowercase();
         let relay = url::Url::parse(&self.relay_url).map_err(|e| ChatFfiError::Invalid {

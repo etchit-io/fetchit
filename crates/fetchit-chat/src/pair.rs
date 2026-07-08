@@ -475,7 +475,10 @@ pub fn record_to_legacy_share_uri(record: &ProfileIndexRecord) -> Result<String,
     let card = AgentCard {
         agent_id,
         display_name: String::new(),
-        created_at: None,
+        // x0xd's AgentCard requires a real u64 `created_at` (Unix seconds);
+        // `None` serialises to JSON `null` which x0x >= 0.24's stricter card
+        // import (ADR-0017) rejects. Carry the record's issued_at (ms -> s).
+        created_at: Some(record.issued_at_ms / 1000),
         addresses: Vec::new(),
         extra: serde_json::Value::Null,
     };
@@ -663,6 +666,23 @@ mod tests {
         assert_eq!(card.agent_id.0, r.agent_id);
         assert_eq!(card.display_name, "");
         assert!(card.addresses.is_empty());
+    }
+
+    #[test]
+    fn record_to_legacy_share_uri_carries_created_at_not_null() {
+        // Regression: x0x >= 0.24's stricter card import (ADR-0017) rejects a
+        // null `created_at` with "expected u64". The synthetic card must carry
+        // the record's issued_at (ms -> s) so x0xd's /agent/card/import accepts
+        // the JSON instead of erroring, which otherwise silently drops the
+        // x0xd-side mirror of a freshly paired contact.
+        use crate::identity::AgentCard;
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let issued_at_ms = 1_700_000_000_123;
+        let r = mk_signed_record(&dsa, &sk, &pk.to_bytes(), &"a".repeat(64), issued_at_ms);
+        let uri = record_to_legacy_share_uri(&r).expect("synthetic uri");
+        let card = AgentCard::from_share_uri(&uri).expect("decode");
+        assert_eq!(card.created_at, Some(issued_at_ms / 1000));
     }
 
     #[test]

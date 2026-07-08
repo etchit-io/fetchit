@@ -150,6 +150,8 @@ fetch>it keeps the Autonomi connection warm while you're using it, and **drops i
 | Backgrounded ≥ 60s | **dropped** -- QUIC + DHT silent until next fetch |
 | Process killed by OS | reaped -- next launch reconnects |
 
+The table above is the **browse** connection. **Chat** follows its own rule: by default it *stays connected* in the background (Settings → chat → **keep chat connected**) so messages send instantly on return, rather than paying a slow reconnect. Turn that off to have chat disconnect on idle too, saving battery at the cost of a slower reconnect.
+
 Settings also lets you save a new peer list -- saving forces the connection to drop so the new list takes effect on the next fetch.
 
 ---
@@ -276,7 +278,7 @@ For depth on what works inside the SPA sandbox + the protocol-level details, see
 ## Tips
 
 - **First fetch can take up to ~10s** -- that's the initial DHT warmup. Repeat fetches in the same session are fast.
-- **Connection drops after 60s in the background** to save battery. Fine. Just expect one re-bootstrap when you come back.
+- **The browse connection drops after 60s in the background** to save battery. Fine. Just expect one re-bootstrap when you come back. (Chat stays connected by default so messaging stays instant — see the connection-lifecycle note above.)
 - **The peer count in settings is a real-time honesty signal.** If it dips to 0 (red), the network is being weird; that's an honest report, not a glitch -- it usually self-recovers within a poll cycle.
 - **For air-gapped use** (no traditional internet), as long as Autonomi peers are reachable somehow (LAN node, satellite link, whatever), fetch>it works. SPAs that inline everything also run fine.
 - **For QR codes / link sharing**: encode `autonomi://<addr>` directly. Anyone with fetch>it on Android can scan and land on the page.

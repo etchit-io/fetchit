@@ -8,7 +8,10 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.LookupFfi
+import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.PublishReportFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
 interface ChatGateway {
@@ -92,6 +95,41 @@ interface ChatGateway {
 
     /** Fresh `x0x://invite/...` link for [groupId]. */
     suspend fun groupInvite(groupId: String): String
+
+    /**
+     * The active minted fediverse @handle, or `null` when the user has not
+     * opted in to public posting. Local vault read (no network), safe to call
+     * before anything connects — drives the onboarding gate.
+     */
+    fun fediActorStatus(): String?
+
+    /**
+     * Opt in to public posting: mint the actor identity for [handle] and
+     * register it with the directory. One-tap on a fresh identity — the engine
+     * publishes a minimal handle-only profile when none exists yet, so no
+     * pre-published profile is required. Directory-registration failure is
+     * reported in the result, not thrown.
+     */
+    suspend fun fediMint(handle: String): MintOutcomeFfi
+
+    /**
+     * Resolve a fediverse `@local@instance` handle to a contact card:
+     * [uniffi.fetchit_ffi.LookupKindFfi.VERIFIED] carries the chat agent id +
+     * a `shareUri` so the user can message them privately (post-quantum),
+     * `PUBLIC_ONLY` found the account but couldn't confirm the person, and
+     * `NOT_FOUND` resolved to nobody. Needs a live connection (hits the
+     * directory + the person's relay). A malformed handle throws.
+     */
+    suspend fun fediLookup(handle: String): LookupFfi
+
+    /**
+     * Publish [bodyMd] publicly as the minted @handle. The engine resolves
+     * `@user@host` mentions, runs denylist gating, and delivers best-effort;
+     * the report lists accepted + failed inboxes. Throws when no handle is
+     * minted yet — gate the compose affordance on
+     * [fediActorStatus] instead of letting that surface.
+     */
+    suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi
 
     /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
@@ -195,6 +233,11 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.sendGroupMessage(groupId, body, senderName).messageId
     override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
+    override fun fediActorStatus(): String? = inner.fediActorStatus()
+    override suspend fun fediMint(handle: String): MintOutcomeFfi = inner.fediMint(handle)
+    override suspend fun fediLookup(handle: String): LookupFfi = inner.fediLookup(handle)
+    override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
+        inner.fediPublish(bodyMd, replyToActorUrl)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =
