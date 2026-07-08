@@ -2810,28 +2810,20 @@ impl Client {
             PendingJoinDriver, SystemClock,
         };
 
-        // Production probe: read the roster over the client's `Groups` view.
-        // `Absent` (owner has not applied our join) => re-bridge the saved
-        // event; anything in the roster => `ListedButUnkeyed` => re-request the
-        // Welcome. It deliberately never returns `ActiveKeyed`, and here is why
-        // Bob's decrypt / `apply_join_result`-409 keyed-probe (PR #7 B-review)
-        // is NOT wired: (a) fetchit persists no inbound frame to read-only
-        // `/secure/decrypt` -- a cold-start joiner (the only case this driver
-        // ever sees) has received no group message yet, so there is nothing to
-        // decrypt; (b) `apply_join_result` / `apply_metadata_event` RE-RUN the
-        // single-use `invite_secret` check, so probing with the captured
-        // `member_joined` risks re-spending the invite -- the exact G1 violation
-        // this feature exists to prevent; (c) the owner's `MemberAdded`
-        // join-result exists only at the instant of keying, which is precisely
-        // when the inbound apply removes the record, so "record present" and
-        // "keyed" are mutually exclusive in time. Convergence is therefore
-        // signalled authoritatively at the inbound apply site
-        // (`dispatch_inbound_bridge`), which removes the record. Erring toward
-        // `ListedButUnkeyed` is the safe direction -- at worst one idempotent
-        // re-bridge per tick, never the false `Converged` that stranded a
-        // keyless member in the old roster-only loop (PR #7 review #3). A real
-        // read-only `ActiveKeyed` probe needs a `keyed_epoch` on `/members` --
-        // an x0x-fork endpoint we have not built yet.
+        // Production probe. Preferred path: the read-only keyed-check
+        // (`GET /groups/<id>/secure/self`, the x0x `keyed_epoch` endpoint) --
+        // `keyed` => `ActiveKeyed`, roster-listed-but-not-keyed =>
+        // `ListedButUnkeyed`, not-in-roster => `Absent`. It is a pure read: it
+        // burns no MLS generation and cannot re-spend the single-use invite --
+        // the reason the earlier decrypt / `apply_join_result`-409 probes were
+        // rejected (apply_* RE-RUN the `invite_secret`, and a cold-start joiner
+        // has no stored frame to decrypt). Fallback, when the daemon predates
+        // the endpoint (404) or is unreachable: roster-only, where any
+        // in-roster member reads as `ListedButUnkeyed` -- never a false
+        // `ActiveKeyed`. In BOTH modes the inbound-apply removal
+        // (`dispatch_inbound_bridge`) stays the authoritative convergence that
+        // retires the record; the probe only decides re-bridge vs re-request
+        // between ticks (PR #7 review #3 + the `keyed_epoch` follow-up).
         struct Probe<'a> {
             client: &'a Client,
         }
@@ -2852,6 +2844,25 @@ impl Client {
                             ChatError::Invalid("durable join requires chat state".into())
                         })?;
                     let parsed = crate::groups::GroupId::parse(&gid)?;
+                    // Preferred: the read-only keyed-check (GET secure/self).
+                    // `keyed` => ActiveKeyed; roster-listed but not keyed =>
+                    // ListedButUnkeyed; not in roster => Absent.
+                    if let Ok(secure) = client.secure_groups() {
+                        if let Ok(st) = secure.group_self_status(&gid).await {
+                            return Ok(if st.keyed {
+                                MembershipStatus::ActiveKeyed
+                            } else if st.in_roster {
+                                MembershipStatus::ListedButUnkeyed
+                            } else {
+                                MembershipStatus::Absent
+                            });
+                        }
+                    }
+                    // Fallback -- daemon predates the endpoint (404) or is
+                    // unreachable: roster-only. Any in-roster member reads as
+                    // ListedButUnkeyed; convergence still comes from the
+                    // authoritative inbound-apply removal. Never a false
+                    // ActiveKeyed.
                     let list = client.groups().members(&parsed).await?;
                     Ok(if list.iter().any(|a| a.0 == self_hex) {
                         MembershipStatus::ListedButUnkeyed
