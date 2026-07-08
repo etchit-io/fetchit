@@ -18,7 +18,8 @@
 use crate::error::{ChatError, Result};
 use crate::identity::AgentId;
 use crate::transport::{
-    InboundEnvelope, OutboundEnvelope, OutboundKind, Reachability, SendReceipt, Transport,
+    DeliveryAck, InboundEnvelope, OutboundEnvelope, OutboundKind, Reachability, SendReceipt,
+    Transport,
 };
 use async_trait::async_trait;
 use fetchit_relay_client::{Client, ClientConfig, RelaySet, Signer};
@@ -468,10 +469,23 @@ fn spawn_inbound_pump(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let Some(delivery) = relay_set.next_delivery().await else {
+            let Some(tagged) = relay_set.next_delivery_tagged().await else {
                 break;
             };
-            let Some(inbound) = map_inbound_delivery(delivery.envelope) else {
+            // A durable replay (transit_seq > 0) carries an ack token
+            // routed back to the DELIVERING relay — ids are relay-local.
+            // Consumers confirm it only after the envelope's effects are
+            // durable; an unconfirmed drop leaves the entry stored for
+            // redelivery. Direct pushes (seq 0) have no stored copy.
+            let ack = (tagged.deliver.transit_seq > 0).then(|| {
+                let rs = Arc::clone(&relay_set);
+                let relay = tagged.relay;
+                let seq = tagged.deliver.transit_seq;
+                DeliveryAck::new(move || {
+                    let _ = rs.ack_transit(relay, vec![seq]);
+                })
+            });
+            let Some(inbound) = map_inbound_delivery(tagged.deliver.envelope, ack) else {
                 continue;
             };
             if tx.send(inbound).is_err() {
@@ -492,7 +506,7 @@ fn spawn_inbound_pump(
 /// ride the `Dm` shape — none has a dedicated [`OutboundKind`], and the
 /// dispatcher re-reads `transit.kind` to route the bridge event and the
 /// public post to their own handlers before any DM logic runs.
-fn map_inbound_delivery(env: TransitEnvelope) -> Option<InboundEnvelope> {
+fn map_inbound_delivery(env: TransitEnvelope, ack: Option<DeliveryAck>) -> Option<InboundEnvelope> {
     let kind = match env.kind {
         // Dm, the M2.5 bridge metadata event, a bridged fediverse
         // PublicPost, and an M6.7 PairRecordPush all ride the Dm shape;
@@ -546,6 +560,7 @@ fn map_inbound_delivery(env: TransitEnvelope) -> Option<InboundEnvelope> {
         timestamp_ms: env.timestamp_ms,
         transport_name: TRANSPORT_NAME,
         transit: Some(env),
+        ack,
     })
 }
 
@@ -852,7 +867,8 @@ mod tests {
             1_700_000_000_000,
         )
         .unwrap();
-        let mapped = map_inbound_delivery(env).expect("PublicPost must be forwarded, not dropped");
+        let mapped =
+            map_inbound_delivery(env, None).expect("PublicPost must be forwarded, not dropped");
         assert!(
             matches!(mapped.kind, OutboundKind::Dm),
             "PublicPost rides the Dm shape; the dispatcher re-discriminates on transit.kind",
@@ -883,7 +899,7 @@ mod tests {
         )
         .unwrap();
         let mapped =
-            map_inbound_delivery(env).expect("PairRecordPush must be forwarded, not dropped");
+            map_inbound_delivery(env, None).expect("PairRecordPush must be forwarded, not dropped");
         assert!(
             matches!(mapped.kind, OutboundKind::Dm),
             "PairRecordPush rides the Dm shape; the dispatcher re-discriminates on transit.kind",
@@ -905,7 +921,7 @@ mod tests {
             TransitEnvelope::public_post("https://x.example/u/a", b"{}".to_vec(), 1).unwrap();
         env.kind = RelayKind::AdminEvent;
         assert!(
-            map_inbound_delivery(env).is_none(),
+            map_inbound_delivery(env, None).is_none(),
             "AdminEvent has no chat-layer route and must stay dropped",
         );
     }

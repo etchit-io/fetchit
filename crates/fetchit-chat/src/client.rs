@@ -1543,12 +1543,29 @@ impl Client {
         }))
     }
 
+    #[allow(clippy::too_many_lines)] // one arm per envelope kind; splitting would scatter the ack decision table
     async fn default_dispatch_one(&self, mut env: InboundEnvelope) {
+        // Ack-after-persist: `ack` confirms the transport's stored copy
+        // ONLY at terminal outcomes (vault-persisted, provable
+        // duplicate, deterministic reject of immutable bytes). Every
+        // transient path — StaleEpoch-class frames, bridge dispatch
+        // with x0xd down, vault I/O errors — returns WITHOUT
+        // confirming, so the relay redelivers within its TTL and the
+        // recovery paths (re-key, epoch catch-up) get the frame again.
+        let ack = env.ack.take();
         let Some(transit) = env.transit.take() else {
+            // No wire envelope: nothing any consumer could ever apply.
+            if let Some(a) = &ack {
+                a.confirm();
+            }
             return;
         };
         if let Some(identity) = self.identity_arc() {
             if hex::encode(transit.sender_agent_id.as_bytes()) == identity.agent_id_hex() {
+                // Our own echo: permanently uninteresting.
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
                 return;
             }
         }
@@ -1556,8 +1573,15 @@ impl Client {
             transit.kind,
             fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent
         ) {
-            if let Err(e) = self.dispatch_inbound_bridge(&transit).await {
-                log::warn!("bridge dispatch dropped envelope: {e}");
+            match self.dispatch_inbound_bridge(&transit).await {
+                Ok(()) => {
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
+                // Bridge apply can fail because the local x0xd is
+                // down/restarting: hold, redelivery retries it.
+                Err(e) => log::warn!("bridge dispatch dropped envelope: {e}"),
             }
             return;
         }
@@ -1571,6 +1595,12 @@ impl Client {
         if matches!(transit.kind, fetchit_relay_proto::EnvelopeKind::PublicPost) {
             if let Err(e) = self.dispatch_inbound_public_post(&transit) {
                 log::warn!("public-post dispatch dropped envelope: {e}");
+            }
+            // Terminal either way: broadcast is the ephemeral surface
+            // (no vault state), and a decode failure is a deterministic
+            // verdict on immutable bytes.
+            if let Some(a) = &ack {
+                a.confirm();
             }
             return;
         }
@@ -1590,6 +1620,11 @@ impl Client {
         if should_drop_inbound_from_denylisted(self.denylist.as_ref(), &transit).await {
             self.denylist_dropped_inbound
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Deliberate drop: reclaim the stored copy so a blocked
+            // sender's backlog doesn't redeliver every reconnect.
+            if let Some(a) = &ack {
+                a.confirm();
+            }
             return;
         }
         // M6.7: a contact proactively pushing its re-signed device roster
@@ -1600,8 +1635,18 @@ impl Client {
             transit.kind,
             fetchit_relay_proto::EnvelopeKind::PairRecordPush
         ) {
-            if let Err(e) = self.dispatch_inbound_pair_record_push(&transit).await {
-                log::warn!("pair-record-push dispatch dropped envelope: {e}");
+            match self.dispatch_inbound_pair_record_push(&transit).await {
+                // Applied (or already-current: the apply is
+                // anti-rollback idempotent) — durable, reclaim.
+                Ok(()) => {
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
+                // Could be a vault write failure: hold for redelivery.
+                // An invalid push redelivering until TTL is bounded
+                // noise; a lost valid push is a real regression.
+                Err(e) => log::warn!("pair-record-push dispatch dropped envelope: {e}"),
             }
             return;
         }
@@ -1612,12 +1657,27 @@ impl Client {
                 .map(|g| hex::encode(g.as_bytes()))
                 .unwrap_or_default();
             if group_id_hex.is_empty() {
+                // Malformed: no group id can ever appear on redelivery.
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
                 return;
             }
-            let _ = self
+            // Persisted and Replay are both terminal (history extended +
+            // vault flushed, or provably already held). Errors include
+            // the x0xd decrypt failures of a stale/keyless epoch — the
+            // exact frames that must redeliver after re-key / epoch
+            // catch-up — so they hold the token.
+            if self
                 .messages()
                 .receive_private_group_envelope(&transit, &group_id_hex)
-                .await;
+                .await
+                .is_ok()
+            {
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
+            }
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
         {
             // Pass the outbox handle so a DeliveryReceipt flips the matching
@@ -1625,14 +1685,25 @@ impl Client {
             // gives Android the same Delivered path desktop gets).
             let outbox = self.chat.as_ref().map(|c| &c.outbox);
             let outbox_tx = self.chat.as_ref().map(|c| &c.outbox_tx);
-            let _ = crate::conversation::dispatch_inbound_with_outbox(
+            // Variant-aware: StaleEpoch / KemDecapFailed / missing-card
+            // drops are Ok-shaped but NOT terminal — the classifier
+            // holds exactly those for redelivery. Err (vault/registry
+            // I/O) is transient and also holds.
+            if let Ok(dispatch) = crate::conversation::dispatch_inbound_with_outbox(
                 transit,
                 identity.as_ref(),
                 registry.as_ref(),
                 outbox,
                 outbox_tx,
             )
-            .await;
+            .await
+            {
+                if crate::conversation::confirms_delivery(&dispatch) {
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
+            }
         }
     }
 

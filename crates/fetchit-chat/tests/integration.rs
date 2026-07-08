@@ -237,6 +237,7 @@ async fn relay_inbound_payload_round_trips_to_direct_message() {
         timestamp_ms: 1_700_000_000_000,
         transport_name: "relay",
         transit: None,
+        ack: None,
     };
     let dm = decode_direct_message(inbound).unwrap();
     assert_eq!(dm.body, "hi there");

@@ -1707,6 +1707,11 @@ impl ChatClient {
 /// A malformed or unrecognised envelope never panics the pump; errors are
 /// logged at `warn` level.
 ///
+/// Delivery acks (`InboundEnvelope::ack`) are confirmed only at terminal
+/// outcomes (vault-persisted, provable duplicate, deterministic reject of
+/// immutable bytes); transient failures leave the token unconfirmed so
+/// the relay redelivers within its TTL.
+///
 /// Returns the [`tokio::task::AbortHandle`] for the spawned task so the
 /// caller can abort it on disconnect or drop.
 fn spawn_inbound_pump(
@@ -1743,9 +1748,20 @@ async fn run_inbound_pump(
     let outbox = client.outbox_arc();
     let events = client.outbox_events();
     while let Some(mut env) = rx.recv().await {
+        // Ack-after-persist: confirm ONLY at terminal outcomes so the
+        // relay reclaims its stored copy; every transient path drops the
+        // token unconfirmed and redelivery retries. Decision table
+        // mirrors `Client::default_dispatch_one`.
+        let ack = env.ack.take();
         let transit = match env.transit.take() {
             Some(t) => t,
-            None => continue,
+            // No wire envelope: nothing any consumer could ever apply.
+            None => {
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
+                continue;
+            }
         };
 
         let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
@@ -1755,7 +1771,13 @@ async fn run_inbound_pump(
             .unwrap_or_default();
 
         match route_envelope(&transit.kind, &sender_hex, &self_hex) {
-            EnvelopeRoute::SelfSource => continue,
+            // Own echo: permanently uninteresting, reclaim.
+            EnvelopeRoute::SelfSource => {
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
+                continue;
+            }
 
             EnvelopeRoute::PublicPost => {
                 // M4 Stage 5.3: bridged fediverse public post. Dispatch feeds
@@ -1763,6 +1785,12 @@ async fn run_inbound_pump(
                 // into `tx`.
                 if let Err(e) = client.dispatch_inbound_public_post(&transit) {
                     log::warn!("[chat_ffi] public-post dispatch dropped envelope: {e}");
+                }
+                // Terminal either way: the broadcast is ephemeral and a
+                // decode failure is a deterministic verdict on immutable
+                // bytes.
+                if let Some(a) = &ack {
+                    a.confirm();
                 }
                 continue;
             }
@@ -1776,8 +1804,14 @@ async fn run_inbound_pump(
             transit.kind,
             fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent
         ) {
-            if let Err(e) = client.dispatch_inbound_bridge(&transit).await {
-                log::warn!("[chat_ffi] bridge dispatch dropped envelope: {e}");
+            match client.dispatch_inbound_bridge(&transit).await {
+                Ok(()) => {
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
+                // x0xd may be down/restarting: hold, redelivery retries.
+                Err(e) => log::warn!("[chat_ffi] bridge dispatch dropped envelope: {e}"),
             }
             continue;
         }
@@ -1798,6 +1832,10 @@ async fn run_inbound_pump(
                 .unwrap_or_default();
             if group_id_hex.is_empty() {
                 log::warn!("[chat_ffi] private-group envelope without group_id; dropping");
+                // Malformed: no group id can ever appear on redelivery.
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
                 continue;
             }
             match client
@@ -1805,11 +1843,18 @@ async fn run_inbound_pump(
                 .receive_private_group_envelope(&transit, &group_id_hex)
                 .await
             {
+                // Persisted and Replay are both terminal: history
+                // extended + vault flushed, or provably already held.
                 Ok(outcome) => {
                     if let Some(event) = project_group_receive(group_id_hex, outcome) {
                         let _ = tx.send(event);
                     }
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
                 }
+                // StaleEpoch-class decrypt failures: hold the ack so the
+                // relay redelivers after re-key / epoch catch-up.
                 Err(e) => log::warn!("[chat_ffi] private_group_decrypt_failed: {e}"),
             }
             continue;
@@ -1831,7 +1876,7 @@ async fn run_inbound_pump(
             }
         };
 
-        match dispatch_inbound_with_outbox(
+        let dispatch = match dispatch_inbound_with_outbox(
             transit,
             identity.as_ref(),
             registry.as_ref(),
@@ -1840,11 +1885,27 @@ async fn run_inbound_pump(
         )
         .await
         {
-            Ok(InboundDispatch::Message {
+            Ok(dispatch) => dispatch,
+            // Transient (vault/registry I/O): hold for redelivery.
+            Err(e) => {
+                log::warn!("[chat_ffi] dispatch_inbound error: {e}");
+                continue;
+            }
+        };
+        // Variant-aware: StaleEpoch / KemDecapFailed / missing-card drops
+        // are Ok-shaped but NOT terminal — the classifier holds exactly
+        // those for redelivery.
+        if fetchit_chat::conversation::confirms_delivery(&dispatch) {
+            if let Some(a) = &ack {
+                a.confirm();
+            }
+        }
+        match dispatch {
+            InboundDispatch::Message {
                 group_id_hex,
                 sender_agent_id_hex,
                 payload,
-            }) => {
+            } => {
                 // Best-effort receipt send (mirrors peer.rs lines 770-786).
                 if let Some(message_id) = payload.message_id.as_deref() {
                     let received_at_ms = std::time::SystemTime::now()
@@ -1869,16 +1930,13 @@ async fn run_inbound_pump(
                     message_id: payload.message_id,
                 });
             }
-            Ok(InboundDispatch::Receipt { message_id, .. }) => {
+            InboundDispatch::Receipt { message_id, .. } => {
                 let _ = tx.send(ChatEventFfi::Receipt { message_id });
             }
-            Ok(_other) => {
+            _other => {
                 // Welcomed, Rekeyed, WelcomeIgnored, stale epoch, KEM/AEAD
                 // failures -- conversation state may be updated as a side-
                 // effect; no FFI event needed.
-            }
-            Err(e) => {
-                log::warn!("[chat_ffi] dispatch_inbound error: {e}");
             }
         }
     }

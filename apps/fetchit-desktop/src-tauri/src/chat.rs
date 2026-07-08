@@ -2428,6 +2428,11 @@ async fn handle_inbound(
     registry: &fetchit_chat::conversation::ConversationRegistry,
     mut env: fetchit_chat::transport::InboundEnvelope,
 ) {
+    // Ack-after-persist: confirm ONLY at terminal outcomes so the relay
+    // reclaims its stored copy; every transient path drops the token
+    // unconfirmed and redelivery retries. Decision table mirrors
+    // `Client::default_dispatch_one`. LAN-direct envelopes carry no ack.
+    let ack = env.ack.take();
     if let Some(transit) = env.transit.take() {
         // Private-group (MLS) envelopes decrypt through a different engine
         // path than DM/receipt/welcome, so branch BEFORE the move into
@@ -2447,6 +2452,10 @@ async fn handle_inbound(
             // before the decrypt path so we never persist phantom history.
             let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
             if sender_hex == identity.agent_id_hex() {
+                // Own echo: permanently uninteresting, reclaim.
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
                 return;
             }
             let group_id_hex = transit
@@ -2456,6 +2465,10 @@ async fn handle_inbound(
                 .unwrap_or_default();
             if group_id_hex.is_empty() {
                 log_pump("[relay] private-group envelope without group_id");
+                // Malformed: no group id can ever appear on redelivery.
+                if let Some(a) = &ack {
+                    a.confirm();
+                }
                 return;
             }
             match client
@@ -2497,11 +2510,22 @@ async fn handle_inbound(
                             }),
                         );
                     }
+                    // History extended + vault flushed: terminal.
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
                 }
                 // Replayed envelope (already in the per-sender sliding
-                // window). No state change; surface nothing.
-                Ok(PrivateGroupReceive::Replay) => {}
+                // window). No state change; surface nothing. Provable
+                // duplicate: terminal.
+                Ok(PrivateGroupReceive::Replay) => {
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
                 Err(e) => {
+                    // StaleEpoch-class decrypt failures: hold the ack so
+                    // the relay redelivers after re-key / epoch catch-up.
                     let _ = app.emit(
                         "chat:warn",
                         serde_json::json!({
@@ -2522,7 +2546,7 @@ async fn handle_inbound(
         // but this pump bypasses that dispatcher.
         let outbox = client.outbox_arc();
         let outbox_events = client.outbox_events();
-        match dispatch_inbound_with_outbox(
+        let dispatch = match dispatch_inbound_with_outbox(
             transit,
             identity,
             registry,
@@ -2531,28 +2555,42 @@ async fn handle_inbound(
         )
         .await
         {
-            Ok(
-                InboundDispatch::Welcomed { conversation }
-                | InboundDispatch::Rekeyed { conversation },
-            ) => {
+            Ok(dispatch) => dispatch,
+            // Transient (vault/registry I/O): hold for redelivery.
+            Err(e) => {
+                log_pump(&format!("[relay] dispatch error: {e}"));
+                return;
+            }
+        };
+        // Variant-aware: StaleEpoch / KemDecapFailed / missing-card drops
+        // are Ok-shaped but NOT terminal — the classifier holds exactly
+        // those for redelivery.
+        if fetchit_chat::conversation::confirms_delivery(&dispatch) {
+            if let Some(a) = &ack {
+                a.confirm();
+            }
+        }
+        match dispatch {
+            InboundDispatch::Welcomed { conversation }
+            | InboundDispatch::Rekeyed { conversation } => {
                 let _ = app.emit("chat:conversation", &conversation);
             }
-            Ok(InboundDispatch::WelcomedPending { conversation }) => {
+            InboundDispatch::WelcomedPending { conversation } => {
                 // TOFU first-contact welcome from a sender we'd never
                 // heard from. Surface as a contact request so the UI
                 // can prompt the user before treating it as a normal
                 // conversation.
                 let _ = app.emit("chat:contact-request", &conversation);
             }
-            Ok(InboundDispatch::WelcomeIgnored | InboundDispatch::ReplayDetected { .. }) => {
+            InboundDispatch::WelcomeIgnored | InboundDispatch::ReplayDetected { .. } => {
                 // Stale or duplicate welcome, or spec §7 replay drop —
                 // observers' problem, not the user's. Silent.
             }
-            Ok(InboundDispatch::Message {
+            InboundDispatch::Message {
                 group_id_hex,
                 sender_agent_id_hex,
                 payload,
-            }) => {
+            } => {
                 let dm = DirectMessage {
                     from: AgentId(sender_agent_id_hex.clone()),
                     to: None,
@@ -2585,12 +2623,12 @@ async fn handle_inbound(
                     }
                 }
             }
-            Ok(InboundDispatch::Receipt {
+            InboundDispatch::Receipt {
                 group_id_hex,
                 sender_agent_id_hex,
                 message_id,
                 received_at_ms,
-            }) => {
+            } => {
                 let _ = app.emit(
                     "chat:receipt",
                     serde_json::json!({
@@ -2601,10 +2639,10 @@ async fn handle_inbound(
                     }),
                 );
             }
-            Ok(InboundDispatch::StaleEpoch {
+            InboundDispatch::StaleEpoch {
                 group_id_hex,
                 epoch,
-            }) => {
+            } => {
                 let _ = app.emit(
                     "chat:warn",
                     serde_json::json!({
@@ -2614,16 +2652,16 @@ async fn handle_inbound(
                     }),
                 );
             }
-            Ok(InboundDispatch::KemDecapFailed) => {
+            InboundDispatch::KemDecapFailed => {
                 let _ = app.emit(
                     "chat:warn",
                     serde_json::json!({ "kind": "kem_decap_failed" }),
                 );
             }
-            Ok(InboundDispatch::AeadOpenFailed {
+            InboundDispatch::AeadOpenFailed {
                 group_id_hex,
                 epoch,
-            }) => {
+            } => {
                 let _ = app.emit(
                     "chat:warn",
                     serde_json::json!({
@@ -2633,7 +2671,7 @@ async fn handle_inbound(
                     }),
                 );
             }
-            Ok(InboundDispatch::Dropped { kind, sender }) => {
+            InboundDispatch::Dropped { kind, sender } => {
                 let _ = app.emit(
                     "chat:warn",
                     serde_json::json!({
@@ -2642,13 +2680,14 @@ async fn handle_inbound(
                     }),
                 );
             }
-            Err(e) => {
-                log_pump(&format!("[relay] dispatch error: {e}"));
-            }
         }
     } else {
         // Transports that don't carry a TransitEnvelope fall through
-        // to the legacy plaintext-envelope decoder.
+        // to the legacy plaintext-envelope decoder. The decode is a
+        // deterministic verdict on immutable bytes: terminal either way.
+        if let Some(a) = &ack {
+            a.confirm();
+        }
         match fetchit_chat::messages::decode_direct_message(env) {
             Ok(dm) => {
                 let _ = app.emit("chat:dm", &dm);

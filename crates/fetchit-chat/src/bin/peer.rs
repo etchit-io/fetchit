@@ -44,13 +44,13 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
+use fetchit_chat::conversation::{confirms_delivery, dispatch_inbound, InboundDispatch};
 use fetchit_chat::groups::{GroupId, GroupInvite, JoinOutcome};
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::{
     decode_direct_message, is_private_group_envelope, PrivateGroupReceive,
 };
-use fetchit_chat::transport::InboundEnvelope;
+use fetchit_chat::transport::{DeliveryAck, InboundEnvelope};
 use fetchit_chat::Client;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -1176,10 +1176,14 @@ fn require_daemonless_passphrase(daemonless: bool, passphrase: Option<&str>) -> 
 /// Decode + dispatch a private-secure-group envelope. Returns Some
 /// when the body is fresh and should be surfaced to the user; None on
 /// self-source, replay, decrypt failure, or any of the verify/lookup
-/// edge cases.
+/// edge cases. `ack` is confirmed only at terminal outcomes (persisted,
+/// replay, malformed); decrypt failures leave it unconfirmed so the
+/// relay redelivers.
+#[allow(clippy::too_many_lines)] // one arm per receive outcome; splitting scatters the ack decisions
 async fn decode_private_group(
     client: &Client,
     transit: &fetchit_relay_proto::TransitEnvelope,
+    ack: Option<&DeliveryAck>,
 ) -> Option<PeerInbound> {
     // Self-source filter: our own sends fan out via the relay and can
     // echo back to us (especially when running both ends of a test).
@@ -1194,6 +1198,10 @@ async fn decode_private_group(
         .map(|identity| identity.agent_id_hex().to_owned())
         .unwrap_or_default();
     if !self_hex.is_empty() && hex::encode(transit.sender_agent_id.as_bytes()) == self_hex {
+        // Own echo: permanently uninteresting, reclaim the stored copy.
+        if let Some(a) = ack {
+            a.confirm();
+        }
         return None;
     }
     let group_id_hex = transit
@@ -1203,6 +1211,10 @@ async fn decode_private_group(
         .unwrap_or_default();
     if group_id_hex.is_empty() {
         eprintln!("[peer] private-group envelope without group_id");
+        // Malformed: no group id can ever appear on redelivery.
+        if let Some(a) = ack {
+            a.confirm();
+        }
         return None;
     }
     let messages = client.messages();
@@ -1267,6 +1279,12 @@ async fn decode_private_group(
                     entry.body
                 );
             }
+            // History extended + vault flushed: terminal, reclaim now.
+            // The echo below is a fire-and-forget side effect (with
+            // early-return guards) that must not gate the ack.
+            if let Some(a) = ack {
+                a.confirm();
+            }
             // M2 live-test echo handler — strict OPT-IN as of 2026-07-03.
             // Soak rigs that assert an inbound from us set
             // FETCHIT_PEER_ECHO=1; every other peer stays silent. The old
@@ -1307,9 +1325,17 @@ async fn decode_private_group(
         }
         Ok(PrivateGroupReceive::Replay) => {
             eprintln!("[peer] private-group: replay dropped");
+            // Provable duplicate: terminal.
+            if let Some(a) = ack {
+                a.confirm();
+            }
             None
         }
         Err(e) => {
+            // StaleEpoch-class decrypt failures: hold the ack (drop it
+            // unconfirmed) so the relay redelivers after re-key /
+            // epoch catch-up.
+            //
             // Soak-collector decrypt-fail anchor. Metadata only -- group
             // prefix + sender prefix; the plaintext never existed at this
             // layer (decrypt failed) so there is nothing sensitive to
@@ -1365,7 +1391,13 @@ fn take_echo_budget() -> bool {
     admit_echo(&mut guard, minute)
 }
 
+#[allow(clippy::too_many_lines)] // one arm per envelope kind; splitting scatters the ack decisions
 async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<PeerInbound> {
+    // Ack-after-persist: confirm ONLY at terminal outcomes so the relay
+    // reclaims its stored copy; every transient path drops the token
+    // unconfirmed and redelivery retries. Decision table mirrors
+    // `Client::default_dispatch_one`.
+    let ack = env.ack.take();
     // Chat-v2 envelopes (TransitEnvelope present) go through the
     // conversation dispatcher so we get a decrypted MessagePayload.
     if let Some(transit) = env.transit.take() {
@@ -1397,8 +1429,14 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
             transit.kind,
             fetchit_relay_proto::EnvelopeKind::X0xdGroupMetadataEvent
         ) {
-            if let Err(e) = client.dispatch_inbound_bridge(&transit).await {
-                eprintln!("[peer] bridge dispatch error: {e}");
+            match client.dispatch_inbound_bridge(&transit).await {
+                Ok(()) => {
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
+                // x0xd may be down/restarting: hold, redelivery retries.
+                Err(e) => eprintln!("[peer] bridge dispatch error: {e}"),
             }
             return None;
         }
@@ -1410,16 +1448,32 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
         // transport that legitimately leaves kem_ciphertext empty
         // doesn't silently start misrouting here.
         if is_private_group_envelope(&transit) {
-            return decode_private_group(client, &transit).await;
+            return decode_private_group(client, &transit, ack.as_ref()).await;
         }
         let identity = client.identity_arc()?;
         let registry = client.registry_arc()?;
-        match dispatch_inbound(transit, identity.as_ref(), registry.as_ref()).await {
-            Ok(InboundDispatch::Message {
+        let dispatch = match dispatch_inbound(transit, identity.as_ref(), registry.as_ref()).await {
+            Ok(dispatch) => dispatch,
+            // Transient (vault/registry I/O): hold for redelivery.
+            Err(e) => {
+                eprintln!("[peer] dispatch error: {e}");
+                return None;
+            }
+        };
+        // Variant-aware: StaleEpoch / KemDecapFailed / missing-card
+        // drops are Ok-shaped but NOT terminal — the classifier holds
+        // exactly those for redelivery.
+        if confirms_delivery(&dispatch) {
+            if let Some(a) = &ack {
+                a.confirm();
+            }
+        }
+        match dispatch {
+            InboundDispatch::Message {
                 group_id_hex,
                 sender_agent_id_hex,
                 payload,
-            }) => {
+            } => {
                 let Ok(from) = AgentId::parse(sender_agent_id_hex.clone()) else {
                     return None;
                 };
@@ -1451,22 +1505,22 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
                     body: payload.body,
                 })
             }
-            Ok(InboundDispatch::Receipt { message_id, .. }) => {
+            InboundDispatch::Receipt { message_id, .. } => {
                 eprintln!("[peer] got receipt for message_id={message_id}");
                 None
             }
-            Ok(other) => {
+            other => {
                 eprintln!("[peer] dispatch returned non-message: {other:?}");
-                None
-            }
-            Err(e) => {
-                eprintln!("[peer] dispatch error: {e}");
                 None
             }
         }
     } else {
         // Legacy plaintext envelope — used by transports that don't
-        // speak the v2 conversation wire format.
+        // speak the v2 conversation wire format. The decode is a
+        // deterministic verdict on immutable bytes: terminal either way.
+        if let Some(a) = &ack {
+            a.confirm();
+        }
         match decode_direct_message(env) {
             Ok(dm) => Some(PeerInbound {
                 from: dm.from,

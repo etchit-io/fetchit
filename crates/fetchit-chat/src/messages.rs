@@ -5929,6 +5929,7 @@ mod tests {
             timestamp_ms: 1_700_000_000_000,
             transport_name: "relay",
             transit: None,
+            ack: None,
         };
         let dm = decode_direct_message(inbound).unwrap();
         assert_eq!(dm.body, "hello");
@@ -5951,6 +5952,7 @@ mod tests {
             timestamp_ms: 1,
             transport_name: "relay",
             transit: None,
+            ack: None,
         };
         let dm = decode_direct_message(inbound).unwrap();
         assert_eq!(dm.body, "");
@@ -5968,6 +5970,7 @@ mod tests {
             timestamp_ms: 1,
             transport_name: "relay",
             transit: None,
+            ack: None,
         };
         assert!(decode_direct_message(inbound).is_err());
     }

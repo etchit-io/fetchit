@@ -111,6 +111,42 @@ pub enum InboundDispatch {
     },
 }
 
+/// Whether a dispatch outcome is TERMINAL for the envelope that produced
+/// it — its effects are durably applied (vault persisted), it is a
+/// provable duplicate, or no future redelivery could ever process it
+/// differently — so a transport-held stored copy may be reclaimed
+/// ([`crate::transport::DeliveryAck::confirm`]).
+///
+/// Returns `false` for outcomes a later redelivery can genuinely
+/// improve, which must leave the stored copy in place:
+/// - [`InboundDispatch::StaleEpoch`] — the headline case: the frame
+///   becomes decryptable after a re-key / epoch catch-up, and the
+///   relay's redelivery is what fills the gap.
+/// - [`InboundDispatch::KemDecapFailed`] — encrypted to a different KEM
+///   key; a device/pair update can make a redelivery decryptable.
+/// - [`InboundDispatch::Dropped`] with `"no-card"` / `"no-pubkey"` —
+///   the sender's card can arrive or gain its pubkey before the TTL.
+///
+/// Everything else confirms: persisted messages/receipts/rekeys/welcomes,
+/// duplicates, tampered frames (`AeadOpenFailed` — corrupt bytes never
+/// improve), and signature/membership rejections (deterministic verdicts
+/// on immutable bytes).
+#[must_use]
+pub fn confirms_delivery(dispatch: &InboundDispatch) -> bool {
+    match dispatch {
+        InboundDispatch::Welcomed { .. }
+        | InboundDispatch::WelcomedPending { .. }
+        | InboundDispatch::WelcomeIgnored
+        | InboundDispatch::Rekeyed { .. }
+        | InboundDispatch::Message { .. }
+        | InboundDispatch::Receipt { .. }
+        | InboundDispatch::AeadOpenFailed { .. }
+        | InboundDispatch::ReplayDetected { .. } => true,
+        InboundDispatch::StaleEpoch { .. } | InboundDispatch::KemDecapFailed => false,
+        InboundDispatch::Dropped { kind, .. } => !matches!(kind.as_str(), "no-card" | "no-pubkey"),
+    }
+}
+
 /// Outcome of the verify prelude: either an early `Dropped` result, or
 /// a green light that the message-path dispatcher can proceed.
 #[allow(clippy::large_enum_variant)] // InboundDispatch contains Conversation; boxing here would force every call site to dereference.
@@ -717,6 +753,46 @@ mod tests {
     };
     use crate::chat_crypto::random_symmetric_key;
     use crate::local_store::StoreLayout;
+
+    #[test]
+    fn confirms_delivery_holds_exactly_the_retriable_outcomes() {
+        use super::confirms_delivery as c;
+        use super::InboundDispatch as D;
+        // Retriable: a later redelivery can genuinely improve these.
+        assert!(!c(&D::StaleEpoch {
+            group_id_hex: "g".into(),
+            epoch: 2
+        }));
+        assert!(!c(&D::KemDecapFailed));
+        assert!(!c(&D::Dropped {
+            kind: "no-card".into(),
+            sender: "s".into()
+        }));
+        assert!(!c(&D::Dropped {
+            kind: "no-pubkey".into(),
+            sender: "s".into()
+        }));
+        // Terminal: persisted, duplicate, or deterministic verdicts on
+        // immutable bytes.
+        assert!(c(&D::WelcomeIgnored));
+        assert!(c(&D::ReplayDetected {
+            group_id_hex: "g".into(),
+            sender_agent_id_hex: "s".into(),
+        }));
+        assert!(c(&D::AeadOpenFailed {
+            group_id_hex: "g".into(),
+            epoch: 2
+        }));
+        assert!(c(&D::Dropped {
+            kind: "bad-signature".into(),
+            sender: "s".into()
+        }));
+        assert!(c(&D::Dropped {
+            kind: "rekey-from-non-member".into(),
+            sender: "s".into(),
+        }));
+    }
+
     use crate::messages::StoredContactCard;
     use base64::engine::general_purpose::STANDARD as B64;
     use fetchit_relay_client::{MlDsaSigner, Signer};

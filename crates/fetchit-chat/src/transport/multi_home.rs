@@ -1181,6 +1181,7 @@ mod tests {
             timestamp_ms: 1_700_000_000_000,
             transport_name: "multi-home-test",
             transit: Some(transit),
+            ack: None,
         }
     }
 
