@@ -2760,7 +2760,13 @@ impl Client {
 
         match outcome {
             Ok(()) => {
-                let _ = store.remove(&gid_hex);
+                // Roster convergence is NOT a keyed check: a roster-active
+                // joiner can still be keyless (the Welcome pull is a
+                // separate, cross-NAT-fragile step). Leave the durable
+                // record — the apply-site removal fires at the authoritative
+                // keyed moment (join-result applied), and the driver
+                // re-drives if the Welcome never lands. Removing here would
+                // strand a keyless "joined" group with no safety net.
                 Ok(groups::JoinOutcome::Converged(group))
             }
             Err(ChatError::JoinerNotConverged { .. }) => {
