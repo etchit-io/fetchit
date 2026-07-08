@@ -441,6 +441,34 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
   const linkDeviceBtn = root.querySelector<HTMLButtonElement>("[data-act=link-device]");
   linkDeviceBtn?.addEventListener("click", () => hooks.onLinkDevice?.());
 
+  const nameInput = root.querySelector<HTMLInputElement>("#display-name-input");
+  const nameSave = root.querySelector<HTMLButtonElement>("[data-act=save-name]");
+  const nameStatus = root.querySelector<HTMLParagraphElement>("#display-name-status");
+  if (nameInput) {
+    void invoke<string>("display_name")
+      .then((n) => {
+        nameInput.value = n;
+      })
+      .catch(() => {});
+  }
+  nameSave?.addEventListener("click", () => {
+    if (!nameInput || !nameStatus) return;
+    const name = nameInput.value.trim();
+    nameStatus.hidden = false;
+    if (!name) {
+      nameStatus.textContent = "Your name can't be empty.";
+      return;
+    }
+    void invoke("set_display_name", { name })
+      .then(() => {
+        nameInput.value = name;
+        nameStatus.textContent = "Saved. New messages will use this name.";
+      })
+      .catch(() => {
+        nameStatus.textContent = "Couldn't save your name. Please try again.";
+      });
+  });
+
   enabledBox.addEventListener("change", () => {
     applyPolicy(readPolicy({ enabledBox, modeSelect, maxMb }));
   });
@@ -648,6 +676,18 @@ function buildPage(): HTMLElement {
       <h1>Settings</h1>
       <button type="button" class="settings-close" aria-label="Close settings">×</button>
     </header>
+    <section class="setting-group" id="group-name">
+      <h2>Your name</h2>
+      <p class="setting-desc">
+        What people in your chats see. Change it any time &mdash; new messages use the new name.
+      </p>
+      <div class="setting-row setting-row--stack">
+        <input type="text" id="display-name-input" maxlength="48" spellcheck="false"
+               placeholder="Your name" aria-label="Your display name">
+        <button type="button" class="setting-action" data-act="save-name">Save</button>
+      </div>
+      <p class="setting-desc" id="display-name-status" hidden></p>
+    </section>
     <section class="setting-group" id="group-appearance">
       <details class="setting-collapsible">
         <summary><h2>Appearance</h2></summary>
