@@ -20,13 +20,17 @@ describe("settings panel", () => {
     await $("#settings-toggle").click();
     await expect($("#settings")).toBeDisplayed();
 
-    for (const id of [
-      "#group-network",
-      "#group-peers",
-      "#group-cache",
-      "#group-bookmarks",
-      "#group-about",
-    ]) {
+    // Everyday sections are visible as soon as the panel opens.
+    for (const id of ["#group-bookmarks", "#group-about"]) {
+      await expect($(id)).toBeDisplayed();
+    }
+
+    // Power sections live inside the collapsed Advanced block and only
+    // render once it is expanded (the panel's grandma-proofing default).
+    const advanced = $("#group-advanced");
+    await expect(advanced).toBeExisting();
+    await advanced.$("summary").click();
+    for (const id of ["#group-network", "#group-peers", "#group-cache"]) {
       await expect($(id)).toBeDisplayed();
     }
   });
