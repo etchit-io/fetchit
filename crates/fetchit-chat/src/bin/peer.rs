@@ -381,7 +381,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let token = resolve_token(&cli)?;
     let passphrase = resolve_passphrase(&cli)?;
-    require_daemonless_passphrase(cli.daemonless, passphrase.as_deref())?;
+    require_daemonless_passphrase(cli.daemonless, passphrase.as_ref().map(|p| p.as_str()))?;
     // The fedi vault unseals with the same custody the builder installs:
     // the Client retains the passphrase, so fedi paths need no copy here.
 
@@ -405,7 +405,9 @@ async fn main() -> Result<()> {
         }
     }
     if let Some(p) = passphrase {
-        builder = builder.passphrase(p);
+        // The builder setter re-wraps into `Zeroizing`; hand it the inner
+        // string (this transient copy drops right after the move).
+        builder = builder.passphrase(p.as_str().to_owned());
     }
     let client = builder.build().await.context("build Client")?;
 
@@ -1150,13 +1152,22 @@ fn resolve_token(cli: &Cli) -> Result<String> {
     Ok(raw.trim().to_owned())
 }
 
-fn resolve_passphrase(cli: &Cli) -> Result<Option<String>> {
+fn resolve_passphrase(cli: &Cli) -> Result<Option<zeroize::Zeroizing<String>>> {
+    // #91 Z4b: the passphrase read from a file or the environment is an
+    // owned copy that outlives this function via the returned binding;
+    // wrap it (and the raw file contents) in `Zeroizing` so every copy is
+    // wiped on drop instead of lingering in freed heap.
     if let Some(path) = cli.passphrase_file.as_ref() {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("read passphrase file at {}", path.display()))?;
-        return Ok(Some(raw.trim().to_owned()));
+        let raw = zeroize::Zeroizing::new(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("read passphrase file at {}", path.display()))?,
+        );
+        return Ok(Some(zeroize::Zeroizing::new(raw.trim().to_owned())));
     }
-    Ok(cli.passphrase_env.clone().map(|s| s.trim().to_owned()))
+    Ok(cli
+        .passphrase_env
+        .clone()
+        .map(|s| zeroize::Zeroizing::new(s.trim().to_owned())))
 }
 
 /// Daemonless peers seal their identity vault with the Argon2id
@@ -2102,6 +2113,28 @@ mod tests {
         // The x0xd path resolves identity from the daemon, so a
         // passphrase stays optional (keychain fallback) there.
         assert!(require_daemonless_passphrase(false, None).is_ok());
+    }
+
+    #[test]
+    fn resolve_passphrase_return_is_zeroizing() {
+        // #91 Z4b compile-time guard, mirroring the chat_crypto #22 style:
+        // binding the resolver output to an explicit `Zeroizing` type means
+        // a regression that returns a bare `String` fails to compile. The
+        // trim assertion is a bonus round-trip check.
+        let tmp = tempfile::tempdir().unwrap();
+        let pw = tmp.path().join("pass");
+        std::fs::write(&pw, "  vault-secret  \n").unwrap();
+        let cli = Cli::parse_from([
+            "fetchit-chat-peer",
+            "--passphrase-file",
+            pw.to_str().unwrap(),
+            "echo",
+        ]);
+        let resolved: Option<zeroize::Zeroizing<String>> = resolve_passphrase(&cli).unwrap();
+        assert_eq!(
+            resolved.as_deref().map(String::as_str),
+            Some("vault-secret")
+        );
     }
 
     // ── group-create / group-chat arg parsing ─────────────────────────

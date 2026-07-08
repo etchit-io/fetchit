@@ -68,7 +68,10 @@ pub struct ClientBuilder {
     token: Option<String>,
     relay_url: Option<Url>,
     data_dir: Option<PathBuf>,
-    passphrase: Option<String>,
+    /// #91 Z4a: held in a `Zeroizing` so the builder never keeps a plain
+    /// passphrase copy between `.passphrase()` and `.build()`; `build()`
+    /// moves it on into the `Arc<Zeroizing<String>>` custody hold.
+    passphrase: Option<zeroize::Zeroizing<String>>,
     enable_lan_direct: bool,
     /// Caller-supplied callback that resolves a peer `agent_id` to its
     /// ML-DSA-65 public key. The desktop wires this through the chat
@@ -176,7 +179,9 @@ impl ClientBuilder {
     /// When omitted, the keystore path is used.
     #[must_use]
     pub fn passphrase(mut self, s: String) -> Self {
-        self.passphrase = Some(s);
+        // #91 Z4a: wrap on the way in so the builder's held copy is wiped
+        // on drop. Signature stays `String` so callers are unaffected.
+        self.passphrase = Some(zeroize::Zeroizing::new(s));
         self
     }
 
@@ -290,7 +295,10 @@ impl ClientBuilder {
             token,
             self.relay_url,
             self.data_dir,
-            self.passphrase,
+            // #91 Z4a: `from_parts` takes a plain `Option<String>` (out of
+            // scope here) and re-wraps it into the `Arc<Zeroizing<String>>`
+            // custody hold, so hand it the inner clone.
+            self.passphrase.map(|p| p.to_string()),
             self.enable_lan_direct,
             self.contact_pubkey_lookup,
             self.x0xd_port_file,
