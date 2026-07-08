@@ -17,9 +17,10 @@ use std::process::Command;
 const X0XD_PIN_VERSION: &str = "0.27.0";
 
 /// Pinned commit: the `mobile-0.27` fork tip on josh-clsn/x0x (upstream
-/// `v0.27.0` release lineage plus the fetch>it fork tail).
+/// `v0.27.0` release lineage plus the fetch>it fork tail, now including the
+/// read-only `GET /groups/:id/secure/self` keyed-epoch probe).
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "ac082b9b4c2b8b516bfa4a0dbe4ce2473f5267ca";
+const X0XD_PIN_SHA: &str = "b19f8c171831c535f44b31d28e0f19b61469b813";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
