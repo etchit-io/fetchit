@@ -803,6 +803,18 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -822,6 +834,8 @@ internal interface IntegrityCheckingUniffiLib : Library {
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_detect(
 ): Short
+fun uniffi_fetchit_ffi_checksum_func_enroll_confirmed_device(
+): Short
 fun uniffi_fetchit_ffi_checksum_func_extract_archive_entry(
 ): Short
 fun uniffi_fetchit_ffi_checksum_func_restore_recovery_phrase(
@@ -840,7 +854,11 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_group(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_disconnect(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
 ): Short
@@ -862,6 +880,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_join_group(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_join_group_durable(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_leave_group(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_list_groups(
@@ -873,6 +893,10 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_outbox_snapshot(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_publish_outcome(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_pending_joins(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_preview_link_offer(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact(
 ): Short
@@ -961,8 +985,12 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_history(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_group(`ptr`: Pointer,`name`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,`private`: Byte,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_create_link_offer(`ptr`: Pointer,`ttlSecs`: Long,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_disconnect(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+fun uniffi_fetchit_ffi_fn_method_chatclient_drive_pending_joins_once(`ptr`: Pointer,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -983,6 +1011,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_import_pair_uri(`ptr`: Pointer,`uri`
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_join_group(`ptr`: Pointer,`invite`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_join_group_durable(`ptr`: Pointer,`invite`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_leave_group(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_list_groups(`ptr`: Pointer,
@@ -994,6 +1024,10 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_outbox_snapshot(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_pair_publish_outcome(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_pair_share_uri(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_pending_joins(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_preview_link_offer(`ptr`: Pointer,`uri`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_remove_contact(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,
 ): Long
@@ -1025,6 +1059,8 @@ fun uniffi_fetchit_ffi_fn_func_default_peers(uniffi_out_err: UniffiRustCallStatu
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_detect(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_func_enroll_confirmed_device(`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`uri`: RustBuffer.ByValue,`postRelay`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_func_extract_archive_entry(`archiveBytes`: RustBuffer.ByValue,`entryPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_func_restore_recovery_phrase(`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`phrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1167,6 +1203,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_func_detect() != 20870.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_func_enroll_confirmed_device() != 7989.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_func_extract_archive_entry() != 6186.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1194,7 +1233,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_group() != 1975.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer() != 61206.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_disconnect() != 16284.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once() != 45686.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 2558.toShort()) {
@@ -1227,6 +1272,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 13616.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group_durable() != 49722.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_leave_group() != 25370.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1243,6 +1291,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri() != 50989.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_pending_joins() != 58167.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_preview_link_offer() != 7760.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact() != 56807.toShort()) {
@@ -1773,6 +1827,19 @@ public interface ChatClientInterface {
     suspend fun `createGroup`(`name`: kotlin.String, `displayName`: kotlin.String?, `private`: kotlin.Boolean): GroupFfi
     
     /**
+     * M6.4 new-device side: mint a link-device offer for THIS device and
+     * publish it to the relay blob store, returning the QR pointer to encode
+     * plus the short-code to show beside it. `ttl_secs` bounds the enrollment
+     * window — the offer self-expires and the existing device rejects a stale
+     * one on confirm.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] in REST-only mode (no chat state) or on a seal
+     * failure; [`ChatFfiError::Network`] when no relay accepts the offer.
+     */
+    suspend fun `createLinkOffer`(`ttlSecs`: kotlin.ULong): CreatedLinkOfferFfi
+    
+    /**
      * Stop the inbound pump and feed drains, releasing the relay
      * connection. Idempotent; safe to call more than once. Android
      * calls this when the app no longer needs live chat (background,
@@ -1781,6 +1848,20 @@ public interface ChatClientInterface {
      * already-queued events and then returns `None` forever.
      */
     fun `disconnect`()
+    
+    /**
+     * Advance every due durable join one step (re-bridge the saved event or
+     * re-request the Welcome; a fully-keyed one is retired). Returns the
+     * group ids STILL pending after this pass, so a shell timer can refresh
+     * "joining…" badges and detect convergence (a group leaving the set).
+     * Idempotent, cheap, and a no-op when nothing is pending; spends no
+     * second invite (a resume never calls `join_post`).
+     *
+     * # Errors
+     *
+     * [`ChatFfiError`] on a pending-join store error.
+     */
+    suspend fun `drivePendingJoinsOnce`(): List<kotlin.String>
     
     /**
      * Enqueue an outbound DM through the durable outbox: persist a
@@ -1927,6 +2008,24 @@ public interface ChatClientInterface {
     suspend fun `joinGroup`(`invite`: kotlin.String, `displayName`: kotlin.String?): GroupFfi
     
     /**
+     * Durable join: like [`Self::join_group`], but a join that cannot
+     * converge now (owner offline) is a resumable [`JoinOutcomeFfi::Pending`]
+     * the resume pump completes when the owner is next reachable -- never a
+     * hard error, never a re-spent single-use invite. The shell draws
+     * "joining…" on `Pending`, calls [`Self::drive_pending_joins_once`] on a
+     * timer to advance it, and lists in-flight joins via
+     * [`Self::pending_joins`]. `Converged` warms member cards exactly like
+     * [`Self::join_group`] so the first inbound frame decrypts without a lazy
+     * fetch.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Network`] on relay or x0xd failure.
+     * [`ChatFfiError::Invalid`] for a malformed invite or self-join.
+     */
+    suspend fun `joinGroupDurable`(`invite`: kotlin.String, `displayName`: kotlin.String?): JoinOutcomeFfi
+    
+    /**
      * Leave a group, dropping it from the local list.
      *
      * Mirrors the desktop `chat_group_leave` command. Rejoining requires a
@@ -1994,6 +2093,29 @@ public interface ChatClientInterface {
      * [`ChatFfiError::Invalid`] when pair URI construction fails.
      */
     suspend fun `pairShareUri`(): kotlin.String
+    
+    /**
+     * Group ids with a durable join still in progress -- the shell draws
+     * these as "joining…" rather than a failure.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError`] on a pending-join store read error.
+     */
+    fun `pendingJoins`(): List<kotlin.String>
+    
+    /**
+     * M6.4 existing-device side: fetch the offer a scanned `uri` points at and
+     * return the confirm-screen preview (the new device's agent id, the
+     * short-code to compare, and freshness). The full offer is validated
+     * during the fetch; mint the certificate only after the human confirms the
+     * short-code matches the new device's screen.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] on a malformed URI or offer;
+     * [`ChatFfiError::Network`] when no relay serves the blob.
+     */
+    suspend fun `previewLinkOffer`(`uri`: kotlin.String): LinkOfferPreviewFfi
     
     /**
      * Remove a contact, dropping the conversation from the local store.
@@ -2323,6 +2445,38 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * M6.4 new-device side: mint a link-device offer for THIS device and
+     * publish it to the relay blob store, returning the QR pointer to encode
+     * plus the short-code to show beside it. `ttl_secs` bounds the enrollment
+     * window — the offer self-expires and the existing device rejects a stale
+     * one on confirm.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] in REST-only mode (no chat state) or on a seal
+     * failure; [`ChatFfiError::Network`] when no relay accepts the offer.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `createLinkOffer`(`ttlSecs`: kotlin.ULong) : CreatedLinkOfferFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_create_link_offer(
+                thisPtr,
+                FfiConverterULong.lower(`ttlSecs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeCreatedLinkOfferFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Stop the inbound pump and feed drains, releasing the relay
      * connection. Idempotent; safe to call more than once. Android
      * calls this when the app no longer needs live chat (background,
@@ -2339,6 +2493,39 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     }
     
     
+
+    
+    /**
+     * Advance every due durable join one step (re-bridge the saved event or
+     * re-request the Welcome; a fully-keyed one is retired). Returns the
+     * group ids STILL pending after this pass, so a shell timer can refresh
+     * "joining…" badges and detect convergence (a group leaving the set).
+     * Idempotent, cheap, and a no-op when nothing is pending; spends no
+     * second invite (a resume never calls `join_post`).
+     *
+     * # Errors
+     *
+     * [`ChatFfiError`] on a pending-join store error.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `drivePendingJoinsOnce`() : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_drive_pending_joins_once(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -2668,6 +2855,43 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Durable join: like [`Self::join_group`], but a join that cannot
+     * converge now (owner offline) is a resumable [`JoinOutcomeFfi::Pending`]
+     * the resume pump completes when the owner is next reachable -- never a
+     * hard error, never a re-spent single-use invite. The shell draws
+     * "joining…" on `Pending`, calls [`Self::drive_pending_joins_once`] on a
+     * timer to advance it, and lists in-flight joins via
+     * [`Self::pending_joins`]. `Converged` warms member cards exactly like
+     * [`Self::join_group`] so the first inbound frame decrypts without a lazy
+     * fetch.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Network`] on relay or x0xd failure.
+     * [`ChatFfiError::Invalid`] for a malformed invite or self-join.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `joinGroupDurable`(`invite`: kotlin.String, `displayName`: kotlin.String?) : JoinOutcomeFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_join_group_durable(
+                thisPtr,
+                FfiConverterString.lower(`invite`),FfiConverterOptionalString.lower(`displayName`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeJoinOutcomeFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Leave a group, dropping it from the local list.
      *
      * Mirrors the desktop `chat_group_leave` command. Rejoining requires a
@@ -2834,6 +3058,59 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Group ids with a durable join still in progress -- the shell draws
+     * these as "joining…" rather than a failure.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError`] on a pending-join store read error.
+     */
+    @Throws(ChatFfiException::class)override fun `pendingJoins`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_pending_joins(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * M6.4 existing-device side: fetch the offer a scanned `uri` points at and
+     * return the confirm-screen preview (the new device's agent id, the
+     * short-code to compare, and freshness). The full offer is validated
+     * during the fetch; mint the certificate only after the human confirms the
+     * short-code matches the new device's screen.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] on a malformed URI or offer;
+     * [`ChatFfiError::Network`] when no relay serves the blob.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `previewLinkOffer`(`uri`: kotlin.String) : LinkOfferPreviewFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_preview_link_offer(
+                thisPtr,
+                FfiConverterString.lower(`uri`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeLinkOfferPreviewFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -3588,6 +3865,106 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
 
 
 /**
+ * M6.4 new-device link offer: the QR pointer to encode plus the confirm
+ * code to show beside it plus the absolute expiry. Returned by
+ * [`ChatClient::create_link_offer`].
+ */
+data class CreatedLinkOfferFfi (
+    /**
+     * `fetchit://link/v1/…` pointer to render as the QR the new device shows.
+     */
+    var `uri`: kotlin.String, 
+    /**
+     * Human-comparable confirm code (`XXXX-XXXX-XXXX`) shown beside the QR.
+     */
+    var `shortCode`: kotlin.String, 
+    /**
+     * Absolute expiry, milliseconds since Unix epoch.
+     */
+    var `expMs`: kotlin.ULong
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCreatedLinkOfferFfi: FfiConverterRustBuffer<CreatedLinkOfferFfi> {
+    override fun read(buf: ByteBuffer): CreatedLinkOfferFfi {
+        return CreatedLinkOfferFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CreatedLinkOfferFfi) = (
+            FfiConverterString.allocationSize(value.`uri`) +
+            FfiConverterString.allocationSize(value.`shortCode`) +
+            FfiConverterULong.allocationSize(value.`expMs`)
+    )
+
+    override fun write(value: CreatedLinkOfferFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`uri`, buf)
+            FfiConverterString.write(value.`shortCode`, buf)
+            FfiConverterULong.write(value.`expMs`, buf)
+    }
+}
+
+
+
+/**
+ * M6.4 outcome of a completed enrollment (existing-device side), returned by
+ * [`enroll_confirmed_device`].
+ */
+data class EnrollOutcomeFfi (
+    /**
+     * The newly linked device's agent id (hex).
+     */
+    var `agentIdHex`: kotlin.String, 
+    /**
+     * The account roster revision published for this enrollment (N+1).
+     */
+    var `recordRevision`: kotlin.ULong, 
+    /**
+     * True once the devices-group admission is live (M6.6); false while it is
+     * the M6.4 stub -- lets the shell show "linked, syncing" vs "linked".
+     */
+    var `devicesGroupAdmitted`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEnrollOutcomeFfi: FfiConverterRustBuffer<EnrollOutcomeFfi> {
+    override fun read(buf: ByteBuffer): EnrollOutcomeFfi {
+        return EnrollOutcomeFfi(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EnrollOutcomeFfi) = (
+            FfiConverterString.allocationSize(value.`agentIdHex`) +
+            FfiConverterULong.allocationSize(value.`recordRevision`) +
+            FfiConverterBoolean.allocationSize(value.`devicesGroupAdmitted`)
+    )
+
+    override fun write(value: EnrollOutcomeFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`agentIdHex`, buf)
+            FfiConverterULong.write(value.`recordRevision`, buf)
+            FfiConverterBoolean.write(value.`devicesGroupAdmitted`, buf)
+    }
+}
+
+
+
+/**
  * Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
  * errors for blockers -- those land in `pending`.
  */
@@ -3846,6 +4223,58 @@ public object FfiConverterTypeGroupSendReceiptFfi: FfiConverterRustBuffer<GroupS
     override fun write(value: GroupSendReceiptFfi, buf: ByteBuffer) {
             FfiConverterOptionalString.write(value.`messageId`, buf)
             FfiConverterBoolean.write(value.`delivered`, buf)
+    }
+}
+
+
+
+/**
+ * M6.4 confirm-screen preview the existing device shows after scanning a
+ * link QR: the new device's agent id, the code to compare against the new
+ * device's screen, and whether the offer already expired. Returned by
+ * [`ChatClient::preview_link_offer`].
+ */
+data class LinkOfferPreviewFfi (
+    /**
+     * The new device's agent id (hex).
+     */
+    var `agentIdHex`: kotlin.String, 
+    /**
+     * Human-comparable confirm code (`XXXX-XXXX-XXXX`) to compare against the
+     * new device's screen before confirming.
+     */
+    var `shortCode`: kotlin.String, 
+    /**
+     * True when the offer is past its expiry at the caller's clock.
+     */
+    var `expired`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLinkOfferPreviewFfi: FfiConverterRustBuffer<LinkOfferPreviewFfi> {
+    override fun read(buf: ByteBuffer): LinkOfferPreviewFfi {
+        return LinkOfferPreviewFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LinkOfferPreviewFfi) = (
+            FfiConverterString.allocationSize(value.`agentIdHex`) +
+            FfiConverterString.allocationSize(value.`shortCode`) +
+            FfiConverterBoolean.allocationSize(value.`expired`)
+    )
+
+    override fun write(value: LinkOfferPreviewFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`agentIdHex`, buf)
+            FfiConverterString.write(value.`shortCode`, buf)
+            FfiConverterBoolean.write(value.`expired`, buf)
     }
 }
 
@@ -4620,6 +5049,98 @@ public object FfiConverterTypeFetchitError : FfiConverterRustBuffer<FetchitExcep
     }
 
 }
+
+
+
+/**
+ * Outcome of a durable join, surfaced to Android
+ * ([`crate::ChatClient::join_group_durable`]). `Converged` carries the live
+ * group; `Pending` carries only the group id -- the join is a durable intent
+ * the resume pump completes when the owner is next reachable, so the shell
+ * draws "joining…" instead of a failure. Mirrors
+ * [`fetchit_chat::groups::JoinOutcome`].
+ */
+sealed class JoinOutcomeFfi {
+    
+    /**
+     * Fully joined and keyed -- usable immediately.
+     */
+    data class Converged(
+        /**
+         * The joined group.
+         */
+        val `group`: GroupFfi) : JoinOutcomeFfi() {
+        companion object
+    }
+    
+    /**
+     * Join accepted but not yet converged; the resume pump
+     * ([`crate::ChatClient::drive_pending_joins_once`]) finishes it with no
+     * user action and no re-spent invite. Draw "joining…".
+     */
+    data class Pending(
+        /**
+         * 64-hex group id being joined.
+         */
+        val `groupId`: kotlin.String) : JoinOutcomeFfi() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeJoinOutcomeFfi : FfiConverterRustBuffer<JoinOutcomeFfi>{
+    override fun read(buf: ByteBuffer): JoinOutcomeFfi {
+        return when(buf.getInt()) {
+            1 -> JoinOutcomeFfi.Converged(
+                FfiConverterTypeGroupFfi.read(buf),
+                )
+            2 -> JoinOutcomeFfi.Pending(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: JoinOutcomeFfi) = when(value) {
+        is JoinOutcomeFfi.Converged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeGroupFfi.allocationSize(value.`group`)
+            )
+        }
+        is JoinOutcomeFfi.Pending -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`groupId`)
+            )
+        }
+    }
+
+    override fun write(value: JoinOutcomeFfi, buf: ByteBuffer) {
+        when(value) {
+            is JoinOutcomeFfi.Converged -> {
+                buf.putInt(1)
+                FfiConverterTypeGroupFfi.write(value.`group`, buf)
+                Unit
+            }
+            is JoinOutcomeFfi.Pending -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`groupId`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
 
 
 
@@ -5475,6 +5996,36 @@ public object FfiConverterSequenceSequenceString: FfiConverterRustBuffer<List<Li
     )
     }
     
+
+        /**
+         * M6.4 existing-device side: complete a scanned link enrollment. Fetches +
+         * validates the offer at `uri`, mints the new device's account certificate
+         * under a single vault unlock (`passphrase`, or the OS keychain when `None`),
+         * republishes the account roster to `post_relay` at the next revision with the
+         * new device (its own advertised relays read from the URI), and returns the
+         * outcome. A free function, not a `ChatClient` method, because the account
+         * vault lives under `data_dir` -- no live connection is required. The
+         * devices-group admission is deferred to M6.6 (`devices_group_admitted` is
+         * currently always false).
+         *
+         * # Errors
+         * `ChatFfiError` on an expired / malformed offer, a wrong passphrase, no
+         * cached account record, or a relay rejection.
+         */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `enrollConfirmedDevice`(`dataDir`: kotlin.String, `passphrase`: kotlin.String?, `uri`: kotlin.String, `postRelay`: kotlin.String) : EnrollOutcomeFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_func_enroll_confirmed_device(FfiConverterString.lower(`dataDir`),FfiConverterOptionalString.lower(`passphrase`),FfiConverterString.lower(`uri`),FfiConverterString.lower(`postRelay`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeEnrollOutcomeFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
 
         /**
          * Read one named entry's decompressed bytes out of a ZIP archive.
