@@ -547,7 +547,7 @@ fn decrypt_and_verify_welcome(
     let Ok(ss) = kem_decapsulate(identity.kem_secret_key(), &envelope.kem_ciphertext) else {
         return Ok(Err(InboundDispatch::KemDecapFailed));
     };
-    let aead_key = derive_aead_key(&ss, KDF_INFO_WELCOME);
+    let aead_key = derive_aead_key(&ss[..], KDF_INFO_WELCOME);
     if envelope.nonce.len() != 12 {
         return Err(ChatError::Invalid("nonce length".into()));
     }
@@ -2118,7 +2118,7 @@ mod tests {
             .try_into()
             .unwrap();
         let (kem_ct, ss) = kem_encapsulate(recipient_kem_pub).unwrap();
-        let aead_key = derive_aead_key(&ss, KDF_INFO_WELCOME);
+        let aead_key = derive_aead_key(&ss[..], KDF_INFO_WELCOME);
         let nonce = random_nonce(&mut OsRng);
         let aad = message_aad(&group_id_bytes, envelope_epoch);
         let ciphertext = aead_seal(&aead_key, &nonce, &payload_bytes, &aad).unwrap();

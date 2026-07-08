@@ -110,7 +110,7 @@ pub async fn generate_rsa_2048() -> Result<RsaPrivateKeyMaterial, ChatError> {
 ///
 /// Returns a 32-byte AEAD key suitable for ChaCha20-Poly1305 seal/open.
 #[must_use]
-pub fn derive_fedi_vault_key(master_key: &MasterKey) -> [u8; AEAD_KEY_LEN] {
+pub fn derive_fedi_vault_key(master_key: &MasterKey) -> zeroize::Zeroizing<[u8; AEAD_KEY_LEN]> {
     derive_aead_key(master_key.as_bytes(), FEDI_VAULT_INFO)
 }
 
@@ -370,7 +370,7 @@ mod tests {
             0x27, 0x23, 0xe4, 0xe7, 0x25, 0x67, 0xe2, 0xc3, 0xbf, 0x7f, 0xdb, 0xe8, 0x9a, 0xca,
             0xf0, 0x9f, 0x5e, 0xd5,
         ];
-        assert_eq!(derived, expected);
+        assert_eq!(*derived, expected);
     }
 
     #[test]

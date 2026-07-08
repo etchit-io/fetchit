@@ -75,7 +75,7 @@ pub async fn build_welcome_outbox<S: fetchit_relay_client::Signer + ?Sized>(
             return Err(ChatError::Invalid("device kem key length".into()));
         }
         let (kem_ct, ss) = kem_encapsulate(&kem_pub)?;
-        let aead_key = derive_aead_key(&ss, KDF_INFO_WELCOME);
+        let aead_key = derive_aead_key(&ss[..], KDF_INFO_WELCOME);
         let nonce = random_nonce(&mut OsRng);
         let aad = message_aad(&group_id_bytes, conv.current_epoch);
         let ciphertext = aead_seal(&aead_key, &nonce, &payload_bytes, &aad)?;

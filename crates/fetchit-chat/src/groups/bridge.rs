@@ -375,7 +375,7 @@ pub fn seal_bridge_wrapper(
     }
     let plaintext = wrapper.to_postcard()?;
     let (kem_ciphertext, ss) = kem_encapsulate(recipient_kem_pub)?;
-    let aead_key = derive_aead_key(&ss, KDF_INFO_BRIDGE);
+    let aead_key = derive_aead_key(&ss[..], KDF_INFO_BRIDGE);
     let nonce = random_nonce(&mut OsRng);
     let aad = bridge_aad();
     let ciphertext = aead_seal(&aead_key, &nonce, &plaintext, &aad)?;
@@ -413,7 +413,7 @@ pub fn unseal_bridge_wrapper(
     }
     let ss = kem_decapsulate(our_kem_sec, kem_ciphertext)
         .map_err(|e| ChatError::Invalid(format!("bridge kem decap: {e}")))?;
-    let aead_key = derive_aead_key(&ss, KDF_INFO_BRIDGE);
+    let aead_key = derive_aead_key(&ss[..], KDF_INFO_BRIDGE);
     let mut nonce_arr = [0u8; AEAD_NONCE_LEN];
     nonce_arr.copy_from_slice(nonce);
     let aad = bridge_aad();
