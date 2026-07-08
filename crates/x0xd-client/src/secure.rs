@@ -162,6 +162,23 @@ struct GroupPolicyMeta {
     confidentiality: Confidentiality,
 }
 
+/// Response of `GET /groups/<id>/secure/self`: read-only self keyed-status +
+/// epoch. `keyed` is true only when this daemon holds the group's live crypto
+/// state, not merely a roster listing. Fields default conservatively so a
+/// partial response never reads as a false `keyed=true`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroupSelfStatus {
+    /// True when this daemon holds the group's live crypto state (keyed).
+    #[serde(default)]
+    pub keyed: bool,
+    /// True when this agent is an active member in the group roster.
+    #[serde(default)]
+    pub in_roster: bool,
+    /// The group's current secret epoch.
+    #[serde(default)]
+    pub epoch: u64,
+}
+
 /// Endpoint wrapper around the x0xd `/groups` + `/secure/*` surface.
 /// Owns its own HTTP client + bearer auth — same pattern as
 /// [`crate::X0xdSigner`]. Construct via [`SecureGroupsEndpoint::new`].
@@ -616,6 +633,39 @@ impl SecureGroupsEndpoint {
             .ok_or_else(|| X0xdError::Rejected("group meta response missing policy".into()))
     }
 
+    /// Read-only self keyed-status + epoch via `GET /groups/<id>/secure/self`.
+    /// Reports whether THIS daemon holds the group's live crypto state
+    /// (`keyed`), whether it is in the roster (`in_roster`), and the current
+    /// `epoch` -- a pure read that burns no MLS generation. The durable-join
+    /// resume probe uses it to tell a converged member (`keyed`) from a
+    /// roster-listed-but-keyless one, without decrypting a stored frame or
+    /// replaying a join event.
+    ///
+    /// # Errors
+    /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (path-traversal
+    /// guard). [`X0xdError`] on transport failure or a non-2xx status --
+    /// including `404` from a daemon that predates this endpoint, which the
+    /// caller treats as "unknown" and falls back from.
+    pub async fn group_self_status(&self, group_id: &str) -> Result<GroupSelfStatus, X0xdError> {
+        let group_id = validate_group_id_hex(group_id)?;
+        let path = format!("groups/{group_id}/secure/self");
+        let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
+        let raw = self
+            .http
+            .get(url)
+            .bearer_auth(&self.api_token)
+            .send()
+            .await?;
+        if !raw.status().is_success() {
+            let status = raw.status();
+            let body = raw.text().await.unwrap_or_default();
+            return Err(X0xdError::Rejected(format!(
+                "x0xd GET /groups/{group_id}/secure/self returned {status}: {body}"
+            )));
+        }
+        Ok(raw.json().await?)
+    }
+
     /// Apply a signed `NamedGroupMetadataEvent` to local MLS state via
     /// x0xd `POST /groups/<id>/apply-metadata-event`, with NO gossip
     /// publish. Engine A's cross-NAT group-join re-injects the joiner's
@@ -760,6 +810,43 @@ mod tests {
             .await
             .unwrap();
         assert!(applied);
+    }
+
+    #[tokio::test]
+    async fn group_self_status_parses_keyed_in_roster_epoch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{TEST_GROUP_HEX}/secure/self")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyed": true,
+                "in_roster": true,
+                "epoch": 5,
+            })))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let st = endpoint.group_self_status(TEST_GROUP_HEX).await.unwrap();
+        assert!(st.keyed);
+        assert!(st.in_roster);
+        assert_eq!(st.epoch, 5);
+    }
+
+    #[tokio::test]
+    async fn group_self_status_404_is_error_so_the_probe_falls_back() {
+        // A daemon that predates the endpoint 404s. The durable-join probe
+        // treats an Err as "unknown" and falls back to its roster-only read,
+        // so a 404 MUST surface as Err -- never a defaulted keyed=false
+        // success a caller could mistake for a real "not keyed" answer.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{TEST_GROUP_HEX}/secure/self")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        assert!(endpoint.group_self_status(TEST_GROUP_HEX).await.is_err());
     }
 
     #[tokio::test]
