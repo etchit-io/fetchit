@@ -10,6 +10,7 @@ use rand::RngCore;
 use saorsa_pqc::api::sig::MlDsaVariant;
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSignature};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use crate::error::ChatError;
 
@@ -90,13 +91,15 @@ pub fn lan_binding_bytes(
 // ── KEM ────────────────────────────────────────────────────────────────
 
 /// Encapsulate a fresh symmetric secret against `recipient_kem_pub`.
-/// Returns the KEM ciphertext (1088 B) and the 32-byte shared secret.
+/// Returns the KEM ciphertext (1088 B) and the 32-byte shared secret,
+/// the latter `Zeroizing` so our extracted copy is wiped on drop (the
+/// saorsa secret type zeroizes itself, but `to_bytes` escapes a copy).
 ///
 /// # Errors
 /// Returns `ChatError::Invalid` for malformed inputs.
 pub fn kem_encapsulate(
     recipient_kem_pub: &[u8],
-) -> Result<(Vec<u8>, [u8; KEM_SHARED_SECRET_LEN]), ChatError> {
+) -> Result<(Vec<u8>, Zeroizing<[u8; KEM_SHARED_SECRET_LEN]>), ChatError> {
     use saorsa_pqc::api::kem::{MlKem, MlKemPublicKey, MlKemVariant};
     if recipient_kem_pub.len() != KEM_PUBLIC_KEY_LEN {
         return Err(ChatError::Invalid(format!(
@@ -111,18 +114,19 @@ pub fn kem_encapsulate(
         .encapsulate(&pk)
         .map_err(|e| ChatError::Invalid(format!("kem encap: {e}")))?;
     let ct_bytes = ct.to_bytes();
-    let ss_arr = ss.to_bytes();
+    let ss_arr = Zeroizing::new(ss.to_bytes());
     Ok((ct_bytes, ss_arr))
 }
 
-/// Decapsulate a KEM ciphertext with our secret key.
+/// Decapsulate a KEM ciphertext with our secret key. Returns the
+/// 32-byte shared secret `Zeroizing` (wiped on drop).
 ///
 /// # Errors
 /// Returns `ChatError::Invalid` if either input is malformed or decap fails.
 pub fn kem_decapsulate(
     our_kem_sec: &[u8],
     kem_ciphertext: &[u8],
-) -> Result<[u8; KEM_SHARED_SECRET_LEN], ChatError> {
+) -> Result<Zeroizing<[u8; KEM_SHARED_SECRET_LEN]>, ChatError> {
     use saorsa_pqc::api::kem::{MlKem, MlKemCiphertext, MlKemSecretKey, MlKemVariant};
     if our_kem_sec.len() != KEM_SECRET_KEY_LEN {
         return Err(ChatError::Invalid("kem secret key wrong length".into()));
@@ -138,34 +142,37 @@ pub fn kem_decapsulate(
     let ss = kem
         .decapsulate(&sk, &ct)
         .map_err(|e| ChatError::Invalid(format!("kem decap: {e}")))?;
-    Ok(ss.to_bytes())
+    Ok(Zeroizing::new(ss.to_bytes()))
 }
 
-/// Generate a fresh ML-KEM-768 keypair. Returns `(public_key_bytes, secret_key_bytes)`.
+/// Generate a fresh ML-KEM-768 keypair. Returns `(public_key_bytes,
+/// secret_key_bytes)`; the secret key is `Zeroizing` so the extracted
+/// copy is wiped on drop.
 ///
 /// # Errors
 /// Returns `ChatError::Invalid` if the underlying primitive fails.
-pub fn kem_keygen() -> Result<(Vec<u8>, Vec<u8>), ChatError> {
+pub fn kem_keygen() -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), ChatError> {
     use saorsa_pqc::api::kem::{MlKem, MlKemVariant};
     let kem = MlKem::new(MlKemVariant::MlKem768);
     let (pk, sk) = kem
         .generate_keypair()
         .map_err(|e| ChatError::Invalid(format!("kem keygen: {e}")))?;
-    Ok((pk.to_bytes(), sk.to_bytes()))
+    Ok((pk.to_bytes(), Zeroizing::new(sk.to_bytes())))
 }
 
 // ── HKDF ───────────────────────────────────────────────────────────────
 
 /// Derive a 32-byte symmetric key from a KEM shared secret using
-/// HKDF-SHA-256 with the supplied info string.
+/// HKDF-SHA-256 with the supplied info string. The key is `Zeroizing`
+/// so it is wiped from memory on drop.
 #[must_use]
 #[allow(clippy::expect_used)]
-pub fn derive_aead_key(shared_secret: &[u8], info: &[u8]) -> [u8; AEAD_KEY_LEN] {
+pub fn derive_aead_key(shared_secret: &[u8], info: &[u8]) -> Zeroizing<[u8; AEAD_KEY_LEN]> {
     let hk = Hkdf::<Sha256>::new(None, shared_secret);
     let mut out = [0u8; AEAD_KEY_LEN];
     hk.expand(info, &mut out)
         .expect("HKDF expand cannot fail for 32-byte output");
-    out
+    Zeroizing::new(out)
 }
 
 // ── AEAD ───────────────────────────────────────────────────────────────
@@ -293,6 +300,21 @@ pub fn ml_dsa_verify(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    // Zeroize-on-drop contract (#91 Z1/Z2/Z3): these bindings assert
+    // BY TYPE that the secret-bearing returns are Zeroizing wrappers, so
+    // a signature regression that drops the wrapper fails to compile.
+    #[test]
+    fn secret_returns_are_zeroizing_wrapped() {
+        let (pk, sk): (Vec<u8>, zeroize::Zeroizing<Vec<u8>>) = kem_keygen().unwrap();
+        let (ct, ss): (Vec<u8>, zeroize::Zeroizing<[u8; KEM_SHARED_SECRET_LEN]>) =
+            kem_encapsulate(&pk).unwrap();
+        let ss2: zeroize::Zeroizing<[u8; KEM_SHARED_SECRET_LEN]> =
+            kem_decapsulate(&sk, &ct).unwrap();
+        assert_eq!(*ss, *ss2, "encap/decap shared secret must round-trip");
+        let key: zeroize::Zeroizing<[u8; AEAD_KEY_LEN]> = derive_aead_key(&ss[..], b"info");
+        assert_eq!(key.len(), AEAD_KEY_LEN);
+    }
 
     #[test]
     fn kem_round_trip() {
