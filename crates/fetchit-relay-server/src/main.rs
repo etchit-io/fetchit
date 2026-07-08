@@ -1,8 +1,9 @@
 //! Binary entrypoint — bootstrap config, init tracing, run the server.
 
 use anyhow::Result;
+use fetchit_relay_server::group_log::GroupLogStore;
 use fetchit_relay_server::transit::TransitStore;
-use fetchit_relay_server::{Server, ServerConfig, SqliteTransitStore};
+use fetchit_relay_server::{Server, ServerConfig, SqliteGroupLog, SqliteTransitStore};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -36,9 +37,29 @@ async fn main() -> Result<()> {
         }
         None => None,
     };
+    // The group log shares the one durable database file with the
+    // transit store (separate tables, WAL mode).
+    let group_log_store: Option<Arc<dyn GroupLogStore + Send + Sync>> =
+        match &config.transit_db_path {
+            Some(path) => {
+                let store = SqliteGroupLog::open(
+                    path,
+                    config.group_log_window,
+                    config.group_log_per_group_cap,
+                    config.group_log_total_bytes_cap,
+                )?;
+                tracing::info!(path = %path.display(), "group-log: durable sqlite store");
+                Some(Arc::new(store))
+            }
+            None => None,
+        };
     let server = Server::new(config);
     let server = match transit_store {
         Some(store) => server.with_transit_store(store),
+        None => server,
+    };
+    let server = match group_log_store {
+        Some(store) => server.with_group_log_store(store),
         None => server,
     };
     // M4 Stage 7: opt-in fediverse-inbox role. A no-op (route absent)

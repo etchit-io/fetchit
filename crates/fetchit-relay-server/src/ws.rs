@@ -8,8 +8,9 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use fetchit_relay_proto::{
-    from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Moved, Ping,
-    Pong, Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, TransitAck, WatchPresence,
+    from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, GroupId, Hello,
+    LogAppend, LogFetch, LogRecordWire, LogRecords, Moved, Ping, Pong, Ready, SendFrame,
+    ServerFrame, Throttle, ThrottleReason, TransitAck, WatchPresence,
 };
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::Deserialize;
@@ -29,6 +30,10 @@ const WS_OUTBOUND_CAPACITY: usize = 512;
 /// nothing at all) must not be able to pin a connection handler open
 /// indefinitely.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum records per `LogRecords` reply frame. Keeps any single
+/// frame bounded while a long backlog streams as multiple chunks.
+const LOG_RECORDS_CHUNK: usize = 64;
 
 /// Query string optionally carrying the bearer token for the WS upgrade.
 /// Legacy transport: newer clients send the token in the `Authorization:
@@ -279,6 +284,14 @@ fn handle_client_frame(
 ) -> bool {
     match frame {
         ClientFrame::Hello(_) | ClientFrame::Subscribe(_) => true,
+        ClientFrame::LogAppend(append) => {
+            handle_log_append(state, auth, caps, self_tx, append);
+            true
+        }
+        ClientFrame::LogFetch(fetch) => {
+            handle_log_fetch(state, auth, self_tx, &fetch);
+            true
+        }
         ClientFrame::Ping(Ping { nonce }) => {
             self_tx.try_send(ServerFrame::Pong(Pong { nonce })).is_ok()
         }
@@ -406,6 +419,117 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Deposit one record onto the group log. Deposits ride the same
+/// per-envelope size cap and per-sender rate limiter as `Send`
+/// deposits. Fire-and-forget: success sends no reply; a cap rejection
+/// answers `Throttle` so the depositor can back off and retry.
+fn handle_log_append(
+    state: &Arc<ServerState>,
+    auth: &AuthTokenState,
+    caps: &EffectiveCapabilities,
+    self_tx: &mpsc::Sender<ServerFrame>,
+    append: LogAppend,
+) {
+    let LogAppend {
+        group_id,
+        kind,
+        recipient,
+        payload,
+    } = append;
+    if payload.len() > caps.max_envelope_bytes as usize {
+        state.metrics.throttle_envelope_too_large();
+        let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+            retry_after_ms: 0,
+            reason: ThrottleReason::EnvelopeTooLarge,
+        }));
+        return;
+    }
+    if !state
+        .ratelimit
+        .allow(&auth.agent_id, caps.max_envelopes_per_min)
+    {
+        state.metrics.throttle_per_sender();
+        let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+            retry_after_ms: 1_000,
+            reason: ThrottleReason::PerSenderRate,
+        }));
+        return;
+    }
+    if state
+        .group_log
+        .append(group_id, kind, recipient, payload, now_ms())
+        .is_err()
+    {
+        state.metrics.throttle_per_recipient();
+        let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+            retry_after_ms: 5_000,
+            reason: ThrottleReason::PerRecipientCapacity,
+        }));
+    }
+}
+
+/// Serve a `LogFetch`. Possession of the group id is the fetch
+/// capability for Commit records — the relay is blind and runs no
+/// membership check. `JoinResult` records are additionally gated to
+/// the authenticated agent they are addressed to, so one joiner can
+/// never read another's staged result.
+fn handle_log_fetch(
+    state: &Arc<ServerState>,
+    auth: &AuthTokenState,
+    self_tx: &mpsc::Sender<ServerFrame>,
+    fetch: &LogFetch,
+) {
+    let records: Vec<LogRecordWire> = state
+        .group_log
+        .fetch_since(&fetch.group_id, fetch.since_seq)
+        .into_iter()
+        .filter(|r| r.recipient.is_none() || r.recipient == Some(auth.agent_id))
+        .map(|r| LogRecordWire {
+            seq: r.seq,
+            kind: r.kind,
+            recipient: r.recipient,
+            payload: r.payload,
+            inserted_at_ms: r.inserted_at_ms,
+        })
+        .collect();
+    send_log_records(self_tx, fetch.group_id, records);
+}
+
+/// Answer a `LogFetch`: push `records` onto the outbound channel as
+/// `LogRecords` frames of at most [`LOG_RECORDS_CHUNK`] records, the
+/// final frame carrying `done = true`. An empty result still sends one
+/// `done` frame so the client observes completion. If the channel
+/// fills mid-reply the remainder is dropped — the log is
+/// non-destructive, so the client simply refetches with a higher
+/// `since_seq`.
+fn send_log_records(
+    tx: &mpsc::Sender<ServerFrame>,
+    group_id: GroupId,
+    records: Vec<LogRecordWire>,
+) {
+    let mut remaining = records;
+    loop {
+        let tail = if remaining.len() > LOG_RECORDS_CHUNK {
+            remaining.split_off(LOG_RECORDS_CHUNK)
+        } else {
+            Vec::new()
+        };
+        let done = tail.is_empty();
+        if tx
+            .try_send(ServerFrame::LogRecords(LogRecords {
+                group_id,
+                records: remaining,
+                done,
+            }))
+            .is_err()
+            || done
+        {
+            return;
+        }
+        remaining = tail;
+    }
+}
+
 /// Outcome of replaying stored transit entries onto a fresh
 /// per-connection outbound channel.
 struct ReplayOutcome {
@@ -450,8 +574,8 @@ mod tests {
     //! regression here would re-introduce ghosted sessions that linger until
     //! the client-side keepalive eventually triggers a reconnect.
     use super::{
-        await_hello_inner, bearer_from_headers, replay_transit, LoopExit, HELLO_TIMEOUT,
-        WS_OUTBOUND_CAPACITY,
+        await_hello_inner, bearer_from_headers, replay_transit, send_log_records, LoopExit,
+        HELLO_TIMEOUT, LOG_RECORDS_CHUNK, WS_OUTBOUND_CAPACITY,
     };
     use crate::transit::StoredEntry;
     use axum::extract::ws::Message;
@@ -576,6 +700,80 @@ mod tests {
         drop(rx);
         let outcome = replay_transit(stored_with_tags(&[7, 8, 9]), &tx, 0);
         assert_eq!(outcome.delivered, 0);
+    }
+
+    fn wire_records(n: usize) -> Vec<fetchit_relay_proto::LogRecordWire> {
+        (1..=n)
+            .map(|i| fetchit_relay_proto::LogRecordWire {
+                seq: i as u64,
+                kind: fetchit_relay_proto::LogRecordKind::Commit,
+                recipient: None,
+                payload: vec![0xcd; 4],
+                inserted_at_ms: 1,
+            })
+            .collect()
+    }
+
+    fn recv_log_records(
+        rx: &mut mpsc::Receiver<ServerFrame>,
+    ) -> Option<fetchit_relay_proto::LogRecords> {
+        match rx.try_recv() {
+            Ok(ServerFrame::LogRecords(lr)) => Some(lr),
+            Ok(other) => panic!("expected LogRecords, got {other:?}"),
+            Err(_) => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_log_records_chunks_and_marks_final_frame_done() {
+        let group = fetchit_relay_proto::GroupId::from_bytes([7u8; 32]);
+        let (tx, mut rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+        send_log_records(&tx, group, wire_records(LOG_RECORDS_CHUNK * 2 + 10));
+
+        let first = recv_log_records(&mut rx).expect("first chunk");
+        assert_eq!(first.records.len(), LOG_RECORDS_CHUNK);
+        assert!(!first.done);
+        assert_eq!(first.records[0].seq, 1);
+        let second = recv_log_records(&mut rx).expect("second chunk");
+        assert_eq!(second.records.len(), LOG_RECORDS_CHUNK);
+        assert!(!second.done);
+        let last = recv_log_records(&mut rx).expect("final chunk");
+        assert_eq!(last.records.len(), 10);
+        assert!(last.done, "final chunk carries done=true");
+        assert_eq!(
+            last.records.last().unwrap().seq,
+            (LOG_RECORDS_CHUNK * 2 + 10) as u64,
+            "seqs stream in order across chunks"
+        );
+        assert!(recv_log_records(&mut rx).is_none(), "no extra frames");
+    }
+
+    #[tokio::test]
+    async fn send_log_records_empty_result_sends_single_done_frame() {
+        let group = fetchit_relay_proto::GroupId::from_bytes([8u8; 32]);
+        let (tx, mut rx) = mpsc::channel::<ServerFrame>(8);
+        send_log_records(&tx, group, Vec::new());
+        let only = recv_log_records(&mut rx).expect("completion frame");
+        assert!(only.records.is_empty());
+        assert!(only.done);
+        assert!(recv_log_records(&mut rx).is_none());
+    }
+
+    #[tokio::test]
+    async fn send_log_records_stops_when_channel_fills() {
+        // Channel holds exactly one frame: the first chunk lands, the
+        // rest is dropped. The log is non-destructive, so the client
+        // refetches with a higher since_seq.
+        let group = fetchit_relay_proto::GroupId::from_bytes([9u8; 32]);
+        let (tx, mut rx) = mpsc::channel::<ServerFrame>(1);
+        send_log_records(&tx, group, wire_records(LOG_RECORDS_CHUNK * 3));
+        let first = recv_log_records(&mut rx).expect("first chunk landed");
+        assert_eq!(first.records.len(), LOG_RECORDS_CHUNK);
+        assert!(!first.done);
+        assert!(
+            recv_log_records(&mut rx).is_none(),
+            "reply stops at the full channel"
+        );
     }
 
     /// Same `tokio::select!` shape as `run_io_loop`, kept generic so we can

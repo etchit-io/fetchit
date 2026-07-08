@@ -4,7 +4,11 @@
 //! Undelivered envelopes are held in a [`transit::TransitStore`]: the
 //! in-RAM [`transit::TransitBuffer`] or the durable, blind,
 //! `SQLite`-backed [`transit_sqlite::SqliteTransitStore`] (ciphertext
-//! only, bounded retention, delete-on-ack).
+//! only, bounded retention, delete-on-ack). Per-group log records
+//! (commits, addressed join results) are held serve-to-many in a
+//! [`group_log::GroupLogStore`]: the in-RAM [`group_log::RamGroupLog`]
+//! or the durable [`group_log_sqlite::SqliteGroupLog`] sharing the
+//! transit store's database file.
 
 #![forbid(unsafe_code)]
 
@@ -14,6 +18,8 @@ pub mod capability;
 pub mod config;
 pub mod error;
 pub mod forwarding;
+pub mod group_log;
+pub mod group_log_sqlite;
 #[cfg(feature = "fediverse-inbox")]
 pub mod inbox;
 pub mod metrics;
@@ -33,6 +39,8 @@ pub mod ws;
 
 pub use config::ServerConfig;
 pub use error::ServerError;
+pub use group_log::RamGroupLog;
+pub use group_log_sqlite::SqliteGroupLog;
 pub use metrics::Metrics;
 pub use server::Server;
 pub use session::SessionRegistry;

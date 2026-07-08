@@ -1030,9 +1030,13 @@ fn spawn_reader(
                             // peer from a hung process.
                             tracing::debug!("relay keepalive pong");
                         }
-                        ServerFrame::Throttle(Throttle { .. }) | ServerFrame::Ready(_) => {
+                        ServerFrame::Throttle(Throttle { .. })
+                        | ServerFrame::Ready(_)
+                        | ServerFrame::LogRecords(_) => {
                             // Throttle observable via metrics in a future pass.
-                            // Stray Ready outside the handshake is a no-op.
+                            // A stray Ready outside the handshake, and a
+                            // LogRecords answering a LogFetch this supervisor
+                            // connection never issues, are both no-ops.
                         }
                         ServerFrame::Moved(Moved { dedupe_key }) => {
                             // The recipient migrated away from this relay;
