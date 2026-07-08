@@ -506,10 +506,7 @@ fn spawn_inbound_pump(
 /// ride the `Dm` shape — none has a dedicated [`OutboundKind`], and the
 /// dispatcher re-reads `transit.kind` to route the bridge event and the
 /// public post to their own handlers before any DM logic runs.
-fn map_inbound_delivery(
-    env: TransitEnvelope,
-    ack: Option<DeliveryAck>,
-) -> Option<InboundEnvelope> {
+fn map_inbound_delivery(env: TransitEnvelope, ack: Option<DeliveryAck>) -> Option<InboundEnvelope> {
     let kind = match env.kind {
         // Dm, the M2.5 bridge metadata event, a bridged fediverse
         // PublicPost, and an M6.7 PairRecordPush all ride the Dm shape;
@@ -870,7 +867,8 @@ mod tests {
             1_700_000_000_000,
         )
         .unwrap();
-        let mapped = map_inbound_delivery(env, None).expect("PublicPost must be forwarded, not dropped");
+        let mapped =
+            map_inbound_delivery(env, None).expect("PublicPost must be forwarded, not dropped");
         assert!(
             matches!(mapped.kind, OutboundKind::Dm),
             "PublicPost rides the Dm shape; the dispatcher re-discriminates on transit.kind",

@@ -1543,6 +1543,7 @@ impl Client {
         }))
     }
 
+    #[allow(clippy::too_many_lines)] // one arm per envelope kind; splitting would scatter the ack decision table
     async fn default_dispatch_one(&self, mut env: InboundEnvelope) {
         // Ack-after-persist: `ack` confirms the transport's stored copy
         // ONLY at terminal outcomes (vault-persisted, provable
@@ -1662,22 +1663,20 @@ impl Client {
                 }
                 return;
             }
-            match self
+            // Persisted and Replay are both terminal (history extended +
+            // vault flushed, or provably already held). Errors include
+            // the x0xd decrypt failures of a stale/keyless epoch — the
+            // exact frames that must redeliver after re-key / epoch
+            // catch-up — so they hold the token.
+            if self
                 .messages()
                 .receive_private_group_envelope(&transit, &group_id_hex)
                 .await
+                .is_ok()
             {
-                // Persisted and Replay are both terminal: history
-                // extended + vault flushed, or provably already held.
-                Ok(_) => {
-                    if let Some(a) = &ack {
-                        a.confirm();
-                    }
+                if let Some(a) = &ack {
+                    a.confirm();
                 }
-                // Errors here include the x0xd decrypt failures of a
-                // stale/keyless epoch — the exact frames that must
-                // redeliver after re-key / epoch catch-up. Hold.
-                Err(_) => {}
             }
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
         {
@@ -1686,7 +1685,11 @@ impl Client {
             // gives Android the same Delivered path desktop gets).
             let outbox = self.chat.as_ref().map(|c| &c.outbox);
             let outbox_tx = self.chat.as_ref().map(|c| &c.outbox_tx);
-            match crate::conversation::dispatch_inbound_with_outbox(
+            // Variant-aware: StaleEpoch / KemDecapFailed / missing-card
+            // drops are Ok-shaped but NOT terminal — the classifier
+            // holds exactly those for redelivery. Err (vault/registry
+            // I/O) is transient and also holds.
+            if let Ok(dispatch) = crate::conversation::dispatch_inbound_with_outbox(
                 transit,
                 identity.as_ref(),
                 registry.as_ref(),
@@ -1695,18 +1698,11 @@ impl Client {
             )
             .await
             {
-                // Variant-aware: StaleEpoch / KemDecapFailed / missing-
-                // card drops are Ok-shaped but NOT terminal — the
-                // classifier holds exactly those for redelivery.
-                Ok(dispatch) => {
-                    if crate::conversation::confirms_delivery(&dispatch) {
-                        if let Some(a) = &ack {
-                            a.confirm();
-                        }
+                if crate::conversation::confirms_delivery(&dispatch) {
+                    if let Some(a) = &ack {
+                        a.confirm();
                     }
                 }
-                // Transient (vault/registry I/O): hold.
-                Err(_) => {}
             }
         }
     }

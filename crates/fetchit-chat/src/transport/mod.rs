@@ -145,8 +145,11 @@ pub fn group_resend_envelope(
 /// Clones share the same one-shot: the first `confirm` wins, later calls
 /// are no-ops.
 pub struct DeliveryAck {
-    inner: std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    inner: std::sync::Arc<std::sync::Mutex<Option<ReclaimFn>>>,
 }
+
+/// Boxed transport-side reclaim action held by a [`DeliveryAck`].
+type ReclaimFn = Box<dyn FnOnce() + Send>;
 
 impl DeliveryAck {
     /// Wrap the transport-side reclaim action (e.g. sending a
@@ -181,12 +184,10 @@ impl Clone for DeliveryAck {
 
 impl std::fmt::Debug for DeliveryAck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let armed = self
-            .inner
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or_default();
-        f.debug_struct("DeliveryAck").field("armed", &armed).finish()
+        let armed = self.inner.lock().is_ok_and(|g| g.is_some());
+        f.debug_struct("DeliveryAck")
+            .field("armed", &armed)
+            .finish()
     }
 }
 

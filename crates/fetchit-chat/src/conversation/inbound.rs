@@ -143,9 +143,7 @@ pub fn confirms_delivery(dispatch: &InboundDispatch) -> bool {
         | InboundDispatch::AeadOpenFailed { .. }
         | InboundDispatch::ReplayDetected { .. } => true,
         InboundDispatch::StaleEpoch { .. } | InboundDispatch::KemDecapFailed => false,
-        InboundDispatch::Dropped { kind, .. } => {
-            !matches!(kind.as_str(), "no-card" | "no-pubkey")
-        }
+        InboundDispatch::Dropped { kind, .. } => !matches!(kind.as_str(), "no-card" | "no-pubkey"),
     }
 }
 
@@ -761,10 +759,19 @@ mod tests {
         use super::confirms_delivery as c;
         use super::InboundDispatch as D;
         // Retriable: a later redelivery can genuinely improve these.
-        assert!(!c(&D::StaleEpoch { group_id_hex: "g".into(), epoch: 2 }));
+        assert!(!c(&D::StaleEpoch {
+            group_id_hex: "g".into(),
+            epoch: 2
+        }));
         assert!(!c(&D::KemDecapFailed));
-        assert!(!c(&D::Dropped { kind: "no-card".into(), sender: "s".into() }));
-        assert!(!c(&D::Dropped { kind: "no-pubkey".into(), sender: "s".into() }));
+        assert!(!c(&D::Dropped {
+            kind: "no-card".into(),
+            sender: "s".into()
+        }));
+        assert!(!c(&D::Dropped {
+            kind: "no-pubkey".into(),
+            sender: "s".into()
+        }));
         // Terminal: persisted, duplicate, or deterministic verdicts on
         // immutable bytes.
         assert!(c(&D::WelcomeIgnored));
@@ -772,8 +779,14 @@ mod tests {
             group_id_hex: "g".into(),
             sender_agent_id_hex: "s".into(),
         }));
-        assert!(c(&D::AeadOpenFailed { group_id_hex: "g".into(), epoch: 2 }));
-        assert!(c(&D::Dropped { kind: "bad-signature".into(), sender: "s".into() }));
+        assert!(c(&D::AeadOpenFailed {
+            group_id_hex: "g".into(),
+            epoch: 2
+        }));
+        assert!(c(&D::Dropped {
+            kind: "bad-signature".into(),
+            sender: "s".into()
+        }));
         assert!(c(&D::Dropped {
             kind: "rekey-from-non-member".into(),
             sender: "s".into(),
