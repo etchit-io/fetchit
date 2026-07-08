@@ -2569,6 +2569,24 @@ impl Client {
             &owner_hex,
         )
         .await?;
+        // Resolve the owner's rendezvous relay hints now (same resolution the
+        // first bridge uses), with a primary-relay fallback, and cache the
+        // relay URLs on the record. A resume re-bridge then routes to the owner
+        // even when they are not on our primary relay -- never a `None` hint
+        // (PR #7 B1). Empty only if neither a card nor a primary relay exists.
+        let owner_relay_hints =
+            crate::messages::StoredContactCard::resolve_recipient_hints(&chat.layout, &owner_hex)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    primary_snapshot
+                        .as_deref()
+                        .map(|url| crate::card::RendezvousHintsV1 {
+                            relays: vec![url.to_owned()],
+                        })
+                })
+                .map(|h| h.relays)
+                .unwrap_or_default();
         Ok(crate::groups::pending_join::PendingJoin::new(
             gid_hex.to_owned(),
             b64.encode(&captured.payload),
@@ -2576,6 +2594,7 @@ impl Client {
             invite_hash.to_owned(),
             owner_hex,
             b64.encode(&owner_kem),
+            owner_relay_hints,
             b64.encode(chat.identity.kem_public_key()),
             crate::groups::pending_join_driver::now_ms(),
         ))
@@ -2608,6 +2627,18 @@ impl Client {
             payload,
         };
         let local_agent_id = chat.signer.agent_id();
+        // Reconstruct the owner's cached rendezvous hints so the re-bridge
+        // routes to the owner even when they are off our primary relay (PR #7
+        // B1) -- never a `None` hint, unless the record predates the field and
+        // no primary is set, in which case the router's primary-relay fallback
+        // still applies.
+        let hints = if record.owner_relay_hints.is_empty() {
+            None
+        } else {
+            Some(crate::card::RendezvousHintsV1 {
+                relays: record.owner_relay_hints.clone(),
+            })
+        };
         crate::groups::join_bridge::emit_self_join_bridge(
             &captured,
             &record.owner_agent_id,
@@ -2617,7 +2648,7 @@ impl Client {
             &chat.local_machine_id,
             chat.signer.as_ref(),
             &self.router,
-            None,
+            hints.as_ref(),
         )
         .await
     }
@@ -2671,6 +2702,11 @@ impl Client {
         // and persisted so a resume never re-`join_post`s (G1).
         let (group, captured) = self.groups().join_post(invite, display_name).await?;
         let gid_hex = group.group_id.as_str().to_owned();
+        // A durable record lands on disk only when the daemon returned the
+        // inline captured event (persisted below). This governs the
+        // transient-error arm: a `Pending` with no record has nothing to
+        // resume, so it must propagate instead (PR #7 B2).
+        let persisted = captured.is_some();
 
         // Persist the intent BEFORE the wait so a timeout leaves a durable
         // record the driver completes. Needs the inline captured event; an
@@ -2716,10 +2752,20 @@ impl Client {
                 Ok(groups::JoinOutcome::Pending { group_id: gid_hex })
             }
             Err(e) => {
-                // Terminal (malformed/already-consumed invite) — retire the
-                // intent so the driver won't retry a doomed join.
-                let _ = store.remove(&gid_hex);
-                Err(e)
+                // Post-`join_post`: the single-use invite is already spent, so
+                // a bridge/wait failure here is transient (owner offline, relay
+                // blip) -- a malformed or already-consumed invite fails at
+                // `join_post` above, never here. Keep the durable record and
+                // report Pending so the driver completes it; removing it would
+                // strand a spent invite (PR #7 B2). Only when NO record was
+                // persisted (an unpatched daemon returned no inline event) is
+                // there nothing to resume, so propagate the error instead.
+                if persisted {
+                    Ok(groups::JoinOutcome::Pending { group_id: gid_hex })
+                } else {
+                    let _ = store.remove(&gid_hex);
+                    Err(e)
+                }
             }
         }
     }
@@ -2746,13 +2792,25 @@ impl Client {
         // Production probe: read the roster over the client's `Groups` view.
         // `Absent` (owner has not applied our join) => re-bridge the saved
         // event; anything in the roster => `ListedButUnkeyed` => re-request the
-        // Welcome. It never returns `ActiveKeyed`: fetchit has no read-only
-        // keyed check yet (the deferred x0xd `keyed_epoch` ask), so convergence
-        // is signalled authoritatively at the inbound apply site
+        // Welcome. It deliberately never returns `ActiveKeyed`, and here is why
+        // Bob's decrypt / `apply_join_result`-409 keyed-probe (PR #7 B-review)
+        // is NOT wired: (a) fetchit persists no inbound frame to read-only
+        // `/secure/decrypt` -- a cold-start joiner (the only case this driver
+        // ever sees) has received no group message yet, so there is nothing to
+        // decrypt; (b) `apply_join_result` / `apply_metadata_event` RE-RUN the
+        // single-use `invite_secret` check, so probing with the captured
+        // `member_joined` risks re-spending the invite -- the exact G1 violation
+        // this feature exists to prevent; (c) the owner's `MemberAdded`
+        // join-result exists only at the instant of keying, which is precisely
+        // when the inbound apply removes the record, so "record present" and
+        // "keyed" are mutually exclusive in time. Convergence is therefore
+        // signalled authoritatively at the inbound apply site
         // (`dispatch_inbound_bridge`), which removes the record. Erring toward
         // `ListedButUnkeyed` is the safe direction -- at worst one idempotent
         // re-bridge per tick, never the false `Converged` that stranded a
-        // keyless member in the old roster-only loop (PR #7 review #3).
+        // keyless member in the old roster-only loop (PR #7 review #3). A real
+        // read-only `ActiveKeyed` probe needs a `keyed_epoch` on `/members` --
+        // an x0x-fork endpoint we have not built yet.
         struct Probe<'a> {
             client: &'a Client,
         }
@@ -2789,6 +2847,12 @@ impl Client {
         // bridge, so re-bridging IS the Welcome re-request. `request_join_result`
         // is kept a distinct entrypoint (Bob's Decision 3) so the warm
         // epoch-catch-up recovery can extend it without touching the cold path.
+        // KNOWN LIMITATION (PR #7 M1): today `request_join_result` aliases
+        // `rebridge`, and the owner's re-stage is a no-op outside the relay's
+        // 10-minute JoinResult TTL, so a resume later than that window relies on
+        // the owner still holding the staged result. It converges inside the
+        // window; the durable relay Commit-log re-stage (the warm-recovery
+        // build) lifts the limit. Tracked, not blocking.
         struct Bridge<'a> {
             client: &'a Client,
         }

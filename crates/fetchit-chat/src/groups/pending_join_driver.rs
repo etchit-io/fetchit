@@ -218,6 +218,7 @@ mod tests {
             "invitehash".into(),
             "aa".repeat(32),
             "b3duZXJrZW0=".into(),
+            vec!["https://relay.example".to_owned()],
             "am9pbmVya2Vt".into(),
             100,
         )

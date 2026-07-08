@@ -55,6 +55,13 @@ pub struct PendingJoin {
     pub owner_agent_id: String,
     /// Owner ML-KEM pubkey, base64 — resolved once, cached for re-bridges.
     pub owner_kem_pubkey_b64: String,
+    /// Owner rendezvous relay hints (relay URLs), resolved from the owner's
+    /// card at submit time with a primary-relay fallback, and cached so a
+    /// re-bridge routes to the owner even when they are not on our primary
+    /// relay (PR #7 B1). `#[serde(default)]` so a record persisted before this
+    /// field still loads; empty means fall back to the router's primary relay.
+    #[serde(default)]
+    pub owner_relay_hints: Vec<String>,
     /// Our own ML-KEM pubkey hint, base64, for the owner's reply seal.
     pub joiner_kem_pubkey_b64: String,
     /// Epoch ms when the intent was first submitted.
@@ -78,6 +85,7 @@ impl PendingJoin {
         invite_hash: String,
         owner_agent_id: String,
         owner_kem_pubkey_b64: String,
+        owner_relay_hints: Vec<String>,
         joiner_kem_pubkey_b64: String,
         now_ms: u64,
     ) -> Self {
@@ -88,6 +96,7 @@ impl PendingJoin {
             invite_hash,
             owner_agent_id,
             owner_kem_pubkey_b64,
+            owner_relay_hints,
             joiner_kem_pubkey_b64,
             created_at_ms: now_ms,
             last_attempt_ms: 0,
@@ -204,6 +213,7 @@ mod tests {
             "invitehash".into(),
             "aa".repeat(32),
             "b3duZXJrZW0=".into(),
+            vec!["https://relay.example".to_owned()],
             "am9pbmVya2Vt".into(),
             now,
         )

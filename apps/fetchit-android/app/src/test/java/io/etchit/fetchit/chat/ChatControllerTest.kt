@@ -10,6 +10,7 @@ import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.CreatedLinkOfferFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
@@ -31,6 +32,7 @@ class FakeGateway : ChatGateway {
     val sentGroupMessages = mutableListOf<Triple<String, String, String>>()
     val invitesRequested = mutableListOf<String>()
     var groups: List<GroupFfi> = emptyList()
+    var pendingJoinIds: List<String> = emptyList()
 
     // Remove / leave recorders (delegation assertions). When set, the matching
     // throw lets a test exercise the swallow-the-failure path.
@@ -75,6 +77,14 @@ class FakeGateway : ChatGateway {
         joinedGroups += (invite to displayName)
         return GroupFfi("d".repeat(64), null, 2uL, isOwner = false, isPrivate = true)
     }
+    override suspend fun joinGroupDurable(invite: String, displayName: String?): JoinOutcomeFfi {
+        joinedGroups += (invite to displayName)
+        return JoinOutcomeFfi.Converged(
+            GroupFfi("d".repeat(64), null, 2uL, isOwner = false, isPrivate = true),
+        )
+    }
+    override fun pendingJoins(): List<String> = pendingJoinIds
+    override suspend fun drivePendingJoins(): List<String> = pendingJoinIds
     override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? {
         sentGroupMessages += Triple(groupId, body, senderName); return "gm-${sentGroupMessages.size}"
     }
@@ -437,6 +447,10 @@ class ChatControllerTest {
                 throw UnsupportedOperationException()
             override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
                 throw UnsupportedOperationException()
+            override suspend fun joinGroupDurable(invite: String, displayName: String?): JoinOutcomeFfi =
+                throw UnsupportedOperationException()
+            override fun pendingJoins(): List<String> = emptyList()
+            override suspend fun drivePendingJoins(): List<String> = emptyList()
             override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? = null
             override suspend fun listGroups(): List<GroupFfi> = emptyList()
             override suspend fun groupInvite(groupId: String): String = ""
