@@ -63,6 +63,14 @@ pub enum ClientError {
     /// the bubble to a clear `failed` state.
     #[error("send timed out after {0:?}")]
     SendTimeout(std::time::Duration),
+
+    /// A `log_fetch` did not receive a `done=true` `LogRecords` reply
+    /// before its per-chunk deadline. The group-log fetch is idempotent
+    /// (it re-reads from a `since_seq` cursor), so callers retry the
+    /// fetch on the next recovery pass rather than treating this as a
+    /// permanent failure.
+    #[error("log fetch timed out after {0:?}")]
+    LogFetchTimeout(std::time::Duration),
 }
 
 impl From<x0xd_client::X0xdError> for ClientError {

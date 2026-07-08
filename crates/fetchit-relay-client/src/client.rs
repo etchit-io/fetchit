@@ -18,8 +18,9 @@ use crate::signer::Signer;
 use fetchit_relay_proto::{
     auth_signing_bytes, from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest,
     AuthVerifyResponse, CapabilityToken, ClientFrame, DedupeKey, Deliver, EffectiveCapabilities,
-    Hello, Moved, Ping, Pong, PresenceUpdate, Ready, SendFrame, ServerFrame, TenantId, Throttle,
-    TransitAck, TransitEnvelope, WatchPresence,
+    GroupId, Hello, LogAppend, LogFetch, LogRecordKind, LogRecordWire, LogRecords, Moved, Ping,
+    Pong, PresenceUpdate, Ready, SendFrame, ServerFrame, TenantId, Throttle, TransitAck,
+    TransitEnvelope, WatchPresence,
 };
 use futures_util::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
 use rand::RngCore;
@@ -73,6 +74,13 @@ const SEND_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// chosen so a slow but functioning link still resolves successfully
 /// while an actually-lost ack surfaces well before the user gives up.
 const SEND_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a `log_fetch` waits for the next `LogRecords` chunk before
+/// giving up. Applied per chunk (reset on each), so a many-chunk reply
+/// from a large group log never spuriously times out — only a stall
+/// (disconnected mid-fetch, relay hung) does. Matches [`SEND_ACK_TIMEOUT`]:
+/// a group-log read is the same round-trip class as a deposit ack.
+const LOG_FETCH_CHUNK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Connection parameters for one relay session.
 #[derive(Clone, Debug)]
@@ -222,6 +230,23 @@ enum SupervisorCmd {
     AckTransit {
         acked_ids: Vec<u64>,
     },
+    /// Append one opaque record to a group's durable log. Fire-and-forget
+    /// like [`Self::AckTransit`]: the relay produces no reply on success,
+    /// and a drop on a dead connection is the caller's to retry.
+    LogAppend {
+        group_id: GroupId,
+        kind: LogRecordKind,
+        recipient: Option<AgentId>,
+        payload: Vec<u8>,
+    },
+    /// Request a group's log records with `seq > since_seq`. The chunked
+    /// [`LogRecords`] reply is routed back to the waiting `log_fetch` via
+    /// the `log_records` channel (not a reply oneshot) so the reassembly
+    /// loop lives on the caller side.
+    LogFetch {
+        group_id: GroupId,
+        since_seq: u64,
+    },
     /// Internal signal raised by the reader / keepalive tasks when the
     /// WS for `gen` died. Carries the reason for diagnostics.
     Disconnected {
@@ -274,6 +299,12 @@ pub struct Client {
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
     inbox: Mutex<mpsc::UnboundedReceiver<Deliver>>,
     presence: Mutex<mpsc::UnboundedReceiver<PresenceUpdate>>,
+    /// Chunked `LogRecords` replies to the current `log_fetch`. Holding
+    /// this receiver's lock for a whole fetch serializes fetches, so only
+    /// one `LogFetch` is ever outstanding — every inbound chunk is then
+    /// unambiguously that fetch's reply, needing no correlation id (the
+    /// wire frames carry none).
+    log_records: Mutex<mpsc::UnboundedReceiver<LogRecords>>,
     state_rx: watch::Receiver<ConnState>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
 }
@@ -312,6 +343,7 @@ impl Client {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         let (presence_tx, presence_rx) = mpsc::unbounded_channel();
+        let (log_records_tx, log_records_rx) = mpsc::unbounded_channel();
 
         let (initial_state, initial_session, effective_capabilities) = match open_session(
             &config,
@@ -356,6 +388,7 @@ impl Client {
             signer,
             inbox_tx,
             presence_tx,
+            log_records_tx,
             state_tx,
             cmd_tx: cmd_tx.clone(),
         };
@@ -366,6 +399,7 @@ impl Client {
             cmd_tx,
             inbox: Mutex::new(inbox_rx),
             presence: Mutex::new(presence_rx),
+            log_records: Mutex::new(log_records_rx),
             state_rx,
             supervisor: Mutex::new(Some(join)),
         })
@@ -435,6 +469,92 @@ impl Client {
         self.cmd_tx
             .send(SupervisorCmd::AckTransit { acked_ids })
             .map_err(|_| ClientError::InboxClosed)
+    }
+
+    /// Append one opaque record to `group_id`'s durable relay log.
+    ///
+    /// Fire-and-forget: the relay assigns the per-group sequence number
+    /// and sends no reply on success. A drop while disconnected is
+    /// silently lost (the caller re-appends), matching the group-log's
+    /// at-least-once posture. `recipient` is `None` for a
+    /// [`LogRecordKind::Commit`] (served to every group fetcher) and
+    /// `Some(joiner)` for a [`LogRecordKind::JoinResult`] (the relay gates
+    /// the fetch to that agent). Backs the owner-publish side of #297.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when the supervisor has shut
+    /// down.
+    pub fn log_append(
+        &self,
+        group_id: GroupId,
+        kind: LogRecordKind,
+        recipient: Option<AgentId>,
+        payload: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        self.cmd_tx
+            .send(SupervisorCmd::LogAppend {
+                group_id,
+                kind,
+                recipient,
+                payload,
+            })
+            .map_err(|_| ClientError::InboxClosed)
+    }
+
+    /// Fetch `group_id`'s durable-log records with `seq > since_seq`,
+    /// ascending, reassembling the chunked [`LogRecords`] reply into one
+    /// `Vec`.
+    ///
+    /// The transport under the epoch-recovery `CommitSource` (#297): a
+    /// behind member reads the commits it missed since its cursor.
+    /// Fetches are serialized — one outstanding `LogFetch` at a time — so
+    /// the chunked reply needs no correlation id (the wire frames carry
+    /// none). Idempotent: a timeout or disconnect leaves the cursor
+    /// untouched, so the caller retries from the same `since_seq`.
+    ///
+    /// # Errors
+    /// - [`ClientError::InboxClosed`] when the supervisor has shut down.
+    /// - [`ClientError::LogFetchTimeout`] when no `done=true` chunk
+    ///   arrives within the per-chunk deadline (e.g. disconnected). The
+    ///   fetch is retryable.
+    pub async fn log_fetch(
+        &self,
+        group_id: GroupId,
+        since_seq: u64,
+    ) -> Result<Vec<LogRecordWire>, ClientError> {
+        // Holding this lock for the whole fetch is the "one outstanding
+        // LogFetch" guarantee: no other fetch can interleave its reply.
+        let mut rx = self.log_records.lock().await;
+        // Drain stragglers from a prior fetch that timed out, so a late
+        // chunk can't be mistaken for this fetch's reply.
+        while rx.try_recv().is_ok() {}
+
+        self.cmd_tx
+            .send(SupervisorCmd::LogFetch {
+                group_id,
+                since_seq,
+            })
+            .map_err(|_| ClientError::InboxClosed)?;
+
+        let mut out = Vec::new();
+        loop {
+            match tokio::time::timeout(LOG_FETCH_CHUNK_TIMEOUT, rx.recv()).await {
+                Ok(Some(lr)) => {
+                    // A chunk for a different group could only be a very
+                    // late straggler from a prior fetch — ignore it and
+                    // keep waiting for this group's done=true.
+                    if lr.group_id == group_id {
+                        out.extend(lr.records);
+                        if lr.done {
+                            return Ok(out);
+                        }
+                    }
+                }
+                // Sender side closed: the supervisor is gone.
+                Ok(None) => return Err(ClientError::InboxClosed),
+                Err(_) => return Err(ClientError::LogFetchTimeout(LOG_FETCH_CHUNK_TIMEOUT)),
+            }
+        }
     }
 
     /// Subscribe to presence transitions for `agents`.
@@ -544,6 +664,7 @@ struct Supervisor {
     signer: Arc<dyn Signer + Send + Sync>,
     inbox_tx: mpsc::UnboundedSender<Deliver>,
     presence_tx: mpsc::UnboundedSender<PresenceUpdate>,
+    log_records_tx: mpsc::UnboundedSender<LogRecords>,
     state_tx: watch::Sender<ConnState>,
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
 }
@@ -600,6 +721,10 @@ impl Supervisor {
         }
     }
 
+    // One cohesive command loop / reconnect state machine: the Disconnected
+    // arm reconnects and rethreads inner/backoff/next_gen, so splitting the
+    // match out would scatter that state across helpers for no clarity gain.
+    #[allow(clippy::too_many_lines)]
     async fn run(
         self,
         initial: Option<OpenSession>,
@@ -671,6 +796,30 @@ impl Supervisor {
                         let _ = send_ack_frame(i, acked_ids).await;
                     }
                 }
+                SupervisorCmd::LogAppend {
+                    group_id,
+                    kind,
+                    recipient,
+                    payload,
+                } => {
+                    // Best-effort like AckTransit: a drop on a dead
+                    // connection is the owner-publish caller's to retry.
+                    if let Some(i) = inner.as_ref() {
+                        let _ = send_log_append_frame(i, group_id, kind, recipient, payload).await;
+                    }
+                }
+                SupervisorCmd::LogFetch {
+                    group_id,
+                    since_seq,
+                } => {
+                    // Send the request; the LogRecords reply is routed to
+                    // the caller via `log_records_tx` in spawn_reader. If
+                    // disconnected the frame is dropped and the caller's
+                    // `log_fetch` times out and retries.
+                    if let Some(i) = inner.as_ref() {
+                        let _ = send_log_fetch_frame(i, group_id, since_seq).await;
+                    }
+                }
                 SupervisorCmd::Disconnected { gen, reason } => {
                     // Ignore signals from already-torn-down connections.
                     let Some(current) = inner.as_ref() else {
@@ -727,6 +876,7 @@ impl Supervisor {
             outbox.clone(),
             self.inbox_tx.clone(),
             self.presence_tx.clone(),
+            self.log_records_tx.clone(),
             self.cmd_tx.clone(),
         );
         let keepalive = self.config.keepalive.map(|i| {
@@ -793,10 +943,14 @@ impl Supervisor {
                         // AckTransit: no live connection, drop the ack —
                         // loss-safe, the relay keeps the entries and
                         // redelivers on the reconnect this loop is working
-                        // toward. Disconnected: spurious signal from a
-                        // previous WS, already handled.
+                        // toward. LogAppend/LogFetch: same posture — the
+                        // append is re-sent and the fetch times out and
+                        // retries from its cursor. Disconnected: spurious
+                        // signal from a previous WS, already handled.
                         Some(
                             SupervisorCmd::AckTransit { .. }
+                            | SupervisorCmd::LogAppend { .. }
+                            | SupervisorCmd::LogFetch { .. }
                             | SupervisorCmd::Disconnected { .. },
                         ) => {}
                         // Re-arm: skip the rest of the backoff and retry
@@ -993,6 +1147,7 @@ fn spawn_reader(
     outbox: Arc<Outbox>,
     inbox: mpsc::UnboundedSender<Deliver>,
     presence: mpsc::UnboundedSender<PresenceUpdate>,
+    log_records: mpsc::UnboundedSender<LogRecords>,
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1030,13 +1185,16 @@ fn spawn_reader(
                             // peer from a hung process.
                             tracing::debug!("relay keepalive pong");
                         }
-                        ServerFrame::Throttle(Throttle { .. })
-                        | ServerFrame::Ready(_)
-                        | ServerFrame::LogRecords(_) => {
+                        ServerFrame::LogRecords(lr) => {
+                            // Route the chunk to the in-flight `log_fetch`
+                            // (see `Client::log_fetch`). If no fetch is
+                            // waiting (receiver dropped) the send fails
+                            // silently — a stray reply is harmless.
+                            let _ = log_records.send(lr);
+                        }
+                        ServerFrame::Throttle(Throttle { .. }) | ServerFrame::Ready(_) => {
                             // Throttle observable via metrics in a future pass.
-                            // A stray Ready outside the handshake, and a
-                            // LogRecords answering a LogFetch this supervisor
-                            // connection never issues, are both no-ops.
+                            // A stray Ready outside the handshake is a no-op.
                         }
                         ServerFrame::Moved(Moved { dedupe_key }) => {
                             // The recipient migrated away from this relay;
@@ -1074,6 +1232,40 @@ async fn send_ack_frame(inner: &Inner, acked_ids: Vec<u64>) -> Result<(), Client
         return Ok(());
     }
     let frame = ClientFrame::TransitAck(TransitAck { acked_ids });
+    let bytes = to_bytes(&frame)?;
+    let mut sender = inner.sender.lock().await;
+    sender.send(Message::Binary(bytes)).await?;
+    Ok(())
+}
+
+async fn send_log_append_frame(
+    inner: &Inner,
+    group_id: GroupId,
+    kind: LogRecordKind,
+    recipient: Option<AgentId>,
+    payload: Vec<u8>,
+) -> Result<(), ClientError> {
+    let frame = ClientFrame::LogAppend(LogAppend {
+        group_id,
+        kind,
+        recipient,
+        payload,
+    });
+    let bytes = to_bytes(&frame)?;
+    let mut sender = inner.sender.lock().await;
+    sender.send(Message::Binary(bytes)).await?;
+    Ok(())
+}
+
+async fn send_log_fetch_frame(
+    inner: &Inner,
+    group_id: GroupId,
+    since_seq: u64,
+) -> Result<(), ClientError> {
+    let frame = ClientFrame::LogFetch(LogFetch {
+        group_id,
+        since_seq,
+    });
     let bytes = to_bytes(&frame)?;
     let mut sender = inner.sender.lock().await;
     sender.send(Message::Binary(bytes)).await?;
