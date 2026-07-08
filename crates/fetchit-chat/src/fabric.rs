@@ -171,7 +171,10 @@ pub struct AgentCertificate {
 /// Length-prefix a field as `u32_be(len) || bytes`, mirroring the frozen
 /// pair-record convention. (relay-proto's `push_lp` is private to that
 /// crate, so this reimplements the identical layout.)
-fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ChatError> {
+///
+/// `pub(crate)` so sibling admission can build its own length-prefixed
+/// signing domain over the identical layout ([`crate::sibling_admission`]).
+pub(crate) fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ChatError> {
     let n = u32::try_from(bytes.len()).map_err(|_| {
         ChatError::Invalid(format!(
             "cert field is {} bytes; exceeds u32::MAX",
@@ -305,6 +308,32 @@ pub fn verify_agent_certificate(
         .map_err(|e| ChatError::Invalid(format!("cert verify backend: {e}")))?;
     if !ok {
         return Err(ChatError::Invalid("cert signature does not verify".into()));
+    }
+    Ok(())
+}
+
+/// Verify a raw ML-DSA-65 signature (`sig`) over `message` under the raw
+/// public key `pubkey`. `pubkey` and `sig` are the raw encodings, not
+/// base64 — the caller decodes.
+///
+/// Shared by [`crate::sibling_admission`]'s request-authenticity gate so
+/// the device-key verification path is one implementation.
+///
+/// # Errors
+/// [`ChatError::Invalid`] if the key or signature fail to parse, the
+/// backend errors, or the signature does not verify.
+pub(crate) fn verify_ml_dsa65(pubkey: &[u8], message: &[u8], sig: &[u8]) -> Result<(), ChatError> {
+    let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, pubkey)
+        .map_err(|e| ChatError::Invalid(format!("ml-dsa pubkey parse: {e}")))?;
+    let signature = MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, sig)
+        .map_err(|e| ChatError::Invalid(format!("ml-dsa sig parse: {e}")))?;
+    let ok = MlDsa::new(MlDsaVariant::MlDsa65)
+        .verify(&pk, message, &signature)
+        .map_err(|e| ChatError::Invalid(format!("ml-dsa verify backend: {e}")))?;
+    if !ok {
+        return Err(ChatError::Invalid(
+            "ml-dsa signature does not verify".into(),
+        ));
     }
     Ok(())
 }

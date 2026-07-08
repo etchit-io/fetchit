@@ -224,7 +224,7 @@ pub async fn republish_cached_pair_record_v4(
 /// `relays`. The five identity fields come off the cert; `primary` is false (a
 /// newly enrolled device is never the canonical device #1) and `cert_b64` is
 /// the STANDARD-base64 of the JSON-serialized certificate.
-fn device_entry_from_cert(
+pub(crate) fn device_entry_from_cert(
     cert: &AgentCertificate,
     relays: Vec<String>,
 ) -> Result<DeviceEntryV4, ChatError> {

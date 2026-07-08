@@ -357,16 +357,24 @@ impl SecureGroupsEndpoint {
     /// owner's other device. A 2xx response means x0xd accepted the add
     /// (Welcome staged); the caller does not wait for the sibling to pull it.
     ///
+    /// Returns whether the add was fresh: `true` on a 2xx add, `false` on a
+    /// `409` (the agent is already a member — an idempotent no-op the
+    /// caller reports as already-admitted, not an error). This mirrors
+    /// [`Self::apply_metadata_event`]'s 409 handling and lets a concurrent
+    /// second admitter (M6.6 devices-group fanout) converge instead of
+    /// erroring.
+    ///
     /// # Errors
     /// [`X0xdError::Invalid`] if `group_id` is not 64-hex (before any HTTP);
     /// [`X0xdError::Url`] if it fails to join the base; [`X0xdError::Http`]
-    /// on transport failure; [`X0xdError::Rejected`] on a non-2xx response.
+    /// on transport failure; [`X0xdError::Rejected`] on a response that is
+    /// neither 2xx nor `409`.
     pub async fn add_treekem_member(
         &self,
         group_id: &str,
         agent_id_hex: &str,
         treekem_key_package_b64: &str,
-    ) -> Result<(), X0xdError> {
+    ) -> Result<bool, X0xdError> {
         let group_id = validate_group_id_hex(group_id)?;
         let url = self
             .base_url
@@ -382,14 +390,17 @@ impl SecureGroupsEndpoint {
             })
             .send()
             .await?;
-        if !raw.status().is_success() {
+        // 2xx = fresh direct-add (Welcome staged); 409 = the agent is
+        // already a member, an idempotent no-op reported as `false`.
+        let code = raw.status().as_u16();
+        if !raw.status().is_success() && code != 409 {
             let status = raw.status();
             let body = raw.text().await.unwrap_or_default();
             return Err(X0xdError::Rejected(format!(
                 "x0xd POST /groups/{group_id}/members returned {status}: {body}"
             )));
         }
-        Ok(())
+        Ok(code != 409)
     }
 
     /// Encrypt one application frame under the group's current MLS
@@ -765,10 +776,30 @@ mod tests {
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
-        endpoint
+        let fresh = endpoint
             .add_treekem_member(TEST_GROUP_HEX, "aa", "kp")
             .await
             .unwrap();
+        assert!(fresh, "a 2xx add is a fresh direct-add");
+    }
+
+    #[tokio::test]
+    async fn add_treekem_member_treats_409_as_already_member() {
+        // 409 = the agent is already in the group: an idempotent no-op the
+        // caller reports as already-admitted, never an error.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/groups/{TEST_GROUP_HEX}/members")))
+            .respond_with(ResponseTemplate::new(409).set_body_string("already a member"))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        let fresh = endpoint
+            .add_treekem_member(TEST_GROUP_HEX, "aa", "kp")
+            .await
+            .unwrap();
+        assert!(!fresh, "a 409 is an already-member no-op, not a fresh add");
     }
 
     #[tokio::test]
