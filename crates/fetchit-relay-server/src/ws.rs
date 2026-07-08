@@ -278,7 +278,10 @@ fn handle_client_frame(
     frame: ClientFrame,
 ) -> bool {
     match frame {
-        ClientFrame::Hello(_) | ClientFrame::Subscribe(_) => true,
+        ClientFrame::Hello(_)
+        | ClientFrame::Subscribe(_)
+        | ClientFrame::LogAppend(_)
+        | ClientFrame::LogFetch(_) => true,
         ClientFrame::Ping(Ping { nonce }) => {
             self_tx.try_send(ServerFrame::Pong(Pong { nonce })).is_ok()
         }

@@ -14,6 +14,7 @@ pub mod capability;
 pub mod config;
 pub mod error;
 pub mod forwarding;
+pub mod group_log;
 #[cfg(feature = "fediverse-inbox")]
 pub mod inbox;
 pub mod metrics;
@@ -33,6 +34,7 @@ pub mod ws;
 
 pub use config::ServerConfig;
 pub use error::ServerError;
+pub use group_log::RamGroupLog;
 pub use metrics::Metrics;
 pub use server::Server;
 pub use session::SessionRegistry;

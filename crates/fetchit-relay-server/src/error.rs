@@ -57,4 +57,13 @@ pub enum ServerError {
     /// write, or delete). Carries a human-readable cause, never payload.
     #[error("transit store backend error: {0}")]
     TransitStore(String),
+
+    /// The group log's global byte cap would be exceeded by an append.
+    #[error("group log at global byte capacity")]
+    GroupLogFull,
+
+    /// A durable group-log backend operation failed (open, read, write,
+    /// or sweep). Carries a human-readable cause, never payload.
+    #[error("group log backend error: {0}")]
+    GroupLog(String),
 }
