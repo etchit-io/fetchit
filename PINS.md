@@ -17,6 +17,7 @@ CI if `Cargo.lock` drifts from any rev or version listed below.
 | `xor_name`         | `= "5.0.0"`                                           | Autonomi address type. Wire-level breaking on bump.                 |
 | `saorsa-pqc`       | `"0.5"` (resolves to `0.5.1`)                         | ML-KEM-768 + ML-DSA-65 primitives. Affects vault + envelope crypto. |
 | `snow`             | `"0.10.0"` (transitive lock)                          | Noise XX for LAN-direct channel-binding handshake.                  |
+| `four-word-networking` | `= "2.7.0"`                                       | Word rendering for identities (`fetchit-words`). Same crate+version x0x uses; a dictionary change makes the same id read as different words across apps. |
 
 ## fetchit-ffi pins (workspace-excluded crate)
 

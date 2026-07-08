@@ -12,6 +12,7 @@ pub mod image;
 pub mod json;
 pub mod lang_detect;
 pub mod markdown;
+pub mod mls_envelope;
 pub mod text;
 pub mod video;
 pub mod zip;
@@ -24,6 +25,7 @@ pub use html::HtmlHandler;
 pub use image::ImageHandler;
 pub use json::JsonHandler;
 pub use markdown::MarkdownHandler;
+pub use mls_envelope::MlsEnvelopeHandler;
 pub use text::TextHandler;
 pub use video::VideoHandler;
 pub use zip::{extract_entry, ZipHandler};
@@ -41,6 +43,7 @@ use crate::HandlerRegistry;
 pub fn default_registry() -> HandlerRegistry {
     let mut reg = HandlerRegistry::new();
     reg.register(EtchitEnvelopeHandler)
+        .register(MlsEnvelopeHandler)
         .register(ImageHandler)
         .register(AudioHandler)
         .register(VideoHandler)

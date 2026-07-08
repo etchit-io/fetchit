@@ -25,6 +25,7 @@ use fetchit_core::handlers::default_registry;
 fn handler_kinds_and_order_match_snapshot() {
     let expected = [
         "etchit/envelope-v1",
+        "saorsa-mls/envelope-v1",
         "image/*",
         "audio/*",
         "video/*",

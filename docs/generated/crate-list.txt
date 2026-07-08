@@ -2,6 +2,7 @@ fetchit-chat
 fetchit-cli
 fetchit-core
 fetchit-fedi
+fetchit-mcp
 fetchit-net
 fetchit-relay-client
 fetchit-relay-proto
@@ -9,4 +10,5 @@ fetchit-relay-server
 fetchit-trust
 fetchit-trust-client
 fetchit-trust-types
+fetchit-words
 x0xd-client

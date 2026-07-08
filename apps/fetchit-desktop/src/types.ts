@@ -10,4 +10,5 @@ export type Rendition =
   | { kind: "video"; mime: string; byteLen: number }
   | { kind: "pdf"; byteLen: number }
   | { kind: "binary"; mime: string; byteLen: number }
+  | { kind: "encryptedEnvelope"; groupHint: string | null; ciphertextLen: number }
   | { kind: "blocked"; reason: string };

@@ -2259,6 +2259,29 @@ body:not([data-view="settings"]) #settings {
   color: var(--bone-dim);
 }
 
+.encrypted-notice {
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--copper, #c9732b);
+  border-radius: var(--r-card);
+  box-shadow: var(--elev-1), var(--edge-highlight);
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+  max-width: 42rem;
+}
+.encrypted-notice__title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  color: var(--copper, #c9732b);
+}
+.encrypted-notice__hint,
+.encrypted-notice__size {
+  margin: 0.5rem 0 0;
+  font-family: var(--mono, monospace);
+  font-size: 0.85rem;
+  color: var(--bone-dim);
+}
+
 /* Profile page */
 .profile-page { max-width: 720px; margin: 0 auto; padding: 24px; }
 .profile-page__band { display: flex; align-items: center; gap: 16px;

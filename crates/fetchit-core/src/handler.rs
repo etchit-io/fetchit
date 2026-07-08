@@ -160,6 +160,18 @@ pub enum Rendition {
         /// markdown heuristic may supply `"markdown"`.
         language: Option<String>,
     },
+    /// An encrypted `saorsa-mls/v1` envelope, recognised but not decrypted.
+    ///
+    /// Type seam only: shells can show "encrypted content" and offer a
+    /// decrypt affordance backed by an external key holder (x0xd). No
+    /// decrypt path exists in the engine; keys never enter fetchit-core.
+    EncryptedEnvelope {
+        /// Optional group hint from the envelope's `group=` header — an
+        /// opaque label chosen by the publisher, never interpreted here.
+        group_hint: Option<String>,
+        /// Length of the opaque ciphertext body in bytes.
+        ciphertext_len: usize,
+    },
     /// Bytes the registry could not classify any more specifically.
     OpaqueBinary {
         /// Best-effort MIME guess (e.g. via the `infer` crate). May be
@@ -298,6 +310,7 @@ mod tests {
                 | Rendition::Archive { .. }
                 | Rendition::Html { .. }
                 | Rendition::EtchitEnvelope { .. }
+                | Rendition::EncryptedEnvelope { .. }
                 | Rendition::OpaqueBinary { .. }
                 | Rendition::Blocked { .. } => {}
             }

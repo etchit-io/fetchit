@@ -56,6 +56,11 @@ grep -q 'uniffi = { version = "=0.29.5"' crates/fetchit-ffi/Cargo.toml \
     || fail "crates/fetchit-ffi/Cargo.toml uniffi != =0.29.5"
 ok "uniffi =0.29.5 (fetchit-ffi)"
 
+# four-word-networking: =2.7.0 (word rendering must match x0x tooling)
+grep -q 'four-word-networking = "=2.7.0"' Cargo.toml \
+    || fail "Cargo.toml four-word-networking != =2.7.0"
+ok "four-word-networking =2.7.0"
+
 # Relay region defaults
 SETTINGS=apps/fetchit-desktop/src-tauri/src/settings.rs
 grep -q '67.207.94.66:8088' "$SETTINGS" \

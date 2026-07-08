@@ -31,6 +31,10 @@ use fetchit_net::{set_data_home, AutonomiClient, DEFAULT_PEERS};
     version,
     about = "fetch>it — read-only viewer for the Autonomi network.",
     long_about = None,
+    after_help = "This is the fetch>it command-line tool. Most people want the \
+                  desktop or mobile app instead — download it for Mac, Windows, \
+                  Linux, or Android at https://etchit.io/fetch (or build it from \
+                  apps/fetchit-desktop, not the workspace root).",
 )]
 struct Cli {
     #[command(subcommand)]
@@ -261,6 +265,18 @@ fn print_rendition(r: &Rendition) {
             println!("bytes: {}", body.len());
             println!("---");
             println!("{}", preview_text(body, 4_000));
+        }
+        Rendition::EncryptedEnvelope {
+            group_hint,
+            ciphertext_len,
+        } => {
+            println!("kind: saorsa-mls/envelope-v1");
+            if let Some(hint) = group_hint {
+                println!("group hint: {hint}");
+            }
+            println!("ciphertext bytes: {ciphertext_len}");
+            println!("---");
+            println!("encrypted content; fetch>it holds no keys and cannot decrypt");
         }
         // Rendition is #[non_exhaustive]; future variants print a
         // generic header so the CLI never panics on a new kind.

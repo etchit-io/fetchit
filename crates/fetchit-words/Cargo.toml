@@ -1,0 +1,18 @@
+[package]
+name = "fetchit-words"
+description = "Four-word verification phrases over already-exchanged identities. Renders agent ids with the same dictionary x0x tooling uses, plus a pairwise spoken-confirmation phrase. Leaf crate: no network, no async."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+four-word-networking = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

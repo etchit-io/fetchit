@@ -1,0 +1,40 @@
+[package]
+name = "fetchit-mcp"
+description = "Minimal MCP (Model Context Protocol) stdio server over fetchit-core: read-only Autonomi fetch + typed, text-safe rendering for AI agents. Experiment; local-stdio prototype with MCPB bundling as the upgrade path."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "fetchit-mcp"
+path = "src/main.rs"
+required-features = ["net"]
+
+[features]
+# The library (protocol + rendition mapper) is network-free and cheap to
+# build/test. The binary needs the Autonomi client; gating it keeps
+# `cargo test -p fetchit-mcp` off the ant-core dependency tree.
+net = ["dep:fetchit-net", "dep:fetchit-trust-client", "dep:anyhow", "dep:async-trait"]
+
+[lints]
+workspace = true
+
+[dependencies]
+fetchit-core = { path = "../fetchit-core" }
+fetchit-trust-types = { path = "../fetchit-trust-types" }
+fetchit-net = { path = "../fetchit-net", optional = true }
+fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"], optional = true }
+anyhow = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
