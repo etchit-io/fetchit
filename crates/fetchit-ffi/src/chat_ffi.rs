@@ -2200,8 +2200,10 @@ mod tests {
             attachment: None,
             delivered_at_ms: None,
         };
-        let projected =
-            project_group_receive(group_id.clone(), PrivateGroupReceive::Persisted { entry, gap: None });
+        let projected = project_group_receive(
+            group_id.clone(),
+            PrivateGroupReceive::Persisted { entry, gap: None },
+        );
         match projected {
             Some(ChatEventFfi::GroupMessage {
                 group_id: gid,
