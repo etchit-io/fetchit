@@ -382,9 +382,8 @@ async fn main() -> Result<()> {
     let token = resolve_token(&cli)?;
     let passphrase = resolve_passphrase(&cli)?;
     require_daemonless_passphrase(cli.daemonless, passphrase.as_deref())?;
-    // The fedi vault unseals with the same passphrase as the at-rest
-    // vault; keep a copy since the builder consumes the original.
-    let vault_passphrase = passphrase.clone();
+    // The fedi vault unseals with the same custody the builder installs:
+    // the Client retains the passphrase, so fedi paths need no copy here.
 
     let mut builder = Client::builder()
         .relay_url(cli.relay.clone())
@@ -469,7 +468,6 @@ async fn main() -> Result<()> {
                 &domain,
                 &out,
                 post_url.as_deref(),
-                vault_passphrase.as_deref(),
             )
             .await
         }
@@ -489,10 +487,9 @@ async fn run_mint_actor(
     domain: &str,
     out: &std::path::Path,
     post_url: Option<&str>,
-    passphrase: Option<&str>,
 ) -> Result<()> {
     let identity = if let Some(existing) = client
-        .load_actor_identity(handle, passphrase)
+        .load_actor_identity(handle)
         .await
         .context("load_actor_identity")?
     {
@@ -501,7 +498,7 @@ async fn run_mint_actor(
     } else {
         eprintln!("[peer] minting fresh actor identity for {handle:?} on {domain}");
         client
-            .mint_actor_identity(handle, domain, passphrase)
+            .mint_actor_identity(handle, domain)
             .await
             .context("mint_actor_identity")?
     };

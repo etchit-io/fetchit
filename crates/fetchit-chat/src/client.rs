@@ -512,6 +512,14 @@ pub struct Client {
     /// in `Endpoint`; never persisted. `std::sync::Mutex` (not async): the
     /// critical section is a `HashMap` get/insert, no `.await` held.
     neg_resolve_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// The vault custody passphrase this client was built with (`None` =
+    /// OS-keychain custody). Retained so every vault re-open (fediverse
+    /// actor mint/load/upgrade, public post) resolves the SAME custody
+    /// the boot-time vault used -- per-call passphrase parameters let a
+    /// caller pass `None` against a passphrase-mode vault, which fails
+    /// only at runtime on mobile. `Zeroizing` clears the heap bytes on
+    /// final drop; `Arc` so `Client` clones share one zeroized value.
+    custody_passphrase: Option<Arc<Zeroizing<String>>>,
     /// Session-lived `GroupId -> kind` cache shared into every
     /// [`messages::Endpoint`] (cloned in [`Self::messages`], exactly like
     /// [`Self::neg_resolve_cache`]) so [`messages::Endpoint::send_to_group`]
@@ -601,6 +609,12 @@ impl Client {
         });
         let needs_chat =
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
+        // Retain the custody choice for the client's lifetime BEFORE the
+        // passphrase moves into the vault build: later vault re-opens
+        // (fediverse identity paths) must resolve the same custody.
+        let custody_passphrase = passphrase
+            .as_ref()
+            .map(|p| Arc::new(Zeroizing::new(p.clone())));
 
         let (
             router,
@@ -675,6 +689,7 @@ impl Client {
             multi_home_inbound,
             primary_relay_url,
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            custody_passphrase,
             group_kinds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home,
             fediverse,
@@ -4669,6 +4684,13 @@ async fn sweep_auto_rekey(
 }
 
 impl Client {
+    /// The vault custody passphrase retained at build time, as the
+    /// `Option<&str>` shape [`resolve_master_key`] takes. `None` =
+    /// OS-keychain custody.
+    fn custody_passphrase(&self) -> Option<&str> {
+        self.custody_passphrase.as_ref().map(|z| z.as_str())
+    }
+
     /// Mint a fresh fediverse-bridge actor identity for this user's
     /// chat identity. Generates an RSA-2048 keypair, signs the
     /// ML-DSA-65 attestation over the canonical
@@ -4680,9 +4702,9 @@ impl Client {
     /// `WebFinger` record (currently fetchit-operated: `etchit.io`).
     /// `actor_url` is constructed as `https://<domain>/actors/<handle>`.
     ///
-    /// `passphrase` mirrors the rest of the chat surface — `None` uses
-    /// the OS keychain entry, `Some` derives via Argon2id with the
-    /// existing identity vault's salt.
+    /// Vault custody resolves from the passphrase retained at client
+    /// build time (`None` = OS keychain), so every re-open matches the
+    /// boot-time vault.
     ///
     /// # Errors
     ///
@@ -4697,7 +4719,6 @@ impl Client {
         &self,
         handle: &str,
         domain: &str,
-        passphrase: Option<&str>,
     ) -> Result<fetchit_fedi::actor::ActorIdentity> {
         let chat = self
             .chat
@@ -4709,7 +4730,8 @@ impl Client {
         let agent_id_hex = chat.identity.agent_id_hex().to_string();
 
         let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
-        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
 
         if chat.layout.actor_identity_path(handle).exists() {
             log::warn!(
@@ -4764,7 +4786,6 @@ impl Client {
         &self,
         handle: &str,
         domain: &str,
-        passphrase: Option<&str>,
         profile_addr: &str,
         relay_hint: &str,
         hint_epoch_ms: u64,
@@ -4779,7 +4800,8 @@ impl Client {
         let agent_id_hex = chat.identity.agent_id_hex().to_string();
 
         let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
-        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
 
         if chat.layout.actor_identity_path(handle).exists() {
             log::warn!(
@@ -4897,7 +4919,6 @@ impl Client {
         &self,
         handle: &str,
         domain: &str,
-        passphrase: Option<&str>,
         relay: &url::Url,
         registry_base: &url::Url,
         now_ms: u64,
@@ -4925,14 +4946,7 @@ impl Client {
             Err(e) => return Err(ChatError::Invalid(format!("profile record: {e}"))),
         };
         let identity = self
-            .mint_actor_identity_v2(
-                handle,
-                domain,
-                passphrase,
-                &profile_addr,
-                relay.as_str(),
-                now_ms,
-            )
+            .mint_actor_identity_v2(handle, domain, &profile_addr, relay.as_str(), now_ms)
             .await?;
         let (registered, registration_error) =
             crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
@@ -4956,7 +4970,6 @@ impl Client {
     pub async fn ensure_actor_v2_and_register(
         &self,
         handle: &str,
-        passphrase: Option<&str>,
         relay: &url::Url,
         registry_base: &url::Url,
         now_ms: u64,
@@ -4981,16 +4994,10 @@ impl Client {
             }
         };
         let upgraded = self
-            .upgrade_actor_attestation_v2(
-                handle,
-                passphrase,
-                &record.profile_addr,
-                relay.as_str(),
-                now_ms,
-            )
+            .upgrade_actor_attestation_v2(handle, &record.profile_addr, relay.as_str(), now_ms)
             .await?;
         let identity = self
-            .load_actor_identity(handle, passphrase)
+            .load_actor_identity(handle)
             .await?
             .ok_or_else(|| ChatError::Invalid(format!("no actor identity for {handle}")))?;
         let (registered, pending) =
@@ -5097,7 +5104,6 @@ impl Client {
     pub async fn upgrade_actor_attestation_v2(
         &self,
         handle: &str,
-        passphrase: Option<&str>,
         profile_addr: &str,
         relay_hint: &str,
         hint_epoch_ms: u64,
@@ -5109,7 +5115,8 @@ impl Client {
         validate_actor_handle(handle)?;
 
         let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
-        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
 
         let Some(mut vault) =
             crate::fedi_vault::load_actor_identity(handle, &master, &chat.layout)?
@@ -5158,7 +5165,6 @@ impl Client {
     pub async fn load_actor_identity(
         &self,
         handle: &str,
-        passphrase: Option<&str>,
     ) -> Result<Option<fetchit_fedi::actor::ActorIdentity>> {
         let chat = self
             .chat
@@ -5167,7 +5173,8 @@ impl Client {
         validate_actor_handle(handle)?;
 
         let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
-        let (master, _kdf, _salt) = resolve_master_key(&identity_vault_path, passphrase)?;
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
 
         let Some(vault) = crate::fedi_vault::load_actor_identity(handle, &master, &chat.layout)?
         else {
@@ -5220,21 +5227,17 @@ impl Client {
     pub async fn publish_public_post(
         &self,
         handle: &str,
-        passphrase: Option<&str>,
         post: &fetchit_fedi::PublicPost,
     ) -> Result<PublishReport> {
         let transport = self.fediverse.as_ref().ok_or_else(|| {
             ChatError::Invalid("fediverse transport not configured (REST-only client)".into())
         })?;
 
-        let identity = self
-            .load_actor_identity(handle, passphrase)
-            .await?
-            .ok_or_else(|| {
-                ChatError::Invalid(format!(
-                    "no fediverse actor identity minted for handle {handle}"
-                ))
-            })?;
+        let identity = self.load_actor_identity(handle).await?.ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "no fediverse actor identity minted for handle {handle}"
+            ))
+        })?;
 
         // Pre-flight: gate the replied-to actor before any resolution
         // or delivery. Mentions are gated per-resolution just below.
@@ -6576,6 +6579,10 @@ mod tests {
             multi_home_inbound: None,
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // The test vault above is passphrase-mode, so the retained
+            // custody must match -- fedi paths in tests then exercise
+            // the same custody resolution mobile uses in production.
+            custody_passphrase: Some(Arc::new(Zeroizing::new("d9-test".to_owned()))),
             group_kinds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home: None,
             fediverse: None,
@@ -7191,6 +7198,7 @@ mod tests {
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            custody_passphrase: Some(Arc::new(Zeroizing::new("d9-test".to_owned()))),
             group_kinds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             multi_home: None,
             fediverse: None,
@@ -7300,10 +7308,7 @@ mod tests {
             reply_to_actor_url: None,
             mentions: vec![],
         };
-        let err = client
-            .publish_public_post("josh", None, &post)
-            .await
-            .unwrap_err();
+        let err = client.publish_public_post("josh", &post).await.unwrap_err();
         match err {
             ChatError::Invalid(msg) => assert!(
                 msg.contains("fediverse transport not configured"),
@@ -7338,7 +7343,7 @@ mod tests {
         let relay = format!("{}/", relay_server.uri()).parse().unwrap();
         let registry = "http://unused.invalid/".parse().unwrap();
         let outcome = client
-            .mint_and_register_actor("alice", "etchit.io", Some("d9-test"), &relay, &registry, 1)
+            .mint_and_register_actor("alice", "etchit.io", &relay, &registry, 1)
             .await
             .expect("one-tap mint publishes the minimal profile then mints");
         assert!(
@@ -7350,6 +7355,26 @@ mod tests {
         assert!(!outcome.registered);
         assert!(outcome.registration_error.is_some());
         // relay_server drop asserts the .expect(1) minimal-publish POST fired.
+    }
+
+    #[tokio::test]
+    async fn actor_vault_round_trips_under_retained_passphrase_custody() {
+        // The client retains its build-time custody, so a vault minted
+        // through it must reload with no per-call passphrase. This is
+        // the c2e0e0df bug class: a `None` passed against a
+        // passphrase-mode vault compiled fine and failed only at
+        // runtime on mobile; retention makes the mismatch impossible.
+        let (client, _dir) = test_client_no_denylist();
+        client
+            .mint_actor_identity("alice", "etchit.io")
+            .await
+            .expect("mint under retained passphrase custody");
+        let loaded = client
+            .load_actor_identity("alice")
+            .await
+            .expect("load resolves the same retained custody")
+            .expect("identity persisted");
+        assert_eq!(loaded.handle, "alice");
     }
 
     #[tokio::test]
@@ -7367,7 +7392,7 @@ mod tests {
         let relay = format!("{}/", relay_server.uri()).parse().unwrap();
         let registry = "http://unused.invalid/".parse().unwrap();
         let outcome = client
-            .ensure_actor_v2_and_register("alice", None, &relay, &registry, 1)
+            .ensure_actor_v2_and_register("alice", &relay, &registry, 1)
             .await
             .expect("ensure pass reports pending, never errors on a blocker");
         assert!(!outcome.upgraded);

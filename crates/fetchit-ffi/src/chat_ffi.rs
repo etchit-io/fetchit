@@ -1175,7 +1175,7 @@ impl ChatClient {
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let outcome = self
             .inner
-            .mint_and_register_actor(&handle, FEDI_DOMAIN, None, &relay, &registry_base, now_ms)
+            .mint_and_register_actor(&handle, FEDI_DOMAIN, &relay, &registry_base, now_ms)
             .await
             .map_err(ChatFfiError::from)?;
         Ok(MintOutcomeFfi {
@@ -1215,7 +1215,7 @@ impl ChatClient {
         };
         let report = self
             .inner
-            .publish_public_post(&handle, None, &post)
+            .publish_public_post(&handle, &post)
             .await
             .map_err(ChatFfiError::from)?;
         Ok(PublishReportFfi {
@@ -1257,7 +1257,7 @@ impl ChatClient {
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let outcome = self
             .inner
-            .ensure_actor_v2_and_register(&handle, None, &relay, &registry_base, now_ms)
+            .ensure_actor_v2_and_register(&handle, &relay, &registry_base, now_ms)
             .await
             .map_err(ChatFfiError::from)?;
         Ok(EnsureV2Ffi {
