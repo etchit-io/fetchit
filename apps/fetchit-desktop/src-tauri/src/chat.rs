@@ -1027,7 +1027,11 @@ pub async fn chat_pending_joins(
     state: tauri::State<'_, ChatState>,
 ) -> Result<Vec<String>, String> {
     ensure_chat_enabled(&app_state)?;
-    state.get().await?.pending_joins().map_err(|e| e.to_string())
+    state
+        .get()
+        .await?
+        .pending_joins()
+        .map_err(|e| e.to_string())
 }
 
 /// Advance every due durable join one step and return the group ids STILL
