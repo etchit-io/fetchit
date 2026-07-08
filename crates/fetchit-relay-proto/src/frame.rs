@@ -6,7 +6,7 @@
 
 use crate::capability::{CapabilityToken, EffectiveCapabilities};
 use crate::envelope::TransitEnvelope;
-use crate::identity::{AgentId, DedupeKey, TenantId};
+use crate::identity::{AgentId, DedupeKey, GroupId, TenantId};
 use crate::region::Region;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,13 @@ pub enum ClientFrame {
     /// reclaim them. Appended last so the discriminants of every earlier
     /// variant stay stable on the postcard wire.
     TransitAck(TransitAck),
+    /// Deposit one opaque record onto a group's append-only log.
+    /// Appended after `TransitAck` so the discriminants of every
+    /// earlier variant stay stable on the postcard wire.
+    LogAppend(LogAppend),
+    /// Request group-log records newer than a sequence number.
+    /// Appended after `LogAppend` for the same wire-compat reason.
+    LogFetch(LogFetch),
 }
 
 /// Top-level message emitted by the relay.
@@ -72,6 +79,11 @@ pub enum ServerFrame {
     /// Appended last so the discriminants of every earlier variant are
     /// stable on the postcard wire.
     Moved(Moved),
+    /// A chunk of group-log records answering a [`LogFetch`].
+    ///
+    /// Appended after `Moved` so the discriminants of every earlier
+    /// variant stay stable on the postcard wire.
+    LogRecords(LogRecords),
 }
 
 /// Opening handshake from the client.
@@ -180,6 +192,78 @@ pub struct Deliver {
 pub struct TransitAck {
     /// The [`Deliver::transit_seq`] values the client has accepted.
     pub acked_ids: Vec<u64>,
+}
+
+/// What a group-log record carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogRecordKind {
+    /// A group commit, served to every fetcher of the group.
+    Commit,
+    /// A join result addressed to exactly one joining agent.
+    JoinResult,
+}
+
+/// Client deposits one opaque record onto a group's append-only log.
+///
+/// The relay assigns the per-group sequence number and never inspects
+/// the payload. Fire-and-forget: success produces no reply; a cap
+/// rejection produces a [`Throttle`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogAppend {
+    /// Group whose log receives the record.
+    pub group_id: GroupId,
+    /// Record kind.
+    pub kind: LogRecordKind,
+    /// `None` for a [`LogRecordKind::Commit`]; `Some(joiner)` for a
+    /// [`LogRecordKind::JoinResult`] so the relay can gate fetches to
+    /// the addressed agent.
+    pub recipient: Option<AgentId>,
+    /// Opaque ciphertext payload.
+    pub payload: Vec<u8>,
+}
+
+/// Client requests group-log records with `seq > since_seq`.
+///
+/// `since_seq = 0` fetches from the beginning: assigned sequence
+/// numbers start at 1.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogFetch {
+    /// Group whose log is being read.
+    pub group_id: GroupId,
+    /// Only records with a sequence number strictly greater than this
+    /// are returned.
+    pub since_seq: u64,
+}
+
+/// One group-log record as carried in a [`LogRecords`] reply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogRecordWire {
+    /// Relay-assigned per-group sequence number (starts at 1, never
+    /// reused within a group).
+    pub seq: u64,
+    /// Record kind.
+    pub kind: LogRecordKind,
+    /// `None` for a [`LogRecordKind::Commit`]; `Some(joiner)` for a
+    /// [`LogRecordKind::JoinResult`].
+    pub recipient: Option<AgentId>,
+    /// Opaque ciphertext payload.
+    pub payload: Vec<u8>,
+    /// Server timestamp at append, milliseconds since the Unix epoch.
+    pub inserted_at_ms: u64,
+}
+
+/// A chunk of group-log records answering a [`LogFetch`], ordered by
+/// ascending `seq`. `done` is `true` on the final chunk of the reply;
+/// an empty fetch result is a single frame with no records and
+/// `done = true`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogRecords {
+    /// Group the records belong to.
+    pub group_id: GroupId,
+    /// Records in ascending `seq` order.
+    pub records: Vec<LogRecordWire>,
+    /// `true` on the final chunk of this reply.
+    pub done: bool,
 }
 
 /// Soft rejection with a retry hint.
@@ -415,6 +499,107 @@ mod tests {
             let decoded: ServerFrame = postcard::from_bytes(&bytes).unwrap();
             assert_eq!(frame, decoded);
         }
+    }
+
+    #[test]
+    fn log_append_roundtrips() {
+        use crate::identity::GROUP_ID_LEN;
+        for (kind, recipient) in [
+            (LogRecordKind::Commit, None),
+            (
+                LogRecordKind::JoinResult,
+                Some(AgentId::from_bytes([5u8; AGENT_ID_LEN])),
+            ),
+        ] {
+            let frame = ClientFrame::LogAppend(LogAppend {
+                group_id: GroupId::from_bytes([2u8; GROUP_ID_LEN]),
+                kind,
+                recipient,
+                payload: vec![0xee; 48],
+            });
+            let bytes = postcard::to_allocvec(&frame).unwrap();
+            let decoded: ClientFrame = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(frame, decoded);
+        }
+    }
+
+    #[test]
+    fn log_fetch_roundtrips() {
+        use crate::identity::GROUP_ID_LEN;
+        let frame = ClientFrame::LogFetch(LogFetch {
+            group_id: GroupId::from_bytes([3u8; GROUP_ID_LEN]),
+            since_seq: 41,
+        });
+        let bytes = postcard::to_allocvec(&frame).unwrap();
+        let decoded: ClientFrame = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn log_records_roundtrips() {
+        use crate::identity::GROUP_ID_LEN;
+        let frame = ServerFrame::LogRecords(LogRecords {
+            group_id: GroupId::from_bytes([4u8; GROUP_ID_LEN]),
+            records: vec![
+                LogRecordWire {
+                    seq: 1,
+                    kind: LogRecordKind::Commit,
+                    recipient: None,
+                    payload: vec![0xaa; 16],
+                    inserted_at_ms: 1_700_000_000_000,
+                },
+                LogRecordWire {
+                    seq: 2,
+                    kind: LogRecordKind::JoinResult,
+                    recipient: Some(AgentId::from_bytes([6u8; AGENT_ID_LEN])),
+                    payload: vec![0xbb; 16],
+                    inserted_at_ms: 1_700_000_000_001,
+                },
+            ],
+            done: true,
+        });
+        let bytes = postcard::to_allocvec(&frame).unwrap();
+        let decoded: ServerFrame = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn log_frames_do_not_shift_existing_discriminants() {
+        use crate::identity::GROUP_ID_LEN;
+        // LogAppend / LogFetch are appended LAST on ClientFrame and
+        // LogRecords LAST on ServerFrame: the wire bytes of every
+        // pre-existing variant must stay identical, or mixed-version
+        // relays and clients misparse each other.
+        let ack = ClientFrame::TransitAck(TransitAck { acked_ids: vec![] });
+        let bytes = postcard::to_allocvec(&ack).unwrap();
+        assert_eq!(bytes[0], 6, "TransitAck must keep postcard discriminant 6");
+        let append = ClientFrame::LogAppend(LogAppend {
+            group_id: GroupId::from_bytes([0u8; GROUP_ID_LEN]),
+            kind: LogRecordKind::Commit,
+            recipient: None,
+            payload: vec![],
+        });
+        let bytes = postcard::to_allocvec(&append).unwrap();
+        assert_eq!(bytes[0], 7, "LogAppend is the appended discriminant 7");
+        let fetch = ClientFrame::LogFetch(LogFetch {
+            group_id: GroupId::from_bytes([0u8; GROUP_ID_LEN]),
+            since_seq: 0,
+        });
+        let bytes = postcard::to_allocvec(&fetch).unwrap();
+        assert_eq!(bytes[0], 8, "LogFetch is the appended discriminant 8");
+
+        let moved = ServerFrame::Moved(Moved {
+            dedupe_key: DedupeKey::from_bytes([3u8; DEDUPE_KEY_LEN]),
+        });
+        let bytes = postcard::to_allocvec(&moved).unwrap();
+        assert_eq!(bytes[0], 7, "Moved must keep postcard discriminant 7");
+        let records = ServerFrame::LogRecords(LogRecords {
+            group_id: GroupId::from_bytes([0u8; GROUP_ID_LEN]),
+            records: vec![],
+            done: true,
+        });
+        let bytes = postcard::to_allocvec(&records).unwrap();
+        assert_eq!(bytes[0], 8, "LogRecords is the appended discriminant 8");
     }
 
     #[test]
