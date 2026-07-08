@@ -163,34 +163,6 @@ open class FetchitApplication : Application() {
             }
         }
     }
-
-    /**
-     * Rehydrate the chat runtime when the app returns to the foreground.
-     * Paired with [disconnectAll]: once the idle grace period tears the
-     * chat client down, a return to an already-open chat screen would
-     * otherwise show empty group and conversation surfaces until a full
-     * relaunch, because there is no in-pump reconnect and Activity resume
-     * does not reconnect. Reconnecting here refills them.
-     *
-     * Guards on the [_chatController] nullable backing field, never the
-     * [chatController] getter: a foreground event must not construct the
-     * chat runtime for users who never opened chat (mirrors [disconnectAll]).
-     * A no-op when chat is already live: [ChatController.ensureGateway]
-     * fast-paths a running pump and the group reload is a cheap local read.
-     */
-    private fun reconnectChatIfActive() {
-        val controller = _chatController ?: return
-        appScope.launch {
-            try {
-                controller.ensureGateway()
-                controller.refreshGroups()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                android.util.Log.w("fetchit.chat", "foreground chat reconnect failed", e)
-            }
-        }
-    }
 }
 
 /** Convenience accessor for activities and fragments. */
