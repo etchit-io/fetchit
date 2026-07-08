@@ -331,6 +331,14 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          # RUSTFLAGS emptied: this cross-compiles the full external dependency
+          # tree (x0x-fork + ant-core + saorsa + …), which must NOT be gated on
+          # our global `-D warnings` — same reason as the clippy-fetchit-ffi and
+          # uniffi-bindgen steps above (e.g. x0x-fork's cli/daemon.rs carries
+          # unused-variable warnings that would otherwise fail the release
+          # build). fetchit-ffi's OWN code is still gated strictly by the
+          # dedicated clippy job.
+          RUSTFLAGS: ""
         run: ./scripts/build-jni-libs.sh
 
       - name: Build debug APK
