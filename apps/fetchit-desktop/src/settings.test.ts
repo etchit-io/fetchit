@@ -58,6 +58,8 @@ function makeRouter(
       (args as { peers?: string[] } | undefined)?.peers ?? [],
     reset_peers_override: () => undefined,
     refresh_peers_from_upstream: () => ({ peers: [], updated: false }),
+    display_name: () => "",
+    set_display_name: () => undefined,
   };
   const table = { ...defaults, ...overrides };
   return (cmd: string, args?: Record<string, unknown>) => {
@@ -542,5 +544,46 @@ describe("settings view my profile", () => {
     expect(btn).not.toBeNull();
     btn!.click();
     expect(onViewMyProfile).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("display name", () => {
+  it("lives at the top level, not inside Advanced", () => {
+    mountSettings(host, defaultHooks());
+    const section = host.querySelector("#group-name");
+    expect(section).not.toBeNull();
+    expect(section?.closest("#group-advanced")).toBeNull();
+    expect(section?.closest("details")).toBeNull();
+  });
+
+  it("populates from the backend and saves the trimmed name", async () => {
+    (invoke as unknown as InvokeMock).mockImplementation(
+      makeRouter({ display_name: () => "Alice" }),
+    );
+    mountSettings(host, defaultHooks());
+    await flush();
+    const input = host.querySelector<HTMLInputElement>("#display-name-input");
+    expect(input?.value).toBe("Alice");
+
+    input!.value = "  Alice B  ";
+    host.querySelector<HTMLButtonElement>("[data-act=save-name]")!.click();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("set_display_name", { name: "Alice B" });
+    const status = host.querySelector<HTMLParagraphElement>("#display-name-status");
+    expect(status?.hidden).toBe(false);
+    expect(status?.textContent).toContain("Saved");
+  });
+
+  it("refuses an empty name without calling the backend", async () => {
+    mountSettings(host, defaultHooks());
+    await flush();
+    const input = host.querySelector<HTMLInputElement>("#display-name-input")!;
+    input.value = "   ";
+    (invoke as unknown as InvokeMock).mockClear();
+    host.querySelector<HTMLButtonElement>("[data-act=save-name]")!.click();
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith("set_display_name", expect.anything());
+    const status = host.querySelector<HTMLParagraphElement>("#display-name-status");
+    expect(status?.textContent).toContain("empty");
   });
 });
