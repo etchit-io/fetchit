@@ -431,6 +431,7 @@ fn inbound_envelope_from_transit(from: AgentId, env: TransitEnvelope) -> Option<
         timestamp_ms: env.timestamp_ms,
         transport_name: TRANSPORT_NAME,
         transit: Some(env),
+        ack: None,
     })
 }
 

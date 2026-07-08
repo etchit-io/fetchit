@@ -130,6 +130,66 @@ pub fn group_resend_envelope(
     })
 }
 
+/// One-shot confirmation that an inbound envelope's effects are durably
+/// applied — persisted to the vault, provably a duplicate, or terminally
+/// unprocessable — so the delivering transport may reclaim its stored
+/// copy (the relay's durable transit entry).
+///
+/// Dropping the token WITHOUT calling [`DeliveryAck::confirm`] means
+/// "not done yet": the transport keeps the envelope and redelivers it on
+/// a later connect, bounded by the relay's transit TTL. That is the safe
+/// direction for transient failures — a group frame that is
+/// undecryptable at the current epoch (`StaleEpoch` class) becomes
+/// readable after a re-key, and the redelivery self-fills the gap.
+///
+/// Clones share the same one-shot: the first `confirm` wins, later calls
+/// are no-ops.
+pub struct DeliveryAck {
+    inner: std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+}
+
+impl DeliveryAck {
+    /// Wrap the transport-side reclaim action (e.g. sending a
+    /// `TransitAck` for this envelope's durable id).
+    pub fn new(reclaim: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(Some(Box::new(reclaim)))),
+        }
+    }
+
+    /// Fire the reclaim action. Idempotent across clones: only the first
+    /// call runs it.
+    pub fn confirm(&self) {
+        let taken = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(reclaim) = taken {
+            reclaim();
+        }
+    }
+}
+
+impl Clone for DeliveryAck {
+    fn clone(&self) -> Self {
+        Self {
+            inner: std::sync::Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl std::fmt::Debug for DeliveryAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let armed = self
+            .inner
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or_default();
+        f.debug_struct("DeliveryAck").field("armed", &armed).finish()
+    }
+}
+
 /// One inbound message decoded enough for the chat layer to route.
 #[derive(Clone, Debug)]
 pub struct InboundEnvelope {
@@ -148,6 +208,16 @@ pub struct InboundEnvelope {
     /// envelope (KEM ciphertext, signature, epoch, nonce). Transports
     /// without a wire `TransitEnvelope` leave it `None`.
     pub transit: Option<TransitEnvelope>,
+    /// Ack-after-persist token for durably-replayed deliveries: `Some`
+    /// when the transport holds a reclaimable stored copy (the relay's
+    /// durable transit entry). The consumer calls
+    /// [`DeliveryAck::confirm`] ONLY once the envelope's effects are
+    /// durable (vault-persisted, provable duplicate, or terminally
+    /// unprocessable); anything transient — `StaleEpoch`-class frames,
+    /// vault I/O errors — leaves the token unconfirmed so the relay
+    /// redelivers. `None` for direct pushes and transports without a
+    /// stored copy.
+    pub ack: Option<DeliveryAck>,
 }
 
 /// A message-transport that can send and receive chat envelopes.
@@ -271,6 +341,34 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
+
+    #[test]
+    fn delivery_ack_fires_once_across_clones() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = Arc::clone(&count);
+        let ack = DeliveryAck::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        });
+        let clone = ack.clone();
+        ack.confirm();
+        clone.confirm();
+        ack.confirm();
+        assert_eq!(count.load(Ordering::SeqCst), 1, "one-shot across clones");
+    }
+
+    #[test]
+    fn delivery_ack_dropped_unconfirmed_never_fires() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = Arc::clone(&count);
+        drop(DeliveryAck::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "drop without confirm must leave the stored copy reclaimable later"
+        );
+    }
 
     struct ScriptedTransport {
         name: &'static str,
