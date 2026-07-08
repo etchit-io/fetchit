@@ -2056,6 +2056,16 @@ impl Client {
                 .apply_join_result(&stable_group_id, &member, &wrapper.payload_b64, &owner_hex)
                 .await
                 .map_err(ChatError::from)?;
+            // Applying the owner's join-result IS the keying event: this
+            // durable pending-join has converged. Remove the intent so the
+            // resume driver stops re-pulling it. This is the authoritative
+            // `ActiveKeyed` signal -- a read-only keyed probe on `/members`
+            // is the deferred x0xd ask, so until it lands convergence is
+            // observed here at the apply site, not by polling. Best-effort:
+            // a stale record only costs one idempotent re-bridge next tick.
+            if let Ok(store) = self.pending_join_store() {
+                let _ = store.remove(&stable_group_id);
+            }
             return Ok(());
         }
 
@@ -2502,6 +2512,396 @@ impl Client {
         )
         .await?;
         Ok(group)
+    }
+
+    /// Open the durable pending-join store under the chat data dir.
+    fn pending_join_store(&self) -> Result<crate::groups::pending_join::PendingJoinStore> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("durable join requires chat state".into()))?;
+        crate::groups::pending_join::PendingJoinStore::open(chat.layout.root.join("pending_joins"))
+    }
+
+    /// Group ids with a durable pending join still in progress — shells show
+    /// these as "joining…" rather than a failure.
+    ///
+    /// # Errors
+    /// Propagates a store listing error.
+    pub fn pending_joins(&self) -> Result<Vec<String>> {
+        Ok(self
+            .pending_join_store()?
+            .list()?
+            .into_iter()
+            .filter(|r| !r.is_terminal())
+            .map(|r| r.group_id)
+            .collect())
+    }
+
+    /// Build a persistable pending-join record from the one captured event,
+    /// caching the owner + own KEM keys so a re-bridge needs no re-resolution.
+    async fn build_pending_join(
+        &self,
+        gid_hex: &str,
+        invite_hash: &str,
+        captured: &crate::groups::join_bridge::CapturedSelfJoin,
+    ) -> Result<crate::groups::pending_join::PendingJoin> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("durable join requires chat state".into()))?;
+        let owner_hex =
+            crate::groups::join_bridge::inviter_agent_id_from_member_joined(&captured.payload)
+                .ok_or_else(|| {
+                    ChatError::Invalid("durable join: captured event has no inviter".into())
+                })?;
+        let primary_snapshot = self.primary_relay_url.read().await.clone();
+        let relay = primary_snapshot
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok());
+        let http = crate::relay_http::guarded_client();
+        let owner_kem = crate::groups::bridge::resolve_owner_kem_with_fallback(
+            &chat.layout,
+            relay.as_ref(),
+            &http,
+            &owner_hex,
+        )
+        .await?;
+        // Resolve the owner's rendezvous relay hints now (same resolution the
+        // first bridge uses), with a primary-relay fallback, and cache the
+        // relay URLs on the record. A resume re-bridge then routes to the owner
+        // even when they are not on our primary relay -- never a `None` hint
+        // (PR #7 B1). Empty only if neither a card nor a primary relay exists.
+        let owner_relay_hints =
+            crate::messages::StoredContactCard::resolve_recipient_hints(&chat.layout, &owner_hex)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    primary_snapshot
+                        .as_deref()
+                        .map(|url| crate::card::RendezvousHintsV1 {
+                            relays: vec![url.to_owned()],
+                        })
+                })
+                .map(|h| h.relays)
+                .unwrap_or_default();
+        Ok(crate::groups::pending_join::PendingJoin::new(
+            gid_hex.to_owned(),
+            b64.encode(&captured.payload),
+            captured.topic.clone(),
+            invite_hash.to_owned(),
+            owner_hex,
+            b64.encode(&owner_kem),
+            owner_relay_hints,
+            b64.encode(chat.identity.kem_public_key()),
+            crate::groups::pending_join_driver::now_ms(),
+        ))
+    }
+
+    /// Re-bridge a saved pending-join to its owner — byte-identical to the
+    /// first bridge, using the record's cached KEM keys, and NEVER
+    /// `join_post`. The driver's re-drive primitive.
+    async fn rebridge_pending(
+        &self,
+        record: &crate::groups::pending_join::PendingJoin,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("durable join requires chat state".into()))?;
+        let payload = b64
+            .decode(&record.captured_event_b64)
+            .map_err(|e| ChatError::Invalid(format!("pending-join payload b64: {e}")))?;
+        let owner_kem = b64
+            .decode(&record.owner_kem_pubkey_b64)
+            .map_err(|e| ChatError::Invalid(format!("pending-join owner_kem b64: {e}")))?;
+        let joiner_kem = b64
+            .decode(&record.joiner_kem_pubkey_b64)
+            .map_err(|e| ChatError::Invalid(format!("pending-join joiner_kem b64: {e}")))?;
+        let captured = crate::groups::join_bridge::CapturedSelfJoin {
+            topic: record.captured_topic.clone(),
+            payload,
+        };
+        let local_agent_id = chat.signer.agent_id();
+        // Reconstruct the owner's cached rendezvous hints so the re-bridge
+        // routes to the owner even when they are off our primary relay (PR #7
+        // B1) -- never a `None` hint, unless the record predates the field and
+        // no primary is set, in which case the router's primary-relay fallback
+        // still applies.
+        let hints = if record.owner_relay_hints.is_empty() {
+            None
+        } else {
+            Some(crate::card::RendezvousHintsV1 {
+                relays: record.owner_relay_hints.clone(),
+            })
+        };
+        crate::groups::join_bridge::emit_self_join_bridge(
+            &captured,
+            &record.owner_agent_id,
+            &owner_kem,
+            &joiner_kem,
+            &local_agent_id,
+            &chat.local_machine_id,
+            chat.signer.as_ref(),
+            &self.router,
+            hints.as_ref(),
+        )
+        .await
+    }
+
+    /// Durable join: `join_post` once, persist the intent, and return
+    /// [`groups::JoinOutcome`]. `Pending` is NOT an error — the persisted
+    /// record is completed by [`Self::drive_pending_joins_once`] (shell-pumped)
+    /// when the owner's daemon is next reachable, with no user action and no
+    /// second `join_post` (the single-use invite is spent at most once, G1).
+    /// This is the INITIAL-join entrypoint; resume is the driver, not a
+    /// re-call of this method.
+    ///
+    /// # Errors
+    /// Propagates `join_post` errors (malformed invite, self-join). A
+    /// non-convergence is returned as `Pending`, never an error.
+    pub async fn join_group_durable(
+        &self,
+        invite: &groups::GroupInvite,
+        display_name: Option<&str>,
+    ) -> Result<groups::JoinOutcome> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("client built without chat state".into()))?;
+        let self_id = crate::identity::AgentId(chat.identity.agent_id_hex().to_owned());
+        let store = self.pending_join_store()?;
+
+        // Resume pre-check (PR #7 #1): `GroupInvite` is opaque, so key the
+        // guard on `sha256(invite)`. If a non-terminal intent already exists
+        // for this exact invite, a second `join_post` would spend the
+        // single-use secret again — the bug this method exists to prevent. So
+        // return the in-progress `Pending` and let the driver finish it. This
+        // makes G1 structural at the ENTRY, not just inside the driver.
+        let invite_hash = {
+            use sha2::Digest as _;
+            let mut h = sha2::Sha256::new();
+            h.update(invite.0.as_bytes());
+            hex::encode(h.finalize())
+        };
+        if let Some(existing) = store
+            .list()?
+            .into_iter()
+            .find(|r| !r.is_terminal() && r.invite_hash == invite_hash)
+        {
+            return Ok(groups::JoinOutcome::Pending {
+                group_id: existing.group_id,
+            });
+        }
+
+        // Exactly one join_post; the captured event is reused by the bridge
+        // and persisted so a resume never re-`join_post`s (G1).
+        let (group, captured) = self.groups().join_post(invite, display_name).await?;
+        let gid_hex = group.group_id.as_str().to_owned();
+        // A durable record lands on disk only when the daemon returned the
+        // inline captured event (persisted below). This governs the
+        // transient-error arm: a `Pending` with no record has nothing to
+        // resume, so it must propagate instead (PR #7 B2).
+        let persisted = captured.is_some();
+
+        // Persist the intent BEFORE the wait so a timeout leaves a durable
+        // record the driver completes. Needs the inline captured event; an
+        // unpatched daemon that returns none just gets the plain wait below.
+        // PR #7 #2: a persist failure must PROPAGATE — returning `Pending`
+        // with no record on disk means the invite is spent but the driver has
+        // nothing to resume (the pre-PR silent-never-completes failure).
+        if let Some(cap) = &captured {
+            let record = self.build_pending_join(&gid_hex, &invite_hash, cap).await?;
+            store.upsert(&record)?;
+        }
+
+        let native_wait = crate::groups::membership::native_first_wait();
+        let outcome = Self::run_native_then_bridge(
+            captured,
+            {
+                let gid = group.group_id.clone();
+                let self_id = self_id.clone();
+                move || async move {
+                    self.groups()
+                        .wait_membership(
+                            &gid,
+                            &self_id,
+                            native_wait,
+                            crate::groups::membership::MEMBERSHIP_POLL_INTERVAL,
+                        )
+                        .await
+                }
+            },
+            |cap| {
+                let group = &group;
+                async move { self.bridge_captured_join(group, &cap).await }
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(()) => {
+                let _ = store.remove(&gid_hex);
+                Ok(groups::JoinOutcome::Converged(group))
+            }
+            Err(ChatError::JoinerNotConverged { .. }) => {
+                Ok(groups::JoinOutcome::Pending { group_id: gid_hex })
+            }
+            Err(e) => {
+                // Post-`join_post`: the single-use invite is already spent, so
+                // a bridge/wait failure here is transient (owner offline, relay
+                // blip) -- a malformed or already-consumed invite fails at
+                // `join_post` above, never here. Keep the durable record and
+                // report Pending so the driver completes it; removing it would
+                // strand a spent invite (PR #7 B2). Only when NO record was
+                // persisted (an unpatched daemon returned no inline event) is
+                // there nothing to resume, so propagate the error instead.
+                if persisted {
+                    Ok(groups::JoinOutcome::Pending { group_id: gid_hex })
+                } else {
+                    let _ = store.remove(&gid_hex);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Pump the durable pending-join resume once: for each record DUE for a
+    /// retry ([`is_due`](crate::groups::pending_join_driver::is_due), N1),
+    /// probe membership and either converge (remove) or re-bridge the SAVED
+    /// event (never `join_post`). Shells call this on startup and on a timer /
+    /// presence-online, mirroring the outbox driver.
+    ///
+    /// # Errors
+    /// Propagates a store listing error.
+    pub async fn drive_pending_joins_once(
+        &self,
+    ) -> Result<Vec<(String, crate::groups::pending_join_driver::DriveOutcome)>> {
+        use std::future::Future;
+
+        use crate::groups::pending_join::PendingJoin;
+        use crate::groups::pending_join_driver::{
+            is_due, now_ms, DriveOutcome, JoinBridge, MembershipProbe, MembershipStatus,
+            PendingJoinDriver, SystemClock,
+        };
+
+        // Production probe: read the roster over the client's `Groups` view.
+        // `Absent` (owner has not applied our join) => re-bridge the saved
+        // event; anything in the roster => `ListedButUnkeyed` => re-request the
+        // Welcome. It deliberately never returns `ActiveKeyed`, and here is why
+        // Bob's decrypt / `apply_join_result`-409 keyed-probe (PR #7 B-review)
+        // is NOT wired: (a) fetchit persists no inbound frame to read-only
+        // `/secure/decrypt` -- a cold-start joiner (the only case this driver
+        // ever sees) has received no group message yet, so there is nothing to
+        // decrypt; (b) `apply_join_result` / `apply_metadata_event` RE-RUN the
+        // single-use `invite_secret` check, so probing with the captured
+        // `member_joined` risks re-spending the invite -- the exact G1 violation
+        // this feature exists to prevent; (c) the owner's `MemberAdded`
+        // join-result exists only at the instant of keying, which is precisely
+        // when the inbound apply removes the record, so "record present" and
+        // "keyed" are mutually exclusive in time. Convergence is therefore
+        // signalled authoritatively at the inbound apply site
+        // (`dispatch_inbound_bridge`), which removes the record. Erring toward
+        // `ListedButUnkeyed` is the safe direction -- at worst one idempotent
+        // re-bridge per tick, never the false `Converged` that stranded a
+        // keyless member in the old roster-only loop (PR #7 review #3). A real
+        // read-only `ActiveKeyed` probe needs a `keyed_epoch` on `/members` --
+        // an x0x-fork endpoint we have not built yet.
+        struct Probe<'a> {
+            client: &'a Client,
+        }
+        impl MembershipProbe for Probe<'_> {
+            fn status(
+                &self,
+                group_id: &str,
+            ) -> impl Future<Output = std::result::Result<MembershipStatus, ChatError>> + Send
+            {
+                let client = self.client;
+                let gid = group_id.to_owned();
+                async move {
+                    let self_hex = client
+                        .chat
+                        .as_ref()
+                        .map(|c| c.identity.agent_id_hex().to_owned())
+                        .ok_or_else(|| {
+                            ChatError::Invalid("durable join requires chat state".into())
+                        })?;
+                    let parsed = crate::groups::GroupId::parse(&gid)?;
+                    let list = client.groups().members(&parsed).await?;
+                    Ok(if list.iter().any(|a| a.0 == self_hex) {
+                        MembershipStatus::ListedButUnkeyed
+                    } else {
+                        MembershipStatus::Absent
+                    })
+                }
+            }
+        }
+
+        // Production bridge: both arms re-emit the SAVED event (never
+        // `join_post`, G1). The owner's `reply_to_bridged_join` re-applies the
+        // member_joined and re-stages+re-bridges the Welcome on every received
+        // bridge, so re-bridging IS the Welcome re-request. `request_join_result`
+        // is kept a distinct entrypoint (Bob's Decision 3) so the warm
+        // epoch-catch-up recovery can extend it without touching the cold path.
+        // KNOWN LIMITATION (PR #7 M1): today `request_join_result` aliases
+        // `rebridge`, and the owner's re-stage is a no-op outside the relay's
+        // 10-minute JoinResult TTL, so a resume later than that window relies on
+        // the owner still holding the staged result. It converges inside the
+        // window; the durable relay Commit-log re-stage (the warm-recovery
+        // build) lifts the limit. Tracked, not blocking.
+        struct Bridge<'a> {
+            client: &'a Client,
+        }
+        impl JoinBridge for Bridge<'_> {
+            fn rebridge(
+                &self,
+                record: &PendingJoin,
+            ) -> impl Future<Output = std::result::Result<(), ChatError>> + Send {
+                let client = self.client;
+                let record = record.clone();
+                async move { client.rebridge_pending(&record).await }
+            }
+            fn request_join_result(
+                &self,
+                record: &PendingJoin,
+            ) -> impl Future<Output = std::result::Result<(), ChatError>> + Send {
+                let client = self.client;
+                let record = record.clone();
+                async move { client.rebridge_pending(&record).await }
+            }
+        }
+
+        if self.chat.is_none() {
+            return Ok(Vec::new());
+        }
+        let store = self.pending_join_store()?;
+        let driver = PendingJoinDriver::new(
+            self.pending_join_store()?,
+            Bridge { client: self },
+            Probe { client: self },
+            SystemClock,
+        );
+
+        // N1: the LOOP gates by `is_due`; `drive_once` acts on every call, so
+        // only hand it records past their backoff. A not-yet-due record stays
+        // Pending, untouched.
+        let mut out = Vec::new();
+        for record in store.list()? {
+            if record.is_terminal() {
+                continue;
+            }
+            if !is_due(&record, now_ms()) {
+                out.push((record.group_id.clone(), DriveOutcome::Pending));
+                continue;
+            }
+            let gid = record.group_id.clone();
+            out.push((gid, driver.drive_once(record).await?));
+        }
+        Ok(out)
     }
 
     /// Pure native-best-effort-then-always-bridge orchestration over a

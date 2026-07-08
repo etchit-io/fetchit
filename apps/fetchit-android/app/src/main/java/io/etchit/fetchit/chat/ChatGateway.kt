@@ -6,6 +6,7 @@ import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.CreatedLinkOfferFfi
 import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
+import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 
@@ -58,6 +59,26 @@ interface ChatGateway {
 
     /** Join a group from an `x0x://invite/...` link, presenting [displayName]. */
     suspend fun joinGroup(invite: String, displayName: String?): GroupFfi
+
+    /**
+     * Durable join: like [joinGroup] but a join that cannot converge now
+     * (owner offline) returns [JoinOutcomeFfi.Pending] the resume pump
+     * completes when the owner is next reachable -- never a hard error, never
+     * a re-spent invite. Call [drivePendingJoins] on a timer to advance
+     * pending joins; [pendingJoins] lists the ones still in flight.
+     */
+    suspend fun joinGroupDurable(invite: String, displayName: String?): JoinOutcomeFfi
+
+    /** Group ids with a durable join still in progress (draw "joining…"). */
+    fun pendingJoins(): List<String>
+
+    /**
+     * Advance every due durable join one step; returns the group ids STILL
+     * pending after this pass, so a timer can refresh badges and detect
+     * convergence (a group leaving the set). Idempotent; a no-op when nothing
+     * is pending, and never a second `join_post`.
+     */
+    suspend fun drivePendingJoins(): List<String>
 
     /**
      * Send [body] to [groupId], routed private/public by the engine's
@@ -162,6 +183,10 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.createGroup(name, displayName, private)
     override suspend fun joinGroup(invite: String, displayName: String?): GroupFfi =
         inner.joinGroup(invite, displayName)
+    override suspend fun joinGroupDurable(invite: String, displayName: String?): JoinOutcomeFfi =
+        inner.joinGroupDurable(invite, displayName)
+    override fun pendingJoins(): List<String> = inner.pendingJoins()
+    override suspend fun drivePendingJoins(): List<String> = inner.drivePendingJoinsOnce()
     override suspend fun sendGroupMessage(groupId: String, body: String, senderName: String): String? =
         // The regenerated bindings return a richer GroupSendReceiptFfi
         // (messageId + delivered); the gateway keeps its String? message-id

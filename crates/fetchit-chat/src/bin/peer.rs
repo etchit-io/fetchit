@@ -45,7 +45,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fetchit_chat::conversation::{dispatch_inbound, InboundDispatch};
-use fetchit_chat::groups::{GroupId, GroupInvite};
+use fetchit_chat::groups::{GroupId, GroupInvite, JoinOutcome};
 use fetchit_chat::identity::AgentId;
 use fetchit_chat::messages::{
     decode_direct_message, is_private_group_envelope, PrivateGroupReceive,
@@ -345,6 +345,16 @@ struct GroupChatArgs {
     /// requires `--invite-file`.
     #[arg(long)]
     auto: bool,
+
+    /// Drive the join through the durable pending-join path
+    /// ([`Client::join_group_durable`]): `join_post` runs at most once per
+    /// invite ever, and a join that cannot converge now (owner offline)
+    /// becomes a persisted `Pending` that the lifetime resume pump
+    /// auto-completes when the owner returns -- never a hard error, never a
+    /// re-spent invite. Mutually exclusive with `--auto`/`--engine-a`;
+    /// requires `--invite-file`.
+    #[arg(long)]
+    durable: bool,
 
     /// Path to a UTF-8 outbox file. When set, outbound group lines are
     /// read from this file (resuming from `--cursor-file`) instead of
@@ -669,6 +679,101 @@ async fn run_group_invite(client: &Client, group: &str) -> Result<()> {
     Ok(())
 }
 
+/// Perform the invite join per the selected policy. `--durable` is the
+/// pending-join path: a non-converged join returns as a persisted `Pending`
+/// (the lifetime resume pump completes it) instead of erroring, so an invite
+/// is never wasted and the join auto-completes when the owner is next
+/// reachable. The other policies converge-or-error exactly as before.
+async fn join_via_invite(
+    client: &Client,
+    invite: &GroupInvite,
+    display_name: &str,
+    args: &GroupChatArgs,
+) -> Result<()> {
+    if args.engine_a && args.auto {
+        anyhow::bail!("--engine-a and --auto are mutually exclusive");
+    }
+    if args.durable && (args.auto || args.engine_a) {
+        anyhow::bail!("--durable is mutually exclusive with --auto/--engine-a");
+    }
+    if args.durable {
+        eprintln!("[peer] joining via the durable path (join_group_durable)");
+        match client
+            .join_group_durable(invite, Some(display_name))
+            .await
+            .context("Client::join_group_durable(invite)")?
+        {
+            JoinOutcome::Converged(group) => eprintln!(
+                "[peer] joined group {} (membership convergence confirmed)",
+                group.group_id.as_str(),
+            ),
+            JoinOutcome::Pending { group_id } => eprintln!(
+                "[peer] join PENDING for {group_id} -- owner not yet reachable; the \
+                 resume pump will auto-complete it with no user action. Entering the \
+                 group loop now.",
+            ),
+        }
+        return Ok(());
+    }
+    let group = if args.auto {
+        eprintln!("[peer] joining via the v1 shared policy (join_group_auto)");
+        client
+            .join_group_auto(invite, Some(display_name))
+            .await
+            .context("Client::join_group_auto(invite)")?
+    } else if args.engine_a {
+        eprintln!("[peer] joining via engine-A cross-NAT bridge (join_group_bridged)");
+        client
+            .join_group_bridged(invite, Some(display_name))
+            .await
+            .context("Client::join_group_bridged(invite)")?
+    } else {
+        client
+            .groups()
+            .join(invite, Some(display_name))
+            .await
+            .context("Client::groups().join(invite)")?
+    };
+    eprintln!(
+        "[peer] joined group {} (membership convergence confirmed)",
+        group.group_id.as_str(),
+    );
+    Ok(())
+}
+
+/// Spawn the durable-join resume pump for the peer's lifetime: re-drive any
+/// persisted pending join to convergence on the driver's backoff. A join that
+/// could not converge at startup (owner offline) auto-completes here the
+/// moment the owner returns -- no user action, no re-spent invite, never a
+/// hard error. A pure no-op when nothing is pending; logs the pending set
+/// shrinking so the acceptance run (kill a seat mid-join, watch it rejoin)
+/// has a clear convergence signal.
+fn spawn_durable_join_pump(client: &Client) {
+    let pump_client = client.clone();
+    tokio::spawn(async move {
+        use std::collections::HashSet;
+        let mut prev: HashSet<String> = HashSet::new();
+        loop {
+            if let Err(e) = pump_client.drive_pending_joins_once().await {
+                eprintln!("[peer] pending-join pump error: {e}");
+            }
+            let now: HashSet<String> = pump_client
+                .pending_joins()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            for gid in prev.difference(&now) {
+                eprintln!(
+                    "[peer] durable join CONVERGED for {gid} -- now fully joined, no \
+                     user action taken"
+                );
+            }
+            prev = now;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+}
+
 /// Persistent group send/receive loop. When `invite_file` is set the
 /// peer joins the group via that invite link first. The loop then
 /// mirrors [`run_chat_outbox`]'s atomic-cursor rig -- a spawned inbound
@@ -721,32 +826,14 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
             invite.0.len(),
             invite_path.display(),
         );
-        if args.engine_a && args.auto {
-            anyhow::bail!("--engine-a and --auto are mutually exclusive");
-        }
-        let group = if args.auto {
-            eprintln!("[peer] joining via the v1 shared policy (join_group_auto)");
-            client
-                .join_group_auto(&invite, Some(display_name))
-                .await
-                .context("Client::join_group_auto(invite)")?
-        } else if args.engine_a {
-            eprintln!("[peer] joining via engine-A cross-NAT bridge (join_group_bridged)");
-            client
-                .join_group_bridged(&invite, Some(display_name))
-                .await
-                .context("Client::join_group_bridged(invite)")?
-        } else {
-            client
-                .groups()
-                .join(&invite, Some(display_name))
-                .await
-                .context("Client::groups().join(invite)")?
-        };
-        eprintln!(
-            "[peer] joined group {} (membership convergence confirmed)",
-            group.group_id.as_str(),
-        );
+        join_via_invite(client, &invite, display_name, args).await?;
+    }
+
+    // Durable-join resume pump: complete any persisted pending join whenever
+    // the owner's daemon is next reachable -- no user action, no re-spent
+    // invite, never a hard error. See `spawn_durable_join_pump`.
+    if args.durable {
+        spawn_durable_join_pump(client);
     }
 
     match (args.outbox_file.as_deref(), args.cursor_file.as_deref()) {

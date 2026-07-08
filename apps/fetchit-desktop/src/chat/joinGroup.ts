@@ -9,6 +9,12 @@ import type { Group } from "./types";
 export interface JoinGroupHandlers {
   onClose: () => void;
   onJoined: (group: Group) => void;
+  /**
+   * A join that could not converge yet (owner offline) succeeded as a durable
+   * `Pending` intent — NOT an error. The caller starts the resume pump so it
+   * auto-completes when the owner returns. Optional for back-compat.
+   */
+  onPending?: (groupId: string) => void;
 }
 
 export function mountJoinGroup(
@@ -85,9 +91,20 @@ export function mountJoinGroup(
     joinBtn.disabled = true;
     status.textContent = "Joining…";
     try {
-      const group = await joinGroup(uri, myDisplayName);
-      status.textContent = `Joined ${group.name ?? group.group_id.slice(0, 8)}.`;
-      handlers.onJoined(group);
+      const outcome = await joinGroup(uri, myDisplayName);
+      if (outcome.status === "converged") {
+        const group = outcome.group;
+        status.textContent = `Joined ${group.name ?? group.group_id.slice(0, 8)}.`;
+        handlers.onJoined(group);
+      } else {
+        // Pending: the owner is not reachable yet. This is NOT a failure — the
+        // join is a durable intent the resume pump completes on its own, so we
+        // reassure instead of showing the scary "Failed" the offline-owner
+        // case used to hit.
+        status.textContent
+          = "Joining… this finishes on its own when the owner is back online.";
+        handlers.onPending?.(outcome.group_id);
+      }
     } catch (e) {
       status.textContent = `Failed: ${friendlyError(e)}`;
       joinBtn.disabled = false;
