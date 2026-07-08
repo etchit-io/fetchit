@@ -4,7 +4,11 @@
 //! Undelivered envelopes are held in a [`transit::TransitStore`]: the
 //! in-RAM [`transit::TransitBuffer`] or the durable, blind,
 //! `SQLite`-backed [`transit_sqlite::SqliteTransitStore`] (ciphertext
-//! only, bounded retention, delete-on-ack).
+//! only, bounded retention, delete-on-ack). Per-group log records
+//! (commits, addressed join results) are held serve-to-many in a
+//! [`group_log::GroupLogStore`]: the in-RAM [`group_log::RamGroupLog`]
+//! or the durable [`group_log_sqlite::SqliteGroupLog`] sharing the
+//! transit store's database file.
 
 #![forbid(unsafe_code)]
 
