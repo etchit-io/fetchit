@@ -21,7 +21,7 @@ describe("settings panel", () => {
     await expect($("#settings")).toBeDisplayed();
 
     // Everyday sections are visible as soon as the panel opens.
-    for (const id of ["#group-bookmarks", "#group-about"]) {
+    for (const id of ["#group-name", "#group-bookmarks", "#group-about"]) {
       await expect($(id)).toBeDisplayed();
     }
 

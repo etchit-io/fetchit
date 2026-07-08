@@ -15,7 +15,7 @@
 // long string is rendered, and backdrop-click-to-close.
 
 import { confirmContact, removeContact } from "./api";
-import { errMsg } from "./errors";
+import { friendlyError } from "./errors";
 import type { ChatStore, PendingContact } from "./state";
 
 export interface PendingContactsHandlers {
@@ -147,7 +147,7 @@ function renderRow(entry: PendingContact, store: ChatStore): HTMLElement {
       await confirmContact(entry.groupIdHex);
       store.removePendingContact(entry.groupIdHex);
     } catch (e) {
-      status.textContent = `Failed: ${errMsg(e)}`;
+      status.textContent = `Couldn’t accept this contact. ${friendlyError(e)}`;
       lockButtons(false);
     }
   });
@@ -159,7 +159,7 @@ function renderRow(entry: PendingContact, store: ChatStore): HTMLElement {
       await removeContact(entry.peerAgentId);
       store.removePendingContact(entry.groupIdHex);
     } catch (e) {
-      status.textContent = `Failed: ${errMsg(e)}`;
+      status.textContent = `Couldn’t decline this contact. ${friendlyError(e)}`;
       lockButtons(false);
     }
   });
