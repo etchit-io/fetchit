@@ -555,6 +555,13 @@ pub struct Client {
     /// [`build_with_chat`]; `None` in REST-only mode (no actor identity
     /// vault, so nothing to sign with).
     fediverse: Option<Arc<FediverseTransport>>,
+    /// Task #297 (chat resilience): per-group MLS-epoch recovery status.
+    /// The dispatcher flips a group to `Reconnecting` when its inbound
+    /// decrypt fails (a stale/keyless epoch) and back to `Live` when
+    /// messages flow again; [`Self::recover_group_once`] drives the
+    /// catch-up. Shared across `Client` clones so the spawned dispatcher,
+    /// the shell's status getter, and any recovery driver observe one map.
+    group_recovery: crate::groups::epoch_recovery::GroupStatusMap,
 }
 
 impl Client {
@@ -694,6 +701,7 @@ impl Client {
             multi_home,
             fediverse,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
+            group_recovery: crate::groups::epoch_recovery::GroupStatusMap::new(),
         };
 
         // Best-effort pair-record publish: runs once at connect time so
@@ -1668,14 +1676,28 @@ impl Client {
             // the x0xd decrypt failures of a stale/keyless epoch — the
             // exact frames that must redeliver after re-key / epoch
             // catch-up — so they hold the token.
-            if self
+            match self
                 .messages()
                 .receive_private_group_envelope(&transit, &group_id_hex)
                 .await
-                .is_ok()
             {
-                if let Some(a) = &ack {
-                    a.confirm();
+                Ok(_) => {
+                    // Messages are flowing for this group again (fresh or a
+                    // replay both prove we are keyed) — clear any Reconnecting
+                    // a prior stale-epoch drop set (#297).
+                    self.group_recovery.set_live(&group_id_hex);
+                    if let Some(a) = &ack {
+                        a.confirm();
+                    }
+                }
+                Err(_) => {
+                    // Decrypt failed: a stale / keyless epoch (the StaleEpoch
+                    // loop). Surface Reconnecting so the shell shows catch-up
+                    // rather than a silent drop, and HOLD the frame (no ack)
+                    // for relay redelivery. `recover_group_once` drives the
+                    // actual catch-up; the warm commit-apply lands with the
+                    // durable Commit-log (#297 Lane A).
+                    self.group_recovery.set_reconnecting(&group_id_hex);
                 }
             }
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
@@ -1716,6 +1738,134 @@ impl Client {
             .map_err(|e| ChatError::Invalid(format!("x0xd base url: {e}")))?;
         x0xd_client::SecureGroupsEndpoint::new(base, self.http.token().to_owned())
             .map_err(ChatError::from)
+    }
+
+    /// Task #297: current recovery status of a group — `Live` (keyed and
+    /// flowing) or `Reconnecting` (a stale-epoch catch-up is in progress).
+    /// A group never in trouble reads `Live`. A shell renders this as
+    /// "reconnecting to group…" instead of a silently-dead conversation.
+    #[must_use]
+    pub fn group_recovery_status(
+        &self,
+        group_id_hex: &str,
+    ) -> crate::groups::epoch_recovery::GroupRecoveryStatus {
+        self.group_recovery.get(group_id_hex)
+    }
+
+    /// Subscribe to per-group recovery status transitions (Live <->
+    /// Reconnecting), so a shell reacts without polling. Mirrors
+    /// [`Self::subscribe_outbox`].
+    #[must_use]
+    pub fn subscribe_group_recovery(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::groups::epoch_recovery::GroupStatusEvent> {
+        self.group_recovery.subscribe()
+    }
+
+    /// Drive the ONE recovery path for a single group one step (#297). The
+    /// `EpochBehind` + warm triggers pass `target_epoch = Some(secret_epoch)`
+    /// (the inbound frame's epoch we must reach); the wedge-watchdog passes
+    /// `None` (drain whatever commits exist and re-check keyed).
+    ///
+    /// Dispatch (see [`crate::groups::epoch_recovery::EpochRecoveryDriver`]):
+    /// keyed + caught up -> `Converged` (status `Live`); keyed but behind ->
+    /// fetch + apply group-log commits, re-probe; not keyed -> hand off to
+    /// the existing durable pending-join resume ([`Self::drive_pending_joins_once`]).
+    ///
+    /// The warm commit source + applier are DEFERRED to Alice's durable
+    /// per-group Commit-log (#297 Lane A): the relay-client does not yet
+    /// issue `LogFetch`, so [`DeferredSource`] yields no records and a
+    /// behind-but-keyed member correctly stays `Reconnecting` (never a
+    /// false `Live`). The cold path is fully live today.
+    ///
+    /// # Errors
+    /// Propagates a probe (`group_self_status`) or cold-resume error.
+    pub async fn recover_group_once(
+        &self,
+        group_id_hex: &str,
+        target_epoch: Option<u64>,
+    ) -> Result<crate::groups::epoch_recovery::RecoverOutcome> {
+        use std::future::Future;
+
+        use crate::groups::epoch_recovery::{
+            ApplyOutcome, ColdRecover, CommitApplier, CommitRecord, CommitSource,
+            EpochRecoveryDriver, GroupState, GroupStateProbe,
+        };
+
+        // Production probe over the read-only keyed-status endpoint
+        // (`GET /groups/<id>/secure/self`) — the same probe the cold
+        // pending-join resume uses, widened to carry the epoch.
+        struct WarmProbe<'a> {
+            client: &'a Client,
+        }
+        impl GroupStateProbe for WarmProbe<'_> {
+            fn probe(&self, group_id: &str) -> impl Future<Output = Result<GroupState>> + Send {
+                let client = self.client;
+                let gid = group_id.to_owned();
+                async move {
+                    let secure = client.secure_groups()?;
+                    let st = secure
+                        .group_self_status(&gid)
+                        .await
+                        .map_err(ChatError::from)?;
+                    Ok(GroupState {
+                        keyed: st.keyed,
+                        in_roster: st.in_roster,
+                        epoch: st.epoch,
+                    })
+                }
+            }
+        }
+
+        // Cold path: delegate to the EXISTING durable pending-join resume
+        // — never a parallel loop. Returns whether this group had a record.
+        struct ColdViaPendingJoins<'a> {
+            client: &'a Client,
+        }
+        impl ColdRecover for ColdViaPendingJoins<'_> {
+            fn recover_cold(&self, group_id: &str) -> impl Future<Output = Result<bool>> + Send {
+                let client = self.client;
+                let gid = group_id.to_owned();
+                async move {
+                    let outcomes = client.drive_pending_joins_once().await?;
+                    Ok(outcomes.iter().any(|(g, _)| g == &gid))
+                }
+            }
+        }
+
+        // DEFERRED warm seam. TODO(#297-laneA): back with the relay
+        // group-log `LogFetch` once the relay-client issues it and the
+        // durable Commit-log serves records.
+        struct DeferredSource;
+        impl CommitSource for DeferredSource {
+            async fn fetch_since(
+                &self,
+                _group_id: &str,
+                _since_seq: u64,
+            ) -> Result<Vec<CommitRecord>> {
+                Ok(Vec::new())
+            }
+        }
+        // Unreachable while DeferredSource yields nothing. TODO(#297-laneA):
+        // dispatch to x0xd's signature-verifying apply path
+        // (apply_metadata_event / apply_join_result) — NEVER a bypass.
+        struct DeferredApplier;
+        impl CommitApplier for DeferredApplier {
+            async fn apply(&self, _group_id: &str, _record: &CommitRecord) -> Result<ApplyOutcome> {
+                Err(ChatError::Invalid(
+                    "warm commit apply not yet wired (#297 Lane A)".into(),
+                ))
+            }
+        }
+
+        let driver = EpochRecoveryDriver::new(
+            DeferredSource,
+            DeferredApplier,
+            WarmProbe { client: self },
+            ColdViaPendingJoins { client: self },
+            self.group_recovery.clone(),
+        );
+        driver.recover_once(group_id_hex, target_epoch).await
     }
 
     /// Cloneable handle to the M2.5 reachability cache. Mutated by the
@@ -6680,6 +6830,7 @@ mod tests {
             multi_home: None,
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
+            group_recovery: crate::groups::epoch_recovery::GroupStatusMap::new(),
         };
         (client, dir)
     }
@@ -7296,6 +7447,7 @@ mod tests {
             multi_home: None,
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
+            group_recovery: crate::groups::epoch_recovery::GroupStatusMap::new(),
         };
 
         // Router carries exactly one transport — MultiHomeTransport —
