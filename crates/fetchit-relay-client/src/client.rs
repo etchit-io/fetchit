@@ -456,7 +456,7 @@ impl Client {
     /// reset the backoff to the floor and retry immediately instead of waiting
     /// out the exponential delay. Call this on app-foreground or a
     /// network-regain event (or from a wedge-watchdog) so a returning
-    /// connection recovers in ~1 s rather than up to [`MAX_BACKOFF`]. A no-op
+    /// connection recovers in ~1 s rather than up to `MAX_BACKOFF`. A no-op
     /// when already connected or after the supervisor has stopped; pairs with
     /// [`ClientConfig::with_unbounded_reconnect`] (retry forever) to give
     /// "retry forever, and retry NOW when connectivity returns".
