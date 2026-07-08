@@ -49,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone x0x fork sibling (fetchit-ffi path dep)
+        run: git clone --depth 1 --branch mobile-0.27 https://github.com/josh-clsn/x0x ../x0x-fork
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -70,17 +72,28 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Clone x0x fork sibling (fetchit-ffi path dep)
+        run: git clone --depth 1 --branch mobile-0.27 https://github.com/josh-clsn/x0x ../x0x-fork
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install libdbus (keyring→secret-service, Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # fetchit-ffi and apps/fetchit-desktop/src-tauri are excluded from the
       # workspace — the line above skips them. Lint them explicitly so clippy
       # drift can't accumulate unseen in the excluded crates AND so cfg(windows)
       # / cfg(target_os = "macos") branches actually get checked on the runner
       # where they compile.
-      - run: cargo clippy --manifest-path crates/fetchit-ffi/Cargo.toml --all-targets -- -D warnings
+      # RUSTFLAGS emptied so the x0x-fork path dep (and other deps) aren't gated
+      # on -D warnings: a dependency's warning under a newer rustc must not fail
+      # our CI. `-- -D warnings` still gates fetchit-ffi's OWN code strictly.
+      - name: Clippy fetchit-ffi
+        env:
+          RUSTFLAGS: ""
+        run: cargo clippy --manifest-path crates/fetchit-ffi/Cargo.toml --all-targets -- -D warnings
       - name: Install Tauri system deps (Linux only)
         if: runner.os == 'Linux'
         run: |
@@ -99,6 +112,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install libdbus (keyring→secret-service, Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # No --all-features: it would pull fetchit-net's `devnet-tests`
       # feature — an opt-in LocalDevnet suite that links ant-node and
       # needs the `anvil` + `ant` binaries — into every CI build. That
@@ -243,6 +259,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone x0x fork sibling (fetchit-ffi path dep)
+        run: git clone --depth 1 --branch mobile-0.27 https://github.com/josh-clsn/x0x ../x0x-fork
 
       - uses: actions/setup-java@v4
         with:
@@ -266,6 +284,8 @@ jobs:
         with:
           workspaces: crates/fetchit-ffi
 
+      - name: Install libdbus (keyring→secret-service, host build)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # fetchit-ffi host unit tests — rendition-mapping logic. The crate is
       # workspace-excluded (cdylib for the JNI build), so the `test` job's
       # `cargo test --workspace` never runs them. Host target; no NDK needed.
@@ -276,6 +296,11 @@ jobs:
         run: cargo install cargo-ndk --locked
 
       - name: Install uniffi-bindgen (version must match crates/fetchit-ffi)
+        # RUSTFLAGS emptied: this compiles an external tool whose transitive deps
+        # must not be gated on our -D warnings (a newer rustc warns inside
+        # uniffi_internal_macros, which would otherwise fail the install).
+        env:
+          RUSTFLAGS: ""
         run: cargo install uniffi-bindgen-cli --git https://github.com/mozilla/uniffi-rs --tag v0.29.5
 
       - name: Set up Android NDK r27
@@ -285,10 +310,35 @@ jobs:
           ndk-version: r27
           add-to-path: true
 
+      # The android job died with "No space left on device" (System.IOException
+      # in the runner agent). It's DISK, not memory/CPU: the arm64 cross-compile
+      # lands on top of the earlier host-target `fetchit-ffi` build, the NDK, and
+      # the gradle caches, and together they exhaust the private runner's ~14 GB
+      # root disk. (Measured build peak is only ~4.6 GB RAM — an earlier swap
+      # step was the wrong fix and its 12 GB swapfile only made the fill worse.)
+      # Reclaim the large unused pre-installed toolchains before the compile —
+      # none of them are needed by the Rust or Android build. `df -h` brackets
+      # the reclaim so the log shows the headroom won.
+      - name: Free disk space for the arm64 build
+        run: |
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell 2>/dev/null || true
+          echo "after:"; df -h /
+
       - name: Build fetchit-ffi for arm64-v8a
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          # RUSTFLAGS emptied: this cross-compiles the full external dependency
+          # tree (x0x-fork + ant-core + saorsa + …), which must NOT be gated on
+          # our global `-D warnings` — same reason as the clippy-fetchit-ffi and
+          # uniffi-bindgen steps above (e.g. x0x-fork's cli/daemon.rs carries
+          # unused-variable warnings that would otherwise fail the release
+          # build). fetchit-ffi's OWN code is still gated strictly by the
+          # dedicated clippy job.
+          RUSTFLAGS: ""
         run: ./scripts/build-jni-libs.sh
 
       - name: Build debug APK
@@ -318,6 +368,8 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install libdbus (keyring→secret-service)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: crate list matches cargo metadata
         run: sh scripts/check-crate-list.sh
       - name: doc-comment paths resolve

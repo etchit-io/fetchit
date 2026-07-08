@@ -2676,7 +2676,7 @@ impl Client {
     /// [`crate::transport::OutboundKind::Dm`]-shaped envelope whose transit
     /// `kind` stays [`fetchit_relay_proto::EnvelopeKind::PairRecordPush`], so a
     /// relay forwards it and the receiver re-discriminates it back into
-    /// [`Self::dispatch_inbound_pair_record_push`]. The record carries its own
+    /// `dispatch_inbound_pair_record_push`. The record carries its own
     /// user signature and is public, so the push travels UNSEALED — there is no
     /// per-recipient seal (see [`fetchit_relay_proto::pair_record_push`]).
     ///

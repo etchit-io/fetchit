@@ -198,7 +198,9 @@ async fn serve_progressive(
     let head = if avail == 0 {
         Bytes::new()
     } else {
-        sm.read_range(0, avail.min(sniff_end + 1) - 1).await.unwrap_or_default()
+        sm.read_range(0, avail.min(sniff_end + 1) - 1)
+            .await
+            .unwrap_or_default()
     };
     let mime = sniff_mime(&head);
 
@@ -333,12 +335,12 @@ mod tests {
         state.insert_stream_for_test(addr, sm.clone());
         let port = super::spawn(state).await.unwrap();
 
-        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        conn.write_all(
-            format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "cd".repeat(32)).as_bytes(),
-        )
-        .await
-        .unwrap();
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        conn.write_all(format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "cd".repeat(32)).as_bytes())
+            .await
+            .unwrap();
         // feed after the request is in flight
         sm.push(b"abc").await.unwrap();
         sm.push(b"def").await.unwrap();
@@ -347,9 +349,19 @@ mod tests {
         let mut resp = Vec::new();
         conn.read_to_end(&mut resp).await.unwrap();
         let text = String::from_utf8_lossy(&resp);
-        assert!(text.contains("Content-Length: 6"), "expected Content-Length: 6 in {text}");
-        assert!(text.contains("Accept-Ranges: bytes"), "expected Accept-Ranges in {text}");
-        assert!(resp.ends_with(b"abcdef"), "expected body abcdef, got tail {:?}", &resp[resp.len().saturating_sub(10)..]);
+        assert!(
+            text.contains("Content-Length: 6"),
+            "expected Content-Length: 6 in {text}"
+        );
+        assert!(
+            text.contains("Accept-Ranges: bytes"),
+            "expected Accept-Ranges in {text}"
+        );
+        assert!(
+            resp.ends_with(b"abcdef"),
+            "expected body abcdef, got tail {:?}",
+            &resp[resp.len().saturating_sub(10)..]
+        );
     }
 
     /// Regression: a Memory-backed progressive stream whose feeder ends with
@@ -368,13 +380,12 @@ mod tests {
         state.insert_stream_for_test(addr, sm.clone());
         let port = super::spawn(state).await.unwrap();
 
-        let mut conn =
-            tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        conn.write_all(
-            format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "ef".repeat(32)).as_bytes(),
-        )
-        .await
-        .unwrap();
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        conn.write_all(format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "ef".repeat(32)).as_bytes())
+            .await
+            .unwrap();
 
         // Push far fewer bytes than the sniff window, then signal failure.
         sm.push(&[0xFFu8; 50]).await.unwrap();

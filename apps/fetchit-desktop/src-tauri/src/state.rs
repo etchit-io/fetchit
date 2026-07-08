@@ -173,7 +173,10 @@ impl AppState {
             return Ok((sm, guard));
         }
         let client = crate::state::ensure_client(self, &self.effective_peers()).await?;
-        let total = client.content_size(&addr).await.map_err(|e| e.to_string())?;
+        let total = client
+            .content_size(&addr)
+            .await
+            .map_err(|e| e.to_string())?;
         #[cfg(not(feature = "e2e"))]
         let backing = if self.disk_cache.policy().enabled {
             // Remove any stale partial left by a previous crash before starting
@@ -201,6 +204,7 @@ impl AppState {
         };
         let client = Arc::new(client);
         let streams = self.streams.clone();
+        #[cfg(not(feature = "e2e"))]
         let disk_cache = self.disk_cache.clone();
         #[cfg(not(feature = "e2e"))]
         let cache_on = self.disk_cache.policy().enabled;
