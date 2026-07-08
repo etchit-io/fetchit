@@ -250,7 +250,7 @@ describe("relay region picker", () => {
     expect(descEl().textContent).toContain("my-vps.example:8443");
   });
 
-  it("validates the custom URL field and shows the backend error on rejection", async () => {
+  it("validates the custom URL field and shows a friendly error on rejection", async () => {
     (invoke as unknown as InvokeMock).mockImplementation(
       makeRouter({
         set_relay_url: () => {
@@ -266,7 +266,9 @@ describe("relay region picker", () => {
     customSaveBtn().click();
     await flush();
     expect(customErr().hidden).toBe(false);
-    expect(customErr().textContent).toContain("bad scheme");
+    // friendlyError maps the raw "invalid relay url" backend string to
+    // plain language instead of leaking the Rust variant to the user.
+    expect(customErr().textContent).toContain("valid URL");
     // Dropdown should not have flipped to Custom — original NYC stays.
     expect(selectEl().value).toBe("nyc");
   });

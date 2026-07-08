@@ -4,6 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { friendlyError } from "./chat/errors";
 import { fmtBytes } from "./format";
 import { addBookmark, listBookmarks, removeBookmark, type Bookmark } from "./bookmarks";
 import { MAX_BOOKMARKS_PER_QR } from "./bookmarkShare";
@@ -221,7 +222,7 @@ export function mountSettings(host: HTMLElement, hooks: SettingsHooks): Settings
       relayCustomError.textContent = "";
       renderRelayChoice(url, relayRegions);
     } catch (e) {
-      relayCustomError.textContent = String(e);
+      relayCustomError.textContent = friendlyError(e);
       relayCustomError.hidden = false;
       // Revert dropdown to whatever the daemon currently knows about.
       renderRelayChoice(lastRelayUrl, relayRegions);
@@ -612,7 +613,7 @@ function mountPeers(root: HTMLElement): void {
       .then((cleaned) => {
         editor.value = cleaned.join("\n");
       })
-      .catch((e: unknown) => showError(typeof e === "string" ? e : "save failed"))
+      .catch((e: unknown) => showError(typeof e === "string" ? e : "Couldn’t save the peer list. Please try again."))
       .finally(() => {
         saveBtn.disabled = false;
       });
@@ -623,7 +624,7 @@ function mountPeers(root: HTMLElement): void {
     resetBtn.disabled = true;
     void invoke("reset_peers_override")
       .then(() => prefill())
-      .catch((e: unknown) => showError(typeof e === "string" ? e : "reset failed"))
+      .catch((e: unknown) => showError(typeof e === "string" ? e : "Couldn’t reset the peer list. Please try again."))
       .finally(() => {
         resetBtn.disabled = false;
       });
@@ -641,7 +642,7 @@ function mountPeers(root: HTMLElement): void {
         const verb = result.updated ? "Updated" : "Already current";
         showError(`${verb} · ${n} peer${n === 1 ? "" : "s"}`);
       })
-      .catch((e: unknown) => showError(typeof e === "string" ? e : "refresh failed"))
+      .catch((e: unknown) => showError(typeof e === "string" ? e : "Couldn’t refresh peers from upstream. Please try again."))
       .finally(() => {
         refreshBtn.disabled = false;
       });

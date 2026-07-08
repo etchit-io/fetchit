@@ -11,6 +11,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { renderQrSvg } from "./qr";
+import { friendlyError } from "./chat/errors";
 
 export interface LinkDeviceModalApi {
   open(): void;
@@ -167,7 +168,7 @@ export function mountLinkDeviceModal(host: HTMLElement): LinkDeviceModalApi {
         newIdlePanel.hidden = true;
         newActivePanel.hidden = false;
       } catch (e) {
-        newError.textContent = `Could not generate link: ${String(e)}`;
+        newError.textContent = `Couldn’t create a pairing link. ${friendlyError(e)}`;
         newError.hidden = false;
         generateBtn.textContent = "Generate pairing link";
         generateBtn.disabled = false;
@@ -250,7 +251,7 @@ export function mountLinkDeviceModal(host: HTMLElement): LinkDeviceModalApi {
         currentUri = "";
         confirmBtn.textContent = "Yes, link it";
       } catch (e) {
-        statusEl.textContent = `Linking failed: ${String(e)}`;
+        statusEl.textContent = `Couldn’t link the device. ${friendlyError(e)}`;
         statusEl.setAttribute("data-error", "1");
         confirmBtn.disabled = false;
         confirmBtn.textContent = "Yes, link it";
