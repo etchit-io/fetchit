@@ -105,6 +105,13 @@ if-addrs = "0.13"
 # fetchit-chat is the structural home of these helpers.
 mdns-sd = { version = "0.20", default-features = false }
 
+# Approve the main webview's camera permission request for the
+# add-contact QR scanner (WebKitGTK denies getUserMedia by default).
+# Version pin mirrors wry's own `=2.0.2` so the lockfile keeps a single
+# copy; `v2_8` gates the UserMediaPermissionRequest device accessors.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_8"] }
+
 [dev-dependencies]
 tempfile = "3"
 

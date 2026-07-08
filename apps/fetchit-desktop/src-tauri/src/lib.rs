@@ -1063,6 +1063,45 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             crate::linux_deep_link::register_or_cleanup(app.handle());
 
+            // Camera for the add-contact "Scan a QR code" flow. WebKitGTK
+            // ships with media-stream off and denies every webview
+            // permission request by default, so getUserMedia needs both
+            // flipped for the main window. Scope of the grant: video-only
+            // capture requests; audio or anything else still falls through
+            // to WebKit's default deny (`false` = unhandled). Rendered
+            // network content cannot reach this grant — it runs inside a
+            // sandboxed null-origin iframe whose `navigator.mediaDevices`
+            // is locked to `undefined` before any SPA script runs
+            // (src/renderers/htmlRewriter.ts). Windows needs no handler:
+            // WebView2 shows its own camera permission prompt. macOS is
+            // covered by wry's WKUIDelegate grant + NSCameraUsageDescription
+            // in Info.plist (the OS-level prompt).
+            #[cfg(target_os = "linux")]
+            if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.with_webview(|webview| {
+                    use webkit2gtk::glib::prelude::Cast;
+                    use webkit2gtk::{
+                        PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+                        UserMediaPermissionRequestExt, WebViewExt,
+                    };
+                    let wv = webview.inner();
+                    if let Some(settings) = WebViewExt::settings(&wv) {
+                        settings.set_enable_media_stream(true);
+                    }
+                    wv.connect_permission_request(|_wv, request| {
+                        if let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() {
+                            if media.is_for_video_device() && !media.is_for_audio_device() {
+                                media.allow();
+                            } else {
+                                media.deny();
+                            }
+                            return true;
+                        }
+                        false
+                    });
+                });
+            }
+
             // Resolve the app-local data dir once; everything user-persisted
             // lives under it (settings.json + the on-disk byte cache).
             let app_data = app

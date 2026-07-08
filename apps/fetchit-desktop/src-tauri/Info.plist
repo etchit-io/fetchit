@@ -4,5 +4,7 @@
 <dict>
     <key>NSLocalNetworkUsageDescription</key>
     <string>fetch&gt;it connects to the Autonomi peer-to-peer network to fetch content. Peers can be anywhere in the world, including occasionally on the same local network. fetch&gt;it does not scan, browse, or collect data from devices on your network.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>fetch&gt;it uses the camera only while you scan a QR code to add a contact. Video stays on this device and is never recorded or uploaded.</string>
 </dict>
 </plist>
