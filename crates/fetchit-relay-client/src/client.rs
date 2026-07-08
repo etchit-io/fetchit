@@ -19,7 +19,7 @@ use fetchit_relay_proto::{
     auth_signing_bytes, from_bytes, to_bytes, Ack, AgentId, AuthChallenge, AuthVerifyRequest,
     AuthVerifyResponse, CapabilityToken, ClientFrame, DedupeKey, Deliver, EffectiveCapabilities,
     Hello, Moved, Ping, Pong, PresenceUpdate, Ready, SendFrame, ServerFrame, TenantId, Throttle,
-    TransitEnvelope, WatchPresence,
+    TransitAck, TransitEnvelope, WatchPresence,
 };
 use futures_util::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
 use rand::RngCore;
@@ -215,6 +215,13 @@ enum SupervisorCmd {
         add: Vec<AgentId>,
         remove: Vec<AgentId>,
     },
+    /// Confirm durable transit ids back to the relay so it reclaims
+    /// the stored entries. Fire-and-forget by design: an ack lost to a
+    /// dead connection just means the relay redelivers on the next
+    /// connect — at-least-once still holds.
+    AckTransit {
+        acked_ids: Vec<u64>,
+    },
     /// Internal signal raised by the reader / keepalive tasks when the
     /// WS for `gen` died. Carries the reason for diagnostics.
     Disconnected {
@@ -406,6 +413,28 @@ impl Client {
     /// Returns `None` once the supervisor has shut down for good.
     pub async fn next_delivery(&self) -> Option<Deliver> {
         self.inbox.lock().await.recv().await
+    }
+
+    /// Confirm durably-replayed deliveries back to the relay so it
+    /// reclaims the stored entries (`Deliver::transit_seq` values;
+    /// `0` = direct push, filtered out here as it needs no ack).
+    ///
+    /// Fire-and-forget: if the connection is down when the ack would
+    /// go out, it is dropped and the relay simply redelivers the entry
+    /// on the next connect — at-least-once holds either way. Ids are
+    /// relay-local; only ack ids received from THIS client.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when the supervisor has
+    /// shut down.
+    pub fn ack_transit(&self, acked_ids: Vec<u64>) -> Result<(), ClientError> {
+        let acked_ids: Vec<u64> = acked_ids.into_iter().filter(|&id| id != 0).collect();
+        if acked_ids.is_empty() {
+            return Ok(());
+        }
+        self.cmd_tx
+            .send(SupervisorCmd::AckTransit { acked_ids })
+            .map_err(|_| ClientError::InboxClosed)
     }
 
     /// Subscribe to presence transitions for `agents`.
@@ -634,6 +663,14 @@ impl Supervisor {
                         let _ = send_watch_frame(i, add, remove).await;
                     }
                 }
+                SupervisorCmd::AckTransit { acked_ids } => {
+                    // Best-effort: if the connection is down the ack is
+                    // simply dropped and the relay redelivers the entry
+                    // on the next connect.
+                    if let Some(i) = inner.as_ref() {
+                        let _ = send_ack_frame(i, acked_ids).await;
+                    }
+                }
                 SupervisorCmd::Disconnected { gen, reason } => {
                     // Ignore signals from already-torn-down connections.
                     let Some(current) = inner.as_ref() else {
@@ -753,9 +790,15 @@ impl Supervisor {
                             for a in &add { watch_set.insert(*a); }
                             for a in &remove { watch_set.remove(a); }
                         }
-                        // Spurious Disconnected from a previous WS;
-                        // already handled — ignore.
-                        Some(SupervisorCmd::Disconnected { .. }) => {}
+                        // AckTransit: no live connection, drop the ack —
+                        // loss-safe, the relay keeps the entries and
+                        // redelivers on the reconnect this loop is working
+                        // toward. Disconnected: spurious signal from a
+                        // previous WS, already handled.
+                        Some(
+                            SupervisorCmd::AckTransit { .. }
+                            | SupervisorCmd::Disconnected { .. },
+                        ) => {}
                         // Re-arm: skip the rest of the backoff and retry
                         // now, resetting to the floor so a later failure
                         // backs off from scratch.
@@ -1016,6 +1059,17 @@ async fn send_watch_frame(
         return Ok(());
     }
     let frame = ClientFrame::WatchPresence(WatchPresence { add, remove });
+    let bytes = to_bytes(&frame)?;
+    let mut sender = inner.sender.lock().await;
+    sender.send(Message::Binary(bytes)).await?;
+    Ok(())
+}
+
+async fn send_ack_frame(inner: &Inner, acked_ids: Vec<u64>) -> Result<(), ClientError> {
+    if acked_ids.is_empty() {
+        return Ok(());
+    }
+    let frame = ClientFrame::TransitAck(TransitAck { acked_ids });
     let bytes = to_bytes(&frame)?;
     let mut sender = inner.sender.lock().await;
     sender.send(Message::Binary(bytes)).await?;

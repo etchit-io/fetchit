@@ -31,6 +31,10 @@ pub enum ClientFrame {
     Ping(Ping),
     /// Client-initiated graceful close.
     Bye(Bye),
+    /// Confirms durable transit entries were delivered so the relay can
+    /// reclaim them. Appended last so the discriminants of every earlier
+    /// variant stay stable on the postcard wire.
+    TransitAck(TransitAck),
 }
 
 /// Top-level message emitted by the relay.
@@ -158,10 +162,24 @@ pub struct Moved {
 pub struct Deliver {
     /// The envelope being delivered.
     pub envelope: TransitEnvelope,
-    /// Server-assigned sequence within this connection (resets on reconnect).
+    /// Durable-store id of this entry when replayed from the transit
+    /// store (echo it in [`TransitAck`] to confirm delivery and let the
+    /// relay reclaim it). `0` for a direct push that needs no ack.
     pub transit_seq: u64,
     /// Server timestamp at delivery, milliseconds since the Unix epoch.
     pub delivered_at_ms: u64,
+}
+
+/// Client confirmation that the listed durable transit ids were
+/// delivered and may be reclaimed by the relay.
+///
+/// Transport-level and blind: the ids echo [`Deliver::transit_seq`] from
+/// durable replays (a `0` is never sent). This is NOT the sealed
+/// end-to-end delivery receipt, which the relay cannot read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitAck {
+    /// The [`Deliver::transit_seq`] values the client has accepted.
+    pub acked_ids: Vec<u64>,
 }
 
 /// Soft rejection with a retry hint.
@@ -254,6 +272,16 @@ mod tests {
             tenant_id: None,
             preferred_region: Some(Region::Nyc),
             capabilities: None,
+        });
+        let bytes = postcard::to_allocvec(&frame).unwrap();
+        let decoded: ClientFrame = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn transit_ack_roundtrips() {
+        let frame = ClientFrame::TransitAck(TransitAck {
+            acked_ids: vec![1, 2, 9],
         });
         let bytes = postcard::to_allocvec(&frame).unwrap();
         let decoded: ClientFrame = postcard::from_bytes(&bytes).unwrap();

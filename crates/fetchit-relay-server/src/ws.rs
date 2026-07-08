@@ -2,14 +2,14 @@
 
 use crate::auth::AuthTokenState;
 use crate::server::ServerState;
-use crate::transit::Entry;
+use crate::transit::StoredEntry;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use fetchit_relay_proto::{
     from_bytes, to_bytes, Ack, ClientFrame, Deliver, EffectiveCapabilities, Hello, Moved, Ping,
-    Pong, Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, TransitEnvelope, WatchPresence,
+    Pong, Ready, SendFrame, ServerFrame, Throttle, ThrottleReason, TransitAck, WatchPresence,
 };
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::Deserialize;
@@ -114,25 +114,19 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
     let session_id = state.sessions.register(auth.agent_id, tx.clone());
     state.metrics.connection_opened();
 
-    // Drain the transit buffer into the freshly-built outbound
-    // channel. Anything that can't land because the channel is
-    // already saturated (a contended watcher set publishing
-    // presence updates can consume capacity between register and
-    // drain) is replayed back into transit instead of being
-    // dropped — otherwise we'd silently lose messages the
-    // recipient had been promised TTL-bounded durability for.
-    let drained = state.transit.drain(&auth.agent_id);
-    let ReplayOutcome {
-        delivered,
-        undelivered,
-    } = replay_transit(drained, &tx, now_ms());
+    // Replay buffered transit non-destructively: every entry stays in
+    // the store until the client confirms it with a TransitAck echoing
+    // the durable id carried in `Deliver::transit_seq`. A mid-replay
+    // disconnect (or a writer that dies with frames still in the
+    // socket) therefore redelivers on the next connect instead of
+    // silently losing what was drained but never read. Entries that
+    // don't fit the outbound channel (a contended watcher set can
+    // consume capacity between register and replay) also just remain
+    // stored for the next connect.
+    let ReplayOutcome { delivered } =
+        replay_transit(state.transit.read_all(&auth.agent_id), &tx, now_ms());
     for _ in 0..delivered {
         state.metrics.envelope_delivered();
-    }
-    for env in undelivered {
-        if state.transit.enqueue(auth.agent_id, env).is_err() {
-            state.metrics.throttle_per_recipient();
-        }
     }
 
     let mut writer: JoinHandle<()> = tokio::spawn(async move {
@@ -298,6 +292,13 @@ fn handle_client_frame(
             }
             true
         }
+        ClientFrame::TransitAck(TransitAck { acked_ids }) => {
+            // Scoped to the authenticated agent: a client can only
+            // reclaim durable entries addressed to itself, so a
+            // malicious ack cannot evict another recipient's backlog.
+            state.transit.delete(&auth.agent_id, &acked_ids);
+            true
+        }
         ClientFrame::Send(SendFrame {
             to,
             envelope,
@@ -405,60 +406,37 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// Outcome of replaying a drained transit batch onto a fresh
+/// Outcome of replaying stored transit entries onto a fresh
 /// per-connection outbound channel.
 struct ReplayOutcome {
     /// Number of envelopes that landed on the channel successfully.
     delivered: usize,
-    /// Envelopes that did NOT land — either the channel was already
-    /// full (a watcher set publishing presence updates can consume
-    /// capacity in the window between `register` and `drain`) or the
-    /// writer task had already died. Callers should re-enqueue these
-    /// back to transit so a future reconnect picks them up.
-    undelivered: Vec<TransitEnvelope>,
 }
 
-/// Push every drained entry onto `tx` and collect the ones that
-/// don't make it. Stops on the first `try_send` error, returning
-/// every remaining entry (including the rejected one) as
-/// `undelivered` — the caller decides whether to re-enqueue, log,
-/// or drop. Treats `Full` and `Closed` symmetrically: in both cases
-/// no further sends will succeed on this channel, so we collect and
-/// hand back so the caller can preserve durability.
+/// Push every stored entry onto `tx` as a `Deliver` carrying its
+/// durable store id in `transit_seq` — the id the client echoes back
+/// in a `TransitAck` to reclaim the entry. Non-destructive: the store
+/// still holds every entry, so this stops at the first `try_send`
+/// error (`Full` and `Closed` alike mean no further send can succeed)
+/// and the unsent remainder is simply replayed on the next connect.
 fn replay_transit(
-    drained: Vec<Entry>,
+    stored: Vec<StoredEntry>,
     tx: &mpsc::Sender<ServerFrame>,
     delivered_at_ms: u64,
 ) -> ReplayOutcome {
     let mut delivered = 0usize;
-    let mut undelivered = Vec::new();
-    let mut iter = drained.into_iter().enumerate();
-    while let Some((seq, entry)) = iter.next() {
+    for entry in stored {
         let frame = ServerFrame::Deliver(Deliver {
             envelope: entry.envelope,
-            transit_seq: seq as u64,
+            transit_seq: entry.id,
             delivered_at_ms,
         });
-        match tx.try_send(frame) {
-            Ok(()) => delivered += 1,
-            Err(e) => {
-                let rejected = match e {
-                    mpsc::error::TrySendError::Full(f) | mpsc::error::TrySendError::Closed(f) => f,
-                };
-                if let ServerFrame::Deliver(d) = rejected {
-                    undelivered.push(d.envelope);
-                }
-                for (_, remaining) in iter {
-                    undelivered.push(remaining.envelope);
-                }
-                break;
-            }
+        if tx.try_send(frame).is_err() {
+            break;
         }
+        delivered += 1;
     }
-    ReplayOutcome {
-        delivered,
-        undelivered,
-    }
+    ReplayOutcome { delivered }
 }
 
 #[cfg(test)]
@@ -475,7 +453,7 @@ mod tests {
         await_hello_inner, bearer_from_headers, replay_transit, LoopExit, HELLO_TIMEOUT,
         WS_OUTBOUND_CAPACITY,
     };
-    use crate::transit::Entry;
+    use crate::transit::StoredEntry;
     use axum::extract::ws::Message;
     use fetchit_relay_proto::{
         to_bytes, AgentId, ClientFrame, EnvelopeKind, Hello, MachineId, Pong, ServerFrame,
@@ -516,7 +494,7 @@ mod tests {
     }
     use futures_util::stream::{self, StreamExt};
     use std::convert::Infallible;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
@@ -538,11 +516,12 @@ mod tests {
         }
     }
 
-    fn drained_with_tags(tags: &[u8]) -> Vec<Entry> {
+    fn stored_with_tags(tags: &[u8]) -> Vec<StoredEntry> {
         tags.iter()
-            .map(|&t| Entry {
+            .map(|&t| StoredEntry {
+                id: u64::from(t) * 10,
                 envelope: marked_envelope(t),
-                enqueued_at: Instant::now(),
+                enqueued_at_ms: 1,
             })
             .collect()
     }
@@ -550,57 +529,53 @@ mod tests {
     #[tokio::test]
     async fn replay_transit_delivers_everything_when_channel_has_room() {
         let (tx, mut rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
-        let outcome = replay_transit(drained_with_tags(&[1, 2, 3]), &tx, 0);
+        let outcome = replay_transit(stored_with_tags(&[1, 2, 3]), &tx, 0);
         assert_eq!(outcome.delivered, 3);
-        assert!(outcome.undelivered.is_empty());
-        // Receiver gets all three Deliver frames in order.
+        // Receiver gets all three Deliver frames in order, each
+        // carrying its durable store id (the ack handle) in
+        // transit_seq.
         for tag in [1u8, 2, 3] {
             match rx.try_recv().expect("frame available") {
-                ServerFrame::Deliver(d) => assert_eq!(d.envelope.ciphertext, vec![tag]),
+                ServerFrame::Deliver(d) => {
+                    assert_eq!(d.envelope.ciphertext, vec![tag]);
+                    assert_eq!(d.transit_seq, u64::from(tag) * 10);
+                }
                 other => panic!("expected Deliver, got {other:?}"),
             }
         }
     }
 
     #[tokio::test]
-    async fn replay_transit_returns_undelivered_when_channel_fills_mid_drain() {
-        // Channel sized to exactly two frames. Drain three. The third
-        // try_send must surface as Full; replay_transit must hand it
-        // back rather than drop it, preserving the durability
-        // contract WS-001 was supposed to keep.
+    async fn replay_transit_stops_counting_when_channel_fills_mid_replay() {
+        // Channel sized to exactly two frames. Replay three. The third
+        // try_send surfaces as Full; the replay is non-destructive so
+        // the unsent entry simply stays in the store for the next
+        // connect — only the delivered count matters here.
         let (tx, _rx) = mpsc::channel::<ServerFrame>(2);
-        let outcome = replay_transit(drained_with_tags(&[1, 2, 3]), &tx, 0);
+        let outcome = replay_transit(stored_with_tags(&[1, 2, 3]), &tx, 0);
         assert_eq!(outcome.delivered, 2);
-        assert_eq!(outcome.undelivered.len(), 1);
-        assert_eq!(outcome.undelivered[0].ciphertext, vec![3]);
     }
 
     #[tokio::test]
-    async fn replay_transit_returns_remaining_when_first_send_full() {
-        // Watcher set saturated the channel BEFORE the drain loop
-        // starts — every entry is undelivered and the order is
-        // preserved so re-enqueue keeps FIFO semantics.
+    async fn replay_transit_delivers_none_when_first_send_full() {
+        // Watcher set saturated the channel BEFORE the replay loop
+        // starts — nothing lands, everything stays stored.
         let (tx, _rx) = mpsc::channel::<ServerFrame>(1);
         tx.try_send(ServerFrame::Pong(fetchit_relay_proto::Pong { nonce: 0 }))
             .unwrap();
-        let outcome = replay_transit(drained_with_tags(&[1, 2, 3]), &tx, 0);
+        let outcome = replay_transit(stored_with_tags(&[1, 2, 3]), &tx, 0);
         assert_eq!(outcome.delivered, 0);
-        assert_eq!(outcome.undelivered.len(), 3);
-        for (env, expected) in outcome.undelivered.iter().zip([1u8, 2, 3]) {
-            assert_eq!(env.ciphertext, vec![expected]);
-        }
     }
 
     #[tokio::test]
-    async fn replay_transit_returns_all_when_channel_closed() {
-        // Writer task died before drain — receiver dropped, every
-        // try_send fails Closed. Caller still gets every envelope
-        // back so durability is preserved instead of silently lost.
+    async fn replay_transit_delivers_none_when_channel_closed() {
+        // Writer task died before replay — receiver dropped, every
+        // try_send fails Closed. Everything stays stored for the next
+        // connect.
         let (tx, rx) = mpsc::channel::<ServerFrame>(8);
         drop(rx);
-        let outcome = replay_transit(drained_with_tags(&[7, 8, 9]), &tx, 0);
+        let outcome = replay_transit(stored_with_tags(&[7, 8, 9]), &tx, 0);
         assert_eq!(outcome.delivered, 0);
-        assert_eq!(outcome.undelivered.len(), 3);
     }
 
     /// Same `tokio::select!` shape as `run_io_loop`, kept generic so we can
