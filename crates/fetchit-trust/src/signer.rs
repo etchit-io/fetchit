@@ -42,7 +42,10 @@ impl IssuerSigner {
         let sk_path = dir.join("issuer.sk");
         if pk_path.exists() && sk_path.exists() {
             let pk_bytes = std::fs::read(&pk_path)?;
-            let sk_bytes = std::fs::read(&sk_path)?;
+            // #91 T5: the raw ML-DSA issuer secret read from disk is a plain
+            // Vec; wrap so the extracted copy is wiped on drop (`from_bytes`
+            // borrows via Deref, so `&sk_bytes` still works).
+            let sk_bytes = zeroize::Zeroizing::new(std::fs::read(&sk_path)?);
             let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
             let public_key = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &pk_bytes)
                 .map_err(|e| TrustError::IssuerKey(format!("pk: {e}")))?;
@@ -59,7 +62,10 @@ impl IssuerSigner {
             set_dir_perms_0700(dir)?;
             let signer = Self::generate(key_id)?;
             std::fs::write(&pk_path, signer.public_key.to_bytes())?;
-            write_secret(&sk_path, &signer.secret_key.to_bytes())?;
+            // #91 T6: `.to_bytes()` escapes an owned secret copy for the disk
+            // write; bind it in a Zeroizing so it is wiped on drop.
+            let sk_out = zeroize::Zeroizing::new(signer.secret_key.to_bytes());
+            write_secret(&sk_path, &sk_out)?;
             Ok(signer)
         }
     }
