@@ -380,6 +380,9 @@ impl Server {
 }
 
 fn spawn_sweeper(state: Arc<ServerState>) {
+    let profile_ttl_ms = u64::try_from(state.config.profile_ttl.as_millis()).unwrap_or(u64::MAX);
+    let pair_record_ttl_ms =
+        u64::try_from(state.config.pair_record_ttl.as_millis()).unwrap_or(u64::MAX);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         // Only warn when the eviction count STRICTLY EXCEEDS the
@@ -404,6 +407,12 @@ fn spawn_sweeper(state: Arc<ServerState>) {
             // write-only token flood cannot grow RAM unbounded (lazy
             // expiry-on-read alone would never evict a never-read blob).
             let _ = state.blobs.sweep_expired(crate::blob::now_ms());
+            // Reachability/discovery indexes: evict per-agent records not refreshed
+            // within the TTL. These were deposit-only and absent from this sweeper —
+            // the slow-OOM leak (#295).
+            let now = crate::forwarding::now_ms();
+            let _ = state.profiles.sweep_expired(now, profile_ttl_ms);
+            let _ = state.pair_records.sweep_expired(now, pair_record_ttl_ms);
             let buffered = i64::try_from(state.transit.len()).unwrap_or(i64::MAX);
             state.metrics.set_transit_buffer_envelopes(buffered);
             // Count every TTL-evicted envelope into the dropped-by-TTL

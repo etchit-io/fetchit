@@ -155,6 +155,17 @@ impl ProfileIndex {
         }
     }
 
+    /// Evict profile records whose `issued_at_ms` is older than `ttl_ms`
+    /// relative to `now_ms`. Bounds the deposit-only index so it can't grow
+    /// to OOM (was absent from the sweeper). Returns the count evicted.
+    #[must_use]
+    pub fn sweep_expired(&self, now_ms: u64, ttl_ms: u64) -> usize {
+        let before = self.by_agent.len();
+        self.by_agent
+            .retain(|_, r| now_ms.saturating_sub(r.issued_at_ms) <= ttl_ms);
+        before.saturating_sub(self.by_agent.len())
+    }
+
     /// Count of currently-stored records (including tombstones).
     /// Used in tests; production code shouldn't depend on this.
     #[must_use]
@@ -443,6 +454,31 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(idx.current_issued_at(&id), Some(n));
+    }
+
+    #[test]
+    fn sweep_expired_evicts_only_stale_and_keeps_future_dated() {
+        // Deposit-only index bound: a record not refreshed within ttl_ms is
+        // evicted; a fresh one survives; and a future-dated record
+        // (issued_at_ms > now → saturating_sub gives age 0) is never
+        // wrongly evicted.
+        let idx = ProfileIndex::new();
+        let stale = mk_record(0xaa, 100, &"a".repeat(64));
+        let fresh = mk_record(0xbb, 1_000, &"b".repeat(64));
+        let future = mk_record(0xcc, 2_000, &"c".repeat(64));
+        idx.put(stale.clone());
+        idx.put(fresh.clone());
+        idx.put(future.clone());
+
+        // now=1000, ttl=100: stale is 900 ms old (>100) → out; fresh is 0 ms
+        // old → in; future has "negative" age that saturates to 0 → in.
+        let evicted = idx.sweep_expired(1_000, 100);
+        assert_eq!(evicted, 1);
+
+        assert!(idx.get_live(&stale.agent_id).is_none());
+        assert_eq!(idx.current_issued_at(&stale.agent_id), None);
+        assert_eq!(idx.get_live(&fresh.agent_id).unwrap().issued_at_ms, 1_000);
+        assert_eq!(idx.current_issued_at(&future.agent_id), Some(2_000));
     }
 
     #[test]

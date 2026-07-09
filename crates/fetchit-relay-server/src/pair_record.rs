@@ -161,6 +161,23 @@ impl PairRecordIndex {
         }
     }
 
+    /// Evict records whose `issued_at_ms` is older than `ttl_ms` relative
+    /// to `now_ms`, across BOTH maps (V1 by agent and V4 by user). Bounds
+    /// the deposit-only index so a churn of unique agents/users can't grow
+    /// it to OOM (was absent from the sweeper). Returns the total evicted.
+    #[must_use]
+    pub fn sweep_expired(&self, now_ms: u64, ttl_ms: u64) -> usize {
+        let before_agent = self.by_agent.len();
+        self.by_agent
+            .retain(|_, r| now_ms.saturating_sub(r.issued_at_ms) <= ttl_ms);
+        let agent_evicted = before_agent.saturating_sub(self.by_agent.len());
+        let before_user = self.by_user.len();
+        self.by_user
+            .retain(|_, r| now_ms.saturating_sub(r.issued_at_ms) <= ttl_ms);
+        let user_evicted = before_user.saturating_sub(self.by_user.len());
+        agent_evicted + user_evicted
+    }
+
     /// Count of stored records. Test-only.
     #[must_use]
     #[allow(dead_code)]
@@ -640,6 +657,38 @@ mod tests {
         idx.put_v4(mk_record_v4(&id, 9));
         assert_eq!(idx.get(&id).unwrap().issued_at_ms, 5);
         assert_eq!(idx.get_v4(&id).unwrap().revision, 9);
+    }
+
+    #[test]
+    fn sweep_expired_evicts_stale_across_v1_and_v4() {
+        // Deposit-only index bound: stale records (issued_at_ms older than
+        // ttl relative to now) are evicted from BOTH the V1 by-agent map and
+        // the V4 by-user map; fresh records in either survive.
+        let idx = PairRecordIndex::new();
+        let stale_agent = hex::encode([0xa0; 32]);
+        let fresh_agent = hex::encode([0xa1; 32]);
+        let stale_user = hex::encode([0xb0; 32]);
+        let fresh_user = hex::encode([0xb1; 32]);
+
+        idx.put(mk_record(&stale_agent, 100));
+        idx.put(mk_record(&fresh_agent, 1_000));
+
+        let mut v4_stale = mk_record_v4(&stale_user, 1);
+        v4_stale.issued_at_ms = 100;
+        idx.put_v4(v4_stale);
+        let mut v4_fresh = mk_record_v4(&fresh_user, 1);
+        v4_fresh.issued_at_ms = 1_000;
+        idx.put_v4(v4_fresh);
+
+        // now=1000, ttl=100: the two 900-ms-old records go, the two 0-ms-old
+        // ones stay — one from each map.
+        let evicted = idx.sweep_expired(1_000, 100);
+        assert_eq!(evicted, 2);
+
+        assert!(idx.get(&stale_agent).is_none());
+        assert_eq!(idx.get(&fresh_agent).unwrap().issued_at_ms, 1_000);
+        assert!(idx.get_v4(&stale_user).is_none());
+        assert_eq!(idx.get_v4(&fresh_user).unwrap().issued_at_ms, 1_000);
     }
 
     #[test]

@@ -44,6 +44,14 @@ pub struct ServerConfig {
     pub challenge_ttl: Duration,
     /// Lifetime of a minted bearer token for the WebSocket upgrade.
     pub bearer_ttl: Duration,
+    /// How long a profile-index record survives without a refresh before
+    /// the sweeper evicts it. Bounds the deposit-only `ProfileIndex` so a
+    /// churn of unique agents can't grow it toward OOM.
+    pub profile_ttl: Duration,
+    /// How long a pair-record (V1 by agent, V4 by user) survives without a
+    /// refresh before the sweeper evicts it. Bounds the deposit-only
+    /// `PairRecordIndex` against the same slow-OOM growth.
+    pub pair_record_ttl: Duration,
     /// Trust anchors: issuer key id → ML-DSA-65 public key bytes.
     pub issuer_keys: HashMap<String, Vec<u8>>,
     /// Loopback-only listener for sensitive metrics (`/v1/metrics/internal`).
@@ -83,6 +91,8 @@ impl ServerConfig {
             group_log_total_bytes_cap: 1 << 30,
             challenge_ttl: Duration::from_secs(60),
             bearer_ttl: Duration::from_secs(15 * 60),
+            profile_ttl: Duration::from_secs(30 * 24 * 60 * 60),
+            pair_record_ttl: Duration::from_secs(30 * 24 * 60 * 60),
             issuer_keys: HashMap::new(),
             internal_bind: Some(SocketAddr::from(([127, 0, 0, 1], 9088))),
             transit_db_path: None,
