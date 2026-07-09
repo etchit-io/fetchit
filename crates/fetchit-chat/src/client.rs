@@ -295,10 +295,10 @@ impl ClientBuilder {
             token,
             self.relay_url,
             self.data_dir,
-            // #91 Z4a: `from_parts` takes a plain `Option<String>` (out of
-            // scope here) and re-wraps it into the `Arc<Zeroizing<String>>`
-            // custody hold, so hand it the inner clone.
-            self.passphrase.map(|p| p.to_string()),
+            // #91 Z4c: hand `from_parts` the `Zeroizing<String>` directly so
+            // no plain copy of the passphrase escapes into the build path
+            // (the copy drops wiped at each seam instead of lingering).
+            self.passphrase,
             self.enable_lan_direct,
             self.contact_pubkey_lookup,
             self.x0xd_port_file,
@@ -622,7 +622,7 @@ impl Client {
         token: String,
         relay_url: Option<Url>,
         data_dir: Option<PathBuf>,
-        passphrase: Option<String>,
+        passphrase: Option<Zeroizing<String>>,
         enable_lan_direct: bool,
         contact_pubkey_lookup: Option<ContactPubkeyLookup>,
         x0xd_port_file: Option<PathBuf>,
@@ -638,10 +638,10 @@ impl Client {
             relay_url.is_some() || data_dir.is_some() || passphrase.is_some() || enable_lan_direct;
         // Retain the custody choice for the client's lifetime BEFORE the
         // passphrase moves into the vault build: later vault re-opens
-        // (fediverse identity paths) must resolve the same custody.
-        let custody_passphrase = passphrase
-            .as_ref()
-            .map(|p| Arc::new(Zeroizing::new(p.clone())));
+        // (fediverse identity paths) must resolve the same custody. `p` is
+        // already `Zeroizing<String>`, so clone it straight into the Arc (no
+        // second wrap, no plain copy).
+        let custody_passphrase = passphrase.as_ref().map(|p| Arc::new(p.clone()));
 
         let (
             router,
@@ -4285,7 +4285,7 @@ async fn build_with_chat(
     token: String,
     relay_url: Option<Url>,
     data_dir: Option<PathBuf>,
-    passphrase: Option<String>,
+    passphrase: Option<Zeroizing<String>>,
     enable_lan_direct: bool,
     contact_pubkey_lookup: Option<ContactPubkeyLookup>,
     x0xd_port_file: Option<PathBuf>,
@@ -4326,8 +4326,10 @@ async fn build_with_chat(
     let layout = StoreLayout::ensure(data_dir)?;
 
     let identity_vault_path = layout.root.join(IDENTITY_VAULT_FILE);
-    let (master, kdf_id, argon_salt) =
-        resolve_master_key(identity_vault_path.as_path(), passphrase.as_deref())?;
+    let (master, kdf_id, argon_salt) = resolve_master_key(
+        identity_vault_path.as_path(),
+        passphrase.as_ref().map(|z| z.as_str()),
+    )?;
     let master = Arc::new(master);
 
     // Resolve the local agent identity. Daemon path: x0xd `/agent` owns

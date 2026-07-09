@@ -1164,9 +1164,12 @@ fn resolve_passphrase(cli: &Cli) -> Result<Option<zeroize::Zeroizing<String>>> {
         );
         return Ok(Some(zeroize::Zeroizing::new(raw.trim().to_owned())));
     }
+    // Borrow, don't `.clone()`: a clone would allocate a plain, UNtrimmed
+    // copy of the passphrase that drops un-wiped. `as_deref` hands the
+    // closure a `&str`, so the only owned copy is the trimmed one we wrap.
     Ok(cli
         .passphrase_env
-        .clone()
+        .as_deref()
         .map(|s| zeroize::Zeroizing::new(s.trim().to_owned())))
 }
 
