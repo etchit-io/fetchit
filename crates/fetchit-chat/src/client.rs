@@ -570,6 +570,18 @@ pub struct Client {
     /// catch-up. Shared across `Client` clones so the spawned dispatcher,
     /// the shell's status getter, and any recovery driver observe one map.
     group_recovery: crate::groups::epoch_recovery::GroupStatusMap,
+    /// Per-group last-applied group-log cursor for epoch recovery. Held on
+    /// the client (not the driver) so it survives `recover_group_once`
+    /// rebuilding the driver each call — warm catch-up resumes from the
+    /// cursor instead of re-fetching the whole log every tick. Shared
+    /// across `Client` clones (`Arc`) so every recovery pass sees one
+    /// store. Not durable across a restart; the applier's idempotent 409
+    /// handling covers a cold start.
+    recovery_cursors: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Group ids with an epoch-recovery pass currently in flight. Guards
+    /// [`Self::trigger_group_recovery`] so a burst of stale-epoch frames for
+    /// one group spawns a single recovery, not a storm. Shared across clones.
+    recovering: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Client {
@@ -710,6 +722,8 @@ impl Client {
             fediverse,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
             group_recovery: crate::groups::epoch_recovery::GroupStatusMap::new(),
+            recovery_cursors: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            recovering: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
 
         // Best-effort pair-record publish: runs once at connect time so
@@ -1684,29 +1698,32 @@ impl Client {
             // the x0xd decrypt failures of a stale/keyless epoch — the
             // exact frames that must redeliver after re-key / epoch
             // catch-up — so they hold the token.
-            match self
+            if self
                 .messages()
                 .receive_private_group_envelope(&transit, &group_id_hex)
                 .await
+                .is_ok()
             {
-                Ok(_) => {
-                    // Messages are flowing for this group again (fresh or a
-                    // replay both prove we are keyed) — clear any Reconnecting
-                    // a prior stale-epoch drop set (#297).
-                    self.group_recovery.set_live(&group_id_hex);
-                    if let Some(a) = &ack {
-                        a.confirm();
-                    }
+                // Deliver + ack. Do NOT clear Reconnecting here: a successful
+                // decrypt only proves we are keyed for THIS frame's epoch, not
+                // that we have caught up to the group's current epoch — a
+                // delayed old-epoch frame decrypts fine while we are still
+                // behind (#297 cross-review F1). Only `recover_group_once`,
+                // which drains the group-log to a known target and re-probes,
+                // is authoritative for `Live`.
+                if let Some(a) = &ack {
+                    a.confirm();
                 }
-                Err(_) => {
-                    // Decrypt failed: a stale / keyless epoch (the StaleEpoch
-                    // loop). Surface Reconnecting so the shell shows catch-up
-                    // rather than a silent drop, and HOLD the frame (no ack)
-                    // for relay redelivery. `recover_group_once` drives the
-                    // actual catch-up; the warm commit-apply lands with the
-                    // durable Commit-log (#297 Lane A).
-                    self.group_recovery.set_reconnecting(&group_id_hex);
-                }
+            } else {
+                // Decrypt failed: a stale / keyless epoch (the StaleEpoch loop).
+                // Surface Reconnecting so the shell shows catch-up rather than a
+                // silent drop, and HOLD the frame (no ack) for relay
+                // redelivery. Trigger the recovery driver toward this frame's
+                // epoch (the target so an empty log does not falsely converge);
+                // it drains the group-log, applies the missed commits, and
+                // clears `Live` once keyed at target.
+                self.group_recovery.set_reconnecting(&group_id_hex);
+                self.trigger_group_recovery(group_id_hex.clone(), Some(u64::from(transit.epoch)));
             }
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
         {
@@ -1866,14 +1883,42 @@ impl Client {
             }
         }
 
-        let driver = EpochRecoveryDriver::new(
+        let driver = EpochRecoveryDriver::new_with_cursors(
             DeferredSource,
             DeferredApplier,
             WarmProbe { client: self },
             ColdViaPendingJoins { client: self },
             self.group_recovery.clone(),
+            self.recovery_cursors.clone(),
         );
         driver.recover_once(group_id_hex, target_epoch).await
+    }
+
+    /// Spawn a background epoch-recovery pass for `group_id` toward
+    /// `target_epoch`, deduplicated so at most one runs per group at a time:
+    /// a burst of stale-epoch frames for one group triggers a single pass,
+    /// not a storm. The spawned task drops the group from the in-flight set
+    /// when it finishes (success or error), so the next stale frame re-arms
+    /// it. Fire-and-forget: a recovery error just leaves the group
+    /// `Reconnecting` for the next trigger.
+    pub fn trigger_group_recovery(&self, group_id: String, target_epoch: Option<u64>) {
+        {
+            let Ok(mut inflight) = self.recovering.lock() else {
+                return;
+            };
+            if !inflight.insert(group_id.clone()) {
+                // Already recovering this group — the in-flight pass will
+                // pick up the latest log state; no need to stack another.
+                return;
+            }
+        }
+        let client = self.clone();
+        tokio::spawn(async move {
+            let _ = client.recover_group_once(&group_id, target_epoch).await;
+            if let Ok(mut inflight) = client.recovering.lock() {
+                inflight.remove(&group_id);
+            }
+        });
     }
 
     /// Cloneable handle to the M2.5 reachability cache. Mutated by the
@@ -6839,6 +6884,8 @@ mod tests {
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
             group_recovery: crate::groups::epoch_recovery::GroupStatusMap::new(),
+            recovery_cursors: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            recovering: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
         (client, dir)
     }
@@ -7456,6 +7503,8 @@ mod tests {
             fediverse: None,
             relay_failover_cb: Arc::new(tokio::sync::RwLock::new(None)),
             group_recovery: crate::groups::epoch_recovery::GroupStatusMap::new(),
+            recovery_cursors: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            recovering: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
 
         // Router carries exactly one transport — MultiHomeTransport —
