@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::error::Result;
 use crate::groups::pending_join_driver::MembershipStatus;
@@ -66,12 +66,14 @@ pub struct EpochRecoveryDriver<S, A, P, R> {
     probe: P,
     cold: R,
     status: GroupStatusMap,
-    /// In-memory last-applied group-log seq per group. The DURABLE cursor
-    /// is Alice's per-group Commit-log (#297 Lane A); until it lands this
-    /// starts each process at 0 and relies on the applier's idempotent
-    /// 409 handling to skip already-applied commits.
-    // TODO(#297-laneA): persist the cursor via the durable Commit-log.
-    cursors: Mutex<HashMap<String, u64>>,
+    /// Last-applied group-log seq per group. Shared (`Arc`) so it survives
+    /// the driver being rebuilt on each `recover_group_once` call — the
+    /// caller holds the store and threads it in via [`Self::new_with_cursors`],
+    /// so warm catch-up resumes from the cursor instead of re-fetching from 0
+    /// every tick. Not durable across a process restart; the applier's
+    /// idempotent 409 handling covers a cold start (re-fetch from 0, skip
+    /// already-applied commits).
+    cursors: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl<S, A, P, R> EpochRecoveryDriver<S, A, P, R>
@@ -81,15 +83,40 @@ where
     P: GroupStateProbe + Sync,
     R: ColdRecover + Sync,
 {
-    /// Build a driver over its seams + the shared status map.
+    /// Build a driver over its seams + the shared status map, with a fresh
+    /// per-driver cursor store (each process starts at 0). Use
+    /// [`Self::new_with_cursors`] to share the cursor across driver rebuilds.
     pub fn new(source: S, applier: A, probe: P, cold: R, status: GroupStatusMap) -> Self {
+        Self::new_with_cursors(
+            source,
+            applier,
+            probe,
+            cold,
+            status,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+    }
+
+    /// Build a driver over an EXTERNALLY-owned cursor store. The caller
+    /// (the client) holds the `Arc` for its lifetime and passes the same one
+    /// each time it rebuilds the driver, so the last-applied cursor persists
+    /// across `recover_group_once` calls instead of resetting to 0 (which
+    /// would re-fetch the whole log every tick once a warm source is wired).
+    pub fn new_with_cursors(
+        source: S,
+        applier: A,
+        probe: P,
+        cold: R,
+        status: GroupStatusMap,
+        cursors: Arc<Mutex<HashMap<String, u64>>>,
+    ) -> Self {
         Self {
             source,
             applier,
             probe,
             cold,
             status,
-            cursors: Mutex::new(HashMap::new()),
+            cursors,
         }
     }
 
@@ -287,6 +314,52 @@ mod tests {
             payload_b64: "ZXY".into(),
             author_agent_id_hex: Some("aa".repeat(32)),
         }
+    }
+
+    /// Source that records the `since_seq` it is asked to fetch from, so a
+    /// test can assert the driver read the shared cursor rather than 0.
+    struct CapturingSource {
+        seen: Arc<Mutex<Vec<u64>>>,
+    }
+    impl CommitSource for CapturingSource {
+        fn fetch_since(
+            &self,
+            _g: &str,
+            since: u64,
+        ) -> impl Future<Output = Result<Vec<CommitRecord>>> + Send {
+            self.seen.lock().unwrap().push(since);
+            async { Ok(Vec::new()) }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cursor_store_survives_driver_rebuild() {
+        // recover_group_once rebuilds the driver on every call; the cursor
+        // must live in the shared store the caller threads in, so warm
+        // catch-up resumes from it instead of re-fetching from seq 0. Seed the
+        // store as if a prior driver applied through seq 3, then a fresh driver
+        // over the SAME store must fetch since 3.
+        let cursors = Arc::new(Mutex::new(HashMap::new()));
+        cursors.lock().unwrap().insert("g".to_string(), 3u64);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let status = GroupStatusMap::new();
+
+        let d = EpochRecoveryDriver::new_with_cursors(
+            CapturingSource { seen: seen.clone() },
+            OkApplier::default(),
+            // keyed but behind target 9 -> warm loop -> fetch_since(cursor).
+            ScriptProbe::new(vec![keyed(0)]),
+            CountingCold::default(),
+            status,
+            cursors.clone(),
+        );
+        let _ = d.recover_once("g", Some(9)).await.unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().first().copied(),
+            Some(3),
+            "driver fetched since the shared cursor (3), proving the store is external"
+        );
     }
 
     #[tokio::test]
