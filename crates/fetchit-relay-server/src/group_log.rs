@@ -54,6 +54,14 @@ pub struct StoredLogRecord {
     pub recipient: Option<AgentId>,
     /// Opaque ciphertext payload — never inspected by the relay.
     pub payload: Vec<u8>,
+    /// Agent that appended the record, stamped by the relay from the
+    /// authenticated session. `None` only for records written before
+    /// the column existed.
+    ///
+    /// Provenance, never authority: a reader MUST take authorization
+    /// from the x0xd-derived `committed_by` inside the payload, never
+    /// from this field.
+    pub author: Option<AgentId>,
     /// Server-side append time (ms since the Unix epoch).
     pub inserted_at_ms: u64,
 }
@@ -81,6 +89,7 @@ pub trait GroupLogStore: Send + Sync {
         kind: LogRecordKind,
         recipient: Option<AgentId>,
         payload: Vec<u8>,
+        author: AgentId,
         now_ms: u64,
     ) -> Result<u64, ServerError>;
 
@@ -171,6 +180,7 @@ impl GroupLogStore for RamGroupLog {
         kind: LogRecordKind,
         recipient: Option<AgentId>,
         payload: Vec<u8>,
+        author: AgentId,
         now_ms: u64,
     ) -> Result<u64, ServerError> {
         let size = record_size(payload.len());
@@ -195,6 +205,7 @@ impl GroupLogStore for RamGroupLog {
             kind,
             recipient,
             payload,
+            author: Some(author),
             inserted_at_ms: now_ms,
         });
         Ok(seq)
@@ -263,8 +274,63 @@ mod tests {
     }
 
     fn append_commit(log: &RamGroupLog, group: GroupId, payload: &[u8], at: u64) -> u64 {
-        log.append(group, LogRecordKind::Commit, None, payload.to_vec(), at)
-            .unwrap()
+        log.append(
+            group,
+            LogRecordKind::Commit,
+            None,
+            payload.to_vec(),
+            aid(0),
+            at,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn append_stamps_the_author_and_fetch_returns_it() {
+        let l = log();
+        let author = aid(7);
+        l.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            b"c".to_vec(),
+            author,
+            10,
+        )
+        .unwrap();
+        let got = l.fetch_since(&gid(1), 0);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].author,
+            Some(author),
+            "the relay must stamp the appending agent onto the record"
+        );
+    }
+
+    #[test]
+    fn author_is_per_record_not_per_group() {
+        let l = log();
+        l.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            b"a".to_vec(),
+            aid(1),
+            10,
+        )
+        .unwrap();
+        l.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            b"b".to_vec(),
+            aid(2),
+            20,
+        )
+        .unwrap();
+        let got = l.fetch_since(&gid(1), 0);
+        assert_eq!(got[0].author, Some(aid(1)));
+        assert_eq!(got[1].author, Some(aid(2)));
     }
 
     #[test]
@@ -333,6 +399,7 @@ mod tests {
             LogRecordKind::JoinResult,
             Some(aid(0x42)),
             b"welcome".to_vec(),
+            aid(0),
             10,
         )
         .unwrap();
@@ -371,10 +438,24 @@ mod tests {
         let payload = 100usize;
         let cap = RECORD_FIXED_OVERHEAD + payload;
         let l = RamGroupLog::new(WINDOW, 16, cap);
-        l.append(gid(1), LogRecordKind::Commit, None, vec![0u8; payload], 10)
-            .expect("first record fits");
+        l.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            vec![0u8; payload],
+            aid(0),
+            10,
+        )
+        .expect("first record fits");
         let err = l
-            .append(gid(2), LogRecordKind::Commit, None, vec![0u8; payload], 20)
+            .append(
+                gid(2),
+                LogRecordKind::Commit,
+                None,
+                vec![0u8; payload],
+                aid(0),
+                20,
+            )
             .expect_err("second record must trip the global cap");
         assert!(matches!(err, ServerError::GroupLogFull));
         assert_eq!(

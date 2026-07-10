@@ -1017,6 +1017,41 @@ async fn log_fetch_collect(
 }
 
 #[tokio::test]
+async fn group_log_stamps_each_record_with_its_authenticated_appender() {
+    let addr = start_test_server().await;
+    let (alice_id, mut alice) = connect_agent(addr, b"alice-pubkey-bytes").await;
+    let (bob_id, mut bob) = connect_agent(addr, b"bob-pubkey-bytes").await;
+    assert_ne!(
+        alice_id, bob_id,
+        "distinct agents for the test to mean anything"
+    );
+
+    let group = GroupId::from_bytes([0x51; 32]);
+    send_log_append(
+        &mut alice,
+        group,
+        LogRecordKind::Commit,
+        None,
+        b"from-alice",
+    )
+    .await;
+    // Fetch on alice's connection first: frames on one connection are
+    // ordered, so this guarantees her append landed before bob's.
+    let _ = log_fetch_collect(&mut alice, group, 0).await;
+    send_log_append(&mut bob, group, LogRecordKind::Commit, None, b"from-bob").await;
+
+    let records = log_fetch_collect(&mut bob, group, 0).await;
+    assert_eq!(records.len(), 2);
+    // The relay stamps the authenticated session identity. LogAppend
+    // carries no author field, so a client cannot claim to be anyone
+    // else: the only way a record bears alice's id is alice's session.
+    assert_eq!(records[0].payload, b"from-alice");
+    assert_eq!(records[0].author, Some(alice_id));
+    assert_eq!(records[1].payload, b"from-bob");
+    assert_eq!(records[1].author, Some(bob_id));
+}
+
+#[tokio::test]
 async fn group_log_append_then_fetch_returns_ordered_commits() {
     let addr = start_test_server().await;
     let (_, mut alice) = connect_agent(addr, b"alice-pubkey-bytes").await;

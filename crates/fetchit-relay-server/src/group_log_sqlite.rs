@@ -75,11 +75,22 @@ impl SqliteGroupLog {
                  kind INTEGER NOT NULL,
                  recipient BLOB,
                  payload BLOB NOT NULL,
+                 author BLOB,
                  inserted_at_ms INTEGER NOT NULL
              )",
             [],
         )
         .map_err(|e| ServerError::GroupLog(e.to_string()))?;
+        // Migration for databases created before `author` existed:
+        // CREATE TABLE IF NOT EXISTS above is a no-op for them, so add
+        // the column separately. Rows written before the migration keep
+        // a NULL author, which reads back as `None`. Re-running is a
+        // duplicate-column error, which we treat as already-applied.
+        match conn.execute("ALTER TABLE group_log ADD COLUMN author BLOB", []) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(ServerError::GroupLog(e.to_string())),
+        }
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_group_log_group_seq ON group_log(group_id, seq)",
             [],
@@ -109,11 +120,13 @@ impl GroupLogStore for SqliteGroupLog {
         kind: LogRecordKind,
         recipient: Option<AgentId>,
         payload: Vec<u8>,
+        author: AgentId,
         now_ms: u64,
     ) -> Result<u64, ServerError> {
         let size = FIXED_OVERHEAD.saturating_add(payload.len());
         let gid: &[u8] = group.as_bytes();
         let rcpt: Option<Vec<u8>> = recipient.map(|a| a.as_bytes().to_vec());
+        let author_bytes: Vec<u8> = author.as_bytes().to_vec();
         let mut conn = self
             .conn
             .lock()
@@ -169,14 +182,15 @@ impl GroupLogStore for SqliteGroupLog {
             .map_err(|e| ServerError::GroupLog(e.to_string()))?
             .map_or(1, |v| u64::try_from(v).unwrap_or(u64::MAX));
         tx.execute(
-            "INSERT INTO group_log (group_id, seq, kind, recipient, payload, inserted_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO group_log (group_id, seq, kind, recipient, payload, author, inserted_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 gid,
                 i64::try_from(seq).unwrap_or(i64::MAX),
                 kind_to_i64(kind),
                 rcpt,
                 payload,
+                author_bytes,
                 i64::try_from(now_ms).unwrap_or(i64::MAX),
             ],
         )
@@ -201,7 +215,7 @@ impl GroupLogStore for SqliteGroupLog {
             return Vec::new();
         };
         let Ok(mut stmt) = conn.prepare(
-            "SELECT seq, kind, recipient, payload, inserted_at_ms FROM group_log
+            "SELECT seq, kind, recipient, payload, author, inserted_at_ms FROM group_log
              WHERE group_id = ?1 AND seq > ?2 ORDER BY seq",
         ) else {
             return Vec::new();
@@ -214,14 +228,15 @@ impl GroupLogStore for SqliteGroupLog {
                     r.get::<_, i64>(1)?,
                     r.get::<_, Option<Vec<u8>>>(2)?,
                     r.get::<_, Vec<u8>>(3)?,
-                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<Vec<u8>>>(4)?,
+                    r.get::<_, i64>(5)?,
                 ))
             },
         ) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (seq, kind_raw, rcpt, payload, at) in rows.flatten() {
+        for (seq, kind_raw, rcpt, payload, author_raw, at) in rows.flatten() {
             let Some(kind) = kind_from_i64(kind_raw) else {
                 continue;
             };
@@ -232,11 +247,19 @@ impl GroupLogStore for SqliteGroupLog {
                     Err(_) => continue,
                 },
             };
+            // A pre-migration row has a NULL author; an unparseable one
+            // is treated the same. Provenance is advisory, so neither
+            // drops the record: the payload still carries the
+            // authorization-bearing `committed_by`.
+            let author = author_raw
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .map(AgentId::from_bytes);
             out.push(StoredLogRecord {
                 seq: u64::try_from(seq).unwrap_or(0),
                 kind,
                 recipient,
                 payload,
+                author,
                 inserted_at_ms: u64::try_from(at).unwrap_or(0),
             });
         }
@@ -304,8 +327,112 @@ mod tests {
     }
 
     fn append_commit(log: &SqliteGroupLog, group: GroupId, payload: &[u8], at: u64) -> u64 {
-        log.append(group, LogRecordKind::Commit, None, payload.to_vec(), at)
-            .unwrap()
+        log.append(
+            group,
+            LogRecordKind::Commit,
+            None,
+            payload.to_vec(),
+            aid(0),
+            at,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn author_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.db");
+        {
+            let s = open(&path);
+            s.append(
+                gid(1),
+                LogRecordKind::Commit,
+                None,
+                b"c".to_vec(),
+                aid(9),
+                10,
+            )
+            .unwrap();
+        }
+        let s = open(&path);
+        let got = s.fetch_since(&gid(1), 0);
+        assert_eq!(got[0].author, Some(aid(9)));
+    }
+
+    #[test]
+    fn pre_migration_db_gains_author_column_and_keeps_old_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        // Build the OLD schema (no `author`) and seed a row, exactly as a
+        // relay deployed before this change would have on disk.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE group_log (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     group_id BLOB NOT NULL,
+                     seq INTEGER NOT NULL,
+                     kind INTEGER NOT NULL,
+                     recipient BLOB,
+                     payload BLOB NOT NULL,
+                     inserted_at_ms INTEGER NOT NULL
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE group_log_seq (group_id BLOB PRIMARY KEY, next_seq INTEGER NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO group_log (group_id, seq, kind, recipient, payload, inserted_at_ms)
+                 VALUES (?1, 1, 0, NULL, ?2, 10)",
+                rusqlite::params![gid(1).as_bytes(), b"legacy".to_vec()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO group_log_seq (group_id, next_seq) VALUES (?1, 2)",
+                rusqlite::params![gid(1).as_bytes()],
+            )
+            .unwrap();
+        }
+        // Opening migrates in place; the legacy row reads back with no
+        // author, and new appends carry one.
+        let s = open(&path);
+        s.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            b"new".to_vec(),
+            aid(5),
+            20,
+        )
+        .unwrap();
+        let got = s.fetch_since(&gid(1), 0);
+        assert_eq!(got.len(), 2, "legacy row must survive the migration");
+        assert_eq!(got[0].payload, b"legacy");
+        assert_eq!(got[0].author, None, "pre-migration rows have no author");
+        assert_eq!(got[1].author, Some(aid(5)));
+    }
+
+    #[test]
+    fn migration_is_idempotent_across_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.db");
+        drop(open(&path));
+        drop(open(&path));
+        let s = open(&path);
+        s.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            b"x".to_vec(),
+            aid(3),
+            10,
+        )
+        .unwrap();
+        assert_eq!(s.fetch_since(&gid(1), 0)[0].author, Some(aid(3)));
     }
 
     #[test]
@@ -388,6 +515,7 @@ mod tests {
             LogRecordKind::JoinResult,
             Some(aid(0x42)),
             b"welcome".to_vec(),
+            aid(0),
             10,
         )
         .unwrap();
@@ -419,10 +547,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let payload = 100usize;
         let s = SqliteGroupLog::open(&dir.path().join("log.db"), WINDOW, 16, payload + 64).unwrap();
-        s.append(gid(1), LogRecordKind::Commit, None, vec![0u8; payload], 10)
-            .expect("first record fits");
+        s.append(
+            gid(1),
+            LogRecordKind::Commit,
+            None,
+            vec![0u8; payload],
+            aid(0),
+            10,
+        )
+        .expect("first record fits");
         let err = s
-            .append(gid(2), LogRecordKind::Commit, None, vec![0u8; payload], 20)
+            .append(
+                gid(2),
+                LogRecordKind::Commit,
+                None,
+                vec![0u8; payload],
+                aid(0),
+                20,
+            )
             .expect_err("second record must trip the global cap");
         assert!(matches!(err, crate::error::ServerError::GroupLogFull));
     }

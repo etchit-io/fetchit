@@ -188,7 +188,8 @@ default, or in an operator-selected durable `SQLite` store
 and a multi-day offline window. Either way the relay holds only opaque
 ciphertext and never inspects the payload (stays blind); at-rest protection is
 the operator's full-disk encryption, not relay-side. A parallel durable
-group-log store keeps opaque per-group records for epoch catch-up, join-result
+group-log store keeps opaque per-group records (payload opaque; each record
+stamped with its authenticated appender as provenance) for epoch catch-up, join-result
 re-staging, and cold group reconstruction. WS upgrades authenticate with a
 bearer token presented in the `Authorization` header (case-insensitive scheme). Built with the
 `fediverse-inbox` feature it also hosts the

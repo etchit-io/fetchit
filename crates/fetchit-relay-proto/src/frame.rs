@@ -248,6 +248,16 @@ pub struct LogRecordWire {
     pub recipient: Option<AgentId>,
     /// Opaque ciphertext payload.
     pub payload: Vec<u8>,
+    /// Agent that appended this record, stamped by the relay from the
+    /// authenticated session. `None` for records the relay stored
+    /// before it tracked authorship.
+    ///
+    /// Provenance only, never authority. The relay authenticates the
+    /// appending session but cannot vouch for what the payload claims,
+    /// so a consumer MUST take authorization from the ML-DSA-verified
+    /// `committed_by` inside the payload and treat this field as a
+    /// routing/debugging hint.
+    pub author: Option<AgentId>,
     /// Server timestamp at append, milliseconds since the Unix epoch.
     pub inserted_at_ms: u64,
 }
@@ -546,6 +556,7 @@ mod tests {
                     kind: LogRecordKind::Commit,
                     recipient: None,
                     payload: vec![0xaa; 16],
+                    author: Some(AgentId::from_bytes([9u8; AGENT_ID_LEN])),
                     inserted_at_ms: 1_700_000_000_000,
                 },
                 LogRecordWire {
@@ -553,6 +564,7 @@ mod tests {
                     kind: LogRecordKind::JoinResult,
                     recipient: Some(AgentId::from_bytes([6u8; AGENT_ID_LEN])),
                     payload: vec![0xbb; 16],
+                    author: None,
                     inserted_at_ms: 1_700_000_000_001,
                 },
             ],

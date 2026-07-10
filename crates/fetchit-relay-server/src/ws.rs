@@ -457,7 +457,7 @@ fn handle_log_append(
     }
     if state
         .group_log
-        .append(group_id, kind, recipient, payload, now_ms())
+        .append(group_id, kind, recipient, payload, auth.agent_id, now_ms())
         .is_err()
     {
         state.metrics.throttle_per_recipient();
@@ -489,6 +489,7 @@ fn handle_log_fetch(
             kind: r.kind,
             recipient: r.recipient,
             payload: r.payload,
+            author: r.author,
             inserted_at_ms: r.inserted_at_ms,
         })
         .collect();
@@ -709,6 +710,7 @@ mod tests {
                 kind: fetchit_relay_proto::LogRecordKind::Commit,
                 recipient: None,
                 payload: vec![0xcd; 4],
+                author: None,
                 inserted_at_ms: 1,
             })
             .collect()
