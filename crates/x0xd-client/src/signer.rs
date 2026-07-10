@@ -12,7 +12,7 @@ use crate::error::X0xdError;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use fetchit_relay_proto::derive_agent_id;
+use fetchit_relay_proto::{derive_agent_id, AGENT_SIGN_CONTEXT, AGENT_SIGN_SCHEME_ID};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -208,7 +208,14 @@ impl X0xdSigner {
     }
 
     async fn post_sign_once(&self, payload: &[u8]) -> Result<AgentSignResponse, X0xdError> {
+        // x0x >= 0.29 mandates a `context` on `/agent/sign`: the daemon signs
+        // `assemble_agent_sign_buffer(context, payload)`, never the raw payload.
+        // Sending the shared `AGENT_SIGN_CONTEXT` makes an x0xd-signed payload
+        // reproduce byte-for-byte what the daemonless `MlDsaSigner` produces, so
+        // the two signing paths cross-verify. The warmup call rides the same
+        // context (its signature is discarded).
         let body = serde_json::json!({
+            "context": AGENT_SIGN_CONTEXT,
             "payload_b64": B64.encode(payload),
         });
         let url = self.base_url().join("agent/sign")?;
@@ -333,7 +340,7 @@ impl Signer for X0xdSigner {
         let Some(sig_b64) = resp.signature_b64.as_deref() else {
             return Err("x0xd /agent/sign response missing signature_b64".into());
         };
-        if resp.algorithm.as_deref() != Some("x0x.agent-sign.v1.ml-dsa-65") {
+        if resp.algorithm.as_deref() != Some(AGENT_SIGN_SCHEME_ID) {
             return Err(format!("unexpected algorithm tag {:?}", resp.algorithm));
         }
         B64.decode(sig_b64).map_err(|e| e.to_string())
@@ -357,7 +364,7 @@ mod tests {
             "agent_id": agent_id_hex,
             "public_key_b64": pubkey_b64,
             "signature_b64": sig_b64,
-            "algorithm": "x0x.agent-sign.v1.ml-dsa-65",
+            "algorithm": AGENT_SIGN_SCHEME_ID,
         })
     }
 

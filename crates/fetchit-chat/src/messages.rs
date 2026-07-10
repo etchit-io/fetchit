@@ -2084,7 +2084,9 @@ impl<'a> Endpoint<'a> {
         let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
         sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
         sign_bytes.extend_from_slice(&canonical);
-        ml_dsa_verify(&agent_pub, &sign_bytes, &env.sender_signature)
+        // Agent-key signature: verify over the external-agent-sign framing.
+        let framed = fetchit_relay_proto::agent_sign_input(&sign_bytes);
+        ml_dsa_verify(&agent_pub, &framed, &env.sender_signature)
             .map_err(|_| ChatError::Invalid("envelope signature verify failed".into()))?;
 
         // Validate the nonce shape BEFORE we touch x0xd's /secure/decrypt
@@ -6865,7 +6867,10 @@ mod tests {
         let input = forwarding_signing_input(&agent_id_hex, &moved_to, issued_at_ms).unwrap();
         let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
         let sk = MlDsaSecretKey::from_bytes(MlDsaVariant::MlDsa65, sk_bytes).unwrap();
-        let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let sig = dsa
+            .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
         ForwardingRecordV1 {
             agent_id_hex,
             moved_to_relays: moved_to,

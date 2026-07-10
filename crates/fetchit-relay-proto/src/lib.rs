@@ -44,7 +44,9 @@ pub use pair_record_push::PairRecordPushPayload;
 pub use public_post::{PublicPostPayload, FEDIVERSE_BRIDGE_SENDER};
 pub use region::Region;
 pub use sign_domains::SIGN_DOMAIN_PROFILE;
-pub use sign_domains::{assemble_agent_sign_buffer, AGENT_SIGN_CONTEXT};
+pub use sign_domains::{
+    agent_sign_input, assemble_agent_sign_buffer, AGENT_SIGN_CONTEXT, AGENT_SIGN_SCHEME_ID,
+};
 
 /// Protocol version negotiated in the `Hello` / `Ready` exchange.
 pub const PROTOCOL_VERSION: u16 = 2;

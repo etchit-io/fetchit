@@ -401,6 +401,9 @@ fn verify_peer_binding(
         proof.created_at_ms,
         expected_h_at_sign,
     );
+    // The LAN binding proof is signed through the `Signer` trait, so verify
+    // over the external-agent-sign framing.
+    let to_verify = fetchit_relay_proto::agent_sign_input(&to_verify);
     ml_dsa_verify(&peer_pk, &to_verify, &proof.sig)
 }
 

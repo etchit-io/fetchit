@@ -78,7 +78,10 @@ impl AuthService {
                 "public_key does not match agent_id".into(),
             ));
         }
-        let signing_bytes = auth_signing_bytes(&req.challenge);
+        // Agent-key signature: verify over the external-agent-sign framing that
+        // both x0xd's `/agent/sign` and the daemonless signer now produce.
+        let signing_bytes =
+            fetchit_relay_proto::agent_sign_input(&auth_signing_bytes(&req.challenge));
         if !verifier.verify_ml_dsa_65(&req.agent_public_key, &signing_bytes, &req.signature) {
             return Err(ServerError::AuthRejected(
                 "signature verification failed".into(),

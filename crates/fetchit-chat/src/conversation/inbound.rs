@@ -189,7 +189,9 @@ fn verify_sender(
     let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
     sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
     sign_bytes.extend_from_slice(&canonical);
-    if ml_dsa_verify(&agent_pub, &sign_bytes, &envelope.sender_signature).is_err() {
+    // Agent-key signature: verify over the external-agent-sign framing.
+    let framed = fetchit_relay_proto::agent_sign_input(&sign_bytes);
+    if ml_dsa_verify(&agent_pub, &framed, &envelope.sender_signature).is_err() {
         return Ok(VerifyOutcome::Drop(InboundDispatch::Dropped {
             kind: "bad-signature".to_owned(),
             sender: sender_agent_hex,
@@ -631,7 +633,9 @@ fn decrypt_and_verify_welcome(
     let mut sign_bytes = Vec::with_capacity(SIGN_DOMAIN_ENVELOPE.len() + canonical.len());
     sign_bytes.extend_from_slice(SIGN_DOMAIN_ENVELOPE);
     sign_bytes.extend_from_slice(&canonical);
-    if ml_dsa_verify(&sender_pk, &sign_bytes, &envelope.sender_signature).is_err() {
+    // Agent-key signature: verify over the external-agent-sign framing.
+    let framed = fetchit_relay_proto::agent_sign_input(&sign_bytes);
+    if ml_dsa_verify(&sender_pk, &framed, &envelope.sender_signature).is_err() {
         return Ok(Err(InboundDispatch::Dropped {
             kind: "bad-signature".to_owned(),
             sender: sender_agent_hex,

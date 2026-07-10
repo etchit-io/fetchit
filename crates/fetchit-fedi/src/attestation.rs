@@ -381,6 +381,9 @@ pub fn verify_binding(
         &attestation.ml_dsa_pubkey,
     ));
     let input = signing_input(handle, actor_url, &derived, spki_der)?;
+    // Attestation is signed through the agent `Signer`: verify over the
+    // external-agent-sign framing.
+    let input = fetchit_relay_proto::agent_sign_input(&input);
     let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &attestation.ml_dsa_pubkey)
         .map_err(|e| AttestationVerifyError::PubkeyParse(e.to_string()))?;
     let sig = MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &attestation.signature)
@@ -431,6 +434,9 @@ pub fn verify_binding_v2(
         &attestation.relay_hint,
         attestation.hint_epoch_ms,
     )?;
+    // Attestation is signed through the agent `Signer`: verify over the
+    // external-agent-sign framing.
+    let input = fetchit_relay_proto::agent_sign_input(&input);
     let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &attestation.ml_dsa_pubkey)
         .map_err(|e| AttestationVerifyError::PubkeyParse(e.to_string()))?;
     let sig = MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &attestation.signature)
@@ -459,7 +465,10 @@ pub(crate) fn test_attested(
     let (pk, sk) = dsa.generate_keypair().unwrap();
     let derived = hex::encode(fetchit_relay_proto::derive_agent_id(&pk.to_bytes()));
     let input = signing_input(handle, actor_url, &derived, spki_der).unwrap();
-    let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+    let sig = dsa
+        .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+        .unwrap()
+        .to_bytes();
     (MlDsaAttestation::new(pk.to_bytes(), sig), derived)
 }
 
@@ -490,7 +499,10 @@ pub(crate) fn test_attested_v2(
         hint_epoch_ms,
     )
     .unwrap();
-    let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+    let sig = dsa
+        .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+        .unwrap()
+        .to_bytes();
     (
         ActorAttestationV2 {
             version: 2,

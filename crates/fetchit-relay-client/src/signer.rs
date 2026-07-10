@@ -14,7 +14,7 @@
 //!   the client with the server's `AcceptAllVerifier`.
 
 use async_trait::async_trait;
-use fetchit_relay_proto::derive_agent_id;
+use fetchit_relay_proto::{agent_sign_input, derive_agent_id};
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSecretKey, MlDsaVariant};
 
 pub use x0xd_client::{Signer, X0xdSigner};
@@ -150,8 +150,14 @@ impl Signer for MlDsaSigner {
         self.public_key_bytes.clone()
     }
     async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, String> {
+        // Reproduce x0x >= 0.29's mandatory external-agent-sign framing so a
+        // daemonless signature is byte-identical to what an x0xd `/agent/sign`
+        // call produces for the same `message` (see `X0xdSigner`). Without this
+        // wrap the desktop (daemon) and mobile (daemonless) signing paths would
+        // fail to cross-verify.
+        let framed = agent_sign_input(message);
         self.dsa
-            .sign(&self.secret_key, message)
+            .sign(&self.secret_key, &framed)
             .map(|sig| sig.to_bytes())
             .map_err(|e| e.to_string())
     }
@@ -168,11 +174,14 @@ mod tests {
         let msg = b"verify me";
         let sig = signer.sign(msg).await.unwrap();
 
+        // sign() wraps with the external-agent-sign framing, so the raw
+        // ML-DSA signature is over `agent_sign_input(msg)`.
+        let framed = agent_sign_input(msg);
         let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
         let sig_value =
             saorsa_pqc::api::sig::MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &sig).unwrap();
         assert!(dsa
-            .verify(signer.public_key_value(), msg, &sig_value)
+            .verify(signer.public_key_value(), &framed, &sig_value)
             .unwrap());
     }
 
@@ -187,11 +196,12 @@ mod tests {
 
         let msg = b"after restore";
         let sig = restored.sign(msg).await.unwrap();
+        let framed = agent_sign_input(msg);
         let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
         let sig_value =
             saorsa_pqc::api::sig::MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &sig).unwrap();
         assert!(dsa
-            .verify(restored.public_key_value(), msg, &sig_value)
+            .verify(restored.public_key_value(), &framed, &sig_value)
             .unwrap());
     }
 
@@ -218,11 +228,12 @@ mod tests {
         let signer = MlDsaSigner::from_seed(&[7u8; 32]);
         let msg = b"seed-derived signer signs";
         let sig = signer.sign(msg).await.unwrap();
+        let framed = agent_sign_input(msg);
         let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
         let sig_value =
             saorsa_pqc::api::sig::MlDsaSignature::from_bytes(MlDsaVariant::MlDsa65, &sig).unwrap();
         assert!(dsa
-            .verify(signer.public_key_value(), msg, &sig_value)
+            .verify(signer.public_key_value(), &framed, &sig_value)
             .unwrap());
     }
 

@@ -410,6 +410,10 @@ pub fn verify_pair_record(record: &PairRecordV1) -> Result<(), PairRecordError> 
         &record.advertised_relays,
         record.issued_at_ms,
     )?;
+    // PairRecordV1 is signed through the agent `Signer`, so verify over the
+    // external-agent-sign framing. (PairRecordV4 below uses the USER key and
+    // is deliberately NOT wrapped.)
+    let input = crate::agent_sign_input(&input);
 
     let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &ml_dsa_pubkey)
         .map_err(|e| PairRecordError::PubkeyParse(e.to_string()))?;
@@ -464,6 +468,8 @@ pub fn verify_forwarding_record(
         &record.moved_to_relays,
         record.issued_at_ms,
     )?;
+    // Agent-key signature: verify over the external-agent-sign framing.
+    let input = crate::agent_sign_input(&input);
 
     let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, expected_pubkey)
         .map_err(|e| PairRecordError::PubkeyParse(e.to_string()))?;
@@ -826,7 +832,10 @@ mod tests {
         let ts: u64 = 42;
 
         let input = pair_signing_input(&agent_hex, &pk_bytes, &kem_pk, &relays, ts).unwrap();
-        let sig_bytes = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let sig_bytes = dsa
+            .sign(&sk, &crate::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
 
         let record = PairRecordV1 {
             record_version: RECORD_VERSION_V1,
@@ -853,7 +862,10 @@ mod tests {
         let ts: u64 = 99;
 
         let input = forwarding_signing_input(&agent_hex, &relays, ts).unwrap();
-        let sig_bytes = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let sig_bytes = dsa
+            .sign(&sk, &crate::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
 
         let record = ForwardingRecordV1 {
             agent_id_hex: agent_hex,
@@ -1095,7 +1107,10 @@ mod tests {
         let ts: u64 = 7;
 
         let input = pair_signing_input(&agent_hex, &pk_bytes, &kem_pk, &relays, ts).unwrap();
-        let sig_bytes = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let sig_bytes = dsa
+            .sign(&sk, &crate::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
 
         let record = PairRecordV1 {
             record_version: RECORD_VERSION_V1,

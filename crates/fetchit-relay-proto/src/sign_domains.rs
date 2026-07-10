@@ -53,6 +53,15 @@ pub const AGENT_SIGN_MAGIC: &[u8] = b"x0x.external-agent-sign.v1";
 /// signatures cross-verify.
 pub const AGENT_SIGN_CONTEXT: &str = "fetchit.agent-sign.v1";
 
+/// The API-envelope scheme tag x0x's `POST /agent/sign` returns in its
+/// `algorithm` field (byte-identical to x0x `api::agent_signing::SCHEME_ID`).
+/// This is NOT a wire byte-prefix — it is the HTTP-response contract tag. The
+/// x0xd HTTP signer requires the response to carry this exact string, so a
+/// daemon still on the pre-`.v2` scheme (which signed raw / optional-domain
+/// payloads) is rejected rather than silently trusted. `.v2` pins the
+/// mandatory-context DST; it bumps in lockstep with the x0x pin.
+pub const AGENT_SIGN_SCHEME_ID: &str = "x0x.agent-sign.v2.ml-dsa-65";
+
 /// Reproduce x0x's `assemble_buffer`: the exact bytes x0xd signs for a
 /// `/agent/sign` request carrying `context`. Framing:
 /// `[TAG] || MAGIC || u32_be(len(context)) || context || payload`.
@@ -73,17 +82,44 @@ pub fn assemble_agent_sign_buffer(context: &str, payload: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// The exact bytes a fetch>it agent-key signature is computed over: the
+/// external-agent-sign framing under fetch>it's fixed [`AGENT_SIGN_CONTEXT`].
+///
+/// Both the daemonless [`MlDsaSigner`](../fetchit_relay_client) producer and
+/// every agent-key verifier call this one function, so a producer and a
+/// verifier can never disagree on the context. (The x0xd HTTP signer produces
+/// the same bytes by sending `context = AGENT_SIGN_CONTEXT` to the daemon,
+/// which assembles the buffer itself.) Use this at verify sites — never
+/// `assemble_agent_sign_buffer` with an ad-hoc context.
+#[must_use]
+pub fn agent_sign_input(message: &[u8]) -> Vec<u8> {
+    assemble_agent_sign_buffer(AGENT_SIGN_CONTEXT, message)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]
+    fn agent_sign_input_binds_the_fetchit_context() {
+        // The verify-site helper must equal the general primitive under the
+        // fixed context, or producers and verifiers drift apart.
+        assert_eq!(
+            agent_sign_input(b"m"),
+            assemble_agent_sign_buffer(AGENT_SIGN_CONTEXT, b"m")
+        );
+    }
+
+    #[test]
     fn assemble_agent_sign_buffer_matches_x0x_framing() {
         // Byte-pinned against x0x `assemble_buffer("ctx", b"payload")`.
         let a = assemble_agent_sign_buffer("ctx", b"payload");
         assert_eq!(a[0], 0xF0, "leading namespace tag");
-        assert_eq!(&a[1..1 + AGENT_SIGN_MAGIC.len()], b"x0x.external-agent-sign.v1");
+        assert_eq!(
+            &a[1..=AGENT_SIGN_MAGIC.len()],
+            b"x0x.external-agent-sign.v1"
+        );
         let off = 1 + AGENT_SIGN_MAGIC.len();
         assert_eq!(&a[off..off + 4], &3u32.to_be_bytes(), "u32 BE ctx length");
         assert_eq!(&a[off + 4..off + 7], b"ctx");

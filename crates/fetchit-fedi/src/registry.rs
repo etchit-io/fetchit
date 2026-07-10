@@ -304,7 +304,10 @@ mod tests {
             epoch,
         )
         .unwrap();
-        let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let sig = dsa
+            .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
         let req = RegisterActorRequest {
             handle: "josh".into(),
             rsa_spki_der: spki,

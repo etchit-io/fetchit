@@ -410,7 +410,9 @@ pub fn verify_card_extension(
     let sig = B64
         .decode(sig_b64)
         .map_err(|e| ChatError::Invalid(format!("sig b64: {e}")))?;
-    ml_dsa_verify(agent_public_key_bytes, &sign_bytes, &sig)?;
+    // Agent-key signature: verify over the external-agent-sign framing.
+    let framed = fetchit_relay_proto::agent_sign_input(&sign_bytes);
+    ml_dsa_verify(agent_public_key_bytes, &framed, &sig)?;
 
     Ok(CardExtension {
         // `version` (u64) was checked equal to `u64::from(CARD_VERSION)` above,

@@ -411,7 +411,12 @@ mod tests {
         let x25519_pub = [0x22; 32];
         let bytes = lan_binding_bytes(&agent_id, &x25519_pub, 1_700_000_000_000);
         let sig = signer.sign(&bytes).await.unwrap();
-        ml_dsa_verify(&signer.public_key(), &bytes, &sig).unwrap();
+        ml_dsa_verify(
+            &signer.public_key(),
+            &fetchit_relay_proto::agent_sign_input(&bytes),
+            &sig,
+        )
+        .unwrap();
     }
 
     #[tokio::test]

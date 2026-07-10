@@ -512,7 +512,7 @@ mod tests {
             use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
             let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
             Ok(dsa
-                .sign(&self.sk, message)
+                .sign(&self.sk, &fetchit_relay_proto::agent_sign_input(message))
                 .map_err(|e| e.to_string())?
                 .to_bytes())
         }

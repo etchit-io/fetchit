@@ -609,7 +609,10 @@ mod import_tests {
 
         let input =
             pair_signing_input(&agent_id_hex, &pk_bytes, &kem_pk, &relay_strs, 1_000).unwrap();
-        let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+        let sig = dsa
+            .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
 
         let record = PairRecordV1 {
             record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,

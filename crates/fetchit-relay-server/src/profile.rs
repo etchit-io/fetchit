@@ -276,6 +276,8 @@ pub fn verify_record(
     let mut sign_input = Vec::with_capacity(SIGN_DOMAIN_PROFILE.len() + canonical.len());
     sign_input.extend_from_slice(SIGN_DOMAIN_PROFILE);
     sign_input.extend_from_slice(&canonical);
+    // Agent-key signature: verify over the external-agent-sign framing.
+    let sign_input = fetchit_relay_proto::agent_sign_input(&sign_input);
     if !verifier.verify_ml_dsa_65(&pubkey_bytes, &sign_input, &sig_bytes) {
         return Err(ProfileError::SigVerifyFailed);
     }

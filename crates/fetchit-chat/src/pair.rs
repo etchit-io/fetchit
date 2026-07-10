@@ -180,6 +180,9 @@ pub fn verify_index_record(record: &ProfileIndexRecord) -> std::result::Result<V
     let mut sign_input = Vec::with_capacity(SIGN_DOMAIN_PROFILE.len() + canonical.len());
     sign_input.extend_from_slice(SIGN_DOMAIN_PROFILE);
     sign_input.extend_from_slice(&canonical);
+    // Agent-key signature: verify over the external-agent-sign framing (the
+    // record was signed through the `Signer` in `sign_minimal_index_record`).
+    let sign_input = fetchit_relay_proto::agent_sign_input(&sign_input);
 
     let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
     let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &pubkey_bytes)
@@ -563,7 +566,10 @@ mod tests {
         let mut sign_input = Vec::with_capacity(SIGN_DOMAIN_PROFILE.len() + canonical.len());
         sign_input.extend_from_slice(SIGN_DOMAIN_PROFILE);
         sign_input.extend_from_slice(&canonical);
-        let sig_bytes = dsa.sign(sk, &sign_input).unwrap().to_bytes();
+        let sig_bytes = dsa
+            .sign(sk, &fetchit_relay_proto::agent_sign_input(&sign_input))
+            .unwrap()
+            .to_bytes();
         ProfileIndexRecord {
             sig: B64URL.encode(sig_bytes),
             ..unsigned
@@ -605,7 +611,7 @@ mod tests {
         async fn sign(&self, message: &[u8]) -> std::result::Result<Vec<u8>, String> {
             let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
             Ok(dsa
-                .sign(&self.sk, message)
+                .sign(&self.sk, &fetchit_relay_proto::agent_sign_input(message))
                 .map_err(|e| e.to_string())?
                 .to_bytes())
         }
@@ -1008,7 +1014,10 @@ mod tests {
         let kem_pk = vec![0u8; 1184];
         let input = pair_signing_input(&agent_id_hex, pk_bytes, &kem_pk, &relay_strs, issued_at_ms)
             .unwrap();
-        let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+        let sig = dsa
+            .sign(sk, &fetchit_relay_proto::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
         PairRecordV1 {
             record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
             agent_id_hex,
@@ -1227,7 +1236,10 @@ mod tests {
             .map(std::string::ToString::to_string)
             .collect();
         let input = forwarding_signing_input(&agent_id_hex, &relay_strs, issued_at_ms).unwrap();
-        let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+        let sig = dsa
+            .sign(sk, &fetchit_relay_proto::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
         ForwardingRecordV1 {
             agent_id_hex,
             moved_to_relays: relay_strs,

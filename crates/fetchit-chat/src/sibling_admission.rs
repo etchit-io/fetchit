@@ -174,6 +174,10 @@ pub fn authorize_sibling_admission(
         &request.treekem_key_package_b64,
         request.nonce,
     )?;
+    // The device request is signed through the `Signer` trait, so verify over
+    // the external-agent-sign framing. Wrap HERE, not inside `verify_ml_dsa65`
+    // (a generic helper the raw agent-certificate path also calls).
+    let input = fetchit_relay_proto::agent_sign_input(&input);
     verify_ml_dsa65(&device_pubkey, &input, &sig).map_err(|e| {
         ChatError::Invalid(format!(
             "sibling-join request signature does not verify: {e}"
