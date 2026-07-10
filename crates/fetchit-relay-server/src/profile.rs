@@ -23,8 +23,8 @@ use dashmap::DashMap;
 // so the relay, the chat client, and any future SDK share one
 // byte literal via the type system rather than by docstring
 // social contract.
-pub use fetchit_relay_proto::SIGN_DOMAIN_PROFILE;
 use fetchit_relay_proto::derive_agent_id;
+pub use fetchit_relay_proto::SIGN_DOMAIN_PROFILE;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
