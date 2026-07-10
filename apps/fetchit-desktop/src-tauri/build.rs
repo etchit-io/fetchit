@@ -16,11 +16,13 @@ use std::process::Command;
 /// 0.27.0). Cross-NAT DM + 2-party group verified on 0.27, both legs.
 const X0XD_PIN_VERSION: &str = "0.27.0";
 
-/// Pinned commit: the `mobile-0.27` fork tip on josh-clsn/x0x (upstream
-/// `v0.27.0` release lineage plus the fetch>it fork tail, now including the
-/// read-only `GET /groups/:id/secure/self` keyed-epoch probe).
+/// Pinned commit on josh-clsn/x0x: the `v0.27.0` release lineage plus the
+/// fetch>it fork tail (read-only `GET /groups/:id/secure/self` keyed-epoch
+/// probe), plus the actor-authz tightening that binds group-metadata admin
+/// actions to the ML-DSA-verified `commit.committed_by` instead of the
+/// client-supplied `sender_agent_id` the REST apply paths used to trust.
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "b19f8c171831c535f44b31d28e0f19b61469b813";
+const X0XD_PIN_SHA: &str = "c67bb58df6e4c9e8c63338466706c9272760d0bf";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

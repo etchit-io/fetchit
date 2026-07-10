@@ -38,7 +38,7 @@ env:
   # Mirrors bundled-x0xd.yml and apps/fetchit-desktop/src-tauri/build.rs.
   # Bump in lockstep with build.rs::X0XD_PIN_SHA and X0XD_PIN_VERSION;
   # scripts/check-pins.sh enforces the lockstep.
-  X0XD_PIN_SHA: "b19f8c171831c535f44b31d28e0f19b61469b813"
+  X0XD_PIN_SHA: "c67bb58df6e4c9e8c63338466706c9272760d0bf"
   X0XD_PIN_VERSION: "0.27.0"
 
 jobs:
