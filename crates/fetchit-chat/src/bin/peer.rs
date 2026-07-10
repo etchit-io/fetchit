@@ -627,14 +627,21 @@ async fn run_send(
         None => None,
     };
     let attachment = attachment.as_ref();
+    if body.is_empty() && attachment.is_none() {
+        anyhow::bail!("nothing to send: provide --body and/or --attach");
+    }
     let peer = AgentId::parse(peer_hex.to_owned()).context("invalid peer agent id")?;
     let mut inbound = client
         .take_transport_inbound("relay")
         .context("relay inbound already taken")?;
+
+    // The reader forwards every inbound delivery-receipt message id on
+    // this channel so the send below can wait for OURS specifically.
+    let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let client_clone = client.clone();
     let reader = tokio::spawn(async move {
         while let Some(env) = inbound.recv().await {
-            if let Some(dm) = decode_inbound(&client_clone, env).await {
+            if let Some(dm) = decode_inbound(&client_clone, env, Some(&receipt_tx)).await {
                 println!("[{}] {}", short(&dm.from.0), dm.body);
             }
         }
@@ -653,16 +660,39 @@ async fn run_send(
         attachment.is_some()
     );
 
-    // Hold the connection open so the relay can return a delivery
-    // receipt (the recipient decrypt-acked); the reader prints
-    // `got receipt for message_id=…`, which the smoke asserts on.
-    let _ = tokio::time::timeout(
-        Duration::from_secs(10),
-        futures_util::future::pending::<()>(),
-    )
-    .await;
-    drop(reader);
-    Ok(())
+    // Honest delivery assertion: wait for the receipt that matches OUR
+    // message id, exit 0 the instant it arrives (no fixed 10s tax), or
+    // exit 2 on timeout, distinct from a send failure (exit 1) so an
+    // automated smoke reads the verdict from the exit code alone.
+    let Some(our_id) = sent else {
+        eprintln!("[peer] no message id returned (no receipt expected); cannot assert delivery");
+        reader.abort();
+        return Ok(());
+    };
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            got = receipt_rx.recv() => match got {
+                Some(rid) if rid == our_id => {
+                    eprintln!("[peer] delivered, receipt for id={our_id}");
+                    reader.abort();
+                    return Ok(());
+                }
+                Some(_) => {} // a receipt for some other message; keep waiting
+                None => {
+                    eprintln!("[peer] inbound closed before a receipt for id={our_id}; exiting 2");
+                    reader.abort();
+                    std::process::exit(2);
+                }
+            },
+            () = &mut deadline => {
+                eprintln!("[peer] sent but NO receipt within 10s for id={our_id}; exiting 2");
+                reader.abort();
+                std::process::exit(2);
+            }
+        }
+    }
 }
 
 async fn run_mint_actor(
@@ -984,7 +1014,7 @@ async fn run_group_chat(client: &Client, display_name: &str, args: &GroupChatArg
     let client_clone = client.clone();
     let reader_handle = tokio::spawn(async move {
         while let Some(env) = inbound.recv().await {
-            if let Some(dm) = decode_inbound(&client_clone, env).await {
+            if let Some(dm) = decode_inbound(&client_clone, env, None).await {
                 println!("[{}] {}", short(&dm.from.0), dm.body);
             }
         }
@@ -1589,7 +1619,11 @@ fn take_echo_budget() -> bool {
 }
 
 #[allow(clippy::too_many_lines)] // one arm per envelope kind; splitting scatters the ack decisions
-async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<PeerInbound> {
+async fn decode_inbound(
+    client: &Client,
+    mut env: InboundEnvelope,
+    receipt_tx: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Option<PeerInbound> {
     // Ack-after-persist: confirm ONLY at terminal outcomes so the relay
     // reclaims its stored copy; every transient path drops the token
     // unconfirmed and redelivery retries. Decision table mirrors
@@ -1704,6 +1738,13 @@ async fn decode_inbound(client: &Client, mut env: InboundEnvelope) -> Option<Pee
             }
             InboundDispatch::Receipt { message_id, .. } => {
                 eprintln!("[peer] got receipt for message_id={message_id}");
+                // Surface the receipt to a waiter (the one-shot `send`
+                // mode selects on `message_id == our sent id`) so an
+                // automated smoke can assert delivery via the exit code
+                // rather than scraping stderr.
+                if let Some(tx) = receipt_tx {
+                    let _ = tx.send(message_id);
+                }
                 None
             }
             other => {
@@ -1792,7 +1833,7 @@ async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
         .context("relay inbound already taken")?;
     eprintln!("[peer] echo mode — auto-replying to every inbound DM");
     while let Some(env) = inbound.recv().await {
-        let Some(dm) = decode_inbound(client, env).await else {
+        let Some(dm) = decode_inbound(client, env, None).await else {
             continue;
         };
         eprintln!("[peer] in: from={} body={:?}", short(&dm.from.0), dm.body);
@@ -1824,7 +1865,7 @@ async fn run_chat(client: &Client, display_name: &str, peer_hex: &str) -> Result
     let client_clone = client.clone();
     let reader_handle = tokio::spawn(async move {
         while let Some(env) = inbound.recv().await {
-            if let Some(dm) = decode_inbound(&client_clone, env).await {
+            if let Some(dm) = decode_inbound(&client_clone, env, None).await {
                 println!("[{}] {}", short(&dm.from.0), dm.body);
             }
         }
@@ -1903,7 +1944,7 @@ async fn run_chat_outbox(
     let client_clone = client.clone();
     let reader_handle = tokio::spawn(async move {
         while let Some(env) = inbound.recv().await {
-            if let Some(dm) = decode_inbound(&client_clone, env).await {
+            if let Some(dm) = decode_inbound(&client_clone, env, None).await {
                 println!("[{}] {}", short(&dm.from.0), dm.body);
             }
         }
