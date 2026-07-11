@@ -43,11 +43,13 @@ pub mod detect;
 pub mod driver;
 pub mod status;
 pub mod watchdog;
+pub mod wire_map;
 
 pub use detect::{epoch_relation, frame_is_behind, EpochRelation};
 pub use driver::{ColdRecover, EpochRecoveryDriver, RecoverOutcome};
 pub use status::{GroupRecoveryStatus, GroupStatusEvent, GroupStatusMap};
 pub use watchdog::{groups_to_recover, wedge_should_trip, WedgeSignals, WEDGE_THRESHOLD_MS};
+pub use wire_map::{commit_record_from_wire, plan_apply, ApplyPlan};
 
 /// What kind of append-only group-log record this is. Mirrors
 /// [`fetchit_relay_proto::LogRecordKind`] so a record fetched over the
