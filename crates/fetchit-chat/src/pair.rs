@@ -1023,6 +1023,7 @@ mod tests {
             agent_id_hex,
             ml_dsa_pubkey_b64: B64STD.encode(pk_bytes),
             kem_pubkey_b64: B64STD.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relay_strs,
             issued_at_ms,
             sig_b64: B64STD.encode(sig),

@@ -90,6 +90,7 @@ pub async fn build_signed_pair_record(
     signer: &dyn Signer,
     advertised_relays: Vec<String>,
     issued_at_ms: u64,
+    machine_id: String,
 ) -> Result<PairRecordV1> {
     let agent_id_hex = identity.agent_id_hex().to_owned();
     let ml_dsa_pubkey = signer.public_key();
@@ -117,6 +118,7 @@ pub async fn build_signed_pair_record(
         agent_id_hex,
         ml_dsa_pubkey_b64: STANDARD.encode(&ml_dsa_pubkey),
         kem_pubkey_b64: STANDARD.encode(kem_pubkey),
+        machine_id,
         advertised_relays,
         issued_at_ms,
         sig_b64: STANDARD.encode(&sig),
@@ -585,9 +587,10 @@ mod tests {
         let agent_hex = agent_hex_for(&signer);
         let identity = make_identity(dir.path(), &agent_hex);
 
-        let record = build_signed_pair_record(&identity, &signer, relays(), 1_000_000)
-            .await
-            .unwrap();
+        let record =
+            build_signed_pair_record(&identity, &signer, relays(), 1_000_000, String::new())
+                .await
+                .unwrap();
 
         assert_eq!(record.agent_id_hex, agent_hex);
         assert_eq!(record.issued_at_ms, 1_000_000);
@@ -657,6 +660,7 @@ mod tests {
             &signer,
             vec!["wss://nyc-relay.etchit.io/v1/ws".to_owned()],
             1_000_000,
+            String::new(),
         )
         .await
         .unwrap();
@@ -705,9 +709,10 @@ mod tests {
 
         // An already-http/https list (the legacy bare-IP form) must round-trip
         // byte-for-byte: normalization is idempotent here.
-        let record = build_signed_pair_record(&identity, &signer, relays(), 3_000_000)
-            .await
-            .unwrap();
+        let record =
+            build_signed_pair_record(&identity, &signer, relays(), 3_000_000, String::new())
+                .await
+                .unwrap();
         assert_eq!(record.advertised_relays, relays());
         fetchit_relay_proto::pair_record::verify_pair_record(&record)
             .expect("https record must verify");
@@ -720,7 +725,7 @@ mod tests {
         let agent_hex = agent_hex_for(&signer);
         let identity = make_identity(dir.path(), &agent_hex);
 
-        let err = build_signed_pair_record(&identity, &signer, vec![], 1)
+        let err = build_signed_pair_record(&identity, &signer, vec![], 1, String::new())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("pair_signing_input"), "got {err}");
@@ -970,9 +975,10 @@ mod tests {
             Some(&salt),
         )
         .unwrap();
-        let record = build_signed_pair_record(&identity, &signer, relays, issued_at_ms)
-            .await
-            .unwrap();
+        let record =
+            build_signed_pair_record(&identity, &signer, relays, issued_at_ms, String::new())
+                .await
+                .unwrap();
         (record, signer)
     }
 

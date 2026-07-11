@@ -52,6 +52,7 @@ fn mk_signed_pair(dsa: &MlDsa, sk: &MlDsaSecretKey, pk_bytes: &[u8], issued: u64
         agent_id_hex: id,
         ml_dsa_pubkey_b64: B64.encode(pk_bytes),
         kem_pubkey_b64: B64.encode(kem),
+        machine_id: String::new(),
         advertised_relays: relays,
         issued_at_ms: issued,
         sig_b64: B64.encode(sig),

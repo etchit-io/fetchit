@@ -414,6 +414,7 @@ mod tests {
             agent_id_hex: agent_hex.to_string(),
             ml_dsa_pubkey_b64: "AA".to_string(),
             kem_pubkey_b64: "AA".to_string(),
+            machine_id: String::new(),
             advertised_relays: vec!["https://relay.example".to_string()],
             issued_at_ms: issued,
             sig_b64: "AA".to_string(),

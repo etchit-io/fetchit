@@ -60,6 +60,7 @@ fn mk_signed_record(
         agent_id_hex,
         ml_dsa_pubkey_b64: B64.encode(pk_bytes),
         kem_pubkey_b64: B64.encode(kem_bytes),
+        machine_id: String::new(),
         advertised_relays: relays,
         issued_at_ms,
         sig_b64: B64.encode(sig_bytes),

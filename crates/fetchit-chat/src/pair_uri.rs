@@ -619,6 +619,7 @@ mod import_tests {
             agent_id_hex,
             ml_dsa_pubkey_b64: B64.encode(&pk_bytes),
             kem_pubkey_b64: B64.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relay_strs,
             issued_at_ms: 1_000,
             sig_b64: B64.encode(sig),

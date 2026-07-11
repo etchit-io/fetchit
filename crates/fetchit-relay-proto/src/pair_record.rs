@@ -93,6 +93,21 @@ pub struct PairRecordV1 {
     pub ml_dsa_pubkey_b64: String,
     /// ML-KEM-768 public key, STANDARD base64-encoded.
     pub kem_pubkey_b64: String,
+    /// The publisher's x0x machine id (hex, 64 chars). Carried so a
+    /// pointer-URI importer can reconstruct a card that x0x >= 0.29
+    /// accepts: its `/agent/card/import` decodes into
+    /// `groups::card::AgentCard`, where `machine_id` is a required field.
+    ///
+    /// Unsigned, like [`record_version`](Self::record_version): it is not
+    /// part of [`pair_signing_input`], so legacy records without it stay
+    /// byte-identical and keep verifying, and legacy JSON deserialises it
+    /// to empty. Authenticating it buys nothing here — messages are
+    /// KEM-sealed to the signed [`kem_pubkey_b64`](Self::kem_pubkey_b64),
+    /// fetchit's own `StoredContactCard` carries no machine id, and a
+    /// swapped value only mis-targets the optional direct-QUIC path, which
+    /// falls back to relay delivery.
+    #[serde(default)]
+    pub machine_id: String,
     /// Preferred relay URLs in priority order (1..=4 entries, each
     /// a valid http/https URL of at most 256 bytes).
     pub advertised_relays: Vec<String>,
@@ -842,12 +857,61 @@ mod tests {
             agent_id_hex: agent_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relays,
             issued_at_ms: ts,
             sig_b64: STANDARD.encode(&sig_bytes),
         };
 
         verify_pair_record(&record).unwrap();
+    }
+
+    #[test]
+    fn machine_id_carried_unsigned_verifies_and_round_trips() {
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let agent_hex = hex::encode(crate::derive_agent_id(&pk_bytes));
+        let kem_pk = vec![0x55_u8; 32];
+        let relays = relays_two();
+        let ts: u64 = 42;
+        let mid = "a".repeat(64);
+
+        // machine_id is NOT part of the signing input, so a record carrying a
+        // non-empty one still verifies against a signature made without it.
+        let input = pair_signing_input(&agent_hex, &pk_bytes, &kem_pk, &relays, ts).unwrap();
+        let sig_bytes = dsa
+            .sign(&sk, &crate::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
+
+        let record = PairRecordV1 {
+            record_version: RECORD_VERSION_V1,
+            agent_id_hex: agent_hex,
+            ml_dsa_pubkey_b64: STANDARD.encode(&pk_bytes),
+            kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            machine_id: mid.clone(),
+            advertised_relays: relays,
+            issued_at_ms: ts,
+            sig_b64: STANDARD.encode(&sig_bytes),
+        };
+        verify_pair_record(&record).unwrap();
+
+        // serde round-trip preserves machine_id and the record still verifies.
+        let json = serde_json::to_string(&record).unwrap();
+        let back: PairRecordV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.machine_id, mid);
+        verify_pair_record(&back).unwrap();
+
+        // A legacy record (JSON without the field) deserialises machine_id to
+        // empty and still verifies — the field is unsigned + serde-defaulted.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("machine_id");
+        let legacy_rec: PairRecordV1 = serde_json::from_str(&v.to_string()).unwrap();
+        assert_eq!(legacy_rec.machine_id, "");
+        verify_pair_record(&legacy_rec).unwrap();
     }
 
     #[test]
@@ -902,6 +966,7 @@ mod tests {
             agent_id_hex: agent_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&other_pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relays.clone(),
             issued_at_ms: ts,
             sig_b64: STANDARD.encode(&sig_bytes),
@@ -924,6 +989,7 @@ mod tests {
             agent_id_hex: agent_hex_a.clone(),
             ml_dsa_pubkey_b64: STANDARD.encode(&other_pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relays.clone(),
             issued_at_ms: ts,
             sig_b64: STANDARD.encode(&sig_a),
@@ -959,6 +1025,7 @@ mod tests {
             agent_id_hex: target_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&pk_raw),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relays,
             issued_at_ms: ts,
             sig_b64: STANDARD.encode(&sig_bytes),
@@ -1045,6 +1112,7 @@ mod tests {
             agent_id_hex: fake_agent_hex(),
             ml_dsa_pubkey_b64: STANDARD.encode([0xAA_u8; 8]),
             kem_pubkey_b64: STANDARD.encode([0xBB_u8; 8]),
+            machine_id: String::new(),
             advertised_relays: relays_one(),
             issued_at_ms: 12345,
             sig_b64: STANDARD.encode([0xCC_u8; 8]),
@@ -1080,6 +1148,7 @@ mod tests {
             agent_id_hex: fake_agent_hex(),
             ml_dsa_pubkey_b64: STANDARD.encode([0xAA_u8; 8]),
             kem_pubkey_b64: STANDARD.encode([0xBB_u8; 8]),
+            machine_id: String::new(),
             advertised_relays: relays_one(),
             issued_at_ms: 12345,
             sig_b64: STANDARD.encode([0xCC_u8; 8]),
@@ -1117,6 +1186,7 @@ mod tests {
             agent_id_hex: agent_hex,
             ml_dsa_pubkey_b64: STANDARD.encode(&pk_bytes),
             kem_pubkey_b64: STANDARD.encode(&kem_pk),
+            machine_id: String::new(),
             advertised_relays: relays,
             issued_at_ms: ts,
             sig_b64: STANDARD.encode(&sig_bytes),
