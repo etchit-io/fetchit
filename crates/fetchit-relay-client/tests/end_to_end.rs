@@ -236,6 +236,9 @@ mod mock_x0xd {
 
     #[derive(Deserialize)]
     struct SignRequest {
+        // x0x >= 0.29 requires a context; the mock signs the same
+        // external-agent-sign framing a real daemon does.
+        context: String,
         payload_b64: String,
     }
 
@@ -274,7 +277,10 @@ mod mock_x0xd {
                 Json(serde_json::json!({ "ok": false, "error": "bad base64" })),
             );
         };
-        let sig = state.dsa.sign(&state.secret_key, &payload).unwrap();
+        // A 0.29 daemon signs assemble_buffer(context, payload), not the raw
+        // payload, and advertises the v2 scheme tag.
+        let signed = fetchit_relay_proto::assemble_agent_sign_buffer(&req.context, &payload);
+        let sig = state.dsa.sign(&state.secret_key, &signed).unwrap();
         (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -282,7 +288,7 @@ mod mock_x0xd {
                 "agent_id": state.agent_id_hex,
                 "public_key_b64": state.public_key_b64,
                 "signature_b64": B64.encode(sig.to_bytes()),
-                "algorithm": "x0x.agent-sign.v1.ml-dsa-65",
+                "algorithm": fetchit_relay_proto::AGENT_SIGN_SCHEME_ID,
             })),
         )
     }
