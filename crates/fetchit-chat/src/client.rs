@@ -1797,11 +1797,14 @@ impl Client {
     /// fetch + apply group-log commits, re-probe; not keyed -> hand off to
     /// the existing durable pending-join resume ([`Self::drive_pending_joins_once`]).
     ///
-    /// The warm commit source + applier are DEFERRED to Alice's durable
-    /// per-group Commit-log (#297 Lane A): the relay-client does not yet
-    /// issue `LogFetch`, so [`DeferredSource`] yields no records and a
-    /// behind-but-keyed member correctly stays `Reconnecting` (never a
-    /// false `Live`). The cold path is fully live today.
+    /// The warm path is live over the durable relay group-log (#297 Lane A):
+    /// [`LogFetchCommitSource`] fetches the commits (and self-addressed
+    /// join-results) with `seq` past our cursor, and `WarmApplier` applies
+    /// each through x0xd's signature-verifying apply endpoints
+    /// (`apply_metadata_event` / `apply_join_result`) — never a bypass, the
+    /// daemon re-runs full membership authority. With no relay configured
+    /// the source yields nothing and a behind member falls through to the
+    /// cold pending-join resume rather than a false `Live`.
     ///
     /// # Errors
     /// Propagates a probe (`group_self_status`) or cold-resume error.
@@ -1813,8 +1816,8 @@ impl Client {
         use std::future::Future;
 
         use crate::groups::epoch_recovery::{
-            ApplyOutcome, ColdRecover, CommitApplier, CommitRecord, CommitSource,
-            EpochRecoveryDriver, GroupState, GroupStateProbe,
+            ColdRecover, EpochRecoveryDriver, GroupState, GroupStateProbe, LogFetchCommitSource,
+            X0xdCommitApplier,
         };
 
         // Production probe over the read-only keyed-status endpoint
@@ -1858,34 +1861,29 @@ impl Client {
             }
         }
 
-        // DEFERRED warm seam. TODO(#297-laneA): back with the relay
-        // group-log `LogFetch` once the relay-client issues it and the
-        // durable Commit-log serves records.
-        struct DeferredSource;
-        impl CommitSource for DeferredSource {
-            async fn fetch_since(
-                &self,
-                _group_id: &str,
-                _since_seq: u64,
-            ) -> Result<Vec<CommitRecord>> {
-                Ok(Vec::new())
-            }
-        }
-        // Unreachable while DeferredSource yields nothing. TODO(#297-laneA):
-        // dispatch to x0xd's signature-verifying apply path
-        // (apply_metadata_event / apply_join_result) — NEVER a bypass.
-        struct DeferredApplier;
-        impl CommitApplier for DeferredApplier {
-            async fn apply(&self, _group_id: &str, _record: &CommitRecord) -> Result<ApplyOutcome> {
-                Err(ChatError::Invalid(
-                    "warm commit apply not yet wired (#297 Lane A)".into(),
-                ))
-            }
-        }
+        // Our own agent id (hex), for classifying a self-addressed
+        // join-result. Absent only in daemonless/no-chat builds, where warm
+        // recovery cannot run anyway; empty then, so join-results simply
+        // never self-target and commits still apply via their author.
+        let my_agent_hex = self
+            .chat
+            .as_ref()
+            .map(|c| c.identity.agent_id_hex().to_owned())
+            .unwrap_or_default();
+
+        // Warm applier: routes each fetched record to x0xd's
+        // signature-verifying apply endpoint (never a bypass; the daemon
+        // re-runs full membership authority). Built from the same daemon
+        // base URL + token the client's `secure_groups` uses.
+        let applier = X0xdCommitApplier::new(
+            self.http.base_url(),
+            self.http.token().to_owned(),
+            my_agent_hex,
+        );
 
         let driver = EpochRecoveryDriver::new_with_cursors(
-            DeferredSource,
-            DeferredApplier,
+            LogFetchCommitSource::new(self.relay.clone()),
+            applier,
             WarmProbe { client: self },
             ColdViaPendingJoins { client: self },
             self.group_recovery.clone(),
@@ -3840,6 +3838,19 @@ impl Client {
         let advertised_relays = vec![relay_str.to_owned()];
         let agent_hex = chat.identity.agent_id_hex().to_owned();
 
+        // The publisher's own x0x machine id, carried in the pointer record
+        // so a pointer-URI importer can reconstruct a card x0x >= 0.29
+        // accepts (its /agent/card/import requires `machine_id`). Best-effort:
+        // an empty string on lookup failure keeps the field legacy-shaped —
+        // the record still publishes + verifies (machine_id is unsigned), and
+        // only newer importers that need the field are affected.
+        let machine_id = self
+            .identity()
+            .me()
+            .await
+            .map(|id| id.machine_id)
+            .unwrap_or_default();
+
         let wall_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             // 0 (not u64::MAX) on the unreachable overflow branch: feeding
@@ -3853,6 +3864,7 @@ impl Client {
             chat.signer.as_ref(),
             advertised_relays.clone(),
             issued,
+            machine_id.clone(),
         )
         .await?;
 
@@ -3877,6 +3889,7 @@ impl Client {
                 chat.signer.as_ref(),
                 advertised_relays,
                 issued2,
+                machine_id.clone(),
             )
             .await?;
             if let crate::pair_record::PostOutcome::WatermarkReject { .. } =
@@ -4020,7 +4033,16 @@ impl Client {
             // reflects the record it's derived from.
             created_at: Some(record.issued_at_ms / 1000),
             addresses: Vec::new(),
-            extra: serde_json::Value::Null,
+            // Carry the peer's machine id into the card's flattened `extra` so
+            // it serialises as a top-level `machine_id`. x0x >= 0.29 requires
+            // it on /agent/card/import; without it the daemon-side contact
+            // mirror never lands and DMs to this peer can't route. A legacy
+            // pointer without the field leaves `extra` Null (nothing emitted).
+            extra: if record.machine_id.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!({ "machine_id": record.machine_id })
+            },
         };
         // Best-effort legacy sync. The local StoredContactCard saved above
         // is the messaging source of truth (it carries the ML-KEM key the

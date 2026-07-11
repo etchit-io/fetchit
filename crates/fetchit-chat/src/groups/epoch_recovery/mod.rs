@@ -24,15 +24,16 @@
 //!
 //! # The `CommitSource` / `CommitApplier` seams
 //!
-//! The fetch side is a trait ([`CommitSource`]) so Alice's durable
-//! per-group Commit-log (#297 Lane A) plugs in unchanged. Today the relay
-//! `LogFetch`/`LogRecords` frames exist
-//! ([`fetchit_relay_proto::LogFetch`]) but the relay-client supervisor
-//! never *issues* a `LogFetch` — so there is no production `CommitSource`
-//! that serves warm commits yet. See [`DeferredCommitSource`] and the
-//! `TODO(#297-laneA)` markers: the pure recovery loop is fully built and
-//! tested against fake sources; the live warm path lights up when the
-//! durable Commit-log serves records.
+//! The fetch side is a trait ([`CommitSource`]); the production impl is
+//! [`log_source::LogFetchCommitSource`], which issues a relay `LogFetch`
+//! over the durable per-group group-log (#297 Lane A) and maps the returned
+//! records into [`CommitRecord`]s via [`wire_map::commit_record_from_wire`].
+//! The apply side ([`CommitApplier`]) routes each record through
+//! [`wire_map::plan_apply`] to x0xd's signature-verifying endpoints
+//! (`apply_metadata_event` / `apply_join_result`) — never a bypass. Both are
+//! wired into [`crate::Client::recover_group_once`]. With no relay
+//! configured the source yields nothing and a behind member falls through
+//! to the cold pending-join resume rather than reporting a false `Live`.
 
 use std::future::Future;
 
@@ -41,6 +42,7 @@ use crate::groups::pending_join_driver::MembershipStatus;
 
 pub mod detect;
 pub mod driver;
+pub mod log_applier;
 pub mod log_source;
 pub mod status;
 pub mod watchdog;
@@ -48,6 +50,7 @@ pub mod wire_map;
 
 pub use detect::{epoch_relation, frame_is_behind, EpochRelation};
 pub use driver::{ColdRecover, EpochRecoveryDriver, RecoverOutcome};
+pub use log_applier::X0xdCommitApplier;
 pub use log_source::LogFetchCommitSource;
 pub use status::{GroupRecoveryStatus, GroupStatusEvent, GroupStatusMap};
 pub use watchdog::{groups_to_recover, wedge_should_trip, WedgeSignals, WEDGE_THRESHOLD_MS};
