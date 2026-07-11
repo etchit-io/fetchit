@@ -170,6 +170,42 @@ impl RelayTransport {
         &self.relay_set
     }
 
+    /// Append one record to the durable relay group-log via the
+    /// [`RelaySet`]. Fire-and-forget on the send path; the record is
+    /// what a behind member fetches to catch up (`#297` Lane A).
+    ///
+    /// # Errors
+    /// Returns [`ChatError::MessageTransport`] when the set has no relay.
+    pub fn log_append(
+        &self,
+        group_id: fetchit_relay_proto::GroupId,
+        kind: fetchit_relay_proto::LogRecordKind,
+        recipient: Option<fetchit_relay_proto::AgentId>,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        self.relay_set
+            .log_append(group_id, kind, recipient, payload)
+            .map_err(|e| ChatError::MessageTransport(format!("group-log append: {e}")))
+    }
+
+    /// Fetch durable group-log records with `seq > since_seq` via the
+    /// [`RelaySet`], ascending. The transport under the epoch-recovery
+    /// `CommitSource` (`#297` Lane A).
+    ///
+    /// # Errors
+    /// Returns [`ChatError::MessageTransport`] when the set has no relay
+    /// or the fetch times out.
+    pub async fn log_fetch(
+        &self,
+        group_id: fetchit_relay_proto::GroupId,
+        since_seq: u64,
+    ) -> Result<Vec<fetchit_relay_proto::LogRecordWire>> {
+        self.relay_set
+            .log_fetch(group_id, since_seq)
+            .await
+            .map_err(|e| ChatError::MessageTransport(format!("group-log fetch: {e}")))
+    }
+
     /// Tear this transport down by orderly drain, closing its WebSocket
     /// and stopping its inbound pump with no leaked task and no in-flight
     /// envelope dropped mid-map.

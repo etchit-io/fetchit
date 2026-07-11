@@ -7,7 +7,8 @@
 
 use fetchit_relay_client::{Client, ClientConfig, RelaySet, Signer, StaticKeySigner};
 use fetchit_relay_proto::{
-    AgentId, DedupeKey, EnvelopeKind, MachineId, Region, TransitEnvelope, WIRE_VERSION,
+    AgentId, DedupeKey, EnvelopeKind, GroupId, LogRecordKind, MachineId, Region, TransitEnvelope,
+    WIRE_VERSION,
 };
 use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};
 use std::net::SocketAddr;
@@ -241,4 +242,28 @@ async fn next_delivery_merges_inboxes_across_relays() {
     }
     assert!(seen_senders.contains(&alice_id), "alice delivered via A");
     assert!(seen_senders.contains(&carol_id), "carol delivered via B");
+}
+
+#[tokio::test]
+async fn log_append_then_fetch_round_trips_through_set() {
+    // The epoch-recovery CommitSource reaches the group-log through the
+    // RelaySet passthrough, not the leaf Client. Prove append + fetch
+    // round-trip over the set (primary relay, single seq space).
+    let addr = start_server().await;
+    let base = Url::parse(&format!("http://{addr}/")).unwrap();
+    let signer: Arc<dyn Signer + Send + Sync> =
+        Arc::new(StaticKeySigner::from_public_key(b"alice-public-key".to_vec()));
+    let set = RelaySet::connect(vec![ClientConfig::new(base)], signer)
+        .await
+        .unwrap();
+    let group = GroupId::from_bytes([0x33; 32]);
+
+    set.log_append(group, LogRecordKind::Commit, None, b"commit-1".to_vec())
+        .unwrap();
+
+    let records = set.log_fetch(group, 0).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].seq, 1);
+    assert_eq!(records[0].kind, LogRecordKind::Commit);
+    assert_eq!(records[0].payload, b"commit-1");
 }

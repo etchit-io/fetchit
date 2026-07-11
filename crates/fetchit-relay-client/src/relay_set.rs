@@ -19,7 +19,10 @@ use crate::client::{Client, ClientConfig, ConnState};
 use crate::error::ClientError;
 use crate::outbox::Receipt;
 use crate::signer::Signer;
-use fetchit_relay_proto::{AgentId, DedupeKey, Deliver, PresenceUpdate, TransitEnvelope};
+use fetchit_relay_proto::{
+    AgentId, DedupeKey, Deliver, GroupId, LogRecordKind, LogRecordWire, PresenceUpdate,
+    TransitEnvelope,
+};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, Mutex};
 
@@ -327,6 +330,48 @@ impl RelaySet {
             return Err(ClientError::InboxClosed);
         };
         client.ack_transit(acked_ids)
+    }
+
+    /// Append one record to the primary relay's per-group durable log.
+    ///
+    /// Fire-and-forget: the relay assigns the seq. Targets the PRIMARY
+    /// relay (index 0) so the single epoch-recovery cursor tracks one
+    /// coherent seq space. Multi-relay log replication is a follow-up
+    /// (`#297`); it is unneeded on a single-relay topology and would need
+    /// per-relay cursors to stay coherent.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when the set has no relay.
+    pub fn log_append(
+        &self,
+        group_id: GroupId,
+        kind: LogRecordKind,
+        recipient: Option<AgentId>,
+        payload: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        let Some(client) = self.relays.first() else {
+            return Err(ClientError::InboxClosed);
+        };
+        client.log_append(group_id, kind, recipient, payload)
+    }
+
+    /// Fetch group-log records with `seq > since_seq` from the primary
+    /// relay, ascending. Backs the epoch-recovery `CommitSource` (`#297`):
+    /// a behind member pulls the commits it missed and applies them to
+    /// catch up to the current epoch.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::InboxClosed`] when the set has no relay;
+    /// propagates [`ClientError::LogFetchTimeout`] from the leaf client.
+    pub async fn log_fetch(
+        &self,
+        group_id: GroupId,
+        since_seq: u64,
+    ) -> Result<Vec<LogRecordWire>, ClientError> {
+        let Some(client) = self.relays.first() else {
+            return Err(ClientError::InboxClosed);
+        };
+        client.log_fetch(group_id, since_seq).await
     }
 
     /// Fan-out send to every relay in the set.
