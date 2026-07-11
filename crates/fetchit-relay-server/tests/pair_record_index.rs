@@ -51,7 +51,10 @@ fn mk_signed_record(
     let relays = vec!["https://relay.example".to_string()];
     let input = pair_signing_input(&agent_id_hex, pk_bytes, &kem_bytes, &relays, issued_at_ms)
         .expect("signing input");
-    let sig_bytes = dsa.sign(sk, &input).unwrap().to_bytes();
+    let sig_bytes = dsa
+        .sign(sk, &fetchit_relay_proto::agent_sign_input(&input))
+        .unwrap()
+        .to_bytes();
     PairRecordV1 {
         record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
         agent_id_hex,

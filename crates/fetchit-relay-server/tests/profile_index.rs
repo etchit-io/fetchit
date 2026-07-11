@@ -68,7 +68,10 @@ fn mk_signed_record(
     let mut sign_input = Vec::with_capacity(SIGN_DOMAIN_PROFILE.len() + canonical.len());
     sign_input.extend_from_slice(SIGN_DOMAIN_PROFILE);
     sign_input.extend_from_slice(&canonical);
-    let sig_bytes = dsa.sign(sk, &sign_input).unwrap().to_bytes();
+    let sig_bytes = dsa
+        .sign(sk, &fetchit_relay_proto::agent_sign_input(&sign_input))
+        .unwrap()
+        .to_bytes();
     ProfileIndexRecord {
         sig: B64URL.encode(sig_bytes),
         ..unsigned

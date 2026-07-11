@@ -16,7 +16,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  X0XD_PIN_SHA: "c67bb58df6e4c9e8c63338466706c9272760d0bf"
+  X0XD_PIN_SHA: "6c42c1baa0ea356130744da083b270cf62b00845"
 
 jobs:
   build-bundled-x0xd:
@@ -73,7 +73,7 @@ jobs:
       - name: Build fetchit-desktop with bundled binary
         env:
           FETCHIT_BUNDLED_X0XD_PATH: /home/runner/x0x/target/release/x0xd
-          FETCHIT_BUNDLED_X0XD_VERSION: "0.27.0"
+          FETCHIT_BUNDLED_X0XD_VERSION: "0.29.0"
         run: |
           cargo build --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
 

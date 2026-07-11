@@ -1212,7 +1212,10 @@ fn mk_signed_pair(dsa: &MlDsa, sk: &MlDsaSecretKey, pk_bytes: &[u8], issued: u64
     let kem = [0u8; 1184];
     let relays = vec!["https://old.relay.example".to_string()];
     let input = pair_signing_input(&id, pk_bytes, &kem, &relays, issued).unwrap();
-    let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+    let sig = dsa
+        .sign(sk, &fetchit_relay_proto::agent_sign_input(&input))
+        .unwrap()
+        .to_bytes();
     PairRecordV1 {
         record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
         agent_id_hex: id,
@@ -1233,7 +1236,10 @@ fn mk_signed_forwarding(
     let id = agent_id_hex(pk_bytes);
     let moved = vec!["https://new.relay.example".to_string()];
     let input = forwarding_signing_input(&id, &moved, issued).unwrap();
-    let sig = dsa.sign(sk, &input).unwrap().to_bytes();
+    let sig = dsa
+        .sign(sk, &fetchit_relay_proto::agent_sign_input(&input))
+        .unwrap()
+        .to_bytes();
     ForwardingRecordV1 {
         agent_id_hex: id,
         moved_to_relays: moved,

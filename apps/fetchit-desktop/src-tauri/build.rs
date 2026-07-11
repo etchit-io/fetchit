@@ -6,23 +6,22 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Pinned x0xd version we bundle. v0.27.0 carries ADR-0016 flat
-/// Admin/Member group authority (retiring the creator-owner role), the
-/// embeddable in-process serve entrypoint, and the `send_replace`
-/// DM-capability fix. We bundle it via the `mobile-0.27` fork, which
-/// layers the fetch>it tail onto that release: the gossip-isolated
-/// group-join apply endpoints, the peer-relay DM fallback, and the
-/// returning-member re-key fix (whose upstream bail is still present in
-/// 0.27.0). Cross-NAT DM + 2-party group verified on 0.27, both legs.
-const X0XD_PIN_VERSION: &str = "0.27.0";
+/// Pinned x0xd version we bundle. v0.29.0 is our fork tail rebased onto
+/// upstream x0x 0.29 (external-agent-sign DST on `/agent/sign`), bundled
+/// via the `mobile-0.29` fork branch. It carries the fetch>it tail
+/// (gossip-isolated group-join apply endpoints, `GET /secure/self`
+/// keyed-epoch probe, returning-member re-key) plus the re-derived
+/// actor-authz `committed_by` binding and the SecureShareDelivered
+/// local-apply allowlist. The bundled daemon and every client move
+/// together on the 0.29 external-agent-sign framing.
+const X0XD_PIN_VERSION: &str = "0.29.0";
 
-/// Pinned commit on josh-clsn/x0x: the `v0.27.0` release lineage plus the
-/// fetch>it fork tail (read-only `GET /groups/:id/secure/self` keyed-epoch
-/// probe), plus the actor-authz tightening that binds group-metadata admin
-/// actions to the ML-DSA-verified `commit.committed_by` instead of the
-/// client-supplied `sender_agent_id` the REST apply paths used to trust.
+/// Pinned commit on josh-clsn/x0x `mobile-0.29`: upstream 0.29 rebase plus
+/// the carried fetch>it fork tail, the re-derived actor-authz
+/// `committed_by` bindings, and the SecureShareDelivered / GroupCardPublished
+/// local-apply allowlist. Bump in lockstep with the workflow pins.
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "c67bb58df6e4c9e8c63338466706c9272760d0bf";
+const X0XD_PIN_SHA: &str = "6c42c1baa0ea356130744da083b270cf62b00845";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
