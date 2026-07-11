@@ -23,7 +23,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
-use fetchit_relay_proto::{derive_agent_id, SIGN_DOMAIN_PROFILE};
+use fetchit_relay_proto::{agent_sign_input, derive_agent_id, SIGN_DOMAIN_PROFILE};
 use saorsa_pqc::api::kem::{MlKem, MlKemPublicKey, MlKemVariant};
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature, MlDsaVariant};
 use serde_json::json;
@@ -129,7 +129,11 @@ fn sign_input(canonical: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(SIGN_DOMAIN_PROFILE.len() + canonical.len());
     v.extend_from_slice(SIGN_DOMAIN_PROFILE);
     v.extend_from_slice(canonical);
-    v
+    // x0x >= 0.29: the manifest is signed via x0xd `/agent/sign`, which wraps
+    // the payload in the external-agent-sign framing. Reproduce it so the
+    // committed fixture matches what a 0.29-compliant producer emits and what
+    // `ProfileManifest::verify` checks.
+    agent_sign_input(&v)
 }
 
 /// Write `canonical.bin` (always; deterministic) and `sig.bin` (only

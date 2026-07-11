@@ -235,13 +235,11 @@ impl ProfileManifest {
         input.extend_from_slice(SIGN_DOMAIN_PROFILE);
         input.extend_from_slice(&canonical);
 
-        // TODO(front-b 0.29 / etch>it coupling): this RICH ProfileManifest is
-        // signed by etch>it, not fetch>it's `Signer`, so it is deliberately
-        // left un-wrapped here. It must wrap `input` with
-        // `fetchit_relay_proto::agent_sign_input` IFF etch>it signs manifests
-        // via x0xd `/agent/sign` (near-certain — same x0x 0.29 pin), to be
-        // confirmed at etch>it's 0.29 rebuild. The MINIMAL ProfileIndexRecord
-        // path (pair.rs / relay-server profile.rs) IS wrapped. Owner: Alice.
+        // Agent-key signature: verify over the external-agent-sign framing.
+        // The manifest is signed by the ML-DSA identity via x0xd `/agent/sign`
+        // (docs/profile-manifest-v1.md § 2 — "the only signing surface in v1"),
+        // which x0x >= 0.29 wraps, so the verifier must reproduce those bytes.
+        let input = fetchit_relay_proto::agent_sign_input(&input);
         let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
         let pk = MlDsaPublicKey::from_bytes(MlDsaVariant::MlDsa65, &pubkey_bytes)
             .map_err(|e| ProfileError::Pqc(e.to_string()))?;

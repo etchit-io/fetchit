@@ -101,9 +101,14 @@ SIGN_DOMAIN_PROFILE = b"fetchit/profile-manifest/v1"
    target the `serde_jcs` crate (1.0).
 3. Concatenate the byte-literal `SIGN_DOMAIN_PROFILE` with the JCS
    output to form `sign_input`.
-4. POST `sign_input` to x0xd's `/agent/sign` (existing endpoint, no
-   protocol change). x0xd holds the ML-DSA-65 secret throughout --
-   neither etch>it nor fetch>it ever sees it.
+4. POST `sign_input` to x0xd's `/agent/sign` with the fetch>it
+   `context = "fetchit.agent-sign.v1"`. On x0x >= 0.29 this endpoint
+   signs the **mandatory external-agent-sign framing**, not the raw
+   payload -- the bytes actually signed are
+   `[0xF0] || b"x0x.external-agent-sign.v1" || u32_be(len(context)) || context || sign_input`
+   (reproduced by `fetchit_relay_proto::agent_sign_input`). A verifier
+   MUST wrap `sign_input` the same way before checking. x0xd holds the
+   ML-DSA-65 secret throughout -- neither etch>it nor fetch>it ever sees it.
 5. base64url-no-pad the returned signature bytes.
 6. Inject the resulting string back as the `sig` field.
 
