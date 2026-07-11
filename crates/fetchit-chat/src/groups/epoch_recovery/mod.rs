@@ -41,12 +41,14 @@ use crate::groups::pending_join_driver::MembershipStatus;
 
 pub mod detect;
 pub mod driver;
+pub mod log_source;
 pub mod status;
 pub mod watchdog;
 pub mod wire_map;
 
 pub use detect::{epoch_relation, frame_is_behind, EpochRelation};
 pub use driver::{ColdRecover, EpochRecoveryDriver, RecoverOutcome};
+pub use log_source::LogFetchCommitSource;
 pub use status::{GroupRecoveryStatus, GroupStatusEvent, GroupStatusMap};
 pub use watchdog::{groups_to_recover, wedge_should_trip, WedgeSignals, WEDGE_THRESHOLD_MS};
 pub use wire_map::{commit_record_from_wire, plan_apply, ApplyPlan};
