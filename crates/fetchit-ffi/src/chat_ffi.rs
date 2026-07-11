@@ -411,6 +411,11 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
             cli_disable_peer_cache: true,
             instance_name: None,
             exec_policy,
+            // x0x >= 0.29 requires a connect ACL policy on the embed. This
+            // gossip-off embed has no inbound peers to gate, so the documented
+            // embedder default (`ConnectPolicy::Disabled` = default-deny
+            // inbound; outbound to the relay is unaffected) is correct.
+            connect_policy: x0x::connect::ConnectPolicy::default(),
             self_update_enabled: false,
         },
     )
