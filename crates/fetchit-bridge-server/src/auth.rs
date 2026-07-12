@@ -40,13 +40,8 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use saorsa_pqc::api::sig::{MlDsa, MlDsaPublicKey, MlDsaVariant};
-use sha2::{Digest, Sha256};
 
-/// Maximum allowed |now - X-Fetchit-Ts| in milliseconds (5 minutes).
-pub const MAX_SKEW_MS: u64 = 5 * 60 * 1000;
-
-/// Domain separator for the canonical request bytes.
-const DOMAIN: &[u8] = b"fetchit-bridge-auth-v1";
+use fetchit_fedi::bridge_auth::MAX_SKEW_MS;
 
 /// Why a request failed authentication. Rendered as `401`/`403` by the
 /// route layer; variants exist so tests and metrics can distinguish.
@@ -77,21 +72,7 @@ impl std::fmt::Display for AuthError {
     }
 }
 
-/// The canonical bytes a client signs (pre-framing). Public so client
-/// code and tests build the identical input.
-#[must_use]
-pub fn canonical_request(method: &str, path: &str, ts_ms: u64, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(DOMAIN.len() + method.len() + path.len() + 64);
-    out.extend_from_slice(DOMAIN);
-    out.push(0);
-    out.extend_from_slice(method.to_ascii_uppercase().as_bytes());
-    out.push(0);
-    out.extend_from_slice(path.as_bytes());
-    out.push(0);
-    out.extend_from_slice(&ts_ms.to_be_bytes());
-    out.extend_from_slice(&Sha256::digest(body));
-    out
-}
+use fetchit_fedi::bridge_auth::canonical_request;
 
 /// Parsed auth headers.
 #[derive(Debug)]
@@ -178,6 +159,7 @@ pub fn verify_request(
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+    use sha2::{Digest, Sha256};
 
     fn keypair() -> (
         saorsa_pqc::api::sig::MlDsaPublicKey,

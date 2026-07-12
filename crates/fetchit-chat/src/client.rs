@@ -5666,7 +5666,28 @@ impl Client {
     /// gating it through the community denylist when one is installed.
     /// Without a denylist the resolution still runs (we need the URL to
     /// find the inbox) but nothing is blocked.
-    async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {
+    /// Sign `canonical` bytes with the chat agent's ML-DSA key for the
+    /// `bridge-auth-v1` request auth (M7). Returns `(agent_id_hex,
+    /// signature_bytes)`; the `Signer` trait wraps `agent_sign_input`
+    /// exactly as the bridge re-applies before verifying.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] for a REST-only client (no chat state) or a
+    /// signer failure.
+    pub(crate) async fn bridge_auth_sign(&self, canonical: &[u8]) -> Result<(String, Vec<u8>)> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let sig = chat
+            .signer
+            .sign(canonical)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("bridge-auth sign: {e}")))?;
+        Ok((chat.identity.agent_id_hex().to_owned(), sig))
+    }
+
+    pub(crate) async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {
         if let Some(denylist) = self.denylist.as_ref() {
             crate::public::check_mention_denylist(denylist.as_ref(), mention).await
         } else {
