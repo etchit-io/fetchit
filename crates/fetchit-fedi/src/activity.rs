@@ -177,6 +177,110 @@ pub fn build_create_note(
     }
 }
 
+/// An `ActivityStreams` `Follow` activity (M7 P1). The exact JSON shape
+/// `POSTed` to the target actor's inbox when one of our actors follows a
+/// remote account, and the shape we parse back out of a verified inbound
+/// `Follow` when a remote account follows us.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowActivity {
+    /// JSON-LD `@context` — the activitystreams vocabulary URL.
+    #[serde(rename = "@context")]
+    pub context: String,
+    /// Activity id — `<actor_url>/follows/<unique>`; the inbound `Accept`
+    /// is matched against this exact id, so it must be unique per request.
+    pub id: String,
+    /// Always `"Follow"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The following actor's URL (us, outbound; them, inbound).
+    pub actor: String,
+    /// The actor being followed.
+    pub object: String,
+}
+
+/// An `Accept` (or `Reject`) wrapping the `Follow` it answers. Mastodon
+/// echoes the full `Follow` object back; matching is done on
+/// `object.id`, never on the sender's word alone — the HTTP-signature
+/// gate has already bound the envelope to the accepting actor's key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowResponseActivity {
+    /// JSON-LD `@context`.
+    #[serde(rename = "@context")]
+    pub context: String,
+    /// Activity id — `<actor_url>/accepts/<unique>`.
+    pub id: String,
+    /// `"Accept"` or `"Reject"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The actor answering the follow (the followee).
+    pub actor: String,
+    /// The `Follow` being answered, echoed in full.
+    pub object: FollowActivity,
+}
+
+/// An `Undo` wrapping the `Follow` it retracts (unfollow, both
+/// directions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoFollowActivity {
+    /// JSON-LD `@context`.
+    #[serde(rename = "@context")]
+    pub context: String,
+    /// Activity id — `<follow id>/undo`.
+    pub id: String,
+    /// Always `"Undo"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The actor retracting its follow.
+    pub actor: String,
+    /// The original `Follow`, echoed in full.
+    pub object: FollowActivity,
+}
+
+/// Build the outbound `Follow` for `actor_url` → `target_actor_url`.
+///
+/// `unique` disambiguates the activity id (callers pass a timestamp or
+/// counter); the returned activity's `id` is what the remote `Accept`
+/// must echo, so persist it before delivery.
+#[must_use]
+pub fn build_follow(actor_url: &str, target_actor_url: &str, unique: u64) -> FollowActivity {
+    FollowActivity {
+        context: "https://www.w3.org/ns/activitystreams".to_owned(),
+        id: format!("{actor_url}/follows/{unique}"),
+        kind: "Follow".to_owned(),
+        actor: actor_url.to_owned(),
+        object: target_actor_url.to_owned(),
+    }
+}
+
+/// Build the `Accept` answering a verified inbound `follow` on behalf of
+/// `actor_url` (the followee — one of our actors).
+#[must_use]
+pub fn build_accept_follow(
+    actor_url: &str,
+    follow: &FollowActivity,
+    unique: u64,
+) -> FollowResponseActivity {
+    FollowResponseActivity {
+        context: "https://www.w3.org/ns/activitystreams".to_owned(),
+        id: format!("{actor_url}/accepts/{unique}"),
+        kind: "Accept".to_owned(),
+        actor: actor_url.to_owned(),
+        object: follow.clone(),
+    }
+}
+
+/// Build the `Undo(Follow)` retracting `follow` (unfollow).
+#[must_use]
+pub fn build_undo_follow(actor_url: &str, follow: &FollowActivity) -> UndoFollowActivity {
+    UndoFollowActivity {
+        context: "https://www.w3.org/ns/activitystreams".to_owned(),
+        id: format!("{}/undo", follow.id),
+        kind: "Undo".to_owned(),
+        actor: actor_url.to_owned(),
+        object: follow.clone(),
+    }
+}
+
 /// Render a post's markdown body to the HTML that goes in `Note.content`.
 ///
 /// Intentionally minimal and **XSS-safe by construction**: every HTML
@@ -347,5 +451,60 @@ mod tests {
             "https://mastodon.example/users/alice"
         );
         assert_eq!(note["tag"][0]["name"], "@alice@mastodon.example");
+    }
+
+    #[test]
+    fn follow_round_trips_and_accept_echoes_id() {
+        let me = "https://bridge.example/actors/josh";
+        let them = "https://fosstodon.org/users/happyborg";
+        let follow = build_follow(me, them, 1234);
+        assert_eq!(follow.id, "https://bridge.example/actors/josh/follows/1234");
+
+        // serde round-trip: the wire shape Mastodon sees
+        let v = serde_json::to_value(&follow).unwrap();
+        assert_eq!(v["type"], "Follow");
+        assert_eq!(v["actor"], me);
+        assert_eq!(v["object"], them);
+        assert_eq!(v["@context"], "https://www.w3.org/ns/activitystreams");
+        let back: FollowActivity = serde_json::from_value(v).unwrap();
+        assert_eq!(back, follow);
+
+        // Accept wraps the follow verbatim -- matching key is object.id
+        let accept = build_accept_follow(them, &follow, 99);
+        let av = serde_json::to_value(&accept).unwrap();
+        assert_eq!(av["type"], "Accept");
+        assert_eq!(av["actor"], them);
+        assert_eq!(av["object"]["id"], follow.id);
+        assert_eq!(av["object"]["type"], "Follow");
+    }
+
+    #[test]
+    fn undo_wraps_the_original_follow() {
+        let me = "https://bridge.example/actors/josh";
+        let follow = build_follow(me, "https://fosstodon.org/users/happyborg", 7);
+        let undo = build_undo_follow(me, &follow);
+        let v = serde_json::to_value(&undo).unwrap();
+        assert_eq!(v["type"], "Undo");
+        assert_eq!(v["id"], format!("{}/undo", follow.id));
+        assert_eq!(v["object"]["id"], follow.id);
+        assert_eq!(
+            v["object"]["object"],
+            "https://fosstodon.org/users/happyborg"
+        );
+    }
+
+    #[test]
+    fn inbound_mastodon_follow_parses() {
+        // Shape Mastodon actually delivers (no published, exact fields).
+        let raw = serde_json::json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": "https://fosstodon.org/8b3a92c0-1111-2222-3333-444455556666",
+            "type": "Follow",
+            "actor": "https://fosstodon.org/users/happyborg",
+            "object": "https://bridge.example/actors/josh"
+        });
+        let f: FollowActivity = serde_json::from_value(raw).unwrap();
+        assert_eq!(f.kind, "Follow");
+        assert_eq!(f.actor, "https://fosstodon.org/users/happyborg");
     }
 }

@@ -1,0 +1,40 @@
+[Unit]
+Description=fetchit-bridge-server (ActivityPub bridge for fetch>it actors)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# DynamicUser + StateDirectory create the service account and
+# /var/lib/fetchit-bridge automatically -- no manual user setup.
+DynamicUser=yes
+StateDirectory=fetchit-bridge
+
+# The PUBLIC fediverse domain -- NOT this host's name. See DEPLOY.md section 2.
+Environment=FETCHIT_BRIDGE_DOMAIN=example.com
+Environment=FETCHIT_BRIDGE_BIND=127.0.0.1:8089
+Environment=FETCHIT_BRIDGE_DB=/var/lib/fetchit-bridge/bridge.sqlite
+# Comma-separated extra reserved handles (operators, brand variants):
+#Environment=FETCHIT_BRIDGE_RESERVED_HANDLES=alice,bob
+# Registration rate limiter (per IP). Enabled by default; tune or disable (0).
+#Environment=FETCHIT_BRIDGE_REGISTER_BURST=10
+#Environment=FETCHIT_BRIDGE_REGISTER_PER_MIN=10
+# Trusted proxy hops in front of the bridge -- set to your proxy count so the
+# limiter keys on the real client IP, not the proxy. See DEPLOY.md section 3.
+#Environment=FETCHIT_BRIDGE_TRUSTED_PROXY_HOPS=0
+
+ExecStart=/usr/local/bin/fetchit-bridge-server
+Restart=always
+RestartSec=2
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
