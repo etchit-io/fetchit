@@ -271,6 +271,23 @@ returns the device list only when `rec.devices` contains `to`, else `[to]`;
 `StoredContactCard::from_share_uri` captures `user_id` as an unverified
 `Option<String>`.
 
+### 11. Relay group-log records carry plaintext membership metadata
+
+The durable relay group-log (`#297` warm epoch-recovery) stores signed
+membership events -- `MemberAdded` commits and join-results -- as plaintext
+JSON shells for up to the 30-day retention window, fetchable by anyone
+holding the group id. The relay (and any group-id holder) can read
+membership-change metadata: group ids, member agent ids, epochs, `TreeKEM`
+public commit material. This is the same metadata class the relay already
+learns from pair-records and envelope routing, and message content NEVER
+enters the log (it stays end-to-end sealed on the transit path). The
+Welcome's key material inside a logged join-result stays KEM-sealed to the
+joiner. Sealing the log payloads themselves is a tracked Lane B
+consideration.
+
+Code: `crates/fetchit-chat/src/groups/group_log.rs` (producer),
+`crates/fetchit-relay-server/src/group_log.rs` (store).
+
 ## What we promise
 
 - **fetch>it never holds a wallet, never signs Autonomi transactions,

@@ -682,8 +682,9 @@ impl SecureGroupsEndpoint {
     /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (rejected
     /// locally before any HTTP — path-traversal guard). [`X0xdError::Http`]
     /// / [`X0xdError::Url`] on transport / URL-join failure, and
-    /// [`X0xdError::Rejected`] when x0xd returns a status other than
-    /// `200` / `409`.
+    /// [`X0xdError::ApplyRejected`] (carrying the HTTP status, so log
+    /// replayers can tell a dead 4xx from a retryable 5xx) when x0xd
+    /// returns a status other than `200` / `409`.
     pub async fn apply_metadata_event(
         &self,
         group_id: &str,
@@ -708,9 +709,10 @@ impl SecureGroupsEndpoint {
         let code = raw.status().as_u16();
         if code != 200 && code != 409 {
             let body = raw.text().await.unwrap_or_default();
-            return Err(X0xdError::Rejected(format!(
-                "x0xd POST /groups/{group_id}/apply-metadata-event returned {code}: {body}"
-            )));
+            return Err(X0xdError::ApplyRejected {
+                status: code,
+                detail: format!("POST /groups/{group_id}/apply-metadata-event: {body}"),
+            });
         }
         let resp: ApplyMetadataEventResponse = raw.json().await?;
         Ok(resp.applied)
@@ -738,9 +740,11 @@ impl SecureGroupsEndpoint {
     /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (rejected
     /// locally before any HTTP -- path-traversal guard). [`X0xdError::Http`]
     /// / [`X0xdError::Url`] on transport / URL-join failure, and
-    /// [`X0xdError::Rejected`] when x0xd returns a status other than
-    /// `200` / `409` (e.g. a `400` member / sender / event reject the caller
-    /// surfaces rather than silently dropping).
+    /// [`X0xdError::ApplyRejected`] (carrying the HTTP status, so log
+    /// replayers can tell a dead 4xx from a retryable 5xx) when x0xd
+    /// returns a status other than `200` / `409` (e.g. a `400` member /
+    /// sender / event reject the caller surfaces rather than silently
+    /// dropping).
     pub async fn apply_join_result(
         &self,
         group_id: &str,
@@ -767,9 +771,10 @@ impl SecureGroupsEndpoint {
         let code = raw.status().as_u16();
         if code != 200 && code != 409 {
             let body = raw.text().await.unwrap_or_default();
-            return Err(X0xdError::Rejected(format!(
-                "x0xd POST /groups/{group_id}/join-result/{member} returned {code}: {body}"
-            )));
+            return Err(X0xdError::ApplyRejected {
+                status: code,
+                detail: format!("POST /groups/{group_id}/join-result/{member}: {body}"),
+            });
         }
         let resp: ApplyJoinResultResponse = raw.json().await?;
         Ok(resp.applied)
@@ -1020,7 +1025,9 @@ mod tests {
             .apply_join_result(TEST_GROUP_HEX, &member, "ZXY", &owner)
             .await
             .unwrap_err();
-        assert!(matches!(err, X0xdError::Rejected(_)));
+        // The structured variant carries the HTTP status so a durable-log
+        // replayer can classify a dead 4xx apart from a retryable 5xx.
+        assert!(matches!(err, X0xdError::ApplyRejected { status: 403, .. }));
     }
 
     #[tokio::test]

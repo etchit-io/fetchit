@@ -16,6 +16,14 @@ use crate::relay_transport::RelayTransport;
 /// A [`CommitSource`] that fetches durable group-log records over the
 /// relay. The stable group id (64-hex) is decoded to the 32-byte wire
 /// [`fetchit_relay_proto::GroupId`] the transport expects.
+///
+/// Lane B blockers (cursor/seq-space coherence, from the #297 Lane A
+/// cross-review): (a) log-head eviction below our cursor leaves the loop
+/// stopped-on-gap until a floor is adopted from the fetch reply; (b) the
+/// cursor is keyed by group only, so a primary-relay flip points it into a
+/// DIFFERENT relay's seq space and silently skips never-applied records.
+/// Both need either (relay, group)-keyed cursors or a pinned log relay
+/// before multi-relay/log-eviction scenarios are supported.
 pub struct LogFetchCommitSource {
     relay: Option<Arc<RelayTransport>>,
 }

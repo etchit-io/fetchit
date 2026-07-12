@@ -85,6 +85,9 @@ impl From<x0xd_client::X0xdError> for ClientError {
                 // would ripple into every consumer.
                 Self::AuthRejected(s)
             }
+            x0xd_client::X0xdError::ApplyRejected { status, detail } => {
+                Self::AuthRejected(format!("apply rejected ({status}): {detail}"))
+            }
         }
     }
 }

@@ -86,6 +86,20 @@ pub enum X0xdError {
     /// callers can branch on "the bytes never left this process".
     #[error("invalid input: {0}")]
     Invalid(String),
+
+    /// The daemon refused an apply endpoint
+    /// (`apply-metadata-event` / `join-result`) with a concrete HTTP
+    /// status. Distinct from [`Self::Rejected`] so a caller replaying a
+    /// durable log can branch on the status class: a deterministic 4xx
+    /// (malformed / disallowed / unknown) will never succeed on retry
+    /// and must be skipped, while a 5xx is transient and retryable.
+    #[error("x0xd apply rejected (status {status}): {detail}")]
+    ApplyRejected {
+        /// The HTTP status the daemon answered with.
+        status: u16,
+        /// The response body (truncated upstream if oversized).
+        detail: String,
+    },
 }
 
 /// Render a reqwest error together with its full `source()` chain.

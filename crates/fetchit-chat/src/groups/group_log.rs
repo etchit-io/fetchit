@@ -13,7 +13,14 @@
 //! joiner inside the event). The relay can read membership-change
 //! metadata -- the same class it already learns from pair-records and
 //! routing -- and never message content, which stays end-to-end sealed
-//! and never enters the log.
+//! and never enters the log. Sealing the log payloads is a Lane B
+//! consideration (see `docs/SECURITY.md`).
+//!
+//! Lane B design constraint (cross-review P1-2): a member replaying its
+//! OWN historical `JoinResult` (in-memory cursors restart at 0) gets a
+//! daemon 403 once the expected-inviter entry has cleared; the applier
+//! classifies deterministic 4xx as skip-and-advance, so this is benign,
+//! but a durable cursor store would avoid the wasted replay entirely.
 
 use fetchit_relay_proto::{AgentId, GroupId, LogRecordKind};
 
