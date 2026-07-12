@@ -3838,19 +3838,6 @@ impl Client {
         let advertised_relays = vec![relay_str.to_owned()];
         let agent_hex = chat.identity.agent_id_hex().to_owned();
 
-        // The publisher's own x0x machine id, carried in the pointer record
-        // so a pointer-URI importer can reconstruct a card x0x >= 0.29
-        // accepts (its /agent/card/import requires `machine_id`). Best-effort:
-        // an empty string on lookup failure keeps the field legacy-shaped —
-        // the record still publishes + verifies (machine_id is unsigned), and
-        // only newer importers that need the field are affected.
-        let machine_id = self
-            .identity()
-            .me()
-            .await
-            .map(|id| id.machine_id)
-            .unwrap_or_default();
-
         let wall_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             // 0 (not u64::MAX) on the unreachable overflow branch: feeding
@@ -3864,7 +3851,6 @@ impl Client {
             chat.signer.as_ref(),
             advertised_relays.clone(),
             issued,
-            machine_id.clone(),
         )
         .await?;
 
@@ -3889,7 +3875,6 @@ impl Client {
                 chat.signer.as_ref(),
                 advertised_relays,
                 issued2,
-                machine_id.clone(),
             )
             .await?;
             if let crate::pair_record::PostOutcome::WatermarkReject { .. } =
@@ -4033,16 +4018,7 @@ impl Client {
             // reflects the record it's derived from.
             created_at: Some(record.issued_at_ms / 1000),
             addresses: Vec::new(),
-            // Carry the peer's machine id into the card's flattened `extra` so
-            // it serialises as a top-level `machine_id`. x0x >= 0.29 requires
-            // it on /agent/card/import; without it the daemon-side contact
-            // mirror never lands and DMs to this peer can't route. A legacy
-            // pointer without the field leaves `extra` Null (nothing emitted).
-            extra: if record.machine_id.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::json!({ "machine_id": record.machine_id })
-            },
+            extra: serde_json::Value::Null,
         };
         // Best-effort legacy sync. The local StoredContactCard saved above
         // is the messaging source of truth (it carries the ML-KEM key the
