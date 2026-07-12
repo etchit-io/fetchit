@@ -546,6 +546,18 @@ git commit -s -m "feat(chat): production warm CommitApplier via x0xd verifying a
 
 ## Task 5 (BOB-GATED): Producer-side `log_append` on the send path
 
+> **EXECUTION NOTE (2026-07-12):** the gate was lifted by Josh's direct "make it
+> reliable" GO, and the site below turned out wrong: `send_x0xd_metadata_event`
+> has NO production callers, and the moderation dispatchers in
+> `groups/dispatch.rs` are unwired (pending the group-moderation task). The one
+> live epoch-advancing producer is the owner join-reply
+> (`Client::reply_to_bridged_join`), so the append landed there: pure intent
+> builder `groups/group_log.rs::join_reply_log_intents` (JoinResult gated to
+> the joiner + commit-only broadcast Commit), executed durable-first BEFORE the
+> live sends, best-effort. The peer bin additionally now triggers
+> `trigger_group_recovery` on a `StaleEpoch` dispatch instead of only logging
+> it. The steps below are kept as the original plan record.
+
 > **DO NOT START until Bob confirms this piece is Alice's.** The producer-append is the piece with cross-box ownership ambiguity (flagged to Bob over the pipe). Without it the warm fetch returns an empty log and Tasks 3-4 are correct-but-dormant. Tasks 1-4 land and are valuable independently. If Bob owns it, stop after Task 4 and cross-review his append instead.
 
 **Files:**

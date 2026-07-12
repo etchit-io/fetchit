@@ -38,6 +38,7 @@ pub mod bridge_member_role_updated;
 pub mod bridge_policy_updated;
 pub mod dispatch;
 pub mod epoch_recovery;
+pub(crate) mod group_log;
 pub mod join_bridge;
 pub mod membership;
 pub mod pending_join;

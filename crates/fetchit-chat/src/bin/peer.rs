@@ -1762,6 +1762,21 @@ async fn decode_inbound(
                 }
                 None
             }
+            InboundDispatch::StaleEpoch {
+                group_id_hex,
+                epoch,
+            } => {
+                // #297: a frame from a future epoch means this seat fell
+                // behind. Kick the engine's warm recovery (group-log fetch
+                // + verified apply, cold fallback) instead of just logging
+                // the drop; the held ack redelivers the frame once keyed.
+                eprintln!(
+                    "[peer] stale-epoch on {}: triggering recovery toward epoch {epoch}",
+                    short(&group_id_hex)
+                );
+                client.trigger_group_recovery(group_id_hex, Some(u64::from(epoch)));
+                None
+            }
             other => {
                 eprintln!("[peer] dispatch returned non-message: {other:?}");
                 None

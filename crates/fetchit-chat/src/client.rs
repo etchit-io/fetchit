@@ -2429,6 +2429,13 @@ impl Client {
             .ok_or_else(|| ChatError::Invalid("join reply: GET response missing event".into()))?;
         let event_bytes = serde_json::to_vec(event)
             .map_err(|e| ChatError::Invalid(format!("join reply: event encode: {e}")))?;
+        // Durable-first (#297 Lane A): deposit the Welcome-bearing event
+        // (JoinResult, gated to the joiner) and its commit-only projection
+        // (Commit, broadcast) onto the relay group-log BEFORE the live
+        // sends, so a member that misses the live frame warm-recovers from
+        // the log instead of desyncing. Best-effort: a log failure never
+        // blocks the live reply, it only leaves recovery on the cold path.
+        self.append_join_reply_log(&payload, joiner_agent, event);
         // Seal the inline-welcome MemberAdded to the joiner kem (R3) and
         // bridge it back on the same metadata topic; the reply needs no
         // further kem hint.
@@ -2485,6 +2492,38 @@ impl Client {
         )
         .await?;
         Ok(())
+    }
+
+    /// Best-effort producer append onto the durable relay group-log
+    /// (#297 Lane A): the Welcome-bearing event as a recipient-gated
+    /// `JoinResult` plus its commit-only projection as a broadcast
+    /// `Commit`. Never fails the caller -- a log failure only leaves a
+    /// future recovery on the cold path -- and is a no-op with no relay.
+    fn append_join_reply_log(
+        &self,
+        member_joined_payload: &[u8],
+        joiner_agent: [u8; 32],
+        event: &serde_json::Value,
+    ) {
+        let Some(relay) = self.relay.as_ref() else {
+            return;
+        };
+        let Some(mls_gid) =
+            crate::groups::join_bridge::group_id_from_member_joined(member_joined_payload)
+        else {
+            log::warn!("[chat] group-log skipped: member_joined has no group_id");
+            return;
+        };
+        match crate::groups::group_log::join_reply_log_intents(&mls_gid, joiner_agent, event) {
+            Ok(intents) => {
+                for i in intents {
+                    if let Err(e) = relay.log_append(i.group_id, i.kind, i.recipient, i.payload) {
+                        log::warn!("[chat] group-log append failed: {e}");
+                    }
+                }
+            }
+            Err(e) => log::warn!("[chat] group-log intents failed: {e}"),
+        }
     }
 
     /// R3 fan-out: bridge the commit-only `MemberAdded` to the group's
