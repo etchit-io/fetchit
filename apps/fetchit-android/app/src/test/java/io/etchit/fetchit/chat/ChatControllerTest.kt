@@ -12,6 +12,7 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
@@ -116,6 +117,14 @@ class FakeGateway : ChatGateway {
         publishedPosts += (bodyMd to replyToActorUrl)
         return PublishReportFfi(delivered = emptyList(), failed = emptyList())
     }
+
+    override suspend fun fediFollow(target: String): FollowReportFfi =
+        FollowReportFfi(
+            targetActorUrl = target,
+            followActivityId = "test-follow-id",
+            delivered = true,
+            recorded = true,
+        )
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
         if (removeContactThrows) throw RuntimeException("remove boom")
@@ -485,6 +494,8 @@ class ChatControllerTest {
                 LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
             override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
                 PublishReportFfi(delivered = emptyList(), failed = emptyList())
+            override suspend fun fediFollow(target: String): FollowReportFfi =
+                FollowReportFfi(target, "test-follow-id", delivered = true, recorded = true)
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()

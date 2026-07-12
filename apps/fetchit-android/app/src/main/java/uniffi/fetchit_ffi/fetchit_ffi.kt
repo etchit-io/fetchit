@@ -815,6 +815,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -865,6 +867,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
 ): Short
@@ -996,6 +1000,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentId
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_ensure_v2(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(`ptr`: Pointer,`target`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
@@ -1249,6 +1255,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2() != 23776.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow() != 31415.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
@@ -1904,6 +1913,19 @@ public interface ChatClientInterface {
      * access failure.
      */
     suspend fun `fediEnsureV2`(): EnsureV2Ffi
+    
+    /**
+     * Follow a remote fediverse account (`@user@instance`) from our
+     * minted handle: sign + deliver a `Follow` from the device, then
+     * record it pending at the bridge. The remote `Accept` flips the
+     * state later. Requires a minted handle.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted, the target is
+     * blocked/unresolvable, or signing fails. Delivery/record failures
+     * are reported in the returned [`FollowReportFfi`], not errored.
+     */
+    suspend fun `fediFollow`(`target`: kotlin.String): FollowReportFfi
     
     /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
@@ -2612,6 +2634,38 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeEnsureV2Ffi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Follow a remote fediverse account (`@user@instance`) from our
+     * minted handle: sign + deliver a `Follow` from the device, then
+     * record it pending at the bridge. The remote `Accept` flips the
+     * state later. Requires a minted handle.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted, the target is
+     * blocked/unresolvable, or signing fails. Delivery/record failures
+     * are reported in the returned [`FollowReportFfi`], not errored.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediFollow`(`target`: kotlin.String) : FollowReportFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(
+                thisPtr,
+                FfiConverterString.lower(`target`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeFollowReportFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4050,6 +4104,63 @@ public object FfiConverterTypeFailedDeliveryFfi: FfiConverterRustBuffer<FailedDe
     override fun write(value: FailedDeliveryFfi, buf: ByteBuffer) {
             FfiConverterString.write(value.`target`, buf)
             FfiConverterString.write(value.`error`, buf)
+    }
+}
+
+
+
+/**
+ * Result of [`ChatClient::fedi_follow`]: the `Follow` was signed +
+ * delivered from the device and recorded at the bridge as pending. The
+ * remote `Accept` arrives later and flips the state.
+ */
+data class FollowReportFfi (
+    /**
+     * Canonical actor URL we followed.
+     */
+    var `targetActorUrl`: kotlin.String, 
+    /**
+     * `Follow` activity id the remote `Accept` will echo.
+     */
+    var `followActivityId`: kotlin.String, 
+    /**
+     * True when the target inbox accepted the delivery.
+     */
+    var `delivered`: kotlin.Boolean, 
+    /**
+     * True when the bridge recorded the pending follow.
+     */
+    var `recorded`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFollowReportFfi: FfiConverterRustBuffer<FollowReportFfi> {
+    override fun read(buf: ByteBuffer): FollowReportFfi {
+        return FollowReportFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FollowReportFfi) = (
+            FfiConverterString.allocationSize(value.`targetActorUrl`) +
+            FfiConverterString.allocationSize(value.`followActivityId`) +
+            FfiConverterBoolean.allocationSize(value.`delivered`) +
+            FfiConverterBoolean.allocationSize(value.`recorded`)
+    )
+
+    override fun write(value: FollowReportFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`targetActorUrl`, buf)
+            FfiConverterString.write(value.`followActivityId`, buf)
+            FfiConverterBoolean.write(value.`delivered`, buf)
+            FfiConverterBoolean.write(value.`recorded`, buf)
     }
 }
 

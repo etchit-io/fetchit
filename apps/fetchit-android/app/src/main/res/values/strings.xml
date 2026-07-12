@@ -254,6 +254,10 @@
     <string name="chat_lookup_verified_body">verified — this really is them. you can message them privately, end to end.</string>
     <string name="chat_lookup_changed_hands">heads up: this \@name used to belong to someone else.</string>
     <string name="chat_lookup_message_privately">message privately</string>
+    <string name="chat_fedi_follow">follow</string>
+    <string name="chat_fedi_follow_sent">following %1$s — you\'ll see their posts once they accept</string>
+    <string name="chat_fedi_follow_pending">follow sent to %1$s (couldn\'t reach our directory — it\'ll retry)</string>
+    <string name="chat_fedi_follow_failed">couldn\'t follow — mint your @handle first, then try again</string>
     <string name="chat_lookup_public_only_body">we found this account, but can\'t confirm it\'s really them yet — so you can\'t message them privately here.</string>
     <string name="chat_lookup_not_found_title">no one found</string>
     <string name="chat_lookup_not_found_body">we couldn\'t find anyone at %1$s. double-check the spelling?</string>

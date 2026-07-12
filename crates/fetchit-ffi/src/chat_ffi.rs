@@ -476,6 +476,21 @@ pub struct PublishReportFfi {
     pub failed: Vec<FailedDeliveryFfi>,
 }
 
+/// Result of [`ChatClient::fedi_follow`]: the `Follow` was signed +
+/// delivered from the device and recorded at the bridge as pending. The
+/// remote `Accept` arrives later and flips the state.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FollowReportFfi {
+    /// Canonical actor URL we followed.
+    pub target_actor_url: String,
+    /// `Follow` activity id the remote `Accept` will echo.
+    pub follow_activity_id: String,
+    /// True when the target inbox accepted the delivery.
+    pub delivered: bool,
+    /// True when the bridge recorded the pending follow.
+    pub recorded: bool,
+}
+
 /// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
 /// errors for blockers -- those land in `pending`.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1235,6 +1250,37 @@ impl ChatClient {
                 .into_iter()
                 .map(|(target, error)| FailedDeliveryFfi { target, error })
                 .collect(),
+        })
+    }
+
+    /// Follow a remote fediverse account (`@user@instance`) from our
+    /// minted handle: sign + deliver a `Follow` from the device, then
+    /// record it pending at the bridge. The remote `Accept` flips the
+    /// state later. Requires a minted handle.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted, the target is
+    /// blocked/unresolvable, or signing fails. Delivery/record failures
+    /// are reported in the returned [`FollowReportFfi`], not errored.
+    pub async fn fedi_follow(&self, target: String) -> Result<FollowReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .follow_fedi(&handle, &target, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(FollowReportFfi {
+            target_actor_url: report.target_actor_url,
+            follow_activity_id: report.follow_activity_id,
+            delivered: report.delivered,
+            recorded: report.recorded,
         })
     }
 

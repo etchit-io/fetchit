@@ -1234,18 +1234,50 @@ class ChatModeView(
                     .setPositiveButton(context.getString(R.string.chat_lookup_message_privately)) { _, _ ->
                         messagePrivately(lookup)
                     }
+                    .setNeutralButton(context.getString(R.string.chat_fedi_follow)) { _, _ ->
+                        followFedi(lookup.handle)
+                    }
                     .setNegativeButton(context.getString(R.string.action_close), null)
             }
             LookupKindFfi.PUBLIC_ONLY ->
                 builder.setTitle(lookup.handle)
                     .setMessage(context.getString(R.string.chat_lookup_public_only_body))
-                    .setPositiveButton(context.getString(R.string.action_close), null)
+                    .setPositiveButton(context.getString(R.string.chat_fedi_follow)) { _, _ ->
+                        followFedi(lookup.handle)
+                    }
+                    .setNegativeButton(context.getString(R.string.action_close), null)
             LookupKindFfi.NOT_FOUND ->
                 builder.setTitle(context.getString(R.string.chat_lookup_not_found_title))
                     .setMessage(context.getString(R.string.chat_lookup_not_found_body, lookup.handle))
                     .setPositiveButton(context.getString(R.string.action_close), null)
         }
         builder.show()
+    }
+
+    /**
+     * Follow a fediverse account by handle: the device signs + delivers a
+     * `Follow` and the bridge records it pending. Requires a minted handle —
+     * a clear snackbar nudges to mint one first if not. The remote `Accept`
+     * arrives later (standard follow-request UX), so success here means "your
+     * follow is on its way", not "they accepted".
+     */
+    private fun followFedi(handle: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.fediFollow(handle) }.fold(
+                onSuccess = { report ->
+                    val msg = if (report.recorded) {
+                        context.getString(R.string.chat_fedi_follow_sent, handle)
+                    } else {
+                        context.getString(R.string.chat_fedi_follow_pending, handle)
+                    }
+                    snackbar(msg)
+                },
+                onFailure = { e ->
+                    snackbar(userFacingError(e, "fediFollow", R.string.chat_fedi_follow_failed))
+                },
+            )
+        }
     }
 
     /**

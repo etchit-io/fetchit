@@ -11,6 +11,7 @@ import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
@@ -131,6 +132,9 @@ interface ChatGateway {
      */
     suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi
 
+    /** Follow a remote fediverse account (`@user@instance`) from the minted handle. */
+    suspend fun fediFollow(target: String): FollowReportFfi
+
     /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
@@ -238,6 +242,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediLookup(handle: String): LookupFfi = inner.fediLookup(handle)
     override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
         inner.fediPublish(bodyMd, replyToActorUrl)
+
+    override suspend fun fediFollow(target: String): FollowReportFfi = inner.fediFollow(target)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =
