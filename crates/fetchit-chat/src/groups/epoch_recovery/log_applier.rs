@@ -42,15 +42,19 @@ impl X0xdCommitApplier {
 
 /// Classify an apply-endpoint error for the recovery loop by fault
 /// domain. A RECORD-fault -- any deterministic 4xx the daemon answers
-/// for this specific record (400 malformed, 403 disallowed, 404
-/// unknown, 405/413/422/...) -- can NEVER succeed on a later retry, so
-/// the loop must skip it and advance its cursor; otherwise one poison
-/// or stale record (the log is not membership-gated on append) wedges
-/// warm recovery permanently. An ENVIRONMENT-fault stays an error and
-/// retries with the cursor before the record: 401 (broken bearer token
-/// -- EVERY record would 401, and skipping would silently drain the
-/// whole log unapplied), 408 (timeout) and 429 (throttle) are not
-/// properties of the record, and neither are transport failures or 5xx.
+/// for this specific record's content (400 malformed, 403 disallowed,
+/// 404 unknown, 405/413/422/...) -- can NEVER succeed on a later retry,
+/// so the loop must skip it and advance its cursor; otherwise one
+/// poison or stale record (the log is not membership-gated on append)
+/// wedges warm recovery permanently. An ENVIRONMENT-fault stays an
+/// error and retries with the cursor before the record, because it is
+/// constant across records and skipping would silently drain the whole
+/// log unapplied: 401/407 (auth), 431 (headers -- ours never vary per
+/// record), 408 (timeout), 429 (throttle). The failure asymmetry picks
+/// the sides: a wrong Err is a visible, retriggered wedge; a wrong skip
+/// is silent unapplied loss. For the same reason everything OUTSIDE
+/// 4xx (5xx, and any 3xx a non-following client would surface) falls
+/// through to Err -- the safe, visible side -- never to skip.
 fn classify_apply_error(
     e: x0xd_client::X0xdError,
     seq: u64,
@@ -58,7 +62,7 @@ fn classify_apply_error(
 ) -> Result<ApplyOutcome> {
     match e {
         x0xd_client::X0xdError::ApplyRejected { status, detail }
-            if (400..500).contains(&status) && !matches!(status, 401 | 408 | 429) =>
+            if (400..500).contains(&status) && !matches!(status, 401 | 407 | 408 | 429 | 431) =>
         {
             log::warn!(
                 "[chat] warm recovery: daemon rejected log record seq={seq} \
@@ -193,7 +197,7 @@ mod tests {
     /// the daemon already refused it.
     #[tokio::test]
     async fn deterministic_daemon_reject_skips_and_advances() {
-        for status in [400u16, 403, 404, 405, 413, 422] {
+        for status in [400u16, 403, 404, 405, 411, 413, 415, 422] {
             let gid = "ff".repeat(32);
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -219,12 +223,13 @@ mod tests {
     /// Environment-faults stay errors -- the cursor holds BEFORE the
     /// record and the next trigger retries it. 401 is the load-bearing
     /// case: a broken bearer token 401s EVERY record, and classifying it
-    /// as skip would silently drain the whole log unapplied. 408/429 are
-    /// transient by definition; 5xx is the daemon's problem, not the
-    /// record's.
+    /// as skip would silently drain the whole log unapplied; 407/431 are
+    /// the same shape (auth/headers, constant across records). 408/429
+    /// are transient by definition; 5xx is the daemon's problem, not the
+    /// record's; a surfaced 3xx falls to the same safe side.
     #[tokio::test]
     async fn environment_fault_stays_an_error() {
-        for status in [401u16, 408, 429, 500, 503] {
+        for status in [301u16, 401, 407, 408, 429, 431, 500, 503] {
             let gid = "ee".repeat(32);
             let server = MockServer::start().await;
             Mock::given(method("POST"))
