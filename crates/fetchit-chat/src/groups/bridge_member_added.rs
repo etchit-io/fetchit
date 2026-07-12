@@ -28,6 +28,10 @@
 pub(crate) fn commit_only_member_added(event: &serde_json::Value) -> serde_json::Value {
     let mut out = event.clone();
     if let Some(obj) = out.as_object_mut() {
+        // DENYLIST, not allowlist: any FUTURE joiner-sealed field the staged
+        // event grows MUST be added here, or it fans out in the broadcast
+        // Commit (including the durable relay group-log copy every group-id
+        // holder can fetch).
         obj.remove("treekem_welcome_b64");
         obj.remove("welcome_ref");
     }
