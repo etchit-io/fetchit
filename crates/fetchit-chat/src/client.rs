@@ -4096,6 +4096,21 @@ impl Client {
     }
 }
 
+/// Normalize a user-typed fediverse handle for lookup: trim, lowercase,
+/// and tolerate a missing leading `@` (`user@instance.org` is how people
+/// type handles; the strict leading-`@` form is a mention-scanner rule,
+/// not a UX contract). Only the LOOKUP entrance is lenient — message-text
+/// mention scanning keeps requiring `@user@instance` so ordinary email
+/// addresses in prose never parse as mentions.
+fn normalize_lookup_handle(handle: &str) -> String {
+    let trimmed = handle.trim().to_lowercase();
+    if trimmed.starts_with('@') {
+        trimmed
+    } else {
+        format!("@{trimmed}")
+    }
+}
+
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("Client");
@@ -5384,7 +5399,7 @@ impl Client {
     /// [`ChatError::Invalid`] on a malformed handle, a `WebFinger`/actor-fetch
     /// transport failure, or an unreachable sender relay.
     pub async fn lookup_fedi_handle(&self, handle: &str) -> Result<FediLookup> {
-        let parsed = fetchit_fedi::parse_mention(&handle.trim().to_lowercase())
+        let parsed = fetchit_fedi::parse_mention(&normalize_lookup_handle(handle))
             .map_err(|e| ChatError::Invalid(format!("handle: {e}")))?;
         let canonical = format!("@{}@{}", parsed.local, parsed.instance);
         let actor_url = fetchit_fedi::resolve_handle(&parsed)
@@ -6018,6 +6033,31 @@ pub(crate) fn resolve_master_key(
 mod tests {
     use super::*;
     use crate::at_rest::{fresh_argon_salt, kdf_id_argon2, MasterKey, MasterKeySource};
+
+    #[test]
+    fn lookup_handle_normalizes_missing_leading_at() {
+        // The email-like form users actually type must parse.
+        assert_eq!(
+            normalize_lookup_handle("happyborg@fosstodon.org"),
+            "@happyborg@fosstodon.org"
+        );
+        // Canonical form passes through untouched.
+        assert_eq!(
+            normalize_lookup_handle("@happyborg@fosstodon.org"),
+            "@happyborg@fosstodon.org"
+        );
+        // Whitespace + case are cleaned before the check.
+        assert_eq!(
+            normalize_lookup_handle("  HappyBorg@Fosstodon.org "),
+            "@happyborg@fosstodon.org"
+        );
+        // Both normalized forms parse identically downstream.
+        let a = fetchit_fedi::parse_mention("@happyborg@fosstodon.org").unwrap();
+        let b = fetchit_fedi::parse_mention(&normalize_lookup_handle("happyborg@fosstodon.org"))
+            .unwrap();
+        assert_eq!((a.local, a.instance), (b.local, b.instance));
+    }
+
     use crate::conversation::{Member, MemberDevice, MemberDeviceStatus};
     use crate::local_store::StoreLayout;
     use async_trait::async_trait;
