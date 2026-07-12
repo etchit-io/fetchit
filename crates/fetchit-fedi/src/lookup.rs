@@ -22,6 +22,9 @@ use serde_json::Value;
 pub struct RemoteActor {
     /// Canonical actor URL (`id`).
     pub id: url::Url,
+    /// `inbox` endpoint — where Follow/Create/DM activities are posted.
+    /// Mandatory per `ActivityPub` §4.1; every real actor serves one.
+    pub inbox: url::Url,
     /// `preferredUsername` as served; the local part of the handle.
     pub preferred_username: String,
     /// `publicKey.publicKeyPem` when served.
@@ -58,6 +61,11 @@ impl RemoteActor {
             name: "id".into(),
             reason: format!("{e}"),
         })?;
+        let inbox_str = required_str(value, "inbox")?;
+        let inbox: url::Url = inbox_str.parse().map_err(|e| ActorError::InvalidField {
+            name: "inbox".into(),
+            reason: format!("{e}"),
+        })?;
         let preferred_username = required_str(value, "preferredUsername")?.to_owned();
         let rsa_public_key_pem = match value.get("publicKey") {
             None => None,
@@ -86,6 +94,7 @@ impl RemoteActor {
         };
         Ok(Self {
             id,
+            inbox,
             preferred_username,
             rsa_public_key_pem,
             attestation_v2,
@@ -157,6 +166,31 @@ mod tests {
         assert_eq!(actor.preferred_username, "gargron");
     }
 
+    // The inbox is what we POST Follow/Create/DM activities to. It must
+    // decode for a plain Mastodon actor that carries no PQ attestation —
+    // this is the type delivery uses so a non-fetchit target is reachable.
+    #[test]
+    fn remote_actor_exposes_inbox_without_attestation() {
+        let mut v = fixture();
+        v.as_object_mut()
+            .unwrap()
+            .remove(crate::actor::PQ_ATTESTATION_PROPERTY_URI);
+        let actor = RemoteActor::from_json_ld(&v).unwrap();
+        assert_eq!(
+            actor.inbox.as_str(),
+            "https://mastodon.example/users/gargron/inbox"
+        );
+    }
+
+    // An actor doc missing the mandatory `inbox` is malformed and useless
+    // for delivery — decode must fail rather than yield an unreachable actor.
+    #[test]
+    fn remote_actor_missing_inbox_is_rejected() {
+        let mut v = fixture();
+        v.as_object_mut().unwrap().remove("inbox");
+        assert!(RemoteActor::from_json_ld(&v).is_err());
+    }
+
     #[test]
     fn actor_without_public_key_decodes_with_none_pem() {
         let mut v = fixture();
@@ -213,6 +247,7 @@ mod tests {
             "id": actor_url.as_str(),
             "type": "Person",
             "preferredUsername": "josh",
+            "inbox": format!("{}/inbox", actor_url.as_str()),
             "publicKey": { "owner": actor_url.as_str(), "publicKeyPem": pem },
             PQ_ATTESTATION_V2_PROPERTY_URI: serde_json::to_value(&att2).unwrap(),
         });
@@ -227,6 +262,7 @@ mod tests {
             "id": "https://x.example/a",
             "type": "Person",
             "preferredUsername": "a",
+            "inbox": "https://x.example/a/inbox",
         });
         let actor = RemoteActor::from_json_ld(&v).unwrap();
         assert!(actor.verify_attestation_v2().is_err());
@@ -245,6 +281,7 @@ mod tests {
             "id": actor_url.as_str(),
             "type": "Person",
             "preferredUsername": "a",
+            "inbox": format!("{}/inbox", actor_url.as_str()),
             PQ_ATTESTATION_V2_PROPERTY_URI: serde_json::to_value(&att2).unwrap(),
         });
         let actor2 = RemoteActor::from_json_ld(&v2).unwrap();
@@ -269,6 +306,7 @@ mod tests {
             "id": actor_url.as_str(),
             "type": "Person",
             "preferredUsername": "josh",
+            "inbox": format!("{}/inbox", actor_url.as_str()),
             "publicKey": { "owner": actor_url.as_str(), "publicKeyPem": pem },
             PQ_ATTESTATION_V2_PROPERTY_URI: serde_json::to_value(&att2).unwrap(),
         });

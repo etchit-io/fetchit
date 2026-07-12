@@ -5646,7 +5646,9 @@ impl Client {
 
         let mut report = PublishReport::default();
         for actor_url in &recipients {
-            match fetchit_fedi::actor::fetch_actor(actor_url).await {
+            // Lenient decode: mentioned recipients are ordinary fediverse
+            // actors (no PQ attestation required); we only need the inbox.
+            match fetchit_fedi::lookup::fetch_remote_actor(actor_url).await {
                 Ok(actor) => {
                     match transport
                         .deliver(&key, &body, &actor.inbox, &identity.actor_url)

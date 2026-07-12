@@ -72,7 +72,10 @@ impl Client {
         // Resolve + denylist-gate the target before anything leaves the
         // device (reuses the publish path's mention resolve+gate).
         let target_url = self.resolve_and_gate_mention(target).await?;
-        let target_actor = fetchit_fedi::actor::fetch_actor(&target_url)
+        // Lenient decode: the target is any fediverse actor (Mastodon et al),
+        // not necessarily a fetchit actor, so it need not carry a PQ
+        // attestation. We only need its inbox to deliver the Follow.
+        let target_actor = fetchit_fedi::lookup::fetch_remote_actor(&target_url)
             .await
             .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
         let target_actor_url = target_actor.id.to_string();
