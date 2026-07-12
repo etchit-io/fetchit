@@ -40,23 +40,26 @@ impl X0xdCommitApplier {
     }
 }
 
-/// Classify an apply-endpoint error for the recovery loop. A
-/// deterministic daemon reject (400 malformed / 403 disallowed / 404
-/// unknown) can NEVER succeed on a later retry, so the loop must skip
-/// the record and advance its cursor -- otherwise one poison or stale
-/// record (the log is not membership-gated on append) wedges warm
-/// recovery permanently. Everything else (transport, 5xx) is transient:
-/// the pass stops with the cursor BEFORE the record and retries later.
+/// Classify an apply-endpoint error for the recovery loop by fault
+/// domain. A RECORD-fault -- any deterministic 4xx the daemon answers
+/// for this specific record (400 malformed, 403 disallowed, 404
+/// unknown, 405/413/422/...) -- can NEVER succeed on a later retry, so
+/// the loop must skip it and advance its cursor; otherwise one poison
+/// or stale record (the log is not membership-gated on append) wedges
+/// warm recovery permanently. An ENVIRONMENT-fault stays an error and
+/// retries with the cursor before the record: 401 (broken bearer token
+/// -- EVERY record would 401, and skipping would silently drain the
+/// whole log unapplied), 408 (timeout) and 429 (throttle) are not
+/// properties of the record, and neither are transport failures or 5xx.
 fn classify_apply_error(
     e: x0xd_client::X0xdError,
     seq: u64,
     group_id: &str,
 ) -> Result<ApplyOutcome> {
     match e {
-        x0xd_client::X0xdError::ApplyRejected {
-            status: status @ (400 | 403 | 404),
-            detail,
-        } => {
+        x0xd_client::X0xdError::ApplyRejected { status, detail }
+            if (400..500).contains(&status) && !matches!(status, 401 | 408 | 429) =>
+        {
             log::warn!(
                 "[chat] warm recovery: daemon rejected log record seq={seq} \
                  group={group_id} with {status} ({detail}); skipping past the \
@@ -182,14 +185,15 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
-    /// Deterministic daemon rejects (400 malformed / 403 disallowed /
-    /// 404 unknown) mean the record can NEVER become valid: the applier
-    /// must skip-and-advance (`AlreadyApplied`) so one poison or stale
+    /// Deterministic record-fault rejects (400 malformed, 403
+    /// disallowed, 404 unknown, 405/413/422 protocol/size/semantic)
+    /// mean the record can NEVER become valid: the applier must
+    /// skip-and-advance (`AlreadyApplied`) so one poison or stale
     /// record cannot wedge warm recovery forever. Nothing is applied --
     /// the daemon already refused it.
     #[tokio::test]
     async fn deterministic_daemon_reject_skips_and_advances() {
-        for status in [400u16, 403, 404] {
+        for status in [400u16, 403, 404, 405, 413, 422] {
             let gid = "ff".repeat(32);
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -212,23 +216,29 @@ mod tests {
         }
     }
 
-    /// Transient failures (5xx / transport) stay errors: the pass stops
-    /// with the cursor BEFORE the record and the next trigger retries it.
+    /// Environment-faults stay errors -- the cursor holds BEFORE the
+    /// record and the next trigger retries it. 401 is the load-bearing
+    /// case: a broken bearer token 401s EVERY record, and classifying it
+    /// as skip would silently drain the whole log unapplied. 408/429 are
+    /// transient by definition; 5xx is the daemon's problem, not the
+    /// record's.
     #[tokio::test]
-    async fn transient_daemon_failure_stays_an_error() {
-        let gid = "ee".repeat(32);
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path(format!("/groups/{gid}/apply-metadata-event")))
-            .respond_with(ResponseTemplate::new(503).set_body_string("overloaded"))
-            .mount(&server)
-            .await;
+    async fn environment_fault_stays_an_error() {
+        for status in [401u16, 408, 429, 500, 503] {
+            let gid = "ee".repeat(32);
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("/groups/{gid}/apply-metadata-event")))
+                .respond_with(ResponseTemplate::new(status).set_body_string("not-the-record"))
+                .mount(&server)
+                .await;
 
-        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
-        let rec = commit_record(b"retry-me", Some("cc".repeat(32)));
-        assert!(
-            applier.apply(&gid, &rec).await.is_err(),
-            "5xx must NOT advance the cursor; the record is retried next pass"
-        );
+            let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
+            let rec = commit_record(b"retry-me", Some("cc".repeat(32)));
+            assert!(
+                applier.apply(&gid, &rec).await.is_err(),
+                "status {status} must NOT advance the cursor; the record is retried next pass"
+            );
+        }
     }
 }
