@@ -251,8 +251,9 @@ async fn log_append_then_fetch_round_trips_through_set() {
     // round-trip over the set (primary relay, single seq space).
     let addr = start_server().await;
     let base = Url::parse(&format!("http://{addr}/")).unwrap();
-    let signer: Arc<dyn Signer + Send + Sync> =
-        Arc::new(StaticKeySigner::from_public_key(b"alice-public-key".to_vec()));
+    let signer: Arc<dyn Signer + Send + Sync> = Arc::new(StaticKeySigner::from_public_key(
+        b"alice-public-key".to_vec(),
+    ));
     let set = RelaySet::connect(vec![ClientConfig::new(base)], signer)
         .await
         .unwrap();

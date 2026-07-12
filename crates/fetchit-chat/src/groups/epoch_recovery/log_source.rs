@@ -46,8 +46,8 @@ impl CommitSource for LogFetchCommitSource {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use crate::groups::epoch_recovery::CommitRecordKind;
+    use base64::Engine as _;
     use fetchit_relay_client::{Signer, StaticKeySigner};
     use fetchit_relay_proto::{GroupId, LogRecordKind, Region};
     use fetchit_relay_server::{AcceptAllVerifier, Server, ServerConfig};

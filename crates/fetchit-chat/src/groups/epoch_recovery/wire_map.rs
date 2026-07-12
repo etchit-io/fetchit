@@ -174,7 +174,8 @@ mod tests {
         // A self-targeted MemberAdded routes to JoinResult: member parsed
         // from the payload, owner = the record author (the appender).
         let me = "aa11";
-        let payload = br#"{"event":"member_added","group_id":"stableG","agent_id":"aa11","commit":"x"}"#;
+        let payload =
+            br#"{"event":"member_added","group_id":"stableG","agent_id":"aa11","commit":"x"}"#;
         let r = CommitRecord {
             seq: 3,
             kind: CommitRecordKind::JoinResult,
