@@ -263,6 +263,8 @@
     <string name="chat_fedi_needs_handle_body">to follow people or message them across the fediverse, you need your own public @name. create one from your profile — it takes a few seconds.</string>
     <string name="chat_fedi_setup_pending">still setting up your public @name — we\'ll keep trying in the background</string>
     <string name="chat_fedi_dm">message</string>
+    <string name="chat_fedi_thread_sub">fediverse · not encrypted</string>
+    <string name="chat_fedi_thread_hint">message %1$s (not encrypted)</string>
     <string name="chat_fedi_dm_title">message %1$s</string>
     <string name="chat_fedi_dm_banner">Not encrypted — this goes over the regular fediverse, so their server (and ours) can read it. For private, post-quantum chat, invite them to fetch&gt;it.</string>
     <string name="chat_fedi_dm_hint">write a message…</string>

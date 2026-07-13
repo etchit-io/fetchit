@@ -168,5 +168,12 @@ class ConversationStore {
          * unprefixed for back-compat with existing DM call sites.
          */
         fun convKeyDm(agentIdHex: String): String = agentIdHex
+
+        /**
+         * Conversation key for a fediverse (plaintext-rails) thread: an
+         * `f:` prefix over the canonical `user@host` handle, so the same
+         * person's future PQ thread (keyed by agent hex) stays distinct.
+         */
+        fun convKeyFedi(handle: String): String = "f:${canonicalFediHandle(handle)}"
     }
 }

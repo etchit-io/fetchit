@@ -89,6 +89,7 @@ class ChatModeView(
         data class Thread(val peer: String) : Screen()
         data class GroupThread(val groupId: String) : Screen()
         data object Feed : Screen()
+        data class FediThread(val handle: String) : Screen()
     }
 
     private val screenStack = ArrayDeque<Screen>()
@@ -364,6 +365,17 @@ class ChatModeView(
                 feedCollectJob = null
                 slot.removeAllViews()
                 bindFeedScreen()
+            }
+            is Screen.FediThread -> {
+                // Same teardown discipline as the other threads.
+                feedCollectJob?.cancel()
+                feedCollectJob = null
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
+                slot.removeAllViews()
+                bindFediThreadScreen(screen.handle)
             }
         }
     }
@@ -783,7 +795,7 @@ class ChatModeView(
                     text = context.getString(R.string.chat_fedi_dm)
                     setOnClickListener {
                         dialog.dismiss()
-                        composeFediDm(atHandle)
+                        openFediThread(atHandle)
                     }
                 })
                 row.addView(android.widget.ImageButton(context, null, android.R.attr.borderlessButtonStyle).apply {
@@ -1464,7 +1476,7 @@ class ChatModeView(
                 builder.setTitle(lookup.handle)
                     .setMessage(body.toString())
                     .setPositiveButton(context.getString(R.string.chat_fedi_dm)) { _, _ ->
-                        composeFediDm(lookup.handle)
+                        openFediThread(lookup.handle)
                     }
                     .setNeutralButton(followLabel) { _, _ ->
                         followFedi(lookup.handle)
@@ -1540,90 +1552,6 @@ class ChatModeView(
         Snackbar.make(container, msg, Snackbar.LENGTH_LONG)
             .setAction(context.getString(R.string.action_retry)) { retry() }
             .show()
-    }
-
-    /**
-     * Compose + send a plaintext fediverse DM to a public-only account. The
-     * dialog carries a persistent "not encrypted" banner (M7 P3 rule) so the
-     * sender knows this rides ordinary fediverse rails, not PQ chat. On send
-     * the message is signed on-device and delivered to the recipient's inbox.
-     */
-    private fun composeFediDm(handle: String) {
-        if (!requireMintedHandle()) return
-        val editText = EditText(context).apply {
-            hint = context.getString(R.string.chat_fedi_dm_hint)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 2
-            maxLines = 5
-        }
-        // Inline send-status line: failures show HERE with the draft kept,
-        // never as a dismissed dialog + vanished snackbar (a failed send
-        // must not eat the message the user just wrote).
-        val statusLine = android.widget.TextView(context).apply {
-            visibility = android.view.View.GONE
-            val ta = context.obtainStyledAttributes(
-                intArrayOf(com.google.android.material.R.attr.colorError),
-            )
-            setTextColor(ta.getColor(0, 0xFFB00020.toInt()))
-            ta.recycle()
-            textSize = 13f
-            val px8 = (8 * context.resources.displayMetrics.density).toInt()
-            setPadding(0, px8, 0, 0)
-        }
-        val layout = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            val px16 = (16 * context.resources.displayMetrics.density).toInt()
-            setPadding(px16, 0, px16, 0)
-            addView(editText)
-            addView(statusLine)
-        }
-        val dialog = MaterialAlertDialogBuilder(context)
-            .setTitle(context.getString(R.string.chat_fedi_dm_title, handle))
-            .setMessage(context.getString(R.string.chat_fedi_dm_banner))
-            .setView(layout)
-            .setPositiveButton(context.getString(R.string.chat_fedi_dm_send), null)
-            .setNegativeButton(context.getString(R.string.action_cancel), null)
-            .create()
-        dialog.setOnShowListener {
-            val sendBtn = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
-            sendBtn.setOnClickListener {
-                val body = editText.text.toString().trim()
-                if (body.isEmpty()) {
-                    editText.error = context.getString(R.string.chat_fedi_dm_hint)
-                    return@setOnClickListener
-                }
-                sendBtn.isEnabled = false
-                statusLine.visibility = android.view.View.GONE
-                val failInline = { msg: String ->
-                    statusLine.text = msg
-                    statusLine.visibility = android.view.View.VISIBLE
-                    sendBtn.isEnabled = true
-                }
-                lifecycleScope.launch {
-                    val gw = runCatching { connectWithFeedback() }.getOrElse {
-                        failInline(context.getString(R.string.chat_connect_failed_generic))
-                        return@launch
-                    }
-                    runCatching { gw.fediDm(handle, body) }.fold(
-                        onSuccess = { report ->
-                            dialog.dismiss()
-                            snackbar(
-                                context.getString(
-                                    if (report.delivered) R.string.chat_fedi_dm_sent
-                                    else R.string.chat_fedi_dm_pending,
-                                    handle,
-                                ),
-                            )
-                        },
-                        onFailure = { e ->
-                            failInline(userFacingError(e, "fediDm", R.string.chat_fedi_dm_failed))
-                        },
-                    )
-                }
-            }
-        }
-        dialog.show()
     }
 
     /**
@@ -2083,6 +2011,97 @@ class ChatModeView(
     /** ISO-8601 → epoch ms, best-effort (0 sorts a stampless post oldest). */
     private fun parseIsoToMs(iso: String): Long =
         runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrDefault(0L)
+
+    // ── fediverse thread (plaintext rails) ─────────────────────────────
+
+    /** Open the plaintext fediverse conversation with [handle]. */
+    private fun openFediThread(handle: String) {
+        if (!requireMintedHandle()) return
+        showScreen(Screen.FediThread(handle), pushToStack = true)
+    }
+
+    /**
+     * A conversation over ordinary fediverse rails. Sent messages persist
+     * locally (delivered to the other side's server, never echoed back, so
+     * without local persistence a sent message "vanishes" — the exact doubt
+     * device testing surfaced). Their replies land here once the inbound
+     * inbox seam ships. The header carries the not-encrypted contract
+     * permanently instead of a one-shot dialog banner.
+     */
+    private fun bindFediThreadScreen(handle: String) {
+        val view = LayoutInflater.from(context)
+            .inflate(R.layout.view_chat_thread, slot, false)
+        slot.addView(view)
+        val convKey = ConversationStore.convKeyFedi(handle)
+
+        view.findViewById<TextView>(R.id.threadPeerName).text = handle
+        view.findViewById<TextView>(R.id.threadPeerShortId).apply {
+            text = context.getString(R.string.chat_fedi_thread_sub)
+            setTextColor(themeColor(R.attr.fetchitAsh))
+            isClickable = false
+            setOnClickListener(null)
+        }
+        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
+
+        val rv = view.findViewById<RecyclerView>(R.id.messageList)
+        rv.layoutManager = LinearLayoutManager(context).apply { stackFromEnd = true }
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
+        rv.adapter = adapter
+
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+        messageInput.hint = context.getString(R.string.chat_fedi_thread_hint, handle)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.setText("")
+            lifecycleScope.launch {
+                val gw = runCatching { connectWithFeedback() }.getOrElse {
+                    if (screenStack.lastOrNull() == Screen.FediThread(handle)) {
+                        messageInput.setText(body)
+                    }
+                    return@launch
+                }
+                runCatching { gw.fediDm(handle, body) }.fold(
+                    onSuccess = { report ->
+                        // The bubble appearing in the thread IS the sent
+                        // confirmation; only the degraded case speaks up.
+                        controller.conversations.append(
+                            convKey,
+                            ChatMessage(
+                                outbound = true,
+                                body = body,
+                                sentAtMs = System.currentTimeMillis(),
+                                messageId = report.noteId,
+                            ),
+                        )
+                        if (!report.delivered) {
+                            snackbar(context.getString(R.string.chat_fedi_dm_pending, handle))
+                        }
+                    },
+                    onFailure = { e ->
+                        if (screenStack.lastOrNull() == Screen.FediThread(handle)) {
+                            messageInput.setText(body)
+                        }
+                        snackbar(userFacingError(e, "fediDm", R.string.chat_fedi_dm_failed))
+                    },
+                )
+            }
+        }
+
+        threadCollectJob = lifecycleScope.launch {
+            controller.hydrateConversation(convKey)
+            controller.conversations.messagesFor(convKey).collect { msgs ->
+                val prevSize = adapter.itemCount
+                val rows = msgs.map { MessageRow.Dm(it) }
+                adapter.submitList(rows)
+                if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+            }
+        }
+    }
 
     /**
      * Wire the feed's compose row. Posting is public and needs a minted
