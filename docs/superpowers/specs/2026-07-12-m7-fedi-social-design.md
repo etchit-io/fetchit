@@ -38,8 +38,19 @@ Status: IN PROGRESS (2026-07-13, PR #29 josh-clsn/fetchit).
   (honest empty state until inbound-Accept processing lands), blocked list
   with unblock; pulled remote posts merged into the feed (de-duped,
   block-filtered); blocked accounts gated on the lookup card.
-- **P2 push feed + P3 inbound reply-render** — Alice's delivery seam, not
-  started (the pull feed above is the interim read path).
+- **Inbound loop — BUILT, awaiting bridge redeploy** (2026-07-13): the
+  reply half. `POST /actors/:handle/inbox` verifies the sender's HTTP
+  signature (RFC 9421 + cavage, digest + date-skew) against their fetched
+  RSA key, then Create(Note) → plain-text store (deduped by note id),
+  Accept(Follow) → `follow_accepted`. Owner-only `GET
+  /actors/:handle/messages` (bridge-auth-v1, since_ms cursor). Client:
+  `fetch_fedi_inbox` + FFI `fedi_inbox`; the Android fedi thread pulls on
+  open. Shared helpers lifted to fetchit-fedi (`parse_imf_fixdate`,
+  `parse_rsa_public_key_pem`). **The deployed bridge is still the pre-inbox
+  binary (POST inbox = 404 live); the loop needs a bridge redeploy to the
+  Trust droplet — prod write, Josh-gated.**
+- **P2 push feed** — Alice's delivery seam, not started (the pull feed +
+  pull inbox above are the interim read paths; push replaces the polling).
 - **P4 escalate-to-PQ** — not started (verified-user path ~90% via lookup
   `share_uri`; public-only path = invite-via-fedi-DM pointer + consent).
 
