@@ -211,6 +211,24 @@ pub fn compute_content_digest(body: &[u8]) -> String {
     format!("sha-256=:{}:", B64.encode(hash))
 }
 
+/// Parse an RSA public key from PEM, accepting both the SPKI
+/// (`BEGIN PUBLIC KEY`) and PKCS#1 (`BEGIN RSA PUBLIC KEY`) encodings
+/// Mastodon-family servers serve. Returns `None` on any decode failure.
+///
+/// Home for the helper the inbound-verify path needs: it feeds
+/// [`verify_signature_rfc9421`] / [`verify_signature_cavage`], so it
+/// lives next to them where every inbox consumer (relay + bridge) can
+/// share one parser.
+#[must_use]
+pub fn parse_rsa_public_key_pem(pem: &str) -> Option<RsaPublicKey> {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
+    if let Ok(k) = RsaPublicKey::from_public_key_pem(pem) {
+        return Some(k);
+    }
+    RsaPublicKey::from_pkcs1_pem(pem).ok()
+}
+
 /// Build the RFC 9421 `Signature-Input` parameter portion (the part
 /// after `sig1=`). The same string is appended to the canonical
 /// signing base on the `@signature-params` line.

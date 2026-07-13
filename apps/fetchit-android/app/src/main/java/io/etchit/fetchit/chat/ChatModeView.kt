@@ -89,6 +89,7 @@ class ChatModeView(
         data class Thread(val peer: String) : Screen()
         data class GroupThread(val groupId: String) : Screen()
         data object Feed : Screen()
+        data class FediThread(val handle: String) : Screen()
     }
 
     private val screenStack = ArrayDeque<Screen>()
@@ -364,6 +365,17 @@ class ChatModeView(
                 feedCollectJob = null
                 slot.removeAllViews()
                 bindFeedScreen()
+            }
+            is Screen.FediThread -> {
+                // Same teardown discipline as the other threads.
+                feedCollectJob?.cancel()
+                feedCollectJob = null
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
+                slot.removeAllViews()
+                bindFediThreadScreen(screen.handle)
             }
         }
     }
@@ -646,10 +658,14 @@ class ChatModeView(
     private fun renderFediHubHeader(shortId: TextView, onMinted: () -> Unit = {}) {
         val handle = controller.fediActorStatus()
         if (handle != null) {
-            shortId.text = context.getString(R.string.fedi_hub_handle, handle)
-            shortId.setTextColor(themeColor(R.attr.fetchitAsh))
-            shortId.setOnClickListener(null)
-            shortId.isClickable = false
+            // The minted @name is a door to the social graph — the chevron +
+            // copper make it READ as tappable (an unmarked tap target failed
+            // device testing: "I see nothing new").
+            shortId.text =
+                context.getString(R.string.fedi_hub_handle_tappable, handle)
+            shortId.setTextColor(themeColor(R.attr.fetchitCopper))
+            shortId.contentDescription = context.getString(R.string.fedi_people_desc)
+            shortId.setOnClickListener { showFediPeopleSheet(handle) }
         } else {
             shortId.text = context.getString(R.string.fedi_hub_join)
             shortId.setTextColor(themeColor(R.attr.fetchitCopper))
@@ -659,6 +675,193 @@ class ChatModeView(
                     onMinted()
                 }
             }
+        }
+    }
+
+    /**
+     * "Your fediverse" sheet — the social-graph surface a social app owes
+     * its user: who you follow (with message / unfollow / block per row),
+     * who follows you, and who you've blocked (with unblock). Opened by
+     * tapping your @name in the feed header. Lists load live; every
+     * action re-renders the sheet so state is never stale on screen.
+     */
+    private fun showFediPeopleSheet(handle: String) {
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(context)
+        val px16 = (16 * context.resources.displayMetrics.density).toInt()
+        val px8 = px16 / 2
+        val root = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(px16, px16, px16, px16)
+        }
+        val scroller = android.widget.ScrollView(context).apply { addView(root) }
+
+        fun header(text: String) = TextView(context).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(themeColor(R.attr.fetchitCopper))
+            setPadding(0, px16, 0, px8)
+        }
+        fun line(text: String) = TextView(context).apply {
+            this.text = text
+            textSize = 14f
+            setPadding(0, px8, 0, px8)
+        }
+
+        root.addView(TextView(context).apply {
+            text = context.getString(R.string.fedi_people_title)
+            textSize = 18f
+        })
+        root.addView(line(context.getString(R.string.fedi_hub_handle, handle)))
+        root.addView(android.widget.Button(context).apply {
+            text = context.getString(R.string.fedi_people_find)
+            setOnClickListener {
+                dialog.dismiss()
+                showAddContactDialog()
+            }
+        })
+
+        val followingHeader = header(context.getString(R.string.fedi_people_following, "…"))
+        root.addView(followingHeader)
+        val followingBox = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(followingBox)
+
+        root.addView(header(context.getString(R.string.fedi_people_followers)))
+        root.addView(line(context.getString(R.string.fedi_people_followers_empty)))
+
+        val blockedHeader = header(context.getString(R.string.fedi_people_blocked))
+        root.addView(blockedHeader)
+        val blockedBox = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(blockedBox)
+
+        fun renderBlocked() {
+            blockedBox.removeAllViews()
+            val blocked = blockStore.blocked()
+            blockedHeader.visibility = if (blocked.isEmpty()) View.GONE else View.VISIBLE
+            blocked.forEach { b ->
+                val row = android.widget.LinearLayout(context).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                row.addView(TextView(context).apply {
+                    text = context.getString(R.string.fedi_handle_at, b)
+                    textSize = 14f
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
+                })
+                row.addView(android.widget.Button(context, null, android.R.attr.borderlessButtonStyle).apply {
+                    text = context.getString(R.string.fedi_unblock)
+                    setOnClickListener {
+                        blockStore.unblock(b)
+                        snackbar(context.getString(R.string.fedi_unblocked, b))
+                        renderBlocked()
+                    }
+                })
+                blockedBox.addView(row)
+            }
+        }
+        renderBlocked()
+
+        fun renderFollowing(entries: List<uniffi.fetchit_ffi.FediFollowingFfi>) {
+            followingBox.removeAllViews()
+            followingHeader.text =
+                context.getString(R.string.fedi_people_following, entries.size.toString())
+            if (entries.isEmpty()) {
+                followingBox.addView(line(context.getString(R.string.fedi_people_following_empty)))
+                return
+            }
+            entries.forEach { e ->
+                val atHandle = "@${e.label}"
+                val row = android.widget.LinearLayout(context).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                row.addView(TextView(context).apply {
+                    text = if (e.state == "accepted") {
+                        atHandle
+                    } else {
+                        context.getString(R.string.fedi_following_pending_row, atHandle)
+                    }
+                    textSize = 14f
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
+                })
+                row.addView(android.widget.Button(context, null, android.R.attr.borderlessButtonStyle).apply {
+                    text = context.getString(R.string.chat_fedi_dm)
+                    setOnClickListener {
+                        dialog.dismiss()
+                        openFediThread(atHandle)
+                    }
+                })
+                row.addView(android.widget.ImageButton(context, null, android.R.attr.borderlessButtonStyle).apply {
+                    setImageResource(android.R.drawable.ic_menu_more)
+                    contentDescription = context.getString(R.string.fedi_row_more)
+                    setOnClickListener { anchor ->
+                        PopupMenu(context, anchor).apply {
+                            menu.add(context.getString(R.string.fedi_unfollow))
+                            menu.add(context.getString(R.string.fedi_block))
+                            setOnMenuItemClickListener { item ->
+                                when (item.title) {
+                                    context.getString(R.string.fedi_unfollow) ->
+                                        unfollowFedi(e.targetActorUrl, atHandle) { dialog.dismiss() }
+                                    context.getString(R.string.fedi_block) -> {
+                                        blockStore.block(atHandle)
+                                        snackbar(context.getString(R.string.fedi_blocked, atHandle))
+                                        renderBlocked()
+                                    }
+                                }
+                                true
+                            }
+                            show()
+                        }
+                    }
+                })
+                followingBox.addView(row)
+            }
+        }
+
+        dialog.setContentView(scroller)
+        dialog.show()
+
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                followingBox.addView(line(context.getString(R.string.chat_connect_failed_generic)))
+                return@launch
+            }
+            runCatching { gw.fediFollowing() }.fold(
+                onSuccess = { renderFollowing(it) },
+                onFailure = {
+                    followingBox.addView(
+                        line(userFacingError(it, "fediFollowing", R.string.fedi_people_load_failed)),
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Unfollow with feedback: the device retracts the follow and the
+     * directory record drops; the local following memory is cleared so
+     * lookup cards stop showing "following ✓".
+     */
+    private fun unfollowFedi(targetActorUrl: String, atHandle: String, onDone: () -> Unit = {}) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.fediUnfollow(targetActorUrl) }.fold(
+                onSuccess = {
+                    followStore.forget(atHandle)
+                    snackbar(context.getString(R.string.fedi_unfollowed, atHandle))
+                    onDone()
+                },
+                onFailure = { e ->
+                    snackbar(userFacingError(e, "fediUnfollow", R.string.fedi_unfollow_failed))
+                },
+            )
         }
     }
 
@@ -1223,29 +1426,132 @@ class ChatModeView(
      */
     private fun showLookupResultDialog(lookup: LookupFfi) {
         val builder = MaterialAlertDialogBuilder(context)
+        // A blocked account's card offers exactly one path: unblock.
+        if (blockStore.isBlocked(lookup.handle)) {
+            builder.setTitle(lookup.handle)
+                .setMessage(context.getString(R.string.fedi_lookup_blocked_body))
+                .setPositiveButton(context.getString(R.string.fedi_unblock)) { _, _ ->
+                    blockStore.unblock(lookup.handle)
+                    snackbar(context.getString(R.string.fedi_unblocked, lookup.handle))
+                    showLookupResultDialog(lookup)
+                }
+                .setNegativeButton(context.getString(R.string.action_close), null)
+                .show()
+            return
+        }
+        // Device-local memory of sent follows: the card keeps showing
+        // "following ✓" long after the confirmation snackbar is gone.
+        // The button stays tappable — re-following is idempotent.
+        val following = followStore.isFollowing(lookup.handle)
+        val followLabel = context.getString(
+            if (following) R.string.chat_fedi_following_badge else R.string.chat_fedi_follow,
+        )
         when (lookup.kind) {
             LookupKindFfi.VERIFIED -> {
                 val body = StringBuilder(context.getString(R.string.chat_lookup_verified_body))
                 if (lookup.previousAgentIdHex != null) {
                     body.append("\n\n").append(context.getString(R.string.chat_lookup_changed_hands))
                 }
+                if (following) {
+                    body.append("\n\n").append(context.getString(R.string.chat_lookup_following_line))
+                }
                 builder.setTitle(lookup.handle)
                     .setMessage(body.toString())
                     .setPositiveButton(context.getString(R.string.chat_lookup_message_privately)) { _, _ ->
                         messagePrivately(lookup)
                     }
+                    .setNeutralButton(followLabel) { _, _ ->
+                        followFedi(lookup.handle)
+                    }
                     .setNegativeButton(context.getString(R.string.action_close), null)
             }
-            LookupKindFfi.PUBLIC_ONLY ->
+            LookupKindFfi.PUBLIC_ONLY -> {
+                val body = StringBuilder(context.getString(R.string.chat_lookup_public_only_body))
+                if (following) {
+                    body.append("\n\n").append(context.getString(R.string.chat_lookup_following_line))
+                }
+                // Message is the primary action: leading with the caveat text
+                // plus a buried button read as "you can't message them" in
+                // device testing. The card must open doors, not close them.
                 builder.setTitle(lookup.handle)
-                    .setMessage(context.getString(R.string.chat_lookup_public_only_body))
-                    .setPositiveButton(context.getString(R.string.action_close), null)
+                    .setMessage(body.toString())
+                    .setPositiveButton(context.getString(R.string.chat_fedi_dm)) { _, _ ->
+                        openFediThread(lookup.handle)
+                    }
+                    .setNeutralButton(followLabel) { _, _ ->
+                        followFedi(lookup.handle)
+                    }
+                    .setNegativeButton(context.getString(R.string.action_close), null)
+            }
             LookupKindFfi.NOT_FOUND ->
                 builder.setTitle(context.getString(R.string.chat_lookup_not_found_title))
                     .setMessage(context.getString(R.string.chat_lookup_not_found_body, lookup.handle))
                     .setPositiveButton(context.getString(R.string.action_close), null)
         }
         builder.show()
+    }
+
+    /**
+     * Follow a fediverse account by handle: the device signs + delivers a
+     * `Follow` and the bridge records it pending. Requires a minted handle —
+     * a clear snackbar nudges to mint one first if not. The remote `Accept`
+     * arrives later (standard follow-request UX), so success here means "your
+     * follow is on its way", not "they accepted".
+     */
+    private fun followFedi(handle: String) {
+        if (!requireMintedHandle()) return
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                retrySnackbar(context.getString(R.string.chat_connect_failed_generic)) {
+                    followFedi(handle)
+                }
+                return@launch
+            }
+            runCatching { gw.fediFollow(handle) }.fold(
+                onSuccess = { report ->
+                    // The Follow reached their server either way; remember it
+                    // so the lookup card shows "following ✓" from now on.
+                    followStore.recordFollow(handle)
+                    val msg = if (report.recorded) {
+                        context.getString(R.string.chat_fedi_follow_sent, handle)
+                    } else {
+                        context.getString(R.string.chat_fedi_follow_pending, handle)
+                    }
+                    snackbar(msg)
+                },
+                onFailure = { e ->
+                    retrySnackbar(userFacingError(e, "fediFollow", R.string.chat_fedi_follow_failed)) {
+                        followFedi(handle)
+                    }
+                },
+            )
+        }
+    }
+
+    /**
+     * Gate a fediverse action on having a minted \@handle, explaining in
+     * plain language what to do when there isn't one. Returns whether the
+     * action may proceed. Without this gate the engine's rejection surfaces
+     * as a generic failure — misleading when the real fix is "mint first".
+     */
+    private fun requireMintedHandle(): Boolean {
+        if (controller.fediActorStatus() != null) return true
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_fedi_needs_handle_title))
+            .setMessage(context.getString(R.string.chat_fedi_needs_handle_body))
+            .setPositiveButton(context.getString(R.string.action_close), null)
+            .show()
+        return false
+    }
+
+    /**
+     * Failure snackbar with a "retry" action — a failed outcome must offer
+     * the path forward, never dead-end on a vanished message.
+     */
+    private fun retrySnackbar(msg: String, retry: () -> Unit) {
+        Snackbar.make(container, msg, Snackbar.LENGTH_LONG)
+            .setAction(context.getString(R.string.action_retry)) { retry() }
+            .show()
     }
 
     /**
@@ -1643,13 +1949,17 @@ class ChatModeView(
         renderFediHubHeader(view.findViewById(R.id.threadPeerShortId)) { bindFeedCompose(view) }
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
         bindFeedCompose(view)
-        // The (group-only) members-button slot becomes "find people" here: the
-        // same one-smart-field dialog as add-someone, so the hub can search
-        // @names without a trip back to the chat list.
-        val findBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
-        findBtn.visibility = View.VISIBLE
-        findBtn.contentDescription = context.getString(R.string.feed_find_people_desc)
-        findBtn.setOnClickListener { showAddContactDialog() }
+        // The (group-only) members-button slot becomes the people door here —
+        // the ic_people icon opens "your fediverse" (following / followers /
+        // blocked, with find-someone inside). Before a handle exists it falls
+        // back to the add-someone dialog so the button is never a dead end.
+        val peopleBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
+        peopleBtn.visibility = View.VISIBLE
+        peopleBtn.contentDescription = context.getString(R.string.fedi_people_desc)
+        peopleBtn.setOnClickListener {
+            val handle = controller.fediActorStatus()
+            if (handle != null) showFediPeopleSheet(handle) else showAddContactDialog()
+        }
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
@@ -1660,12 +1970,187 @@ class ChatModeView(
         feedCollectJob = lifecycleScope.launch {
             controller.feed.posts.collect { posts ->
                 val prevSize = adapter.itemCount
-                val rows = posts.map { MessageRow.Post(it) }
+                val rows = posts
+                    .filterNot { blockStore.isBlocked(it.actorUrl) }
+                    .map { MessageRow.Post(it) }
                 adapter.submitList(rows)
                 // Scroll only when new posts arrive, not on content-only updates.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
         }
+        refreshPulledFeed()
+    }
+
+    /**
+     * Pull the newest posts from followed accounts into the feed (merged +
+     * de-duped by [FeedStore.mergeRemote]). Quiet on failure — the feed
+     * simply stays as-is; a spinnerless refresh matches the screen's calm.
+     * Runs on every feed open; repeat pulls are cheap no-ops thanks to
+     * the merge de-dup.
+     */
+    private fun refreshPulledFeed() {
+        if (controller.fediActorStatus() == null) return
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.fediFeed() }
+                .onSuccess { posts ->
+                    controller.feed.mergeRemote(
+                        posts.map {
+                            FeedPost(
+                                actorUrl = it.authorLabel,
+                                body = it.text,
+                                receivedAtMs = parseIsoToMs(it.published),
+                            )
+                        },
+                    )
+                }
+                .onFailure { android.util.Log.w(TAG, "fediFeed pull: ${ffiReason(it)}") }
+        }
+    }
+
+    /** ISO-8601 → epoch ms, best-effort (0 sorts a stampless post oldest). */
+    private fun parseIsoToMs(iso: String): Long =
+        runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrDefault(0L)
+
+    // ── fediverse thread (plaintext rails) ─────────────────────────────
+
+    /** Open the plaintext fediverse conversation with [handle]. */
+    private fun openFediThread(handle: String) {
+        if (!requireMintedHandle()) return
+        showScreen(Screen.FediThread(handle), pushToStack = true)
+    }
+
+    /**
+     * A conversation over ordinary fediverse rails. Sent messages persist
+     * locally (delivered to the other side's server, never echoed back, so
+     * without local persistence a sent message "vanishes" — the exact doubt
+     * device testing surfaced). Their replies land here once the inbound
+     * inbox seam ships. The header carries the not-encrypted contract
+     * permanently instead of a one-shot dialog banner.
+     */
+    private fun bindFediThreadScreen(handle: String) {
+        val view = LayoutInflater.from(context)
+            .inflate(R.layout.view_chat_thread, slot, false)
+        slot.addView(view)
+        val convKey = ConversationStore.convKeyFedi(handle)
+
+        view.findViewById<TextView>(R.id.threadPeerName).text = handle
+        view.findViewById<TextView>(R.id.threadPeerShortId).apply {
+            text = context.getString(R.string.chat_fedi_thread_sub)
+            setTextColor(themeColor(R.attr.fetchitAsh))
+            isClickable = false
+            setOnClickListener(null)
+        }
+        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
+
+        val rv = view.findViewById<RecyclerView>(R.id.messageList)
+        rv.layoutManager = LinearLayoutManager(context).apply { stackFromEnd = true }
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
+        rv.adapter = adapter
+
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+        messageInput.hint = context.getString(R.string.chat_fedi_thread_hint, handle)
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.setText("")
+            lifecycleScope.launch {
+                val gw = runCatching { connectWithFeedback() }.getOrElse {
+                    if (screenStack.lastOrNull() == Screen.FediThread(handle)) {
+                        messageInput.setText(body)
+                    }
+                    return@launch
+                }
+                runCatching { gw.fediDm(handle, body) }.fold(
+                    onSuccess = { report ->
+                        // The bubble appearing in the thread IS the sent
+                        // confirmation; only the degraded case speaks up.
+                        controller.conversations.append(
+                            convKey,
+                            ChatMessage(
+                                outbound = true,
+                                body = body,
+                                sentAtMs = System.currentTimeMillis(),
+                                messageId = report.noteId,
+                            ),
+                        )
+                        if (!report.delivered) {
+                            snackbar(context.getString(R.string.chat_fedi_dm_pending, handle))
+                        }
+                    },
+                    onFailure = { e ->
+                        if (screenStack.lastOrNull() == Screen.FediThread(handle)) {
+                            messageInput.setText(body)
+                        }
+                        snackbar(userFacingError(e, "fediDm", R.string.chat_fedi_dm_failed))
+                    },
+                )
+            }
+        }
+
+        threadCollectJob = lifecycleScope.launch {
+            controller.hydrateConversation(convKey)
+            controller.conversations.messagesFor(convKey).collect { msgs ->
+                val prevSize = adapter.itemCount
+                val rows = msgs.map { MessageRow.Dm(it) }
+                adapter.submitList(rows)
+                if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+            }
+        }
+        pullFediReplies(handle, convKey)
+    }
+
+    /**
+     * Pull inbound fediverse replies from the bridge inbox and drop any
+     * addressed to us from [handle]'s sender into the thread. A shared
+     * cursor (across all fedi threads — the inbox is one stream) advances
+     * so each reply lands once; matching is by note id so a re-pull can't
+     * double a bubble. Quiet on failure — the thread simply shows what it
+     * has. The reply becomes visible the moment the sender's server
+     * delivers it and this thread is next opened.
+     */
+    private fun pullFediReplies(handle: String, convKey: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            val cursor = fediInboxCursor()
+            val msgs = runCatching { gw.fediInbox(cursor) }.getOrElse {
+                android.util.Log.w(TAG, "fediInbox pull: ${ffiReason(it)}")
+                return@launch
+            }
+            if (msgs.isEmpty()) return@launch
+            val target = canonicalFediHandle(handle)
+            var maxSeen = cursor
+            msgs.forEach { m ->
+                maxSeen = maxOf(maxSeen, m.createdMs)
+                // Only messages from THIS thread's correspondent land here;
+                // others advance the cursor but wait for their own thread.
+                if (canonicalFediHandle(m.senderLabel) == target) {
+                    controller.conversations.append(
+                        convKey,
+                        ChatMessage(
+                            outbound = false,
+                            body = m.text,
+                            sentAtMs = m.createdMs,
+                            messageId = m.noteId,
+                        ),
+                    )
+                }
+            }
+            setFediInboxCursor(maxSeen)
+        }
+    }
+
+    private fun fediInboxCursor(): Long =
+        context.getSharedPreferences("fedi_inbox_cursor", Context.MODE_PRIVATE)
+            .getLong("since_ms", 0L)
+
+    private fun setFediInboxCursor(sinceMs: Long) {
+        context.getSharedPreferences("fedi_inbox_cursor", Context.MODE_PRIVATE)
+            .edit().putLong("since_ms", sinceMs).apply()
     }
 
     /**
@@ -1726,12 +2211,16 @@ class ChatModeView(
      * (via [userFacingError]) + a retry action; the raw engine reason goes to
      * logcat, never to the screen.
      */
+    /** Set once per view after the first self-heal registration pass runs. */
+    private var fediEnsureDone = false
+    private var fediSetupNagged = false
+    private val followStore by lazy { FediFollowStore(context) }
+    private val blockStore by lazy { FediBlockStore(context) }
+
     private suspend fun connectWithFeedback(): ChatGateway {
         showConnecting(true)
-        return runCatching {
+        val gateway = runCatching {
             controller.ensureGateway()
-        }.onSuccess {
-            showConnecting(false)
         }.onFailure { e ->
             showConnecting(false)
             val message = userFacingError(e, "ensureGateway", R.string.chat_connect_failed_generic)
@@ -1741,6 +2230,36 @@ class ChatModeView(
                 }
                 .show()
         }.getOrThrow()
+        // Self-heal the fediverse actor registration once per session: a bridge
+        // redeploy or a fresh device leaves the handle minted locally but absent
+        // from the directory, which silently breaks follow/DM recording. Re-run
+        // the idempotent register pass (reuses the existing identity) before the
+        // caller's fedi action proceeds. Failures are non-fatal (stay pending).
+        if (!fediEnsureDone && controller.fediActorStatus() != null) {
+            fediEnsureDone = true
+            runCatching { gateway.fediEnsureV2() }
+                .onSuccess {
+                    android.util.Log.w(
+                        "FediSelfHeal",
+                        "ensure: registered=${it.registered} upgraded=${it.upgraded} pending=${it.pending}",
+                    )
+                    if (!it.registered) {
+                        // Not registered yet: re-arm so the next connect retries,
+                        // and tell the user once (quietly) that setup is ongoing.
+                        fediEnsureDone = false
+                        if (!fediSetupNagged) {
+                            fediSetupNagged = true
+                            snackbar(context.getString(R.string.chat_fedi_setup_pending))
+                        }
+                    }
+                }
+                .onFailure {
+                    android.util.Log.w("FediSelfHeal", "ensure threw: ${it.message}")
+                    fediEnsureDone = false
+                }
+        }
+        showConnecting(false)
+        return gateway
     }
 
     /**

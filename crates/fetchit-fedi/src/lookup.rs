@@ -22,8 +22,14 @@ use serde_json::Value;
 pub struct RemoteActor {
     /// Canonical actor URL (`id`).
     pub id: url::Url,
+    /// `inbox` endpoint — where Follow/Create/DM activities are posted.
+    /// Mandatory per `ActivityPub` §4.1; every real actor serves one.
+    pub inbox: url::Url,
     /// `preferredUsername` as served; the local part of the handle.
     pub preferred_username: String,
+    /// `outbox` collection URL when served (every Mastodon-family actor
+    /// has one; optional here so exotic actors still decode).
+    pub outbox: Option<url::Url>,
     /// `publicKey.publicKeyPem` when served.
     pub rsa_public_key_pem: Option<String>,
     /// v2 attestation when served. Present-but-malformed is a decode
@@ -58,7 +64,16 @@ impl RemoteActor {
             name: "id".into(),
             reason: format!("{e}"),
         })?;
+        let inbox_str = required_str(value, "inbox")?;
+        let inbox: url::Url = inbox_str.parse().map_err(|e| ActorError::InvalidField {
+            name: "inbox".into(),
+            reason: format!("{e}"),
+        })?;
         let preferred_username = required_str(value, "preferredUsername")?.to_owned();
+        let outbox = value
+            .get("outbox")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse().ok());
         let rsa_public_key_pem = match value.get("publicKey") {
             None => None,
             Some(pk) => {
@@ -86,7 +101,9 @@ impl RemoteActor {
         };
         Ok(Self {
             id,
+            inbox,
             preferred_username,
+            outbox,
             rsa_public_key_pem,
             attestation_v2,
         })
@@ -136,6 +153,126 @@ pub async fn fetch_remote_actor(actor_url: &url::Url) -> Result<RemoteActor, Fet
     RemoteActor::from_json_ld(&value).map_err(FetchActorError::Parse)
 }
 
+/// One post from a remote actor's outbox, reduced to what a feed
+/// renders. `content_html` is the wire HTML as served — callers strip
+/// it with [`crate::text::html_to_text`] before display; it must never
+/// reach a renderer raw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemotePost {
+    /// Author actor URL (`attributedTo`, falling back to the wrapping
+    /// activity's `actor`).
+    pub author_url: String,
+    /// The Note's `content` — raw HTML off the wire.
+    pub content_html: String,
+    /// ISO-8601 `published` stamp as served (empty when absent). UTC
+    /// ISO-8601 sorts lexicographically, so feeds can order on the
+    /// string without a datetime parse.
+    pub published: String,
+    /// Human-facing URL of the post (`url`, falling back to `id`).
+    pub object_url: String,
+}
+
+fn post_from_note(note: &Value, fallback_author: Option<&str>) -> Option<RemotePost> {
+    let author_url = note
+        .get("attributedTo")
+        .and_then(Value::as_str)
+        .or(fallback_author)?
+        .to_owned();
+    let content_html = note
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if content_html.is_empty() {
+        return None;
+    }
+    let published = note
+        .get("published")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let object_url = note
+        .get("url")
+        .and_then(Value::as_str)
+        .or_else(|| note.get("id").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_owned();
+    Some(RemotePost {
+        author_url,
+        content_html,
+        published,
+        object_url,
+    })
+}
+
+/// Pure parse: collect the `Create(Note)` items (and tolerated bare
+/// `Note` items) from an outbox page's `orderedItems`, newest-first as
+/// served, capped at `cap`. Boosts (`Announce`) and non-Note objects
+/// are skipped — the v1 feed renders authored text posts only.
+#[must_use]
+pub fn posts_from_outbox_page(page: &Value, cap: usize) -> Vec<RemotePost> {
+    let Some(items) = page.get("orderedItems").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        if out.len() >= cap {
+            break;
+        }
+        let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+        let post = match kind {
+            "Create" => {
+                let activity_actor = item.get("actor").and_then(Value::as_str);
+                match item.get("object") {
+                    Some(obj) if obj.get("type").and_then(Value::as_str) == Some("Note") => {
+                        post_from_note(obj, activity_actor)
+                    }
+                    _ => None,
+                }
+            }
+            "Note" => post_from_note(item, None),
+            _ => None,
+        };
+        if let Some(p) = post {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Fetch the newest posts from an actor's outbox: GET the collection,
+/// follow its `first` page when the items aren't inline (the
+/// Mastodon-family shape), and reduce to at most `cap` [`RemotePost`]s.
+/// Same SSRF hardening as [`fetch_remote_actor`] on both requests.
+///
+/// # Errors
+///
+/// Same [`FetchActorError`] surface as the actor fetch; a page with no
+/// parsable items is `Ok(vec![])`, not an error (fail-open to an empty
+/// feed entry, never a broken feed).
+pub async fn fetch_outbox_posts(
+    outbox: &url::Url,
+    cap: usize,
+) -> Result<Vec<RemotePost>, FetchActorError> {
+    let client = pinned_no_redirect_client(outbox, ACTOR_FETCH_TIMEOUT).await?;
+    let collection = fetch_json_ld_at_url(&client, outbox, ACTOR_FETCH_TIMEOUT).await?;
+    if collection.get("orderedItems").is_some() {
+        return Ok(posts_from_outbox_page(&collection, cap));
+    }
+    match collection.get("first") {
+        Some(Value::String(first_url)) => {
+            let Ok(first) = first_url.parse::<url::Url>() else {
+                return Ok(Vec::new());
+            };
+            let client = pinned_no_redirect_client(&first, ACTOR_FETCH_TIMEOUT).await?;
+            let page = fetch_json_ld_at_url(&client, &first, ACTOR_FETCH_TIMEOUT).await?;
+            Ok(posts_from_outbox_page(&page, cap))
+        }
+        Some(embedded @ Value::Object(_)) => Ok(posts_from_outbox_page(embedded, cap)),
+        _ => Ok(Vec::new()),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -155,6 +292,31 @@ mod tests {
         assert!(actor.attestation_v2.is_none());
         assert!(actor.rsa_public_key_pem.is_some());
         assert_eq!(actor.preferred_username, "gargron");
+    }
+
+    // The inbox is what we POST Follow/Create/DM activities to. It must
+    // decode for a plain Mastodon actor that carries no PQ attestation —
+    // this is the type delivery uses so a non-fetchit target is reachable.
+    #[test]
+    fn remote_actor_exposes_inbox_without_attestation() {
+        let mut v = fixture();
+        v.as_object_mut()
+            .unwrap()
+            .remove(crate::actor::PQ_ATTESTATION_PROPERTY_URI);
+        let actor = RemoteActor::from_json_ld(&v).unwrap();
+        assert_eq!(
+            actor.inbox.as_str(),
+            "https://mastodon.example/users/gargron/inbox"
+        );
+    }
+
+    // An actor doc missing the mandatory `inbox` is malformed and useless
+    // for delivery — decode must fail rather than yield an unreachable actor.
+    #[test]
+    fn remote_actor_missing_inbox_is_rejected() {
+        let mut v = fixture();
+        v.as_object_mut().unwrap().remove("inbox");
+        assert!(RemoteActor::from_json_ld(&v).is_err());
     }
 
     #[test]
@@ -213,6 +375,7 @@ mod tests {
             "id": actor_url.as_str(),
             "type": "Person",
             "preferredUsername": "josh",
+            "inbox": format!("{}/inbox", actor_url.as_str()),
             "publicKey": { "owner": actor_url.as_str(), "publicKeyPem": pem },
             PQ_ATTESTATION_V2_PROPERTY_URI: serde_json::to_value(&att2).unwrap(),
         });
@@ -227,6 +390,7 @@ mod tests {
             "id": "https://x.example/a",
             "type": "Person",
             "preferredUsername": "a",
+            "inbox": "https://x.example/a/inbox",
         });
         let actor = RemoteActor::from_json_ld(&v).unwrap();
         assert!(actor.verify_attestation_v2().is_err());
@@ -245,6 +409,7 @@ mod tests {
             "id": actor_url.as_str(),
             "type": "Person",
             "preferredUsername": "a",
+            "inbox": format!("{}/inbox", actor_url.as_str()),
             PQ_ATTESTATION_V2_PROPERTY_URI: serde_json::to_value(&att2).unwrap(),
         });
         let actor2 = RemoteActor::from_json_ld(&v2).unwrap();
@@ -269,10 +434,83 @@ mod tests {
             "id": actor_url.as_str(),
             "type": "Person",
             "preferredUsername": "josh",
+            "inbox": format!("{}/inbox", actor_url.as_str()),
             "publicKey": { "owner": actor_url.as_str(), "publicKeyPem": pem },
             PQ_ATTESTATION_V2_PROPERTY_URI: serde_json::to_value(&att2).unwrap(),
         });
         let actor = RemoteActor::from_json_ld(&v).unwrap();
         assert!(actor.verify_attestation_v2().is_err());
+    }
+
+    #[test]
+    fn remote_actor_exposes_outbox_when_served() {
+        let mut v = fixture();
+        v["outbox"] = serde_json::json!("https://mastodon.example/users/g/outbox");
+        let actor = RemoteActor::from_json_ld(&v).unwrap();
+        assert_eq!(
+            actor.outbox.unwrap().as_str(),
+            "https://mastodon.example/users/g/outbox"
+        );
+        // Absent outbox stays None — exotic actors still decode.
+        let mut bare = fixture();
+        bare.as_object_mut().unwrap().remove("outbox");
+        assert!(RemoteActor::from_json_ld(&bare).unwrap().outbox.is_none());
+    }
+
+    fn outbox_page() -> Value {
+        serde_json::json!({
+            "type": "OrderedCollectionPage",
+            "orderedItems": [
+                {
+                    "type": "Create",
+                    "actor": "https://m.example/users/g",
+                    "object": {
+                        "type": "Note",
+                        "attributedTo": "https://m.example/users/g",
+                        "content": "<p>hello <b>world</b></p>",
+                        "published": "2026-07-13T06:00:00Z",
+                        "url": "https://m.example/@g/1"
+                    }
+                },
+                { "type": "Announce", "object": "https://elsewhere.example/x" },
+                {
+                    "type": "Create",
+                    "actor": "https://m.example/users/g",
+                    "object": { "type": "Image", "url": "https://m.example/i/2" }
+                },
+                {
+                    "type": "Note",
+                    "attributedTo": "https://m.example/users/g",
+                    "content": "bare note",
+                    "id": "https://m.example/notes/3"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn outbox_page_reduces_to_authored_notes_only() {
+        let posts = posts_from_outbox_page(&outbox_page(), 10);
+        assert_eq!(posts.len(), 2, "boosts + non-Note objects skipped");
+        assert_eq!(posts[0].author_url, "https://m.example/users/g");
+        assert_eq!(posts[0].content_html, "<p>hello <b>world</b></p>");
+        assert_eq!(posts[0].published, "2026-07-13T06:00:00Z");
+        assert_eq!(posts[0].object_url, "https://m.example/@g/1");
+        // Bare Note falls back to its id for the object url.
+        assert_eq!(posts[1].object_url, "https://m.example/notes/3");
+    }
+
+    #[test]
+    fn outbox_page_honors_cap_and_tolerates_junk() {
+        assert_eq!(posts_from_outbox_page(&outbox_page(), 1).len(), 1);
+        assert!(posts_from_outbox_page(&serde_json::json!({}), 10).is_empty());
+        assert!(
+            posts_from_outbox_page(&serde_json::json!({"orderedItems": "nope"}), 10).is_empty()
+        );
+        // A Note with no content renders nothing worth feeding.
+        let empty = serde_json::json!({"orderedItems":[
+            {"type":"Note","attributedTo":"https://m.example/u/g","content":""}
+        ]});
+        assert!(posts_from_outbox_page(&empty, 10).is_empty());
     }
 }

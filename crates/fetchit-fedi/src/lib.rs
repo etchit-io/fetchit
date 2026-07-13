@@ -26,12 +26,14 @@
 pub mod activity;
 pub mod actor;
 pub mod attestation;
+pub mod bridge_auth;
 pub mod lookup;
 pub mod registry;
 pub mod signature;
 pub mod signature_cache;
 pub mod signature_cavage;
 pub mod ssrf;
+pub mod text;
 pub mod transport;
 pub mod webfinger;
 

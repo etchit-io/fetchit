@@ -1,0 +1,39 @@
+[package]
+name = "fetchit-bridge-server"
+description = "Dedicated ActivityPub bridge node for the fetch>it network: WebFinger + actor-doc serving, Follow/fan-out, durable store. Isolated from the RAM-only chat relays."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+fetchit-fedi = { path = "../fetchit-fedi" }
+fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+saorsa-pqc.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true
+hex.workspace = true
+
+[[bin]]
+name = "fetchit-bridge-server"
+path = "src/main.rs"

@@ -476,6 +476,86 @@ pub struct PublishReportFfi {
     pub failed: Vec<FailedDeliveryFfi>,
 }
 
+/// Result of [`ChatClient::fedi_follow`]: the `Follow` was signed +
+/// delivered from the device and recorded at the bridge as pending. The
+/// remote `Accept` arrives later and flips the state.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FollowReportFfi {
+    /// Canonical actor URL we followed.
+    pub target_actor_url: String,
+    /// `Follow` activity id the remote `Accept` will echo.
+    pub follow_activity_id: String,
+    /// True when the target inbox accepted the delivery.
+    pub delivered: bool,
+    /// True when the bridge recorded the pending follow.
+    pub recorded: bool,
+}
+
+/// Result of [`ChatClient::fedi_dm`]: a plaintext fediverse DM signed on
+/// the device and delivered to the recipient's inbox. This message is not
+/// end-to-end encrypted — the UI must show the unencrypted-thread banner.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediDmReportFfi {
+    /// Canonical actor URL the DM was addressed to.
+    pub recipient_actor_url: String,
+    /// The note object id (the DM thread key).
+    pub note_id: String,
+    /// True when the recipient inbox accepted the delivery.
+    pub delivered: bool,
+}
+
+/// One account we follow, from the bridge's owner-only list.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediFollowingFfi {
+    /// Remote actor URL the follow targets.
+    pub target_actor_url: String,
+    /// Short display label — `user@host` derived from the actor URL.
+    pub label: String,
+    /// `"pending"` (Follow sent) or `"accepted"` (their Accept arrived).
+    pub state: String,
+}
+
+/// Result of [`ChatClient::fedi_unfollow`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UnfollowReportFfi {
+    /// The `Undo(Follow)` reached the target's inbox.
+    pub delivered: bool,
+    /// The bridge dropped its follow record.
+    pub removed: bool,
+}
+
+/// One inbound fediverse message pulled from the bridge inbox — a reply
+/// on the plaintext rails, ready to render in the fedi thread.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediInboxMessageFfi {
+    /// Sender's canonical actor URL.
+    pub sender_actor_url: String,
+    /// Sender's short label — `user@host`.
+    pub sender_label: String,
+    /// The Note id (client-side dedup key).
+    pub note_id: String,
+    /// Plain-text body.
+    pub text: String,
+    /// Bridge receive time (epoch ms) — the client's cursor axis.
+    pub created_ms: i64,
+}
+
+/// One post in the pulled read feed (text only; wire HTML is reduced
+/// engine-side, so shells render this as plain text).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediPostFfi {
+    /// Author actor URL.
+    pub author_url: String,
+    /// Short author label — `user@host`.
+    pub author_label: String,
+    /// Post body as plain text.
+    pub text: String,
+    /// ISO-8601 publish stamp as served (may be empty).
+    pub published: String,
+    /// Link to the post on its home server.
+    pub object_url: String,
+}
+
 /// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
 /// errors for blockers -- those land in `pending`.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1236,6 +1316,198 @@ impl ChatClient {
                 .map(|(target, error)| FailedDeliveryFfi { target, error })
                 .collect(),
         })
+    }
+
+    /// Follow a remote fediverse account (`@user@instance`) from our
+    /// minted handle: sign + deliver a `Follow` from the device, then
+    /// record it pending at the bridge. The remote `Accept` flips the
+    /// state later. Requires a minted handle.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted, the target is
+    /// blocked/unresolvable, or signing fails. Delivery/record failures
+    /// are reported in the returned [`FollowReportFfi`], not errored.
+    pub async fn fedi_follow(&self, target: String) -> Result<FollowReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .follow_fedi(&handle, &target, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(FollowReportFfi {
+            target_actor_url: report.target_actor_url,
+            follow_activity_id: report.follow_activity_id,
+            delivered: report.delivered,
+            recorded: report.recorded,
+        })
+    }
+
+    /// Send a plaintext fediverse DM (`@user@instance`) from our minted
+    /// handle: sign a direct `Create(Note)` on the device and deliver it to
+    /// the recipient's inbox. Requires a minted handle. This message is
+    /// **not** end-to-end encrypted — the UI shows the unencrypted-thread
+    /// banner and offers escalation to PQ chat (P4).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted, the target is
+    /// blocked/unresolvable, or signing fails. A transient inbox outage is
+    /// reported as `delivered == false` in [`FediDmReportFfi`], not errored.
+    pub async fn fedi_dm(
+        &self,
+        target: String,
+        body: String,
+    ) -> Result<FediDmReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .send_fedi_dm(&handle, &target, &body, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(FediDmReportFfi {
+            recipient_actor_url: report.recipient_actor_url,
+            note_id: report.note_id,
+            delivered: report.delivered,
+        })
+    }
+
+    /// The accounts our minted handle follows, from the bridge's
+    /// owner-only list (newest first as the bridge returns them).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+    /// is unreachable.
+    pub async fn fedi_following(&self) -> Result<Vec<FediFollowingFfi>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let entries = self
+            .inner
+            .list_fedi_following(&handle, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(entries
+            .into_iter()
+            .map(|e| FediFollowingFfi {
+                label: fetchit_chat::fedi_feed::author_label(&e.target_actor_url),
+                target_actor_url: e.target_actor_url,
+                state: e.state,
+            })
+            .collect())
+    }
+
+    /// Unfollow a fediverse account: sign + deliver the `Undo(Follow)`
+    /// and drop the bridge record.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or we are not
+    /// following the target. Delivery/record outages are reported in the
+    /// returned [`UnfollowReportFfi`], not errored.
+    pub async fn fedi_unfollow(
+        &self,
+        target_actor_url: String,
+    ) -> Result<UnfollowReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .unfollow_fedi(&handle, &target_actor_url, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(UnfollowReportFfi {
+            delivered: report.delivered,
+            removed: report.removed,
+        })
+    }
+
+    /// Pull inbound fediverse messages (replies on the plaintext rails)
+    /// for the minted handle, strictly newer than `since_ms` (`0` from
+    /// the start), oldest-first. Owner-only (bridge-auth-v1).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+    /// is unreachable.
+    pub async fn fedi_inbox(&self, since_ms: i64) -> Result<Vec<FediInboxMessageFfi>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let msgs = self
+            .inner
+            .fetch_fedi_inbox(&handle, since_ms, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(msgs
+            .into_iter()
+            .map(|m| FediInboxMessageFfi {
+                sender_label: fetchit_chat::fedi_feed::author_label(&m.sender_actor_url),
+                sender_actor_url: m.sender_actor_url,
+                note_id: m.note_id,
+                text: m.text,
+                created_ms: m.created_ms,
+            })
+            .collect())
+    }
+
+    /// Pull the read feed: newest text posts from followed accounts,
+    /// merged newest-first (engine caps apply). Per-account failures are
+    /// skipped engine-side; an empty vec is a valid feed.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+    /// following list is unreachable.
+    pub async fn fedi_feed(&self) -> Result<Vec<FediPostFfi>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let posts = self
+            .inner
+            .fetch_fedi_feed(&handle, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(posts
+            .into_iter()
+            .map(|p| FediPostFfi {
+                author_url: p.author_url,
+                author_label: p.author_label,
+                text: p.text,
+                published: p.published,
+                object_url: p.object_url,
+            })
+            .collect())
     }
 
     /// Run the v2 upgrade + re-register pass, called when the fedi hub opens

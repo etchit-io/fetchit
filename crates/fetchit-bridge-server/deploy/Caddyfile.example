@@ -1,0 +1,12 @@
+# TLS-terminating reverse proxy for the bridge origin.
+#
+# Caddy auto-provisions a Let's Encrypt certificate for this hostname, which
+# must resolve publicly to this host. If you also front the public domain with
+# Cloudflare, this origin hostname stays DNS-only (grey cloud), so the edge can
+# reach it directly over TLS.
+#
+# Replace bridge-origin.example.com with your origin hostname.
+
+bridge-origin.example.com {
+	reverse_proxy 127.0.0.1:8089
+}

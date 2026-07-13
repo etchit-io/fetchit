@@ -5331,9 +5331,11 @@ impl Client {
         })
     }
 
-    /// Run the v2 upgrade + re-register pass for the active `handle` (called
-    /// when the fedi hub opens). Transparently upgrades a pre-M5 (v1-only)
-    /// identity to v2 and re-asserts the directory record. NEVER errors the
+    /// Run the heal + v2 upgrade + re-register pass for the active `handle`
+    /// (called when the fedi hub opens). Transparently re-signs attestations
+    /// the current verifiers reject (pre-0.29 signing format, rotated agent
+    /// key), upgrades a pre-M5 (v1-only) identity to v2, and re-asserts the
+    /// directory record. NEVER errors the
     /// pass for upgrade blockers -- no published profile, bridge unreachable
     /// -- those land in [`EnsureV2Outcome::pending`]. Shares one path with
     /// the desktop `fediverse_ensure_v2` command.
@@ -5354,28 +5356,56 @@ impl Client {
             .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
         let agent_id_hex = chat.identity.agent_id_hex().to_string();
         let http = crate::relay_http::guarded_client();
-        let record = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http).await
+        // Heal stale attestations FIRST: identities minted before the x0x
+        // 0.29 agent-sign framing carry signatures no current verifier
+        // accepts (the bridge answers 403 forever), and an attestation
+        // signed by a rotated-away agent key binds a dead identity. Both
+        // re-sign transparently under the live key. Best-effort: a heal
+        // failure surfaces through the registration error below.
+        let mut pending: Option<String> = None;
+        if let Err(e) = self.heal_actor_attestations(handle, now_ms).await {
+            pending = Some(format!("attestation heal failed: {e}"));
+        }
+        // Best-effort profile refresh + attestation upgrade. A missing or
+        // unreachable published profile must NOT block registration: the bridge
+        // directory only needs handle + RSA SPKI + v2 attestation, none of which
+        // require a live profile fetch. Registering unconditionally lets a fresh
+        // device or an emptied directory self-heal its registration; the profile
+        // note is surfaced only when registration itself has nothing to report.
+        let upgraded = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http)
+            .await
         {
-            Ok(r) => r,
+            Ok(record) => self
+                .upgrade_actor_attestation_v2(handle, &record.profile_addr, relay.as_str(), now_ms)
+                .await
+                .unwrap_or(false),
             Err(e) => {
-                // No published profile / relay unreachable is a pending state
-                // on hub open, not a failure.
-                return Ok(EnsureV2Outcome {
-                    upgraded: false,
-                    registered: false,
-                    pending: Some(e.to_string()),
-                });
+                if pending.is_none() {
+                    pending = Some(format!("profile refresh skipped: {e}"));
+                }
+                false
             }
         };
-        let upgraded = self
-            .upgrade_actor_attestation_v2(handle, &record.profile_addr, relay.as_str(), now_ms)
-            .await?;
-        let identity = self
-            .load_actor_identity(handle)
-            .await?
-            .ok_or_else(|| ChatError::Invalid(format!("no actor identity for {handle}")))?;
-        let (registered, pending) =
+        // Nothing minted is a pending state, not an error: the pass's
+        // contract is "never errors on a blocker" so the hub stays usable.
+        let Some(identity) = self.load_actor_identity(handle).await? else {
+            return Ok(EnsureV2Outcome {
+                upgraded,
+                registered: false,
+                pending: Some(format!("no actor identity minted for {handle}")),
+            });
+        };
+        let (registered, reg_pending) =
             crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        // A registration failure is actionable — surface it, but never at the
+        // cost of hiding an earlier heal/profile note (a masked heal error
+        // makes the resulting 403 undiagnosable from the outcome alone).
+        if let Some(reg) = reg_pending {
+            pending = Some(match pending {
+                Some(prior) => format!("{reg} (also: {prior})"),
+                None => reg,
+            });
+        }
         Ok(EnsureV2Outcome {
             upgraded,
             registered,
@@ -5522,6 +5552,44 @@ impl Client {
         Ok(true)
     }
 
+    /// Verify the vault's stored attestations under the live agent key and
+    /// re-sign any that no longer hold (pre-0.29 signing format, rotated
+    /// agent key), persisting the healed vault. Returns whether anything
+    /// was re-signed; `Ok(false)` when nothing is minted for `handle`.
+    /// Called by [`Self::ensure_actor_v2_and_register`] so every ensure
+    /// pass leaves the vault verifiable before registration is attempted.
+    ///
+    /// # Errors
+    ///
+    /// - [`ChatError::Invalid`] when chat state has not been initialised
+    ///   or `handle` fails validation.
+    /// - Propagates master-key resolution, vault decrypt/save, and
+    ///   re-signing failures.
+    async fn heal_actor_attestations(&self, handle: &str, now_ms: u64) -> Result<bool> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        validate_actor_handle(handle)?;
+
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
+
+        let Some(mut vault) =
+            crate::fedi_vault::load_actor_identity(handle, &master, &chat.layout)?
+        else {
+            return Ok(false);
+        };
+        let healed =
+            crate::fedi_identity::heal_actor_attestations(&mut vault, chat.signer.as_ref(), now_ms)
+                .await?;
+        if healed {
+            crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
+        }
+        Ok(healed)
+    }
+
     /// Load a previously-minted [`fetchit_fedi::actor::ActorIdentity`]
     /// from the fedi vault. Returns `Ok(None)` when no vault file
     /// exists for the handle (the caller's "first run / not yet
@@ -5646,7 +5714,9 @@ impl Client {
 
         let mut report = PublishReport::default();
         for actor_url in &recipients {
-            match fetchit_fedi::actor::fetch_actor(actor_url).await {
+            // Lenient decode: mentioned recipients are ordinary fediverse
+            // actors (no PQ attestation required); we only need the inbox.
+            match fetchit_fedi::lookup::fetch_remote_actor(actor_url).await {
                 Ok(actor) => {
                     match transport
                         .deliver(&key, &body, &actor.inbox, &identity.actor_url)
@@ -5666,7 +5736,28 @@ impl Client {
     /// gating it through the community denylist when one is installed.
     /// Without a denylist the resolution still runs (we need the URL to
     /// find the inbox) but nothing is blocked.
-    async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {
+    /// Sign `canonical` bytes with the chat agent's ML-DSA key for the
+    /// `bridge-auth-v1` request auth (M7). Returns `(agent_id_hex,
+    /// signature_bytes)`; the `Signer` trait wraps `agent_sign_input`
+    /// exactly as the bridge re-applies before verifying.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] for a REST-only client (no chat state) or a
+    /// signer failure.
+    pub(crate) async fn bridge_auth_sign(&self, canonical: &[u8]) -> Result<(String, Vec<u8>)> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let sig = chat
+            .signer
+            .sign(canonical)
+            .await
+            .map_err(|e| ChatError::Invalid(format!("bridge-auth sign: {e}")))?;
+        Ok((chat.identity.agent_id_hex().to_owned(), sig))
+    }
+
+    pub(crate) async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {
         if let Some(denylist) = self.denylist.as_ref() {
             crate::public::check_mention_denylist(denylist.as_ref(), mention).await
         } else {
