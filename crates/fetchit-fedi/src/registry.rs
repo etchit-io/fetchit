@@ -64,7 +64,12 @@ pub enum RegistryError {
     },
 }
 
-/// `POST {base}v1/actors`: first-time registration.
+/// `POST {base}actors`: first-time registration.
+///
+/// Path matches the deployed `fetchit-bridge-server`, which serves the
+/// whole actor surface (registration, actor docs, `WebFinger`, follow
+/// graph) under the unversioned `/actors` family — the edge routes
+/// `/actors*` to the bridge.
 ///
 /// # Errors
 ///
@@ -75,7 +80,7 @@ pub async fn register_actor(
     http: &reqwest::Client,
 ) -> Result<RegisterActorResponse, RegistryError> {
     let url = base
-        .join("v1/actors")
+        .join("actors")
         .map_err(|e| RegistryError::Transport(format!("build url: {e}")))?;
     let resp = http
         .post(url)
@@ -87,7 +92,7 @@ pub async fn register_actor(
     decode_response(resp).await
 }
 
-/// `PUT {base}v1/actors/<handle>`: update an existing registration
+/// `PUT {base}actors/<handle>`: update an existing registration
 /// (new hint epoch, new profile address, RSA key rotation). The handle
 /// in the path comes from `req.handle` and is path-safe by the crate's
 /// handle alphabet; the bridge re-validates.
@@ -101,7 +106,7 @@ pub async fn update_actor(
     http: &reqwest::Client,
 ) -> Result<RegisterActorResponse, RegistryError> {
     let url = base
-        .join(&format!("v1/actors/{}", req.handle))
+        .join(&format!("actors/{}", req.handle))
         .map_err(|e| RegistryError::Transport(format!("build url: {e}")))?;
     let resp = http
         .put(url)
@@ -182,10 +187,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_posts_to_v1_actors_and_decodes_created() {
+    async fn register_posts_to_actors_and_decodes_created() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/actors"))
+            .and(path("/actors"))
             .and(body_json(serde_json::to_value(contract_request()).unwrap()))
             .respond_with(ResponseTemplate::new(201).set_body_string(include_str!(
                 "../tests/fixtures/registry-v1/register-response.json"
@@ -203,7 +208,7 @@ mod tests {
     async fn update_puts_to_handle_path() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
-            .and(path("/v1/actors/josh"))
+            .and(path("/actors/josh"))
             .respond_with(ResponseTemplate::new(200).set_body_string(include_str!(
                 "../tests/fixtures/registry-v1/register-response.json"
             )))
@@ -225,7 +230,7 @@ mod tests {
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v1/actors"))
+                .and(path("/actors"))
                 .respond_with(ResponseTemplate::new(status))
                 .mount(&server)
                 .await;
@@ -251,7 +256,7 @@ mod tests {
     async fn unprocessable_carries_reason_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/actors"))
+            .and(path("/actors"))
             .respond_with(ResponseTemplate::new(422).set_body_string("bad attestation"))
             .mount(&server)
             .await;
