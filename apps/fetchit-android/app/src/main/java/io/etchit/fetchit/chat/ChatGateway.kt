@@ -11,6 +11,7 @@ import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
@@ -144,6 +145,15 @@ interface ChatGateway {
     suspend fun fediDm(target: String, body: String): FediDmReportFfi
 
     /**
+     * Re-run the fediverse actor upgrade + re-register pass for an
+     * already-minted handle (idempotent, reuses the existing identity).
+     * Self-heals the bridge registration after a bridge redeploy or a fresh
+     * device leaves the local handle minted but unregistered. A no-op when
+     * no handle is minted.
+     */
+    suspend fun fediEnsureV2(): EnsureV2Ffi
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -254,6 +264,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediFollow(target: String): FollowReportFfi = inner.fediFollow(target)
     override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
         inner.fediDm(target, body)
+    override suspend fun fediEnsureV2(): EnsureV2Ffi = inner.fediEnsureV2()
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

@@ -12,6 +12,7 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
@@ -132,6 +133,8 @@ class FakeGateway : ChatGateway {
             noteId = "test-note-id",
             delivered = true,
         )
+    override suspend fun fediEnsureV2(): EnsureV2Ffi =
+        EnsureV2Ffi(upgraded = false, registered = true, pending = null)
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
         if (removeContactThrows) throw RuntimeException("remove boom")
@@ -505,6 +508,8 @@ class ChatControllerTest {
                 FollowReportFfi(target, "test-follow-id", delivered = true, recorded = true)
             override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
                 FediDmReportFfi(target, "test-note-id", delivered = true)
+            override suspend fun fediEnsureV2(): EnsureV2Ffi =
+                EnsureV2Ffi(upgraded = false, registered = true, pending = null)
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()

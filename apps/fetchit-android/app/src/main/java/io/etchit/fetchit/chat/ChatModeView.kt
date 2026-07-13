@@ -1824,12 +1824,13 @@ class ChatModeView(
      * (via [userFacingError]) + a retry action; the raw engine reason goes to
      * logcat, never to the screen.
      */
+    /** Set once per view after the first self-heal registration pass runs. */
+    private var fediEnsureDone = false
+
     private suspend fun connectWithFeedback(): ChatGateway {
         showConnecting(true)
-        return runCatching {
+        val gateway = runCatching {
             controller.ensureGateway()
-        }.onSuccess {
-            showConnecting(false)
         }.onFailure { e ->
             showConnecting(false)
             val message = userFacingError(e, "ensureGateway", R.string.chat_connect_failed_generic)
@@ -1839,6 +1840,17 @@ class ChatModeView(
                 }
                 .show()
         }.getOrThrow()
+        // Self-heal the fediverse actor registration once per session: a bridge
+        // redeploy or a fresh device leaves the handle minted locally but absent
+        // from the directory, which silently breaks follow/DM recording. Re-run
+        // the idempotent register pass (reuses the existing identity) before the
+        // caller's fedi action proceeds. Failures are non-fatal (stay pending).
+        if (!fediEnsureDone && controller.fediActorStatus() != null) {
+            fediEnsureDone = true
+            runCatching { gateway.fediEnsureV2() }
+        }
+        showConnecting(false)
+        return gateway
     }
 
     /**
