@@ -6,15 +6,23 @@ feed, post publicly, and DM people over ordinary ActivityPub rails — then
 escalate any of those contacts into PQ chat when they want privacy.
 "Come for the network, stay for the privacy."
 
-Status: IN PROGRESS (2026-07-12, PR #29 josh-clsn/fetchit).
+Status: IN PROGRESS (2026-07-13, PR #29 josh-clsn/fetchit).
 - **P1 Follow — DONE, proven on-device** (bridge-auth-v1 + follow routes +
   `follow_fedi` + FFI + Android). Includes the plain-Mastodon delivery fix:
   both `follow_fedi` and `publish_public_post` now decode the target with
   the lenient `fetch_remote_actor` (inbox-only, no PQ-attestation demand)
   instead of the strict fetchit actor parser.
+- **Registration self-heal — DONE, bridge-proven** (2026-07-13). Root cause
+  of the on-device follow/DM failures: pre-cutover (00796c4) vault
+  attestations are raw-signed and can never verify under the agent-sign
+  framing → bridge 403 → never in directory. `heal_actor_attestations`
+  re-signs stale/rotated attestations at every ensure pass. Deployed bridge
+  confirmed post-cutover empirically (framed probe → `201 registered`,
+  actor-doc + WebFinger 200). On-device heal of @josh pending Josh's retry.
 - **P3 outbound fedi-DM — DONE, gated, device-test pending** (`build_direct_note`
   + `Client::send_fedi_dm` + FFI `fedi_dm` + Android "fedi message" button
-  with not-encrypted banner).
+  with not-encrypted banner). Compose dialog keeps the draft on failure;
+  follows persist to `FediFollowStore` for a durable "following" state.
 - **P2 feed + P3 inbound reply-render** — Alice's delivery seam, not started.
 - **P4 escalate-to-PQ** — not started (verified-user path ~90% via lookup
   `share_uri`; public-only path = invite-via-fedi-DM pointer + consent).
