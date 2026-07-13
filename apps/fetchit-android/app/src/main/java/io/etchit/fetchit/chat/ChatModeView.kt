@@ -1223,32 +1223,47 @@ class ChatModeView(
      */
     private fun showLookupResultDialog(lookup: LookupFfi) {
         val builder = MaterialAlertDialogBuilder(context)
+        // Device-local memory of sent follows: the card keeps showing
+        // "following ✓" long after the confirmation snackbar is gone.
+        // The button stays tappable — re-following is idempotent.
+        val following = followStore.isFollowing(lookup.handle)
+        val followLabel = context.getString(
+            if (following) R.string.chat_fedi_following_badge else R.string.chat_fedi_follow,
+        )
         when (lookup.kind) {
             LookupKindFfi.VERIFIED -> {
                 val body = StringBuilder(context.getString(R.string.chat_lookup_verified_body))
                 if (lookup.previousAgentIdHex != null) {
                     body.append("\n\n").append(context.getString(R.string.chat_lookup_changed_hands))
                 }
+                if (following) {
+                    body.append("\n\n").append(context.getString(R.string.chat_lookup_following_line))
+                }
                 builder.setTitle(lookup.handle)
                     .setMessage(body.toString())
                     .setPositiveButton(context.getString(R.string.chat_lookup_message_privately)) { _, _ ->
                         messagePrivately(lookup)
                     }
-                    .setNeutralButton(context.getString(R.string.chat_fedi_follow)) { _, _ ->
+                    .setNeutralButton(followLabel) { _, _ ->
                         followFedi(lookup.handle)
                     }
                     .setNegativeButton(context.getString(R.string.action_close), null)
             }
-            LookupKindFfi.PUBLIC_ONLY ->
+            LookupKindFfi.PUBLIC_ONLY -> {
+                val body = StringBuilder(context.getString(R.string.chat_lookup_public_only_body))
+                if (following) {
+                    body.append("\n\n").append(context.getString(R.string.chat_lookup_following_line))
+                }
                 builder.setTitle(lookup.handle)
-                    .setMessage(context.getString(R.string.chat_lookup_public_only_body))
-                    .setPositiveButton(context.getString(R.string.chat_fedi_follow)) { _, _ ->
+                    .setMessage(body.toString())
+                    .setPositiveButton(followLabel) { _, _ ->
                         followFedi(lookup.handle)
                     }
                     .setNeutralButton(context.getString(R.string.chat_fedi_dm)) { _, _ ->
                         composeFediDm(lookup.handle)
                     }
                     .setNegativeButton(context.getString(R.string.action_close), null)
+            }
             LookupKindFfi.NOT_FOUND ->
                 builder.setTitle(context.getString(R.string.chat_lookup_not_found_title))
                     .setMessage(context.getString(R.string.chat_lookup_not_found_body, lookup.handle))
@@ -1265,10 +1280,19 @@ class ChatModeView(
      * follow is on its way", not "they accepted".
      */
     private fun followFedi(handle: String) {
+        if (!requireMintedHandle()) return
         lifecycleScope.launch {
-            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                retrySnackbar(context.getString(R.string.chat_connect_failed_generic)) {
+                    followFedi(handle)
+                }
+                return@launch
+            }
             runCatching { gw.fediFollow(handle) }.fold(
                 onSuccess = { report ->
+                    // The Follow reached their server either way; remember it
+                    // so the lookup card shows "following ✓" from now on.
+                    followStore.recordFollow(handle)
                     val msg = if (report.recorded) {
                         context.getString(R.string.chat_fedi_follow_sent, handle)
                     } else {
@@ -1277,10 +1301,38 @@ class ChatModeView(
                     snackbar(msg)
                 },
                 onFailure = { e ->
-                    snackbar(userFacingError(e, "fediFollow", R.string.chat_fedi_follow_failed))
+                    retrySnackbar(userFacingError(e, "fediFollow", R.string.chat_fedi_follow_failed)) {
+                        followFedi(handle)
+                    }
                 },
             )
         }
+    }
+
+    /**
+     * Gate a fediverse action on having a minted \@handle, explaining in
+     * plain language what to do when there isn't one. Returns whether the
+     * action may proceed. Without this gate the engine's rejection surfaces
+     * as a generic failure — misleading when the real fix is "mint first".
+     */
+    private fun requireMintedHandle(): Boolean {
+        if (controller.fediActorStatus() != null) return true
+        MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_fedi_needs_handle_title))
+            .setMessage(context.getString(R.string.chat_fedi_needs_handle_body))
+            .setPositiveButton(context.getString(R.string.action_close), null)
+            .show()
+        return false
+    }
+
+    /**
+     * Failure snackbar with a "retry" action — a failed outcome must offer
+     * the path forward, never dead-end on a vanished message.
+     */
+    private fun retrySnackbar(msg: String, retry: () -> Unit) {
+        Snackbar.make(container, msg, Snackbar.LENGTH_LONG)
+            .setAction(context.getString(R.string.action_retry)) { retry() }
+            .show()
     }
 
     /**
@@ -1290,6 +1342,7 @@ class ChatModeView(
      * the message is signed on-device and delivered to the recipient's inbox.
      */
     private fun composeFediDm(handle: String) {
+        if (!requireMintedHandle()) return
         val editText = EditText(context).apply {
             hint = context.getString(R.string.chat_fedi_dm_hint)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
@@ -1297,11 +1350,26 @@ class ChatModeView(
             minLines = 2
             maxLines = 5
         }
+        // Inline send-status line: failures show HERE with the draft kept,
+        // never as a dismissed dialog + vanished snackbar (a failed send
+        // must not eat the message the user just wrote).
+        val statusLine = android.widget.TextView(context).apply {
+            visibility = android.view.View.GONE
+            val ta = context.obtainStyledAttributes(
+                intArrayOf(com.google.android.material.R.attr.colorError),
+            )
+            setTextColor(ta.getColor(0, 0xFFB00020.toInt()))
+            ta.recycle()
+            textSize = 13f
+            val px8 = (8 * context.resources.displayMetrics.density).toInt()
+            setPadding(0, px8, 0, 0)
+        }
         val layout = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             val px16 = (16 * context.resources.displayMetrics.density).toInt()
             setPadding(px16, 0, px16, 0)
             addView(editText)
+            addView(statusLine)
         }
         val dialog = MaterialAlertDialogBuilder(context)
             .setTitle(context.getString(R.string.chat_fedi_dm_title, handle))
@@ -1319,9 +1387,15 @@ class ChatModeView(
                     return@setOnClickListener
                 }
                 sendBtn.isEnabled = false
+                statusLine.visibility = android.view.View.GONE
+                val failInline = { msg: String ->
+                    statusLine.text = msg
+                    statusLine.visibility = android.view.View.VISIBLE
+                    sendBtn.isEnabled = true
+                }
                 lifecycleScope.launch {
                     val gw = runCatching { connectWithFeedback() }.getOrElse {
-                        dialog.dismiss()
+                        failInline(context.getString(R.string.chat_connect_failed_generic))
                         return@launch
                     }
                     runCatching { gw.fediDm(handle, body) }.fold(
@@ -1336,8 +1410,7 @@ class ChatModeView(
                             )
                         },
                         onFailure = { e ->
-                            dialog.dismiss()
-                            snackbar(userFacingError(e, "fediDm", R.string.chat_fedi_dm_failed))
+                            failInline(userFacingError(e, "fediDm", R.string.chat_fedi_dm_failed))
                         },
                     )
                 }
@@ -1826,6 +1899,8 @@ class ChatModeView(
      */
     /** Set once per view after the first self-heal registration pass runs. */
     private var fediEnsureDone = false
+    private var fediSetupNagged = false
+    private val followStore by lazy { FediFollowStore(context) }
 
     private suspend fun connectWithFeedback(): ChatGateway {
         showConnecting(true)
@@ -1853,8 +1928,20 @@ class ChatModeView(
                         "FediSelfHeal",
                         "ensure: registered=${it.registered} upgraded=${it.upgraded} pending=${it.pending}",
                     )
+                    if (!it.registered) {
+                        // Not registered yet: re-arm so the next connect retries,
+                        // and tell the user once (quietly) that setup is ongoing.
+                        fediEnsureDone = false
+                        if (!fediSetupNagged) {
+                            fediSetupNagged = true
+                            snackbar(context.getString(R.string.chat_fedi_setup_pending))
+                        }
+                    }
                 }
-                .onFailure { android.util.Log.w("FediSelfHeal", "ensure threw: ${it.message}") }
+                .onFailure {
+                    android.util.Log.w("FediSelfHeal", "ensure threw: ${it.message}")
+                    fediEnsureDone = false
+                }
         }
         showConnecting(false)
         return gateway
