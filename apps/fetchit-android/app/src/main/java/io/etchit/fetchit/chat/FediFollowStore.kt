@@ -4,11 +4,13 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * Canonical storage form of a fediverse handle: trimmed + lowercased.
- * Handles are case-insensitive identifiers; storing one form keeps the
- * "following" state stable however the user typed the lookup.
+ * Canonical storage form of a fediverse handle: trimmed, lowercased,
+ * leading `@` dropped. Handles are case-insensitive identifiers and
+ * arrive both as `@user@host` (lookup cards) and `user@host` (feed
+ * author labels); one form keeps follow/block state stable everywhere.
  */
-fun canonicalFediHandle(handle: String): String = handle.trim().lowercase()
+fun canonicalFediHandle(handle: String): String =
+    handle.trim().removePrefix("@").lowercase()
 
 /**
  * Remembers which fediverse accounts this device has successfully sent a
@@ -34,12 +36,19 @@ class FediFollowStore(context: Context) {
     /** Whether a follow of [handle] was sent from this device. */
     fun isFollowing(handle: String): Boolean = canonicalFediHandle(handle) in handles()
 
+    /** Drop [handle] after an unfollow so cards stop showing "following". */
+    fun forget(handle: String) {
+        prefs.edit().putStringSet(KEY, handles() - canonicalFediHandle(handle)).apply()
+    }
+
     /** All followed handles, sorted for stable display. */
     fun following(): List<String> = handles().sorted()
 
     // getStringSet's returned instance must never be mutated (Android
-    // caches it); copy defensively before use.
-    private fun handles(): Set<String> = prefs.getStringSet(KEY, emptySet()).orEmpty().toSet()
+    // caches it); copy defensively — and re-canonicalize on read so
+    // entries persisted under an older canonical form stay matchable.
+    private fun handles(): Set<String> =
+        prefs.getStringSet(KEY, emptySet()).orEmpty().mapTo(HashSet(), ::canonicalFediHandle)
 
     companion object {
         private const val PREFS_NAME = "fedi_follow_store"

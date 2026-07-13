@@ -272,6 +272,25 @@
     <string name="chat_fedi_dm_failed">couldn\'t send right now — your message is still here, tap send to try again</string>
     <string name="chat_lookup_public_only_body">found them — you can follow this account or message it right from here.\n\nheads-up: messages to them travel the open fediverse, not fetch&gt;it\'s private encrypted chat. private chat needs fetch&gt;it on their side too.</string>
     <string name="chat_lookup_following_line">you follow this account.</string>
+    <string name="fedi_people_title">your fediverse</string>
+    <string name="fedi_people_desc">your people — following, followers, blocked</string>
+    <string name="fedi_people_following">following (%1$s)</string>
+    <string name="fedi_people_following_empty">you\'re not following anyone yet — look someone up with @name and tap follow.</string>
+    <string name="fedi_people_followers">followers</string>
+    <string name="fedi_people_followers_empty">no followers yet — when someone follows your @name, they\'ll show up here.</string>
+    <string name="fedi_people_blocked">blocked</string>
+    <string name="fedi_people_load_failed">couldn\'t load who you follow right now — try again in a moment</string>
+    <string name="fedi_following_pending_row">%1$s · waiting for their accept</string>
+    <string name="fedi_row_more">more actions</string>
+    <string name="fedi_unfollow">unfollow</string>
+    <string name="fedi_unfollowed">unfollowed %1$s</string>
+    <string name="fedi_unfollow_failed">couldn\'t unfollow right now — try again in a moment</string>
+    <string name="fedi_block">block</string>
+    <string name="fedi_blocked">blocked %1$s — their posts are hidden on this device</string>
+    <string name="fedi_unblock">unblock</string>
+    <string name="fedi_unblocked">unblocked %1$s</string>
+    <string name="fedi_handle_at">@%1$s</string>
+    <string name="fedi_lookup_blocked_body">you\'ve blocked this account on this device — its posts are hidden and follow/message are off. unblock to interact again.</string>
     <string name="chat_lookup_not_found_title">no one found</string>
     <string name="chat_lookup_not_found_body">we couldn\'t find anyone at %1$s. double-check the spelling?</string>
     <!-- Feed compose (public posting) + hub search. The hint names the handle

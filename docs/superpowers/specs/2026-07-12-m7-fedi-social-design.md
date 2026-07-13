@@ -23,7 +23,23 @@ Status: IN PROGRESS (2026-07-13, PR #29 josh-clsn/fetchit).
   + `Client::send_fedi_dm` + FFI `fedi_dm` + Android "fedi message" button
   with not-encrypted banner). Compose dialog keeps the draft on failure;
   follows persist to `FediFollowStore` for a durable "following" state.
-- **P2 feed + P3 inbound reply-render** — Alice's delivery seam, not started.
+- **@josh LIVE + follow proven e2e** (2026-07-13): heal → register 201 →
+  `GET /actors/josh` 200 → Follow of `@happyborg@fosstodon.org` delivered
+  + recorded (Josh saw the pending-accept snackbar). The reserved-handle
+  gate needed a one-time release of `josh` from the droplet env extras
+  (owner-claims mechanism = follow-up hardening item).
+- **Social surface — BUILT, device-test pending** (2026-07-13, Josh's
+  "UI a user would expect from a social app" directive): engine
+  `list_fedi_following`/`unfollow_fedi` (bridge routes already existed) +
+  `fetch_fedi_feed` (client-side outbox pull, SSRF-guarded, HTML→text via
+  `fetchit_fedi::text::html_to_text`); FFI `fedi_following`/`fedi_unfollow`/
+  `fedi_feed`; Android "your fediverse" sheet (tap your @name in the feed
+  header): following list with message/unfollow/block per row, followers
+  (honest empty state until inbound-Accept processing lands), blocked list
+  with unblock; pulled remote posts merged into the feed (de-duped,
+  block-filtered); blocked accounts gated on the lookup card.
+- **P2 push feed + P3 inbound reply-render** — Alice's delivery seam, not
+  started (the pull feed above is the interim read path).
 - **P4 escalate-to-PQ** — not started (verified-user path ~90% via lookup
   `share_uri`; public-only path = invite-via-fedi-DM pointer + consent).
 

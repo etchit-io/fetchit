@@ -12,6 +12,9 @@ import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.EnsureV2Ffi
+import uniffi.fetchit_ffi.FediFollowingFfi
+import uniffi.fetchit_ffi.FediPostFfi
+import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
@@ -154,6 +157,26 @@ interface ChatGateway {
     suspend fun fediEnsureV2(): EnsureV2Ffi
 
     /**
+     * The accounts the minted handle follows, from the directory's
+     * owner-only list. Throws when no handle is minted or the directory
+     * is unreachable.
+     */
+    suspend fun fediFollowing(): List<FediFollowingFfi>
+
+    /**
+     * Unfollow a fediverse account by its actor URL: the device signs +
+     * delivers the `Undo(Follow)` and the directory drops its record.
+     */
+    suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi
+
+    /**
+     * Pull the read feed: newest text posts from followed accounts,
+     * merged newest-first. Per-account failures are skipped engine-side;
+     * an empty list is a valid (quiet) feed.
+     */
+    suspend fun fediFeed(): List<FediPostFfi>
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -265,6 +288,10 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
         inner.fediDm(target, body)
     override suspend fun fediEnsureV2(): EnsureV2Ffi = inner.fediEnsureV2()
+    override suspend fun fediFollowing(): List<FediFollowingFfi> = inner.fediFollowing()
+    override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
+        inner.fediUnfollow(targetActorUrl)
+    override suspend fun fediFeed(): List<FediPostFfi> = inner.fediFeed()
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

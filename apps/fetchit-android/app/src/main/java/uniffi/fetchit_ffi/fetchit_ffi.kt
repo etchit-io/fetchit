@@ -819,6 +819,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -872,13 +878,19 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_feed(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_group_invite(
 ): Short
@@ -1007,13 +1019,19 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_dm(`ptr`: Pointer,`target`: Rus
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_ensure_v2(`ptr`: Pointer,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_feed(`ptr`: Pointer,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(`ptr`: Pointer,`target`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unfollow(`ptr`: Pointer,`targetActorUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_group_invite(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
 ): Long
@@ -1266,7 +1284,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2() != 23776.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_feed() != 35308.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow() != 31415.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following() != 3672.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
@@ -1276,6 +1300,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow() != 48078.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_group_invite() != 61583.toShort()) {
@@ -1938,6 +1965,17 @@ public interface ChatClientInterface {
     suspend fun `fediEnsureV2`(): EnsureV2Ffi
     
     /**
+     * Pull the read feed: newest text posts from followed accounts,
+     * merged newest-first (engine caps apply). Per-account failures are
+     * skipped engine-side; an empty vec is a valid feed.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * following list is unreachable.
+     */
+    suspend fun `fediFeed`(): List<FediPostFfi>
+    
+    /**
      * Follow a remote fediverse account (`@user@instance`) from our
      * minted handle: sign + deliver a `Follow` from the device, then
      * record it pending at the bridge. The remote `Accept` flips the
@@ -1949,6 +1987,16 @@ public interface ChatClientInterface {
      * are reported in the returned [`FollowReportFfi`], not errored.
      */
     suspend fun `fediFollow`(`target`: kotlin.String): FollowReportFfi
+    
+    /**
+     * The accounts our minted handle follows, from the bridge's
+     * owner-only list (newest first as the bridge returns them).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * is unreachable.
+     */
+    suspend fun `fediFollowing`(): List<FediFollowingFfi>
     
     /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
@@ -1990,6 +2038,17 @@ public interface ChatClientInterface {
      * fails before any delivery was attempted.
      */
     suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
+    
+    /**
+     * Unfollow a fediverse account: sign + deliver the `Undo(Follow)`
+     * and drop the bridge record.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or we are not
+     * following the target. Delivery/record outages are reported in the
+     * returned [`UnfollowReportFfi`], not errored.
+     */
+    suspend fun `fediUnfollow`(`targetActorUrl`: kotlin.String): UnfollowReportFfi
     
     /**
      * Mint a fresh `x0x://invite/...` link for a group, suitable for the
@@ -2697,6 +2756,36 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Pull the read feed: newest text posts from followed accounts,
+     * merged newest-first (engine caps apply). Per-account failures are
+     * skipped engine-side; an empty vec is a valid feed.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * following list is unreachable.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediFeed`() : List<FediPostFfi> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_feed(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeFediPostFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Follow a remote fediverse account (`@user@instance`) from our
      * minted handle: sign + deliver a `Follow` from the device, then
      * record it pending at the bridge. The remote `Accept` flips the
@@ -2722,6 +2811,35 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeFollowReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The accounts our minted handle follows, from the bridge's
+     * owner-only list (newest first as the bridge returns them).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * is unreachable.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediFollowing`() : List<FediFollowingFfi> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeFediFollowingFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -2820,6 +2938,36 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePublishReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Unfollow a fediverse account: sign + deliver the `Undo(Follow)`
+     * and drop the bridge record.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or we are not
+     * following the target. Delivery/record outages are reported in the
+     * returned [`UnfollowReportFfi`], not errored.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediUnfollow`(`targetActorUrl`: kotlin.String) : UnfollowReportFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_unfollow(
+                thisPtr,
+                FfiConverterString.lower(`targetActorUrl`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeUnfollowReportFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4216,6 +4364,117 @@ public object FfiConverterTypeFediDmReportFfi: FfiConverterRustBuffer<FediDmRepo
 
 
 /**
+ * One account we follow, from the bridge's owner-only list.
+ */
+data class FediFollowingFfi (
+    /**
+     * Remote actor URL the follow targets.
+     */
+    var `targetActorUrl`: kotlin.String, 
+    /**
+     * Short display label — `user@host` derived from the actor URL.
+     */
+    var `label`: kotlin.String, 
+    /**
+     * `"pending"` (Follow sent) or `"accepted"` (their Accept arrived).
+     */
+    var `state`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediFollowingFfi: FfiConverterRustBuffer<FediFollowingFfi> {
+    override fun read(buf: ByteBuffer): FediFollowingFfi {
+        return FediFollowingFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediFollowingFfi) = (
+            FfiConverterString.allocationSize(value.`targetActorUrl`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterString.allocationSize(value.`state`)
+    )
+
+    override fun write(value: FediFollowingFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`targetActorUrl`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterString.write(value.`state`, buf)
+    }
+}
+
+
+
+/**
+ * One post in the pulled read feed (text only; wire HTML is reduced
+ * engine-side, so shells render this as plain text).
+ */
+data class FediPostFfi (
+    /**
+     * Author actor URL.
+     */
+    var `authorUrl`: kotlin.String, 
+    /**
+     * Short author label — `user@host`.
+     */
+    var `authorLabel`: kotlin.String, 
+    /**
+     * Post body as plain text.
+     */
+    var `text`: kotlin.String, 
+    /**
+     * ISO-8601 publish stamp as served (may be empty).
+     */
+    var `published`: kotlin.String, 
+    /**
+     * Link to the post on its home server.
+     */
+    var `objectUrl`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediPostFfi: FfiConverterRustBuffer<FediPostFfi> {
+    override fun read(buf: ByteBuffer): FediPostFfi {
+        return FediPostFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediPostFfi) = (
+            FfiConverterString.allocationSize(value.`authorUrl`) +
+            FfiConverterString.allocationSize(value.`authorLabel`) +
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterString.allocationSize(value.`published`) +
+            FfiConverterString.allocationSize(value.`objectUrl`)
+    )
+
+    override fun write(value: FediPostFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`authorUrl`, buf)
+            FfiConverterString.write(value.`authorLabel`, buf)
+            FfiConverterString.write(value.`text`, buf)
+            FfiConverterString.write(value.`published`, buf)
+            FfiConverterString.write(value.`objectUrl`, buf)
+    }
+}
+
+
+
+/**
  * Result of [`ChatClient::fedi_follow`]: the `Follow` was signed +
  * delivered from the device and recorded at the bridge as pending. The
  * remote `Accept` arrives later and flips the state.
@@ -4760,6 +5019,47 @@ public object FfiConverterTypePublishReportFfi: FfiConverterRustBuffer<PublishRe
     override fun write(value: PublishReportFfi, buf: ByteBuffer) {
             FfiConverterSequenceString.write(value.`delivered`, buf)
             FfiConverterSequenceTypeFailedDeliveryFfi.write(value.`failed`, buf)
+    }
+}
+
+
+
+/**
+ * Result of [`ChatClient::fedi_unfollow`].
+ */
+data class UnfollowReportFfi (
+    /**
+     * The `Undo(Follow)` reached the target's inbox.
+     */
+    var `delivered`: kotlin.Boolean, 
+    /**
+     * The bridge dropped its follow record.
+     */
+    var `removed`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUnfollowReportFfi: FfiConverterRustBuffer<UnfollowReportFfi> {
+    override fun read(buf: ByteBuffer): UnfollowReportFfi {
+        return UnfollowReportFfi(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UnfollowReportFfi) = (
+            FfiConverterBoolean.allocationSize(value.`delivered`) +
+            FfiConverterBoolean.allocationSize(value.`removed`)
+    )
+
+    override fun write(value: UnfollowReportFfi, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`delivered`, buf)
+            FfiConverterBoolean.write(value.`removed`, buf)
     }
 }
 
@@ -6059,6 +6359,62 @@ public object FfiConverterSequenceTypeFailedDeliveryFfi: FfiConverterRustBuffer<
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFailedDeliveryFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFediFollowingFfi: FfiConverterRustBuffer<List<FediFollowingFfi>> {
+    override fun read(buf: ByteBuffer): List<FediFollowingFfi> {
+        val len = buf.getInt()
+        return List<FediFollowingFfi>(len) {
+            FfiConverterTypeFediFollowingFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FediFollowingFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFediFollowingFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FediFollowingFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFediFollowingFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFediPostFfi: FfiConverterRustBuffer<List<FediPostFfi>> {
+    override fun read(buf: ByteBuffer): List<FediPostFfi> {
+        val len = buf.getInt()
+        return List<FediPostFfi>(len) {
+            FfiConverterTypeFediPostFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FediPostFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFediPostFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FediPostFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFediPostFfi.write(it, buf)
         }
     }
 }

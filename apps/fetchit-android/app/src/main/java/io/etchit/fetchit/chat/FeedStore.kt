@@ -39,6 +39,25 @@ class FeedStore(
         save(next)
     }
 
+    /**
+     * Merge a pulled batch of remote posts into the feed. Pulls repeat on
+     * every refresh, so entries already present (same author + body) are
+     * dropped; the merged feed is re-sorted oldest-first (the list renders
+     * top-to-bottom) and capped keeping the NEWEST posts.
+     */
+    fun mergeRemote(remote: List<FeedPost>) {
+        if (remote.isEmpty()) return
+        val current = _posts.value
+        val seen = current.mapTo(HashSet()) { it.actorUrl to it.body }
+        val fresh = remote.filter { (it.actorUrl to it.body) !in seen }
+        if (fresh.isEmpty()) return
+        val next = (current + fresh)
+            .sortedBy { it.receivedAtMs }
+            .takeLast(MAX_POSTS)
+        _posts.value = next
+        save(next)
+    }
+
     private companion object {
         const val MAX_POSTS = 200
     }

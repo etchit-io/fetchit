@@ -14,7 +14,10 @@ import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediDmReportFfi
+import uniffi.fetchit_ffi.FediFollowingFfi
+import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.FollowReportFfi
+import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
@@ -135,6 +138,10 @@ class FakeGateway : ChatGateway {
         )
     override suspend fun fediEnsureV2(): EnsureV2Ffi =
         EnsureV2Ffi(upgraded = false, registered = true, pending = null)
+    override suspend fun fediFollowing(): List<FediFollowingFfi> = emptyList()
+    override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
+        UnfollowReportFfi(delivered = true, removed = true)
+    override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
         if (removeContactThrows) throw RuntimeException("remove boom")
@@ -510,6 +517,10 @@ class ChatControllerTest {
                 FediDmReportFfi(target, "test-note-id", delivered = true)
             override suspend fun fediEnsureV2(): EnsureV2Ffi =
                 EnsureV2Ffi(upgraded = false, registered = true, pending = null)
+            override suspend fun fediFollowing(): List<FediFollowingFfi> = emptyList()
+            override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
+                UnfollowReportFfi(delivered = true, removed = true)
+            override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
