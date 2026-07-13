@@ -646,10 +646,12 @@ class ChatModeView(
     private fun renderFediHubHeader(shortId: TextView, onMinted: () -> Unit = {}) {
         val handle = controller.fediActorStatus()
         if (handle != null) {
-            shortId.text = context.getString(R.string.fedi_hub_handle, handle)
-            shortId.setTextColor(themeColor(R.attr.fetchitAsh))
-            // The minted @name is the door to the social graph: tapping it
-            // opens following / followers / blocked with their actions.
+            // The minted @name is a door to the social graph — the chevron +
+            // copper make it READ as tappable (an unmarked tap target failed
+            // device testing: "I see nothing new").
+            shortId.text =
+                context.getString(R.string.fedi_hub_handle_tappable, handle)
+            shortId.setTextColor(themeColor(R.attr.fetchitCopper))
             shortId.contentDescription = context.getString(R.string.fedi_people_desc)
             shortId.setOnClickListener { showFediPeopleSheet(handle) }
         } else {
@@ -698,6 +700,13 @@ class ChatModeView(
             textSize = 18f
         })
         root.addView(line(context.getString(R.string.fedi_hub_handle, handle)))
+        root.addView(android.widget.Button(context).apply {
+            text = context.getString(R.string.fedi_people_find)
+            setOnClickListener {
+                dialog.dismiss()
+                showAddContactDialog()
+            }
+        })
 
         val followingHeader = header(context.getString(R.string.fedi_people_following, "…"))
         root.addView(followingHeader)
@@ -2012,13 +2021,17 @@ class ChatModeView(
         renderFediHubHeader(view.findViewById(R.id.threadPeerShortId)) { bindFeedCompose(view) }
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
         bindFeedCompose(view)
-        // The (group-only) members-button slot becomes "find people" here: the
-        // same one-smart-field dialog as add-someone, so the hub can search
-        // @names without a trip back to the chat list.
-        val findBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
-        findBtn.visibility = View.VISIBLE
-        findBtn.contentDescription = context.getString(R.string.feed_find_people_desc)
-        findBtn.setOnClickListener { showAddContactDialog() }
+        // The (group-only) members-button slot becomes the people door here —
+        // the ic_people icon opens "your fediverse" (following / followers /
+        // blocked, with find-someone inside). Before a handle exists it falls
+        // back to the add-someone dialog so the button is never a dead end.
+        val peopleBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
+        peopleBtn.visibility = View.VISIBLE
+        peopleBtn.contentDescription = context.getString(R.string.fedi_people_desc)
+        peopleBtn.setOnClickListener {
+            val handle = controller.fediActorStatus()
+            if (handle != null) showFediPeopleSheet(handle) else showAddContactDialog()
+        }
 
         val rv = view.findViewById<RecyclerView>(R.id.messageList)
         val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
