@@ -817,6 +817,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -865,6 +867,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2(
 ): Short
@@ -999,6 +1003,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentId
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_dm(`ptr`: Pointer,`target`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_ensure_v2(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(`ptr`: Pointer,`target`: RustBuffer.ByValue,
@@ -1252,6 +1258,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 19997.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 743.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2() != 23776.toShort()) {
@@ -1901,6 +1910,20 @@ public interface ChatClientInterface {
      * so the onboarding gate can query it before anything connects.
      */
     fun `fediActorStatus`(): kotlin.String?
+    
+    /**
+     * Send a plaintext fediverse DM (`@user@instance`) from our minted
+     * handle: sign a direct `Create(Note)` on the device and deliver it to
+     * the recipient's inbox. Requires a minted handle. This message is
+     * **not** end-to-end encrypted — the UI shows the unencrypted-thread
+     * banner and offers escalation to PQ chat (P4).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted, the target is
+     * blocked/unresolvable, or signing fails. A transient inbox outage is
+     * reported as `delivered == false` in [`FediDmReportFfi`], not errored.
+     */
+    suspend fun `fediDm`(`target`: kotlin.String, `body`: kotlin.String): FediDmReportFfi
     
     /**
      * Run the v2 upgrade + re-register pass, called when the fedi hub opens
@@ -2607,6 +2630,39 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     )
     }
     
+
+    
+    /**
+     * Send a plaintext fediverse DM (`@user@instance`) from our minted
+     * handle: sign a direct `Create(Note)` on the device and deliver it to
+     * the recipient's inbox. Requires a minted handle. This message is
+     * **not** end-to-end encrypted — the UI shows the unencrypted-thread
+     * banner and offers escalation to PQ chat (P4).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted, the target is
+     * blocked/unresolvable, or signing fails. A transient inbox outage is
+     * reported as `delivered == false` in [`FediDmReportFfi`], not errored.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediDm`(`target`: kotlin.String, `body`: kotlin.String) : FediDmReportFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_dm(
+                thisPtr,
+                FfiConverterString.lower(`target`),FfiConverterString.lower(`body`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeFediDmReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -4104,6 +4160,56 @@ public object FfiConverterTypeFailedDeliveryFfi: FfiConverterRustBuffer<FailedDe
     override fun write(value: FailedDeliveryFfi, buf: ByteBuffer) {
             FfiConverterString.write(value.`target`, buf)
             FfiConverterString.write(value.`error`, buf)
+    }
+}
+
+
+
+/**
+ * Result of [`ChatClient::fedi_dm`]: a plaintext fediverse DM signed on
+ * the device and delivered to the recipient's inbox. This message is not
+ * end-to-end encrypted — the UI must show the unencrypted-thread banner.
+ */
+data class FediDmReportFfi (
+    /**
+     * Canonical actor URL the DM was addressed to.
+     */
+    var `recipientActorUrl`: kotlin.String, 
+    /**
+     * The note object id (the DM thread key).
+     */
+    var `noteId`: kotlin.String, 
+    /**
+     * True when the recipient inbox accepted the delivery.
+     */
+    var `delivered`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediDmReportFfi: FfiConverterRustBuffer<FediDmReportFfi> {
+    override fun read(buf: ByteBuffer): FediDmReportFfi {
+        return FediDmReportFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediDmReportFfi) = (
+            FfiConverterString.allocationSize(value.`recipientActorUrl`) +
+            FfiConverterString.allocationSize(value.`noteId`) +
+            FfiConverterBoolean.allocationSize(value.`delivered`)
+    )
+
+    override fun write(value: FediDmReportFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`recipientActorUrl`, buf)
+            FfiConverterString.write(value.`noteId`, buf)
+            FfiConverterBoolean.write(value.`delivered`, buf)
     }
 }
 

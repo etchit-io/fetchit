@@ -12,6 +12,7 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
+import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.LookupKindFfi
@@ -124,6 +125,12 @@ class FakeGateway : ChatGateway {
             followActivityId = "test-follow-id",
             delivered = true,
             recorded = true,
+        )
+    override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
+        FediDmReportFfi(
+            recipientActorUrl = target,
+            noteId = "test-note-id",
+            delivered = true,
         )
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
@@ -496,6 +503,8 @@ class ChatControllerTest {
                 PublishReportFfi(delivered = emptyList(), failed = emptyList())
             override suspend fun fediFollow(target: String): FollowReportFfi =
                 FollowReportFfi(target, "test-follow-id", delivered = true, recorded = true)
+            override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
+                FediDmReportFfi(target, "test-note-id", delivered = true)
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()

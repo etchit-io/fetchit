@@ -491,6 +491,19 @@ pub struct FollowReportFfi {
     pub recorded: bool,
 }
 
+/// Result of [`ChatClient::fedi_dm`]: a plaintext fediverse DM signed on
+/// the device and delivered to the recipient's inbox. This message is not
+/// end-to-end encrypted — the UI must show the unencrypted-thread banner.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediDmReportFfi {
+    /// Canonical actor URL the DM was addressed to.
+    pub recipient_actor_url: String,
+    /// The note object id (the DM thread key).
+    pub note_id: String,
+    /// True when the recipient inbox accepted the delivery.
+    pub delivered: bool,
+}
+
 /// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
 /// errors for blockers -- those land in `pending`.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1281,6 +1294,41 @@ impl ChatClient {
             follow_activity_id: report.follow_activity_id,
             delivered: report.delivered,
             recorded: report.recorded,
+        })
+    }
+
+    /// Send a plaintext fediverse DM (`@user@instance`) from our minted
+    /// handle: sign a direct `Create(Note)` on the device and deliver it to
+    /// the recipient's inbox. Requires a minted handle. This message is
+    /// **not** end-to-end encrypted — the UI shows the unencrypted-thread
+    /// banner and offers escalation to PQ chat (P4).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted, the target is
+    /// blocked/unresolvable, or signing fails. A transient inbox outage is
+    /// reported as `delivered == false` in [`FediDmReportFfi`], not errored.
+    pub async fn fedi_dm(
+        &self,
+        target: String,
+        body: String,
+    ) -> Result<FediDmReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .send_fedi_dm(&handle, &target, &body, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(FediDmReportFfi {
+            recipient_actor_url: report.recipient_actor_url,
+            note_id: report.note_id,
+            delivered: report.delivered,
         })
     }
 

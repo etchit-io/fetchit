@@ -26,6 +26,7 @@ pub mod discovery;
 pub mod error;
 pub mod events;
 pub mod fabric;
+pub mod fedi_dm;
 pub mod fedi_follow;
 pub mod fedi_identity;
 pub mod fedi_resolutions;

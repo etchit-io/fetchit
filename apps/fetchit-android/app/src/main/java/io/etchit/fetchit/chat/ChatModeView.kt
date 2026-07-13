@@ -1245,6 +1245,9 @@ class ChatModeView(
                     .setPositiveButton(context.getString(R.string.chat_fedi_follow)) { _, _ ->
                         followFedi(lookup.handle)
                     }
+                    .setNeutralButton(context.getString(R.string.chat_fedi_dm)) { _, _ ->
+                        composeFediDm(lookup.handle)
+                    }
                     .setNegativeButton(context.getString(R.string.action_close), null)
             LookupKindFfi.NOT_FOUND ->
                 builder.setTitle(context.getString(R.string.chat_lookup_not_found_title))
@@ -1278,6 +1281,69 @@ class ChatModeView(
                 },
             )
         }
+    }
+
+    /**
+     * Compose + send a plaintext fediverse DM to a public-only account. The
+     * dialog carries a persistent "not encrypted" banner (M7 P3 rule) so the
+     * sender knows this rides ordinary fediverse rails, not PQ chat. On send
+     * the message is signed on-device and delivered to the recipient's inbox.
+     */
+    private fun composeFediDm(handle: String) {
+        val editText = EditText(context).apply {
+            hint = context.getString(R.string.chat_fedi_dm_hint)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 2
+            maxLines = 5
+        }
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val px16 = (16 * context.resources.displayMetrics.density).toInt()
+            setPadding(px16, 0, px16, 0)
+            addView(editText)
+        }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.chat_fedi_dm_title, handle))
+            .setMessage(context.getString(R.string.chat_fedi_dm_banner))
+            .setView(layout)
+            .setPositiveButton(context.getString(R.string.chat_fedi_dm_send), null)
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .create()
+        dialog.setOnShowListener {
+            val sendBtn = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+            sendBtn.setOnClickListener {
+                val body = editText.text.toString().trim()
+                if (body.isEmpty()) {
+                    editText.error = context.getString(R.string.chat_fedi_dm_hint)
+                    return@setOnClickListener
+                }
+                sendBtn.isEnabled = false
+                lifecycleScope.launch {
+                    val gw = runCatching { connectWithFeedback() }.getOrElse {
+                        dialog.dismiss()
+                        return@launch
+                    }
+                    runCatching { gw.fediDm(handle, body) }.fold(
+                        onSuccess = { report ->
+                            dialog.dismiss()
+                            snackbar(
+                                context.getString(
+                                    if (report.delivered) R.string.chat_fedi_dm_sent
+                                    else R.string.chat_fedi_dm_pending,
+                                    handle,
+                                ),
+                            )
+                        },
+                        onFailure = { e ->
+                            dialog.dismiss()
+                            snackbar(userFacingError(e, "fediDm", R.string.chat_fedi_dm_failed))
+                        },
+                    )
+                }
+            }
+        }
+        dialog.show()
     }
 
     /**

@@ -11,6 +11,7 @@ import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
+import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
 
@@ -136,6 +137,13 @@ interface ChatGateway {
     suspend fun fediFollow(target: String): FollowReportFfi
 
     /**
+     * Send a plaintext fediverse DM (`@user@instance`) from the minted
+     * handle. Not end-to-end encrypted — the UI shows the unencrypted-thread
+     * banner and offers escalation to PQ chat.
+     */
+    suspend fun fediDm(target: String, body: String): FediDmReportFfi
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -244,6 +252,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.fediPublish(bodyMd, replyToActorUrl)
 
     override suspend fun fediFollow(target: String): FollowReportFfi = inner.fediFollow(target)
+    override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
+        inner.fediDm(target, body)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

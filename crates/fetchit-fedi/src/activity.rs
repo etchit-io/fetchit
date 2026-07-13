@@ -177,6 +177,62 @@ pub fn build_create_note(
     }
 }
 
+/// Build a `Create { Note }` for a DIRECT fedi DM to a single recipient —
+/// the `ActivityPub` visibility=direct shape (M7 P3). `to` carries only the
+/// recipient (never [`PUBLIC_AUDIENCE`]), `cc` is empty, and a `Mention`
+/// tag names the recipient so Mastodon threads it as a direct message.
+///
+/// This message is **not** end-to-end encrypted: the recipient's server —
+/// and ours — can read it. The chat layer renders such DMs under a
+/// persistent unencrypted-thread banner and never interleaves them with PQ
+/// messages (the M7 P3 hard UX rule). Escalation to PQ chat is a separate,
+/// user-consented action (P4).
+///
+/// Body markdown is rendered through [`markdown_body_to_html`], which
+/// escapes all HTML metacharacters — no raw markup is ever emitted, so the
+/// activity is XSS-safe by construction.
+#[must_use]
+pub fn build_direct_note(
+    actor_url: &str,
+    recipient_actor_url: &str,
+    recipient_handle: &str,
+    body_md: &str,
+    created_at_ms: u64,
+) -> CreateActivity {
+    let published = format_rfc3339_utc(created_at_ms);
+    let note_id = format!("{actor_url}/statuses/{created_at_ms}");
+    let activity_id = format!("{note_id}/activity");
+    let to = vec![recipient_actor_url.to_owned()];
+    let tag = vec![Mention {
+        kind: "Mention".to_owned(),
+        href: recipient_actor_url.to_owned(),
+        name: recipient_handle.to_owned(),
+    }];
+
+    let note = Note {
+        id: note_id,
+        kind: "Note".to_owned(),
+        attributed_to: actor_url.to_owned(),
+        content: markdown_body_to_html(body_md),
+        published: published.clone(),
+        to: to.clone(),
+        cc: Vec::new(),
+        in_reply_to: None,
+        tag,
+    };
+
+    CreateActivity {
+        context: "https://www.w3.org/ns/activitystreams".to_owned(),
+        id: activity_id,
+        kind: "Create".to_owned(),
+        actor: actor_url.to_owned(),
+        published,
+        to,
+        cc: Vec::new(),
+        object: note,
+    }
+}
+
 /// An `ActivityStreams` `Follow` activity (M7 P1). The exact JSON shape
 /// `POSTed` to the target actor's inbox when one of our actors follows a
 /// remote account, and the shape we parse back out of a verified inbound
@@ -451,6 +507,62 @@ mod tests {
             "https://mastodon.example/users/alice"
         );
         assert_eq!(note["tag"][0]["name"], "@alice@mastodon.example");
+    }
+
+    #[test]
+    fn build_direct_note_is_direct_visibility() {
+        let activity = build_direct_note(
+            "https://etchit.io/actors/josh",
+            "https://fosstodon.org/users/happyborg",
+            "@happyborg@fosstodon.org",
+            "hey, want to move to private chat?",
+            1_700_000_000_000,
+        );
+        let json = serde_json::to_value(&activity).unwrap();
+
+        // Direct visibility: addressed only to the recipient, never Public,
+        // and cc empty at both the activity and note level.
+        assert_eq!(json["to"][0], "https://fosstodon.org/users/happyborg");
+        assert!(!json["to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == PUBLIC_AUDIENCE));
+        assert_eq!(json["cc"].as_array().unwrap().len(), 0);
+        let note = &json["object"];
+        assert_eq!(note["to"][0], "https://fosstodon.org/users/happyborg");
+        assert!(!note["to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == PUBLIC_AUDIENCE));
+        assert_eq!(note["cc"].as_array().unwrap().len(), 0);
+        // The recipient is tagged so Mastodon threads it as a DM, and the
+        // body is HTML-escaped through the shared markdown renderer.
+        assert_eq!(note["tag"][0]["type"], "Mention");
+        assert_eq!(
+            note["tag"][0]["href"],
+            "https://fosstodon.org/users/happyborg"
+        );
+        assert_eq!(note["tag"][0]["name"], "@happyborg@fosstodon.org");
+        assert_eq!(note["content"], "<p>hey, want to move to private chat?</p>");
+        assert_eq!(note["attributedTo"], "https://etchit.io/actors/josh");
+    }
+
+    #[test]
+    fn build_direct_note_escapes_html_body() {
+        let activity = build_direct_note(
+            "https://etchit.io/actors/josh",
+            "https://fosstodon.org/users/happyborg",
+            "@happyborg@fosstodon.org",
+            "<script>alert(1)</script>",
+            1_700_000_000_000,
+        );
+        let json = serde_json::to_value(&activity).unwrap();
+        assert!(!json["object"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<script>"));
     }
 
     #[test]
