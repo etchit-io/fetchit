@@ -193,13 +193,101 @@ pub async fn sign_actor_attestation_v2(
     })
 }
 
-/// Register (or re-assert on 409) `identity` with the fediverse directory at
-/// `base`, mirroring the desktop `register_with_directory`: POST `v1/actors`,
-/// and on a [`fetchit_fedi::registry::RegistryError::HandleTaken`] (409) fall
-/// back to PUT so re-asserting our OWN handle after an attestation refresh
-/// self-heals. A genuine squat by another agent fails the PUT's continuity
-/// check and surfaces honestly. Lifted into the engine so the desktop command
-/// and the FFI mint/ensure paths share one registration path (DRY).
+/// Verify the vault's stored attestations under the CURRENT agent key and
+/// re-sign any that no longer hold, returning whether anything was re-signed
+/// (the caller persists the vault when `true`).
+///
+/// Two staleness classes are healed:
+///
+/// - **Signing-format drift** — attestations minted before the x0x 0.29
+///   external-agent-sign framing are signed over the raw input; every
+///   current verifier (bridge registration included) reconstructs the
+///   framed input, so those signatures can never verify again. Re-signing
+///   through the live signer produces the framed shape.
+/// - **Agent-key rotation** — an attestation validly signed by a previous
+///   agent key binds the actor to a dead chat identity; rebinding under
+///   the live key keeps handle-to-agent resolution truthful.
+///
+/// A healed v2 attestation preserves its `profile_addr`/`relay_hint` and
+/// bumps `hint_epoch_ms` to strictly increase (registries reject
+/// non-increasing epochs). `vault.agent_id_hex` follows the live key.
+///
+/// # Errors
+///
+/// [`ChatError::Invalid`] when re-signing fails (signer error or canonical
+/// field validation).
+pub async fn heal_actor_attestations(
+    vault: &mut crate::fedi_vault::ActorIdentityVault,
+    signer: &dyn x0xd_client::Signer,
+    now_ms: u64,
+) -> Result<bool, ChatError> {
+    let signer_pk = signer.public_key();
+    let live_agent_hex = hex::encode(signer.agent_id());
+    let mut healed = false;
+
+    let v1_holds = vault.ml_dsa_attestation.ml_dsa_pubkey == signer_pk
+        && fetchit_fedi::attestation::verify_binding(
+            &vault.handle,
+            &vault.actor_url,
+            &vault.spki_der,
+            &vault.ml_dsa_attestation,
+        )
+        .is_ok();
+    if !v1_holds {
+        vault.ml_dsa_attestation = sign_actor_attestation(
+            &vault.handle,
+            &vault.actor_url,
+            &live_agent_hex,
+            &vault.spki_der,
+            signer,
+        )
+        .await?;
+        healed = true;
+    }
+
+    if let Some(v2) = vault.ml_dsa_attestation_v2.clone() {
+        let v2_holds = v2.ml_dsa_pubkey == signer_pk
+            && fetchit_fedi::attestation::verify_binding_v2(
+                &vault.handle,
+                &vault.actor_url,
+                &vault.spki_der,
+                &v2,
+            )
+            .is_ok();
+        if !v2_holds {
+            let epoch = now_ms.max(v2.hint_epoch_ms.saturating_add(1));
+            vault.ml_dsa_attestation_v2 = Some(
+                sign_actor_attestation_v2(
+                    &vault.handle,
+                    &vault.actor_url,
+                    &live_agent_hex,
+                    &vault.spki_der,
+                    &v2.profile_addr,
+                    &v2.relay_hint,
+                    epoch,
+                    signer,
+                )
+                .await?,
+            );
+            healed = true;
+        }
+    }
+
+    if healed {
+        vault.agent_id_hex = live_agent_hex;
+    }
+    Ok(healed)
+}
+
+/// Register (or re-assert) `identity` with the fediverse directory at
+/// `base` by posting the actor's own JSON-LD document to `actors` — the
+/// shape the deployed bridge ingests, verifies (embedded ML-DSA
+/// attestation), stores, and serves. Re-registration of the same identity
+/// is idempotent bridge-side, so re-asserting our OWN handle after an
+/// attestation refresh self-heals; a genuine squat by another agent
+/// answers 409 and surfaces honestly. Lifted into the engine so the
+/// desktop command and the FFI mint/ensure paths share one registration
+/// path (DRY).
 ///
 /// Returns `(registered, error)`. Registration failure is REPORTED, never
 /// fatal: a mint/ensure degrades to "pending" rather than failing, so a
@@ -510,6 +598,160 @@ mod tests {
                 .map_err(|e| e.to_string())?
                 .to_bytes())
         }
+    }
+
+    impl RealSigner {
+        /// Sign WITHOUT the external-agent-sign framing — the byte shape
+        /// every pre-x0x-0.29 build produced. Models vault attestations
+        /// minted before the framing cutover (00796c4).
+        fn sign_raw(&self, message: &[u8]) -> Vec<u8> {
+            use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+            MlDsa::new(MlDsaVariant::MlDsa65)
+                .sign(&self.sk, message)
+                .unwrap()
+                .to_bytes()
+        }
+    }
+
+    fn heal_vault(
+        signer: &RealSigner,
+        v1: MlDsaAttestation,
+        v2: Option<ActorAttestationV2>,
+    ) -> crate::fedi_vault::ActorIdentityVault {
+        crate::fedi_vault::ActorIdentityVault {
+            handle: "josh".into(),
+            actor_url: "https://etchit.io/actors/josh".parse().unwrap(),
+            agent_id_hex: hex::encode(x0xd_client::Signer::agent_id(signer)),
+            rsa_priv_pem: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n".into(),
+            spki_der: vec![7, 7],
+            ml_dsa_attestation: v1,
+            ml_dsa_attestation_v2: v2,
+        }
+    }
+
+    #[tokio::test]
+    async fn heal_re_signs_a_pre_framing_v1_attestation() {
+        let signer = RealSigner::generate();
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let agent_hex = hex::encode(x0xd_client::Signer::agent_id(&signer));
+        // The exact stale shape: signed by the SAME key, but over the raw
+        // signing input (no agent-sign framing), as pre-cutover mints did.
+        let input = signing_input("josh", &actor_url, &agent_hex, &[7, 7]).unwrap();
+        let stale = MlDsaAttestation::new(signer.pk.clone(), signer.sign_raw(&input));
+        assert!(
+            fetchit_fedi::attestation::verify_binding("josh", &actor_url, &[7, 7], &stale).is_err(),
+            "fixture must be rejected by the current verifier"
+        );
+
+        let mut vault = heal_vault(&signer, stale, None);
+        let healed = heal_actor_attestations(&mut vault, &signer, 1_000)
+            .await
+            .unwrap();
+
+        assert!(healed);
+        let derived = fetchit_fedi::attestation::verify_binding(
+            "josh",
+            &actor_url,
+            &[7, 7],
+            &vault.ml_dsa_attestation,
+        )
+        .unwrap();
+        assert_eq!(derived, agent_hex);
+        assert_eq!(vault.agent_id_hex, agent_hex);
+    }
+
+    #[tokio::test]
+    async fn heal_is_a_no_op_when_attestations_verify() {
+        let signer = RealSigner::generate();
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let agent_hex = hex::encode(x0xd_client::Signer::agent_id(&signer));
+        let current = sign_actor_attestation("josh", &actor_url, &agent_hex, &[7, 7], &signer)
+            .await
+            .unwrap();
+
+        let mut vault = heal_vault(&signer, current.clone(), None);
+        let healed = heal_actor_attestations(&mut vault, &signer, 1_000)
+            .await
+            .unwrap();
+
+        assert!(!healed);
+        assert_eq!(vault.ml_dsa_attestation, current);
+    }
+
+    #[tokio::test]
+    async fn heal_rebinds_to_a_rotated_agent_key() {
+        let old = RealSigner::generate();
+        let new = RealSigner::generate();
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let old_hex = hex::encode(x0xd_client::Signer::agent_id(&old));
+        // Valid under the OLD key — verifies fine, but binds a dead agent.
+        let old_att = sign_actor_attestation("josh", &actor_url, &old_hex, &[7, 7], &old)
+            .await
+            .unwrap();
+
+        let mut vault = heal_vault(&old, old_att, None);
+        let healed = heal_actor_attestations(&mut vault, &new, 1_000)
+            .await
+            .unwrap();
+
+        assert!(healed);
+        let new_hex = hex::encode(x0xd_client::Signer::agent_id(&new));
+        assert_eq!(vault.agent_id_hex, new_hex);
+        let derived = fetchit_fedi::attestation::verify_binding(
+            "josh",
+            &actor_url,
+            &[7, 7],
+            &vault.ml_dsa_attestation,
+        )
+        .unwrap();
+        assert_eq!(derived, new_hex);
+    }
+
+    #[tokio::test]
+    async fn heal_re_signs_stale_v2_and_bumps_epoch() {
+        let signer = RealSigner::generate();
+        let actor_url: url::Url = "https://etchit.io/actors/josh".parse().unwrap();
+        let agent_hex = hex::encode(x0xd_client::Signer::agent_id(&signer));
+        let profile_addr = "a".repeat(64);
+        let relay_hint = "https://relay.example/";
+        // v1 current, v2 stale (raw-signed, pre-cutover).
+        let v1 = sign_actor_attestation("josh", &actor_url, &agent_hex, &[7, 7], &signer)
+            .await
+            .unwrap();
+        let v2_input = signing_input_v2(
+            "josh",
+            &actor_url,
+            &agent_hex,
+            &[7, 7],
+            &profile_addr,
+            relay_hint,
+            5,
+        )
+        .unwrap();
+        let stale_v2 = ActorAttestationV2 {
+            version: 2,
+            profile_addr: profile_addr.clone(),
+            relay_hint: relay_hint.into(),
+            hint_epoch_ms: 5,
+            ml_dsa_pubkey: signer.pk.clone(),
+            signature: signer.sign_raw(&v2_input),
+        };
+
+        let mut vault = heal_vault(&signer, v1.clone(), Some(stale_v2));
+        // now_ms BEHIND the stored epoch: the bump must still strictly increase.
+        let healed = heal_actor_attestations(&mut vault, &signer, 3)
+            .await
+            .unwrap();
+
+        assert!(healed);
+        assert_eq!(vault.ml_dsa_attestation, v1, "valid v1 must be untouched");
+        let v2 = vault.ml_dsa_attestation_v2.as_ref().unwrap();
+        assert_eq!(v2.hint_epoch_ms, 6);
+        assert_eq!(v2.profile_addr, profile_addr);
+        assert_eq!(v2.relay_hint, relay_hint);
+        let derived =
+            fetchit_fedi::attestation::verify_binding_v2("josh", &actor_url, &[7, 7], v2).unwrap();
+        assert_eq!(derived, agent_hex);
     }
 
     #[tokio::test]
