@@ -5397,10 +5397,14 @@ impl Client {
         };
         let (registered, reg_pending) =
             crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
-        // A registration failure is the actionable one — surface it over the
-        // best-effort profile note.
-        if reg_pending.is_some() {
-            pending = reg_pending;
+        // A registration failure is actionable — surface it, but never at the
+        // cost of hiding an earlier heal/profile note (a masked heal error
+        // makes the resulting 403 undiagnosable from the outcome alone).
+        if let Some(reg) = reg_pending {
+            pending = Some(match pending {
+                Some(prior) => format!("{reg} (also: {prior})"),
+                None => reg,
+            });
         }
         Ok(EnsureV2Outcome {
             upgraded,
