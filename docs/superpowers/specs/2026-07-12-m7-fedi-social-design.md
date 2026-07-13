@@ -6,8 +6,18 @@ feed, post publicly, and DM people over ordinary ActivityPub rails — then
 escalate any of those contacts into PQ chat when they want privacy.
 "Come for the network, stay for the privacy."
 
-Status: DRAFT — Bob's sections concrete (P1/P4 + bridge storage); Alice
-counters P2/P3 + the feed-delivery seam before implementation starts.
+Status: IN PROGRESS (2026-07-12, PR #29 josh-clsn/fetchit).
+- **P1 Follow — DONE, proven on-device** (bridge-auth-v1 + follow routes +
+  `follow_fedi` + FFI + Android). Includes the plain-Mastodon delivery fix:
+  both `follow_fedi` and `publish_public_post` now decode the target with
+  the lenient `fetch_remote_actor` (inbox-only, no PQ-attestation demand)
+  instead of the strict fetchit actor parser.
+- **P3 outbound fedi-DM — DONE, gated, device-test pending** (`build_direct_note`
+  + `Client::send_fedi_dm` + FFI `fedi_dm` + Android "fedi message" button
+  with not-encrypted banner).
+- **P2 feed + P3 inbound reply-render** — Alice's delivery seam, not started.
+- **P4 escalate-to-PQ** — not started (verified-user path ~90% via lookup
+  `share_uri`; public-only path = invite-via-fedi-DM pointer + consent).
 
 ## Topology recap (built, M4/M5)
 
