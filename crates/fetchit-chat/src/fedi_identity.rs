@@ -209,22 +209,18 @@ pub async fn register_or_update_actor(
     identity: &fetchit_fedi::actor::ActorIdentity,
     http: &reqwest::Client,
 ) -> (bool, Option<String>) {
-    let Some(attestation_v2) = identity.ml_dsa_attestation_v2.clone() else {
-        return (false, Some("no v2 attestation on identity".into()));
+    // The deployed bridge registers by ingesting the actor's own JSON-LD
+    // document (the shape it stores + serves), NOT the compact
+    // RegisterActorRequest. Build it from the identity and POST it; the bridge
+    // verifies the embedded attestation and is idempotent on re-registration
+    // of the same identity, so re-asserting our own handle self-heals.
+    let actor = match fetchit_fedi::actor::Actor::from_identity(identity) {
+        Ok(a) => a,
+        Err(e) => return (false, Some(format!("build actor doc: {e}"))),
     };
-    let req = fetchit_fedi::registry::RegisterActorRequest {
-        handle: identity.handle.clone(),
-        rsa_spki_der: identity.spki_der.clone(),
-        attestation_v2,
-    };
-    match fetchit_fedi::registry::register_actor(base, &req, http).await {
-        Ok(_) => (true, None),
-        Err(fetchit_fedi::registry::RegistryError::HandleTaken) => {
-            match fetchit_fedi::registry::update_actor(base, &req, http).await {
-                Ok(_) => (true, None),
-                Err(e) => (false, Some(e.to_string())),
-            }
-        }
+    let doc = actor.to_json_ld();
+    match fetchit_fedi::registry::register_actor_doc(base, &doc, http).await {
+        Ok(()) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     }
 }
@@ -258,15 +254,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_or_update_actor_registers_on_200() {
+    async fn register_or_update_actor_posts_actor_doc_to_actors() {
+        // The bridge ingests the actor JSON-LD document at POST /actors and
+        // answers with a plain-text body; success is the status, not a JSON
+        // payload. Assert we POST the doc to /actors and treat 200 as success.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("v1/actors"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({"actor_url": "https://etchit.io/actors/alice"}),
-                ),
-            )
+            .and(path("/actors"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("updated"))
             .mount(&server)
             .await;
         let base = format!("{}/", server.uri()).parse().unwrap();
@@ -277,40 +272,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_or_update_actor_falls_back_to_put_on_409() {
-        // Re-asserting our OWN handle after an attestation refresh: POST 409,
-        // then PUT self-heals (mirrors the desktop register_with_directory).
+    async fn register_or_update_actor_reports_conflict_on_409() {
+        // A 409 means a DIFFERENT identity holds the handle (a squat); the
+        // bridge answers our own re-registration with 200, so 409 is a real
+        // error surfaced honestly, never claimed as success.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("v1/actors"))
+            .and(path("/actors"))
             .respond_with(ResponseTemplate::new(409))
-            .mount(&server)
-            .await;
-        // update_actor PUTs to the handle-specific path v1/actors/<handle>.
-        Mock::given(method("PUT"))
-            .and(path("/v1/actors/alice"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({"actor_url": "https://etchit.io/actors/alice"}),
-                ),
-            )
             .mount(&server)
             .await;
         let base = format!("{}/", server.uri()).parse().unwrap();
         let (registered, err) =
             register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
-        assert!(registered, "409 on POST self-heals via PUT");
-        assert!(err.is_none());
+        assert!(!registered);
+        assert!(err.unwrap().contains("already registered"));
     }
 
     #[tokio::test]
-    async fn register_or_update_actor_reports_missing_v2_attestation() {
-        // No v2 attestation -> cannot build the request; reported, not fatal.
-        let base = "http://unused.invalid/".parse().unwrap();
+    async fn register_or_update_actor_registers_without_v2_attestation() {
+        // The bridge verifies the v1 attestation carried in the actor doc; a
+        // v2 attestation is not required to register, so a v1-only identity
+        // (fresh mint, pre-upgrade) registers successfully.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/actors"))
+            .respond_with(ResponseTemplate::new(201).set_body_string("registered"))
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri()).parse().unwrap();
         let (registered, err) =
             register_or_update_actor(&base, &actor_fixture(false), &reqwest::Client::new()).await;
-        assert!(!registered);
-        assert!(err.unwrap().contains("v2 attestation"));
+        assert!(registered);
+        assert!(err.is_none());
     }
 
     #[tokio::test]

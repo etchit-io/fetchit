@@ -5354,28 +5354,36 @@ impl Client {
             .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
         let agent_id_hex = chat.identity.agent_id_hex().to_string();
         let http = crate::relay_http::guarded_client();
-        let record = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http).await
+        // Best-effort profile refresh + attestation upgrade. A missing or
+        // unreachable published profile must NOT block registration: the bridge
+        // directory only needs handle + RSA SPKI + v2 attestation, none of which
+        // require a live profile fetch. Registering unconditionally lets a fresh
+        // device or an emptied directory self-heal its registration; the profile
+        // note is surfaced only when registration itself has nothing to report.
+        let mut pending: Option<String> = None;
+        let upgraded = match crate::pair::fetch_index_record_by_id(relay, &agent_id_hex, &http)
+            .await
         {
-            Ok(r) => r,
+            Ok(record) => self
+                .upgrade_actor_attestation_v2(handle, &record.profile_addr, relay.as_str(), now_ms)
+                .await
+                .unwrap_or(false),
             Err(e) => {
-                // No published profile / relay unreachable is a pending state
-                // on hub open, not a failure.
-                return Ok(EnsureV2Outcome {
-                    upgraded: false,
-                    registered: false,
-                    pending: Some(e.to_string()),
-                });
+                pending = Some(format!("profile refresh skipped: {e}"));
+                false
             }
         };
-        let upgraded = self
-            .upgrade_actor_attestation_v2(handle, &record.profile_addr, relay.as_str(), now_ms)
-            .await?;
         let identity = self
             .load_actor_identity(handle)
             .await?
             .ok_or_else(|| ChatError::Invalid(format!("no actor identity for {handle}")))?;
-        let (registered, pending) =
+        let (registered, reg_pending) =
             crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        // A registration failure is the actionable one — surface it over the
+        // best-effort profile note.
+        if reg_pending.is_some() {
+            pending = reg_pending;
+        }
         Ok(EnsureV2Outcome {
             upgraded,
             registered,

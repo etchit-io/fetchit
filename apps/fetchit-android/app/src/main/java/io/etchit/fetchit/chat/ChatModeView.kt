@@ -1848,6 +1848,13 @@ class ChatModeView(
         if (!fediEnsureDone && controller.fediActorStatus() != null) {
             fediEnsureDone = true
             runCatching { gateway.fediEnsureV2() }
+                .onSuccess {
+                    android.util.Log.w(
+                        "FediSelfHeal",
+                        "ensure: registered=${it.registered} upgraded=${it.upgraded} pending=${it.pending}",
+                    )
+                }
+                .onFailure { android.util.Log.w("FediSelfHeal", "ensure threw: ${it.message}") }
         }
         showConnecting(false)
         return gateway
