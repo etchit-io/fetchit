@@ -825,6 +825,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -883,6 +885,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_feed(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_inbox(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
 ): Short
@@ -1024,6 +1028,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_feed(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(`ptr`: Pointer,`target`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_inbox(`ptr`: Pointer,`sinceMs`: Long,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
@@ -1291,6 +1297,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following() != 3672.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_inbox() != 36446.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
@@ -1583,6 +1592,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
+
+    override fun lower(value: Long): Long {
+        return value
+    }
+
+    override fun allocationSize(value: Long) = 8UL
+
+    override fun write(value: Long, buf: ByteBuffer) {
+        buf.putLong(value)
     }
 }
 
@@ -1997,6 +2029,17 @@ public interface ChatClientInterface {
      * is unreachable.
      */
     suspend fun `fediFollowing`(): List<FediFollowingFfi>
+    
+    /**
+     * Pull inbound fediverse messages (replies on the plaintext rails)
+     * for the minted handle, strictly newer than `since_ms` (`0` from
+     * the start), oldest-first. Owner-only (bridge-auth-v1).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * is unreachable.
+     */
+    suspend fun `fediInbox`(`sinceMs`: kotlin.Long): List<FediInboxMessageFfi>
     
     /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
@@ -2840,6 +2883,36 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeFediFollowingFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Pull inbound fediverse messages (replies on the plaintext rails)
+     * for the minted handle, strictly newer than `since_ms` (`0` from
+     * the start), oldest-first. Owner-only (bridge-auth-v1).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * is unreachable.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediInbox`(`sinceMs`: kotlin.Long) : List<FediInboxMessageFfi> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_inbox(
+                thisPtr,
+                FfiConverterLong.lower(`sinceMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeFediInboxMessageFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4406,6 +4479,69 @@ public object FfiConverterTypeFediFollowingFfi: FfiConverterRustBuffer<FediFollo
             FfiConverterString.write(value.`targetActorUrl`, buf)
             FfiConverterString.write(value.`label`, buf)
             FfiConverterString.write(value.`state`, buf)
+    }
+}
+
+
+
+/**
+ * One inbound fediverse message pulled from the bridge inbox — a reply
+ * on the plaintext rails, ready to render in the fedi thread.
+ */
+data class FediInboxMessageFfi (
+    /**
+     * Sender's canonical actor URL.
+     */
+    var `senderActorUrl`: kotlin.String, 
+    /**
+     * Sender's short label — `user@host`.
+     */
+    var `senderLabel`: kotlin.String, 
+    /**
+     * The Note id (client-side dedup key).
+     */
+    var `noteId`: kotlin.String, 
+    /**
+     * Plain-text body.
+     */
+    var `text`: kotlin.String, 
+    /**
+     * Bridge receive time (epoch ms) — the client's cursor axis.
+     */
+    var `createdMs`: kotlin.Long
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediInboxMessageFfi: FfiConverterRustBuffer<FediInboxMessageFfi> {
+    override fun read(buf: ByteBuffer): FediInboxMessageFfi {
+        return FediInboxMessageFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediInboxMessageFfi) = (
+            FfiConverterString.allocationSize(value.`senderActorUrl`) +
+            FfiConverterString.allocationSize(value.`senderLabel`) +
+            FfiConverterString.allocationSize(value.`noteId`) +
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterLong.allocationSize(value.`createdMs`)
+    )
+
+    override fun write(value: FediInboxMessageFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`senderActorUrl`, buf)
+            FfiConverterString.write(value.`senderLabel`, buf)
+            FfiConverterString.write(value.`noteId`, buf)
+            FfiConverterString.write(value.`text`, buf)
+            FfiConverterLong.write(value.`createdMs`, buf)
     }
 }
 
@@ -6387,6 +6523,34 @@ public object FfiConverterSequenceTypeFediFollowingFfi: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFediFollowingFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFediInboxMessageFfi: FfiConverterRustBuffer<List<FediInboxMessageFfi>> {
+    override fun read(buf: ByteBuffer): List<FediInboxMessageFfi> {
+        val len = buf.getInt()
+        return List<FediInboxMessageFfi>(len) {
+            FfiConverterTypeFediInboxMessageFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FediInboxMessageFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFediInboxMessageFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FediInboxMessageFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFediInboxMessageFfi.write(it, buf)
         }
     }
 }

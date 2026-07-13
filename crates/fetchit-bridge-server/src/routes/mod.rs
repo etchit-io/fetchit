@@ -3,4 +3,5 @@
 pub mod actors;
 pub mod follow;
 pub mod health;
+pub mod inbox;
 pub mod webfinger;

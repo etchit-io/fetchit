@@ -2101,6 +2101,56 @@ class ChatModeView(
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
         }
+        pullFediReplies(handle, convKey)
+    }
+
+    /**
+     * Pull inbound fediverse replies from the bridge inbox and drop any
+     * addressed to us from [handle]'s sender into the thread. A shared
+     * cursor (across all fedi threads — the inbox is one stream) advances
+     * so each reply lands once; matching is by note id so a re-pull can't
+     * double a bubble. Quiet on failure — the thread simply shows what it
+     * has. The reply becomes visible the moment the sender's server
+     * delivers it and this thread is next opened.
+     */
+    private fun pullFediReplies(handle: String, convKey: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            val cursor = fediInboxCursor()
+            val msgs = runCatching { gw.fediInbox(cursor) }.getOrElse {
+                android.util.Log.w(TAG, "fediInbox pull: ${ffiReason(it)}")
+                return@launch
+            }
+            if (msgs.isEmpty()) return@launch
+            val target = canonicalFediHandle(handle)
+            var maxSeen = cursor
+            msgs.forEach { m ->
+                maxSeen = maxOf(maxSeen, m.createdMs)
+                // Only messages from THIS thread's correspondent land here;
+                // others advance the cursor but wait for their own thread.
+                if (canonicalFediHandle(m.senderLabel) == target) {
+                    controller.conversations.append(
+                        convKey,
+                        ChatMessage(
+                            outbound = false,
+                            body = m.text,
+                            sentAtMs = m.createdMs,
+                            messageId = m.noteId,
+                        ),
+                    )
+                }
+            }
+            setFediInboxCursor(maxSeen)
+        }
+    }
+
+    private fun fediInboxCursor(): Long =
+        context.getSharedPreferences("fedi_inbox_cursor", Context.MODE_PRIVATE)
+            .getLong("since_ms", 0L)
+
+    private fun setFediInboxCursor(sinceMs: Long) {
+        context.getSharedPreferences("fedi_inbox_cursor", Context.MODE_PRIVATE)
+            .edit().putLong("since_ms", sinceMs).apply()
     }
 
     /**

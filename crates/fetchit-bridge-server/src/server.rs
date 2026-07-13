@@ -90,6 +90,8 @@ impl Server {
                 post(routes::follow::confirm_follower),
             )
             .route("/actors/:handle/outbox", get(routes::actors::outbox))
+            .route("/actors/:handle/inbox", post(routes::inbox::post_inbox))
+            .route("/actors/:handle/messages", get(routes::inbox::get_messages))
             .route("/.well-known/webfinger", get(routes::webfinger::webfinger))
             .with_state(state.clone());
         (router, state)

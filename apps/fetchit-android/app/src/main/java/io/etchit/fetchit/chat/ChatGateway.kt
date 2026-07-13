@@ -13,6 +13,7 @@ import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediFollowingFfi
+import uniffi.fetchit_ffi.FediInboxMessageFfi
 import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.FediDmReportFfi
@@ -177,6 +178,12 @@ interface ChatGateway {
     suspend fun fediFeed(): List<FediPostFfi>
 
     /**
+     * Pull inbound fediverse replies for the minted handle, strictly
+     * newer than [sinceMs] (0 = from the start), oldest-first.
+     */
+    suspend fun fediInbox(sinceMs: Long): List<FediInboxMessageFfi>
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -292,6 +299,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
         inner.fediUnfollow(targetActorUrl)
     override suspend fun fediFeed(): List<FediPostFfi> = inner.fediFeed()
+    override suspend fun fediInbox(sinceMs: Long): List<FediInboxMessageFfi> =
+        inner.fediInbox(sinceMs)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

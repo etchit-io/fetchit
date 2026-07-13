@@ -14,10 +14,36 @@
 //! conversation is a separate, user-consented action (P4).
 
 use fetchit_fedi::activity::build_direct_note;
+use fetchit_fedi::bridge_auth::{canonical_request, HEADER_AGENT, HEADER_SIG, HEADER_TS};
 use fetchit_fedi::signature::HttpSignatureKey;
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use serde::Deserialize;
 
 use crate::client::Client;
 use crate::error::{ChatError, Result};
+
+/// One inbound fediverse message pulled from the bridge inbox, ready to
+/// render in the fedi thread.
+#[derive(Clone, Debug, Deserialize)]
+pub struct FediInboxMessage {
+    /// Sender's canonical actor URL.
+    pub sender_actor_url: String,
+    /// The Note's id (thread-dedup key on the client too).
+    pub note_id: String,
+    /// Plain-text body (the bridge already reduced the HTML).
+    pub text: String,
+    /// ISO-8601 publish stamp as served (may be empty).
+    pub published: String,
+    /// Bridge receive time (epoch ms) — the cursor axis.
+    pub created_ms: i64,
+}
+
+#[derive(Deserialize)]
+struct InboxListBody {
+    items: Vec<FediInboxMessage>,
+}
 
 /// Outcome of a fedi DM: the `Create(Note)` was signed and an attempt was
 /// made to deliver it to the recipient's inbox.
@@ -99,6 +125,62 @@ impl Client {
             note_id,
             delivered,
         })
+    }
+
+    /// Pull inbound fediverse messages for our actor `handle` from the
+    /// bridge inbox, strictly newer than `since_ms` (0 = from the start).
+    /// Owner-only: authed with `bridge-auth-v1` over our agent key.
+    /// Returns oldest-first (the render order); the caller advances a
+    /// `since_ms` cursor from the last row's `created_ms`.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] on a missing minted identity, transport
+    /// failure, non-2xx bridge answer, or malformed body.
+    pub async fn fetch_fedi_inbox(
+        &self,
+        handle: &str,
+        since_ms: i64,
+        now_ms: u64,
+    ) -> Result<Vec<FediInboxMessage>> {
+        let identity = self.load_actor_identity(handle).await?.ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "no fediverse actor identity minted for handle {handle}"
+            ))
+        })?;
+        let origin = format!(
+            "{}://{}",
+            identity.actor_url.scheme(),
+            identity
+                .actor_url
+                .host_str()
+                .ok_or_else(|| ChatError::Invalid("actor url has no host".into()))?
+        );
+        // The signed path is the bare route; the cursor rides the query
+        // string (not part of the bridge-auth canonical request).
+        let path = format!("/actors/{handle}/messages");
+        let canonical = canonical_request("GET", &path, now_ms, b"");
+        let (agent_id_hex, sig) = self.bridge_auth_sign(&canonical).await?;
+
+        let http = crate::relay_http::guarded_client();
+        let resp = http
+            .get(format!("{origin}{path}?since_ms={since_ms}"))
+            .header(HEADER_AGENT, agent_id_hex)
+            .header(HEADER_TS, now_ms.to_string())
+            .header(HEADER_SIG, B64.encode(&sig))
+            .send()
+            .await
+            .map_err(|e| ChatError::Invalid(format!("bridge inbox GET: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(ChatError::Invalid(format!(
+                "bridge inbox list: HTTP {}",
+                resp.status().as_u16()
+            )));
+        }
+        let body: InboxListBody = resp
+            .json()
+            .await
+            .map_err(|e| ChatError::Invalid(format!("bridge inbox decode: {e}")))?;
+        Ok(body.items)
     }
 }
 

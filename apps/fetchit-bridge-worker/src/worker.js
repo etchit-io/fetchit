@@ -46,6 +46,9 @@ function routeMethods(pathname) {
   if (pathname === "/.well-known/webfinger") return ["GET"];
   if (pathname === "/v1/actors") return ["POST"];
   if (pathname.startsWith("/v1/actors/")) return ["PUT"];
+  // An actor's inbox accepts inbound POST deliveries from remote
+  // fediverse servers; every other /actors/* path is GET-only.
+  if (pathname.endsWith("/inbox")) return ["POST"];
   if (pathname === "/actors" || pathname.startsWith("/actors/")) return ["GET"];
   return null;
 }

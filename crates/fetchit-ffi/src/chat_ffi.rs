@@ -524,6 +524,22 @@ pub struct UnfollowReportFfi {
     pub removed: bool,
 }
 
+/// One inbound fediverse message pulled from the bridge inbox — a reply
+/// on the plaintext rails, ready to render in the fedi thread.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediInboxMessageFfi {
+    /// Sender's canonical actor URL.
+    pub sender_actor_url: String,
+    /// Sender's short label — `user@host`.
+    pub sender_label: String,
+    /// The Note id (client-side dedup key).
+    pub note_id: String,
+    /// Plain-text body.
+    pub text: String,
+    /// Bridge receive time (epoch ms) — the client's cursor axis.
+    pub created_ms: i64,
+}
+
 /// One post in the pulled read feed (text only; wire HTML is reduced
 /// engine-side, so shells render this as plain text).
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1426,6 +1442,39 @@ impl ChatClient {
             delivered: report.delivered,
             removed: report.removed,
         })
+    }
+
+    /// Pull inbound fediverse messages (replies on the plaintext rails)
+    /// for the minted handle, strictly newer than `since_ms` (`0` from
+    /// the start), oldest-first. Owner-only (bridge-auth-v1).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+    /// is unreachable.
+    pub async fn fedi_inbox(&self, since_ms: i64) -> Result<Vec<FediInboxMessageFfi>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let msgs = self
+            .inner
+            .fetch_fedi_inbox(&handle, since_ms, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(msgs
+            .into_iter()
+            .map(|m| FediInboxMessageFfi {
+                sender_label: fetchit_chat::fedi_feed::author_label(&m.sender_actor_url),
+                sender_actor_url: m.sender_actor_url,
+                note_id: m.note_id,
+                text: m.text,
+                created_ms: m.created_ms,
+            })
+            .collect())
     }
 
     /// Pull the read feed: newest text posts from followed accounts,

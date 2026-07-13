@@ -21,6 +21,11 @@ describe("classify -- the routing + security decision", () => {
     expect(classify("/actors/josh/outbox", "GET")).toBe("proxy");
   });
 
+  it("proxies inbound POST to an actor inbox, rejects other methods", () => {
+    expect(classify("/actors/josh/inbox", "POST")).toBe("proxy");
+    expect(classify("/actors/josh/inbox", "GET")).toBe("method-not-allowed");
+  });
+
   it("rejects unsupported methods on /actors", () => {
     expect(classify("/actors/josh", "DELETE")).toBe("method-not-allowed");
     expect(classify("/actors/josh", "PUT")).toBe("method-not-allowed");

@@ -505,6 +505,80 @@ pub fn format_imf_fixdate(now: SystemTime) -> String {
     )
 }
 
+/// Parse an RFC 7231 IMF-fixdate `Date` header back to `SystemTime` —
+/// the inverse of [`format_imf_fixdate`]. Tolerates `GMT`, `UTC`, and
+/// `+0000` suffixes (some emitters drift). Returns `None` on any parse
+/// failure or a pre-epoch date (no real inbox request carries one).
+///
+/// Lives beside the formatter so inbound date-skew checks (relay + the
+/// M7 bridge inbox) share one parser rather than each porting a copy.
+#[must_use]
+pub fn parse_imf_fixdate(s: &str) -> Option<SystemTime> {
+    let s = s.trim();
+    let s = s
+        .strip_suffix(" GMT")
+        .or_else(|| s.strip_suffix(" UTC"))
+        .or_else(|| s.strip_suffix(" +0000"))?;
+    let (_dow, rest) = s.split_once(", ")?;
+    let mut parts = rest.split_whitespace();
+    let day: u32 = parts.next()?.parse().ok()?;
+    let month_name = parts.next()?;
+    let year: i64 = parts.next()?.parse().ok()?;
+    let hms = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let mut hms_parts = hms.split(':');
+    let hour: u64 = hms_parts.next()?.parse().ok()?;
+    let minute: u64 = hms_parts.next()?.parse().ok()?;
+    let second: u64 = hms_parts.next()?.parse().ok()?;
+    if hms_parts.next().is_some() {
+        return None;
+    }
+    let month: u32 = match month_name {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let days = days_from_civil(year, month, day)?;
+    let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+/// Howard Hinnant's `days_from_civil`: `(year, month, day)` →
+/// days-since-Unix-epoch. `None` for pre-epoch dates.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+fn days_from_civil(y: i64, m: u32, d: u32) -> Option<u64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * (u64::from(if m > 2 { m - 3 } else { m + 9 })) + 2) / 5 + u64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    if days < 0 {
+        None
+    } else {
+        Some(days as u64)
+    }
+}
+
 fn flip_format(f: SignatureFormat) -> SignatureFormat {
     match f {
         SignatureFormat::Cavage => SignatureFormat::Rfc9421,

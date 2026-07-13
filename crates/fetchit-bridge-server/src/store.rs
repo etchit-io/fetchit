@@ -114,6 +114,16 @@ impl Store {
                  activity_json    TEXT NOT NULL,
                  attempts         INTEGER NOT NULL DEFAULT 0,
                  next_retry_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS inbox_messages (
+                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                 actor_id         TEXT NOT NULL,
+                 sender_actor_url TEXT NOT NULL,
+                 note_id          TEXT NOT NULL,
+                 text             TEXT NOT NULL,
+                 published        TEXT NOT NULL,
+                 created_ms       INTEGER NOT NULL,
+                 UNIQUE (actor_id, note_id)
              );",
         )?;
         Ok(())
@@ -230,6 +240,90 @@ impl Store {
         })
         .await
     }
+
+    /// Store an inbound fediverse message for `actor_id`. Redeliveries
+    /// (same `note_id`) are dropped — remote servers retry with backoff,
+    /// so the unique key makes retries harmless. Returns whether a new
+    /// row was created.
+    ///
+    /// # Errors
+    /// [`BridgeError::Store`] on the underlying `SQLite` failure.
+    pub async fn inbox_insert(&self, msg: InboxMessage) -> Result<bool, BridgeError> {
+        self.with_conn(move |c| {
+            let n = c.execute(
+                "INSERT OR IGNORE INTO inbox_messages
+                     (actor_id, sender_actor_url, note_id, text, published, created_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    msg.actor_id,
+                    msg.sender_actor_url,
+                    msg.note_id,
+                    msg.text,
+                    msg.published,
+                    msg.created_ms
+                ],
+            )?;
+            Ok(n == 1)
+        })
+        .await
+    }
+
+    /// Inbound messages for `actor_id` newer than `since_ms`, oldest
+    /// first, capped at `limit`. The owner-only `messages` route serves
+    /// this; clients advance a `since_ms` cursor from the last row.
+    ///
+    /// # Errors
+    /// [`BridgeError::Store`] on the underlying `SQLite` failure.
+    pub async fn inbox_list(
+        &self,
+        actor_id: &str,
+        since_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<InboxMessage>, BridgeError> {
+        let actor = actor_id.to_owned();
+        self.with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT actor_id, sender_actor_url, note_id, text, published, created_ms
+                 FROM inbox_messages
+                 WHERE actor_id = ?1 AND created_ms > ?2
+                 ORDER BY created_ms ASC, id ASC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt
+                .query_map(params![actor, since_ms, limit], |row| {
+                    Ok(InboxMessage {
+                        actor_id: row.get(0)?,
+                        sender_actor_url: row.get(1)?,
+                        note_id: row.get(2)?,
+                        text: row.get(3)?,
+                        published: row.get(4)?,
+                        created_ms: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+}
+
+/// One inbound fediverse message as stored for its recipient. `text` is
+/// the display-ready plain-text reduction — raw remote HTML is never
+/// persisted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboxMessage {
+    /// Recipient's agent id (the registered actor).
+    pub actor_id: String,
+    /// Sender's canonical actor URL.
+    pub sender_actor_url: String,
+    /// The Note's `id` — the redelivery-dedup key.
+    pub note_id: String,
+    /// Plain-text body.
+    pub text: String,
+    /// ISO-8601 `published` stamp as served (may be empty).
+    pub published: String,
+    /// Bridge receive time (epoch ms) — the cursor axis.
+    pub created_ms: i64,
 }
 
 #[cfg(test)]
@@ -287,5 +381,38 @@ mod tests {
     async fn unknown_handle_is_none() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.actor_by_handle("nobody").await.unwrap().is_none());
+    }
+
+    fn msg(actor: &str, note: &str, created_ms: i64) -> InboxMessage {
+        InboxMessage {
+            actor_id: actor.into(),
+            sender_actor_url: "https://fosstodon.org/users/happyborg".into(),
+            note_id: note.into(),
+            text: "hello back".into(),
+            published: "2026-07-13T13:00:00Z".into(),
+            created_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn inbox_dedups_redeliveries_and_lists_by_cursor() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.inbox_insert(msg("aa", "n1", 100)).await.unwrap());
+        // Remote servers retry deliveries; the same note must not double.
+        assert!(!s.inbox_insert(msg("aa", "n1", 150)).await.unwrap());
+        assert!(s.inbox_insert(msg("aa", "n2", 200)).await.unwrap());
+        // Another recipient's inbox is disjoint.
+        assert!(s.inbox_insert(msg("bb", "n1", 300)).await.unwrap());
+
+        let all = s.inbox_list("aa", 0, 50).await.unwrap();
+        assert_eq!(
+            all.iter().map(|m| m.note_id.as_str()).collect::<Vec<_>>(),
+            vec!["n1", "n2"]
+        );
+        // Cursor: strictly-newer only.
+        let newer = s.inbox_list("aa", 100, 50).await.unwrap();
+        assert_eq!(newer.len(), 1);
+        assert_eq!(newer[0].note_id, "n2");
+        assert!(s.inbox_list("aa", 200, 50).await.unwrap().is_empty());
     }
 }
