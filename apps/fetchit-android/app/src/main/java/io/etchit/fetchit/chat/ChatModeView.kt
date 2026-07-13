@@ -1254,13 +1254,16 @@ class ChatModeView(
                 if (following) {
                     body.append("\n\n").append(context.getString(R.string.chat_lookup_following_line))
                 }
+                // Message is the primary action: leading with the caveat text
+                // plus a buried button read as "you can't message them" in
+                // device testing. The card must open doors, not close them.
                 builder.setTitle(lookup.handle)
                     .setMessage(body.toString())
-                    .setPositiveButton(followLabel) { _, _ ->
-                        followFedi(lookup.handle)
-                    }
-                    .setNeutralButton(context.getString(R.string.chat_fedi_dm)) { _, _ ->
+                    .setPositiveButton(context.getString(R.string.chat_fedi_dm)) { _, _ ->
                         composeFediDm(lookup.handle)
+                    }
+                    .setNeutralButton(followLabel) { _, _ ->
+                        followFedi(lookup.handle)
                     }
                     .setNegativeButton(context.getString(R.string.action_close), null)
             }

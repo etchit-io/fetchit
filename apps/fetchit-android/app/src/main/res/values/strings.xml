@@ -262,7 +262,7 @@
     <string name="chat_fedi_needs_handle_title">get your public @name first</string>
     <string name="chat_fedi_needs_handle_body">to follow people or message them across the fediverse, you need your own public @name. create one from your profile — it takes a few seconds.</string>
     <string name="chat_fedi_setup_pending">still setting up your public @name — we\'ll keep trying in the background</string>
-    <string name="chat_fedi_dm">fedi message</string>
+    <string name="chat_fedi_dm">message</string>
     <string name="chat_fedi_dm_title">message %1$s</string>
     <string name="chat_fedi_dm_banner">Not encrypted — this goes over the regular fediverse, so their server (and ours) can read it. For private, post-quantum chat, invite them to fetch&gt;it.</string>
     <string name="chat_fedi_dm_hint">write a message…</string>
@@ -270,7 +270,7 @@
     <string name="chat_fedi_dm_sent">message sent to %1$s (not encrypted)</string>
     <string name="chat_fedi_dm_pending">message signed for %1$s but their server was unreachable — try again</string>
     <string name="chat_fedi_dm_failed">couldn\'t send right now — your message is still here, tap send to try again</string>
-    <string name="chat_lookup_public_only_body">we found this account, but can\'t confirm it\'s really them yet — so private, encrypted chat isn\'t available. You can still follow them or send a fediverse message.</string>
+    <string name="chat_lookup_public_only_body">found them — you can follow this account or message it right from here.\n\nheads-up: messages to them travel the open fediverse, not fetch&gt;it\'s private encrypted chat. private chat needs fetch&gt;it on their side too.</string>
     <string name="chat_lookup_following_line">you follow this account.</string>
     <string name="chat_lookup_not_found_title">no one found</string>
     <string name="chat_lookup_not_found_body">we couldn\'t find anyone at %1$s. double-check the spelling?</string>
