@@ -504,6 +504,42 @@ pub struct FediDmReportFfi {
     pub delivered: bool,
 }
 
+/// One account we follow, from the bridge's owner-only list.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediFollowingFfi {
+    /// Remote actor URL the follow targets.
+    pub target_actor_url: String,
+    /// Short display label — `user@host` derived from the actor URL.
+    pub label: String,
+    /// `"pending"` (Follow sent) or `"accepted"` (their Accept arrived).
+    pub state: String,
+}
+
+/// Result of [`ChatClient::fedi_unfollow`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UnfollowReportFfi {
+    /// The `Undo(Follow)` reached the target's inbox.
+    pub delivered: bool,
+    /// The bridge dropped its follow record.
+    pub removed: bool,
+}
+
+/// One post in the pulled read feed (text only; wire HTML is reduced
+/// engine-side, so shells render this as plain text).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediPostFfi {
+    /// Author actor URL.
+    pub author_url: String,
+    /// Short author label — `user@host`.
+    pub author_label: String,
+    /// Post body as plain text.
+    pub text: String,
+    /// ISO-8601 publish stamp as served (may be empty).
+    pub published: String,
+    /// Link to the post on its home server.
+    pub object_url: String,
+}
+
 /// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
 /// errors for blockers -- those land in `pending`.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1330,6 +1366,99 @@ impl ChatClient {
             note_id: report.note_id,
             delivered: report.delivered,
         })
+    }
+
+    /// The accounts our minted handle follows, from the bridge's
+    /// owner-only list (newest first as the bridge returns them).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+    /// is unreachable.
+    pub async fn fedi_following(&self) -> Result<Vec<FediFollowingFfi>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let entries = self
+            .inner
+            .list_fedi_following(&handle, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(entries
+            .into_iter()
+            .map(|e| FediFollowingFfi {
+                label: fetchit_chat::fedi_feed::author_label(&e.target_actor_url),
+                target_actor_url: e.target_actor_url,
+                state: e.state,
+            })
+            .collect())
+    }
+
+    /// Unfollow a fediverse account: sign + deliver the `Undo(Follow)`
+    /// and drop the bridge record.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or we are not
+    /// following the target. Delivery/record outages are reported in the
+    /// returned [`UnfollowReportFfi`], not errored.
+    pub async fn fedi_unfollow(
+        &self,
+        target_actor_url: String,
+    ) -> Result<UnfollowReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .unfollow_fedi(&handle, &target_actor_url, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(UnfollowReportFfi {
+            delivered: report.delivered,
+            removed: report.removed,
+        })
+    }
+
+    /// Pull the read feed: newest text posts from followed accounts,
+    /// merged newest-first (engine caps apply). Per-account failures are
+    /// skipped engine-side; an empty vec is a valid feed.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+    /// following list is unreachable.
+    pub async fn fedi_feed(&self) -> Result<Vec<FediPostFfi>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let posts = self
+            .inner
+            .fetch_fedi_feed(&handle, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(posts
+            .into_iter()
+            .map(|p| FediPostFfi {
+                author_url: p.author_url,
+                author_label: p.author_label,
+                text: p.text,
+                published: p.published,
+                object_url: p.object_url,
+            })
+            .collect())
     }
 
     /// Run the v2 upgrade + re-register pass, called when the fedi hub opens

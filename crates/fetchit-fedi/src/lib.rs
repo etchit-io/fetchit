@@ -33,6 +33,7 @@ pub mod signature;
 pub mod signature_cache;
 pub mod signature_cavage;
 pub mod ssrf;
+pub mod text;
 pub mod transport;
 pub mod webfinger;
 
