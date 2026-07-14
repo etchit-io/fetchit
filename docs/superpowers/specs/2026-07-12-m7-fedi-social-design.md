@@ -51,6 +51,22 @@ Status: IN PROGRESS (2026-07-13, PR #29 josh-clsn/fetchit).
   with `{}` → 400 "activity has no actor", with a real actor field →
   fetches sender key → 401 on unsigned (full verify path live). A signed
   delivery stores + serves. On-device reply-render pending Josh's test.**
+- **Thread durability — DONE** (2026-07-14, on-device loss postmortem):
+  fedi DMs previously lived only in the shell's in-memory conversation
+  store while a durable shell-side cursor advanced past every pulled
+  reply — any process death silently wiped sent messages and made
+  pulled replies unrecoverable. Now the ENGINE owns durability:
+  `fedi_thread.rs` keeps one sealed store per minted handle
+  (`fedi/threads/<handle>.json.enc`, identity-vault seal shape) holding
+  every fedi DM both directions plus the inbox cursor; messages and
+  cursor persist in ONE atomic write. `send_fedi_dm` records the
+  outbound message; `sync_fedi_inbox` lands every sender's messages
+  (never skips a thread the user doesn't have open) then advances the
+  cursor; `conversation_history` serves `f:<handle>` keys. The shell's
+  SharedPreferences cursor + sender filtering are deleted. Fresh
+  cursor starts at 0, so the first sync after upgrade re-pulls
+  everything the bridge still holds (bridge rows are re-servable —
+  recovery is server-backed).
 - **P2 push feed** — Alice's delivery seam, not started (the pull feed +
   pull inbox above are the interim read paths; push replaces the polling).
 - **P4 escalate-to-PQ** — not started (verified-user path ~90% via lookup

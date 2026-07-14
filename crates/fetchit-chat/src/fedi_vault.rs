@@ -20,7 +20,7 @@
 //! duplicated here).
 
 use crate::at_rest::MasterKey;
-use crate::chat_crypto::{aead_open, aead_seal, random_nonce, AEAD_NONCE_LEN};
+use crate::chat_crypto::{aead_open, aead_seal, random_nonce, AEAD_KEY_LEN, AEAD_NONCE_LEN};
 use crate::error::ChatError;
 use crate::fedi_identity::derive_fedi_vault_key;
 use crate::local_store::StoreLayout;
@@ -92,22 +92,42 @@ pub fn save_actor_identity(
     master: &MasterKey,
     layout: &StoreLayout,
 ) -> Result<(), ChatError> {
-    use std::io::Write;
-
     let key = derive_fedi_vault_key(master);
     let plain =
         serde_json::to_vec(vault).map_err(|e| ChatError::Invalid(format!("vault encode: {e}")))?;
+    write_sealed_atomic(
+        &layout.actor_identity_path(&vault.handle),
+        *FEDI_VAULT_MAGIC,
+        &key,
+        FEDI_VAULT_AAD,
+        &plain,
+    )
+}
+
+/// Seal `plain` under `key`/`aad` and atomically write
+/// `magic ‖ nonce ‖ ciphertext` to `path`: 0600 permissions, unique tmp
+/// name, rename into place, tmp cleaned up on any failure (per Alice
+/// \[F1\]). Shared by this identity vault and the fedi DM thread store
+/// ([`crate::fedi_thread`]) so both file families ride one reviewed
+/// writer.
+pub(crate) fn write_sealed_atomic(
+    path: &Path,
+    magic: [u8; 4],
+    key: &[u8; AEAD_KEY_LEN],
+    aad: &[u8],
+    plain: &[u8],
+) -> Result<(), ChatError> {
+    use std::io::Write;
 
     let mut rng = OsRng;
     let nonce = random_nonce(&mut rng);
-    let ct = aead_seal(&key, &nonce, &plain, FEDI_VAULT_AAD)?;
+    let ct = aead_seal(key, &nonce, plain, aad)?;
 
     let mut out = Vec::with_capacity(FEDI_HEADER_LEN + ct.len());
-    out.extend_from_slice(FEDI_VAULT_MAGIC);
+    out.extend_from_slice(&magic);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
 
-    let path = layout.actor_identity_path(&vault.handle);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -137,7 +157,7 @@ pub fn save_actor_identity(
     f.write_all(&out)?;
     drop(f);
 
-    fs::rename(&tmp, &path)?;
+    fs::rename(&tmp, path)?;
     // Rename succeeded — the tmp path now refers to `path`. Disarm
     // the guard so the destination isn't deleted.
     std::mem::forget(guard);
@@ -170,34 +190,53 @@ pub fn load_actor_identity(
     master: &MasterKey,
     layout: &StoreLayout,
 ) -> Result<Option<ActorIdentityVault>, ChatError> {
-    let path = layout.actor_identity_path(handle);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = read_vault_file(&path)?;
-
     let key = derive_fedi_vault_key(master);
-    let plain = open_sealed(&key, &bytes)?;
+    let Some(plain) = read_sealed(
+        &layout.actor_identity_path(handle),
+        *FEDI_VAULT_MAGIC,
+        &key,
+        FEDI_VAULT_AAD,
+    )?
+    else {
+        return Ok(None);
+    };
     let vault: ActorIdentityVault = serde_json::from_slice(&plain)
         .map_err(|e| ChatError::Invalid(format!("vault decode: {e}")))?;
     Ok(Some(vault))
 }
 
-fn read_vault_file(path: &Path) -> Result<Vec<u8>, ChatError> {
-    fs::read(path).map_err(ChatError::from)
-}
-
-fn open_sealed(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, ChatError> {
-    if bytes.len() < FEDI_HEADER_LEN {
-        return Err(ChatError::Invalid("fedi vault file too short".into()));
+/// Read and open one `magic ‖ nonce ‖ ciphertext` sealed file.
+/// `Ok(None)` when `path` does not exist — the caller decides what an
+/// absent store means. Shared with [`crate::fedi_thread`].
+///
+/// # Errors
+/// [`ChatError::Invalid`] on a truncated file or magic mismatch; AEAD
+/// errors when the key/AAD don't open the ciphertext; IO errors from
+/// the read.
+pub(crate) fn read_sealed(
+    path: &Path,
+    magic: [u8; 4],
+    key: &[u8; AEAD_KEY_LEN],
+    aad: &[u8],
+) -> Result<Option<Vec<u8>>, ChatError> {
+    if !path.exists() {
+        return Ok(None);
     }
-    if &bytes[..4] != FEDI_VAULT_MAGIC {
-        return Err(ChatError::Invalid("fedi vault magic mismatch".into()));
+    let bytes = fs::read(path).map_err(ChatError::from)?;
+    if bytes.len() < FEDI_HEADER_LEN {
+        return Err(ChatError::Invalid("sealed store file too short".into()));
+    }
+    if bytes[..4] != magic {
+        return Err(ChatError::Invalid("sealed store magic mismatch".into()));
     }
     let mut nonce = [0u8; AEAD_NONCE_LEN];
     nonce.copy_from_slice(&bytes[4..FEDI_HEADER_LEN]);
-    let ct = &bytes[FEDI_HEADER_LEN..];
-    aead_open(key, &nonce, ct, FEDI_VAULT_AAD)
+    Ok(Some(aead_open(
+        key,
+        &nonce,
+        &bytes[FEDI_HEADER_LEN..],
+        aad,
+    )?))
 }
 
 /// List the handles of every actor identity minted into this vault, by
@@ -372,18 +411,23 @@ mod tests {
     }
 
     #[test]
-    fn open_sealed_rejects_short_input() {
-        let key = [0u8; 32];
-        let short = b"FFV1tiny";
-        assert!(open_sealed(&key, short).is_err());
+    fn read_sealed_rejects_short_input() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("short.bin");
+        fs::write(&path, b"FFV1tiny").unwrap();
+        let key = [0u8; AEAD_KEY_LEN];
+        assert!(read_sealed(&path, *FEDI_VAULT_MAGIC, &key, FEDI_VAULT_AAD).is_err());
     }
 
     #[test]
-    fn open_sealed_rejects_wrong_magic() {
-        let key = [0u8; 32];
+    fn read_sealed_rejects_wrong_magic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("badmagic.bin");
         let mut bad = vec![b'X', b'X', b'X', b'X'];
         bad.extend_from_slice(&[0u8; AEAD_NONCE_LEN + 32]);
-        let err = open_sealed(&key, &bad).unwrap_err();
+        fs::write(&path, &bad).unwrap();
+        let key = [0u8; AEAD_KEY_LEN];
+        let err = read_sealed(&path, *FEDI_VAULT_MAGIC, &key, FEDI_VAULT_AAD).unwrap_err();
         assert!(format!("{err}").contains("magic"));
     }
 

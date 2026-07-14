@@ -886,13 +886,13 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following(
 ): Short
-fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_inbox(
-): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow(
 ): Short
@@ -1029,13 +1029,13 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(`ptr`: Pointer,`target`:
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(`ptr`: Pointer,
 ): Long
-fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_inbox(`ptr`: Pointer,`sinceMs`: Long,
-): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unfollow(`ptr`: Pointer,`targetActorUrl`: RustBuffer.ByValue,
 ): Long
@@ -1269,7 +1269,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_group() != 1975.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer() != 61206.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer() != 9806.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_disconnect() != 16284.toShort()) {
@@ -1284,7 +1284,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 19997.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 743.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 53381.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2() != 23776.toShort()) {
@@ -1299,9 +1299,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following() != 3672.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_inbox() != 36446.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1309,6 +1306,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox() != 42525.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow() != 48078.toShort()) {
@@ -1323,7 +1323,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri() != 9374.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 57880.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 26980.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group_durable() != 49722.toShort()) {
@@ -1575,6 +1575,29 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong: FfiConverter<ULong, Long> {
     override fun lift(value: Long): ULong {
         return value.toULong()
@@ -1592,29 +1615,6 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
-    }
-}
-
-/**
- * @suppress
- */
-public object FfiConverterLong: FfiConverter<Long, Long> {
-    override fun lift(value: Long): Long {
-        return value
-    }
-
-    override fun read(buf: ByteBuffer): Long {
-        return buf.getLong()
-    }
-
-    override fun lower(value: Long): Long {
-        return value
-    }
-
-    override fun allocationSize(value: Long) = 8UL
-
-    override fun write(value: Long, buf: ByteBuffer) {
-        buf.putLong(value)
     }
 }
 
@@ -1907,7 +1907,7 @@ public interface ChatClientInterface {
      * M6.4 new-device side: mint a link-device offer for THIS device and
      * publish it to the relay blob store, returning the QR pointer to encode
      * plus the short-code to show beside it. `ttl_secs` bounds the enrollment
-     * window — the offer self-expires and the existing device rejects a stale
+     * window -- the offer self-expires and the existing device rejects a stale
      * one on confirm.
      *
      * # Errors
@@ -1974,7 +1974,7 @@ public interface ChatClientInterface {
      * Send a plaintext fediverse DM (`@user@instance`) from our minted
      * handle: sign a direct `Create(Note)` on the device and deliver it to
      * the recipient's inbox. Requires a minted handle. This message is
-     * **not** end-to-end encrypted — the UI shows the unencrypted-thread
+     * **not** end-to-end encrypted -- the UI shows the unencrypted-thread
      * banner and offers escalation to PQ chat (P4).
      *
      * # Errors
@@ -2031,17 +2031,6 @@ public interface ChatClientInterface {
     suspend fun `fediFollowing`(): List<FediFollowingFfi>
     
     /**
-     * Pull inbound fediverse messages (replies on the plaintext rails)
-     * for the minted handle, strictly newer than `since_ms` (`0` from
-     * the start), oldest-first. Owner-only (bridge-auth-v1).
-     *
-     * # Errors
-     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
-     * is unreachable.
-     */
-    suspend fun `fediInbox`(`sinceMs`: kotlin.Long): List<FediInboxMessageFfi>
-    
-    /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
      * (attestation-bound to a chat agent id, with a share URI for "message
      * privately") or public-only. Load the rich profile (name/bio/avatar)
@@ -2081,6 +2070,21 @@ public interface ChatClientInterface {
      * fails before any delivery was attempted.
      */
     suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
+    
+    /**
+     * Sync inbound fediverse messages (replies on the plaintext rails)
+     * from the bridge inbox into the engine's durable thread store.
+     * The engine owns the cursor: every pulled message is persisted
+     * into its sender's own thread and the cursor advances in the same
+     * atomic save, so nothing can be skipped or lost to a process
+     * death. Returns how many messages were new; render threads via
+     * [`Self::conversation_history`] with an `f:<handle>` key.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * is unreachable.
+     */
+    suspend fun `fediSyncInbox`(): kotlin.UInt
     
     /**
      * Unfollow a fediverse account: sign + deliver the `Undo(Follow)`
@@ -2132,7 +2136,7 @@ public interface ChatClientInterface {
     
     /**
      * Join a private group from an `x0x://invite/...` link through the v1
-     * shared join policy ([`fetchit_chat::Client::join_group_auto`]) — the
+     * shared join policy ([`fetchit_chat::Client::join_group_auto`]) -- the
      * same path the desktop shell takes, so both shells join identically.
      *
      * Native-first, then ALWAYS bridge. The best-effort native
@@ -2599,7 +2603,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * M6.4 new-device side: mint a link-device offer for THIS device and
      * publish it to the relay blob store, returning the QR pointer to encode
      * plus the short-code to show beside it. `ttl_secs` bounds the enrollment
-     * window — the offer self-expires and the existing device rejects a stale
+     * window -- the offer self-expires and the existing device rejects a stale
      * one on confirm.
      *
      * # Errors
@@ -2742,7 +2746,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * Send a plaintext fediverse DM (`@user@instance`) from our minted
      * handle: sign a direct `Create(Note)` on the device and deliver it to
      * the recipient's inbox. Requires a minted handle. This message is
-     * **not** end-to-end encrypted — the UI shows the unencrypted-thread
+     * **not** end-to-end encrypted -- the UI shows the unencrypted-thread
      * banner and offers escalation to PQ chat (P4).
      *
      * # Errors
@@ -2894,36 +2898,6 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * Pull inbound fediverse messages (replies on the plaintext rails)
-     * for the minted handle, strictly newer than `since_ms` (`0` from
-     * the start), oldest-first. Owner-only (bridge-auth-v1).
-     *
-     * # Errors
-     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
-     * is unreachable.
-     */
-    @Throws(ChatFfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fediInbox`(`sinceMs`: kotlin.Long) : List<FediInboxMessageFfi> {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_inbox(
-                thisPtr,
-                FfiConverterLong.lower(`sinceMs`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterSequenceTypeFediInboxMessageFfi.lift(it) },
-        // Error FFI converter
-        ChatFfiException.ErrorHandler,
-    )
-    }
-
-    
-    /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
      * (attestation-bound to a chat agent id, with a share URI for "message
      * privately") or public-only. Load the rich profile (name/bio/avatar)
@@ -3015,6 +2989,40 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePublishReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Sync inbound fediverse messages (replies on the plaintext rails)
+     * from the bridge inbox into the engine's durable thread store.
+     * The engine owns the cursor: every pulled message is persisted
+     * into its sender's own thread and the cursor advances in the same
+     * atomic save, so nothing can be skipped or lost to a process
+     * death. Returns how many messages were new; render threads via
+     * [`Self::conversation_history`] with an `f:<handle>` key.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the bridge
+     * is unreachable.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediSyncInbox`() : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -3148,7 +3156,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     
     /**
      * Join a private group from an `x0x://invite/...` link through the v1
-     * shared join policy ([`fetchit_chat::Client::join_group_auto`]) — the
+     * shared join policy ([`fetchit_chat::Client::join_group_auto`]) -- the
      * same path the desktop shell takes, so both shells join identically.
      *
      * Native-first, then ALWAYS bridge. The best-effort native
@@ -4397,7 +4405,7 @@ public object FfiConverterTypeFailedDeliveryFfi: FfiConverterRustBuffer<FailedDe
 /**
  * Result of [`ChatClient::fedi_dm`]: a plaintext fediverse DM signed on
  * the device and delivered to the recipient's inbox. This message is not
- * end-to-end encrypted — the UI must show the unencrypted-thread banner.
+ * end-to-end encrypted -- the UI must show the unencrypted-thread banner.
  */
 data class FediDmReportFfi (
     /**
@@ -4453,7 +4461,7 @@ data class FediFollowingFfi (
      */
     var `targetActorUrl`: kotlin.String, 
     /**
-     * Short display label — `user@host` derived from the actor URL.
+     * Short display label -- `user@host` derived from the actor URL.
      */
     var `label`: kotlin.String, 
     /**
@@ -4493,69 +4501,6 @@ public object FfiConverterTypeFediFollowingFfi: FfiConverterRustBuffer<FediFollo
 
 
 /**
- * One inbound fediverse message pulled from the bridge inbox — a reply
- * on the plaintext rails, ready to render in the fedi thread.
- */
-data class FediInboxMessageFfi (
-    /**
-     * Sender's canonical actor URL.
-     */
-    var `senderActorUrl`: kotlin.String, 
-    /**
-     * Sender's short label — `user@host`.
-     */
-    var `senderLabel`: kotlin.String, 
-    /**
-     * The Note id (client-side dedup key).
-     */
-    var `noteId`: kotlin.String, 
-    /**
-     * Plain-text body.
-     */
-    var `text`: kotlin.String, 
-    /**
-     * Bridge receive time (epoch ms) — the client's cursor axis.
-     */
-    var `createdMs`: kotlin.Long
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFediInboxMessageFfi: FfiConverterRustBuffer<FediInboxMessageFfi> {
-    override fun read(buf: ByteBuffer): FediInboxMessageFfi {
-        return FediInboxMessageFfi(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterLong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FediInboxMessageFfi) = (
-            FfiConverterString.allocationSize(value.`senderActorUrl`) +
-            FfiConverterString.allocationSize(value.`senderLabel`) +
-            FfiConverterString.allocationSize(value.`noteId`) +
-            FfiConverterString.allocationSize(value.`text`) +
-            FfiConverterLong.allocationSize(value.`createdMs`)
-    )
-
-    override fun write(value: FediInboxMessageFfi, buf: ByteBuffer) {
-            FfiConverterString.write(value.`senderActorUrl`, buf)
-            FfiConverterString.write(value.`senderLabel`, buf)
-            FfiConverterString.write(value.`noteId`, buf)
-            FfiConverterString.write(value.`text`, buf)
-            FfiConverterLong.write(value.`createdMs`, buf)
-    }
-}
-
-
-
-/**
  * One post in the pulled read feed (text only; wire HTML is reduced
  * engine-side, so shells render this as plain text).
  */
@@ -4565,7 +4510,7 @@ data class FediPostFfi (
      */
     var `authorUrl`: kotlin.String, 
     /**
-     * Short author label — `user@host`.
+     * Short author label -- `user@host`.
      */
     var `authorLabel`: kotlin.String, 
     /**
@@ -6531,34 +6476,6 @@ public object FfiConverterSequenceTypeFediFollowingFfi: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFediFollowingFfi.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeFediInboxMessageFfi: FfiConverterRustBuffer<List<FediInboxMessageFfi>> {
-    override fun read(buf: ByteBuffer): List<FediInboxMessageFfi> {
-        val len = buf.getInt()
-        return List<FediInboxMessageFfi>(len) {
-            FfiConverterTypeFediInboxMessageFfi.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<FediInboxMessageFfi>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeFediInboxMessageFfi.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<FediInboxMessageFfi>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeFediInboxMessageFfi.write(it, buf)
         }
     }
 }

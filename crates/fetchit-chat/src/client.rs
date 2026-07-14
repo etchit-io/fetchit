@@ -5590,6 +5590,26 @@ impl Client {
         Ok(healed)
     }
 
+    /// Master key + store layout for the fedi at-rest files (identity
+    /// vault, DM thread store). One master-key resolve per operation,
+    /// mirroring every other fedi vault path.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] when chat state has not been initialised;
+    /// propagates master-key resolution failures.
+    pub(crate) fn fedi_at_rest(
+        &self,
+    ) -> Result<(crate::at_rest::MasterKey, crate::local_store::StoreLayout)> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
+        Ok((master, chat.layout.clone()))
+    }
+
     /// Load a previously-minted [`fetchit_fedi::actor::ActorIdentity`]
     /// from the fedi vault. Returns `Ok(None)` when no vault file
     /// exists for the handle (the caller's "first run / not yet

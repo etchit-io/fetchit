@@ -493,7 +493,7 @@ pub struct FollowReportFfi {
 
 /// Result of [`ChatClient::fedi_dm`]: a plaintext fediverse DM signed on
 /// the device and delivered to the recipient's inbox. This message is not
-/// end-to-end encrypted — the UI must show the unencrypted-thread banner.
+/// end-to-end encrypted -- the UI must show the unencrypted-thread banner.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FediDmReportFfi {
     /// Canonical actor URL the DM was addressed to.
@@ -509,7 +509,7 @@ pub struct FediDmReportFfi {
 pub struct FediFollowingFfi {
     /// Remote actor URL the follow targets.
     pub target_actor_url: String,
-    /// Short display label — `user@host` derived from the actor URL.
+    /// Short display label -- `user@host` derived from the actor URL.
     pub label: String,
     /// `"pending"` (Follow sent) or `"accepted"` (their Accept arrived).
     pub state: String,
@@ -524,29 +524,13 @@ pub struct UnfollowReportFfi {
     pub removed: bool,
 }
 
-/// One inbound fediverse message pulled from the bridge inbox — a reply
-/// on the plaintext rails, ready to render in the fedi thread.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FediInboxMessageFfi {
-    /// Sender's canonical actor URL.
-    pub sender_actor_url: String,
-    /// Sender's short label — `user@host`.
-    pub sender_label: String,
-    /// The Note id (client-side dedup key).
-    pub note_id: String,
-    /// Plain-text body.
-    pub text: String,
-    /// Bridge receive time (epoch ms) — the client's cursor axis.
-    pub created_ms: i64,
-}
-
 /// One post in the pulled read feed (text only; wire HTML is reduced
 /// engine-side, so shells render this as plain text).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FediPostFfi {
     /// Author actor URL.
     pub author_url: String,
-    /// Short author label — `user@host`.
+    /// Short author label -- `user@host`.
     pub author_label: String,
     /// Post body as plain text.
     pub text: String,
@@ -968,7 +952,7 @@ impl ChatClient {
     /// M6.4 new-device side: mint a link-device offer for THIS device and
     /// publish it to the relay blob store, returning the QR pointer to encode
     /// plus the short-code to show beside it. `ttl_secs` bounds the enrollment
-    /// window — the offer self-expires and the existing device rejects a stale
+    /// window -- the offer self-expires and the existing device rejects a stale
     /// one on confirm.
     ///
     /// # Errors
@@ -1066,7 +1050,7 @@ impl ChatClient {
     }
 
     /// Join a private group from an `x0x://invite/...` link through the v1
-    /// shared join policy ([`fetchit_chat::Client::join_group_auto`]) — the
+    /// shared join policy ([`fetchit_chat::Client::join_group_auto`]) -- the
     /// same path the desktop shell takes, so both shells join identically.
     ///
     /// Native-first, then ALWAYS bridge. The best-effort native
@@ -1357,7 +1341,7 @@ impl ChatClient {
     /// Send a plaintext fediverse DM (`@user@instance`) from our minted
     /// handle: sign a direct `Create(Note)` on the device and deliver it to
     /// the recipient's inbox. Requires a minted handle. This message is
-    /// **not** end-to-end encrypted — the UI shows the unencrypted-thread
+    /// **not** end-to-end encrypted -- the UI shows the unencrypted-thread
     /// banner and offers escalation to PQ chat (P4).
     ///
     /// # Errors
@@ -1449,17 +1433,18 @@ impl ChatClient {
         })
     }
 
-    /// Pull inbound fediverse messages (replies on the plaintext rails)
-    /// for the minted handle, strictly newer than `since_ms` (`0` from
-    /// the start), oldest-first. Owner-only (bridge-auth-v1).
+    /// Sync inbound fediverse messages (replies on the plaintext rails)
+    /// from the bridge inbox into the engine's durable thread store.
+    /// The engine owns the cursor: every pulled message is persisted
+    /// into its sender's own thread and the cursor advances in the same
+    /// atomic save, so nothing can be skipped or lost to a process
+    /// death. Returns how many messages were new; render threads via
+    /// [`Self::conversation_history`] with an `f:<handle>` key.
     ///
     /// # Errors
     /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
     /// is unreachable.
-    pub async fn fedi_inbox(
-        &self,
-        since_ms: i64,
-    ) -> Result<Vec<FediInboxMessageFfi>, ChatFfiError> {
+    pub async fn fedi_sync_inbox(&self) -> Result<u32, ChatFfiError> {
         let handle = self
             .fedi_actor_status()
             .ok_or_else(|| ChatFfiError::Invalid {
@@ -1468,21 +1453,10 @@ impl ChatClient {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        let msgs = self
-            .inner
-            .fetch_fedi_inbox(&handle, since_ms, now_ms)
+        self.inner
+            .sync_fedi_inbox(&handle, now_ms)
             .await
-            .map_err(ChatFfiError::from)?;
-        Ok(msgs
-            .into_iter()
-            .map(|m| FediInboxMessageFfi {
-                sender_label: fetchit_chat::fedi_feed::author_label(&m.sender_actor_url),
-                sender_actor_url: m.sender_actor_url,
-                note_id: m.note_id,
-                text: m.text,
-                created_ms: m.created_ms,
-            })
-            .collect())
+            .map_err(ChatFfiError::from)
     }
 
     /// Pull the read feed: newest text posts from followed accounts,
@@ -1842,11 +1816,36 @@ impl ChatClient {
         &self,
         conv_key: String,
     ) -> Result<Vec<ChatHistoryMessageFfi>, ChatFfiError> {
+        // Mirror the shell key scheme: "f:<handle>" is a fediverse
+        // (plaintext-rails) thread served from the engine's durable
+        // fedi thread store; "g:<hex>" is a group; bare hex is a DM
+        // peer. A fedi thread with no minted handle hydrates empty --
+        // the quiet-hydrate contract, never an error.
+        if let Some(label) = conv_key.strip_prefix("f:") {
+            let Some(handle) = self.fedi_actor_status() else {
+                return Ok(Vec::new());
+            };
+            let msgs = self
+                .inner
+                .fedi_thread_history(&handle, label)
+                .map_err(ChatFfiError::from)?;
+            return Ok(msgs
+                .into_iter()
+                .map(|m| ChatHistoryMessageFfi {
+                    outbound: m.outbound,
+                    from_agent_id_hex: String::new(),
+                    sender_name: None,
+                    body: m.text,
+                    sent_at_ms: u64::try_from(m.at_ms).unwrap_or(0),
+                    message_id: m.note_id,
+                    delivered: m.delivered,
+                })
+                .collect());
+        }
         let registry = self.inner.registry_arc().ok_or(ChatFfiError::Invalid {
             reason: "no chat state".to_owned(),
         })?;
-        // Mirror the shell key scheme: "g:<hex>" is a group, bare hex is a DM
-        // peer. The engine keys every conversation by group_id_hex, so a group
+        // The engine keys every conversation by group_id_hex, so a group
         // is a direct get; a DM has no peer-keyed id and must be resolved.
         let conv = if let Some(group_id) = conv_key.strip_prefix("g:") {
             let gid = fetchit_chat::groups::GroupId::parse(group_id).map_err(|e| {
@@ -2181,7 +2180,7 @@ async fn run_inbound_pump(
             }
         };
         // Variant-aware: StaleEpoch / KemDecapFailed / missing-card drops
-        // are Ok-shaped but NOT terminal — the classifier holds exactly
+        // are Ok-shaped but NOT terminal -- the classifier holds exactly
         // those for redelivery.
         if fetchit_chat::conversation::confirms_delivery(&dispatch) {
             if let Some(a) = &ack {

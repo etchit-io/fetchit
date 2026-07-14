@@ -122,6 +122,20 @@ impl StoreLayout {
         self.fedi_dir.join(format!("{handle}.json.enc"))
     }
 
+    /// Path of the sealed fediverse DM thread store for `handle` (M7
+    /// P3): every fedi direct message this device sent or pulled, plus
+    /// the bridge-inbox cursor, in one file so a cursor advance can
+    /// never outlive the messages it covers. Nested under
+    /// `fedi/threads/` so [`crate::fedi_vault::list_actor_handles`]'s
+    /// `fedi/*.json.enc` scan never mistakes a thread store for a
+    /// minted identity.
+    #[must_use]
+    pub fn fedi_threads_path(&self, handle: &str) -> PathBuf {
+        self.fedi_dir
+            .join("threads")
+            .join(format!("{handle}.json.enc"))
+    }
+
     /// Path of the handle-resolution continuity ledger (M5.1): a JSON
     /// map of canonical fediverse handle to the agent id it last
     /// verifiably resolved to. Plaintext: every value in it is public
