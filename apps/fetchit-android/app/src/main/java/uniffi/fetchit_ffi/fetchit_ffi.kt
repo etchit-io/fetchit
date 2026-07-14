@@ -1323,7 +1323,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_import_pair_uri() != 9374.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 13616.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group() != 57880.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_join_group_durable() != 49722.toShort()) {
@@ -2131,15 +2131,19 @@ public interface ChatClientInterface {
     suspend fun `importPairUri`(`uri`: kotlin.String)
     
     /**
-     * Join a private group from an `x0x://invite/...` link via the engine-A
-     * relay bridge ([`fetchit_chat::Client::join_group_bridged`]).
+     * Join a private group from an `x0x://invite/...` link through the v1
+     * shared join policy ([`fetchit_chat::Client::join_group_auto`]) — the
+     * same path the desktop shell takes, so both shells join identically.
      *
-     * The in-process x0xd runs gossip-off (empty bootstrap), so the join is
-     * mesh-independent: it captures the joiner's signed `member_joined` inline
-     * from `POST /groups/join`, bridges it to the owner over the relay, and
-     * waits for membership to converge as the owner's authoritative add rides
-     * the bridge back. `run_inbound_pump` (live since `connect`) applies that
-     * bridged result via `dispatch_inbound_bridge`.
+     * Native-first, then ALWAYS bridge. The best-effort native
+     * warm-gossip membership wait runs first (outcome non-gating) so the
+     * *existing* members converge over the group's gossip topic; the
+     * engine-A relay bridge then always runs, which is what guarantees the
+     * joiner's `TreeKEM` Welcome/keys regardless of gossip reachability.
+     * The single-use invite is spent exactly once: the inline
+     * `member_joined` captured by the one `join_post` is reused on the
+     * bridge. `run_inbound_pump` (live since `connect`) applies the bridged
+     * result via `dispatch_inbound_bridge`.
      *
      * After the join converges, best-effort warms every other member's
      * ML-DSA card so the first inbound private-group frame decrypts
@@ -3143,15 +3147,19 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * Join a private group from an `x0x://invite/...` link via the engine-A
-     * relay bridge ([`fetchit_chat::Client::join_group_bridged`]).
+     * Join a private group from an `x0x://invite/...` link through the v1
+     * shared join policy ([`fetchit_chat::Client::join_group_auto`]) — the
+     * same path the desktop shell takes, so both shells join identically.
      *
-     * The in-process x0xd runs gossip-off (empty bootstrap), so the join is
-     * mesh-independent: it captures the joiner's signed `member_joined` inline
-     * from `POST /groups/join`, bridges it to the owner over the relay, and
-     * waits for membership to converge as the owner's authoritative add rides
-     * the bridge back. `run_inbound_pump` (live since `connect`) applies that
-     * bridged result via `dispatch_inbound_bridge`.
+     * Native-first, then ALWAYS bridge. The best-effort native
+     * warm-gossip membership wait runs first (outcome non-gating) so the
+     * *existing* members converge over the group's gossip topic; the
+     * engine-A relay bridge then always runs, which is what guarantees the
+     * joiner's `TreeKEM` Welcome/keys regardless of gossip reachability.
+     * The single-use invite is spent exactly once: the inline
+     * `member_joined` captured by the one `join_post` is reused on the
+     * bridge. `run_inbound_pump` (live since `connect`) applies the bridged
+     * result via `dispatch_inbound_bridge`.
      *
      * After the join converges, best-effort warms every other member's
      * ML-DSA card so the first inbound private-group frame decrypts
