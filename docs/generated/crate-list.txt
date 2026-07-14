@@ -1,3 +1,4 @@
+fetchit-bridge-server
 fetchit-chat
 fetchit-cli
 fetchit-core
