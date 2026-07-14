@@ -301,6 +301,10 @@ pub enum SignatureVerifyError {
     /// canonical signing base reconstructed from the request.
     #[error("RSA signature verification failed")]
     VerifyFailed,
+    /// The signer's declared header list names a header the request
+    /// does not carry, so the signing base cannot be reconstructed.
+    #[error("signed header {0:?} missing from request")]
+    MissingSignedHeader(String),
 }
 
 impl SignatureVerifyError {
@@ -314,6 +318,7 @@ impl SignatureVerifyError {
             Self::DigestMismatch => "digest_mismatch",
             Self::SignatureDecodeFailed(_) => "signature_decode",
             Self::VerifyFailed => "verify_failed",
+            Self::MissingSignedHeader(_) => "missing_signed_header",
         }
     }
 }

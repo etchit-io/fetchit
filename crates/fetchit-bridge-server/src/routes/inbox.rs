@@ -32,7 +32,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use fetchit_fedi::signature::{compute_content_digest, verify_signature_rfc9421};
 use fetchit_fedi::signature_cavage::{
-    compute_digest_cavage, parse_cavage_signature_header, verify_signature_cavage,
+    compute_digest_cavage, parse_cavage_signature_header, verify_signature_cavage_declared,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -88,7 +88,9 @@ pub async fn post_inbox(
     let Some(pubkey_pem) = sender.rsa_public_key_pem.as_deref() else {
         return (StatusCode::UNAUTHORIZED, "sender has no key").into_response();
     };
-    if let Err(reason) = verify_inbound_signature(&headers, &handle, pubkey_pem, &body) {
+    if let Err(reason) =
+        verify_inbound_signature(&headers, &handle, pubkey_pem, &body, &state.config.domain)
+    {
         return (StatusCode::UNAUTHORIZED, reason).into_response();
     }
 
@@ -111,15 +113,26 @@ pub async fn post_inbox(
 /// `pubkey_pem`. Supports both wire formats Mastodon-family servers
 /// emit (RFC 9421 and draft-cavage). Returns a short reason string on
 /// failure (surfaced as the 401 body).
+///
+/// `public_host` is the fediverse domain this bridge is authoritative
+/// for (`config.domain`). Remote signers sign the `host` from our
+/// advertised inbox URL — `etchit.io` — while the edge worker forwards
+/// to the origin vhost, so the received `Host` header names the WRONG
+/// host for signature reconstruction. Both candidates are tried,
+/// public domain first (the 2026-07-14 zero-stored-replies root
+/// cause, one of two: the fixed-base cavage verifier that ignored the
+/// signer's declared header list was the other).
 fn verify_inbound_signature(
     headers: &HeaderMap,
     handle: &str,
     pubkey_pem: &str,
     body: &[u8],
+    public_host: &str,
 ) -> Result<(), &'static str> {
     let date = header(headers, "date").ok_or("missing date")?;
     check_date_skew(&date).map_err(|()| "stale date")?;
     let host = header(headers, "host").ok_or("missing host")?;
+    let host_candidates = [public_host, host.as_str()];
     let request_path = format!("/actors/{handle}/inbox");
     let pubkey =
         fetchit_fedi::signature::parse_rsa_public_key_pem(pubkey_pem).ok_or("bad sender key")?;
@@ -132,21 +145,28 @@ fn verify_inbound_signature(
             return Err("digest mismatch");
         }
         let scheme = header(headers, "x-forwarded-proto").unwrap_or_else(|| "https".into());
-        let fwd_host = header(headers, "x-forwarded-host").unwrap_or_else(|| host.clone());
-        let target_uri = format!("{scheme}://{fwd_host}{request_path}");
-        verify_signature_rfc9421(
-            &pubkey,
-            &target_uri,
-            &host,
-            &date,
-            &content_digest,
-            &sig_input,
-            &signature,
-            body,
-        )
-        .map_err(|_| "signature invalid")
+        for candidate in dedup_two(&host_candidates) {
+            let target_uri = format!("{scheme}://{candidate}{request_path}");
+            if verify_signature_rfc9421(
+                &pubkey,
+                &target_uri,
+                candidate,
+                &date,
+                &content_digest,
+                &sig_input,
+                &signature,
+                body,
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err("signature invalid")
     } else {
-        // draft-cavage.
+        // draft-cavage — verified over the signer's DECLARED header
+        // list (Mastodon signs `(request-target) host date digest
+        // content-type`), never a fixed base.
         let signature = header(headers, "signature").ok_or("missing signature")?;
         let digest = header(headers, "digest").ok_or("missing digest")?;
         if compute_digest_cavage(body) != digest {
@@ -157,18 +177,28 @@ fn verify_inbound_signature(
         if !parsed.algorithm.is_empty() && parsed.algorithm != "rsa-sha256" {
             return Err("unsupported algorithm");
         }
-        let request_target = format!("post {request_path}");
-        verify_signature_cavage(
+        verify_signature_cavage_declared(
             &pubkey,
-            &request_target,
-            &host,
-            &date,
-            &digest,
+            "post",
+            &request_path,
+            &host_candidates,
+            &|name| header(headers, name),
             &signature,
-            body,
         )
-        .map_err(|_| "signature invalid")
+        .map_err(|e| match e {
+            fetchit_fedi::signature::SignatureVerifyError::MissingSignedHeader(_) => {
+                "signed header missing from request"
+            }
+            _ => "signature invalid",
+        })
     }
+}
+
+/// The two host candidates with an equal pair collapsed to one, so the
+/// common direct-to-origin case costs a single verification.
+fn dedup_two<'a>(candidates: &'a [&'a str; 2]) -> impl Iterator<Item = &'a str> {
+    let dup = candidates[0] == candidates[1];
+    candidates.iter().take(if dup { 1 } else { 2 }).copied()
 }
 
 /// A `Create(Note)`: reduce the Note to plain text and store it as an
@@ -350,4 +380,87 @@ fn check_date_skew(date: &str) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::pkcs8::EncodePublicKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+    use rsa::RsaPrivateKey;
+    use sha2::Sha256;
+
+    /// A request exactly as prod receives a Mastodon delivery: signed
+    /// over the PUBLIC domain and Mastodon's 5-header list, arriving
+    /// with the edge-worker's ORIGIN vhost in `Host`.
+    fn mastodon_delivery() -> (HeaderMap, Vec<u8>, String) {
+        let priv_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let pubkey_pem = priv_key
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let body = br#"{"type":"Create","actor":"https://fosstodon.org/users/happyborg"}"#.to_vec();
+        let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
+        let digest = compute_digest_cavage(&body);
+        let base = format!(
+            "(request-target): post /actors/josh/inbox\n\
+             host: etchit.io\n\
+             date: {date}\n\
+             digest: {digest}\n\
+             content-type: application/activity+json"
+        );
+        let signing_key = SigningKey::<Sha256>::new(priv_key);
+        let sig = B64.encode(signing_key.sign(base.as_bytes()).to_bytes());
+        let signature = format!(
+            "keyId=\"https://fosstodon.org/users/happyborg#main-key\",\
+             algorithm=\"rsa-sha256\",\
+             headers=\"(request-target) host date digest content-type\",\
+             signature=\"{sig}\""
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("bridge-origin.etchit.io"));
+        headers.insert("date", HeaderValue::from_str(&date).unwrap());
+        headers.insert("digest", HeaderValue::from_str(&digest).unwrap());
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("application/activity+json"),
+        );
+        headers.insert("signature", HeaderValue::from_str(&signature).unwrap());
+        (headers, body, pubkey_pem)
+    }
+
+    #[test]
+    fn mastodon_shaped_delivery_verifies_behind_edge_worker() {
+        // The exact prod scenario that produced zero stored replies:
+        // Mastodon's declared header list (with content-type) plus the
+        // origin-vhost Host header. Both killers at once.
+        let (headers, body, pubkey_pem) = mastodon_delivery();
+        verify_inbound_signature(&headers, "josh", &pubkey_pem, &body, "etchit.io")
+            .expect("a real Mastodon delivery must verify through the edge topology");
+    }
+
+    #[test]
+    fn wrong_public_host_still_fails() {
+        // Sanity: candidates don't make verification lax — a signature
+        // over a host we never advertise stays rejected.
+        let (headers, body, pubkey_pem) = mastodon_delivery();
+        assert!(
+            verify_inbound_signature(&headers, "josh", &pubkey_pem, &body, "evil.example").is_err(),
+            "signature bound to etchit.io must not verify for evil.example + origin vhost",
+        );
+    }
+
+    #[test]
+    fn tampered_body_fails_digest_gate() {
+        let (headers, _body, pubkey_pem) = mastodon_delivery();
+        let err = verify_inbound_signature(&headers, "josh", &pubkey_pem, b"{}", "etchit.io")
+            .unwrap_err();
+        assert_eq!(err, "digest mismatch");
+    }
 }

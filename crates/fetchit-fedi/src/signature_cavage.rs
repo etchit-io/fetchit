@@ -336,6 +336,100 @@ pub fn verify_signature_cavage(
         .map_err(|_| SignatureVerifyError::VerifyFailed)
 }
 
+/// Minimum components a cavage `headers` list must cover before its
+/// signature is worth anything: without these, a valid signature binds
+/// nothing that matters (an attacker could sign only `date`).
+const CAVAGE_REQUIRED_COMPONENTS: [&str; 4] = ["(request-target)", "host", "date", "digest"];
+
+/// Verify a draft-cavage signature over the exact component list the
+/// SIGNER declared (`headers="..."`), reconstructing each signing-base
+/// line from the live request — what the spec requires of a verifier.
+///
+/// [`verify_signature_cavage`] instead checks a fixed 4-line base (our
+/// own emitter's shape) and can never verify a Mastodon delivery,
+/// which signs `(request-target) host date digest content-type` — the
+/// 2026-07-14 zero-stored-replies root cause. The second stacked
+/// killer: behind the etchit.io edge worker the received `Host` is the
+/// origin vhost, not the public domain the sender signed — hence
+/// `host_candidates`, tried in order (public domain first, received
+/// `Host` second), at most one extra RSA verify.
+///
+/// The caller MUST have already validated the request's `digest`
+/// header against the body and its `date` header against a skew
+/// window — this function binds the presented headers to the key; it
+/// does not re-check content freshness.
+///
+/// # Errors
+/// - [`SignatureVerifyError::HeaderMalformed`] — unparseable
+///   `Signature` header, or a declared list that fails to cover
+///   [`CAVAGE_REQUIRED_COMPONENTS`].
+/// - [`SignatureVerifyError::MissingSignedHeader`] — the signer
+///   declared a header the request does not carry.
+/// - [`SignatureVerifyError::SignatureDecodeFailed`] — undecodable
+///   signature payload.
+/// - [`SignatureVerifyError::VerifyFailed`] — no host candidate
+///   produces a verifying base.
+pub fn verify_signature_cavage_declared(
+    public_key: &RsaPublicKey,
+    method: &str,
+    path: &str,
+    host_candidates: &[&str],
+    req_header: &dyn Fn(&str) -> Option<String>,
+    signature_header: &str,
+) -> Result<(), SignatureVerifyError> {
+    let params = parse_cavage_signature_header(signature_header)?;
+    // Absent `headers` defaults to `date` alone per draft-cavage —
+    // far below the required floor, so it fails the cover check.
+    let declared: Vec<String> = if params.headers.trim().is_empty() {
+        vec!["date".to_owned()]
+    } else {
+        params
+            .headers
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect()
+    };
+    for required in CAVAGE_REQUIRED_COMPONENTS {
+        if !declared.iter().any(|h| h == required) {
+            return Err(SignatureVerifyError::HeaderMalformed(format!(
+                "signed header list must cover {required}"
+            )));
+        }
+    }
+
+    let sig_bytes = B64
+        .decode(&params.signature)
+        .map_err(|e| SignatureVerifyError::SignatureDecodeFailed(format!("{e}")))?;
+    let parsed_sig = Signature::try_from(sig_bytes.as_slice())
+        .map_err(|e| SignatureVerifyError::SignatureDecodeFailed(format!("{e}")))?;
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key.clone());
+
+    let mut tried: Vec<&str> = Vec::with_capacity(host_candidates.len());
+    for host in host_candidates {
+        if tried.contains(host) {
+            continue;
+        }
+        tried.push(host);
+        let mut lines = Vec::with_capacity(declared.len());
+        for name in &declared {
+            let value = match name.as_str() {
+                "(request-target)" => format!("{method} {path}"),
+                "host" => (*host).to_owned(),
+                other => req_header(other)
+                    .ok_or_else(|| SignatureVerifyError::MissingSignedHeader(other.to_owned()))?,
+            };
+            lines.push(format!("{name}: {value}"));
+        }
+        if verifying_key
+            .verify(lines.join("\n").as_bytes(), &parsed_sig)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err(SignatureVerifyError::VerifyFailed)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -364,6 +458,155 @@ mod tests {
                 pub_key,
             )
         })
+    }
+
+    /// Sign an arbitrary base with the shared test key and wrap it in a
+    /// cavage `Signature` header declaring `headers_list` — the shape a
+    /// remote Mastodon emits, which our own [`sign_post_cavage`] never
+    /// produces (it pins the 4-header list).
+    fn sign_declared(headers_list: &str, base: &str) -> String {
+        let (key, _) = test_key_material();
+        let priv_key = RsaPrivateKey::from_pkcs8_pem(&key.rsa_private_pem).unwrap();
+        let signing_key = SigningKey::<Sha256>::new(priv_key);
+        let sig = B64.encode(signing_key.sign(base.as_bytes()).to_bytes());
+        format!(
+            "keyId=\"https://fosstodon.org/users/happyborg#main-key\",\
+             algorithm=\"rsa-sha256\",headers=\"{headers_list}\",signature=\"{sig}\""
+        )
+    }
+
+    fn mastodon_req_header(name: &str) -> Option<String> {
+        match name {
+            "date" => Some("Mon, 14 Jul 2026 10:00:00 GMT".to_owned()),
+            "digest" => Some("SHA-256=uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=".to_owned()),
+            "content-type" => Some("application/activity+json".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn declared_verifies_mastodon_shape_with_content_type() {
+        // The exact list every current Mastodon signs — five lines,
+        // including content-type, which the fixed-base verifier can
+        // never reconstruct.
+        let list = "(request-target) host date digest content-type";
+        let base = "(request-target): post /actors/josh/inbox\n\
+                    host: etchit.io\n\
+                    date: Mon, 14 Jul 2026 10:00:00 GMT\n\
+                    digest: SHA-256=uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=\n\
+                    content-type: application/activity+json";
+        let sig = sign_declared(list, base);
+        let (_, pub_key) = test_key_material();
+        verify_signature_cavage_declared(
+            pub_key,
+            "post",
+            "/actors/josh/inbox",
+            // The edge-worker topology: received Host is the origin
+            // vhost; the public domain the sender signed comes first.
+            &["etchit.io", "bridge-origin.etchit.io"],
+            &mastodon_req_header,
+            &sig,
+        )
+        .expect("mastodon-shaped signature must verify");
+    }
+
+    #[test]
+    fn declared_falls_through_host_candidates() {
+        let list = "(request-target) host date digest";
+        let base = "(request-target): post /actors/josh/inbox\n\
+                    host: etchit.io\n\
+                    date: Mon, 14 Jul 2026 10:00:00 GMT\n\
+                    digest: SHA-256=uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=";
+        let sig = sign_declared(list, base);
+        let (_, pub_key) = test_key_material();
+        // Signed host is only the SECOND candidate — must still verify.
+        verify_signature_cavage_declared(
+            pub_key,
+            "post",
+            "/actors/josh/inbox",
+            &["bridge-origin.etchit.io", "etchit.io"],
+            &mastodon_req_header,
+            &sig,
+        )
+        .expect("second host candidate must be tried");
+        // No candidate matches what was signed → VerifyFailed. This is
+        // the pre-fix production topology (received Host only).
+        let err = verify_signature_cavage_declared(
+            pub_key,
+            "post",
+            "/actors/josh/inbox",
+            &["bridge-origin.etchit.io"],
+            &mastodon_req_header,
+            &sig,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::VerifyFailed));
+    }
+
+    #[test]
+    fn declared_rejects_under_covered_header_list() {
+        // A valid signature over a list that omits digest binds
+        // nothing — must be rejected before any RSA math.
+        let list = "(request-target) host date";
+        let base = "(request-target): post /actors/josh/inbox\n\
+                    host: etchit.io\n\
+                    date: Mon, 14 Jul 2026 10:00:00 GMT";
+        let sig = sign_declared(list, base);
+        let (_, pub_key) = test_key_material();
+        let err = verify_signature_cavage_declared(
+            pub_key,
+            "post",
+            "/actors/josh/inbox",
+            &["etchit.io"],
+            &mastodon_req_header,
+            &sig,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::HeaderMalformed(_)));
+    }
+
+    #[test]
+    fn declared_reports_missing_signed_header() {
+        // Signer declared a header the request doesn't carry.
+        let list = "(request-target) host date digest x-custom";
+        let base = "(request-target): post /actors/josh/inbox\n\
+                    host: etchit.io\n\
+                    date: Mon, 14 Jul 2026 10:00:00 GMT\n\
+                    digest: SHA-256=uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=\n\
+                    x-custom: nope";
+        let sig = sign_declared(list, base);
+        let (_, pub_key) = test_key_material();
+        let err = verify_signature_cavage_declared(
+            pub_key,
+            "post",
+            "/actors/josh/inbox",
+            &["etchit.io"],
+            &mastodon_req_header,
+            &sig,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SignatureVerifyError::MissingSignedHeader(h) if h == "x-custom"));
+    }
+
+    #[test]
+    fn declared_preserves_signer_header_order() {
+        // The base must follow the DECLARED order, not a canonical one.
+        let list = "host (request-target) digest date";
+        let base = "host: etchit.io\n\
+                    (request-target): post /actors/josh/inbox\n\
+                    digest: SHA-256=uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=\n\
+                    date: Mon, 14 Jul 2026 10:00:00 GMT";
+        let sig = sign_declared(list, base);
+        let (_, pub_key) = test_key_material();
+        verify_signature_cavage_declared(
+            pub_key,
+            "post",
+            "/actors/josh/inbox",
+            &["etchit.io"],
+            &mastodon_req_header,
+            &sig,
+        )
+        .expect("declared order must drive base construction");
     }
 
     #[test]
