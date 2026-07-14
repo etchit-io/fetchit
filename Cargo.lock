@@ -2989,6 +2989,7 @@ dependencies = [
  "fetchit-relay-proto",
  "hex",
  "reqwest 0.12.28",
+ "rsa",
  "rusqlite",
  "saorsa-pqc 0.5.1",
  "serde",

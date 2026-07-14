@@ -11,7 +11,7 @@ set -eu
 # (matches check-crate-list.sh / check-doc-paths.sh). Without it the diff runs
 # against the caller's working directory and can flag another checkout's history.
 cd "$(CDPATH= cd -- "$(dirname -- "$0")"/.. && pwd)"
-base="${1:-origin/chat}"
+base="${1:-origin/main}"
 # Conservative starter set (extend only after proving low false-positive):
 pat='lands.next.milestone|does(n.t| not) exist today|scaffolding|Stage [0-9]|C[45][[:space:]]|C[45]-scaffold'
 

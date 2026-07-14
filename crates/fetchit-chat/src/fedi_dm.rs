@@ -23,6 +23,7 @@ use serde::Deserialize;
 
 use crate::client::Client;
 use crate::error::{ChatError, Result};
+use crate::fedi_thread::{load_fedi_threads, save_fedi_threads, FediThreadMsg};
 
 /// One inbound fediverse message pulled from the bridge inbox, ready to
 /// render in the fedi thread.
@@ -120,6 +121,24 @@ impl Client {
             .await
             .is_ok();
 
+        // Persist the sent DM into the durable thread store BEFORE
+        // returning: without this the bubble exists only in shell
+        // memory and vanishes on process death. A store failure is
+        // logged, not returned — the DM already left for the
+        // recipient's inbox, and reporting failure now would be the
+        // bigger lie.
+        let record = FediThreadMsg {
+            outbound: true,
+            text: body.to_owned(),
+            note_id: note_id.clone(),
+            at_ms: i64::try_from(now_ms).unwrap_or(i64::MAX),
+            peer_actor_url: recipient_actor_url.clone(),
+            delivered,
+        };
+        if let Err(e) = self.record_fedi_thread_msg(handle, target, record) {
+            log::warn!("[chat] fedi DM sent but not persisted locally: {e}");
+        }
+
         Ok(FediDmReport {
             recipient_actor_url,
             note_id,
@@ -181,6 +200,53 @@ impl Client {
             .await
             .map_err(|e| ChatError::Invalid(format!("bridge inbox decode: {e}")))?;
         Ok(body.items)
+    }
+
+    /// Append one message to `handle`'s durable fedi thread store under
+    /// the thread for `label` (canonicalised inside the store),
+    /// persisting atomically.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load/save failures.
+    fn record_fedi_thread_msg(&self, handle: &str, label: &str, msg: FediThreadMsg) -> Result<()> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let mut threads = load_fedi_threads(handle, &master, &layout)?;
+        threads.insert(label, msg);
+        save_fedi_threads(handle, &threads, &master, &layout)
+    }
+
+    /// Sync the bridge inbox into the durable thread store: pull
+    /// everything newer than the stored cursor, land every message in
+    /// its sender's own thread, then advance the cursor. Messages and
+    /// cursor persist in one atomic save, so no message can be
+    /// cursor-skipped — the loss class behind replies vanishing
+    /// on-device. Returns how many messages were new.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] on a missing minted identity, transport
+    /// failure, non-2xx bridge answer, malformed body, or store IO.
+    pub async fn sync_fedi_inbox(&self, handle: &str, now_ms: u64) -> Result<u32> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let mut threads = load_fedi_threads(handle, &master, &layout)?;
+        let items = self
+            .fetch_fedi_inbox(handle, threads.cursor_ms, now_ms)
+            .await?;
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let inserted = threads.fold_inbox(&items);
+        save_fedi_threads(handle, &threads, &master, &layout)?;
+        Ok(inserted)
+    }
+
+    /// The durable fedi DM thread with `label` (canonicalised), oldest
+    /// first — the render source for an `f:<label>` conversation.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load failures.
+    pub fn fedi_thread_history(&self, handle: &str, label: &str) -> Result<Vec<FediThreadMsg>> {
+        let (master, layout) = self.fedi_at_rest()?;
+        Ok(load_fedi_threads(handle, &master, &layout)?.history(label))
     }
 }
 

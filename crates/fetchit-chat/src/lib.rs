@@ -31,6 +31,7 @@ pub mod fedi_feed;
 pub mod fedi_follow;
 pub mod fedi_identity;
 pub mod fedi_resolutions;
+pub mod fedi_thread;
 pub mod fedi_vault;
 pub mod group_invite_uri;
 pub mod groups;
