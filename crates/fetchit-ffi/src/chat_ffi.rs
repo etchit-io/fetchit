@@ -1065,15 +1065,19 @@ impl ChatClient {
         Ok(GroupFfi::from(group))
     }
 
-    /// Join a private group from an `x0x://invite/...` link via the engine-A
-    /// relay bridge ([`fetchit_chat::Client::join_group_bridged`]).
+    /// Join a private group from an `x0x://invite/...` link through the v1
+    /// shared join policy ([`fetchit_chat::Client::join_group_auto`]) — the
+    /// same path the desktop shell takes, so both shells join identically.
     ///
-    /// The in-process x0xd runs gossip-off (empty bootstrap), so the join is
-    /// mesh-independent: it captures the joiner's signed `member_joined` inline
-    /// from `POST /groups/join`, bridges it to the owner over the relay, and
-    /// waits for membership to converge as the owner's authoritative add rides
-    /// the bridge back. `run_inbound_pump` (live since `connect`) applies that
-    /// bridged result via `dispatch_inbound_bridge`.
+    /// Native-first, then ALWAYS bridge. The best-effort native
+    /// warm-gossip membership wait runs first (outcome non-gating) so the
+    /// *existing* members converge over the group's gossip topic; the
+    /// engine-A relay bridge then always runs, which is what guarantees the
+    /// joiner's `TreeKEM` Welcome/keys regardless of gossip reachability.
+    /// The single-use invite is spent exactly once: the inline
+    /// `member_joined` captured by the one `join_post` is reused on the
+    /// bridge. `run_inbound_pump` (live since `connect`) applies the bridged
+    /// result via `dispatch_inbound_bridge`.
     ///
     /// After the join converges, best-effort warms every other member's
     /// ML-DSA card so the first inbound private-group frame decrypts
@@ -1092,12 +1096,13 @@ impl ChatClient {
     ) -> Result<GroupFfi, ChatFfiError> {
         // GroupInvite is a transparent newtype over the raw URI String.
         let inv = fetchit_chat::groups::GroupInvite(invite);
-        // Engine-A bridged join: gossip-off v1 cannot reach the owner over a
-        // cold/NAT gossip mesh, so route through the relay bridge. The plain
-        // groups().join() is the warm-gossip path; it is not used here.
+        // v1 shared policy: native warm-gossip convergence first (so existing
+        // members converge natively), then ALWAYS the engine-A bridge, which
+        // is what guarantees the joiner's keys. Desktop already routes here;
+        // this keeps Android on the same path rather than bridge-only.
         let group = self
             .inner
-            .join_group_bridged(&inv, display_name.as_deref())
+            .join_group_auto(&inv, display_name.as_deref())
             .await
             .map_err(ChatFfiError::from)?;
 
@@ -1451,7 +1456,10 @@ impl ChatClient {
     /// # Errors
     /// [`ChatFfiError::Invalid`] when no handle is minted or the bridge
     /// is unreachable.
-    pub async fn fedi_inbox(&self, since_ms: i64) -> Result<Vec<FediInboxMessageFfi>, ChatFfiError> {
+    pub async fn fedi_inbox(
+        &self,
+        since_ms: i64,
+    ) -> Result<Vec<FediInboxMessageFfi>, ChatFfiError> {
         let handle = self
             .fedi_actor_status()
             .ok_or_else(|| ChatFfiError::Invalid {
