@@ -138,6 +138,13 @@ jobs:
       # needs the `anvil` + `ant` binaries — into every CI build. That
       # suite is run locally / pre-release, not here.
       - run: cargo test --workspace
+      # The relay-server's fediverse-inbox module (registry + inbox
+      # routes, HTTP-sig verify) sits behind the `fediverse-inbox`
+      # feature, so the plain `--workspace` run above never compiles its
+      # tests. Enable it in a scoped step (NOT --all-features, per above)
+      # so a fixture/verify regression there can't land invisibly — a
+      # 2026-07-14 flag-day fixture skew reached main exactly this way.
+      - run: cargo test -p fetchit-relay-server --features fediverse-inbox
 
   # Desktop app — runs the Vite/TS frontend suite (vitest) and the Tauri
   # backend suite (src-tauri). src-tauri is excluded from the root
