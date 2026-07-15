@@ -217,6 +217,17 @@ async fn handle_create(
     if note.get("type").and_then(Value::as_str) != Some("Note") {
         return Ok(());
     }
+    // Only DIRECT messages belong in the DM inbox. A followed account's
+    // public posts (and its public @-replies to third parties) are also
+    // delivered here — that is how ActivityPub push works — but they are
+    // public timeline content, not private mail, and must never render
+    // as a DM. Public/unlisted/followers-only notes are dropped (the
+    // client feed surface pulls public posts from outboxes); only a note
+    // addressed specifically to us, with no public/followers audience,
+    // is stored.
+    if !is_direct_to(note, &rec.actor_url) {
+        return Ok(());
+    }
     let content_html = note
         .get("content")
         .and_then(Value::as_str)
@@ -252,6 +263,45 @@ async fn handle_create(
         .await
         .map(|_| ())
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "store error").into_response())
+}
+
+/// The `as:Public` collection aliases that mark a note public (or, in
+/// `cc` only, unlisted). Any of these anywhere in the audience means the
+/// note is not private.
+const PUBLIC_ALIASES: [&str; 3] = [
+    "https://www.w3.org/ns/activitystreams#Public",
+    "as:Public",
+    "Public",
+];
+
+/// Collect the string URIs from an `ActivityPub` addressing field, which
+/// may be a single string or an array of strings (both are valid).
+fn audience_uris(field: Option<&Value>) -> Vec<&str> {
+    match field {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(arr)) => arr.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Is `note` a direct message addressed to `our_actor_url`?
+///
+/// True only when the combined `to`+`cc` audience (a) contains no
+/// `as:Public` alias (rules out public and unlisted), (b) contains no
+/// followers-collection URI — a `.../followers` broadcast — (rules out
+/// followers-only), and (c) actually names our actor. This is the same
+/// visibility a Mastodon receiver computes; anything else is timeline
+/// content that must not enter the DM inbox.
+fn is_direct_to(note: &Value, our_actor_url: &str) -> bool {
+    let mut audience = audience_uris(note.get("to"));
+    audience.extend(audience_uris(note.get("cc")));
+    if audience.iter().any(|u| PUBLIC_ALIASES.contains(u)) {
+        return false;
+    }
+    if audience.iter().any(|u| u.ends_with("/followers")) {
+        return false;
+    }
+    audience.contains(&our_actor_url)
 }
 
 /// An `Accept(Follow)`: flip the matching following row to `accepted`.
@@ -476,5 +526,65 @@ mod tests {
         let err = verify_inbound_signature(&headers, "josh", &pubkey_pem, b"{}", "etchit.io")
             .unwrap_err();
         assert_eq!(err, "digest mismatch");
+    }
+
+    const OURS: &str = "https://etchit.io/actors/josh";
+
+    #[test]
+    fn direct_note_addressed_only_to_us_is_a_dm() {
+        // A true DM: to = [us], no public, no followers.
+        let note = json!({ "to": [OURS], "cc": [] });
+        assert!(is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn public_post_mentioning_us_is_not_a_dm() {
+        // The exact prod shape of the "hi, in case PMs aren't landing"
+        // post: to includes #Public, cc includes followers + us. Public
+        // timeline content, not a DM — must be dropped.
+        let note = json!({
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "cc": ["https://fosstodon.org/users/happyborg/followers", OURS],
+        });
+        assert!(!is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn unlisted_post_public_in_cc_is_not_a_dm() {
+        let note = json!({
+            "to": [OURS],
+            "cc": ["https://www.w3.org/ns/activitystreams#Public"],
+        });
+        assert!(!is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn followers_only_broadcast_is_not_a_dm() {
+        let note = json!({
+            "to": ["https://fosstodon.org/users/happyborg/followers", OURS],
+            "cc": [],
+        });
+        assert!(!is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn direct_note_not_addressed_to_us_is_not_ours() {
+        // A DM between two other actors that somehow reached us: not
+        // addressed to our actor, so not stored.
+        let note = json!({ "to": ["https://fosstodon.org/users/someone"], "cc": [] });
+        assert!(!is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn bare_public_string_alias_is_not_a_dm() {
+        // `to` as a single string, and the short "Public" alias.
+        let note = json!({ "to": "Public", "cc": OURS });
+        assert!(!is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn to_as_single_string_direct_is_a_dm() {
+        let note = json!({ "to": OURS });
+        assert!(is_direct_to(&note, OURS));
     }
 }
