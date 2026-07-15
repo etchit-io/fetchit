@@ -121,38 +121,68 @@ impl Store {
         .await
     }
 
-    /// Flip a pending follow to `accepted`, matched on the activity id
-    /// carried inside the verified inbound `Accept`.
+    /// Flip a pending follow to `accepted`, bound to the identity of the
+    /// verified inbound `Accept`.
     ///
-    /// Returns `false` when no pending row matches (stale, forged, or
-    /// duplicate `Accept`) — callers treat that as a no-op, not an error.
+    /// The `follow_activity_id` alone is NOT an authorization: it rides
+    /// the `Follow` we deliver to the target's inbox, so it is not secret,
+    /// and any signature-verified actor could otherwise forge an `Accept`
+    /// that flips a follow they were never party to. So the update also
+    /// requires (a) `expected_target_actor_url` — the signature-verified
+    /// sender of the `Accept` — to equal the actor the row actually
+    /// follows, and (b) `expected_actor_id` — the recipient handle the
+    /// `Accept` was delivered to — to own the row.
+    ///
+    /// Returns `false` when no pending row matches under those bindings
+    /// (stale, forged, cross-account, or duplicate `Accept`) — callers
+    /// treat that as a no-op, not an error.
     ///
     /// # Errors
     /// [`BridgeError::Store`] on a database failure.
-    pub async fn follow_accepted(&self, follow_activity_id: &str) -> Result<bool, BridgeError> {
-        let fid = follow_activity_id.to_owned();
+    pub async fn follow_accepted(
+        &self,
+        follow_activity_id: &str,
+        expected_target_actor_url: &str,
+        expected_actor_id: &str,
+    ) -> Result<bool, BridgeError> {
+        let (fid, target, actor) = (
+            follow_activity_id.to_owned(),
+            expected_target_actor_url.to_owned(),
+            expected_actor_id.to_owned(),
+        );
         self.with_conn(move |c| {
             let n = c.execute(
                 "UPDATE following SET state = 'accepted'
-                 WHERE follow_activity_id = ?1 AND state = 'pending'",
-                params![fid],
+                 WHERE follow_activity_id = ?1 AND state = 'pending'
+                   AND target_actor_url = ?2 AND actor_id = ?3",
+                params![fid, target, actor],
             )?;
             Ok(n == 1)
         })
         .await
     }
 
-    /// Drop a follow on a verified inbound `Reject`. Returns `false`
-    /// when nothing matched.
+    /// Drop a follow on a verified inbound `Reject`, bound to the
+    /// signature-verified sender (`expected_target_actor_url`) so a
+    /// third party cannot drop a follow they are not the target of.
+    /// Returns `false` when nothing matched under that binding.
     ///
     /// # Errors
     /// [`BridgeError::Store`] on a database failure.
-    pub async fn follow_rejected(&self, follow_activity_id: &str) -> Result<bool, BridgeError> {
-        let fid = follow_activity_id.to_owned();
+    pub async fn follow_rejected(
+        &self,
+        follow_activity_id: &str,
+        expected_target_actor_url: &str,
+    ) -> Result<bool, BridgeError> {
+        let (fid, target) = (
+            follow_activity_id.to_owned(),
+            expected_target_actor_url.to_owned(),
+        );
         self.with_conn(move |c| {
             let n = c.execute(
-                "DELETE FROM following WHERE follow_activity_id = ?1",
-                params![fid],
+                "DELETE FROM following
+                 WHERE follow_activity_id = ?1 AND target_actor_url = ?2",
+                params![fid, target],
             )?;
             Ok(n == 1)
         })
@@ -353,9 +383,9 @@ mod tests {
         assert_eq!(l[0].follow_activity_id, FID);
 
         // verified Accept flips exactly the matching pending row
-        assert!(s.follow_accepted(FID).await.unwrap());
+        assert!(s.follow_accepted(FID, TGT, A).await.unwrap());
         assert!(
-            !s.follow_accepted(FID).await.unwrap(),
+            !s.follow_accepted(FID, TGT, A).await.unwrap(),
             "duplicate Accept is a no-op"
         );
         assert_eq!(
@@ -373,8 +403,64 @@ mod tests {
     #[tokio::test]
     async fn stale_or_forged_accept_matches_nothing() {
         let s = store();
-        assert!(!s.follow_accepted("never-minted").await.unwrap());
-        assert!(!s.follow_rejected("never-minted").await.unwrap());
+        assert!(!s.follow_accepted("never-minted", TGT, A).await.unwrap());
+        assert!(!s.follow_rejected("never-minted", TGT).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn accept_from_wrong_sender_does_not_flip() {
+        // An Accept whose signature-verified sender is NOT the actor we
+        // followed must be a no-op even though it carries the right
+        // follow_activity_id (which is not secret — it rides the Follow we
+        // delivered). This is the forgeable-Accept authorization gap.
+        let s = store();
+        s.follow_request(A, TGT, TGT_INBOX, FID, 1000)
+            .await
+            .unwrap();
+        assert!(
+            !s.follow_accepted(FID, "https://evil.test/users/mallory", A)
+                .await
+                .unwrap(),
+            "Accept signed by a non-followee must not flip our follow"
+        );
+        assert_eq!(
+            s.following_list(A).await.unwrap()[0].state,
+            FollowState::Pending,
+            "row stays pending after a forged Accept"
+        );
+        // The genuine followee still works.
+        assert!(s.follow_accepted(FID, TGT, A).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn accept_for_another_recipients_follow_does_not_flip() {
+        // Even the correct followee cannot flip a follow that a DIFFERENT
+        // local account owns: the recipient handle must own the row.
+        let s = store();
+        s.follow_request(A, TGT, TGT_INBOX, FID, 1000)
+            .await
+            .unwrap();
+        assert!(
+            !s.follow_accepted(FID, TGT, "agent-b").await.unwrap(),
+            "an Accept delivered to the wrong local actor must not flip"
+        );
+        assert!(s.follow_accepted(FID, TGT, A).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reject_from_wrong_sender_does_not_drop() {
+        let s = store();
+        s.follow_request(A, TGT, TGT_INBOX, FID, 1000)
+            .await
+            .unwrap();
+        assert!(
+            !s.follow_rejected(FID, "https://evil.test/users/mallory")
+                .await
+                .unwrap(),
+            "Reject signed by a non-followee must not drop our follow"
+        );
+        assert!(!s.following_list(A).await.unwrap().is_empty());
+        assert!(s.follow_rejected(FID, TGT).await.unwrap());
     }
 
     #[tokio::test]
@@ -383,7 +469,7 @@ mod tests {
         s.follow_request(A, TGT, TGT_INBOX, FID, 1000)
             .await
             .unwrap();
-        assert!(s.follow_rejected(FID).await.unwrap());
+        assert!(s.follow_rejected(FID, TGT).await.unwrap());
         assert!(s.following_list(A).await.unwrap().is_empty());
         // re-follow after a reject starts a fresh pending row
         assert_eq!(
@@ -400,7 +486,7 @@ mod tests {
         s.follow_request(A, TGT, TGT_INBOX, FID, 1000)
             .await
             .unwrap();
-        s.follow_accepted(FID).await.unwrap();
+        s.follow_accepted(FID, TGT, A).await.unwrap();
         let rec = s.unfollow(A, TGT).await.unwrap().expect("was following");
         assert_eq!(rec.follow_activity_id, FID);
         assert_eq!(rec.target_inbox_url, TGT_INBOX);

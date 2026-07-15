@@ -101,7 +101,7 @@ pub async fn post_inbox(
             Err(resp) => resp,
         },
         Some("Accept") => {
-            handle_accept(&state, &activity).await;
+            handle_accept(&state, &rec, sender.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         // Unknown/unhandled types are acknowledged, never rejected.
@@ -255,14 +255,28 @@ async fn handle_create(
 }
 
 /// An `Accept(Follow)`: flip the matching following row to `accepted`.
-/// The `object.id` echoes the `Follow` id we minted; matching on it
-/// (not the sender's word) is what makes the confirmation trustworthy.
-async fn handle_accept(state: &BridgeState, activity: &Value) {
+///
+/// The `object.id` echoes the `Follow` id we minted, but matching on it
+/// ALONE is not enough — the id rides the `Follow` we deliver, so it is
+/// not secret. The store bind requires the signature-verified sender
+/// (`sender_id`, already authenticated by the inbox HTTP-Signature check)
+/// to be the actor the row follows, and the recipient handle
+/// (`rec.agent_id`) to own the row. A forged or cross-account `Accept`
+/// therefore flips nothing.
+async fn handle_accept(
+    state: &BridgeState,
+    rec: &crate::store::ActorRecord,
+    sender_id: &str,
+    activity: &Value,
+) {
     let follow_id = activity
         .get("object")
         .and_then(|o| o.get("id").and_then(Value::as_str).or_else(|| o.as_str()));
     if let Some(fid) = follow_id {
-        let _ = state.store.follow_accepted(fid).await;
+        let _ = state
+            .store
+            .follow_accepted(fid, sender_id, &rec.agent_id)
+            .await;
     }
 }
 
