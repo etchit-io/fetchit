@@ -436,7 +436,14 @@ mod tests {
                 "josh", &actor_url, &derived, &spki, &profile, relay, epoch,
             )
             .unwrap();
-            let sig = dsa.sign(&sk, &input).unwrap().to_bytes();
+            // Attestations are signed through the agent `Signer`, which wraps
+            // the payload in the external-agent-sign DST framing; verify_binding_v2
+            // verifies over that wrapped input. The fixture must sign the SAME
+            // wrapped bytes (mirrors the 0.29 agent-sign fixture sweep).
+            let sig = dsa
+                .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+                .unwrap()
+                .to_bytes();
             let req = RegisterActorRequest {
                 handle: "josh".into(),
                 rsa_spki_der: spki.clone(),
