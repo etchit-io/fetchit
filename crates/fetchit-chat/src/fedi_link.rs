@@ -17,7 +17,8 @@
 //! the recipient's server in the clear, so a human is the trust anchor).
 
 use crate::at_rest::MasterKey;
-use crate::error::ChatError;
+use crate::client::Client;
+use crate::error::{ChatError, Result};
 use crate::fedi_identity::derive_fedi_vault_key;
 use crate::fedi_thread::canonical_thread_label;
 use crate::fedi_vault::{read_sealed, write_sealed_atomic};
@@ -117,11 +118,7 @@ impl FediLinks {
 ///
 /// # Errors
 /// [`ChatError`] on IO, seal, or JSON-decode failures.
-pub fn load_fedi_links(
-    handle: &str,
-    master: &MasterKey,
-    layout: &StoreLayout,
-) -> Result<FediLinks, ChatError> {
+pub fn load_fedi_links(handle: &str, master: &MasterKey, layout: &StoreLayout) -> Result<FediLinks> {
     let key = derive_fedi_vault_key(master);
     let path = layout.fedi_links_path(handle);
     let Some(plain) = read_sealed(&path, *FEDI_LINKS_MAGIC, &key, FEDI_LINKS_AAD)? else {
@@ -140,7 +137,7 @@ pub fn save_fedi_links(
     links: &FediLinks,
     master: &MasterKey,
     layout: &StoreLayout,
-) -> Result<(), ChatError> {
+) -> Result<()> {
     let key = derive_fedi_vault_key(master);
     let plain =
         serde_json::to_vec(links).map_err(|e| ChatError::Invalid(format!("fedi links encode: {e}")))?;
@@ -151,6 +148,92 @@ pub fn save_fedi_links(
         FEDI_LINKS_AAD,
         &plain,
     )
+}
+
+impl Client {
+    /// Record that a go-private invite was delivered to `target` under
+    /// our minted `handle`. The FFI layer composes + sends the invite
+    /// (the pair URI is FFI-layer state) and calls this ONLY on a
+    /// confirmed delivery, so the pending state can never claim an
+    /// invite the recipient never received.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store IO.
+    pub fn record_fedi_invite(&self, handle: &str, target: &str, at_ms: i64) -> Result<()> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let mut links = load_fedi_links(handle, &master, &layout)?;
+        links.record_invite(target, at_ms);
+        save_fedi_links(handle, &links, &master, &layout)
+    }
+
+    /// Handles invited to private chat but not yet linked.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load.
+    pub fn pending_go_private(&self, handle: &str) -> Result<Vec<String>> {
+        let (master, layout) = self.fedi_at_rest()?;
+        Ok(load_fedi_links(handle, &master, &layout)?.pending())
+    }
+
+    /// Link `target` (fediverse label) to a PQ `agent_id_hex` — the
+    /// manual "Same person?" confirm. Local only; never published.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store IO.
+    pub fn link_fedi_person(&self, handle: &str, target: &str, agent_id_hex: &str) -> Result<()> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let mut links = load_fedi_links(handle, &master, &layout)?;
+        links.link(target, agent_id_hex, now_ms_i64());
+        save_fedi_links(handle, &links, &master, &layout)
+    }
+
+    /// Drop the link for `target`.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store IO.
+    pub fn unlink_fedi_person(&self, handle: &str, target: &str) -> Result<()> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let mut links = load_fedi_links(handle, &master, &layout)?;
+        links.unlink(target);
+        save_fedi_links(handle, &links, &master, &layout)
+    }
+
+    /// Every person link for `handle`, as `(label, link)` pairs.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load.
+    pub fn fedi_person_links(&self, handle: &str) -> Result<Vec<(String, PersonLink)>> {
+        let (master, layout) = self.fedi_at_rest()?;
+        Ok(load_fedi_links(handle, &master, &layout)?
+            .links
+            .into_iter()
+            .collect())
+    }
+
+    /// The fediverse label linked to `agent_id_hex`, if any (reverse
+    /// lookup used to collapse a linked thread into its PQ contact row).
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load.
+    pub fn linked_label_for_agent(
+        &self,
+        handle: &str,
+        agent_id_hex: &str,
+    ) -> Result<Option<String>> {
+        let (master, layout) = self.fedi_at_rest()?;
+        Ok(load_fedi_links(handle, &master, &layout)?.is_linked_agent(agent_id_hex))
+    }
+}
+
+/// Wall-clock unix ms as `i64`, clamped on a pre-epoch or overflowing
+/// clock.
+fn now_ms_i64() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
