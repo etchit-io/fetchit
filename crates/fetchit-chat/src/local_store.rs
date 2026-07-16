@@ -136,6 +136,16 @@ impl StoreLayout {
             .join(format!("{handle}.json.enc"))
     }
 
+    /// Sealed person-link store for the minted `handle`
+    /// (`<root>/fedi/links/<handle>.json.enc`) — the go-private
+    /// lifecycle map (fediverse handle ↔ PQ agent id).
+    #[must_use]
+    pub fn fedi_links_path(&self, handle: &str) -> PathBuf {
+        self.fedi_dir
+            .join("links")
+            .join(format!("{handle}.json.enc"))
+    }
+
     /// Path of the handle-resolution continuity ledger (M5.1): a JSON
     /// map of canonical fediverse handle to the agent id it last
     /// verifiably resolved to. Plaintext: every value in it is public
