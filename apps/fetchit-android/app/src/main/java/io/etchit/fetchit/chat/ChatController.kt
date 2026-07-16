@@ -91,6 +91,17 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      */
     val groups: StateFlow<List<GroupFfi>> = _groups.asStateFlow()
 
+    private val _fediThreads =
+        MutableStateFlow<List<uniffi.fetchit_ffi.FediThreadSummaryFfi>>(emptyList())
+
+    /**
+     * Fediverse DM thread summaries, newest first — the fediverse rows in the
+     * unified Chats list. Refreshed by [refreshFediThreads] (called on entering
+     * the Chats tab, after an inbox sync). Empty when no handle is minted.
+     */
+    val fediThreads: StateFlow<List<uniffi.fetchit_ffi.FediThreadSummaryFfi>> =
+        _fediThreads.asStateFlow()
+
     private val _pendingJoins = MutableStateFlow<List<String>>(emptyList())
 
     /**
@@ -253,6 +264,16 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      * shows until then.
      */
     fun fediActorStatus(): String? = gateway?.fediActorStatus()
+
+    /**
+     * Pull the current fediverse DM thread overview from the engine into
+     * [fediThreads]. Quiet on failure (leaves the last value). No-op without a
+     * connected gateway or a minted handle.
+     */
+    suspend fun refreshFediThreads() {
+        val gw = gateway ?: return
+        _fediThreads.value = runCatching { gw.fediThreadsOverview() }.getOrDefault(emptyList())
+    }
 
     /**
      * Opt in to public posting: mint + register the actor identity for

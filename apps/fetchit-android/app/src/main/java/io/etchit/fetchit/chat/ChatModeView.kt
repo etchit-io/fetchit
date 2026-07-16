@@ -85,14 +85,25 @@ class ChatModeView(
         container.findViewById(R.id.chatScreenSlot)
 
     private sealed class Screen {
-        data object List : Screen()
+        // The three tab roots (bottom-nav). Roots never stack on each other.
+        data object Chats : Screen()
+        data object People : Screen()
+        data object Feed : Screen()
+
+        // Pushed screens — the tab bar hides while any of these is open.
         data class Thread(val peer: String) : Screen()
         data class GroupThread(val groupId: String) : Screen()
-        data object Feed : Screen()
         data class FediThread(val handle: String) : Screen()
     }
 
     private val screenStack = ArrayDeque<Screen>()
+
+    // The messaging tab bar, resolved from the persistent chat container.
+    private val tabBar: com.google.android.material.bottomnavigation.BottomNavigationView =
+        container.findViewById(R.id.chatTabBar)
+
+    // wireTabs() attaches the selection listener exactly once.
+    private var tabsWired = false
 
     // Lazily-inflated list view.
     private var listView: View? = null
@@ -131,10 +142,71 @@ class ChatModeView(
      * Ensures the list screen is shown and kicks off [ensureGateway].
      */
     fun onShown() {
-        if (screenStack.isEmpty() || screenStack.last() !is Screen.List) {
-            showList()
+        if (!tabsWired) {
+            wireTabs()
+            tabsWired = true
         }
-        lifecycleScope.launch { connectWithFeedback() }
+        val tabId = tabIdFor(SettingsStore(context).lastChatTab())
+        // Selecting the item fires the listener → showRoot. If that tab is
+        // already selected (re-entry), drive the root directly so the screen
+        // still renders.
+        if (tabBar.selectedItemId == tabId) {
+            showRoot(rootFor(tabId))
+        } else {
+            tabBar.selectedItemId = tabId
+        }
+        lifecycleScope.launch {
+            runCatching { connectWithFeedback() }
+            // Populate the fediverse rows once connected (the Chats collector
+            // observes controller.fediThreads).
+            controller.refreshFediThreads()
+        }
+    }
+
+    /**
+     * Sync inbound fediverse DMs from the bridge, then refresh the thread
+     * overview so new correspondents surface in the Chats list. Uses the
+     * live gateway if present; a no-op without a minted handle. Quiet on
+     * failure.
+     */
+    private fun refreshChatsFediThreads() {
+        if (controller.fediActorStatus() == null) return
+        lifecycleScope.launch {
+            runCatching { controller.gateway()?.fediSyncInbox() }
+            controller.refreshFediThreads()
+        }
+    }
+
+    /** Attach the bottom-nav selection listener (once). */
+    private fun wireTabs() {
+        tabBar.setOnItemSelectedListener { item ->
+            val (root, name) = when (item.itemId) {
+                R.id.tabPeople -> Screen.People to "people"
+                R.id.tabFeed -> Screen.Feed to "feed"
+                else -> Screen.Chats to "chats"
+            }
+            SettingsStore(context).saveLastChatTab(name)
+            showRoot(root)
+            true
+        }
+    }
+
+    /** Show a tab root: reset the back-stack to just this root. */
+    private fun showRoot(root: Screen) {
+        screenStack.clear()
+        showScreen(root, pushToStack = true)
+    }
+
+    private fun tabIdFor(name: String): Int = when (name) {
+        "people" -> R.id.tabPeople
+        "feed" -> R.id.tabFeed
+        else -> R.id.tabChats
+    }
+
+    private fun rootFor(itemId: Int): Screen = when (itemId) {
+        R.id.tabPeople -> Screen.People
+        R.id.tabFeed -> Screen.Feed
+        else -> Screen.Chats
     }
 
     /**
@@ -145,7 +217,7 @@ class ChatModeView(
     fun onBack(): Boolean {
         if (screenStack.size <= 1) return false
         screenStack.removeLastOrNull()
-        val prev = screenStack.lastOrNull() ?: Screen.List
+        val prev = screenStack.lastOrNull() ?: Screen.Chats
         showScreen(prev, pushToStack = false)
         return true
     }
@@ -285,7 +357,8 @@ class ChatModeView(
     // ── screen navigation ──────────────────────────────────────────────
 
     private fun showList() {
-        showScreen(Screen.List, pushToStack = true)
+        showRoot(Screen.Chats)
+        tabBar.selectedItemId = R.id.tabChats
     }
 
     /** Open the DM thread for [agentIdHex]. */
@@ -302,8 +375,11 @@ class ChatModeView(
         if (pushToStack) {
             if (screenStack.lastOrNull() != screen) screenStack.addLast(screen)
         }
+        // The tab bar shows on the three roots and hides inside any thread.
+        val isRoot = screen is Screen.Chats || screen is Screen.People || screen is Screen.Feed
+        tabBar.visibility = if (isRoot) View.VISIBLE else View.GONE
         when (screen) {
-            is Screen.List -> {
+            is Screen.Chats -> {
                 // Cancel sub-screen collectors on return to list.
                 threadCollectJob?.cancel()
                 threadCollectJob = null
@@ -328,6 +404,17 @@ class ChatModeView(
                     // (which happens on the feed screen).
                     listView?.let { bindOnboardFediCopy(it) }
                 }
+                refreshChatsFediThreads()
+            }
+            is Screen.People -> {
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
+                feedCollectJob?.cancel()
+                feedCollectJob = null
+                slot.removeAllViews()
+                bindPeopleScreen()
             }
             is Screen.Thread -> {
                 // Cancel any running feed collector; thread gets its own fresh one.
@@ -408,9 +495,10 @@ class ChatModeView(
         bindIdentityBadge(identityAvatar, identityName)
         identityBadge.setOnClickListener { onIdentityBadgeTap(identityAvatar, identityName) }
 
-        // Adapter: pinned fediverse row at position 0, then groups + contacts.
+        // Adapter: one unified list — groups, private contacts, and fediverse
+        // threads, newest activity first (buildChatRows). No pinned rows.
         val adapter = ContactListAdapter(
-            onFeedTap = { showScreen(Screen.Feed, pushToStack = true) },
+            onFediTap = { label -> openFediThread(label) },
             onContactTap = { contact -> openThread(contact.agentIdHex) },
             onGroupTap = { group -> openGroupThread(group.groupId) },
             onRemoveContact = { anchor, contact -> showContactRowMenu(anchor, contact) },
@@ -419,24 +507,37 @@ class ChatModeView(
         rv.layoutManager = LinearLayoutManager(context)
         rv.adapter = adapter
 
-        // Observe contacts + groups together: either populates the list, so
-        // visibility tracks (contacts OR groups). The empty-state onboarding
-        // only shows when there is neither a contact nor a group to render.
+        // Observe contacts + groups + fediverse threads together. Any of the
+        // three populates the list; the empty-state onboarding shows only when
+        // all three are empty. A fediverse thread with zero private contacts
+        // still renders (closes the unseen-correspondent gap).
         listContactsJob = lifecycleScope.launch {
-            controller.contacts.contacts
-                .combine(controller.groups) { contacts, groups -> contacts to groups }
-                .collect { (contacts, groups) ->
-                    val onboarding = showChatOnboarding(contacts.size, groups.size)
-                    rv.visibility = if (onboarding) View.GONE else View.VISIBLE
-                    emptyState.visibility = if (onboarding) View.VISIBLE else View.GONE
+            combine(
+                controller.contacts.contacts,
+                controller.groups,
+                controller.fediThreads,
+            ) { contacts, groups, fedi -> Triple(contacts, groups, fedi) }
+                .collect { (contacts, groups, fedi) ->
+                    val rows = buildChatRows(
+                        contacts = contacts,
+                        groups = groups,
+                        groupPreview = { key ->
+                            controller.conversations.messagesFor(key).value.lastOrNull()
+                                ?.let { it.body to it.sentAtMs }
+                        },
+                        contactPreview = { key ->
+                            controller.conversations.messagesFor(key).value.lastOrNull()
+                                ?.let { it.body to it.sentAtMs }
+                        },
+                        fediThreads = fedi,
+                    )
+                    val empty = rows.isEmpty()
+                    rv.visibility = if (empty) View.GONE else View.VISIBLE
+                    emptyState.visibility = if (empty) View.VISIBLE else View.GONE
                     // The FAB duplicates the onboarding buttons on the empty
-                    // state (Josh: add-your-first-person is enough), so it only
-                    // shows once the list has content. Its remaining exclusives
-                    // stay reachable while onboarding: the add-someone box also
-                    // takes group invite links, and create-a-group has its own
-                    // button.
-                    addBtn.visibility = if (onboarding) View.GONE else View.VISIBLE
-                    adapter.submit(groups, contacts)
+                    // state, so it only shows once the list has content.
+                    addBtn.visibility = if (empty) View.GONE else View.VISIBLE
+                    adapter.submit(rows)
                 }
         }
 
@@ -474,7 +575,7 @@ class ChatModeView(
         // The one first-run action needing no contacts, so it lives here in the
         // empty state, not only in the pinned list row — which the empty state
         // hides along with the rest of the (empty) contact list.
-        fediverseBtn.setOnClickListener { showScreen(Screen.Feed, pushToStack = true) }
+        fediverseBtn.setOnClickListener { tabBar.selectedItemId = R.id.tabFeed }
         bindOnboardFediCopy(view)
 
         // FAB: a popup with the list-level actions -- add a contact, start a
@@ -1933,6 +2034,25 @@ class ChatModeView(
         }
     }
 
+    // ── people screen ──────────────────────────────────────────────────
+
+    // Placeholder People tab root. Task 9 replaces this with the real
+    // search + contacts/following/followers/blocked sections + profile card.
+    private fun bindPeopleScreen() {
+        val root = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            val pad = (24 * context.resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        root.addView(TextView(context).apply {
+            text = context.getString(R.string.tab_people)
+            textSize = 18f
+            setTextColor(themeColor(R.attr.fetchitBone))
+        })
+        slot.addView(root)
+    }
+
     // ── feed screen ────────────────────────────────────────────────────
 
     private fun bindFeedScreen() {
@@ -2661,61 +2781,30 @@ class ChatModeView(
 
     // ── contact list adapter ──────────────────────────────────────────
 
-    /**
-     * Row model for the contact list adapter.
-     * Position 0 is always the pinned fediverse channel; group rows render
-     * above contacts.
-     */
-    private sealed class Row {
-        data object Fediverse : Row()
-        data class Group(val group: GroupFfi, val preview: String) : Row()
-        data class Contact(val contact: ChatContact, val preview: String) : Row()
-    }
-
     private inner class ContactListAdapter(
-        private val onFeedTap: () -> Unit,
+        private val onFediTap: (String) -> Unit,
         private val onContactTap: (ChatContact) -> Unit,
         private val onGroupTap: (GroupFfi) -> Unit,
         private val onRemoveContact: (View, ChatContact) -> Unit,
         private val onLeaveGroup: (View, GroupFfi) -> Unit,
     ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
-        private val TYPE_FEED = 0
+        private val TYPE_FEDI = 0
         private val TYPE_CONTACT = 1
         private val TYPE_GROUP = 2
 
-        private val rows = mutableListOf<Row>(Row.Fediverse)
+        private var rows: kotlin.collections.List<ChatRow> = emptyList()
 
-        /**
-         * Rebuild the list: pinned fediverse row, then [groups], then
-         * [contacts]. Each row's preview is the last message body on that
-         * conversation key (group keys are `g:`-prefixed; DM keys are bare).
-         */
-        fun submit(
-            groups: kotlin.collections.List<GroupFfi>,
-            contacts: kotlin.collections.List<ChatContact>,
-        ) {
-            rows.clear()
-            rows.add(Row.Fediverse)
-            groups.forEach { g ->
-                val preview = controller.conversations
-                    .messagesFor(ConversationStore.convKeyGroup(g.groupId)).value
-                    .lastOrNull()?.body.orEmpty()
-                rows.add(Row.Group(g, preview))
-            }
-            contacts.forEach { c ->
-                val preview = controller.conversations
-                    .messagesFor(ConversationStore.convKeyDm(c.agentIdHex)).value
-                    .lastOrNull()?.body.orEmpty()
-                rows.add(Row.Contact(c, preview))
-            }
+        /** Swap in a freshly-built, already-sorted unified row list. */
+        fun submit(newRows: kotlin.collections.List<ChatRow>) {
+            rows = newRows
             notifyDataSetChanged()
         }
 
         override fun getItemViewType(position: Int) = when (rows[position]) {
-            is Row.Fediverse -> TYPE_FEED
-            is Row.Group -> TYPE_GROUP
-            is Row.Contact -> TYPE_CONTACT
+            is ChatRow.Fedi -> TYPE_FEDI
+            is ChatRow.Group -> TYPE_GROUP
+            is ChatRow.Contact -> TYPE_CONTACT
         }
 
         override fun getItemCount() = rows.size
@@ -2724,7 +2813,7 @@ class ChatModeView(
             val v = LayoutInflater.from(parent.context)
                 .inflate(R.layout.item_chat_contact, parent, false)
             return when (viewType) {
-                TYPE_FEED -> FeedViewHolder(v)
+                TYPE_FEDI -> FediViewHolder(v)
                 TYPE_GROUP -> GroupViewHolder(v)
                 else -> ContactViewHolder(v)
             }
@@ -2732,30 +2821,34 @@ class ChatModeView(
 
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             when (val row = rows[position]) {
-                is Row.Fediverse -> (holder as FeedViewHolder).bind(onFeedTap)
-                is Row.Group ->
+                is ChatRow.Fedi -> (holder as FediViewHolder).bind(row.summary, onFediTap)
+                is ChatRow.Group ->
                     (holder as GroupViewHolder).bind(row.group, row.preview, onGroupTap, onLeaveGroup)
-                is Row.Contact ->
+                is ChatRow.Contact ->
                     (holder as ContactViewHolder).bind(row.contact, row.preview, onContactTap, onRemoveContact)
             }
         }
     }
 
-    private inner class FeedViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+    private inner class FediViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
         private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
-        fun bind(onTap: () -> Unit) {
-            shortId.text = "✦"
-            name.text = context.getString(R.string.chat_feed_title)
-            preview.text = context.getString(R.string.chat_feed_subtitle)
-            // The pinned fediverse row is not removable; hide its overflow and
-            // detach the listener a recycled holder might still carry.
+        fun bind(
+            summary: uniffi.fetchit_ffi.FediThreadSummaryFfi,
+            onTap: (String) -> Unit,
+        ) {
+            // A globe marks the open-fediverse (not-encrypted) rail.
+            shortId.text = "🌐"
+            name.text = summary.label
+            preview.text = summary.lastBody
+            // Fediverse threads have no per-row overflow yet (block/unfollow
+            // live on the profile card); detach any recycled listener.
             more.visibility = View.GONE
             more.setOnClickListener(null)
-            itemView.setOnClickListener { onTap() }
+            itemView.setOnClickListener { onTap(summary.label) }
         }
     }
 

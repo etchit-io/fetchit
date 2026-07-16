@@ -112,6 +112,15 @@ class SettingsStore(context: Context) {
         prefs.edit().putString(KEY_MODE, mode).apply()
     }
 
+    /** Last-selected messaging tab ("chats" | "people" | "feed"); defaults to "chats". */
+    fun lastChatTab(): String =
+        prefs.getString(KEY_LAST_CHAT_TAB, "chats").orEmpty().ifEmpty { "chats" }
+
+    /** Persist the last-selected messaging tab so re-entry restores it. */
+    fun saveLastChatTab(tab: String) {
+        prefs.edit().putString(KEY_LAST_CHAT_TAB, tab).apply()
+    }
+
     private companion object {
         const val PREFS_NAME = "fetchit_settings"
         const val KEY_PEERS = "bootstrap_peers"
@@ -119,6 +128,7 @@ class SettingsStore(context: Context) {
         const val KEY_CHAT_DISPLAY_NAME = "chat_display_name"
         const val KEY_CHAT_KEEP_CONNECTED = "chat_keep_connected"
         const val KEY_MODE = "mode"
+        const val KEY_LAST_CHAT_TAB = "last_chat_tab"
         const val MODE_BROWSE = "browse"
         const val MODE_CHAT = "chat"
     }

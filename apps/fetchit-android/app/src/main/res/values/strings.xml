@@ -312,6 +312,9 @@
     <string name="chat_uri_copied">copied</string>
     <string name="chat_pair_copy_link">copy link</string>
     <string name="chat_pair_qr_desc">your chat pairing QR code</string>
+    <string name="tab_chats">Chats</string>
+    <string name="tab_people">People</string>
+    <string name="tab_feed">Feed</string>
     <string name="chat_feed_title">Public posts</string>
     <string name="chat_feed_subtitle">from across the fediverse</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are

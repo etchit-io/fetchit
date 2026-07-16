@@ -432,6 +432,18 @@
                 android:layout_height="0dp"
                 android:layout_weight="1" />
 
+            <!-- Messaging tab bar: Chats / People / Feed. Visible only on the
+                 three tab roots; ChatModeView hides it inside any open thread. -->
+            <com.google.android.material.bottomnavigation.BottomNavigationView
+                android:id="@+id/chatTabBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/fetchitInk2"
+                app:labelVisibilityMode="labeled"
+                app:itemTextColor="?attr/fetchitCopper"
+                app:itemIconTint="?attr/fetchitCopper"
+                app:menu="@menu/chat_tabs" />
+
         </LinearLayout>
 
     </FrameLayout>
