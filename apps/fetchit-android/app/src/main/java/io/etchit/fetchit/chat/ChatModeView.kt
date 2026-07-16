@@ -2056,15 +2056,66 @@ class ChatModeView(
             }
         }
 
+        // If this person is linked to a fediverse handle, the thread is a
+        // merged (🔒) thread: their fediverse history folds in above the
+        // private messages, and the open-fediverse fallback is offered while
+        // the private rail is down. Resolved once (local reverse lookup).
+        val linkedLabel = runCatching { controller.gateway()?.fediLinkedLabelForAgent(peer) }
+            .getOrNull()
+
+        // Fallback offer (§7.6): honest banner + ONE explicit, labeled action.
+        // Never an automatic downgrade — a silent switch would make the 🔒 a
+        // lie. Only meaningful on a linked thread.
+        val fallbackBanner = view.findViewById<View>(R.id.threadFallbackBanner)
+        if (linkedLabel != null) {
+            view.findViewById<TextView>(R.id.threadFallbackText).text =
+                context.getString(R.string.thread_fallback_banner, displayName)
+            view.findViewById<View>(R.id.threadFallbackAction).setOnClickListener {
+                openFediThread(linkedLabel)
+            }
+        } else {
+            fallbackBanner.visibility = View.GONE
+        }
+
         // Collect messages for this peer; job cancelled on screen switch.
         threadCollectJob = lifecycleScope.launch {
             // Hydrate the persisted transcript before/as the thread renders so a
             // reopened DM is not empty after a process kill. Idempotent (de-duped
             // by message id) and non-fatal.
             controller.hydrateConversation(ConversationStore.convKeyDm(peer))
+            // Merged-thread history: the linked person's fediverse messages
+            // (read-only) above a two-line divider, then the private messages.
+            val fediRows: List<MessageRow> = if (linkedLabel != null) {
+                val fkey = ConversationStore.convKeyFedi(linkedLabel)
+                controller.hydrateConversation(fkey)
+                val fediMsgs = controller.conversations.messagesFor(fkey).value
+                if (fediMsgs.isEmpty()) {
+                    emptyList()
+                } else {
+                    fediMsgs.map { MessageRow.Dm(it) } + listOf(
+                        MessageRow.Divider(context.getString(R.string.thread_divider_fedi)),
+                        MessageRow.Divider(context.getString(R.string.thread_divider_pq)),
+                    )
+                }
+            } else {
+                emptyList()
+            }
+            // Show the offered fallback only while the pump is down; it clears
+            // on RUNNING. Child coroutine — cancelled with threadCollectJob.
+            if (linkedLabel != null) {
+                launch {
+                    controller.pumpState.collect { state ->
+                        fallbackBanner.visibility =
+                            if (state == PumpState.STOPPED_ERROR) View.VISIBLE else View.GONE
+                    }
+                }
+            }
             controller.conversations.messagesFor(peer).collect { msgs ->
                 val prevSize = adapter.itemCount
-                val rows = msgs.map { MessageRow.Dm(it) }
+                // The composer sends ONLY PQ (enqueueDm above) — a lock on the
+                // row means nothing typed here is ever plaintext. Fediverse
+                // messaging to this person stays deliberately out of the way.
+                val rows = fediRows + msgs.map { MessageRow.Dm(it) }
                 adapter.submitList(rows)
                 // Scroll only when new messages arrive, not on receipt-tick rebinds.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
@@ -2999,6 +3050,10 @@ class ChatModeView(
     private sealed class MessageRow {
         data class Dm(val msg: ChatMessage) : MessageRow()
         data class Post(val post: FeedPost) : MessageRow()
+
+        /** A centered caption separating merged-thread sections (fediverse
+         *  history above, post-quantum private messages below). */
+        data class Divider(val text: String) : MessageRow()
     }
 
     private val msgDiff = object : DiffUtil.ItemCallback<MessageRow>() {
@@ -3016,6 +3071,8 @@ class ChatModeView(
                 old is MessageRow.Post && new is MessageRow.Post ->
                     old.post.actorUrl == new.post.actorUrl &&
                         old.post.body == new.post.body
+                old is MessageRow.Divider && new is MessageRow.Divider ->
+                    old.text == new.text
                 else -> false
             }
 
@@ -3026,28 +3083,44 @@ class ChatModeView(
     private inner class MessageAdapter(
         private val onLinkTap: (String) -> Unit,
         private val onRetry: () -> Unit,
-    ) : ListAdapter<MessageRow, MessageAdapter.VH>(msgDiff) {
+    ) : ListAdapter<MessageRow, RecyclerView.ViewHolder>(msgDiff) {
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val v = LayoutInflater.from(parent.context)
-                .inflate(R.layout.item_chat_message, parent, false)
-            return VH(v)
+        override fun getItemViewType(position: Int): Int =
+            if (getItem(position) is MessageRow.Divider) VIEW_DIVIDER else VIEW_MESSAGE
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            val inflater = LayoutInflater.from(parent.context)
+            return if (viewType == VIEW_DIVIDER) {
+                DividerVH(inflater.inflate(R.layout.item_chat_divider, parent, false))
+            } else {
+                VH(inflater.inflate(R.layout.item_chat_message, parent, false))
+            }
         }
 
-        override fun onBindViewHolder(holder: VH, position: Int) {
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             when (val row = getItem(position)) {
                 is MessageRow.Dm -> {
                     // The previous message decides whether this is the first of a
                     // consecutive run from the same sender — desktop names a run
-                    // once, not on every line (groupAttribution).
+                    // once, not on every line (groupAttribution). A preceding
+                    // divider is not a Dm, so the first PQ message still names
+                    // its sender.
                     val prevSender = if (position > 0) {
                         (getItem(position - 1) as? MessageRow.Dm)?.msg?.senderAgentIdHex
                     } else {
                         null
                     }
-                    holder.bindDm(row.msg, onLinkTap, prevSender)
+                    (holder as VH).bindDm(row.msg, onLinkTap, prevSender)
                 }
-                is MessageRow.Post -> holder.bindPost(row.post)
+                is MessageRow.Post -> (holder as VH).bindPost(row.post)
+                is MessageRow.Divider -> (holder as DividerVH).bind(row.text)
+            }
+        }
+
+        inner class DividerVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+            private val caption: TextView = itemView.findViewById(R.id.dividerCaption)
+            fun bind(text: String) {
+                caption.text = text
             }
         }
 
@@ -3353,5 +3426,10 @@ class ChatModeView(
         // The self (outbound) hue — copper, matching the copper out-bubble and
         // the desktop self identity. Drawn behind the own-identity badge avatar.
         private const val SELF_HUE = 0xFFC9732B.toInt()
+
+        // MessageAdapter view types: normal message bubble vs merged-thread
+        // section divider.
+        private const val VIEW_MESSAGE = 0
+        private const val VIEW_DIVIDER = 1
     }
 }

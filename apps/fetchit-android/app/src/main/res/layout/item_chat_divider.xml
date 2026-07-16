@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A centered caption row separating merged-thread sections (fediverse
+     history above, post-quantum private messages below). Non-interactive. -->
+<TextView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/dividerCaption"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingTop="10dp"
+    android:paddingBottom="10dp"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:gravity="center"
+    android:textAlignment="center"
+    android:textColor="?attr/fetchitAsh"
+    android:textSize="12sp" />

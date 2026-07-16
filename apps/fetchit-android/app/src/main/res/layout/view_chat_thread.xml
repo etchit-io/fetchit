@@ -127,6 +127,42 @@
 
     </LinearLayout>
 
+    <!-- Private-rail-down fallback offer: shown only on a linked (🔒) thread
+         while the pump is STOPPED_ERROR. Honest banner + ONE explicit,
+         labeled action to send over the open fediverse. Never an automatic
+         downgrade — the user makes the privacy call per message. GONE
+         otherwise. -->
+    <LinearLayout
+        android:id="@+id/threadFallbackBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:background="?attr/fetchitInk2"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/threadFallbackText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="?attr/fetchitBone"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/threadFallbackAction"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:padding="6dp"
+            android:text="@string/thread_fallback_action"
+            android:textColor="?attr/fetchitCopper"
+            android:textSize="13sp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true" />
+
+    </LinearLayout>
+
     <!-- Message list -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/messageList"
