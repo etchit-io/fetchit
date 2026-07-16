@@ -16,7 +16,9 @@ import uniffi.fetchit_ffi.FediFollowingFfi
 import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.FediDmReportFfi
+import uniffi.fetchit_ffi.FediPersonLinkFfi
 import uniffi.fetchit_ffi.FediThreadSummaryFfi
+import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
 
@@ -202,6 +204,31 @@ interface ChatGateway {
     suspend fun fediFollowers(): List<String>
 
     /**
+     * Send a "go private" invite to [target] over the fediverse: it carries
+     * this device's pair link plus an install nudge. Records the pending
+     * invite only on delivery. Throws when no handle is minted.
+     */
+    suspend fun fediGoPrivateInvite(target: String, displayName: String): GoPrivateReportFfi
+
+    /** Fediverse handles invited to private chat but not yet linked. */
+    fun fediPendingInvites(): List<String>
+
+    /**
+     * Link [target] (fediverse label) to a PQ [agentIdHex] — the manual
+     * "Same person?" confirm. Local only; never published.
+     */
+    fun fediLinkPerson(target: String, agentIdHex: String)
+
+    /** Drop the link for [target]. */
+    fun fediUnlinkPerson(target: String)
+
+    /** Every fediverse↔LIT person link. */
+    fun fediPersonLinks(): List<FediPersonLinkFfi>
+
+    /** The fediverse label linked to [agentIdHex], if any (reverse lookup). */
+    fun fediLinkedLabelForAgent(agentIdHex: String): String?
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -321,6 +348,15 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> =
         inner.fediThreadsOverview()
     override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
+    override suspend fun fediGoPrivateInvite(target: String, displayName: String): GoPrivateReportFfi =
+        inner.fediGoPrivateInvite(target, displayName)
+    override fun fediPendingInvites(): List<String> = inner.fediPendingInvites()
+    override fun fediLinkPerson(target: String, agentIdHex: String) =
+        inner.fediLinkPerson(target, agentIdHex)
+    override fun fediUnlinkPerson(target: String) = inner.fediUnlinkPerson(target)
+    override fun fediPersonLinks(): List<FediPersonLinkFfi> = inner.fediPersonLinks()
+    override fun fediLinkedLabelForAgent(agentIdHex: String): String? =
+        inner.fediLinkedLabelForAgent(agentIdHex)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

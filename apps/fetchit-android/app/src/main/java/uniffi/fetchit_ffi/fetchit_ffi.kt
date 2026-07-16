@@ -831,6 +831,18 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -892,9 +904,19 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_followers(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_go_private_invite(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_pending_invites(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
 ): Short
@@ -903,6 +925,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unlink_person(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_group_invite(
 ): Short
@@ -1039,10 +1063,20 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_followers(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(`ptr`: Pointer,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_go_private_invite(`ptr`: Pointer,`target`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_link_person(`ptr`: Pointer,`target`: RustBuffer.ByValue,`agentIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_linked_label_for_agent(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_pending_invites(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(`ptr`: Pointer,
@@ -1051,6 +1085,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_threads_overview(`ptr`: Pointer
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unfollow(`ptr`: Pointer,`targetActorUrl`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unlink_person(`ptr`: Pointer,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 fun uniffi_fetchit_ffi_fn_method_chatclient_group_invite(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_group_members(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
@@ -1314,10 +1350,25 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following() != 3672.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_go_private_invite() != 5912.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person() != 63923.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent() != 21830.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 43138.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_pending_invites() != 39972.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links() != 49751.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
@@ -1330,6 +1381,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow() != 48078.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unlink_person() != 17151.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_group_invite() != 61583.toShort()) {
@@ -2082,6 +2136,39 @@ public interface ChatClientInterface {
     suspend fun `fediFollowing`(): List<FediFollowingFfi>
     
     /**
+     * Send a "go private" invite to `target` over the fediverse: publish
+     * our pair record, compose the invite (pair link + install nudge +
+     * history note), and deliver it as a fediverse DM. Records the
+     * pending invite ONLY on delivery, so the pending state can never
+     * claim an invite the recipient never received.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+     * on a pair-publish / signing / store failure. A transient inbox
+     * outage is `delivered == false`, not an error.
+     */
+    suspend fun `fediGoPrivateInvite`(`target`: kotlin.String, `displayName`: kotlin.String): GoPrivateReportFfi
+    
+    /**
+     * Link a fediverse `target` to a PQ `agent_id_hex` — the manual
+     * "Same person?" confirm. Local only; never published.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+     * on store IO.
+     */
+    fun `fediLinkPerson`(`target`: kotlin.String, `agentIdHex`: kotlin.String)
+    
+    /**
+     * The fediverse label linked to `agent_id_hex`, if any (reverse
+     * lookup used to collapse a linked thread into its PQ contact row).
+     *
+     * # Errors
+     * [`ChatFfiError`] on store load.
+     */
+    fun `fediLinkedLabelForAgent`(`agentIdHex`: kotlin.String): kotlin.String?
+    
+    /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
      * (attestation-bound to a chat agent id, with a share URI for "message
      * privately") or public-only. Load the rich profile (name/bio/avatar)
@@ -2109,6 +2196,23 @@ public interface ChatClientInterface {
      * the mint failing.
      */
     suspend fun `fediMint`(`handle`: kotlin.String): MintOutcomeFfi
+    
+    /**
+     * Fediverse handles invited to private chat but not yet linked.
+     * Empty when no handle is minted (quiet).
+     *
+     * # Errors
+     * [`ChatFfiError`] on store load.
+     */
+    fun `fediPendingInvites`(): List<kotlin.String>
+    
+    /**
+     * Every fediverse↔LIT person link. Empty when no handle is minted.
+     *
+     * # Errors
+     * [`ChatFfiError`] on store load.
+     */
+    fun `fediPersonLinks`(): List<FediPersonLinkFfi>
     
     /**
      * Publish a public post as the active minted handle. `@user@host`
@@ -2158,6 +2262,15 @@ public interface ChatClientInterface {
      * returned [`UnfollowReportFfi`], not errored.
      */
     suspend fun `fediUnfollow`(`targetActorUrl`: kotlin.String): UnfollowReportFfi
+    
+    /**
+     * Drop the link for a fediverse `target`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+     * on store IO.
+     */
+    fun `fediUnlinkPerson`(`target`: kotlin.String)
     
     /**
      * Mint a fresh `x0x://invite/...` link for a group, suitable for the
@@ -2989,6 +3102,79 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Send a "go private" invite to `target` over the fediverse: publish
+     * our pair record, compose the invite (pair link + install nudge +
+     * history note), and deliver it as a fediverse DM. Records the
+     * pending invite ONLY on delivery, so the pending state can never
+     * claim an invite the recipient never received.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+     * on a pair-publish / signing / store failure. A transient inbox
+     * outage is `delivered == false`, not an error.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediGoPrivateInvite`(`target`: kotlin.String, `displayName`: kotlin.String) : GoPrivateReportFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_go_private_invite(
+                thisPtr,
+                FfiConverterString.lower(`target`),FfiConverterString.lower(`displayName`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeGoPrivateReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Link a fediverse `target` to a PQ `agent_id_hex` — the manual
+     * "Same person?" confirm. Local only; never published.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+     * on store IO.
+     */
+    @Throws(ChatFfiException::class)override fun `fediLinkPerson`(`target`: kotlin.String, `agentIdHex`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_link_person(
+        it, FfiConverterString.lower(`target`),FfiConverterString.lower(`agentIdHex`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * The fediverse label linked to `agent_id_hex`, if any (reverse
+     * lookup used to collapse a linked thread into its PQ contact row).
+     *
+     * # Errors
+     * [`ChatFfiError`] on store load.
+     */
+    @Throws(ChatFfiException::class)override fun `fediLinkedLabelForAgent`(`agentIdHex`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_linked_label_for_agent(
+        it, FfiConverterString.lower(`agentIdHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Resolve a `@user@host` fediverse handle to an account card: verified
      * (attestation-bound to a chat agent id, with a share URI for "message
      * privately") or public-only. Load the rich profile (name/bio/avatar)
@@ -3053,6 +3239,45 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         ChatFfiException.ErrorHandler,
     )
     }
+
+    
+    /**
+     * Fediverse handles invited to private chat but not yet linked.
+     * Empty when no handle is minted (quiet).
+     *
+     * # Errors
+     * [`ChatFfiError`] on store load.
+     */
+    @Throws(ChatFfiException::class)override fun `fediPendingInvites`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_pending_invites(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Every fediverse↔LIT person link. Empty when no handle is minted.
+     *
+     * # Errors
+     * [`ChatFfiError`] on store load.
+     */
+    @Throws(ChatFfiException::class)override fun `fediPersonLinks`(): List<FediPersonLinkFfi> {
+            return FfiConverterSequenceTypeFediPersonLinkFfi.lift(
+    callWithPointer {
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(
+        it, _status)
+}
+    }
+    )
+    }
+    
 
     
     /**
@@ -3178,6 +3403,25 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         ChatFfiException.ErrorHandler,
     )
     }
+
+    
+    /**
+     * Drop the link for a fediverse `target`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+     * on store IO.
+     */
+    @Throws(ChatFfiException::class)override fun `fediUnlinkPerson`(`target`: kotlin.String)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(ChatFfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_unlink_person(
+        it, FfiConverterString.lower(`target`),_status)
+}
+    }
+    
+    
 
     
     /**
@@ -4622,6 +4866,62 @@ public object FfiConverterTypeFediFollowingFfi: FfiConverterRustBuffer<FediFollo
 
 
 /**
+ * One fediverse↔LIT person link — mirrors
+ * [`fetchit_chat::fedi_link::PersonLink`] plus its canonical label.
+ */
+data class FediPersonLinkFfi (
+    /**
+     * Canonical `user@host` fediverse label.
+     */
+    var `label`: kotlin.String, 
+    /**
+     * The PQ agent id this handle is linked to, if linked.
+     */
+    var `agentIdHex`: kotlin.String?, 
+    /**
+     * A go-private invite has been delivered to this person.
+     */
+    var `invited`: kotlin.Boolean, 
+    /**
+     * This person is linked to a PQ contact (chat privately in Chats).
+     */
+    var `linked`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediPersonLinkFfi: FfiConverterRustBuffer<FediPersonLinkFfi> {
+    override fun read(buf: ByteBuffer): FediPersonLinkFfi {
+        return FediPersonLinkFfi(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediPersonLinkFfi) = (
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterOptionalString.allocationSize(value.`agentIdHex`) +
+            FfiConverterBoolean.allocationSize(value.`invited`) +
+            FfiConverterBoolean.allocationSize(value.`linked`)
+    )
+
+    override fun write(value: FediPersonLinkFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterOptionalString.write(value.`agentIdHex`, buf)
+            FfiConverterBoolean.write(value.`invited`, buf)
+            FfiConverterBoolean.write(value.`linked`, buf)
+    }
+}
+
+
+
+/**
  * One post in the pulled read feed (text only; wire HTML is reduced
  * engine-side, so shells render this as plain text).
  */
@@ -4792,6 +5092,42 @@ public object FfiConverterTypeFollowReportFfi: FfiConverterRustBuffer<FollowRepo
             FfiConverterString.write(value.`followActivityId`, buf)
             FfiConverterBoolean.write(value.`delivered`, buf)
             FfiConverterBoolean.write(value.`recorded`, buf)
+    }
+}
+
+
+
+/**
+ * Result of [`ChatClient::fedi_go_private_invite`].
+ */
+data class GoPrivateReportFfi (
+    /**
+     * The invite fedi DM reached the recipient's inbox. `false` means it
+     * was signed but the inbox was unreachable — the pending state is NOT
+     * recorded, so the caller can offer a retry.
+     */
+    var `delivered`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeGoPrivateReportFfi: FfiConverterRustBuffer<GoPrivateReportFfi> {
+    override fun read(buf: ByteBuffer): GoPrivateReportFfi {
+        return GoPrivateReportFfi(
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: GoPrivateReportFfi) = (
+            FfiConverterBoolean.allocationSize(value.`delivered`)
+    )
+
+    override fun write(value: GoPrivateReportFfi, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`delivered`, buf)
     }
 }
 
@@ -6653,6 +6989,34 @@ public object FfiConverterSequenceTypeFediFollowingFfi: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFediFollowingFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFediPersonLinkFfi: FfiConverterRustBuffer<List<FediPersonLinkFfi>> {
+    override fun read(buf: ByteBuffer): List<FediPersonLinkFfi> {
+        val len = buf.getInt()
+        return List<FediPersonLinkFfi>(len) {
+            FfiConverterTypeFediPersonLinkFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FediPersonLinkFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFediPersonLinkFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FediPersonLinkFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFediPersonLinkFfi.write(it, buf)
         }
     }
 }

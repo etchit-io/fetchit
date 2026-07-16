@@ -529,6 +529,29 @@ pub struct FediThreadSummaryFfi {
     pub last_outbound: bool,
 }
 
+/// One fediverse↔LIT person link — mirrors
+/// [`fetchit_chat::fedi_link::PersonLink`] plus its canonical label.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediPersonLinkFfi {
+    /// Canonical `user@host` fediverse label.
+    pub label: String,
+    /// The PQ agent id this handle is linked to, if linked.
+    pub agent_id_hex: Option<String>,
+    /// A go-private invite has been delivered to this person.
+    pub invited: bool,
+    /// This person is linked to a PQ contact (chat privately in Chats).
+    pub linked: bool,
+}
+
+/// Result of [`ChatClient::fedi_go_private_invite`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct GoPrivateReportFfi {
+    /// The invite fedi DM reached the recipient's inbox. `false` means it
+    /// was signed but the inbox was unreachable — the pending state is NOT
+    /// recorded, so the caller can offer a retry.
+    pub delivered: bool,
+}
+
 /// Result of [`ChatClient::fedi_unfollow`].
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UnfollowReportFfi {
@@ -1467,6 +1490,151 @@ impl ChatClient {
             .iter()
             .map(|u| fetchit_chat::fedi_feed::author_label(u))
             .collect())
+    }
+
+    /// Send a "go private" invite to `target` over the fediverse: publish
+    /// our pair record, compose the invite (pair link + install nudge +
+    /// history note), and deliver it as a fediverse DM. Records the
+    /// pending invite ONLY on delivery, so the pending state can never
+    /// claim an invite the recipient never received.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+    /// on a pair-publish / signing / store failure. A transient inbox
+    /// outage is `delivered == false`, not an error.
+    pub async fn fedi_go_private_invite(
+        &self,
+        target: String,
+        display_name: String,
+    ) -> Result<GoPrivateReportFfi, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        self.inner
+            .publish_pair_record()
+            .await
+            .map_err(ChatFfiError::from)?;
+        let pair_uri = fetchit_chat::pair_uri::emit_pair_uri(
+            &self.agent_id_hex(),
+            std::slice::from_ref(&self.relay_url),
+        )
+        .map_err(|e| ChatFfiError::Invalid {
+            reason: e.to_string(),
+        })?;
+        let body = format!(
+            "{display_name} invited you to a private, post-quantum encrypted chat \
+             on fetch>it. Open this link in the fetch>it app to accept: {pair_uri} \
+             — new here? Get the app: https://etchit.io/fetch (your fediverse \
+             messages stay here; the private chat starts fresh)"
+        );
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .send_fedi_dm(&handle, &target, &body, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        if report.delivered {
+            self.inner
+                .record_fedi_invite(&handle, &target, i64::try_from(now_ms).unwrap_or(i64::MAX))
+                .map_err(ChatFfiError::from)?;
+        }
+        Ok(GoPrivateReportFfi {
+            delivered: report.delivered,
+        })
+    }
+
+    /// Fediverse handles invited to private chat but not yet linked.
+    /// Empty when no handle is minted (quiet).
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on store load.
+    pub fn fedi_pending_invites(&self) -> Result<Vec<String>, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(Vec::new());
+        };
+        self.inner
+            .pending_go_private(&handle)
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Link a fediverse `target` to a PQ `agent_id_hex` — the manual
+    /// "Same person?" confirm. Local only; never published.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+    /// on store IO.
+    pub fn fedi_link_person(
+        &self,
+        target: String,
+        agent_id_hex: String,
+    ) -> Result<(), ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        self.inner
+            .link_fedi_person(&handle, &target, &agent_id_hex)
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Drop the link for a fediverse `target`.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted; [`ChatFfiError`]
+    /// on store IO.
+    pub fn fedi_unlink_person(&self, target: String) -> Result<(), ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        self.inner
+            .unlink_fedi_person(&handle, &target)
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Every fediverse↔LIT person link. Empty when no handle is minted.
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on store load.
+    pub fn fedi_person_links(&self) -> Result<Vec<FediPersonLinkFfi>, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .inner
+            .fedi_person_links(&handle)
+            .map_err(ChatFfiError::from)?
+            .into_iter()
+            .map(|(label, p)| FediPersonLinkFfi {
+                invited: p.invited_at_ms.is_some(),
+                linked: p.agent_id_hex.is_some(),
+                agent_id_hex: p.agent_id_hex,
+                label,
+            })
+            .collect())
+    }
+
+    /// The fediverse label linked to `agent_id_hex`, if any (reverse
+    /// lookup used to collapse a linked thread into its PQ contact row).
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on store load.
+    pub fn fedi_linked_label_for_agent(
+        &self,
+        agent_id_hex: String,
+    ) -> Result<Option<String>, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(None);
+        };
+        self.inner
+            .linked_label_for_agent(&handle, &agent_id_hex)
+            .map_err(ChatFfiError::from)
     }
 
     /// Unfollow a fediverse account: sign + deliver the `Undo(Follow)`

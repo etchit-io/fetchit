@@ -16,7 +16,9 @@ import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FediFollowingFfi
 import uniffi.fetchit_ffi.FediPostFfi
+import uniffi.fetchit_ffi.FediPersonLinkFfi
 import uniffi.fetchit_ffi.FediThreadSummaryFfi
+import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
@@ -146,6 +148,13 @@ class FakeGateway : ChatGateway {
     override suspend fun fediSyncInbox(): UInt = 0u
     override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> = emptyList()
     override suspend fun fediFollowers(): List<String> = emptyList()
+    override suspend fun fediGoPrivateInvite(target: String, displayName: String): GoPrivateReportFfi =
+        GoPrivateReportFfi(delivered = true)
+    override fun fediPendingInvites(): List<String> = emptyList()
+    override fun fediLinkPerson(target: String, agentIdHex: String) {}
+    override fun fediUnlinkPerson(target: String) {}
+    override fun fediPersonLinks(): List<FediPersonLinkFfi> = emptyList()
+    override fun fediLinkedLabelForAgent(agentIdHex: String): String? = null
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
         if (removeContactThrows) throw RuntimeException("remove boom")
@@ -528,6 +537,13 @@ class ChatControllerTest {
             override suspend fun fediSyncInbox(): UInt = 0u
             override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> = emptyList()
             override suspend fun fediFollowers(): List<String> = emptyList()
+            override suspend fun fediGoPrivateInvite(target: String, displayName: String): GoPrivateReportFfi =
+                GoPrivateReportFfi(delivered = true)
+            override fun fediPendingInvites(): List<String> = emptyList()
+            override fun fediLinkPerson(target: String, agentIdHex: String) {}
+            override fun fediUnlinkPerson(target: String) {}
+            override fun fediPersonLinks(): List<FediPersonLinkFfi> = emptyList()
+            override fun fediLinkedLabelForAgent(agentIdHex: String): String? = null
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
