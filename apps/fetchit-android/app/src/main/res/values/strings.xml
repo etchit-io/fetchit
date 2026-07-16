@@ -301,6 +301,8 @@
          and says "publicly" so the public/non-PQ contract is explicit at the
          moment of typing. -->
     <string name="feed_compose_hint">post publicly as @%1$s</string>
+    <string name="feed_post_button">post</string>
+    <string name="feed_mint_prompt">Get your public @name to post and follow — takes seconds.</string>
     <string name="feed_posted">posted — everyone can see it</string>
     <string name="feed_post_failed">couldn\'t post — try again in a moment</string>
     <string name="feed_find_people_desc">find people</string>
@@ -315,6 +317,9 @@
     <string name="tab_chats">Chats</string>
     <string name="tab_people">People</string>
     <string name="tab_feed">Feed</string>
+    <string name="people_find_hint">find someone — @name or paste a link</string>
+    <string name="people_contacts_header">your contacts</string>
+    <string name="people_contacts_empty">no private contacts yet — add someone above.</string>
     <string name="chat_feed_title">Public posts</string>
     <string name="chat_feed_subtitle">from across the fediverse</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are

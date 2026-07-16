@@ -2036,54 +2036,234 @@ class ChatModeView(
 
     // ── people screen ──────────────────────────────────────────────────
 
-    // Placeholder People tab root. Task 9 replaces this with the real
-    // search + contacts/following/followers/blocked sections + profile card.
+    // The People tab root: search, your private contacts, and the
+    // fediverse social graph (following / followers / blocked).
     private fun bindPeopleScreen() {
+        val px16 = (16 * context.resources.displayMetrics.density).toInt()
+        val px8 = px16 / 2
         val root = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.VERTICAL
-            gravity = android.view.Gravity.CENTER
-            val pad = (24 * context.resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
+            setPadding(px16, px8, px16, px16)
         }
-        root.addView(TextView(context).apply {
-            text = context.getString(R.string.tab_people)
-            textSize = 18f
-            setTextColor(themeColor(R.attr.fetchitBone))
+        val scroller = android.widget.ScrollView(context).apply {
+            addView(root)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+
+        fun header(text: String) = TextView(context).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(themeColor(R.attr.fetchitCopper))
+            setPadding(0, px16, 0, px8)
+        }
+        fun line(text: String) = TextView(context).apply {
+            this.text = text
+            textSize = 14f
+            setTextColor(themeColor(R.attr.fetchitAsh))
+            setPadding(0, px8, 0, px8)
+        }
+
+        // Search — one field for an @name or a pasted link (opens the unified
+        // add-someone flow).
+        root.addView(android.widget.Button(context).apply {
+            text = context.getString(R.string.people_find_hint)
+            setOnClickListener { showAddContactDialog() }
         })
-        slot.addView(root)
+
+        // No public @handle yet → invite to mint (following/followers need one).
+        if (controller.fediActorStatus() == null) {
+            root.addView(TextView(context).apply {
+                text = context.getString(R.string.feed_mint_prompt)
+                textSize = 15f
+                setTextColor(themeColor(R.attr.fetchitCopper))
+                setPadding(0, px16, 0, px8)
+                isClickable = true
+                setOnClickListener { showFediMintDialog { showRoot(Screen.People) } }
+            })
+        }
+
+        // Your private (PQ) contacts.
+        root.addView(header(context.getString(R.string.people_contacts_header)))
+        val contacts = controller.contacts.contacts.value
+        if (contacts.isEmpty()) {
+            root.addView(line(context.getString(R.string.people_contacts_empty)))
+        } else {
+            contacts.forEach { c ->
+                root.addView(TextView(context).apply {
+                    text = "🔒 ${c.displayName}"
+                    textSize = 15f
+                    setTextColor(themeColor(R.attr.fetchitBone))
+                    setPadding(0, px8, 0, px8)
+                    isClickable = true
+                    setOnClickListener { openThread(c.agentIdHex) }
+                })
+            }
+        }
+
+        val followingHeader = header(context.getString(R.string.fedi_people_following, "…"))
+        root.addView(followingHeader)
+        val followingBox = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(followingBox)
+
+        val followersHeader = header(context.getString(R.string.fedi_people_followers))
+        root.addView(followersHeader)
+        val followersBox = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(followersBox)
+
+        val blockedHeader = header(context.getString(R.string.fedi_people_blocked))
+        root.addView(blockedHeader)
+        val blockedBox = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(blockedBox)
+
+        fun renderBlocked() {
+            blockedBox.removeAllViews()
+            val blocked = blockStore.blocked()
+            blockedHeader.visibility = if (blocked.isEmpty()) View.GONE else View.VISIBLE
+            blocked.forEach { b ->
+                val row = android.widget.LinearLayout(context).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                row.addView(TextView(context).apply {
+                    text = context.getString(R.string.fedi_handle_at, b)
+                    textSize = 14f
+                    setTextColor(themeColor(R.attr.fetchitBone))
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
+                })
+                row.addView(android.widget.Button(context, null, android.R.attr.borderlessButtonStyle).apply {
+                    text = context.getString(R.string.fedi_unblock)
+                    setOnClickListener {
+                        blockStore.unblock(b)
+                        snackbar(context.getString(R.string.fedi_unblocked, b))
+                        renderBlocked()
+                    }
+                })
+                blockedBox.addView(row)
+            }
+        }
+        renderBlocked()
+
+        fun renderFollowing(entries: List<uniffi.fetchit_ffi.FediFollowingFfi>) {
+            followingBox.removeAllViews()
+            followingHeader.text =
+                context.getString(R.string.fedi_people_following, entries.size.toString())
+            if (entries.isEmpty()) {
+                followingBox.addView(line(context.getString(R.string.fedi_people_following_empty)))
+                return
+            }
+            entries.forEach { e ->
+                val atHandle = "@${e.label}"
+                val row = android.widget.LinearLayout(context).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                row.addView(TextView(context).apply {
+                    text = if (e.state == "accepted") {
+                        atHandle
+                    } else {
+                        context.getString(R.string.fedi_following_pending_row, atHandle)
+                    }
+                    textSize = 14f
+                    setTextColor(themeColor(R.attr.fetchitBone))
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
+                })
+                row.addView(android.widget.Button(context, null, android.R.attr.borderlessButtonStyle).apply {
+                    text = context.getString(R.string.chat_fedi_dm)
+                    setOnClickListener { openFediThread(atHandle) }
+                })
+                row.addView(android.widget.ImageButton(context, null, android.R.attr.borderlessButtonStyle).apply {
+                    setImageResource(android.R.drawable.ic_menu_more)
+                    contentDescription = context.getString(R.string.fedi_row_more)
+                    setOnClickListener { anchor ->
+                        PopupMenu(context, anchor).apply {
+                            menu.add(context.getString(R.string.fedi_unfollow))
+                            menu.add(context.getString(R.string.fedi_block))
+                            setOnMenuItemClickListener { item ->
+                                when (item.title) {
+                                    context.getString(R.string.fedi_unfollow) ->
+                                        unfollowFedi(e.targetActorUrl, atHandle) { showRoot(Screen.People) }
+                                    context.getString(R.string.fedi_block) -> {
+                                        blockStore.block(atHandle)
+                                        snackbar(context.getString(R.string.fedi_blocked, atHandle))
+                                        renderBlocked()
+                                    }
+                                }
+                                true
+                            }
+                            show()
+                        }
+                    }
+                })
+                followingBox.addView(row)
+            }
+        }
+
+        slot.addView(scroller)
+
+        if (controller.fediActorStatus() == null) {
+            followingHeader.visibility = View.GONE
+            followersHeader.visibility = View.GONE
+            return
+        }
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                followingBox.addView(line(context.getString(R.string.chat_connect_failed_generic)))
+                return@launch
+            }
+            runCatching { gw.fediFollowing() }.fold(
+                onSuccess = { renderFollowing(it) },
+                onFailure = {
+                    followingBox.addView(
+                        line(userFacingError(it, "fediFollowing", R.string.fedi_people_load_failed)),
+                    )
+                },
+            )
+            runCatching { gw.fediFollowers() }.fold(
+                onSuccess = { followers ->
+                    if (followers.isEmpty()) {
+                        followersBox.addView(line(context.getString(R.string.fedi_people_followers_empty)))
+                    } else {
+                        followers.forEach { f ->
+                            followersBox.addView(line(context.getString(R.string.fedi_handle_at, f)))
+                        }
+                    }
+                },
+                onFailure = {
+                    followersBox.addView(line(context.getString(R.string.fedi_people_followers_empty)))
+                },
+            )
+        }
     }
 
     // ── feed screen ────────────────────────────────────────────────────
 
     private fun bindFeedScreen() {
         val view = feedView ?: LayoutInflater.from(context)
-            .inflate(R.layout.view_chat_thread, slot, false)
+            .inflate(R.layout.view_feed, slot, false)
             .also { feedView = it }
 
         slot.addView(view)
 
-        view.findViewById<TextView>(R.id.threadPeerName).text =
-            context.getString(R.string.chat_feed_title)
-        // The compose row appears the moment a handle exists — including right
-        // after minting from this screen's own header prompt.
-        renderFediHubHeader(view.findViewById(R.id.threadPeerShortId)) { bindFeedCompose(view) }
-        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        // Compose (or the mint card when there's no handle yet). The social
+        // graph — find / follow / message — lives on the People tab now; Feed
+        // is content only.
         bindFeedCompose(view)
-        // The (group-only) members-button slot becomes the people door here —
-        // the ic_people icon opens "your fediverse" (following / followers /
-        // blocked, with find-someone inside). Before a handle exists it falls
-        // back to the add-someone dialog so the button is never a dead end.
-        val peopleBtn = view.findViewById<ImageButton>(R.id.threadMembersButton)
-        peopleBtn.visibility = View.VISIBLE
-        peopleBtn.contentDescription = context.getString(R.string.fedi_people_desc)
-        peopleBtn.setOnClickListener {
-            val handle = controller.fediActorStatus()
-            if (handle != null) showFediPeopleSheet(handle) else showAddContactDialog()
-        }
 
-        val rv = view.findViewById<RecyclerView>(R.id.messageList)
-        val lm = LinearLayoutManager(context).apply { stackFromEnd = true }
-        rv.layoutManager = lm
+        val rv = view.findViewById<RecyclerView>(R.id.feedList)
+        rv.layoutManager = LinearLayoutManager(context).apply { stackFromEnd = true }
         val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
         rv.adapter = adapter
 
@@ -2256,15 +2436,25 @@ class ChatModeView(
      * best-effort and quiet); failure restores the draft with a warm note.
      */
     private fun bindFeedCompose(view: View) {
-        val sendRow = view.findViewById<View>(R.id.threadSendRow)
+        val composeRow = view.findViewById<View>(R.id.feedComposeRow)
+        val mintCard = view.findViewById<TextView>(R.id.feedMintCard)
         val handle = controller.fediActorStatus()
         if (handle == null) {
-            sendRow.visibility = View.GONE
+            // No public handle yet — offer to mint one instead of composing.
+            composeRow.visibility = View.GONE
+            mintCard.visibility = View.VISIBLE
+            mintCard.setOnClickListener {
+                showFediMintDialog {
+                    bindFeedCompose(view)
+                    refreshPulledFeed()
+                }
+            }
             return
         }
-        val messageInput = view.findViewById<EditText>(R.id.messageInput)
-        val sendButton = view.findViewById<View>(R.id.sendButton)
-        sendRow.visibility = View.VISIBLE
+        mintCard.visibility = View.GONE
+        composeRow.visibility = View.VISIBLE
+        val messageInput = view.findViewById<EditText>(R.id.feedComposeInput)
+        val sendButton = view.findViewById<View>(R.id.feedSendButton)
         messageInput.hint = context.getString(R.string.feed_compose_hint, handle)
         bindSendEnabled(messageInput, sendButton)
         sendButton.setOnClickListener {

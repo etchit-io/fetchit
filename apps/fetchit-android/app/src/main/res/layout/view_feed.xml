@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?attr/fetchitInk">
+
+    <!-- Compose row — shown when the user has a public @handle. -->
+    <LinearLayout
+        android:id="@+id/feedComposeRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="12dp"
+        android:background="?attr/fetchitInk2"
+        android:visibility="gone">
+
+        <EditText
+            android:id="@+id/feedComposeInput"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:inputType="textMultiLine|textCapSentences"
+            android:maxLines="4"
+            android:textColor="?attr/fetchitBone"
+            android:textColorHint="?attr/fetchitAsh"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/feedSendButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/feed_post_button"
+            android:backgroundTint="?attr/fetchitCopper"
+            android:textColor="?attr/fetchitInk" />
+    </LinearLayout>
+
+    <!-- Mint card — shown instead of the compose row when there is no
+         public @handle yet. One tap opens the mint dialog. -->
+    <TextView
+        android:id="@+id/feedMintCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="16dp"
+        android:background="?attr/fetchitInk2"
+        android:text="@string/feed_mint_prompt"
+        android:textColor="?attr/fetchitCopper"
+        android:textSize="15sp"
+        android:gravity="center"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone" />
+
+    <!-- The feed: newest posts from followed accounts + the user's own. -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/feedList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:paddingHorizontal="8dp"
+        android:clipToPadding="false" />
+
+</LinearLayout>
