@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::client::Client;
 use crate::error::{ChatError, Result};
-use crate::fedi_thread::{load_fedi_threads, save_fedi_threads, FediThreadMsg};
+use crate::fedi_thread::{load_fedi_threads, save_fedi_threads, FediThreadMsg, FediThreadSummary};
 
 /// One inbound fediverse message pulled from the bridge inbox, ready to
 /// render in the fedi thread.
@@ -272,6 +272,17 @@ impl Client {
     pub fn fedi_thread_history(&self, handle: &str, label: &str) -> Result<Vec<FediThreadMsg>> {
         let (master, layout) = self.fedi_at_rest()?;
         Ok(load_fedi_threads(handle, &master, &layout)?.history(label))
+    }
+
+    /// Every fediverse DM thread as a one-line summary, newest first —
+    /// the render source for fediverse rows in the unified conversation
+    /// list. A device with no minted handle has no threads.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load failures.
+    pub fn fedi_threads_overview(&self, handle: &str) -> Result<Vec<FediThreadSummary>> {
+        let (master, layout) = self.fedi_at_rest()?;
+        Ok(load_fedi_threads(handle, &master, &layout)?.overview())
     }
 }
 

@@ -79,6 +79,21 @@ pub struct FediThreads {
     pub threads: BTreeMap<String, Vec<FediThreadMsg>>,
 }
 
+/// A one-line summary of a fediverse DM thread, for the unified
+/// conversation list. Derived from the last message in each thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FediThreadSummary {
+    /// Canonical correspondent label (`user@host`), the `f:<label>`
+    /// conversation key without the prefix.
+    pub label: String,
+    /// The most recent message's plain-text body — the list preview.
+    pub last_body: String,
+    /// The most recent message's ordering stamp — the list sort key.
+    pub last_at_ms: i64,
+    /// `true` when the most recent message was sent by this device.
+    pub last_outbound: bool,
+}
+
 impl FediThreads {
     /// Insert `msg` into the thread for `label` (canonicalised here).
     /// Returns `false` (and stores nothing) when a message with the same
@@ -133,6 +148,32 @@ impl FediThreads {
             }
         }
         inserted
+    }
+
+    /// One [`FediThreadSummary`] per non-empty thread, newest activity
+    /// first (ties broken by label ascending so the order is stable). The
+    /// render source for fediverse rows in the unified conversation list.
+    #[must_use]
+    pub fn overview(&self) -> Vec<FediThreadSummary> {
+        let mut out: Vec<FediThreadSummary> = self
+            .threads
+            .iter()
+            .filter_map(|(label, msgs)| {
+                let last = msgs.last()?;
+                Some(FediThreadSummary {
+                    label: label.clone(),
+                    last_body: last.text.clone(),
+                    last_at_ms: last.at_ms,
+                    last_outbound: last.outbound,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.last_at_ms
+                .cmp(&a.last_at_ms)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        out
     }
 }
 
@@ -316,6 +357,44 @@ mod tests {
         assert!(
             load_fedi_threads("josh", &fixture_master(2), &layout).is_err(),
             "history must never be silently clobbered",
+        );
+    }
+
+    #[test]
+    fn overview_is_one_row_per_thread_newest_first() {
+        let mut t = FediThreads::default();
+        // happyborg: last activity at 200 (an inbound reply)
+        t.insert("@happyborg@fosstodon.org", outbound("s1", 100));
+        t.fold_inbox(&[inbound(
+            "https://fosstodon.org/users/happyborg",
+            "r1",
+            200,
+        )]);
+        // stranger: last activity at 150
+        t.fold_inbox(&[inbound("https://mas.to/users/stranger", "r2", 150)]);
+
+        let ov = t.overview();
+        assert_eq!(ov.len(), 2, "one summary per thread");
+        // newest-first: happyborg (200) before stranger (150)
+        assert_eq!(ov[0].label, "happyborg@fosstodon.org");
+        assert_eq!(ov[0].last_at_ms, 200);
+        assert_eq!(ov[0].last_body, "body of r1");
+        assert!(!ov[0].last_outbound, "last row was an inbound reply");
+        assert_eq!(ov[1].label, "stranger@mas.to");
+        assert_eq!(ov[1].last_at_ms, 150);
+    }
+
+    #[test]
+    fn overview_skips_empty_threads_and_is_deterministic_on_ties() {
+        let mut t = FediThreads::default();
+        // Two threads with the same last_at_ms — label breaks the tie.
+        t.insert("@bbb@h", outbound("s1", 100));
+        t.insert("@aaa@h", outbound("s2", 100));
+        let ov = t.overview();
+        assert_eq!(
+            ov.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(),
+            vec!["aaa@h", "bbb@h"],
+            "equal timestamps sort by label ascending",
         );
     }
 
