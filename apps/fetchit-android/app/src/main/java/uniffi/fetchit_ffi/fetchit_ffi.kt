@@ -4883,6 +4883,11 @@ data class FediPersonLinkFfi (
      */
     var `invited`: kotlin.Boolean, 
     /**
+     * When the invite was delivered (epoch ms), if invited — drives the
+     * resend cooldown so the shell doesn't spam the recipient's inbox.
+     */
+    var `invitedAtMs`: kotlin.Long?, 
+    /**
      * This person is linked to a PQ contact (chat privately in Chats).
      */
     var `linked`: kotlin.Boolean
@@ -4900,6 +4905,7 @@ public object FfiConverterTypeFediPersonLinkFfi: FfiConverterRustBuffer<FediPers
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalLong.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
@@ -4908,6 +4914,7 @@ public object FfiConverterTypeFediPersonLinkFfi: FfiConverterRustBuffer<FediPers
             FfiConverterString.allocationSize(value.`label`) +
             FfiConverterOptionalString.allocationSize(value.`agentIdHex`) +
             FfiConverterBoolean.allocationSize(value.`invited`) +
+            FfiConverterOptionalLong.allocationSize(value.`invitedAtMs`) +
             FfiConverterBoolean.allocationSize(value.`linked`)
     )
 
@@ -4915,6 +4922,7 @@ public object FfiConverterTypeFediPersonLinkFfi: FfiConverterRustBuffer<FediPers
             FfiConverterString.write(value.`label`, buf)
             FfiConverterOptionalString.write(value.`agentIdHex`, buf)
             FfiConverterBoolean.write(value.`invited`, buf)
+            FfiConverterOptionalLong.write(value.`invitedAtMs`, buf)
             FfiConverterBoolean.write(value.`linked`, buf)
     }
 }
@@ -6753,6 +6761,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
+    override fun read(buf: ByteBuffer): kotlin.Long? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterLong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Long?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterLong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterLong.write(value, buf)
         }
     }
 }

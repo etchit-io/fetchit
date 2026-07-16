@@ -539,6 +539,9 @@ pub struct FediPersonLinkFfi {
     pub agent_id_hex: Option<String>,
     /// A go-private invite has been delivered to this person.
     pub invited: bool,
+    /// When the invite was delivered (epoch ms), if invited — drives the
+    /// resend cooldown so the shell doesn't spam the recipient's inbox.
+    pub invited_at_ms: Option<i64>,
     /// This person is linked to a PQ contact (chat privately in Chats).
     pub linked: bool,
 }
@@ -1613,6 +1616,7 @@ impl ChatClient {
             .into_iter()
             .map(|(label, p)| FediPersonLinkFfi {
                 invited: p.invited_at_ms.is_some(),
+                invited_at_ms: p.invited_at_ms,
                 linked: p.agent_id_hex.is_some(),
                 agent_id_hex: p.agent_id_hex,
                 label,

@@ -2454,6 +2454,8 @@ class ChatModeView(
             }
         }
 
+        wireGoPrivateBar(view, handle)
+
         threadCollectJob = lifecycleScope.launch {
             controller.hydrateConversation(convKey)
             controller.conversations.messagesFor(convKey).collect { msgs ->
@@ -2464,6 +2466,106 @@ class ChatModeView(
             }
         }
         pullFediReplies(convKey)
+    }
+
+    /** Resend is offered only after this cooldown, so a tap can't spam the
+     *  recipient's inbox. The pair link is stable, so a resend is idempotent. */
+    private val goPrivateResendCooldownMs = 24L * 60 * 60 * 1000
+
+    /**
+     * Show and drive the go-private strip on a fediverse thread. Reflects the
+     * current per-person state (offer → invited/pending → linked) and never
+     * auto-switches rails: escalation is always an explicit, confirmed tap.
+     */
+    private fun wireGoPrivateBar(view: View, handle: String) {
+        view.findViewById<View>(R.id.fediGoPrivateBar).visibility = View.VISIBLE
+        renderGoPrivateBar(view, handle)
+    }
+
+    private fun renderGoPrivateBar(view: View, handle: String) {
+        val bar = view.findViewById<View>(R.id.fediGoPrivateBar)
+        val label = view.findViewById<TextView>(R.id.fediGoPrivateLabel)
+        val sub = view.findViewById<TextView>(R.id.fediGoPrivateSub)
+        val resend = view.findViewById<TextView>(R.id.fediGoPrivateResend)
+        lifecycleScope.launch {
+            val link = runCatching { controller.gateway()?.fediPersonLinks() }
+                .getOrNull()
+                ?.firstOrNull { it.label.equals(handle, ignoreCase = true) }
+            when {
+                // Already linked (defensive — the row is normally folded away).
+                link?.linked == true -> {
+                    label.text = context.getString(R.string.go_private_linked)
+                    sub.visibility = View.GONE
+                    resend.visibility = View.GONE
+                    bar.isClickable = false
+                    bar.setOnClickListener(null)
+                }
+                // Invite delivered, not yet accepted: quiet pending status.
+                link?.invited == true -> {
+                    label.text = context.getString(R.string.go_private_pending)
+                    sub.visibility = View.GONE
+                    bar.isClickable = false
+                    bar.setOnClickListener(null)
+                    val invitedAt = link.invitedAtMs ?: 0L
+                    val cooledDown =
+                        System.currentTimeMillis() - invitedAt >= goPrivateResendCooldownMs
+                    resend.visibility = if (cooledDown) View.VISIBLE else View.GONE
+                    resend.setOnClickListener {
+                        if (cooledDown) sendGoPrivateInvite(view, handle, resend = true)
+                    }
+                }
+                // Fresh: the actionable offer.
+                else -> {
+                    label.text = context.getString(R.string.go_private_button)
+                    sub.visibility = View.VISIBLE
+                    resend.visibility = View.GONE
+                    bar.isClickable = true
+                    bar.setOnClickListener { confirmGoPrivate(view, handle) }
+                }
+            }
+        }
+    }
+
+    /** The go-private confirmation card. The body states plainly that the
+     *  invite itself travels the open fediverse. */
+    private fun confirmGoPrivate(view: View, handle: String) {
+        MaterialAlertDialogBuilder(context)
+            .setTitle(R.string.go_private_title)
+            .setMessage(context.getString(R.string.go_private_body, handle))
+            .setPositiveButton(R.string.go_private_send) { _, _ ->
+                sendGoPrivateInvite(view, handle, resend = false)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Publish a pair record and send the invite over the existing fediverse DM
+     * rail. Pending state is recorded engine-side only when delivery succeeds
+     * (handled in the FFI), so an unreachable inbox surfaces a retry and leaves
+     * the offer intact rather than lying about a sent invite.
+     */
+    private fun sendGoPrivateInvite(view: View, handle: String, resend: Boolean) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                snackbar(context.getString(R.string.go_private_send_failed, handle))
+                return@launch
+            }
+            val name = displayNameOrDefault(gw)
+            val report = runCatching { gw.fediGoPrivateInvite(handle, name) }.getOrElse {
+                Log.w(TAG, "fediGoPrivateInvite: ${ffiReason(it)}", it)
+                snackbar(context.getString(R.string.go_private_send_failed, handle))
+                return@launch
+            }
+            if (report.delivered) {
+                controller.refreshPersonLinks()
+                if (screenStack.lastOrNull() == Screen.FediThread(handle)) {
+                    renderGoPrivateBar(view, handle)
+                }
+            } else {
+                snackbar(context.getString(R.string.go_private_send_failed, handle))
+            }
+        }
     }
 
     /**

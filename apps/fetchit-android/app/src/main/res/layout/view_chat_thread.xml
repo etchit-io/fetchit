@@ -69,6 +69,64 @@
 
     </LinearLayout>
 
+    <!-- Go-private strip: shown only on a fediverse DM thread. A full-width,
+         clearly-labeled tappable bar (not a nondescript icon) that escalates
+         the thread to a private, post-quantum chat. Flips to a quiet pending
+         status line after the invite is sent. GONE for DM / group / feed. -->
+    <LinearLayout
+        android:id="@+id/fediGoPrivateBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/fediGoPrivateLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/go_private_button"
+                android:textColor="?attr/fetchitCopper"
+                android:textStyle="bold"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/fediGoPrivateSub"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:text="@string/go_private_button_sub"
+                android:textColor="?attr/fetchitAsh"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/fediGoPrivateResend"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:padding="8dp"
+            android:text="@string/go_private_resend"
+            android:textColor="?attr/fetchitCopper"
+            android:textSize="13sp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:visibility="gone" />
+
+    </LinearLayout>
+
     <!-- Message list -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/messageList"

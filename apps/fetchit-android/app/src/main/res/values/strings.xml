@@ -322,6 +322,42 @@
     <string name="chat_new_chat_type">type a name, or paste a link</string>
     <string name="people_contacts_header">your contacts</string>
     <string name="people_contacts_empty">no private contacts yet — add someone above.</string>
+
+    <!-- Go private: escalate a fediverse DM thread to a private, post-quantum
+         chat. The invite itself travels the open fediverse (stated plainly),
+         and the pending/linked states never auto-switch rails. -->
+    <string name="go_private_button">🔒 Go private</string>
+    <string name="go_private_button_sub">turn on post-quantum encryption</string>
+    <string name="go_private_title">Make this chat private?</string>
+    <string name="go_private_body">We\'ll send @%1$s an invite. When they open it in fetch&gt;it, this chat turns private — post-quantum encrypted, nobody (not even servers) can read it. Heads-up: the invite itself travels the open fediverse.</string>
+    <string name="go_private_send">Send private invite</string>
+    <string name="go_private_pending">invite sent — waiting for them to join</string>
+    <!-- The invite DM body itself is assembled in the FFI (crates/fetchit-ffi
+         chat_ffi.rs, fedi_go_private_invite) because it must embed the freshly
+         published pair URI. That Rust string is the single source of truth for
+         the invite copy; do not duplicate it here (it would silently drift). -->
+    <string name="go_private_resend">resend invite</string>
+    <string name="go_private_linked">🔒 linked — you chat privately with this person in Chats</string>
+    <string name="go_private_send_failed">couldn\'t reach %1$s to send the invite — try again in a moment.</string>
+
+    <!-- Manual, human-confirmed link between a fediverse person and a PQ
+         contact. Never automatic: the pair link crossed the open fediverse,
+         so anyone who saw it could impersonate the person. -->
+    <string name="link_confirm_reopen">link to a fediverse person…</string>
+    <string name="link_confirm_title">Same person?</string>
+    <string name="link_confirm_body">You invited @%1$s to private chat, and a new private contact \"%2$s\" just appeared. Are they the same person? Only link them if you\'re sure — anyone who saw the invite link could pretend to be them. If in doubt, ask them out loud.</string>
+    <string name="link_confirm_yes">Yes — link them</string>
+    <string name="link_confirm_no">Not now</string>
+
+    <!-- Dividers inside a linked (merged) thread: fediverse history above,
+         post-quantum private messages below. -->
+    <string name="thread_divider_fedi">messages above traveled the open fediverse</string>
+    <string name="thread_divider_pq">🔒 private from here — post-quantum encrypted</string>
+
+    <!-- Private rail down: honest banner + one explicit, labeled fallback.
+         Never an automatic downgrade (that would make the lock a lie). -->
+    <string name="thread_fallback_banner">can\'t reach %1$s privately right now — your messages will send when reconnected</string>
+    <string name="thread_fallback_action">send over the open fediverse instead (not encrypted)</string>
     <string name="chat_feed_title">Public posts</string>
     <string name="chat_feed_subtitle">from across the fediverse</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are
