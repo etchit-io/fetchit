@@ -129,6 +129,17 @@ class ChatModeView(
     private var listContactsJob: Job? = null
     private var listPumpStateJob: Job? = null
     private var listConnStatusJob: Job? = null
+    private var linkConfirmJob: Job? = null
+
+    /** Contact agent ids present at the time the list first loaded (the
+     *  baseline). A NEW id appearing later, while a go-private invite is
+     *  pending, is what triggers the human-confirmed "Same person?" link. */
+    private val seenContactIds = HashSet<String>()
+
+    /** Contacts we've already surfaced the link-confirm prompt for (accepted
+     *  OR declined) — so a decline doesn't re-nag on every list emission. The
+     *  contact-overflow re-open path covers change-of-mind. */
+    private val linkPromptedIds = HashSet<String>()
 
     // Job for the active DM send; cancelled wherever threadCollectJob is cancelled.
     private var sendJob: Job? = null
@@ -570,6 +581,30 @@ class ChatModeView(
         listConnStatusJob = lifecycleScope.launch {
             controller.connectionStatus.collect { status ->
                 renderConnectionStatus(connStatus, status)
+            }
+        }
+
+        // Detect a newly-imported PQ contact while a go-private invite is
+        // pending, and offer the human-confirmed "Same person?" link. Never
+        // automatic: the pair link crossed the open fediverse, so anyone who
+        // saw it could import it — the user is the trust anchor.
+        linkConfirmJob = lifecycleScope.launch {
+            controller.contacts.contacts.collect { contacts ->
+                val firstSnapshot = seenContactIds.isEmpty()
+                val fresh = contacts.filter {
+                    it.agentIdHex !in seenContactIds && it.agentIdHex !in linkPromptedIds
+                }
+                seenContactIds.addAll(contacts.map { it.agentIdHex })
+                // The first emission just establishes the baseline — contacts
+                // that already existed when the list opened never prompt.
+                if (firstSnapshot) return@collect
+                for (contact in fresh) {
+                    val pending = runCatching { controller.gateway()?.fediPendingInvites() }
+                        .getOrNull().orEmpty()
+                    if (pending.isEmpty()) break
+                    linkPromptedIds.add(contact.agentIdHex)
+                    promptLinkConfirm(contact, pending)
+                }
             }
         }
 
@@ -1058,11 +1093,21 @@ class ChatModeView(
      * opens the confirm dialog. Mirrors desktop's per-row remove affordance.
      */
     private fun showContactRowMenu(anchor: View, contact: ChatContact) {
-        val label = context.getString(rowRemoveLabel(isGroup = false))
+        val removeLabel = context.getString(rowRemoveLabel(isGroup = false))
+        // Offer the "link to a fediverse person…" re-entry only while at least
+        // one go-private invite is pending — the change-of-mind path after a
+        // declined "Same person?" prompt.
+        val pending = runCatching { controller.gateway()?.fediPendingInvites() }
+            .getOrNull().orEmpty()
+        val linkLabel = context.getString(R.string.link_confirm_reopen)
         PopupMenu(context, anchor).apply {
-            menu.add(label)
-            setOnMenuItemClickListener {
-                confirmRemoveContact(contact)
+            if (pending.isNotEmpty()) menu.add(linkLabel)
+            menu.add(removeLabel)
+            setOnMenuItemClickListener { item ->
+                when (item.title) {
+                    linkLabel -> promptLinkConfirm(contact, pending)
+                    else -> confirmRemoveContact(contact)
+                }
                 true
             }
             show()
@@ -1078,6 +1123,56 @@ class ChatModeView(
                 true
             }
             show()
+        }
+    }
+
+    /**
+     * Offer to link a fediverse person to a newly-appeared PQ [contact]. One
+     * pending invite → straight to the confirm card; several → a picker first
+     * (the security copy names the chosen handle either way). Declining is a
+     * no-op; the contact overflow re-opens this flow later.
+     */
+    private fun promptLinkConfirm(contact: ChatContact, pending: List<String>) {
+        when {
+            pending.isEmpty() -> Unit
+            pending.size == 1 -> confirmLinkPerson(contact, pending.first())
+            else -> MaterialAlertDialogBuilder(context)
+                .setTitle(R.string.link_confirm_title)
+                .setItems(pending.toTypedArray()) { _, which ->
+                    confirmLinkPerson(contact, pending[which])
+                }
+                .setNegativeButton(R.string.link_confirm_no, null)
+                .show()
+        }
+    }
+
+    /** The human-confirmed link card. The body names both the invited handle
+     *  and the new contact, and warns that anyone who saw the invite link
+     *  could impersonate them — the user is the trust anchor. */
+    private fun confirmLinkPerson(contact: ChatContact, handle: String) {
+        val contactName = contact.displayName.ifBlank { "${contact.agentIdHex.take(8)}…" }
+        MaterialAlertDialogBuilder(context)
+            .setTitle(R.string.link_confirm_title)
+            .setMessage(context.getString(R.string.link_confirm_body, handle, contactName))
+            .setPositiveButton(R.string.link_confirm_yes) { _, _ ->
+                linkPerson(handle, contact.agentIdHex)
+            }
+            .setNegativeButton(R.string.link_confirm_no, null)
+            .show()
+    }
+
+    /** Commit a fediverse↔PQ link (local only, never published), then refresh
+     *  so the fedi row folds into the contact's 🔒 row. */
+    private fun linkPerson(handle: String, agentIdHex: String) {
+        lifecycleScope.launch {
+            val gw = controller.gateway() ?: return@launch
+            runCatching { gw.fediLinkPerson(handle, agentIdHex) }.onFailure {
+                Log.w(TAG, "fediLinkPerson: ${ffiReason(it)}", it)
+                snackbar(context.getString(R.string.chat_error_generic))
+                return@launch
+            }
+            controller.refreshPersonLinks()
+            controller.refreshFediThreads()
         }
     }
 
