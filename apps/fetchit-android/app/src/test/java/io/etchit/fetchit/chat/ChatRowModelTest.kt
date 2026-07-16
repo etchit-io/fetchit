@@ -27,6 +27,22 @@ class ChatRowModelTest {
     }
 
     @Test
+    fun aLinkedFediThreadIsSuppressedInFavorOfItsContactRow() {
+        val contacts = listOf(ChatContact(agentIdHex = "c".repeat(64), displayName = "Happy", addedAtMs = 0L))
+        val fedi = listOf(fedi("happyborg@fosstodon.org", 300))
+        val rows = buildChatRows(
+            contacts = contacts,
+            groups = emptyList(),
+            groupPreview = { null },
+            contactPreview = { _ -> "let's talk" to 400L },
+            fediThreads = fedi,
+            linkedFediLabels = setOf("happyborg@fosstodon.org"),
+        )
+        assertEquals(1, rows.size)
+        assertEquals("Happy", (rows[0] as ChatRow.Contact).contact.displayName)
+    }
+
+    @Test
     fun aFediThreadWithNoContactsStillProducesARow() {
         // The unseen-correspondent gap: a fedi thread must appear even with
         // zero private contacts and zero groups.

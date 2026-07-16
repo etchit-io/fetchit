@@ -38,6 +38,7 @@ fun buildChatRows(
     groupPreview: (convKey: String) -> Pair<String, Long>?,
     contactPreview: (convKey: String) -> Pair<String, Long>?,
     fediThreads: List<FediThreadSummaryFfi>,
+    linkedFediLabels: Set<String> = emptySet(),
 ): List<ChatRow> {
     val rows = ArrayList<ChatRow>(contacts.size + groups.size + fediThreads.size)
     groups.forEach { g ->
@@ -48,9 +49,11 @@ fun buildChatRows(
         val (body, ms) = contactPreview(ConversationStore.convKeyDm(c.agentIdHex)) ?: ("" to 0L)
         rows.add(ChatRow.Contact(c, body, ms))
     }
-    fediThreads.forEach { t ->
-        rows.add(ChatRow.Fedi(t, t.lastAtMs))
-    }
+    // A fediverse thread linked to a PQ contact is suppressed — its
+    // contact row (🔒) already represents the person, merged in the thread.
+    fediThreads
+        .filterNot { it.label in linkedFediLabels }
+        .forEach { t -> rows.add(ChatRow.Fedi(t, t.lastAtMs)) }
     // Newest first; a stable sort keeps insertion order (groups, then
     // contacts, then fedi) among equal stamps.
     return rows.sortedByDescending { it.sortMs }

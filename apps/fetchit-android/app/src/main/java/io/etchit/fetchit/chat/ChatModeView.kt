@@ -158,8 +158,10 @@ class ChatModeView(
         lifecycleScope.launch {
             runCatching { connectWithFeedback() }
             // Populate the fediverse rows once connected (the Chats collector
-            // observes controller.fediThreads).
+            // observes controller.fediThreads). Person-links drive which fedi
+            // rows fold into a 🔒 contact row.
             controller.refreshFediThreads()
+            controller.refreshPersonLinks()
         }
     }
 
@@ -516,21 +518,27 @@ class ChatModeView(
                 controller.contacts.contacts,
                 controller.groups,
                 controller.fediThreads,
-            ) { contacts, groups, fedi -> Triple(contacts, groups, fedi) }
-                .collect { (contacts, groups, fedi) ->
-                    val rows = buildChatRows(
-                        contacts = contacts,
-                        groups = groups,
-                        groupPreview = { key ->
-                            controller.conversations.messagesFor(key).value.lastOrNull()
-                                ?.let { it.body to it.sentAtMs }
-                        },
-                        contactPreview = { key ->
-                            controller.conversations.messagesFor(key).value.lastOrNull()
-                                ?.let { it.body to it.sentAtMs }
-                        },
-                        fediThreads = fedi,
-                    )
+                controller.personLinks,
+            ) { contacts, groups, fedi, links ->
+                // A fediverse thread whose person is linked to a PQ agent is
+                // folded into that contact's 🔒 row, so suppress its globe row.
+                val linkedLabels = links.filter { it.linked }.map { it.label }.toSet()
+                buildChatRows(
+                    contacts = contacts,
+                    groups = groups,
+                    groupPreview = { key ->
+                        controller.conversations.messagesFor(key).value.lastOrNull()
+                            ?.let { it.body to it.sentAtMs }
+                    },
+                    contactPreview = { key ->
+                        controller.conversations.messagesFor(key).value.lastOrNull()
+                            ?.let { it.body to it.sentAtMs }
+                    },
+                    fediThreads = fedi,
+                    linkedFediLabels = linkedLabels,
+                )
+            }
+                .collect { rows ->
                     val empty = rows.isEmpty()
                     rv.visibility = if (empty) View.GONE else View.VISIBLE
                     emptyState.visibility = if (empty) View.VISIBLE else View.GONE

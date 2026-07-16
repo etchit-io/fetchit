@@ -102,6 +102,19 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     val fediThreads: StateFlow<List<uniffi.fetchit_ffi.FediThreadSummaryFfi>> =
         _fediThreads.asStateFlow()
 
+    private val _personLinks =
+        MutableStateFlow<List<uniffi.fetchit_ffi.FediPersonLinkFfi>>(emptyList())
+
+    /**
+     * Fediverse-person ↔ PQ-agent links, and pending go-private invites.
+     * A `linked` entry means that fediverse thread is folded into its PQ
+     * contact row (the fedi row is suppressed in the unified list);
+     * `invited` (not yet linked) drives the pending-invite affordance.
+     * Refreshed by [refreshPersonLinks]. Empty when no handle is minted.
+     */
+    val personLinks: StateFlow<List<uniffi.fetchit_ffi.FediPersonLinkFfi>> =
+        _personLinks.asStateFlow()
+
     private val _pendingJoins = MutableStateFlow<List<String>>(emptyList())
 
     /**
@@ -273,6 +286,16 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     suspend fun refreshFediThreads() {
         val gw = gateway ?: return
         _fediThreads.value = runCatching { gw.fediThreadsOverview() }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Pull the current fediverse-person link table (linked + pending-invite)
+     * from the engine into [personLinks]. Quiet on failure. No-op without a
+     * connected gateway or a minted handle.
+     */
+    suspend fun refreshPersonLinks() {
+        val gw = gateway ?: return
+        _personLinks.value = runCatching { gw.fediPersonLinks() }.getOrDefault(emptyList())
     }
 
     /**
