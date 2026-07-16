@@ -288,6 +288,35 @@ consideration.
 Code: `crates/fetchit-chat/src/groups/group_log.rs` (producer),
 `crates/fetchit-relay-server/src/group_log.rs` (store).
 
+### 12. Fediverse↔PQ escalation never downgrades a private rail, and the person-link is local-only
+
+Escalating a fediverse (plaintext-rails) conversation to a private,
+post-quantum chat ("go private") holds two invariants:
+
+- **No automatic downgrade.** A linked (🔒) thread's composer is PQ-only
+  and NEVER silently falls back to the open fediverse when the private
+  rail is down. A silent downgrade would turn an outage (or an adversary
+  jamming the private path) into an eavesdropping opportunity and make
+  the lock badge a lie -- the classic downgrade attack, and why Signal
+  removed SMS fallback. When the rail is down the UI offers the open-
+  fediverse rail as one explicit, labeled, per-message choice; the app
+  never makes that choice for the user. The durable outbox holds queued
+  private messages and resends them on reconnect.
+- **The fediverse↔PQ person-link is a local, human-confirmed association
+  that shares no keys and is never published.** The pair link travels the
+  open fediverse in the invite DM, so anyone who saw it (the recipient's
+  server operator included) could import it; auto-linking a new PQ contact
+  to the invited `@handle` would hand an impersonator a verified-looking
+  label. Linking is therefore always an explicit user confirmation ("Same
+  person?"), stored only in the local sealed link store, and honors the
+  hard invariant that the LIT (`agent_id`) and fediverse (`@handle`)
+  identities share no keys and are never auto-associated. Verification
+  words remain the deeper check.
+
+Code: `crates/fetchit-chat/src/fedi_link.rs` (sealed local link store),
+`crates/fetchit-ffi/src/chat_ffi.rs` (`fedi_go_private_invite`,
+`fedi_link_person`).
+
 ## What we promise
 
 - **fetch>it never holds a wallet, never signs Autonomi transactions,
