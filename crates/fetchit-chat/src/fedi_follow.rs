@@ -200,6 +200,51 @@ impl Client {
         Ok(body.items)
     }
 
+    /// The accounts following our actor `handle`, as recorded at the
+    /// bridge (owner-only view; the public AP collection serves counts
+    /// alone). Fetched under `bridge-auth-v1`. Returns follower actor
+    /// URLs, newest first.
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] on a missing minted identity, transport
+    /// failure, a non-2xx bridge answer, or a malformed response body.
+    pub async fn fetch_fedi_followers(&self, handle: &str, now_ms: u64) -> Result<Vec<String>> {
+        let identity = self.load_actor_identity(handle).await?.ok_or_else(|| {
+            ChatError::Invalid(format!(
+                "no fediverse actor identity minted for handle {handle}"
+            ))
+        })?;
+        let origin = actor_origin(&identity)?;
+        let path = format!("/actors/{handle}/followers/list");
+        let canonical = canonical_request("GET", &path, now_ms, b"");
+        let (agent_id_hex, sig) = self.bridge_auth_sign(&canonical).await?;
+
+        let http = crate::relay_http::guarded_client();
+        let resp = http
+            .get(format!("{origin}{path}"))
+            .header(HEADER_AGENT, agent_id_hex)
+            .header(HEADER_TS, now_ms.to_string())
+            .header(HEADER_SIG, B64.encode(&sig))
+            .send()
+            .await
+            .map_err(|e| ChatError::Invalid(format!("bridge followers GET: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(ChatError::Invalid(format!(
+                "bridge followers list: HTTP {}",
+                resp.status().as_u16()
+            )));
+        }
+        let body: FollowersListBody = resp
+            .json()
+            .await
+            .map_err(|e| ChatError::Invalid(format!("bridge followers decode: {e}")))?;
+        Ok(body
+            .items
+            .into_iter()
+            .map(|e| e.follower_actor_url)
+            .collect())
+    }
+
     /// Unfollow `target_actor_url` from our actor `handle`: sign +
     /// deliver the `Undo(Follow)` retracting the original activity, then
     /// drop the bridge record. Mirrors [`Self::follow_fedi`]'s
@@ -323,6 +368,18 @@ pub struct FollowingEntry {
 #[derive(Deserialize)]
 struct FollowingListBody {
     items: Vec<FollowingEntry>,
+}
+
+/// Body of the bridge `GET /actors/:handle/followers/list` response.
+#[derive(Deserialize)]
+struct FollowersListBody {
+    items: Vec<FollowerEntry>,
+}
+
+/// One row of the bridge's owner-only followers list.
+#[derive(Deserialize)]
+struct FollowerEntry {
+    follower_actor_url: String,
 }
 
 /// Outcome of an unfollow attempt.
