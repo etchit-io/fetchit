@@ -365,11 +365,7 @@ mod tests {
         let mut t = FediThreads::default();
         // happyborg: last activity at 200 (an inbound reply)
         t.insert("@happyborg@fosstodon.org", outbound("s1", 100));
-        t.fold_inbox(&[inbound(
-            "https://fosstodon.org/users/happyborg",
-            "r1",
-            200,
-        )]);
+        t.fold_inbox(&[inbound("https://fosstodon.org/users/happyborg", "r1", 200)]);
         // stranger: last activity at 150
         t.fold_inbox(&[inbound("https://mas.to/users/stranger", "r2", 150)]);
 

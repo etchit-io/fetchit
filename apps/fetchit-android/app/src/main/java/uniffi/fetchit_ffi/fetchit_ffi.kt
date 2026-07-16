@@ -827,6 +827,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -884,6 +888,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_feed(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_followers(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
@@ -893,6 +899,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow(
 ): Short
@@ -1027,6 +1035,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_feed(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_follow(`ptr`: Pointer,`target`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_followers(`ptr`: Pointer,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
@@ -1036,6 +1046,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: R
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_threads_overview(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unfollow(`ptr`: Pointer,`targetActorUrl`: RustBuffer.ByValue,
 ): Long
@@ -1296,6 +1308,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow() != 31415.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_followers() != 9197.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following() != 3672.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1309,6 +1324,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox() != 42525.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview() != 10779.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow() != 48078.toShort()) {
@@ -1615,6 +1633,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
+
+    override fun lower(value: Long): Long {
+        return value
+    }
+
+    override fun allocationSize(value: Long) = 8UL
+
+    override fun write(value: Long, buf: ByteBuffer) {
+        buf.putLong(value)
     }
 }
 
@@ -2021,6 +2062,16 @@ public interface ChatClientInterface {
     suspend fun `fediFollow`(`target`: kotlin.String): FollowReportFfi
     
     /**
+     * The accounts following the minted handle, as `@user@host` labels,
+     * from the directory's owner-only list. Throws when no handle is
+     * minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
+     */
+    suspend fun `fediFollowers`(): List<kotlin.String>
+    
+    /**
      * The accounts our minted handle follows, from the bridge's
      * owner-only list (newest first as the bridge returns them).
      *
@@ -2085,6 +2136,17 @@ public interface ChatClientInterface {
      * is unreachable.
      */
     suspend fun `fediSyncInbox`(): kotlin.UInt
+    
+    /**
+     * Every fediverse DM thread as a one-line summary, newest first, for
+     * the unified conversation list. A device with no minted handle has
+     * no threads and returns an empty list (quiet-hydrate contract —
+     * never an error).
+     *
+     * # Errors
+     * [`ChatFfiError`] on a thread-store load failure.
+     */
+    suspend fun `fediThreadsOverview`(): List<FediThreadSummaryFfi>
     
     /**
      * Unfollow a fediverse account: sign + deliver the `Undo(Follow)`
@@ -2869,6 +2931,35 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * The accounts following the minted handle, as `@user@host` labels,
+     * from the directory's owner-only list. Throws when no handle is
+     * minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediFollowers`() : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_followers(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * The accounts our minted handle follows, from the bridge's
      * owner-only list (newest first as the bridge returns them).
      *
@@ -3023,6 +3114,36 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_u32(future) },
         // lift function
         { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Every fediverse DM thread as a one-line summary, newest first, for
+     * the unified conversation list. A device with no minted handle has
+     * no threads and returns an empty list (quiet-hydrate contract —
+     * never an error).
+     *
+     * # Errors
+     * [`ChatFfiError`] on a thread-store load failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediThreadsOverview`() : List<FediThreadSummaryFfi> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_threads_overview(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeFediThreadSummaryFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4558,6 +4679,62 @@ public object FfiConverterTypeFediPostFfi: FfiConverterRustBuffer<FediPostFfi> {
             FfiConverterString.write(value.`text`, buf)
             FfiConverterString.write(value.`published`, buf)
             FfiConverterString.write(value.`objectUrl`, buf)
+    }
+}
+
+
+
+/**
+ * One fediverse DM thread summarised for the unified conversation
+ * list — mirrors [`fetchit_chat::fedi_thread::FediThreadSummary`].
+ */
+data class FediThreadSummaryFfi (
+    /**
+     * Canonical `user@host` label (the `f:<label>` conversation key body).
+     */
+    var `label`: kotlin.String, 
+    /**
+     * Newest message body — the list preview.
+     */
+    var `lastBody`: kotlin.String, 
+    /**
+     * Newest message stamp (epoch ms) — the list sort key.
+     */
+    var `lastAtMs`: kotlin.Long, 
+    /**
+     * `true` when the newest message was outbound.
+     */
+    var `lastOutbound`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediThreadSummaryFfi> {
+    override fun read(buf: ByteBuffer): FediThreadSummaryFfi {
+        return FediThreadSummaryFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediThreadSummaryFfi) = (
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterString.allocationSize(value.`lastBody`) +
+            FfiConverterLong.allocationSize(value.`lastAtMs`) +
+            FfiConverterBoolean.allocationSize(value.`lastOutbound`)
+    )
+
+    override fun write(value: FediThreadSummaryFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterString.write(value.`lastBody`, buf)
+            FfiConverterLong.write(value.`lastAtMs`, buf)
+            FfiConverterBoolean.write(value.`lastOutbound`, buf)
     }
 }
 
@@ -6504,6 +6681,34 @@ public object FfiConverterSequenceTypeFediPostFfi: FfiConverterRustBuffer<List<F
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFediPostFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFediThreadSummaryFfi: FfiConverterRustBuffer<List<FediThreadSummaryFfi>> {
+    override fun read(buf: ByteBuffer): List<FediThreadSummaryFfi> {
+        val len = buf.getInt()
+        return List<FediThreadSummaryFfi>(len) {
+            FfiConverterTypeFediThreadSummaryFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FediThreadSummaryFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFediThreadSummaryFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FediThreadSummaryFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFediThreadSummaryFfi.write(it, buf)
         }
     }
 }

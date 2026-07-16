@@ -515,6 +515,20 @@ pub struct FediFollowingFfi {
     pub state: String,
 }
 
+/// One fediverse DM thread summarised for the unified conversation
+/// list — mirrors [`fetchit_chat::fedi_thread::FediThreadSummary`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediThreadSummaryFfi {
+    /// Canonical `user@host` label (the `f:<label>` conversation key body).
+    pub label: String,
+    /// Newest message body — the list preview.
+    pub last_body: String,
+    /// Newest message stamp (epoch ms) — the list sort key.
+    pub last_at_ms: i64,
+    /// `true` when the newest message was outbound.
+    pub last_outbound: bool,
+}
+
 /// Result of [`ChatClient::fedi_unfollow`].
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UnfollowReportFfi {
@@ -1400,6 +1414,58 @@ impl ChatClient {
                 target_actor_url: e.target_actor_url,
                 state: e.state,
             })
+            .collect())
+    }
+
+    /// Every fediverse DM thread as a one-line summary, newest first, for
+    /// the unified conversation list. A device with no minted handle has
+    /// no threads and returns an empty list (quiet-hydrate contract —
+    /// never an error).
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on a thread-store load failure.
+    pub async fn fedi_threads_overview(&self) -> Result<Vec<FediThreadSummaryFfi>, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(Vec::new());
+        };
+        let rows = self
+            .inner
+            .fedi_threads_overview(&handle)
+            .map_err(ChatFfiError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|s| FediThreadSummaryFfi {
+                label: s.label,
+                last_body: s.last_body,
+                last_at_ms: s.last_at_ms,
+                last_outbound: s.last_outbound,
+            })
+            .collect())
+    }
+
+    /// The accounts following the minted handle, as `@user@host` labels,
+    /// from the directory's owner-only list. Throws when no handle is
+    /// minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
+    pub async fn fedi_followers(&self) -> Result<Vec<String>, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let urls = self
+            .inner
+            .fetch_fedi_followers(&handle, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(urls
+            .iter()
+            .map(|u| fetchit_chat::fedi_feed::author_label(u))
             .collect())
     }
 

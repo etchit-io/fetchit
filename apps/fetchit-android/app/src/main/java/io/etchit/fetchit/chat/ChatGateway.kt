@@ -16,6 +16,7 @@ import uniffi.fetchit_ffi.FediFollowingFfi
 import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.FediDmReportFfi
+import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
 
@@ -187,6 +188,20 @@ interface ChatGateway {
     suspend fun fediSyncInbox(): UInt
 
     /**
+     * Every fediverse DM thread as a one-line summary for the unified
+     * conversation list, newest first. Empty when no handle is minted
+     * (quiet — never throws for that).
+     */
+    suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi>
+
+    /**
+     * The `@user@host` labels of accounts following the minted handle,
+     * newest first. Throws when no handle is minted or the directory is
+     * unreachable.
+     */
+    suspend fun fediFollowers(): List<String>
+
+    /**
      * Remove the contact [agentIdHex] (64-hex agent id) from the engine,
      * dropping its conversation. The caller clears any local UI/store state.
      */
@@ -303,6 +318,9 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.fediUnfollow(targetActorUrl)
     override suspend fun fediFeed(): List<FediPostFfi> = inner.fediFeed()
     override suspend fun fediSyncInbox(): UInt = inner.fediSyncInbox()
+    override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> =
+        inner.fediThreadsOverview()
+    override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =

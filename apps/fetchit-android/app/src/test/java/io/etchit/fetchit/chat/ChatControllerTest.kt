@@ -16,6 +16,7 @@ import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FediFollowingFfi
 import uniffi.fetchit_ffi.FediPostFfi
+import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
@@ -143,6 +144,8 @@ class FakeGateway : ChatGateway {
         UnfollowReportFfi(delivered = true, removed = true)
     override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
     override suspend fun fediSyncInbox(): UInt = 0u
+    override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> = emptyList()
+    override suspend fun fediFollowers(): List<String> = emptyList()
     override suspend fun removeContact(agentIdHex: String) {
         removedContacts += agentIdHex
         if (removeContactThrows) throw RuntimeException("remove boom")
@@ -523,6 +526,8 @@ class ChatControllerTest {
                 UnfollowReportFfi(delivered = true, removed = true)
             override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
             override suspend fun fediSyncInbox(): UInt = 0u
+            override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> = emptyList()
+            override suspend fun fediFollowers(): List<String> = emptyList()
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
