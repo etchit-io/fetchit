@@ -102,9 +102,9 @@ Tap → confirmation card:
 > Heads-up: the invite itself travels the open fediverse.
 > [Send private invite] [Cancel]
 
-Sending composes a fedi DM: one human sentence + the pair link:
+Sending composes a fedi DM: one human sentence + the pair link. The copy does three jobs: invite, install-nudge (the recipient most likely does NOT have fetch>it — the link doubles as the onboarding path), and history expectation-setting (their fediverse messages stay in the app where they sent them; the private chat starts fresh — pre-empting the "my messages vanished" misread):
 
-> {display name} invited you to a private, post-quantum encrypted chat on fetch>it. Open this link in the fetch>it app to accept: {pairShareUri} — new here? Get the app: https://etchit.io/fetch
+> {display name} invited you to a private, post-quantum encrypted chat on fetch>it. Open this link in the fetch>it app to accept: {pairShareUri} — new here? Get the app: https://etchit.io/fetch (your fediverse messages stay here; the private chat starts fresh)
 
 Delivery uses the existing `send_fedi_dm` path. **The pending state is recorded only when the delivery report says `delivered == true`**; an unreachable inbox surfaces the existing retry affordance and records nothing. After a successful send the button becomes a quiet status line: *"invite sent — waiting for them to join"*, with **resend** available after a 24 h cooldown (the pair link is stable — resend just sends the same link again; the cooldown prevents accidental spam).
 
@@ -138,6 +138,14 @@ If several invites are pending, the card lists the pending handles and the user 
 ### 7.5 States
 
 `none → invited(invited_at_ms) → linked(agent_id_hex, linked_at_ms)`, per canonical handle. Declines don't change state (still `invited`). Unlink returns to `none` (invite history retained in the store for the re-open flow).
+
+### 7.6 When the private rail is down — offered fallback, never automatic
+
+The linked thread **never auto-switches rails**. A silent downgrade would convert an outage (or an adversary jamming the private path) into an eavesdropping opportunity, and would make the 🔒 badge a lie — this is the classic downgrade attack, and why Signal removed SMS fallback. Instead, three layers:
+
+1. **Self-healing first:** the durable outbox already queues messages typed while the rail is down and resends on reconnect — nothing is lost, no action needed.
+2. **Honest state + offered switch:** while the connection is down (pump `STOPPED_ERROR`), the linked thread shows a banner: *"can't reach {name} privately right now — your messages will send when reconnected"* with one explicit, labeled action: *"send over the open fediverse instead (not encrypted)"* which opens the fedi rail thread. The user makes the privacy call per message; the app never makes it for them. Anything sent there renders under the 🌐 contract.
+3. **Re-bootstrap:** a truly broken pairing is recovered by the §7.2 flow itself — send a fresh invite over the fedi rail and re-pair. The open rail is the permanent signaling channel for (re)establishing the private one.
 
 ## 8. Group invites over the fedi rail
 
@@ -205,7 +213,12 @@ Same IA, desktop idiom: the chat panel's sidebar gets the three sections as a se
 | `go_private_body` | We'll send @%1$s an invite. When they open it in fetch>it, this chat turns private — post-quantum encrypted, nobody (not even servers) can read it. Heads-up: the invite itself travels the open fediverse. |
 | `go_private_send` | Send private invite |
 | `go_private_pending` | invite sent — waiting for them to join |
-| `go_private_invite_dm` | %1$s invited you to a private, post-quantum encrypted chat on fetch>it. Open this link in the fetch>it app to accept: %2$s — new here? Get the app: https://etchit.io/fetch |
+| `go_private_invite_dm` | %1$s invited you to a private, post-quantum encrypted chat on fetch>it. Open this link in the fetch>it app to accept: %2$s — new here? Get the app: https://etchit.io/fetch (your fediverse messages stay here; the private chat starts fresh) |
+| `go_private_resend` | resend invite |
+| `go_private_linked` | 🔒 linked — you chat privately with this person in Chats |
+| `thread_fallback_banner` | can't reach %1$s privately right now — your messages will send when reconnected |
+| `thread_fallback_action` | send over the open fediverse instead (not encrypted) |
+| `link_confirm_reopen` | link to a fediverse person… |
 | `link_confirm_title` | Same person? |
 | `link_confirm_body` | You invited @%1$s to private chat, and a new private contact "%2$s" just appeared. Are they the same person? Only link them if you're sure — anyone who saw the invite link could pretend to be them. If in doubt, ask them out loud. |
 | `link_confirm_yes` | Yes — link them |
