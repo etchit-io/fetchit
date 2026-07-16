@@ -118,7 +118,11 @@ impl FediLinks {
 ///
 /// # Errors
 /// [`ChatError`] on IO, seal, or JSON-decode failures.
-pub fn load_fedi_links(handle: &str, master: &MasterKey, layout: &StoreLayout) -> Result<FediLinks> {
+pub fn load_fedi_links(
+    handle: &str,
+    master: &MasterKey,
+    layout: &StoreLayout,
+) -> Result<FediLinks> {
     let key = derive_fedi_vault_key(master);
     let path = layout.fedi_links_path(handle);
     let Some(plain) = read_sealed(&path, *FEDI_LINKS_MAGIC, &key, FEDI_LINKS_AAD)? else {
@@ -139,8 +143,8 @@ pub fn save_fedi_links(
     layout: &StoreLayout,
 ) -> Result<()> {
     let key = derive_fedi_vault_key(master);
-    let plain =
-        serde_json::to_vec(links).map_err(|e| ChatError::Invalid(format!("fedi links encode: {e}")))?;
+    let plain = serde_json::to_vec(links)
+        .map_err(|e| ChatError::Invalid(format!("fedi links encode: {e}")))?;
     write_sealed_atomic(
         &layout.fedi_links_path(handle),
         *FEDI_LINKS_MAGIC,
@@ -267,8 +271,15 @@ mod tests {
         assert!(!l.link("happyborg@fosstodon.org", &agent("aa"), 300));
         // Unlink clears the target but keeps invite history.
         l.unlink("happyborg@fosstodon.org");
-        assert!(l.get("happyborg@fosstodon.org").unwrap().agent_id_hex.is_none());
-        assert_eq!(l.get("happyborg@fosstodon.org").unwrap().invited_at_ms, Some(100));
+        assert!(l
+            .get("happyborg@fosstodon.org")
+            .unwrap()
+            .agent_id_hex
+            .is_none());
+        assert_eq!(
+            l.get("happyborg@fosstodon.org").unwrap().invited_at_ms,
+            Some(100)
+        );
         assert!(l.is_linked_agent(&agent("aa")).is_none());
     }
 
@@ -296,17 +307,30 @@ mod tests {
     fn missing_file_loads_fresh_and_wrong_key_errors() {
         let dir = tempdir().unwrap();
         let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
-        let fresh = load_fedi_links("josh", &MasterKey::from_bytes_for_test([1; AEAD_KEY_LEN]), &layout)
-            .unwrap();
+        let fresh = load_fedi_links(
+            "josh",
+            &MasterKey::from_bytes_for_test([1; AEAD_KEY_LEN]),
+            &layout,
+        )
+        .unwrap();
         assert!(fresh.links.is_empty());
 
         let mut l = FediLinks::default();
         l.link("a@h", &agent("cc"), 1);
-        save_fedi_links("josh", &l, &MasterKey::from_bytes_for_test([1; AEAD_KEY_LEN]), &layout)
-            .unwrap();
+        save_fedi_links(
+            "josh",
+            &l,
+            &MasterKey::from_bytes_for_test([1; AEAD_KEY_LEN]),
+            &layout,
+        )
+        .unwrap();
         assert!(
-            load_fedi_links("josh", &MasterKey::from_bytes_for_test([2; AEAD_KEY_LEN]), &layout)
-                .is_err(),
+            load_fedi_links(
+                "josh",
+                &MasterKey::from_bytes_for_test([2; AEAD_KEY_LEN]),
+                &layout
+            )
+            .is_err(),
             "links must never be silently clobbered by a wrong key",
         );
     }
