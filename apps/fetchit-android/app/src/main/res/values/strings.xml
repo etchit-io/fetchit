@@ -358,6 +358,14 @@
          Never an automatic downgrade (that would make the lock a lie). -->
     <string name="thread_fallback_banner">can\'t reach %1$s privately right now — your messages will send when reconnected</string>
     <string name="thread_fallback_action">send over the open fediverse instead (not encrypted)</string>
+
+    <!-- Invite someone to a private group: pick a person (PQ contacts first,
+         fediverse follows below) or copy a link to share with anyone. A
+         fediverse-only person gets a FRESH single-use invite over a fedi DM. -->
+    <string name="group_invite_copy_link">copy a link to share</string>
+    <string name="group_invite_sent">invite sent to %1$s</string>
+    <string name="group_invite_send_failed">couldn\'t reach %1$s to send the invite — try again in a moment.</string>
+    <string name="group_invite_dm">%1$s invited you to the private group \"%2$s\" on fetch&gt;it. Open this link in the fetch&gt;it app to join: %3$s — new here? Get the app: https://etchit.io/fetch</string>
     <string name="chat_feed_title">Public posts</string>
     <string name="chat_feed_subtitle">from across the fediverse</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are

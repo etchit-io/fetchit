@@ -1275,7 +1275,7 @@ class ChatModeView(
             if (viewerCanModerate) {
                 membersDialog.setNeutralButton(
                     context.getString(R.string.chat_group_invite_someone),
-                ) { _, _ -> offerShareInvite(groupId) }
+                ) { _, _ -> showGroupInvitePicker(groupId) }
             }
             membersDialog.show()
         }
@@ -1995,6 +1995,94 @@ class ChatModeView(
                     offerShareInvite(groupId)
                 }
                 .show()
+        }
+    }
+
+    /**
+     * Pick who to invite to a private group: your People — PQ contacts (🔒)
+     * first, fediverse follows (🌐) below — or copy a link to share with
+     * anyone. A PQ contact is invited over the existing PQ DM rail; a
+     * fediverse-only person gets a FRESH single-use invite over a fedi DM.
+     */
+    private fun showGroupInvitePicker(groupId: String) {
+        lifecycleScope.launch {
+            val gw = controller.gateway() ?: return@launch
+            val groupTitle = groupTitle(controller.groups.value.find { it.groupId == groupId }, groupId)
+            val contacts = controller.contacts.contacts.value
+            val follows = runCatching { gw.fediFollowing() }.getOrNull().orEmpty()
+
+            val labels = ArrayList<String>()
+            val actions = ArrayList<() -> Unit>()
+            contacts.forEach { c ->
+                val name = c.displayName.ifBlank { "${c.agentIdHex.take(8)}…" }
+                labels.add("🔒 $name")
+                actions.add { inviteContactToGroup(groupId, groupTitle, c, name) }
+            }
+            follows.forEach { f ->
+                labels.add("🌐 ${f.label}")
+                actions.add { inviteFediToGroup(groupId, groupTitle, f.label) }
+            }
+            labels.add(context.getString(R.string.group_invite_copy_link))
+            actions.add { offerShareInvite(groupId) }
+
+            MaterialAlertDialogBuilder(context)
+                .setTitle(R.string.chat_group_invite_someone)
+                .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
+                .setNegativeButton(context.getString(R.string.action_close), null)
+                .show()
+        }
+    }
+
+    /** Invite a PQ contact to the group over the existing private DM rail:
+     *  mint a fresh single-use invite and DM it. */
+    private fun inviteContactToGroup(
+        groupId: String,
+        groupTitle: String,
+        contact: ChatContact,
+        name: String,
+    ) {
+        lifecycleScope.launch {
+            val gw = controller.gateway() ?: return@launch
+            val invite = runCatching { gw.groupInvite(groupId) }.getOrNull() ?: run {
+                snackbar(context.getString(R.string.group_invite_send_failed, name))
+                return@launch
+            }
+            val senderName = displayNameOrDefault(gw)
+            val body = context.getString(R.string.group_invite_dm, senderName, groupTitle, invite)
+            runCatching { gw.enqueueDm(contact.agentIdHex, body, senderName) }.fold(
+                onSuccess = { snackbar(context.getString(R.string.group_invite_sent, name)) },
+                onFailure = {
+                    Log.w(TAG, "enqueueDm(group-invite): ${ffiReason(it)}", it)
+                    snackbar(context.getString(R.string.group_invite_send_failed, name))
+                },
+            )
+        }
+    }
+
+    /** Invite a fediverse-only person to the group: mint a FRESH single-use
+     *  invite (never reuse) and send it over a fedi DM with the install nudge. */
+    private fun inviteFediToGroup(groupId: String, groupTitle: String, handle: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                snackbar(context.getString(R.string.group_invite_send_failed, handle))
+                return@launch
+            }
+            val invite = runCatching { gw.groupInvite(groupId) }.getOrNull() ?: run {
+                snackbar(context.getString(R.string.group_invite_send_failed, handle))
+                return@launch
+            }
+            val senderName = displayNameOrDefault(gw)
+            val body = context.getString(R.string.group_invite_dm, senderName, groupTitle, invite)
+            val report = runCatching { gw.fediDm(handle, body) }.getOrElse {
+                Log.w(TAG, "fediDm(group-invite): ${ffiReason(it)}", it)
+                snackbar(context.getString(R.string.group_invite_send_failed, handle))
+                return@launch
+            }
+            if (report.delivered) {
+                snackbar(context.getString(R.string.group_invite_sent, handle))
+            } else {
+                snackbar(context.getString(R.string.group_invite_send_failed, handle))
+            }
         }
     }
 
