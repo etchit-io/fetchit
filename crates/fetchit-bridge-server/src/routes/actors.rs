@@ -149,13 +149,40 @@ pub async fn get_actor(
     }
 }
 
-/// `GET /actors/:handle/followers` — an ordered collection (empty until
-/// the Follow/fan-out milestone populates the `followers` table).
+/// `GET /actors/:handle/followers` — the public AP collection. Serves
+/// the REAL follower count (`totalItems`) but never enumerates rows
+/// (`orderedItems` stays empty); the owner reads the list through the
+/// authed `/followers/list` route.
 pub async fn followers(
     State(state): State<Arc<BridgeState>>,
     Path(handle): Path<String>,
 ) -> impl IntoResponse {
-    empty_collection(&state, &handle, "followers").await
+    let rec = match state.store.actor_by_handle(&handle).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such actor").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "actor_by_handle failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store error").into_response();
+        }
+    };
+    let count = state
+        .store
+        .followers_list(&rec.agent_id)
+        .await
+        .map_or(0, |l| l.len());
+    let body = serde_json::json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{}/followers", rec.actor_url),
+        "type": "OrderedCollection",
+        "totalItems": count,
+        "orderedItems": []
+    });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/activity+json")],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 /// `GET /actors/:handle/outbox` — an ordered collection (empty for now).

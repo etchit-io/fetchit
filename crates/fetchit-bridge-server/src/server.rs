@@ -81,6 +81,10 @@ impl Server {
             .route("/actors/:handle", get(routes::actors::get_actor))
             .route("/actors/:handle/followers", get(routes::actors::followers))
             .route(
+                "/actors/:handle/followers/list",
+                get(routes::follow::followers_list),
+            )
+            .route(
                 "/actors/:handle/following",
                 post(routes::follow::record_follow).get(routes::follow::following_list),
             )

@@ -220,6 +220,36 @@ pub async fn following_list(
     }
 }
 
+/// `GET /actors/:handle/followers/list` — owner-only list of the
+/// accounts following this handle. The PUBLIC AP `followers` collection
+/// (in [`crate::routes::actors`]) serves only a count; who follows a
+/// user is not publicly enumerable, so this authed route is the one that
+/// returns rows. `bridge-auth-v1`, newest first.
+pub async fn followers_list(
+    State(state): State<Arc<BridgeState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/actors/{handle}/followers/list");
+    let rec = match auth_actor(&state, &handle, &headers, &Method::GET, &path, b"").await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match state.store.followers_list(&rec.agent_id).await {
+        Ok(list) => {
+            let items: Vec<_> = list
+                .iter()
+                .map(|url| json!({ "follower_actor_url": url }))
+                .collect();
+            Json(json!({ "items": items })).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "followers_list failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "store error").into_response()
+        }
+    }
+}
+
 /// Body of `POST /actors/:handle/followers/confirm`.
 #[derive(Deserialize)]
 pub struct ConfirmFollowerBody {
