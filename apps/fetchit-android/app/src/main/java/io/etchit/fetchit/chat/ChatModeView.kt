@@ -3107,7 +3107,9 @@ class ChatModeView(
             onTap: (ChatContact) -> Unit,
             onMore: (View, ChatContact) -> Unit,
         ) {
-            shortId.text = "${contact.agentIdHex.take(8)}…"
+            // A lock marks a private (PQ) DM — matching the group lock and the
+            // fediverse globe, and never the raw 64-hex (grandma rule 1).
+            shortId.text = "🔒"
             name.text = contact.displayName
             preview.text = lastPreview
             itemView.setOnClickListener { onTap(contact) }
