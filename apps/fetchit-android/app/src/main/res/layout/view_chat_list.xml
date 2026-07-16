@@ -191,7 +191,7 @@
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
-        android:text="@string/chat_add_contact"
+        android:text="@string/chat_new_chat_fab"
         android:backgroundTint="?attr/fetchitCopper"
         android:textColor="?attr/fetchitInk" />
 

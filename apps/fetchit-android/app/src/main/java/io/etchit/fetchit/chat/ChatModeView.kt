@@ -575,13 +575,18 @@ class ChatModeView(
         // The one first-run action needing no contacts, so it lives here in the
         // empty state, not only in the pinned list row — which the empty state
         // hides along with the rest of the (empty) contact list.
-        fediverseBtn.setOnClickListener { tabBar.selectedItemId = R.id.tabFeed }
+        // No handle yet → send them to People (the mint card lives there);
+        // once minted → the Feed tab (public posts).
+        fediverseBtn.setOnClickListener {
+            tabBar.selectedItemId =
+                if (controller.fediActorStatus() == null) R.id.tabPeople else R.id.tabFeed
+        }
         bindOnboardFediCopy(view)
 
         // FAB: a popup with the list-level actions -- add a contact, start a
         // new group, join one from an invite link, or scan a code (the scan
         // affordance re-homed here now the identity badge owns share-my-code).
-        addBtn.setOnClickListener { anchor -> showListActionsMenu(anchor) }
+        addBtn.setOnClickListener { showNewChatSheet() }
     }
 
     /**
@@ -971,23 +976,71 @@ class ChatModeView(
      * a group from a pasted invite, or scan a code. Each entry opens its own
      * dialog (or the scanner), mirroring [showAddContactDialog].
      */
-    private fun showListActionsMenu(anchor: View) {
-        PopupMenu(context, anchor).apply {
-            menu.add(context.getString(R.string.chat_add_contact))
-            menu.add(context.getString(R.string.chat_new_group))
-            menu.add(context.getString(R.string.chat_join_group))
-            menu.add(context.getString(R.string.chat_scan_a_code))
-            setOnMenuItemClickListener { item ->
-                when (item.title) {
-                    context.getString(R.string.chat_add_contact) -> showAddContactDialog()
-                    context.getString(R.string.chat_new_group) -> showNewGroupDialog()
-                    context.getString(R.string.chat_join_group) -> showJoinGroupDialog()
-                    context.getString(R.string.chat_scan_a_code) -> onLaunchScanner()
-                }
-                true
-            }
-            show()
+    /**
+     * The "+ New chat" bottom sheet: one field for a name or a pasted link,
+     * a scan option, group actions, and quick-tap rows for people you already
+     * know. One place to start any conversation.
+     */
+    private fun showNewChatSheet() {
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(context)
+        val px16 = (16 * context.resources.displayMetrics.density).toInt()
+        val px8 = px16 / 2
+        val root = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(px16, px16, px16, px16)
         }
+
+        root.addView(TextView(context).apply {
+            text = context.getString(R.string.chat_new_chat_fab)
+            textSize = 18f
+            setTextColor(themeColor(R.attr.fetchitBone))
+            setPadding(0, 0, 0, px8)
+        })
+
+        fun action(label: String, run: () -> Unit) = android.widget.Button(
+            context,
+            null,
+            android.R.attr.borderlessButtonStyle,
+        ).apply {
+            text = label
+            gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+            setOnClickListener {
+                dialog.dismiss()
+                run()
+            }
+        }
+
+        root.addView(action(context.getString(R.string.chat_new_chat_type)) { showAddContactDialog() })
+        root.addView(action(context.getString(R.string.chat_scan_a_code)) { onLaunchScanner() })
+        root.addView(action(context.getString(R.string.chat_new_group)) { showNewGroupDialog() })
+        root.addView(action(context.getString(R.string.chat_join_group)) { showJoinGroupDialog() })
+
+        // Quick-tap: people you already have a private contact with.
+        val contacts = controller.contacts.contacts.value
+        if (contacts.isNotEmpty()) {
+            root.addView(TextView(context).apply {
+                text = context.getString(R.string.people_contacts_header)
+                textSize = 13f
+                setTextColor(themeColor(R.attr.fetchitCopper))
+                setPadding(0, px16, 0, px8)
+            })
+            contacts.forEach { c ->
+                root.addView(TextView(context).apply {
+                    text = "🔒 ${c.displayName}"
+                    textSize = 15f
+                    setTextColor(themeColor(R.attr.fetchitBone))
+                    setPadding(0, px8, 0, px8)
+                    isClickable = true
+                    setOnClickListener {
+                        dialog.dismiss()
+                        openThread(c.agentIdHex)
+                    }
+                })
+            }
+        }
+
+        dialog.setContentView(android.widget.ScrollView(context).apply { addView(root) })
+        dialog.show()
     }
 
     /**

@@ -318,6 +318,8 @@
     <string name="tab_people">People</string>
     <string name="tab_feed">Feed</string>
     <string name="people_find_hint">find someone — @name or paste a link</string>
+    <string name="chat_new_chat_fab">New chat</string>
+    <string name="chat_new_chat_type">type a name, or paste a link</string>
     <string name="people_contacts_header">your contacts</string>
     <string name="people_contacts_empty">no private contacts yet — add someone above.</string>
     <string name="chat_feed_title">Public posts</string>
