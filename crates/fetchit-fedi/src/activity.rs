@@ -198,6 +198,7 @@ pub fn build_direct_note(
     recipient_handle: &str,
     body_md: &str,
     created_at_ms: u64,
+    reply_to_note_id: Option<&str>,
 ) -> CreateActivity {
     let published = format_rfc3339_utc(created_at_ms);
     let note_id = format!("{actor_url}/statuses/{created_at_ms}");
@@ -217,7 +218,7 @@ pub fn build_direct_note(
         published: published.clone(),
         to: to.clone(),
         cc: Vec::new(),
-        in_reply_to: None,
+        in_reply_to: reply_to_note_id.map(str::to_owned),
         tag,
     };
 
@@ -517,6 +518,7 @@ mod tests {
             "@happyborg@fosstodon.org",
             "hey, want to move to private chat?",
             1_700_000_000_000,
+            None,
         );
         let json = serde_json::to_value(&activity).unwrap();
 
@@ -550,6 +552,39 @@ mod tests {
     }
 
     #[test]
+    fn build_direct_note_threads_under_reply_target() {
+        // With a reply target, inReplyTo carries it so the recipient's
+        // client nests the DM into the ongoing thread.
+        let parent = "https://fosstodon.org/users/happyborg/statuses/999";
+        let activity = build_direct_note(
+            "https://etchit.io/actors/josh",
+            "https://fosstodon.org/users/happyborg",
+            "@happyborg@fosstodon.org",
+            "replying in-thread",
+            1_700_000_000_000,
+            Some(parent),
+        );
+        let json = serde_json::to_value(&activity).unwrap();
+        assert_eq!(json["object"]["inReplyTo"], parent);
+    }
+
+    #[test]
+    fn build_direct_note_first_contact_has_no_reply_field() {
+        // No reply target -> inReplyTo is omitted entirely (serde skips
+        // None), so a first-contact DM is a clean standalone note.
+        let activity = build_direct_note(
+            "https://etchit.io/actors/josh",
+            "https://fosstodon.org/users/happyborg",
+            "@happyborg@fosstodon.org",
+            "first hello",
+            1_700_000_000_000,
+            None,
+        );
+        let json = serde_json::to_value(&activity).unwrap();
+        assert!(json["object"].get("inReplyTo").is_none());
+    }
+
+    #[test]
     fn build_direct_note_escapes_html_body() {
         let activity = build_direct_note(
             "https://etchit.io/actors/josh",
@@ -557,6 +592,7 @@ mod tests {
             "@happyborg@fosstodon.org",
             "<script>alert(1)</script>",
             1_700_000_000_000,
+            None,
         );
         let json = serde_json::to_value(&activity).unwrap();
         assert!(!json["object"]["content"]

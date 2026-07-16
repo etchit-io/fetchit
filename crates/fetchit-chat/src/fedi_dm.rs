@@ -101,6 +101,12 @@ impl Client {
             .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
         let recipient_actor_url = target_actor.id.to_string();
 
+        // Thread the reply under the correspondent's most recent inbound
+        // note so the recipient's client nests it into the ongoing
+        // conversation (Mastodon threads on `inReplyTo`). First contact
+        // -- no inbound message yet -- sends a standalone note.
+        let reply_to = self.latest_inbound_note_id(handle, target).unwrap_or(None);
+
         // Build + sign + deliver the direct Note.
         let activity = build_direct_note(
             identity.actor_url.as_str(),
@@ -108,6 +114,7 @@ impl Client {
             target,
             body,
             now_ms,
+            reply_to.as_deref(),
         );
         let note_id = activity.object.id.clone();
         let wire = serde_json::to_vec(&activity)
@@ -215,6 +222,24 @@ impl Client {
         save_fedi_threads(handle, &threads, &master, &layout)
     }
 
+    /// The note id of the most recent INBOUND message in `handle`'s
+    /// thread with `label`, or `None` when the thread has no inbound
+    /// message yet (first contact). Used to thread an outbound reply
+    /// under what the correspondent last sent.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load failures.
+    fn latest_inbound_note_id(&self, handle: &str, label: &str) -> Result<Option<String>> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let threads = load_fedi_threads(handle, &master, &layout)?;
+        Ok(threads
+            .history(label)
+            .into_iter()
+            .rev()
+            .find(|m| !m.outbound)
+            .map(|m| m.note_id))
+    }
+
     /// Sync the bridge inbox into the durable thread store: pull
     /// everything newer than the stored cursor, land every message in
     /// its sender's own thread, then advance the cursor. Messages and
@@ -266,6 +291,7 @@ mod tests {
             "@happyborg@fosstodon.org",
             "hi over the fediverse",
             42,
+            None,
         );
         assert_eq!(
             activity.object.id,
