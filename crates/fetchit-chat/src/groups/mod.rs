@@ -361,12 +361,50 @@ impl<'a> Endpoint<'a> {
         Ok(resp.groups)
     }
 
-    /// Leave or delete a group. The daemon picks based on ownership:
-    /// the creator's call removes the group for everyone in the
-    /// roster; a non-creator's call leaves it locally only.
+    /// Leave a group -- self-removal only; the group itself continues for
+    /// everyone else.
+    ///
+    /// The daemon enforces ADR-0016: a live group must always keep at least
+    /// one active admin, so the LAST admin's leave is rejected with `409`
+    /// ("make another member an admin before leaving"). A sole member is by
+    /// definition the sole admin, so a solo group can never be left -- use
+    /// [`Self::delete`] to end it instead. The error is returned, never
+    /// swallowed: callers must not report a rejected leave as success.
     pub async fn leave(&self, group: &GroupId) -> Result<()> {
         let path = format!("/groups/{}", group.as_str());
         self.http.delete(&path).await
+    }
+
+    /// Delete a group for everyone: seal a terminal withdrawal commit via
+    /// x0xd `POST /groups/<id>/state/withdraw`.
+    ///
+    /// This is the ADR-0016 exit valve the last-admin invariant exempts, and
+    /// the only way to end a group you are the sole member of. Admin-or-above
+    /// only (the daemon authorizes; a non-admin gets `403`). Members receive
+    /// the signed terminal `GroupDeleted` event, and the daemon's
+    /// `seal_withdrawal` nulls the shared secret so no MLS/`TreeKEM`/GSS key
+    /// material survives -- only a keyless withdrawn tombstone is retained, as
+    /// the guard against reanimating a stale invite card.
+    ///
+    /// Irreversible, and idempotent: a group the daemon reports as ALREADY
+    /// withdrawn (`409 group is withdrawn`) is deleted, so that answers `Ok`
+    /// rather than surfacing as a failure. Without this a retry -- or a second
+    /// device -- reads "couldn't delete" over a group that is already gone.
+    pub async fn delete(&self, group: &GroupId) -> Result<()> {
+        let path = format!("/groups/{}/state/withdraw", group.as_str());
+        match self
+            .http
+            .post_json::<_, serde_json::Value>(&path, &serde_json::json!({}))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(crate::error::ChatError::Daemon { status, ref body })
+                if status == 409 && body.contains("group is withdrawn") =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Create a new "public room" — a group whose messages flow

@@ -362,6 +362,18 @@
     <!-- Invite someone to a private group: pick a person (PQ contacts first,
          fediverse follows below) or copy a link to share with anyone. A
          fediverse-only person gets a FRESH single-use invite over a fedi DM. -->
+    <!-- Delete a group for everyone (terminal withdrawal). The only way out of
+         a group you're the sole member of — a last admin can't leave. -->
+    <string name="chat_delete_group">Delete this group</string>
+    <string name="chat_delete_group_title">Delete this group?</string>
+    <string name="chat_delete_group_message">%1$s will be gone for everyone in it, and this can\'t be undone.</string>
+    <string name="chat_delete_group_confirm">delete</string>
+    <string name="chat_group_deleted">deleted %1$s</string>
+    <string name="chat_group_delete_failed">couldn\'t delete %1$s — only an admin can, and you need to be connected.</string>
+    <!-- Honest leave failure: the daemon rejects a last-admin leave. -->
+    <string name="chat_group_leave_last_admin">you\'re the only admin of %1$s, so you can\'t leave it. Make someone else an admin first, or delete the group.</string>
+    <string name="chat_group_leave_failed">couldn\'t leave %1$s — check your connection and try again.</string>
+
     <string name="group_invite_copy_link">copy a link to share</string>
     <string name="group_invite_sent">invite sent to %1$s</string>
     <string name="group_invite_send_failed">couldn\'t reach %1$s to send the invite — try again in a moment.</string>

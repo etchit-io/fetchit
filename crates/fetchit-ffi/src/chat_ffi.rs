@@ -1899,6 +1899,28 @@ impl ChatClient {
             .map_err(ChatFfiError::from)
     }
 
+    /// Delete a group for everyone (terminal withdrawal commit).
+    ///
+    /// The ADR-0016 exit valve, and the only way to end a group you are the
+    /// sole member of -- a last admin cannot `leave_group` (the daemon 409s).
+    /// Admin-or-above only; the daemon authorizes. No key material survives.
+    /// Irreversible.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when `group_id` is not a valid group id;
+    /// [`ChatFfiError`] on a daemon rejection (`403` when not an admin).
+    pub async fn delete_group(&self, group_id: String) -> Result<(), ChatFfiError> {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(&group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        self.inner
+            .groups()
+            .delete(&gid)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
     /// Roster of active members for a group ("who is in this group").
     ///
     /// Mirrors the desktop `chat_group_members` command. The engine roster is

@@ -843,6 +843,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -883,6 +885,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_group(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_delete_group(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_disconnect(
 ): Short
@@ -1042,6 +1046,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_history(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_group(`ptr`: Pointer,`name`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,`private`: Byte,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_link_offer(`ptr`: Pointer,`ttlSecs`: Long,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_delete_group(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_disconnect(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1318,6 +1324,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer() != 9806.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_delete_group() != 39464.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_disconnect() != 16284.toShort()) {
@@ -2010,6 +2019,20 @@ public interface ChatClientInterface {
      * failure; [`ChatFfiError::Network`] when no relay accepts the offer.
      */
     suspend fun `createLinkOffer`(`ttlSecs`: kotlin.ULong): CreatedLinkOfferFfi
+    
+    /**
+     * Delete a group for everyone (terminal withdrawal commit).
+     *
+     * The ADR-0016 exit valve, and the only way to end a group you are the
+     * sole member of -- a last admin cannot `leave_group` (the daemon 409s).
+     * Admin-or-above only; the daemon authorizes. No key material survives.
+     * Irreversible.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `group_id` is not a valid group id;
+     * [`ChatFfiError`] on a daemon rejection (`403` when not an admin).
+     */
+    suspend fun `deleteGroup`(`groupId`: kotlin.String)
     
     /**
      * Stop the inbound pump and feed drains, releasing the relay
@@ -2800,6 +2823,40 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeCreatedLinkOfferFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Delete a group for everyone (terminal withdrawal commit).
+     *
+     * The ADR-0016 exit valve, and the only way to end a group you are the
+     * sole member of -- a last admin cannot `leave_group` (the daemon 409s).
+     * Admin-or-above only; the daemon authorizes. No key material survives.
+     * Irreversible.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `group_id` is not a valid group id;
+     * [`ChatFfiError`] on a daemon rejection (`403` when not an admin).
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `deleteGroup`(`groupId`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_delete_group(
+                thisPtr,
+                FfiConverterString.lower(`groupId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )

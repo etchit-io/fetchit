@@ -234,8 +234,18 @@ interface ChatGateway {
      */
     suspend fun removeContact(agentIdHex: String)
 
-    /** Leave the group [groupId]; rejoining needs a fresh invite. */
+    /**
+     * Leave the group [groupId]; rejoining needs a fresh invite. Self-removal
+     * only -- the group continues. Throws when the daemon refuses, notably the
+     * last admin (a sole member always is one): use [deleteGroup] instead.
+     */
     suspend fun leaveGroup(groupId: String)
+
+    /**
+     * Delete the group [groupId] for everyone (terminal withdrawal commit).
+     * Admin-or-above only; the daemon authorizes. Irreversible.
+     */
+    suspend fun deleteGroup(groupId: String)
 
     /**
      * Roster of active members for [groupId] -- "who is in this group". Each
@@ -359,6 +369,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.fediLinkedLabelForAgent(agentIdHex)
     override suspend fun removeContact(agentIdHex: String) = inner.removeContact(agentIdHex)
     override suspend fun leaveGroup(groupId: String) = inner.leaveGroup(groupId)
+    override suspend fun deleteGroup(groupId: String) = inner.deleteGroup(groupId)
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> =
         inner.groupMembers(groupId)
     override suspend fun removeMember(groupId: String, agentIdHex: String) =

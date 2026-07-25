@@ -1,6 +1,7 @@
 package io.etchit.fetchit.chat
 
 import android.content.Context
+import io.etchit.fetchit.SettingsStore
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -317,13 +318,29 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     }
 
     /**
-     * Leave a group from the conversation list. Asks the engine to leave, then
-     * refreshes the group list so the row disappears. The leave failure is
-     * swallowed (mirrors [refreshGroups]); the refresh reconciles the list with
-     * the engine's actual membership either way.
+     * Leave a group from the conversation list -- self-removal only; the group
+     * continues for everyone else. Refreshes the list against the engine's
+     * actual membership, then rethrows a rejected leave so the caller can say
+     * so. A sole admin (which a sole member always is) cannot leave: the
+     * daemon rejects it and [deleteGroup] is the way out.
      */
     suspend fun leaveGroup(groupId: String) {
         leaveGroupVia(gateway, groupId) { refreshGroups() }
+    }
+
+    /**
+     * Delete a group for everyone (terminal withdrawal commit), then refresh.
+     * Admin-only -- the daemon authorizes and a refusal propagates.
+     * Irreversible.
+     */
+    suspend fun deleteGroup(groupId: String) {
+        deleteGroupVia(gateway, groupId) {
+            // Record BEFORE the refresh: the daemon still lists the withdrawn
+            // group as a tombstone, so the filter has to be in place for the
+            // very refresh that follows the delete.
+            SettingsStore(appContext).addDeletedGroup(groupId)
+            refreshGroups()
+        }
     }
 
     /**
@@ -405,13 +422,23 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      * are swallowed: a group-list error must not break DM connect.
      */
     private suspend fun loadGroups(gw: ChatGateway) {
-        val loaded = try {
+        val fetched = try {
             gw.listGroups()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             android.util.Log.w("fetchit.chat", "listGroups failed on connect", e)
             return
+        }
+        // x0xd keeps a keyless tombstone for a deleted (withdrawn) group and
+        // still lists it, with no `withdrawn` field to read -- so a group we
+        // deleted would keep its row forever. The delete is real server-side;
+        // this only drops the tombstone from the list.
+        val deleted = SettingsStore(appContext).deletedGroupIds()
+        val loaded = if (deleted.isEmpty()) {
+            fetched
+        } else {
+            fetched.filterNot { it.groupId in deleted }
         }
         for (g in loaded) {
             // Touch the flow so a freshly-loaded group surfaces as an (empty)
@@ -649,13 +676,36 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             refresh: suspend () -> Unit,
         ) {
             if (gw == null) return
+            // Reconcile the list either way, then RETHROW a real failure. The
+            // daemon rejects a last-admin leave (ADR-0016 409), and the row
+            // legitimately stays -- so swallowing here made the caller report
+            // "left <group>" over a group that never went anywhere.
+            var failure: Exception? = null
             try {
                 gw.leaveGroup(groupId)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 logWarn("leaveGroup failed", e)
+                failure = e
             }
+            refresh()
+            failure?.let { throw it }
+        }
+
+        /**
+         * Ask [gw] to delete [groupId] for everyone (terminal withdrawal),
+         * then [refresh]. Unlike [leaveGroupVia] there is no swallow at all:
+         * a delete that the daemon refused (e.g. `403` when not an admin)
+         * must reach the user. No-op when [gw] is `null`.
+         */
+        suspend fun deleteGroupVia(
+            gw: ChatGateway?,
+            groupId: String,
+            refresh: suspend () -> Unit,
+        ) {
+            if (gw == null) return
+            gw.deleteGroup(groupId)
             refresh()
         }
 

@@ -117,6 +117,23 @@ class SettingsStore(context: Context) {
         prefs.getString(KEY_LAST_CHAT_TAB, "chats").orEmpty().ifEmpty { "chats" }
 
     /** Persist the last-selected messaging tab so re-entry restores it. */
+    /**
+     * Group ids this device has deleted (terminal withdrawal). x0xd's
+     * `GET /groups` still returns a withdrawn group as a keyless tombstone and
+     * exposes no `withdrawn` field, so a deleted group would otherwise keep its
+     * row forever. The delete itself is real and server-side -- this only
+     * suppresses the tombstone in the list.
+     */
+    fun deletedGroupIds(): Set<String> =
+        prefs.getStringSet(KEY_DELETED_GROUPS, emptySet()).orEmpty()
+
+    /** Record [groupId] as deleted, so its tombstone stops listing. */
+    fun addDeletedGroup(groupId: String) {
+        prefs.edit()
+            .putStringSet(KEY_DELETED_GROUPS, deletedGroupIds() + groupId)
+            .apply()
+    }
+
     fun saveLastChatTab(tab: String) {
         prefs.edit().putString(KEY_LAST_CHAT_TAB, tab).apply()
     }
@@ -129,6 +146,7 @@ class SettingsStore(context: Context) {
         const val KEY_CHAT_KEEP_CONNECTED = "chat_keep_connected"
         const val KEY_MODE = "mode"
         const val KEY_LAST_CHAT_TAB = "last_chat_tab"
+        const val KEY_DELETED_GROUPS = "deleted_group_ids"
         const val MODE_BROWSE = "browse"
         const val MODE_CHAT = "chat"
     }

@@ -3,6 +3,7 @@ package io.etchit.fetchit.chat
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -52,6 +53,8 @@ class FakeGateway : ChatGateway {
     // throw lets a test exercise the swallow-the-failure path.
     val removedContacts = mutableListOf<String>()
     val leftGroups = mutableListOf<String>()
+    val deletedGroups = mutableListOf<String>()
+    var deleteGroupThrows = false
     var removeContactThrows = false
     var leaveGroupThrows = false
 
@@ -163,6 +166,10 @@ class FakeGateway : ChatGateway {
     override suspend fun leaveGroup(groupId: String) {
         leftGroups += groupId
         if (leaveGroupThrows) throw RuntimeException("leave boom")
+    }
+    override suspend fun deleteGroup(groupId: String) {
+        deletedGroups += groupId
+        if (deleteGroupThrows) throw RuntimeException("delete boom")
     }
     override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> {
         if (groupMembersThrows) throw RuntimeException("members boom")
@@ -311,15 +318,48 @@ class ChatControllerTest {
     }
 
     @Test
-    fun leaveGroupRefreshesEvenWhenGatewayFails() = runTest {
+    fun leaveGroupRefreshesThenRETHROWSWhenTheDaemonRefuses() = runTest {
+        // The daemon rejects a last-admin leave and the row legitimately
+        // stays. Swallowing here is what let the UI claim "left <group>"
+        // over a group that never went anywhere: reconcile, then rethrow.
         val gw = FakeGateway().apply { leaveGroupThrows = true }
         var refreshed = false
-        ChatController.leaveGroupVia(gw, "g".repeat(64), logWarn = { _, _ -> }) {
-            refreshed = true
+        var thrown: Throwable? = null
+        try {
+            ChatController.leaveGroupVia(gw, "g".repeat(64), logWarn = { _, _ -> }) {
+                refreshed = true
+            }
+        } catch (e: RuntimeException) {
+            thrown = e
         }
         assertEquals("g".repeat(64), gw.leftGroups.single())
-        // Failure swallowed; the refresh still reconciles the list.
         assertTrue(refreshed)
+        assertEquals("leave boom", thrown?.message)
+    }
+
+    @Test
+    fun deleteGroupDelegatesToGatewayThenRefreshes() = runTest {
+        val gw = FakeGateway()
+        var refreshed = false
+        ChatController.deleteGroupVia(gw, "g".repeat(64)) { refreshed = true }
+        assertEquals("g".repeat(64), gw.deletedGroups.single())
+        assertTrue(refreshed)
+    }
+
+    @Test
+    fun deleteGroupPropagatesARefusalAndSkipsTheRefresh() = runTest {
+        // A refused delete (403 when not an admin) must reach the user, never
+        // read as "deleted".
+        val gw = FakeGateway().apply { deleteGroupThrows = true }
+        var refreshed = false
+        var thrown: Throwable? = null
+        try {
+            ChatController.deleteGroupVia(gw, "g".repeat(64)) { refreshed = true }
+        } catch (e: RuntimeException) {
+            thrown = e
+        }
+        assertEquals("delete boom", thrown?.message)
+        assertFalse(refreshed)
     }
 
     @Test
@@ -547,6 +587,7 @@ class ChatControllerTest {
             override fun fediLinkedLabelForAgent(agentIdHex: String): String? = null
             override suspend fun removeContact(agentIdHex: String) {}
             override suspend fun leaveGroup(groupId: String) {}
+            override suspend fun deleteGroup(groupId: String) {}
             override suspend fun groupMembers(groupId: String): List<GroupMemberFfi> = emptyList()
             override suspend fun removeMember(groupId: String, agentIdHex: String) {}
             override suspend fun banMember(groupId: String, agentIdHex: String) {}

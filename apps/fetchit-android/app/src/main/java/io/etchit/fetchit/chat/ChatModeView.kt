@@ -1115,15 +1115,50 @@ class ChatModeView(
     }
 
     private fun showGroupRowMenu(anchor: View, group: GroupFfi) {
-        val label = context.getString(rowRemoveLabel(isGroup = true))
+        val leaveLabel = context.getString(rowRemoveLabel(isGroup = true))
+        // Delete is the only exit from a group you're the sole member of (a
+        // last admin cannot leave). The daemon authorizes it; a non-admin is
+        // told so rather than silently failing.
+        val deleteLabel = context.getString(R.string.chat_delete_group)
         PopupMenu(context, anchor).apply {
-            menu.add(label)
-            setOnMenuItemClickListener {
-                confirmLeaveGroup(group)
+            menu.add(leaveLabel)
+            menu.add(deleteLabel)
+            setOnMenuItemClickListener { item ->
+                when (item.title) {
+                    deleteLabel -> confirmDeleteGroup(group)
+                    else -> confirmLeaveGroup(group)
+                }
                 true
             }
             show()
         }
+    }
+
+    /**
+     * Confirm before deleting a group for everyone. Irreversible, so the copy
+     * says so plainly and the destructive verb is the positive button.
+     */
+    private fun confirmDeleteGroup(group: GroupFfi) {
+        val title = groupTitle(group, group.groupId)
+        MaterialAlertDialogBuilder(context)
+            .setTitle(R.string.chat_delete_group_title)
+            .setMessage(context.getString(R.string.chat_delete_group_message, title))
+            .setPositiveButton(R.string.chat_delete_group_confirm) { _, _ ->
+                lifecycleScope.launch {
+                    runCatching { controller.deleteGroup(group.groupId) }
+                        .onSuccess {
+                            snackbar(context.getString(R.string.chat_group_deleted, title))
+                        }
+                        .onFailure { e ->
+                            Log.w(TAG, "deleteGroup: ${ffiReason(e)}", e)
+                            snackbar(
+                                context.getString(R.string.chat_group_delete_failed, title),
+                            )
+                        }
+                }
+            }
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .show()
     }
 
     /**
@@ -1215,7 +1250,17 @@ class ChatModeView(
                     runCatching { controller.leaveGroup(group.groupId) }
                         .onSuccess { snackbar(context.getString(R.string.chat_group_left, title)) }
                         .onFailure { e ->
-                            snackbar(userFacingError(e, "leaveGroup", R.string.chat_error_generic))
+                            // The daemon rejects a last-admin leave (ADR-0016)
+                            // and the row correctly stays -- so name the real
+                            // reason and point at the way out, rather than
+                            // reporting a leave that never happened.
+                            Log.w(TAG, "leaveGroup: ${ffiReason(e)}", e)
+                            val res = if (isLastAdminRejection(e)) {
+                                R.string.chat_group_leave_last_admin
+                            } else {
+                                R.string.chat_group_leave_failed
+                            }
+                            snackbar(context.getString(res, title))
                         }
                 }
             }
