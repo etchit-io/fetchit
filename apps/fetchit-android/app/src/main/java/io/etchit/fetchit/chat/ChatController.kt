@@ -738,8 +738,15 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                     delivered = h.delivered,
                     // Sender attribution only on inbound entries (the group
                     // label reads off these); outbound + DM entries leave null,
-                    // matching the live pump.
-                    senderAgentIdHex = if (h.outbound) null else h.fromAgentIdHex,
+                    // matching the live pump. A blank persisted id is NOT an
+                    // agent id — a fediverse sender has none — so it reads as
+                    // "no attribution" rather than rendering a bare "agent-"
+                    // label and a per-identity bubble stripe.
+                    senderAgentIdHex = if (h.outbound) {
+                        null
+                    } else {
+                        h.fromAgentIdHex.takeIf { it.isNotBlank() }
+                    },
                     senderName = if (h.outbound) null else h.senderName,
                 )
             }

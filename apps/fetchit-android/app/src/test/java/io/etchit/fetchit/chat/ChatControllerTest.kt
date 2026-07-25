@@ -3,6 +3,7 @@ package io.etchit.fetchit.chat
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.fetchit_ffi.ChatEventFfi
@@ -766,6 +767,19 @@ class ChatControllerTest {
         val convo = ConversationStore()
         ChatController.hydrateConversationVia(null, key, convo, logWarn = { _, _ -> })
         assertTrue(convo.messagesFor(key).value.isEmpty())
+    }
+
+    @Test
+    fun aBlankSenderAgentIdBecomesNullSoFediBubblesCarryNoAgentLabel() {
+        // A fediverse sender has no agent id: the engine persists a blank
+        // fromAgentIdHex. An empty string is NOT an agent id — leaving it
+        // non-null made the thread render a bare "agent-" attribution label
+        // (and a per-identity bubble stripe) on inbound fediverse messages.
+        val rows = ChatController.historyToMessages(
+            listOf(historyMsg("hi from the fediverse", 10L, "m1", fromAgentIdHex = "")),
+        )
+        assertEquals(1, rows.size)
+        assertNull(rows[0].senderAgentIdHex)
     }
 
     private fun historyMsg(
