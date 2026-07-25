@@ -87,4 +87,14 @@ grep -q "FETCHIT_BUNDLED_X0XD_VERSION: \"$X0XD_VER\"" .github/workflows/bundled-
     || fail "bundled-x0xd.yml FETCHIT_BUNDLED_X0XD_VERSION != build.rs ($X0XD_VER)"
 ok "x0xd pin lockstep (build.rs == workflows @ ${X0XD_SHA:0:7} / $X0XD_VER)"
 
+# PINS.md x0xd row must match build.rs too. This was the one leg the
+# lockstep above missed: build.rs and the workflows were locked to each
+# other while PINS.md said v0.27.0 for weeks after the 0.29.0 flip —
+# exactly the silent doc drift this script exists to prevent.
+grep -q "| \`x0xd\`.*\`$X0XD_VER\`" PINS.md \
+    || fail "PINS.md x0xd version != build.rs ($X0XD_VER)"
+grep -q "| \`x0xd\`.*$X0XD_SHA" PINS.md \
+    || fail "PINS.md x0xd fork sha != build.rs ($X0XD_SHA)"
+ok "x0xd PINS.md row matches build.rs ($X0XD_VER @ ${X0XD_SHA:0:7})"
+
 echo "all pins green."

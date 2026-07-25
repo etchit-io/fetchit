@@ -31,7 +31,7 @@ These aren't Cargo deps but ship lockstep with the binaries above:
 
 | Asset                  | Pin                                  | Why                                                            |
 |------------------------|--------------------------------------|----------------------------------------------------------------|
-| `x0xd`                 | `v0.27.0` (fork `b19f8c1`)            | Daemon REST + SSE + WS contract; bundled by desktop `build.rs` (`X0XD_PIN_VERSION`/`X0XD_PIN_SHA`). `mobile-0.27` fork = upstream v0.27.0 + fetch>it join-result/DM/re-key tail + read-only `GET /groups/:id/secure/self` keyed-epoch probe (`{keyed,in_roster,epoch}`). Cross-NAT verified. |
+| `x0xd`                 | `0.29.0` (fork `6c42c1baa0ea356130744da083b270cf62b00845`) | Daemon REST + SSE + WS contract; bundled by desktop `build.rs` (`X0XD_PIN_VERSION`/`X0XD_PIN_SHA` — `check-pins.sh` asserts this row against those consts, so this row can no longer drift silently). Fork = upstream v0.29.0 + 9-commit tail: engine-A relay-delivered apply endpoints, read-only `GET /groups/:id/secure/self` keyed-epoch probe, returning-member re-key, actor-authz `committed_by` binding. Cross-NAT verified. Defork campaign runbook lives in the ops repo (`x0x-defork-plan`). |
 | `ant-quic`             | (Saorsa fork of ant-quic, not yet used) | M2 Contract B dependency.                                  |
 | Relay region defaults  | NYC `67.207.94.66:8088`, FRA `159.89.11.217:8088` | Shipped `KNOWN_RELAYS` table in `apps/fetchit-desktop/src-tauri/src/settings.rs`. |
 
