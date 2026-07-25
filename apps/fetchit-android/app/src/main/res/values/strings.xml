@@ -378,6 +378,13 @@
     <string name="group_invite_sent">invite sent to %1$s</string>
     <string name="group_invite_send_failed">couldn\'t reach %1$s to send the invite — try again in a moment.</string>
     <string name="group_invite_dm">%1$s invited you to the private group \"%2$s\" on fetch&gt;it. Open this link in the fetch&gt;it app to join: %3$s — new here? Get the app: https://etchit.io/fetch</string>
+    <!-- Re-invite = confirmed membership reset for someone already in the
+         roster (reinstalled / new phone): remove, re-key, fresh invite. -->
+    <string name="group_reinvite_title">Re-invite %1$s?</string>
+    <string name="group_reinvite_message">%1$s is already in this group. Re-inviting resets their membership and sends a fresh invite — use this when they reinstalled the app or moved to a new phone.</string>
+    <string name="group_reinvite_confirm">re-invite</string>
+    <string name="group_reinvite_owner">%1$s owns this group and is already in it.</string>
+    <string name="group_reinvite_reset_failed">couldn\'t reset %1$s\'s membership — only an admin can, and you need to be connected.</string>
     <string name="chat_feed_title">Public posts</string>
     <string name="chat_feed_subtitle">from across the fediverse</string>
     <!-- Per-post honesty badge (mirrors desktop feedPost): fediverse posts are

@@ -166,7 +166,7 @@ struct GroupPolicyMeta {
 /// epoch. `keyed` is true only when this daemon holds the group's live crypto
 /// state, not merely a roster listing. Fields default conservatively so a
 /// partial response never reads as a false `keyed=true`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GroupSelfStatus {
     /// True when this daemon holds the group's live crypto state (keyed).
     #[serde(default)]
@@ -641,12 +641,18 @@ impl SecureGroupsEndpoint {
     /// roster-listed-but-keyless one, without decrypting a stored frame or
     /// replaying a join event.
     ///
+    /// Returns `Ok(None)` on `404`: the probe is a fork addition, so a
+    /// stock daemon (or one predating the endpoint) has no route for it —
+    /// callers take `None` as "no probe here" and derive the state from
+    /// stock surfaces instead (roster + local convergence record).
+    ///
     /// # Errors
     /// [`X0xdError::Invalid`] when `group_id` is not 64-hex (path-traversal
-    /// guard). [`X0xdError`] on transport failure or a non-2xx status --
-    /// including `404` from a daemon that predates this endpoint, which the
-    /// caller treats as "unknown" and falls back from.
-    pub async fn group_self_status(&self, group_id: &str) -> Result<GroupSelfStatus, X0xdError> {
+    /// guard). [`X0xdError`] on transport failure or any other non-2xx.
+    pub async fn group_self_status(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<GroupSelfStatus>, X0xdError> {
         let group_id = validate_group_id_hex(group_id)?;
         let path = format!("groups/{group_id}/secure/self");
         let url = self.base_url.join(&path).map_err(X0xdError::Url)?;
@@ -656,6 +662,9 @@ impl SecureGroupsEndpoint {
             .bearer_auth(&self.api_token)
             .send()
             .await?;
+        if raw.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         if !raw.status().is_success() {
             let status = raw.status();
             let body = raw.text().await.unwrap_or_default();
@@ -663,7 +672,7 @@ impl SecureGroupsEndpoint {
                 "x0xd GET /groups/{group_id}/secure/self returned {status}: {body}"
             )));
         }
-        Ok(raw.json().await?)
+        Ok(Some(raw.json().await?))
     }
 
     /// Apply a signed `NamedGroupMetadataEvent` to local MLS state via
@@ -831,22 +840,45 @@ mod tests {
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
         let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
-        let st = endpoint.group_self_status(TEST_GROUP_HEX).await.unwrap();
+        let st = endpoint
+            .group_self_status(TEST_GROUP_HEX)
+            .await
+            .unwrap()
+            .expect("fork daemon serves the probe");
         assert!(st.keyed);
         assert!(st.in_roster);
         assert_eq!(st.epoch, 5);
     }
 
     #[tokio::test]
-    async fn group_self_status_404_is_error_so_the_probe_falls_back() {
-        // A daemon that predates the endpoint 404s. The durable-join probe
-        // treats an Err as "unknown" and falls back to its roster-only read,
-        // so a 404 MUST surface as Err -- never a defaulted keyed=false
-        // success a caller could mistake for a real "not keyed" answer.
+    async fn group_self_status_404_is_none_so_the_probe_takes_the_stock_path() {
+        // Stock x0xd has no /secure/self (fork addition). A 404 is the
+        // structured "no probe here" answer -- Ok(None) -- distinct from a
+        // transport failure, and NEVER a defaulted keyed=false success a
+        // caller could mistake for a real "not keyed" answer.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/groups/{TEST_GROUP_HEX}/secure/self")))
             .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        let endpoint = SecureGroupsEndpoint::new(base, "test-token").unwrap();
+        assert_eq!(
+            endpoint.group_self_status(TEST_GROUP_HEX).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn group_self_status_500_is_still_an_error() {
+        // Only 404 means "endpoint absent"; a server fault must stay Err so
+        // callers do not silently reroute onto the stock path over a flapping
+        // fork daemon.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{TEST_GROUP_HEX}/secure/self")))
+            .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
         let base = url::Url::parse(&format!("{}/", server.uri())).unwrap();

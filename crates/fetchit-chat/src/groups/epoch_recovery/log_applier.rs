@@ -20,16 +20,29 @@ pub struct X0xdCommitApplier {
     base_url: String,
     token: String,
     my_agent_hex: String,
+    /// Shared engine-A capability latch (see `Client::engine_a_supported`).
+    /// A route-level 404 from either apply endpoint means the daemon is
+    /// stock and has no engine-A at all — that must flip this latch and
+    /// surface as an environment error, never be skipped as a poison
+    /// record (skipping would silently drain the whole log unapplied).
+    engine_a: std::sync::Arc<std::sync::OnceLock<bool>>,
 }
 
 impl X0xdCommitApplier {
     /// Build an applier targeting the daemon at `base_url` with `token`.
+    /// `engine_a` is the client's shared capability latch.
     #[must_use]
-    pub fn new(base_url: String, token: String, my_agent_hex: String) -> Self {
+    pub fn new(
+        base_url: String,
+        token: String,
+        my_agent_hex: String,
+        engine_a: std::sync::Arc<std::sync::OnceLock<bool>>,
+    ) -> Self {
         Self {
             base_url,
             token,
             my_agent_hex,
+            engine_a,
         }
     }
 
@@ -59,7 +72,23 @@ fn classify_apply_error(
     e: x0xd_client::X0xdError,
     seq: u64,
     group_id: &str,
+    engine_a: &std::sync::OnceLock<bool>,
 ) -> Result<ApplyOutcome> {
+    // Endpoint-level 404 (bare router body, no daemon JSON error shape):
+    // the daemon is stock and has no engine-A apply routes AT ALL. That is
+    // an environment condition, not a property of this record — latch it
+    // and error out so the driver's next pass skips the warm lane entirely.
+    // Treating it as a record fault would "skip" every record and silently
+    // drain the whole log unapplied while looking successful.
+    if crate::groups::engine_a::route_miss_404(&e) {
+        if engine_a.set(false).is_ok() {
+            log::warn!(
+                "[chat] warm recovery: daemon has no engine-A apply endpoints \
+                 (stock x0xd); warm lane disabled, cold resume owns recovery"
+            );
+        }
+        return Err(ChatError::from(e));
+    }
     match e {
         x0xd_client::X0xdError::ApplyRejected { status, detail }
             if (400..500).contains(&status) && !matches!(status, 401 | 407 | 408 | 429 | 431) =>
@@ -87,7 +116,7 @@ impl CommitApplier for X0xdCommitApplier {
                 .await
             {
                 Ok(applied) => applied,
-                Err(e) => return classify_apply_error(e, record.seq, group_id),
+                Err(e) => return classify_apply_error(e, record.seq, group_id, &self.engine_a),
             },
             ApplyPlan::JoinResult {
                 stable_group_id,
@@ -100,7 +129,7 @@ impl CommitApplier for X0xdCommitApplier {
                 .await
             {
                 Ok(applied) => applied,
-                Err(e) => return classify_apply_error(e, record.seq, group_id),
+                Err(e) => return classify_apply_error(e, record.seq, group_id, &self.engine_a),
             },
             // Nothing to apply (malformed, no author, or a join-result not
             // addressed to us). Traced, then treated as already-satisfied so
@@ -139,6 +168,10 @@ mod tests {
         }
     }
 
+    fn latch() -> std::sync::Arc<std::sync::OnceLock<bool>> {
+        std::sync::Arc::new(std::sync::OnceLock::new())
+    }
+
     #[tokio::test]
     async fn commit_routes_to_apply_metadata_event_and_reports_applied() {
         let gid = "aa".repeat(32); // 64-hex, passes validate_group_id_hex
@@ -151,7 +184,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
+        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32), latch());
         let rec = commit_record(b"signed-event", Some("cc".repeat(32)));
         let outcome = applier.apply(&gid, &rec).await.unwrap();
         assert_eq!(outcome, ApplyOutcome::Applied);
@@ -169,7 +202,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
+        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32), latch());
         let rec = commit_record(b"already-have-it", Some("cc".repeat(32)));
         let outcome = applier.apply(&gid, &rec).await.unwrap();
         assert_eq!(outcome, ApplyOutcome::AlreadyApplied);
@@ -180,7 +213,7 @@ mod tests {
         // No author -> plan_apply Skip -> AlreadyApplied, and crucially NO
         // HTTP call (an unmounted server would 404 any request; none is made).
         let server = MockServer::start().await;
-        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
+        let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32), latch());
         let rec = commit_record(b"no-author", None);
         let outcome = applier.apply(&"ee".repeat(32), &rec).await.unwrap();
         assert_eq!(outcome, ApplyOutcome::AlreadyApplied);
@@ -194,7 +227,10 @@ mod tests {
     /// mean the record can NEVER become valid: the applier must
     /// skip-and-advance (`AlreadyApplied`) so one poison or stale
     /// record cannot wedge warm recovery forever. Nothing is applied --
-    /// the daemon already refused it.
+    /// the daemon already refused it. The bodies carry the daemon's
+    /// JSON error shape -- the 404 case is a HANDLER "group not found"
+    /// (a record fault), distinguished from a bare route-level 404
+    /// (engine-A missing entirely; covered separately below).
     #[tokio::test]
     async fn deterministic_daemon_reject_skips_and_advances() {
         for status in [400u16, 403, 404, 405, 411, 413, 415, 422] {
@@ -202,11 +238,15 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path(format!("/groups/{gid}/apply-metadata-event")))
-                .respond_with(ResponseTemplate::new(status).set_body_string("refused"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_string(r#"{"error":"refused","ok":false}"#),
+                )
                 .mount(&server)
                 .await;
 
-            let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
+            let applier =
+                X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32), latch());
             let rec = commit_record(b"refused-event", Some("cc".repeat(32)));
             let outcome = applier
                 .apply(&gid, &rec)
@@ -218,6 +258,34 @@ mod tests {
                 "status {status} must advance the cursor past the dead record"
             );
         }
+    }
+
+    /// A route-level 404 (bare body, no daemon JSON error shape) means
+    /// the daemon is STOCK -- it has no engine-A apply endpoints at all.
+    /// That is an environment condition: the applier must error out (so
+    /// the cursor holds and nothing is "skipped") and flip the shared
+    /// capability latch so the driver stops choosing the warm lane.
+    /// Classifying it as a record fault would skip EVERY record and
+    /// silently drain the whole log unapplied while looking successful.
+    #[tokio::test]
+    async fn route_level_404_errors_and_latches_engine_a_off() {
+        let gid = "ab".repeat(32);
+        let server = MockServer::start().await;
+        // No mounted route: wiremock answers unknown paths with a bare
+        // 404 and an empty body -- exactly the stock-router shape.
+        let shared = latch();
+        let applier =
+            X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32), shared.clone());
+        let rec = commit_record(b"engine-a-event", Some("cc".repeat(32)));
+        assert!(
+            applier.apply(&gid, &rec).await.is_err(),
+            "a missing route must NOT advance the cursor"
+        );
+        assert_eq!(
+            shared.get(),
+            Some(&false),
+            "the shared latch must record that engine-A is unsupported"
+        );
     }
 
     /// Environment-faults stay errors -- the cursor holds BEFORE the
@@ -238,7 +306,8 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let applier = X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32));
+            let applier =
+                X0xdCommitApplier::new(server.uri(), "tok".into(), "bb".repeat(32), latch());
             let rec = commit_record(b"retry-me", Some("cc".repeat(32)));
             assert!(
                 applier.apply(&gid, &rec).await.is_err(),

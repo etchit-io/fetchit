@@ -419,6 +419,15 @@ pub enum RelayFailoverEvent {
 /// fallback or the attempt failed.
 type RelayFailoverCallback = Arc<dyn Fn(RelayFailoverEvent) + Send + Sync>;
 
+/// Epoch-ms clock for advisory stamps (convergence records). Same
+/// zero-on-clock-error fallback as the crate's other `now_ms` helpers —
+/// these stamps order observations, they never gate security decisions.
+fn chat_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Strongly-typed client for the chat surface — wraps x0xd's REST API,
 /// the relay-routed message transport, the local chat identity, and
 /// the conversation registry.
@@ -467,6 +476,14 @@ pub struct Client {
     /// Mutated by [`Self::regenerate_card_with_relays`]; consumed by
     /// [`Self::current_card_value`] when minting a fresh card.
     advertised_relays: Arc<tokio::sync::RwLock<Vec<String>>>,
+    /// Defork P1: latched false the first time an engine-A apply endpoint
+    /// answers a route-level 404 (stock daemon — the endpoints are fork
+    /// additions). Unset reads as supported, so a fork daemon never pays
+    /// a capability probe; once false, the bridge arms drop relayed
+    /// events (the stock daemon's own direct-plane join machinery owns
+    /// delivery) and warm recovery skips straight to the cold resume.
+    /// Shared across `Client` clones.
+    engine_a_supported: Arc<std::sync::OnceLock<bool>>,
     /// M3 R-tail-4: inbound stream pumped from
     /// [`crate::transport::MultiHomeTransport`]'s `on_inbound` callback.
     /// `MultiHomeTransport` does not expose `take_inbound` (the trait
@@ -713,6 +730,7 @@ impl Client {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             failover_watcher_abort: Arc::new(std::sync::Mutex::new(None)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(initial_relays)),
+            engine_a_supported: Arc::new(std::sync::OnceLock::new()),
             multi_home_inbound,
             primary_relay_url,
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1820,9 +1838,10 @@ impl Client {
             X0xdCommitApplier,
         };
 
-        // Production probe over the read-only keyed-status endpoint
-        // (`GET /groups/<id>/secure/self`) — the same probe the cold
-        // pending-join resume uses, widened to carry the epoch.
+        // Production probe: the fork's read-only keyed-status endpoint when
+        // the daemon has it, else the stock derivation (roster + durable
+        // convergence record + one-shot encrypt probe) — one shared
+        // implementation, [`Client::probe_group_state`].
         struct WarmProbe<'a> {
             client: &'a Client,
         }
@@ -1830,18 +1849,7 @@ impl Client {
             fn probe(&self, group_id: &str) -> impl Future<Output = Result<GroupState>> + Send {
                 let client = self.client;
                 let gid = group_id.to_owned();
-                async move {
-                    let secure = client.secure_groups()?;
-                    let st = secure
-                        .group_self_status(&gid)
-                        .await
-                        .map_err(ChatError::from)?;
-                    Ok(GroupState {
-                        keyed: st.keyed,
-                        in_roster: st.in_roster,
-                        epoch: st.epoch,
-                    })
-                }
+                async move { client.probe_group_state(&gid).await }
             }
         }
 
@@ -1874,15 +1882,28 @@ impl Client {
         // Warm applier: routes each fetched record to x0xd's
         // signature-verifying apply endpoint (never a bypass; the daemon
         // re-runs full membership authority). Built from the same daemon
-        // base URL + token the client's `secure_groups` uses.
+        // base URL + token the client's `secure_groups` uses. Carries the
+        // shared engine-A latch so a stock daemon's route-level 404 flips
+        // it instead of masquerading as a poison record.
         let applier = X0xdCommitApplier::new(
             self.http.base_url(),
             self.http.token().to_owned(),
             my_agent_hex,
+            self.engine_a_supported.clone(),
         );
 
+        // The warm lane rides the fork's apply endpoints. Once the daemon is
+        // known stock (latch false), hand the driver an empty commit source —
+        // the documented no-relay behavior — so a behind member goes straight
+        // to the cold resume instead of fetching records it can never apply.
+        let warm_relay = if self.engine_a_available() {
+            self.relay.clone()
+        } else {
+            None
+        };
+
         let driver = EpochRecoveryDriver::new_with_cursors(
-            LogFetchCommitSource::new(self.relay.clone()),
+            LogFetchCommitSource::new(warm_relay),
             applier,
             WarmProbe { client: self },
             ColdViaPendingJoins { client: self },
@@ -2298,10 +2319,20 @@ impl Client {
                     )
                 })?;
             let sender_hex = hex::encode(transit.sender_agent_id.as_bytes());
-            secure
+            match secure
                 .apply_metadata_event(&group_id, &wrapper.payload_b64, &sender_hex)
                 .await
-                .map_err(ChatError::from)?;
+            {
+                Ok(_) => {}
+                Err(e) if crate::groups::engine_a::route_miss_404(&e) => {
+                    // Stock daemon: no engine-A apply door. Drop the bridged
+                    // event — the stock join machinery (direct-plane
+                    // join-result listener + peer relay) owns delivery.
+                    self.mark_engine_a_unsupported();
+                    return Ok(());
+                }
+                Err(e) => return Err(ChatError::from(e)),
+            }
             // The owner reply polls the local x0xd for the staged
             // join-result (up to seconds) and the inbound dispatch pump is
             // serial, so run it off-thread to avoid head-of-line blocking.
@@ -2339,10 +2370,20 @@ impl Client {
             )
         {
             let owner_hex = hex::encode(transit.sender_agent_id.as_bytes());
-            secure
+            match secure
                 .apply_join_result(&stable_group_id, &member, &wrapper.payload_b64, &owner_hex)
                 .await
-                .map_err(ChatError::from)?;
+            {
+                Ok(_) => {}
+                Err(e) if crate::groups::engine_a::route_miss_404(&e) => {
+                    // Stock daemon: no engine-A apply door. Leave the durable
+                    // pending-join intact — the join has NOT converged; the
+                    // stock join machinery / cold resume owns it from here.
+                    self.mark_engine_a_unsupported();
+                    return Ok(());
+                }
+                Err(e) => return Err(ChatError::from(e)),
+            }
             // Applying the owner's join-result IS the keying event: this
             // durable pending-join has converged. Remove the intent so the
             // resume driver stops re-pulling it. This is the authoritative
@@ -2353,6 +2394,9 @@ impl Client {
             if let Ok(store) = self.pending_join_store() {
                 let _ = store.remove(&stable_group_id);
             }
+            // Refresh the durable convergence record the stock keyed-probe
+            // reads (epoch is settled by the next probe; 0 = "unknown yet").
+            self.note_group_converged(&stable_group_id, 0);
             return Ok(());
         }
 
@@ -2849,6 +2893,148 @@ impl Client {
         crate::groups::pending_join::PendingJoinStore::open(chat.layout.root.join("pending_joins"))
     }
 
+    /// Open the durable convergence-record store under the chat data dir —
+    /// the stock-daemon replacement input for the fork's `/secure/self`
+    /// keyed probe (see [`crate::groups::convergence`]).
+    fn convergence_store(&self) -> Result<crate::groups::convergence::ConvergenceStore> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("convergence store requires chat state".into()))?;
+        crate::groups::convergence::ConvergenceStore::open(chat.layout.root.join("converged"))
+    }
+
+    /// True until the daemon proves it lacks the fork's engine-A apply
+    /// endpoints (route-level 404). A fork daemon never trips this, so it
+    /// costs nothing there.
+    pub(crate) fn engine_a_available(&self) -> bool {
+        *self.engine_a_supported.get().unwrap_or(&true)
+    }
+
+    /// Latch "this daemon has no engine-A endpoints" — logged once, on the
+    /// first route-level 404. From here the bridge arms drop relayed
+    /// events (the stock daemon's direct-plane join machinery owns
+    /// delivery) and warm recovery goes straight to the cold resume.
+    pub(crate) fn mark_engine_a_unsupported(&self) {
+        if self.engine_a_supported.set(false).is_ok() {
+            log::warn!(
+                "[chat] engine-a: daemon has no apply endpoints (stock x0xd); \
+                 relay-bridged group events disabled, native delivery owns joins"
+            );
+        }
+    }
+
+    /// Group keyed/roster/epoch state, tolerant of a stock daemon.
+    ///
+    /// Fork daemon: one read of `GET /groups/:id/secure/self`. Stock
+    /// daemon (probe answers 404 => `None`): derive the same three facts
+    /// from stock surfaces — `in_roster` from the members list, `keyed`
+    /// from the durable convergence record, and when the record is absent
+    /// for a roster-listed member (fresh install / wiped app data) settle
+    /// it with a single 1-byte `secure/encrypt` probe. That probe burns
+    /// one sender ratchet generation, which is why it runs only on this
+    /// rare recovery path and its success immediately re-seeds the record
+    /// so the next probe is free. `epoch` is the record's last
+    /// observation on the stock path — advisory for behind-detection,
+    /// never authorization.
+    pub(crate) async fn probe_group_state(
+        &self,
+        group_id_hex: &str,
+    ) -> Result<crate::groups::epoch_recovery::GroupState> {
+        use crate::groups::epoch_recovery::GroupState;
+
+        let secure = self.secure_groups()?;
+        if let Some(st) = secure
+            .group_self_status(group_id_hex)
+            .await
+            .map_err(ChatError::from)?
+        {
+            return Ok(GroupState {
+                keyed: st.keyed,
+                in_roster: st.in_roster,
+                epoch: st.epoch,
+            });
+        }
+
+        // Stock daemon. Roster first: not listed means not keyed either.
+        let parsed = groups::GroupId::parse(group_id_hex)?;
+        let members = self.groups().members(&parsed).await?;
+        let self_hex = self
+            .local_agent_id_hex()
+            .ok_or_else(|| ChatError::Invalid("group probe requires chat state".into()))?;
+        if !members.iter().any(|a| a.0 == self_hex) {
+            return Ok(GroupState {
+                keyed: false,
+                in_roster: false,
+                epoch: 0,
+            });
+        }
+
+        let store = self.convergence_store()?;
+        let stale_record = match store.get(group_id_hex)? {
+            // A settled record answers for free — the hot path.
+            Some(rec) if rec.epoch > 0 => {
+                return Ok(GroupState {
+                    keyed: true,
+                    in_roster: true,
+                    epoch: rec.epoch,
+                });
+            }
+            // Epoch-0 record = "converged, epoch not yet observed" (written
+            // at the apply site, which does not see the epoch). Fall through
+            // to the one-shot probe to settle it; if the probe refuses, the
+            // record was stale and must go.
+            Some(_) => true,
+            None => false,
+        };
+
+        // Roster-listed with no settled convergence record: one-shot encrypt
+        // probe settles keyed-vs-keyless and (re)seeds the record on success.
+        match secure.encrypt(group_id_hex, &[0u8]).await {
+            Ok(frame) => {
+                let epoch = u64::from(frame.secret_epoch);
+                store.record(group_id_hex, epoch, chat_now_ms())?;
+                Ok(GroupState {
+                    keyed: true,
+                    in_roster: true,
+                    epoch,
+                })
+            }
+            Err(e) => {
+                log::debug!(
+                    "[chat] stock keyed-probe: encrypt refused for {group_id_hex}: {e} \
+                     (treating as not keyed)"
+                );
+                if stale_record {
+                    // The unsettled record claimed keyed over a daemon that
+                    // refuses to encrypt — drop it so recovery stops trusting it.
+                    let _ = store.remove(group_id_hex);
+                }
+                Ok(GroupState {
+                    keyed: false,
+                    in_roster: true,
+                    epoch: 0,
+                })
+            }
+        }
+    }
+
+    /// Note that this daemon converged on `group_id_hex` (join completed /
+    /// keys held), refreshing the durable convergence record the stock
+    /// keyed-probe reads. Quiet best-effort: recording is advisory
+    /// recovery state, and a failed write must never fail the join that
+    /// just succeeded.
+    fn note_group_converged(&self, group_id_hex: &str, epoch: u64) {
+        match self.convergence_store() {
+            Ok(store) => {
+                if let Err(e) = store.record(group_id_hex, epoch, chat_now_ms()) {
+                    log::debug!("[chat] convergence record write failed for {group_id_hex}: {e}");
+                }
+            }
+            Err(e) => log::debug!("[chat] convergence store unavailable: {e}"),
+        }
+    }
+
     /// Group ids with a durable pending join still in progress — shells show
     /// these as "joining…" rather than a failure.
     ///
@@ -3155,25 +3341,23 @@ impl Client {
                             ChatError::Invalid("durable join requires chat state".into())
                         })?;
                     let parsed = crate::groups::GroupId::parse(&gid)?;
-                    // Preferred: the read-only keyed-check (GET secure/self).
-                    // `keyed` => ActiveKeyed; roster-listed but not keyed =>
-                    // ListedButUnkeyed; not in roster => Absent.
-                    if let Ok(secure) = client.secure_groups() {
-                        if let Ok(st) = secure.group_self_status(&gid).await {
-                            return Ok(if st.keyed {
-                                MembershipStatus::ActiveKeyed
-                            } else if st.in_roster {
-                                MembershipStatus::ListedButUnkeyed
-                            } else {
-                                MembershipStatus::Absent
-                            });
-                        }
+                    // One shared derivation, fork and stock alike
+                    // ([`Client::probe_group_state`]): the fork's read-only
+                    // secure/self when present, else roster + the durable
+                    // convergence record (+ one-shot encrypt probe). `keyed`
+                    // => ActiveKeyed; roster-listed but not keyed =>
+                    // ListedButUnkeyed; not in roster => Absent. On a probe
+                    // ERROR (daemon unreachable), fall to roster-only —
+                    // never a false ActiveKeyed.
+                    if let Ok(st) = client.probe_group_state(&gid).await {
+                        return Ok(if st.keyed {
+                            MembershipStatus::ActiveKeyed
+                        } else if st.in_roster {
+                            MembershipStatus::ListedButUnkeyed
+                        } else {
+                            MembershipStatus::Absent
+                        });
                     }
-                    // Fallback -- daemon predates the endpoint (404) or is
-                    // unreachable: roster-only. Any in-roster member reads as
-                    // ListedButUnkeyed; convergence still comes from the
-                    // authoritative inbound-apply removal. Never a false
-                    // ActiveKeyed.
                     let list = client.groups().members(&parsed).await?;
                     Ok(if list.iter().any(|a| a.0 == self_hex) {
                         MembershipStatus::ListedButUnkeyed
@@ -7086,6 +7270,7 @@ mod tests {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             failover_watcher_abort: Arc::new(std::sync::Mutex::new(None)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            engine_a_supported: Arc::new(std::sync::OnceLock::new()),
             multi_home_inbound: None,
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -7708,6 +7893,7 @@ mod tests {
             denylist_dropped_inbound: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             failover_watcher_abort: Arc::new(std::sync::Mutex::new(None)),
             advertised_relays: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            engine_a_supported: Arc::new(std::sync::OnceLock::new()),
             multi_home_inbound: Some(Arc::new(std::sync::Mutex::new(Some(inbound_rx)))),
             primary_relay_url: Arc::new(tokio::sync::RwLock::new(None)),
             neg_resolve_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

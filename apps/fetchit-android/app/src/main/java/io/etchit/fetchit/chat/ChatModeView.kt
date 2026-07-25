@@ -2079,7 +2079,11 @@ class ChatModeView(
     }
 
     /** Invite a PQ contact to the group over the existing private DM rail:
-     *  mint a fresh single-use invite and DM it. */
+     *  mint a fresh single-use invite and DM it. When the contact is already
+     *  in the roster (they reinstalled or moved phones — keys gone, roster
+     *  entry left behind), x0xd would refuse to stage their Welcome, so the
+     *  invite is preceded by a confirmed membership RESET (remove → re-key →
+     *  fresh invite); see [reinviteDecision]. */
     private fun inviteContactToGroup(
         groupId: String,
         groupTitle: String,
@@ -2087,21 +2091,60 @@ class ChatModeView(
         name: String,
     ) {
         lifecycleScope.launch {
-            val gw = controller.gateway() ?: return@launch
-            val invite = runCatching { gw.groupInvite(groupId) }.getOrNull() ?: run {
-                snackbar(context.getString(R.string.group_invite_send_failed, name))
-                return@launch
+            when (reinviteDecision(controller.groupMembers(groupId), contact.agentIdHex)) {
+                ReinviteDecision.INVITE -> mintAndDmInvite(groupId, groupTitle, contact, name)
+                ReinviteDecision.ALREADY_OWNER ->
+                    snackbar(context.getString(R.string.group_reinvite_owner, name))
+                ReinviteDecision.CONFIRM_RESET -> MaterialAlertDialogBuilder(context)
+                    .setTitle(context.getString(R.string.group_reinvite_title, name))
+                    .setMessage(context.getString(R.string.group_reinvite_message, name))
+                    .setPositiveButton(R.string.group_reinvite_confirm) { _, _ ->
+                        lifecycleScope.launch { resetAndReinvite(groupId, groupTitle, contact, name) }
+                    }
+                    .setNegativeButton(context.getString(R.string.action_close), null)
+                    .show()
             }
-            val senderName = displayNameOrDefault(gw)
-            val body = context.getString(R.string.group_invite_dm, senderName, groupTitle, invite)
-            runCatching { gw.enqueueDm(contact.agentIdHex, body, senderName) }.fold(
-                onSuccess = { snackbar(context.getString(R.string.group_invite_sent, name)) },
-                onFailure = {
-                    Log.w(TAG, "enqueueDm(group-invite): ${ffiReason(it)}", it)
-                    snackbar(context.getString(R.string.group_invite_send_failed, name))
-                },
-            )
         }
+    }
+
+    /** The confirmed reset: remove the stale membership (x0xd drives the
+     *  re-key that reseals the group without them), then invite normally.
+     *  Removal is admin-gated daemon-side — a rejection surfaces and aborts. */
+    private suspend fun resetAndReinvite(
+        groupId: String,
+        groupTitle: String,
+        contact: ChatContact,
+        name: String,
+    ) {
+        var removed = true
+        controller.removeMember(groupId, contact.agentIdHex) {
+            removed = false
+            snackbar(context.getString(R.string.group_reinvite_reset_failed, name))
+        }
+        if (removed) mintAndDmInvite(groupId, groupTitle, contact, name)
+    }
+
+    /** Mint a fresh single-use invite for [groupId] and DM it to [contact]. */
+    private suspend fun mintAndDmInvite(
+        groupId: String,
+        groupTitle: String,
+        contact: ChatContact,
+        name: String,
+    ) {
+        val gw = controller.gateway() ?: return
+        val invite = runCatching { gw.groupInvite(groupId) }.getOrNull() ?: run {
+            snackbar(context.getString(R.string.group_invite_send_failed, name))
+            return
+        }
+        val senderName = displayNameOrDefault(gw)
+        val body = context.getString(R.string.group_invite_dm, senderName, groupTitle, invite)
+        runCatching { gw.enqueueDm(contact.agentIdHex, body, senderName) }.fold(
+            onSuccess = { snackbar(context.getString(R.string.group_invite_sent, name)) },
+            onFailure = {
+                Log.w(TAG, "enqueueDm(group-invite): ${ffiReason(it)}", it)
+                snackbar(context.getString(R.string.group_invite_send_failed, name))
+            },
+        )
     }
 
     /** Invite a fediverse-only person to the group: mint a FRESH single-use
