@@ -31,7 +31,9 @@ fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"
 # daemon. josh-clsn/x0x fork (mobile-serve-entrypoint) -- adds the opt-in
 # DaemonConfig.identity_dir override serve() needs when there is no writable
 # home. Heavy: pulls the full ant-quic + saorsa-gossip native stack.
-x0x = { path = "../../../x0x-fork" }
+# G1 gate build: STOCK x0x v0.34.3 (worktree of x0x-fork at tag v0.34.3).
+# main still points at ../../../x0x-fork until the Phase-3 flag-day.
+x0x = { path = "../../../x0x-stock-343" }
 # rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring
 # are in the dependency graph (the x0x embed above pulls both). This direct dep
 # makes rustls::crypto::aws_lc_rs reachable so connect() installs it explicitly.
