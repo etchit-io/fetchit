@@ -386,7 +386,10 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
         // the peer cache also rejoins the public net; it is disabled via
         // `ServeOptions.cli_disable_peer_cache` below (2 of 2). With both, the
         // gossip runtime still starts (relay / DM-inbox) but holds 0 public peers.
-        cfg.bootstrap_peers = Vec::new();
+        // The field is three-valued since x0x 0.34: `None` resolves to the
+        // HARDCODED global bootstrap; `Some([])` is "no seed peers at all" --
+        // only the latter matches this path's intent.
+        cfg.bootstrap_peers = Some(Vec::new());
         cfg
     };
     // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
