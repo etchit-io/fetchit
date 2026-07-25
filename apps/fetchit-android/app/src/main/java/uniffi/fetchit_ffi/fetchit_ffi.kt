@@ -1353,7 +1353,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_go_private_invite() != 5912.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person() != 63923.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person() != 55120.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent() != 21830.toShort()) {
@@ -1377,7 +1377,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox() != 42525.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview() != 10779.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview() != 46902.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow() != 48078.toShort()) {
@@ -2150,7 +2150,7 @@ public interface ChatClientInterface {
     suspend fun `fediGoPrivateInvite`(`target`: kotlin.String, `displayName`: kotlin.String): GoPrivateReportFfi
     
     /**
-     * Link a fediverse `target` to a PQ `agent_id_hex` — the manual
+     * Link a fediverse `target` to a PQ `agent_id_hex` -- the manual
      * "Same person?" confirm. Local only; never published.
      *
      * # Errors
@@ -2244,7 +2244,7 @@ public interface ChatClientInterface {
     /**
      * Every fediverse DM thread as a one-line summary, newest first, for
      * the unified conversation list. A device with no minted handle has
-     * no threads and returns an empty list (quiet-hydrate contract —
+     * no threads and returns an empty list (quiet-hydrate contract --
      * never an error).
      *
      * # Errors
@@ -3135,7 +3135,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * Link a fediverse `target` to a PQ `agent_id_hex` — the manual
+     * Link a fediverse `target` to a PQ `agent_id_hex` -- the manual
      * "Same person?" confirm. Local only; never published.
      *
      * # Errors
@@ -3348,7 +3348,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     /**
      * Every fediverse DM thread as a one-line summary, newest first, for
      * the unified conversation list. A device with no minted handle has
-     * no threads and returns an empty list (quiet-hydrate contract —
+     * no threads and returns an empty list (quiet-hydrate contract --
      * never an error).
      *
      * # Errors
@@ -4866,7 +4866,7 @@ public object FfiConverterTypeFediFollowingFfi: FfiConverterRustBuffer<FediFollo
 
 
 /**
- * One fediverse↔LIT person link — mirrors
+ * One fediverse↔LIT person link -- mirrors
  * [`fetchit_chat::fedi_link::PersonLink`] plus its canonical label.
  */
 data class FediPersonLinkFfi (
@@ -4883,7 +4883,7 @@ data class FediPersonLinkFfi (
      */
     var `invited`: kotlin.Boolean, 
     /**
-     * When the invite was delivered (epoch ms), if invited — drives the
+     * When the invite was delivered (epoch ms), if invited -- drives the
      * resend cooldown so the shell doesn't spam the recipient's inbox.
      */
     var `invitedAtMs`: kotlin.Long?, 
@@ -4994,7 +4994,7 @@ public object FfiConverterTypeFediPostFfi: FfiConverterRustBuffer<FediPostFfi> {
 
 /**
  * One fediverse DM thread summarised for the unified conversation
- * list — mirrors [`fetchit_chat::fedi_thread::FediThreadSummary`].
+ * list -- mirrors [`fetchit_chat::fedi_thread::FediThreadSummary`].
  */
 data class FediThreadSummaryFfi (
     /**
@@ -5002,11 +5002,11 @@ data class FediThreadSummaryFfi (
      */
     var `label`: kotlin.String, 
     /**
-     * Newest message body — the list preview.
+     * Newest message body -- the list preview.
      */
     var `lastBody`: kotlin.String, 
     /**
-     * Newest message stamp (epoch ms) — the list sort key.
+     * Newest message stamp (epoch ms) -- the list sort key.
      */
     var `lastAtMs`: kotlin.Long, 
     /**
@@ -5111,7 +5111,7 @@ public object FfiConverterTypeFollowReportFfi: FfiConverterRustBuffer<FollowRepo
 data class GoPrivateReportFfi (
     /**
      * The invite fedi DM reached the recipient's inbox. `false` means it
-     * was signed but the inbox was unreachable — the pending state is NOT
+     * was signed but the inbox was unreachable -- the pending state is NOT
      * recorded, so the caller can offer a retry.
      */
     var `delivered`: kotlin.Boolean

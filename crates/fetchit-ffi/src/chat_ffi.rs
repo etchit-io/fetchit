@@ -516,20 +516,20 @@ pub struct FediFollowingFfi {
 }
 
 /// One fediverse DM thread summarised for the unified conversation
-/// list — mirrors [`fetchit_chat::fedi_thread::FediThreadSummary`].
+/// list -- mirrors [`fetchit_chat::fedi_thread::FediThreadSummary`].
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FediThreadSummaryFfi {
     /// Canonical `user@host` label (the `f:<label>` conversation key body).
     pub label: String,
-    /// Newest message body — the list preview.
+    /// Newest message body -- the list preview.
     pub last_body: String,
-    /// Newest message stamp (epoch ms) — the list sort key.
+    /// Newest message stamp (epoch ms) -- the list sort key.
     pub last_at_ms: i64,
     /// `true` when the newest message was outbound.
     pub last_outbound: bool,
 }
 
-/// One fediverse↔LIT person link — mirrors
+/// One fediverse↔LIT person link -- mirrors
 /// [`fetchit_chat::fedi_link::PersonLink`] plus its canonical label.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FediPersonLinkFfi {
@@ -539,7 +539,7 @@ pub struct FediPersonLinkFfi {
     pub agent_id_hex: Option<String>,
     /// A go-private invite has been delivered to this person.
     pub invited: bool,
-    /// When the invite was delivered (epoch ms), if invited — drives the
+    /// When the invite was delivered (epoch ms), if invited -- drives the
     /// resend cooldown so the shell doesn't spam the recipient's inbox.
     pub invited_at_ms: Option<i64>,
     /// This person is linked to a PQ contact (chat privately in Chats).
@@ -550,7 +550,7 @@ pub struct FediPersonLinkFfi {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct GoPrivateReportFfi {
     /// The invite fedi DM reached the recipient's inbox. `false` means it
-    /// was signed but the inbox was unreachable — the pending state is NOT
+    /// was signed but the inbox was unreachable -- the pending state is NOT
     /// recorded, so the caller can offer a retry.
     pub delivered: bool,
 }
@@ -1445,7 +1445,7 @@ impl ChatClient {
 
     /// Every fediverse DM thread as a one-line summary, newest first, for
     /// the unified conversation list. A device with no minted handle has
-    /// no threads and returns an empty list (quiet-hydrate contract —
+    /// no threads and returns an empty list (quiet-hydrate contract --
     /// never an error).
     ///
     /// # Errors
@@ -1528,8 +1528,8 @@ impl ChatClient {
         })?;
         let body = format!(
             "{display_name} invited you to a private, post-quantum encrypted chat \
-             on fetch>it. Open this link in the fetch>it app to accept: {pair_uri} \
-             — new here? Get the app: https://etchit.io/fetch (your fediverse \
+             on fetch>it. Open this link in the fetch>it app to accept: {pair_uri}\
+             . New here? Get the app: https://etchit.io/fetch (your fediverse \
              messages stay here; the private chat starts fresh)"
         );
         let now_ms = std::time::SystemTime::now()
@@ -1564,7 +1564,7 @@ impl ChatClient {
             .map_err(ChatFfiError::from)
     }
 
-    /// Link a fediverse `target` to a PQ `agent_id_hex` — the manual
+    /// Link a fediverse `target` to a PQ `agent_id_hex` -- the manual
     /// "Same person?" confirm. Local only; never published.
     ///
     /// # Errors

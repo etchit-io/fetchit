@@ -213,7 +213,7 @@ Same IA, desktop idiom: the chat panel's sidebar gets the three sections as a se
 | `go_private_body` | We'll send @%1$s an invite. When they open it in fetch>it, this chat turns private — post-quantum encrypted, nobody (not even servers) can read it. Heads-up: the invite itself travels the open fediverse. |
 | `go_private_send` | Send private invite |
 | `go_private_pending` | invite sent — waiting for them to join |
-| `go_private_invite_dm` | %1$s invited you to a private, post-quantum encrypted chat on fetch>it. Open this link in the fetch>it app to accept: %2$s — new here? Get the app: https://etchit.io/fetch (your fediverse messages stay here; the private chat starts fresh) |
+| `go_private_invite_dm` | %1$s invited you to a private, post-quantum encrypted chat on fetch>it. Open this link in the fetch>it app to accept: %2$s. New here? Get the app: https://etchit.io/fetch (your fediverse messages stay here; the private chat starts fresh) — assembled in the FFI (it embeds the freshly published pair URI), so it carries no em-dash: `check-ffi-doc-comments.sh` bans U+2014 crate-wide because uniffi copies it into the generated binding. |
 | `go_private_resend` | resend invite |
 | `go_private_linked` | 🔒 linked — you chat privately with this person in Chats |
 | `thread_fallback_banner` | can't reach %1$s privately right now — your messages will send when reconnected |
