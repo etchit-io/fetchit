@@ -70,3 +70,12 @@ fetchit-relay-client = { path = "../fetchit-relay-client" }
 
 [build-dependencies]
 uniffi = { version = "=0.29.5", features = ["build"] }
+
+[profile.dev]
+# This crate is workspace-EXCLUDED, so the root manifest's profile does not
+# reach it -- and it is the heaviest producer on the build disk (a 2.3 GB
+# static lib and an 826 MB cdylib per debug build, because it links the whole
+# x0x + ant-quic + saorsa-gossip native stack). `line-tables-only` keeps
+# panic file/line and drops the variable-level DWARF; measured ~60% smaller
+# on the sibling workspace crates. Release is unaffected (it already strips).
+debug = "line-tables-only"

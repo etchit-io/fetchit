@@ -87,6 +87,16 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tempfile = "3.13"
 lru = "0.16"
 
+[profile.dev]
+# Full DWARF made debug + test artifacts enormous: one x0x rlib was 726 MB
+# and a single test binary 561 MB, so a heavy session wrote ~25-30 GB that
+# cargo never reclaims (the build disk hit 99% and killed a linker with a
+# bus error, 2026-07-25). `line-tables-only` keeps file/line in panics and
+# backtraces -- how this codebase is actually debugged, via tracing logs and
+# logcat -- and drops only the variable-level DWARF a step debugger would
+# want. Inherited by the test and bench profiles.
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
