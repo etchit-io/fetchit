@@ -31,9 +31,13 @@ fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"
 # daemon. josh-clsn/x0x fork (mobile-serve-entrypoint) -- adds the opt-in
 # DaemonConfig.identity_dir override serve() needs when there is no writable
 # home. Heavy: pulls the full ant-quic + saorsa-gossip native stack.
-# G1 gate build: STOCK x0x v0.34.3 (worktree of x0x-fork at tag v0.34.3).
-# main still points at ../../../x0x-fork until the Phase-3 flag-day.
-x0x = { path = "../../../x0x-stock-343" }
+# Post-G1: upstream v0.34.3 plus the ONE remaining fork commit -- engine-A's
+# relay-delivered group-join apply endpoints (branch engine-a-34 on
+# josh-clsn/x0x). G1 (2026-07-25) proved a CGNAT phone OWNER cannot converge
+# groups on pure gossip: MemberJoined delivery landed 1 of 2 rounds and the
+# TreeKEM Welcome hand-off 0 of 1, with nothing re-arming either. Engine-A is
+# that missing deterministic lane. See fetchit-ops/docs/x0x-defork-plan.md.
+x0x = { path = "../../../x0x-tail-34" }
 # rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring
 # are in the dependency graph (the x0x embed above pulls both). This direct dep
 # makes rustls::crypto::aws_lc_rs reachable so connect() installs it explicitly.

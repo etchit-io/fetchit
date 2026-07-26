@@ -357,8 +357,14 @@ fn resolve_denylist_url() -> Option<String> {
 ///   `DaemonConfig.identity_dir`. Without it `serve()` writes them to `~/.x0x`,
 ///   which is unwritable on Android.
 ///
-/// `disable_peer_cache` is forced `true` at the `serve()` call below -- the
-/// peer cache (not the bootstrap list) is what rejoins the public gossip net.
+/// GOSSIP IS ON (v1 transport decision: native + gossip primary, relay the
+/// dual-NAT fallback). The embed bootstraps into the public mesh via the
+/// hardcoded seed nodes and keeps the peer cache, all over OUTBOUND QUIC --
+/// the only direction CGNAT permits -- and established links carry pub/sub
+/// both ways, which is what delivers group membership events (MemberJoined /
+/// join results) to a phone nobody can dial. The pre-defork build ran
+/// gossip-off and leaned on the fork's engine-A relay bridge for those
+/// events; stock has no engine-A, so the mesh is load-bearing here.
 ///
 /// # Errors
 ///
@@ -381,15 +387,10 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
         // Android has no writable home -- root the identity keys under app
         // storage via the opt-in identity_dir override.
         cfg.identity_dir = Some(x0xd_data.join("identity"));
-        // gossip-OFF (1 of 2): clear the hardcoded bootstrap seeds (== all the
-        // --no-hard-coded-bootstrap flag does). NECESSARY but NOT sufficient --
-        // the peer cache also rejoins the public net; it is disabled via
-        // `ServeOptions.cli_disable_peer_cache` below (2 of 2). With both, the
-        // gossip runtime still starts (relay / DM-inbox) but holds 0 public peers.
-        // The field is three-valued since x0x 0.34: `None` resolves to the
-        // HARDCODED global bootstrap; `Some([])` is "no seed peers at all" --
-        // only the latter matches this path's intent.
-        cfg.bootstrap_peers = Some(Vec::new());
+        // gossip-ON: leave `bootstrap_peers` at its `None` default, which
+        // resolves to the hardcoded global bootstrap network (the field is
+        // three-valued since x0x 0.34: `None` = hardcoded seeds, `Some([])`
+        // = no seeds at all -- the old gossip-off embed used the latter).
         cfg
     };
     // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
@@ -399,25 +400,25 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
         reason: "embedded_mobile".to_owned(),
         loaded_at_unix_ms: 0,
     };
-    // ServeOptions.cli_disable_peer_cache MUST be true for gossip-off. Empty
-    // bootstrap alone is not enough -- with the cache on, the embedded x0xd
-    // reconnects to cached public coordinators from a prior run (seen on-device:
-    // "Connected to cached peer ... :5483"). Cache off + empty bootstrap = gossip
-    // runtime up (relay / DM-inbox) at 0 public peers. self_update_enabled = false
-    // keeps the embedded daemon from ever replacing/restarting the host app.
+    // Gossip-ON: keep the peer cache (it is what rejoins the public mesh
+    // quickly across app restarts) and allow best-effort UPnP port mapping
+    // (a no-op on IGD-less CGNAT routers, an inbound-path win elsewhere).
+    // self_update_enabled = false keeps the embedded daemon from ever
+    // replacing/restarting the host app.
     serve_with_options(
         cfg,
         ServeOptions {
             skip_update_check: true,
-            // gossip-off embed has no inbound peers; skip UPnP router probing.
-            cli_no_port_mapping: true,
-            cli_disable_peer_cache: true,
+            cli_no_port_mapping: false,
+            cli_disable_peer_cache: false,
             instance_name: None,
             exec_policy,
-            // x0x >= 0.29 requires a connect ACL policy on the embed. This
-            // gossip-off embed has no inbound peers to gate, so the documented
-            // embedder default (`ConnectPolicy::Disabled` = default-deny
-            // inbound; outbound to the relay is unaffected) is correct.
+            // x0x >= 0.29 requires a connect ACL policy on the embed. The
+            // documented embedder default (`ConnectPolicy::Disabled` =
+            // default-deny UNSOLICITED inbound) stays correct with gossip
+            // on: the mesh is joined over outbound dials, and established
+            // links carry pub/sub both ways; CGNAT drops unsolicited
+            // inbound before any policy would see it anyway.
             connect_policy: x0x::connect::ConnectPolicy::default(),
             self_update_enabled: false,
         },
