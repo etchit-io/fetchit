@@ -82,6 +82,14 @@ class SettingsStore(context: Context) {
      */
     fun chatKeepConnected(): Boolean = prefs.getBoolean(KEY_CHAT_KEEP_CONNECTED, true)
 
+    /** Whether the one-time battery-optimization exemption prompt ran. */
+    fun batteryPromptShown(): Boolean = prefs.getBoolean(KEY_BATTERY_PROMPT_SHOWN, false)
+
+    /** Record the battery-exemption prompt as shown (never re-prompts). */
+    fun saveBatteryPromptShown() {
+        prefs.edit().putBoolean(KEY_BATTERY_PROMPT_SHOWN, true).apply()
+    }
+
     /** Persist the chat keep-connected preference. */
     fun saveChatKeepConnected(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_CHAT_KEEP_CONNECTED, enabled).apply()
@@ -144,6 +152,7 @@ class SettingsStore(context: Context) {
         const val KEY_THEME = "theme"
         const val KEY_CHAT_DISPLAY_NAME = "chat_display_name"
         const val KEY_CHAT_KEEP_CONNECTED = "chat_keep_connected"
+        const val KEY_BATTERY_PROMPT_SHOWN = "battery_prompt_shown"
         const val KEY_MODE = "mode"
         const val KEY_LAST_CHAT_TAB = "last_chat_tab"
         const val KEY_DELETED_GROUPS = "deleted_group_ids"

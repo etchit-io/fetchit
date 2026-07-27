@@ -13,6 +13,17 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Background chat receive + message notifications (no push service:
+         the app holds its own relay connection in a foreground service).
+         REMOTE_MESSAGING is the 34+ messaging FGS type; DATA_SYNC is the
+         pre-34 runtime fallback declared alongside it. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".FetchitApplication"
         android:allowBackup="false"
@@ -91,5 +102,22 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Keeps the relay connection alive for background message
+             receive + notifications ("keep chat connected" setting). -->
+        <service
+            android:name=".chat.notify.ChatForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging|dataSync" />
+
+        <!-- Resumes background receive after a reboot (post first
+             unlock, so the chat vault's keystore material is usable). -->
+        <receiver
+            android:name=".chat.notify.ChatBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

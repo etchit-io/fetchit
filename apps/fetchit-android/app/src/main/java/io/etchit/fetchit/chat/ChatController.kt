@@ -149,6 +149,23 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             chatConnectionStatus(pump, connecting)
         }.stateIn(scope, SharingStarted.Eagerly, ChatConnectionStatus.OFFLINE)
 
+    /**
+     * Notification tap: set by [io.etchit.fetchit.chat.notify.ChatForegroundService],
+     * receives every inbound DM / group message from the pump. `null` (no
+     * service / notifications off) drops the events — the UI stores are fed
+     * directly by the pump either way.
+     */
+    @Volatile
+    var inboundSink: ((io.etchit.fetchit.chat.notify.InboundNotify) -> Unit)? = null
+
+    /**
+     * Conversation key of the thread currently on screen, or `null`. The
+     * notify policy suppresses notifications for it; the thread view keeps
+     * this current on open/close.
+     */
+    @Volatile
+    var visibleConvKey: String? = null
+
     /** Returns the cached gateway without connecting, or `null` if not yet connected. */
     fun gateway(): ChatGateway? = gateway
 
@@ -193,6 +210,7 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                         _pumpState.value =
                             if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
                     },
+                    onInbound = { inbound -> inboundSink?.invoke(inbound) },
                 )
                 // Durable-join resume pump: advance any pending join on a timer so a
                 // join that could not converge now (owner offline) auto-completes
@@ -586,6 +604,11 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             logWarn: (String, Throwable) -> Unit = { msg, t ->
                 android.util.Log.w("fetchit.chat", msg, t)
             },
+            // Raw inbound-message tap for the notification layer: fired for
+            // every Dm / GroupMessage BEFORE any notify policy — the sink
+            // (ChatForegroundService) applies `shouldNotify` with the live
+            // self/visible-conversation state the pump cannot see.
+            onInbound: (io.etchit.fetchit.chat.notify.InboundNotify) -> Unit = {},
         ): Job = scope.launch {
             while (true) {
                 val ev = try {
@@ -598,31 +621,55 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                     return@launch
                 } ?: break
                 when (ev) {
-                    is ChatEventFfi.Dm -> convo.append(
-                        ConversationStore.convKeyDm(ev.fromAgentIdHex),
-                        ChatMessage(
-                            outbound = false,
-                            body = ev.body,
-                            sentAtMs = System.currentTimeMillis(),
-                            messageId = ev.messageId,
-                        ),
-                    )
-                    is ChatEventFfi.GroupMessage -> convo.append(
-                        ConversationStore.convKeyGroup(ev.groupId),
-                        ChatMessage(
-                            outbound = false,
-                            body = ev.body,
-                            sentAtMs = System.currentTimeMillis(),
-                            messageId = ev.messageId,
-                            // Group bubbles attribute the sender; the UI shows a
-                            // label off this (DMs leave it null).
-                            senderAgentIdHex = ev.fromAgentIdHex,
-                            // Sender's self-attached display name (rides the
-                            // encrypted message); the label prefers it over the
-                            // agent-id fallback.
-                            senderName = ev.senderName,
-                        ),
-                    )
+                    is ChatEventFfi.Dm -> {
+                        convo.append(
+                            ConversationStore.convKeyDm(ev.fromAgentIdHex),
+                            ChatMessage(
+                                outbound = false,
+                                body = ev.body,
+                                sentAtMs = System.currentTimeMillis(),
+                                messageId = ev.messageId,
+                            ),
+                        )
+                        onInbound(
+                            io.etchit.fetchit.chat.notify.InboundNotify(
+                                convKey = ConversationStore.convKeyDm(ev.fromAgentIdHex),
+                                kind = io.etchit.fetchit.chat.notify.InboundKind.DM,
+                                senderAgentIdHex = ev.fromAgentIdHex,
+                                senderLabel = null,
+                                body = ev.body,
+                                messageId = ev.messageId.orEmpty(),
+                            ),
+                        )
+                    }
+                    is ChatEventFfi.GroupMessage -> {
+                        convo.append(
+                            ConversationStore.convKeyGroup(ev.groupId),
+                            ChatMessage(
+                                outbound = false,
+                                body = ev.body,
+                                sentAtMs = System.currentTimeMillis(),
+                                messageId = ev.messageId,
+                                // Group bubbles attribute the sender; the UI shows a
+                                // label off this (DMs leave it null).
+                                senderAgentIdHex = ev.fromAgentIdHex,
+                                // Sender's self-attached display name (rides the
+                                // encrypted message); the label prefers it over the
+                                // agent-id fallback.
+                                senderName = ev.senderName,
+                            ),
+                        )
+                        onInbound(
+                            io.etchit.fetchit.chat.notify.InboundNotify(
+                                convKey = ConversationStore.convKeyGroup(ev.groupId),
+                                kind = io.etchit.fetchit.chat.notify.InboundKind.GROUP,
+                                senderAgentIdHex = ev.fromAgentIdHex,
+                                senderLabel = ev.senderName,
+                                body = ev.body,
+                                messageId = ev.messageId.orEmpty(),
+                            ),
+                        )
+                    }
                     is ChatEventFfi.Receipt -> convo.markDelivered(ev.messageId)
                     is ChatEventFfi.PublicPost -> decodePost(ev, htmlStripper)?.let(feed::append)
                     is ChatEventFfi.Outbox -> projectOutbox(convo, ev.bubble)

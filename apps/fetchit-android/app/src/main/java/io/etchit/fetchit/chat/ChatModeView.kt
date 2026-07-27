@@ -384,9 +384,33 @@ class ChatModeView(
         showScreen(Screen.GroupThread(groupId), pushToStack = true)
     }
 
+    /**
+     * Open the thread for a [ConversationStore] conversation key — the
+     * reverse of the key derivation, used by notification taps
+     * ([io.etchit.fetchit.chat.notify.MessageNotifier]).
+     */
+    fun openConversationByKey(key: String) {
+        if (key.startsWith("g:")) {
+            openGroupThread(key.removePrefix("g:"))
+        } else {
+            openThread(key)
+        }
+    }
+
     private fun showScreen(screen: Screen, pushToStack: Boolean) {
         if (pushToStack) {
             if (screenStack.lastOrNull() != screen) screenStack.addLast(screen)
+        }
+        // Every navigation (open AND back-pop) lands here, so this is the
+        // one place the notify policy's on-screen-conversation state stays
+        // correct. Opening a thread also clears its pending notification.
+        controller.visibleConvKey = when (screen) {
+            is Screen.Thread -> ConversationStore.convKeyDm(screen.peer)
+            is Screen.GroupThread -> ConversationStore.convKeyGroup(screen.groupId)
+            else -> null
+        }
+        controller.visibleConvKey?.let {
+            io.etchit.fetchit.chat.notify.MessageNotifier(context).cancel(it)
         }
         // The tab bar shows on the three roots and hides inside any thread.
         val isRoot = screen is Screen.Chats || screen is Screen.People || screen is Screen.Feed

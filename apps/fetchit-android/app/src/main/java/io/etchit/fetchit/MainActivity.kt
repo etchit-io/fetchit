@@ -371,6 +371,45 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         binding.swipeRefresh.setOnRefreshListener { resetToIdle() }
 
         onBackPressedDispatcher.addCallback(this, backCallback)
+
+        startBackgroundChatIfEnabled()
+    }
+
+    /**
+     * Bring up the background message service ("keep chat connected",
+     * default on): ask for notification permission (13+) the first time,
+     * start [io.etchit.fetchit.chat.notify.ChatForegroundService], and
+     * offer the battery-optimization exemption once — without it some
+     * OEMs (Samsung especially) kill the service within minutes.
+     */
+    private fun startBackgroundChatIfEnabled() {
+        val settings = SettingsStore(this)
+        if (!settings.chatKeepConnected()) return
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                REQ_POST_NOTIFICATIONS,
+            )
+        }
+        androidx.core.content.ContextCompat.startForegroundService(
+            this,
+            Intent(this, io.etchit.fetchit.chat.notify.ChatForegroundService::class.java),
+        )
+        val power = getSystemService(POWER_SERVICE) as android.os.PowerManager
+        if (!power.isIgnoringBatteryOptimizations(packageName) && !settings.batteryPromptShown()) {
+            settings.saveBatteryPromptShown()
+            runCatching {
+                startActivity(
+                    Intent(
+                        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        android.net.Uri.parse("package:$packageName"),
+                    ),
+                )
+            }
+        }
     }
 
     override fun currentAddressInput(): String =
@@ -394,6 +433,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         // rendition, surface a one-tap chip so they don't have to
         // long-press → paste → tap-fetch.
         maybeOfferClipboardPaste()
+    }
+
+    override fun onStop() {
+        // Leaving the foreground: no conversation is "on screen", so the
+        // notify policy must stop suppressing the last-open thread.
+        (application as FetchitApplication).chatController.visibleConvKey = null
+        super.onStop()
     }
 
     private fun maybeOfferClipboardPaste() {
@@ -430,6 +476,18 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     }
 
     private fun handleViewIntent(intent: Intent?) {
+        // Notification tap: open the conversation the notification was
+        // for. Consumed so a config-change redelivery can't re-navigate.
+        intent?.getStringExtra(
+            io.etchit.fetchit.chat.notify.MessageNotifier.EXTRA_OPEN_CONV_KEY,
+        )?.let { key ->
+            intent.removeExtra(
+                io.etchit.fetchit.chat.notify.MessageNotifier.EXTRA_OPEN_CONV_KEY,
+            )
+            setMode(Mode.CHAT, persist = false)
+            chatModeView.openConversationByKey(key)
+            return
+        }
         val uri = intent?.data ?: return
         // `fetchit://import?v=1&data=…` is the bookmark-import deep
         // link the desktop's QR-share emits. Route to the
@@ -813,6 +871,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
 
     private companion object {
         const val TAG = "fetchit"
+        /** Runtime-permission request code for POST_NOTIFICATIONS (33+). */
+        const val REQ_POST_NOTIFICATIONS = 41
         /** Initial delay before any status text appears; fetches that
          *  finish below this duration display none. */
         const val STATUS_INITIAL_DELAY_MS = 1_500L
