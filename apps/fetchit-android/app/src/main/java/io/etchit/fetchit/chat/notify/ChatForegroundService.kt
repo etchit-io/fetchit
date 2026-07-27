@@ -35,6 +35,7 @@ class ChatForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        running = true
         notifier = MessageNotifier(this).also { it.ensureChannels() }
     }
 
@@ -98,10 +99,24 @@ class ChatForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         (application as FetchitApplication).chatController.inboundSink = null
         scope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        /**
+         * Whether an instance is live. Start-callers check this first: on
+         * 14+ the user may swipe the (dismissible) persistent notification
+         * away, and a redundant `startForegroundService` on every app open
+         * would re-post it — the "it keeps coming back" annoyance. One
+         * process, one service; a plain flag is enough.
+         */
+        @Volatile
+        var running: Boolean = false
+            private set
+    }
 }

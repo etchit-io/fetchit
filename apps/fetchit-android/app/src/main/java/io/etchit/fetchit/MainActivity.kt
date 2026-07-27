@@ -394,10 +394,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
                 REQ_POST_NOTIFICATIONS,
             )
         }
-        androidx.core.content.ContextCompat.startForegroundService(
-            this,
-            Intent(this, io.etchit.fetchit.chat.notify.ChatForegroundService::class.java),
-        )
+        // Only when not already live: a redundant start re-posts the
+        // persistent notification the user may have deliberately swiped
+        // away (dismissible on 14+ while the service keeps running).
+        if (!io.etchit.fetchit.chat.notify.ChatForegroundService.running) {
+            androidx.core.content.ContextCompat.startForegroundService(
+                this,
+                Intent(this, io.etchit.fetchit.chat.notify.ChatForegroundService::class.java),
+            )
+        }
         val power = getSystemService(POWER_SERVICE) as android.os.PowerManager
         if (!power.isIgnoringBatteryOptimizations(packageName) && !settings.batteryPromptShown()) {
             settings.saveBatteryPromptShown()
