@@ -2331,6 +2331,19 @@ impl Client {
                     self.mark_engine_a_unsupported();
                     return Ok(());
                 }
+                Err(e) if crate::groups::engine_a::apply_conflict_409(&e) => {
+                    // The applier declined without a handler error: for a
+                    // bridged member_joined that means REPLAY — the joiner
+                    // retried because our earlier reply never landed, and
+                    // this member is already admitted. What the joiner is
+                    // missing is not admission but the STAGED join-result,
+                    // so fall through to the reply poll and re-serve it. If
+                    // the stage has expired the poll times out and logs (the
+                    // upstream already-active re-stage gap owns that tail).
+                    log::info!(
+                        "[chat] engine-a owner: replayed member_joined for an admitted member; re-serving staged join-result"
+                    );
+                }
                 Err(e) => return Err(ChatError::from(e)),
             }
             // The owner reply polls the local x0xd for the staged
@@ -2380,6 +2393,18 @@ impl Client {
                     // pending-join intact — the join has NOT converged; the
                     // stock join machinery / cold resume owns it from here.
                     self.mark_engine_a_unsupported();
+                    return Ok(());
+                }
+                Err(e) if crate::groups::engine_a::apply_conflict_409(&e) => {
+                    // A duplicate owner reply (re-bridged after a retried
+                    // join) the daemon already converged past — or a decline
+                    // of a stale result. Neither warrants failing the
+                    // dispatch pump, and neither PROVES convergence, so
+                    // leave the durable pending-join for the resume driver /
+                    // keyed probe to settle authoritatively.
+                    log::info!(
+                        "[chat] engine-a joiner: local apply declined a join-result replay; leaving pending-join to the resume driver"
+                    );
                     return Ok(());
                 }
                 Err(e) => return Err(ChatError::from(e)),
