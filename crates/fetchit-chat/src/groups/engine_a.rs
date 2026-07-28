@@ -110,8 +110,7 @@ mod tests {
         // refusal, never the applier's idempotent decline.
         let withdrawn = x0xd_client::X0xdError::ApplyRejected {
             status: 409,
-            detail: "POST /groups/abc/join: {\"ok\":false,\"error\":\"group is withdrawn\"}"
-                .into(),
+            detail: "POST /groups/abc/join: {\"ok\":false,\"error\":\"group is withdrawn\"}".into(),
         };
         assert!(!apply_conflict_409(&withdrawn));
         let not_conflict = x0xd_client::X0xdError::ApplyRejected {
