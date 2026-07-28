@@ -608,8 +608,26 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             // every Dm / GroupMessage BEFORE any notify policy — the sink
             // (ChatForegroundService) applies `shouldNotify` with the live
             // self/visible-conversation state the pump cannot see.
+            //
+            // Invoked ONLY through [notifySink], never directly: the sink is a
+            // bystander and must not be able to kill delivery.
             onInbound: (io.etchit.fetchit.chat.notify.InboundNotify) -> Unit = {},
         ): Job = scope.launch {
+            // The pump is the sole feed for the conversation stores, so an
+            // exception escaping the notification sink stops inbound chat dead
+            // until the app restarts — silently, which is the worst failure
+            // this app can have. Contain it here: a broken notifier costs a
+            // notification, never a message. (Shipped un-contained on
+            // 2026-07-26; device stopped receiving after the first throw.)
+            fun notifySink(inbound: io.etchit.fetchit.chat.notify.InboundNotify) {
+                try {
+                    onInbound(inbound)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logWarn("inbound notify sink failed", e)
+                }
+            }
             while (true) {
                 val ev = try {
                     gw.nextEvent()
@@ -631,7 +649,7 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                                 messageId = ev.messageId,
                             ),
                         )
-                        onInbound(
+                        notifySink(
                             io.etchit.fetchit.chat.notify.InboundNotify(
                                 convKey = ConversationStore.convKeyDm(ev.fromAgentIdHex),
                                 kind = io.etchit.fetchit.chat.notify.InboundKind.DM,
@@ -659,7 +677,7 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                                 senderName = ev.senderName,
                             ),
                         )
-                        onInbound(
+                        notifySink(
                             io.etchit.fetchit.chat.notify.InboundNotify(
                                 convKey = ConversationStore.convKeyGroup(ev.groupId),
                                 kind = io.etchit.fetchit.chat.notify.InboundKind.GROUP,
