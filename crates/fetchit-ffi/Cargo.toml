@@ -28,16 +28,16 @@ fetchit-relay-proto = { path = "../fetchit-relay-proto" }
 fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"] }
 # Embedded x0xd: connect() runs x0x::daemon::serve() in-process on a loopback
 # port so groups get a /secure/* TreeKEM surface on Android without a separate
-# daemon. josh-clsn/x0x fork (mobile-serve-entrypoint) -- adds the opt-in
-# DaemonConfig.identity_dir override serve() needs when there is no writable
-# home. Heavy: pulls the full ant-quic + saorsa-gossip native stack.
-# Post-G1: upstream v0.34.3 plus the ONE remaining fork commit -- engine-A's
-# relay-delivered group-join apply endpoints (branch engine-a-34 on
-# josh-clsn/x0x). G1 (2026-07-25) proved a CGNAT phone OWNER cannot converge
-# groups on pure gossip: MemberJoined delivery landed 1 of 2 rounds and the
-# TreeKEM Welcome hand-off 0 of 1, with nothing re-arming either. Engine-A is
-# that missing deterministic lane. See fetchit-ops/docs/x0x-defork-plan.md.
-x0x = { path = "../../../x0x-tail-34" }
+# daemon. Heavy: pulls the full ant-quic + saorsa-gossip native stack.
+# Post-G1 defork: upstream v0.34.3 plus the short engine-A tail (branch
+# engine-a-34 on josh-clsn/x0x) -- relay-delivered group-join apply endpoints
+# and the TreeKEM join-retry convergence fixes. G1 (2026-07-25) proved a CGNAT
+# phone OWNER cannot converge groups on pure gossip: MemberJoined delivery
+# landed 1 of 2 rounds and the TreeKEM Welcome hand-off 0 of 1, with nothing
+# re-arming either. Engine-A is that missing deterministic lane. See
+# fetchit-ops/docs/x0x-defork-plan.md. Rev pin moves in lockstep with the
+# desktop bundle (build.rs X0XD_PIN_SHA) -- PINS.md is the source of truth.
+x0x = { git = "https://github.com/josh-clsn/x0x.git", rev = "e381a319de8581b0a7e80e28b8fafe9c088a1d93" }
 # rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring
 # are in the dependency graph (the x0x embed above pulls both). This direct dep
 # makes rustls::crypto::aws_lc_rs reachable so connect() installs it explicitly.

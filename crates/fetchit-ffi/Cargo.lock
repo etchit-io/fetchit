@@ -9087,6 +9087,7 @@ dependencies = [
 [[package]]
 name = "x0x"
 version = "0.34.3"
+source = "git+https://github.com/josh-clsn/x0x.git?rev=e381a319de8581b0a7e80e28b8fafe9c088a1d93#e381a319de8581b0a7e80e28b8fafe9c088a1d93"
 dependencies = [
  "ant-quic",
  "anyhow",

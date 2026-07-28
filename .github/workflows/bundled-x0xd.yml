@@ -16,7 +16,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  X0XD_PIN_SHA: "6c42c1baa0ea356130744da083b270cf62b00845"
+  X0XD_PIN_SHA: "e381a319de8581b0a7e80e28b8fafe9c088a1d93"
 
 jobs:
   build-bundled-x0xd:
@@ -47,8 +47,9 @@ jobs:
 
       - name: Clone pinned josh-clsn/x0x
         run: |
-          # josh-clsn fork: carries the X0X-0070b peer-relay wiring the
-          # 0.27 client stack expects (upstream inclusion tracked in x0x#158).
+          # josh-clsn fork: upstream v0.34.3 plus the engine-A tail
+          # (relay-delivered group-join apply endpoints + join-retry
+          # convergence) on the engine-a-34 branch.
           git clone https://github.com/josh-clsn/x0x "$HOME/x0x"
           cd "$HOME/x0x"
           git checkout "$X0XD_PIN_SHA"
@@ -73,7 +74,7 @@ jobs:
       - name: Build fetchit-desktop with bundled binary
         env:
           FETCHIT_BUNDLED_X0XD_PATH: /home/runner/x0x/target/release/x0xd
-          FETCHIT_BUNDLED_X0XD_VERSION: "0.29.0"
+          FETCHIT_BUNDLED_X0XD_VERSION: "0.34.3"
         run: |
           cargo build --manifest-path apps/fetchit-desktop/src-tauri/Cargo.toml
 

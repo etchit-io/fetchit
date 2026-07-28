@@ -33,13 +33,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned josh-clsn/x0x sha for the bundled x0xd (fork carries the
-  # X0X-0070b peer-relay wiring; upstream inclusion tracked in x0x#158).
+  # Pinned josh-clsn/x0x sha for the bundled x0xd (upstream v0.34.3 plus
+  # the engine-A tail on the engine-a-34 branch).
   # Mirrors bundled-x0xd.yml and apps/fetchit-desktop/src-tauri/build.rs.
   # Bump in lockstep with build.rs::X0XD_PIN_SHA and X0XD_PIN_VERSION;
   # scripts/check-pins.sh enforces the lockstep.
-  X0XD_PIN_SHA: "6c42c1baa0ea356130744da083b270cf62b00845"
-  X0XD_PIN_VERSION: "0.29.0"
+  X0XD_PIN_SHA: "e381a319de8581b0a7e80e28b8fafe9c088a1d93"
+  X0XD_PIN_VERSION: "0.34.3"
 
 jobs:
   release-apk:

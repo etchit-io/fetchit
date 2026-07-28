@@ -6,22 +6,21 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Pinned x0xd version we bundle. v0.29.0 is our fork tail rebased onto
-/// upstream x0x 0.29 (external-agent-sign DST on `/agent/sign`), bundled
-/// via the `mobile-0.29` fork branch. It carries the fetch>it tail
-/// (gossip-isolated group-join apply endpoints, `GET /secure/self`
-/// keyed-epoch probe, returning-member re-key) plus the re-derived
-/// actor-authz `committed_by` binding and the SecureShareDelivered
-/// local-apply allowlist. The bundled daemon and every client move
-/// together on the 0.29 external-agent-sign framing.
-const X0XD_PIN_VERSION: &str = "0.29.0";
+/// Pinned x0xd version we bundle. v0.34.3 is the post-defork base: stock
+/// upstream x0x 0.34.3 (which absorbed the 0.29-era fork tail — re-key,
+/// actor-authz `committed_by`, `GET /secure/self`) plus the short engine-A
+/// tail on the `engine-a-34` branch: relay-delivered group-join apply
+/// endpoints for gossip-isolated peers and the TreeKEM join-retry
+/// convergence fixes. The bundled daemon and the Android embed (fetchit-ffi
+/// `x0x` git pin) move together on this rev.
+const X0XD_PIN_VERSION: &str = "0.34.3";
 
-/// Pinned commit on josh-clsn/x0x `mobile-0.29`: upstream 0.29 rebase plus
-/// the carried fetch>it fork tail, the re-derived actor-authz
-/// `committed_by` bindings, and the SecureShareDelivered / GroupCardPublished
-/// local-apply allowlist. Bump in lockstep with the workflow pins.
+/// Pinned commit on josh-clsn/x0x `engine-a-34`: upstream v0.34.3 plus the
+/// engine-A tail (apply endpoints + join-result store, join-retry
+/// convergence, parity-test defer, engine-A CLI subcommands). Bump in
+/// lockstep with the workflow pins and the fetchit-ffi `x0x` rev.
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "6c42c1baa0ea356130744da083b270cf62b00845";
+const X0XD_PIN_SHA: &str = "e381a319de8581b0a7e80e28b8fafe9c088a1d93";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
