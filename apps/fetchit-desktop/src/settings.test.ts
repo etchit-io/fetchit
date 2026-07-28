@@ -44,9 +44,12 @@ function makeRouter(
     lan_direct_enabled: () => false,
     peers_override: () => [],
     default_peers: () => [],
+    // Two-row fixture keeps the multi-region dropdown mechanics covered
+    // even though only NYC ships today; "aux" is synthetic (RFC 5737
+    // documentation address), not a real region.
     relay_regions: () => [
       { tag: "nyc", label: "NYC (US East)", url: "http://67.207.94.66:8088" },
-      { tag: "fra", label: "Frankfurt (EU)", url: "http://159.89.11.217:8088" },
+      { tag: "aux", label: "Aux (test)", url: "http://192.0.2.7:8088" },
     ],
     relay_url: () => "http://67.207.94.66:8088",
     set_relay_url: () => undefined,
@@ -171,7 +174,7 @@ describe("relay region picker", () => {
     await api.open();
     await flush();
     const opts = Array.from(selectEl().options).map((o) => o.value);
-    expect(opts).toEqual(["nyc", "fra", "__custom__"]);
+    expect(opts).toEqual(["nyc", "aux", "__custom__"]);
     expect(selectEl().value).toBe("nyc");
     expect(descEl().textContent).toContain("67.207.94.66:8088");
   });
@@ -224,7 +227,7 @@ describe("relay region picker", () => {
     await api.open();
     await flush();
 
-    selectEl().value = "fra";
+    selectEl().value = "aux";
     selectEl().dispatchEvent(new Event("change"));
     await flush();
 
@@ -232,8 +235,8 @@ describe("relay region picker", () => {
       ([cmd]) => cmd === "set_relay_url",
     );
     expect(calls).toHaveLength(1);
-    expect(calls[0][1]).toEqual({ url: "http://159.89.11.217:8088" });
-    expect(descEl().textContent).toContain("159.89.11.217:8088");
+    expect(calls[0][1]).toEqual({ url: "http://192.0.2.7:8088" });
+    expect(descEl().textContent).toContain("192.0.2.7:8088");
   });
 
   it("treats a URL not in KNOWN_RELAYS as Custom and prefills the input", async () => {

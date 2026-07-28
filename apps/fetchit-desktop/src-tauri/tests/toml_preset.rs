@@ -15,8 +15,4 @@ fn x0xd_toml_template_parses_as_toml() {
         raw.contains("PLACEHOLDER_NY_RELAY_AGENT_ID_HEX"),
         "NY placeholder must be present"
     );
-    assert!(
-        raw.contains("PLACEHOLDER_FRA_RELAY_AGENT_ID_HEX"),
-        "FRA placeholder must be present"
-    );
 }

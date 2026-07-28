@@ -54,22 +54,17 @@ pub struct KnownRelay {
 
 /// Fetchit-operated relay nodes. The first entry is the shipped default.
 /// Add a new row when a region comes online — the frontend reads this
-/// table verbatim so no separate JS update is needed.
+/// table verbatim so no separate JS update is needed. (FRA was
+/// decommissioned 2026-07; its bare-IP row lives on only in the frozen
+/// [`RELAY_URL_MIGRATIONS`] healing table below.)
 ///
 /// `url` uses the `https` scheme; the relay client upgrades it to `wss`
 /// for the WebSocket connection (see `fetchit_relay_client::build_ws_url`).
-pub const KNOWN_RELAYS: &[KnownRelay] = &[
-    KnownRelay {
-        tag: "nyc",
-        label: "NYC (US East)",
-        url: "https://nyc-relay.etchit.io",
-    },
-    KnownRelay {
-        tag: "fra",
-        label: "Frankfurt (EU)",
-        url: "https://fra-relay.etchit.io",
-    },
-];
+pub const KNOWN_RELAYS: &[KnownRelay] = &[KnownRelay {
+    tag: "nyc",
+    label: "NYC (US East)",
+    url: "https://nyc-relay.etchit.io",
+}];
 
 /// Default fetchit-operated relay URL. First entry of [`KNOWN_RELAYS`].
 pub const DEFAULT_RELAY_URL: &str = KNOWN_RELAYS[0].url;

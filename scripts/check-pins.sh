@@ -61,13 +61,20 @@ grep -q 'four-word-networking = "=2.7.0"' Cargo.toml \
     || fail "Cargo.toml four-word-networking != =2.7.0"
 ok "four-word-networking =2.7.0"
 
-# Relay region defaults
+# Relay region defaults: NYC is the sole live region (FRA decommissioned
+# 2026-07). The retired bare-IP rows must survive ONLY in the frozen
+# migration/healing tables, never re-enter the live KNOWN_RELAYS directory.
 SETTINGS=apps/fetchit-desktop/src-tauri/src/settings.rs
+grep -q 'nyc-relay.etchit.io' "$SETTINGS" \
+    || fail "$SETTINGS missing NYC default nyc-relay.etchit.io"
 grep -q '67.207.94.66:8088' "$SETTINGS" \
-    || fail "$SETTINGS missing NYC default 67.207.94.66:8088"
+    || fail "$SETTINGS lost the NYC bare-IP healing entry (RELAY_URL_MIGRATIONS)"
 grep -q '159.89.11.217:8088' "$SETTINGS" \
-    || fail "$SETTINGS missing FRA default 159.89.11.217:8088"
-ok "KNOWN_RELAYS NYC + FRA defaults"
+    || fail "$SETTINGS lost the FRA bare-IP healing entry (RELAY_URL_MIGRATIONS)"
+if grep -q 'tag: "fra"' "$SETTINGS"; then
+    fail "$SETTINGS re-lists retired FRA in KNOWN_RELAYS"
+fi
+ok "relay defaults (NYC live; FRA heal-only)"
 
 # Bundled-x0xd pin lockstep: build.rs is the source of truth; both
 # workflow files must carry the identical sha and version (a drift here

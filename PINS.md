@@ -33,7 +33,7 @@ These aren't Cargo deps but ship lockstep with the binaries above:
 |------------------------|--------------------------------------|----------------------------------------------------------------|
 | `x0xd`                 | `0.34.3` (tail `e381a319de8581b0a7e80e28b8fafe9c088a1d93`) | Daemon REST + SSE + WS contract; bundled by desktop `build.rs` (`X0XD_PIN_VERSION`/`X0XD_PIN_SHA` — `check-pins.sh` asserts this row against those consts, so this row can no longer drift silently) and embedded on Android via the fetchit-ffi `x0x` git pin at the **same rev**. Post-defork: stock upstream v0.34.3 (which absorbed the 0.29-era fork tail — returning-member re-key, actor-authz `committed_by`, `GET /groups/:id/secure/self`) plus the short engine-A tail on `engine-a-34` (josh-clsn/x0x): relay-delivered group-join apply endpoints and TreeKEM join-retry convergence fixes. G3 cross-NAT verified 2026-07-27. Defork runbook lives in the ops repo (`x0x-defork-plan`). |
 | `ant-quic`             | (Saorsa fork of ant-quic, not yet used) | M2 Contract B dependency.                                  |
-| Relay region defaults  | NYC `67.207.94.66:8088`, FRA `159.89.11.217:8088` | Shipped `KNOWN_RELAYS` table in `apps/fetchit-desktop/src-tauri/src/settings.rs`. |
+| Relay region defaults  | NYC `https://nyc-relay.etchit.io` (sole live region) | Shipped `KNOWN_RELAYS` table in `apps/fetchit-desktop/src-tauri/src/settings.rs`. FRA decommissioned 2026-07; both retired bare-IP rows (`67.207.94.66:8088`, `159.89.11.217:8088`) survive only in the frozen `RELAY_URL_MIGRATIONS` / `BARE_IP_RELAY_MIGRATIONS` healing tables. |
 
 ## What "drift" means
 

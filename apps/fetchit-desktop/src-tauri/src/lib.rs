@@ -789,9 +789,6 @@ fn bundled_x0xd_toml_path(identity_dir: &std::path::Path) -> std::path::PathBuf 
         if let Ok(ny) = std::env::var("FETCHIT_NY_RELAY_AGENT_ID") {
             filled = filled.replace("PLACEHOLDER_NY_RELAY_AGENT_ID_HEX", &ny);
         }
-        if let Ok(fra) = std::env::var("FETCHIT_FRA_RELAY_AGENT_ID") {
-            filled = filled.replace("PLACEHOLDER_FRA_RELAY_AGENT_ID_HEX", &fra);
-        }
         let _ = std::fs::write(&dst, filled);
     }
     dst
@@ -894,7 +891,7 @@ fn boot_x0xd_supervisor_blocking(identity_dir: &std::path::Path) -> Option<Strin
     use x0xd_supervisor::{BinaryChoice, SupervisorConfig};
 
     let bundled_version = option_env!("FETCHIT_BUNDLED_X0XD_VERSION")
-        .unwrap_or("0.23.1")
+        .unwrap_or("0.34.3")
         .parse::<semver::Version>()
         .ok();
 

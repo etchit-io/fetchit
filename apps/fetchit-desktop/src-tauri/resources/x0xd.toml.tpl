@@ -12,7 +12,6 @@
 #   [peer_relay]
 #   candidates = [
 #       "PLACEHOLDER_NY_RELAY_AGENT_ID_HEX",
-#       "PLACEHOLDER_FRA_RELAY_AGENT_ID_HEX",
 #   ]
 #
 # and update the first-run substitution in lib.rs to fill the
