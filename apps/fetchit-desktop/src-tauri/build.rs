@@ -17,10 +17,14 @@ const X0XD_PIN_VERSION: &str = "0.34.3";
 
 /// Pinned commit on josh-clsn/x0x `engine-a-34`: upstream v0.34.3 plus the
 /// engine-A tail (apply endpoints + join-result store, join-retry
-/// convergence, parity-test defer, engine-A CLI subcommands). Bump in
-/// lockstep with the workflow pins and the fetchit-ffi `x0x` rev.
+/// convergence, parity-test defer, engine-A CLI subcommands) and the
+/// leaf-mode tail (config flag + vendored saorsa-gossip-pubsub patch:
+/// leaves stop relaying pass-through gossip — default OFF, so this
+/// desktop bundle behaves byte-identically to stock; only the Android
+/// embed opts in). Bump in lockstep with the workflow pins and the
+/// fetchit-ffi `x0x` rev.
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "e381a319de8581b0a7e80e28b8fafe9c088a1d93";
+const X0XD_PIN_SHA: &str = "90e3e62f13b78c152f69c0856a989ca1d0b628fa";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

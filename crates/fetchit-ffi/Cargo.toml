@@ -37,7 +37,7 @@ fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"
 # re-arming either. Engine-A is that missing deterministic lane. See
 # fetchit-ops/docs/x0x-defork-plan.md. Rev pin moves in lockstep with the
 # desktop bundle (build.rs X0XD_PIN_SHA) -- PINS.md is the source of truth.
-x0x = { git = "https://github.com/josh-clsn/x0x.git", rev = "e381a319de8581b0a7e80e28b8fafe9c088a1d93" }
+x0x = { git = "https://github.com/josh-clsn/x0x.git", rev = "90e3e62f13b78c152f69c0856a989ca1d0b628fa" }
 # rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring
 # are in the dependency graph (the x0x embed above pulls both). This direct dep
 # makes rustls::crypto::aws_lc_rs reachable so connect() installs it explicitly.
@@ -70,6 +70,15 @@ fetchit-relay-client = { path = "../fetchit-relay-client" }
 
 [build-dependencies]
 uniffi = { version = "=0.29.5", features = ["build"] }
+
+# x0x's leaf_mode calls saorsa-gossip-pubsub APIs that exist only in the
+# patched copy vendored inside the x0x repo (vendor/saorsa-gossip-pubsub:
+# leaf nodes stop relaying pass-through topics). Cargo ignores [patch]
+# sections in dependency manifests, so every build root that embeds x0x
+# must re-declare the patch or the embed fails to compile. Same rev as
+# the x0x pin above -- move them together.
+[patch.crates-io]
+saorsa-gossip-pubsub = { git = "https://github.com/josh-clsn/x0x.git", rev = "90e3e62f13b78c152f69c0856a989ca1d0b628fa" }
 
 [profile.dev]
 # This crate is workspace-EXCLUDED, so the root manifest's profile does not

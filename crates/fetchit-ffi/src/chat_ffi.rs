@@ -453,6 +453,12 @@ fn embed_daemon_config(x0xd_data: &std::path::Path, mesh: bool) -> DaemonConfig 
     // The field is three-valued since x0x 0.34: `None` = hardcoded seeds,
     // `Some([])` = no seeds at all (the old gossip-off embed used the latter).
     cfg.bootstrap_peers = if mesh { None } else { Some(Vec::new()) };
+    // A phone is always a LEAF, even with the mesh up: it keeps its own
+    // inbox, groups, and contact channels but skips the network-serving
+    // subscriptions (legacy DM bus, global discovery, directory shards,
+    // global public fallback) whose traffic scales with the whole network.
+    // That foreground duty was the bulk of the 129GB July 2026 bill.
+    cfg.leaf_mode = true;
     cfg
 }
 
@@ -1047,12 +1053,11 @@ impl ChatClient {
                 // previous mode rather than leaving group crypto dead.
                 log::warn!("[chat_ffi] mesh flip re-serve failed ({e}); restoring previous mode");
                 let prev = self.mesh_active.load(Ordering::SeqCst);
-                let restored =
-                    serve_inprocess(&self.x0xd_data, prev)
-                        .await
-                        .map_err(|e2| ChatFfiError::Network {
-                            reason: format!("mesh flip failed and restore failed: {e}; {e2}"),
-                        })?;
+                let restored = serve_inprocess(&self.x0xd_data, prev).await.map_err(|e2| {
+                    ChatFfiError::Network {
+                        reason: format!("mesh flip failed and restore failed: {e}; {e2}"),
+                    }
+                })?;
                 (restored, prev)
             }
         };
@@ -2966,6 +2971,13 @@ mod tests {
         // Invariants that must hold in BOTH modes -- a mode flip must never
         // loosen the phone hardening.
         for cfg in [&meshed, &leaf] {
+            assert!(
+                cfg.leaf_mode,
+                "a phone is always an x0x leaf: full mesh duty (legacy DM \
+                 bus, global discovery, shard serving) is what burned \
+                 129GB/month; mesh on/off only picks whether we GOSSIP, \
+                 never whether we haul freight for the network"
+            );
             assert!(cfg.api_address.ip().is_loopback(), "API stays loopback");
             assert_eq!(cfg.api_address.port(), 0, "API port stays OS-assigned");
             assert_eq!(cfg.bind_address.port(), 0, "QUIC port stays ephemeral");
