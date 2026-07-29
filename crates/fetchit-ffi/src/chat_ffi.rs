@@ -270,11 +270,18 @@ pub struct ChatClient {
     /// otherwise panic with "no reactor running".
     rt_handle: tokio::runtime::Handle,
     /// The in-process x0xd serving the group `/secure` TreeKEM surface.
-    /// `connect` points the daemonless engine's `base_url`/`token` at this
-    /// handle's loopback address. `disconnect`/`Drop` call its sync
-    /// `shutdown()`. Held (not underscore-prefixed) because the teardown
-    /// paths read it.
-    x0xd: ServerHandle,
+    /// `connect` points the daemonless engine at it via the `api.port`
+    /// port-file (self-healing across restarts). `disconnect`/`Drop` call
+    /// its sync `shutdown()`. `Option` inside a sync mutex so
+    /// [`ChatClient::set_mesh_active`] can take the handle out, re-serve
+    /// off-lock, and put the replacement back -- the lock is never held
+    /// across an await.
+    x0xd: std::sync::Mutex<Option<ServerHandle>>,
+    /// Data dir handed to `serve_inprocess`; a mesh flip re-serves from it.
+    x0xd_data: PathBuf,
+    /// Current embed mesh mode; makes [`ChatClient::set_mesh_active`]
+    /// idempotent so lifecycle-driven repeat calls are free.
+    mesh_active: std::sync::atomic::AtomicBool,
     events: Mutex<mpsc::UnboundedReceiver<ChatEventFfi>>,
     pump_abort: tokio::task::AbortHandle,
     drain_abort: tokio::task::AbortHandle,
@@ -312,8 +319,14 @@ impl Drop for ChatClient {
             }
         }
         // Trigger the embedded x0xd's graceful shutdown. Sync + non-consuming;
-        // the spawned serve future ends on the next poll.
-        self.x0xd.shutdown();
+        // the spawned serve future ends on the next poll. A poisoned lock
+        // means the swap task panicked mid-flip; the handle it held has
+        // already dropped (Drop cancels), so skipping is still a shutdown.
+        if let Ok(guard) = self.x0xd.lock() {
+            if let Some(h) = guard.as_ref() {
+                h.shutdown();
+            }
+        }
     }
 }
 
@@ -369,30 +382,11 @@ fn resolve_denylist_url() -> Option<String> {
 /// # Errors
 ///
 /// [`ChatFfiError::Network`] when `serve()` fails to bind or start.
-async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, ChatFfiError> {
-    // #115 DaemonConfig has private fields, so the struct-literal +
-    // `..Default::default()` form is rejected from this crate (E0451). Build from
-    // Default and set the public fields -- the same idiom #115's own bin uses
-    // (src/bin/x0xd.rs). Private fields (update, port_mapping_enabled, ...) keep
-    // their defaults; self-update is gated off via `ServeOptions` below.
-    #[allow(clippy::field_reassign_with_default)]
-    let cfg = {
-        let mut cfg = DaemonConfig::default();
-        // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
-        cfg.api_address = (std::net::Ipv4Addr::LOCALHOST, 0).into();
-        // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
-        // fixed-port clash with any other x0xd on the device.
-        cfg.bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0).into();
-        cfg.data_dir = x0xd_data.to_path_buf();
-        // Android has no writable home -- root the identity keys under app
-        // storage via the opt-in identity_dir override.
-        cfg.identity_dir = Some(x0xd_data.join("identity"));
-        // gossip-ON: leave `bootstrap_peers` at its `None` default, which
-        // resolves to the hardcoded global bootstrap network (the field is
-        // three-valued since x0x 0.34: `None` = hardcoded seeds, `Some([])`
-        // = no seeds at all -- the old gossip-off embed used the latter).
-        cfg
-    };
+async fn serve_inprocess(
+    x0xd_data: &std::path::Path,
+    mesh: bool,
+) -> Result<ServerHandle, ChatFfiError> {
+    let cfg = embed_daemon_config(x0xd_data, mesh);
     // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
     // under x0x::exec. Gates remote x0x-exec-over-gossip only.
     let exec_policy = ExecPolicy::Disabled {
@@ -427,6 +421,64 @@ async fn serve_inprocess(x0xd_data: &std::path::Path) -> Result<ServerHandle, Ch
     .map_err(|e| ChatFfiError::Network {
         reason: format!("x0xd serve: {e}"),
     })
+}
+
+/// Build the embedded daemon's config for the requested mesh mode.
+///
+/// `mesh` is the phone's data-bill lever (129GB in July 2026 was one phone
+/// doing full-mesh duty): `true` leaves `bootstrap_peers` at `None`, which
+/// resolves to the hardcoded global seeds -- full public-mesh citizenship.
+/// `false` pins it to `Some([])` -- x0x's "no seeds at all" -- so the daemon
+/// still serves the local `/secure` `TreeKEM` surface (group crypto keeps
+/// working) but never joins the mesh; transport rides the relay + engine-A.
+///
+/// #115 `DaemonConfig` has private fields, so the struct-literal +
+/// `..Default::default()` form is rejected from this crate (E0451). Build
+/// from Default and set the public fields -- the same idiom #115's own bin
+/// uses (src/bin/x0xd.rs). Private fields (update, port_mapping_enabled,
+/// ...) keep their defaults; self-update is gated off via `ServeOptions` at
+/// the serve call.
+#[allow(clippy::field_reassign_with_default)]
+fn embed_daemon_config(x0xd_data: &std::path::Path, mesh: bool) -> DaemonConfig {
+    let mut cfg = DaemonConfig::default();
+    // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
+    cfg.api_address = (std::net::Ipv4Addr::LOCALHOST, 0).into();
+    // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
+    // fixed-port clash with any other x0xd on the device.
+    cfg.bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0).into();
+    cfg.data_dir = x0xd_data.to_path_buf();
+    // Android has no writable home -- root the identity keys under app
+    // storage via the opt-in identity_dir override.
+    cfg.identity_dir = Some(x0xd_data.join("identity"));
+    // The field is three-valued since x0x 0.34: `None` = hardcoded seeds,
+    // `Some([])` = no seeds at all (the old gossip-off embed used the latter).
+    cfg.bootstrap_peers = if mesh { None } else { Some(Vec::new()) };
+    cfg
+}
+
+/// Re-serve the embedded daemon in the requested mesh mode.
+///
+/// Gracefully stops `old` (bounded -- a wedged supervisor must not hang the
+/// flip), then boots a fresh embed from the same data dir. The new serve
+/// rewrites `<data>/api.port`, which is the file the engine's port-file
+/// self-heal re-reads on the next connect error, so group crypto re-attaches
+/// without rebuilding the client; `<data>/api-token` persists, so the
+/// engine's bearer stays valid.
+async fn reserve_embed(
+    old: ServerHandle,
+    x0xd_data: &std::path::Path,
+    mesh: bool,
+) -> Result<ServerHandle, ChatFfiError> {
+    if tokio::time::timeout(std::time::Duration::from_secs(10), old.shutdown_and_wait())
+        .await
+        .is_err()
+    {
+        // The cancel token is already triggered; the supervisor finishes
+        // winding down in the background. The new embed binds a fresh
+        // ephemeral port, so a slow old socket cannot clash with it.
+        log::warn!("[chat_ffi] embed shutdown timed out; proceeding with re-serve");
+    }
+    serve_inprocess(x0xd_data, mesh).await
 }
 
 /// Receipt for a group send: the message id plus whether it reached the
@@ -680,7 +732,11 @@ impl ChatClient {
     /// `relay_url` must be an HTTP or WebSocket URL of a running fetch>it
     /// relay (e.g. `https://nyc-relay.etchit.io`). `data_dir` is the
     /// on-device path for the identity vault and conversation store.
-    /// `passphrase` derives the at-rest master key.
+    /// `passphrase` derives the at-rest master key. `mesh_active` picks the
+    /// embedded daemon's initial mesh mode (see
+    /// [`ChatClient::set_mesh_active`]): the shell passes `false` when it
+    /// connects in the background (boot receiver / notification service) so
+    /// a backgrounded phone never joins the public mesh just to leave it.
     ///
     /// # Errors
     ///
@@ -692,6 +748,7 @@ impl ChatClient {
         relay_url: String,
         data_dir: String,
         passphrase: String,
+        mesh_active: bool,
     ) -> Result<Arc<Self>, ChatFfiError> {
         // rustls 0.23 cannot auto-determine its process CryptoProvider when both
         // aws-lc-rs and ring are in the dependency graph (the in-process x0x
@@ -754,7 +811,7 @@ impl ChatClient {
                 })?;
         }
 
-        let x0xd = serve_inprocess(&x0xd_data).await?;
+        let x0xd = serve_inprocess(&x0xd_data, mesh_active).await?;
         let x0xd_base = format!("http://{}", x0xd.local_addr());
         // #115 ServerHandle does not expose the API token; the daemon wrote it
         // to <data_dir>/api-token via load_or_generate_api_token during serve(),
@@ -773,6 +830,11 @@ impl ChatClient {
             .passphrase(passphrase.clone())
             .base_url(x0xd_base)
             .token(x0xd_token)
+            // Self-heal target: a mesh-mode flip re-serves the embed on a new
+            // ephemeral port and rewrites api.port; the engine's Http (and the
+            // x0xd signer) re-read this file on connect errors, so group
+            // crypto re-attaches without rebuilding the client.
+            .x0xd_port_file(x0xd_data.join("api.port"))
             .build()
             .await
             .map_err(ChatFfiError::from)?;
@@ -905,7 +967,9 @@ impl ChatClient {
             inner,
             relay_url,
             rt_handle,
-            x0xd,
+            x0xd: std::sync::Mutex::new(Some(x0xd)),
+            x0xd_data,
+            mesh_active: std::sync::atomic::AtomicBool::new(mesh_active),
             events: Mutex::new(rx),
             pump_abort,
             drain_abort,
@@ -933,7 +997,84 @@ impl ChatClient {
         // Stop the embedded x0xd alongside the background-task teardown.
         // Sync + non-consuming, so it is safe from this `&self` method
         // (the consuming async `join()` would not be).
-        self.x0xd.shutdown();
+        if let Ok(guard) = self.x0xd.lock() {
+            if let Some(h) = guard.as_ref() {
+                h.shutdown();
+            }
+        }
+    }
+
+    /// Flip the embedded daemon's mesh mode at runtime.
+    ///
+    /// `true` = full public-mesh citizenship (foreground: direct P2P and
+    /// native gossip groups). `false` = leaf/off (background: the daemon
+    /// stays up serving local group crypto, but never joins the mesh --
+    /// inbound messages ride the relay, which is what notifications consume).
+    /// The flip re-serves the embed on a fresh ephemeral port; the engine
+    /// re-attaches through the `api.port` port-file self-heal. Idempotent:
+    /// repeat calls in the current mode return immediately, so the shell can
+    /// call this from every lifecycle transition.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError::Invalid`] when a flip is already in progress.
+    /// [`ChatFfiError::Network`] when the re-serve fails; a best-effort
+    /// re-serve in the previous mode is attempted first so group crypto is
+    /// not left dead behind a transient bind failure.
+    pub async fn set_mesh_active(&self, active: bool) -> Result<(), ChatFfiError> {
+        use std::sync::atomic::Ordering;
+        if self.mesh_active.load(Ordering::SeqCst) == active {
+            return Ok(());
+        }
+        // Take the handle out under the sync lock; never hold it across an
+        // await. A concurrent flip sees `None` and reports busy instead of
+        // deadlocking or double-serving.
+        let old = {
+            let mut guard = self.x0xd.lock().map_err(|_| ChatFfiError::Network {
+                reason: "x0xd handle lock poisoned".to_owned(),
+            })?;
+            guard.take()
+        };
+        let Some(old) = old else {
+            return Err(ChatFfiError::Invalid {
+                reason: "mesh flip already in progress".to_owned(),
+            });
+        };
+        let swapped = match reserve_embed(old, &self.x0xd_data, active).await {
+            Ok(handle) => (handle, active),
+            Err(e) => {
+                // The old embed is gone either way; try to restore the
+                // previous mode rather than leaving group crypto dead.
+                log::warn!("[chat_ffi] mesh flip re-serve failed ({e}); restoring previous mode");
+                let prev = self.mesh_active.load(Ordering::SeqCst);
+                let restored =
+                    serve_inprocess(&self.x0xd_data, prev)
+                        .await
+                        .map_err(|e2| ChatFfiError::Network {
+                            reason: format!("mesh flip failed and restore failed: {e}; {e2}"),
+                        })?;
+                (restored, prev)
+            }
+        };
+        let (handle, mode) = swapped;
+        {
+            let mut guard = self.x0xd.lock().map_err(|_| ChatFfiError::Network {
+                reason: "x0xd handle lock poisoned".to_owned(),
+            })?;
+            *guard = Some(handle);
+        }
+        self.mesh_active.store(mode, Ordering::SeqCst);
+        log::info!(
+            "[chat_ffi] embed mesh mode -> {}",
+            if mode { "full" } else { "leaf-off" }
+        );
+        if mode == active {
+            Ok(())
+        } else {
+            Err(ChatFfiError::Network {
+                reason: "mesh flip failed; previous mode restored".to_owned(),
+            })
+        }
     }
 
     /// The local agent id as lowercase 64-character hex.
@@ -2702,6 +2843,7 @@ mod tests {
             "https://nyc-relay.etchit.io".into(),
             dir.path().to_str().unwrap().to_owned(),
             "test-passphrase-ffi-smoke".into(),
+            true,
         )
         .await
         .expect("connect should succeed");
@@ -2733,6 +2875,7 @@ mod tests {
             "https://nyc-relay.etchit.io".into(),
             dir.path().to_str().unwrap().to_owned(),
             "test-passphrase-ffi-pair-smoke".into(),
+            true,
         )
         .await
         .expect("connect should succeed");
@@ -2758,7 +2901,8 @@ mod tests {
     async fn inprocess_serve_binds_loopback_and_roots_identity_under_data_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         let x0xd_data = dir.path().join("x0xd");
-        let handle = serve_inprocess(&x0xd_data)
+        // mesh=false keeps the test hermetic: no public-mesh join from CI.
+        let handle = serve_inprocess(&x0xd_data, false)
             .await
             .expect("in-process serve should come up");
 
@@ -2793,6 +2937,89 @@ mod tests {
         );
 
         handle.shutdown();
+    }
+
+    /// The mesh flag is the phone's data-bill lever: `true` leaves
+    /// `bootstrap_peers` at `None` (hardcoded public seeds -- full mesh),
+    /// `false` pins it to `Some([])` (no seeds at all -- the daemon still
+    /// serves /secure group crypto locally, transport rides the relay).
+    /// The 129GB/month July bill was the phone doing full-mesh duty; this
+    /// mapping is what background mode flips.
+    #[test]
+    fn embed_daemon_config_maps_mesh_flag_to_bootstrap_peers() {
+        let data = std::path::Path::new("/tmp/x0xd-test");
+
+        let meshed = embed_daemon_config(data, true);
+        assert!(
+            meshed.bootstrap_peers.is_none(),
+            "mesh=true must leave bootstrap_peers None (hardcoded public seeds)"
+        );
+
+        let leaf = embed_daemon_config(data, false);
+        assert_eq!(
+            leaf.bootstrap_peers,
+            Some(Vec::new()),
+            "mesh=false must pin bootstrap_peers to an explicit empty list \
+             (daemon up, zero mesh -- Some([]) is x0x's 'no seeds at all')"
+        );
+
+        // Invariants that must hold in BOTH modes -- a mode flip must never
+        // loosen the phone hardening.
+        for cfg in [&meshed, &leaf] {
+            assert!(cfg.api_address.ip().is_loopback(), "API stays loopback");
+            assert_eq!(cfg.api_address.port(), 0, "API port stays OS-assigned");
+            assert_eq!(cfg.bind_address.port(), 0, "QUIC port stays ephemeral");
+            assert_eq!(cfg.data_dir, data, "data dir follows the caller");
+            assert_eq!(
+                cfg.identity_dir.as_deref(),
+                Some(data.join("identity")).as_deref(),
+                "identity stays rooted under app storage"
+            );
+        }
+    }
+
+    /// Swapping mesh mode re-serves the embed in place: the old daemon shuts
+    /// down, a fresh one binds a new ephemeral port, and `api.port` is
+    /// rewritten to match -- which is the file the engine's port-file
+    /// self-heal re-reads, so group crypto keeps working across the flip
+    /// without rebuilding the client.
+    #[tokio::test]
+    async fn reserve_embed_swaps_port_and_rewrites_api_port() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let x0xd_data = dir.path().join("x0xd");
+
+        let first = serve_inprocess(&x0xd_data, false)
+            .await
+            .expect("first in-process serve should come up");
+        let token_before = std::fs::read_to_string(x0xd_data.join("api-token"))
+            .expect("api-token written by first serve");
+
+        let second = reserve_embed(first, &x0xd_data, false)
+            .await
+            .expect("re-serve should come up");
+        let second_addr = second.local_addr();
+
+        let port_file = std::fs::read_to_string(x0xd_data.join("api.port"))
+            .expect("api.port must exist after re-serve");
+        assert!(
+            port_file.trim().ends_with(&second_addr.port().to_string()),
+            "api.port must advertise the NEW port (engine self-heal target); \
+             file={port_file:?} new={second_addr}"
+        );
+        assert!(
+            second_addr.ip().is_loopback(),
+            "re-served API must stay loopback, got {second_addr}"
+        );
+        // Same persisted token across the swap -- the engine's bearer stays
+        // valid, no re-auth needed.
+        let token_after = std::fs::read_to_string(x0xd_data.join("api-token"))
+            .expect("api-token persists across re-serve");
+        assert_eq!(
+            token_before.trim(),
+            token_after.trim(),
+            "token must persist across a mesh-mode swap"
+        );
+        second.shutdown();
     }
 
     #[test]

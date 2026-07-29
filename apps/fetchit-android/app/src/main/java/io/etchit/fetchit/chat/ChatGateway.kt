@@ -34,6 +34,14 @@ interface ChatGateway {
      */
     fun pairPublishOutcome(): String?
 
+    /**
+     * Flip the embedded daemon's mesh mode (see [MeshPolicy]): `true` =
+     * full public mesh (foreground), `false` = daemon up but mesh parked
+     * (background; inbound rides the relay). Idempotent on the FFI side.
+     * Default no-op so test fakes without a daemon stay valid.
+     */
+    suspend fun setMeshActive(active: Boolean) {}
+
     /** Returns a `x0x://pair/…` URI encoding this agent's pairing offer. */
     suspend fun pairShareUri(): String
 
@@ -317,6 +325,8 @@ interface ChatGateway {
 class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override fun agentIdHex(): String = inner.agentIdHex()
     override fun pairPublishOutcome(): String? = inner.pairPublishOutcome()
+    override suspend fun setMeshActive(active: Boolean) = inner.setMeshActive(active)
+
     override suspend fun pairShareUri(): String = inner.pairShareUri()
     override suspend fun importPairUri(uri: String) = inner.importPairUri(uri)
     override suspend fun enqueueDm(to: String, body: String, senderName: String): String =

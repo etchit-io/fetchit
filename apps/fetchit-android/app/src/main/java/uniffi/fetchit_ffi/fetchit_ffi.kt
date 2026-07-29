@@ -845,6 +845,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -970,6 +972,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_send_dm(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_client_fetch(
@@ -1035,7 +1039,7 @@ internal interface UniffiLib : Library {
 ): Pointer
 fun uniffi_fetchit_ffi_fn_free_chatclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_fetchit_ffi_fn_constructor_chatclient_connect(`relayUrl`: RustBuffer.ByValue,`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,
+fun uniffi_fetchit_ffi_fn_constructor_chatclient_connect(`relayUrl`: RustBuffer.ByValue,`dataDir`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`meshActive`: Byte,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_agent_id_hex(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1130,6 +1134,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_retry_outbox(`ptr`: Pointer,uniffi_o
 fun uniffi_fetchit_ffi_fn_method_chatclient_send_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_send_group_message(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_set_mesh_active(`ptr`: Pointer,`active`: Byte,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_start_outbox(`ptr`: Pointer,`displayName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1452,6 +1458,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message() != 57470.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 46561.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1464,7 +1473,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_client_peer_count() != 60187.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_constructor_chatclient_connect() != 36013.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_constructor_chatclient_connect() != 40554.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_constructor_client_connect() != 948.toShort()) {
@@ -2547,6 +2556,27 @@ public interface ChatClientInterface {
      * [`ChatFfiError::Network`] on transport, x0xd, or relay failure.
      */
     suspend fun `sendGroupMessage`(`groupId`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): GroupSendReceiptFfi
+    
+    /**
+     * Flip the embedded daemon's mesh mode at runtime.
+     *
+     * `true` = full public-mesh citizenship (foreground: direct P2P and
+     * native gossip groups). `false` = leaf/off (background: the daemon
+     * stays up serving local group crypto, but never joins the mesh --
+     * inbound messages ride the relay, which is what notifications consume).
+     * The flip re-serves the embed on a fresh ephemeral port; the engine
+     * re-attaches through the `api.port` port-file self-heal. Idempotent:
+     * repeat calls in the current mode return immediately, so the shell can
+     * call this from every lifecycle transition.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when a flip is already in progress.
+     * [`ChatFfiError::Network`] when the re-serve fails; a best-effort
+     * re-serve in the previous mode is attempted first so group crypto is
+     * not left dead behind a transient bind failure.
+     */
+    suspend fun `setMeshActive`(`active`: kotlin.Boolean)
     
     /**
      * Start the background outbox retry driver: re-sends failed/unacked
@@ -4072,6 +4102,47 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Flip the embedded daemon's mesh mode at runtime.
+     *
+     * `true` = full public-mesh citizenship (foreground: direct P2P and
+     * native gossip groups). `false` = leaf/off (background: the daemon
+     * stays up serving local group crypto, but never joins the mesh --
+     * inbound messages ride the relay, which is what notifications consume).
+     * The flip re-serves the embed on a fresh ephemeral port; the engine
+     * re-attaches through the `api.port` port-file self-heal. Idempotent:
+     * repeat calls in the current mode return immediately, so the shell can
+     * call this from every lifecycle transition.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError::Invalid`] when a flip is already in progress.
+     * [`ChatFfiError::Network`] when the re-serve fails; a best-effort
+     * re-serve in the previous mode is attempted first so group crypto is
+     * not left dead behind a transient bind failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setMeshActive`(`active`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_set_mesh_active(
+                thisPtr,
+                FfiConverterBoolean.lower(`active`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Start the background outbox retry driver: re-sends failed/unacked
      * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
      * services [`ChatClient::retry_outbox`]. Call once after `connect`,
@@ -4100,7 +4171,11 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * `relay_url` must be an HTTP or WebSocket URL of a running fetch>it
      * relay (e.g. `https://nyc-relay.etchit.io`). `data_dir` is the
      * on-device path for the identity vault and conversation store.
-     * `passphrase` derives the at-rest master key.
+     * `passphrase` derives the at-rest master key. `mesh_active` picks the
+     * embedded daemon's initial mesh mode (see
+     * [`ChatClient::set_mesh_active`]): the shell passes `false` when it
+     * connects in the background (boot receiver / notification service) so
+     * a backgrounded phone never joins the public mesh just to leave it.
      *
      * # Errors
      *
@@ -4110,9 +4185,9 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `connect`(`relayUrl`: kotlin.String, `dataDir`: kotlin.String, `passphrase`: kotlin.String) : ChatClient {
+     suspend fun `connect`(`relayUrl`: kotlin.String, `dataDir`: kotlin.String, `passphrase`: kotlin.String, `meshActive`: kotlin.Boolean) : ChatClient {
         return uniffiRustCallAsync(
-        UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_constructor_chatclient_connect(FfiConverterString.lower(`relayUrl`),FfiConverterString.lower(`dataDir`),FfiConverterString.lower(`passphrase`),),
+        UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_constructor_chatclient_connect(FfiConverterString.lower(`relayUrl`),FfiConverterString.lower(`dataDir`),FfiConverterString.lower(`passphrase`),FfiConverterBoolean.lower(`meshActive`),),
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_pointer(future, callback, continuation) },
         { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_pointer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_pointer(future) },

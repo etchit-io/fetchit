@@ -2,6 +2,8 @@ package io.etchit.fetchit
 
 import android.app.Application
 import android.content.Context
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import io.etchit.fetchit.chat.ChatController
 import java.io.File
@@ -79,6 +81,22 @@ open class FetchitApplication : Application() {
         peerCountTracker.start()
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             IdleDisconnect(::disconnectAll, ::reconnectChatIfActive),
+        )
+        // Mesh-mode lifecycle: full mesh only while the app is visible; a
+        // debounced drop on background caps the data bill (129GB/July was
+        // one phone doing full-mesh duty around the clock). onStop reads
+        // the backing field so backgrounding never constructs a controller
+        // just to tell it we left.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    chatController.meshPolicy.onForeground()
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    _chatController?.meshPolicy?.onBackground()
+                }
+            },
         )
     }
 

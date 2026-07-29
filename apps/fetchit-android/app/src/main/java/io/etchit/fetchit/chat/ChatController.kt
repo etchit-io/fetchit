@@ -126,6 +126,25 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     val pendingJoins: StateFlow<List<String>> = _pendingJoins.asStateFlow()
 
     @Volatile private var gateway: ChatGateway? = null
+
+    /**
+     * Foreground/background mesh mode for the embedded x0x daemon -- the
+     * data-bill guard (see [MeshPolicy]). Applies through the gateway when
+     * one is connected; a failed flip is logged and the next lifecycle
+     * transition re-converges. Also seeds the initial mode for a fresh
+     * connect, so a background connect (boot receiver, notification
+     * service) never joins the public mesh.
+     */
+    val meshPolicy: MeshPolicy = MeshPolicy(scope) { active ->
+        try {
+            gateway?.setMeshActive(active)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("fetchit.chat", "mesh mode apply failed", e)
+        }
+    }
+
     private var pump: Job? = null
     private var pendingJoinPump: Job? = null
     private val connectMutex = Mutex()
@@ -197,6 +216,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                     DEFAULT_RELAY,
                     dataDir.absolutePath,
                     ChatSecrets(appContext).vaultPass(),
+                    // Background connects (boot receiver, notification
+                    // service) must never join the public mesh just to
+                    // leave it -- the policy's current mode decides.
+                    meshPolicy.active,
                 )
                 val gw = FfiChatGateway(client)
                 gateway = gw
