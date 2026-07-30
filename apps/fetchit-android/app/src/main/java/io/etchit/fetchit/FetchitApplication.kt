@@ -6,6 +6,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import io.etchit.fetchit.chat.ChatController
+import io.etchit.fetchit.chat.MeshNetworkMonitor
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -59,7 +60,19 @@ open class FetchitApplication : Application() {
      * to avoid inadvertently constructing the controller from a background event.
      */
     val chatController: ChatController
-        get() = _chatController ?: ChatController(this, appScope).also { _chatController = it }
+        get() =
+            _chatController
+                ?: ChatController(this, appScope).also {
+                    _chatController = it
+                    // Seed the network half of the mesh policy at construction:
+                    // the monitor has been following the default network since
+                    // onCreate, and a controller born on mobile data must not
+                    // mesh on its first foreground.
+                    it.meshPolicy.onNetworkChanged(meshNetworkMonitor.latest)
+                }
+
+    /** Process-lifetime tracker of whether the default network may mesh. */
+    val meshNetworkMonitor: MeshNetworkMonitor by lazy { MeshNetworkMonitor(this) }
 
     /** Live peer-count gauge. Polls every 15s once started. */
     val peerCountTracker: PeerCountTracker by lazy { PeerCountTracker { cached } }
@@ -82,11 +95,15 @@ open class FetchitApplication : Application() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             IdleDisconnect(::disconnectAll, ::reconnectChatIfActive),
         )
-        // Mesh-mode lifecycle: full mesh only while the app is visible; a
-        // debounced drop on background caps the data bill (129GB/July was
-        // one phone doing full-mesh duty around the clock). onStop reads
-        // the backing field so backgrounding never constructs a controller
-        // just to tell it we left.
+        // Mesh-mode lifecycle: mesh only while the app is visible AND the
+        // network is unmetered Wi-Fi/Ethernet (129GB/July was one phone
+        // doing mesh duty on mobile data around the clock). The monitor
+        // pushes network verdicts through the nullable backing field so a
+        // network change never constructs a controller; a controller built
+        // later seeds itself from the monitor in the getter above.
+        meshNetworkMonitor.start { allowed ->
+            _chatController?.meshPolicy?.onNetworkChanged(allowed)
+        }
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
