@@ -382,11 +382,48 @@ fn resolve_denylist_url() -> Option<String> {
 /// # Errors
 ///
 /// [`ChatFfiError::Network`] when `serve()` fails to bind or start.
-async fn serve_inprocess(
+/// Parse the daemon's `api.port` file contents (`"127.0.0.1:43077"`) to
+/// the bare port. `None` on absent/garbage input -- the caller falls back
+/// to an OS-assigned port.
+fn parse_api_port(contents: &str) -> Option<u16> {
+    contents.trim().rsplit(':').next()?.parse().ok()
+}
+
+/// The API port the previous embed (this run or a prior app process)
+/// served on, from `<data>/api.port`. `None` on first-ever start.
+fn previous_api_port(x0xd_data: &std::path::Path) -> Option<u16> {
+    parse_api_port(&std::fs::read_to_string(x0xd_data.join("api.port")).ok()?)
+}
+
+/// Serve preferring the previous API port, falling back to an ephemeral
+/// one when that port is unavailable (another process claimed it between
+/// runs). Port STABILITY is the point: every mesh flip used to roll a
+/// fresh ephemeral port, and long-lived engine consumers that snapshot
+/// their URL (observed live 2026-07-31: the outbox /events opener
+/// retrying a dead port every 60s) were left talking to a corpse --
+/// surfacing in the UI as a bogus "check your internet connection".
+async fn serve_inprocess_stable(
     x0xd_data: &std::path::Path,
     mesh: bool,
 ) -> Result<ServerHandle, ChatFfiError> {
-    let cfg = embed_daemon_config(x0xd_data, mesh);
+    if let Some(port) = previous_api_port(x0xd_data) {
+        match serve_inprocess(x0xd_data, mesh, Some(port)).await {
+            Ok(handle) => return Ok(handle),
+            Err(e) => log::warn!(
+                "[chat_ffi] preferred api port {port} unavailable ({e}); \
+                 falling back to an ephemeral port"
+            ),
+        }
+    }
+    serve_inprocess(x0xd_data, mesh, None).await
+}
+
+async fn serve_inprocess(
+    x0xd_data: &std::path::Path,
+    mesh: bool,
+    preferred_api_port: Option<u16>,
+) -> Result<ServerHandle, ChatFfiError> {
+    let cfg = embed_daemon_config(x0xd_data, mesh, preferred_api_port);
     // ExecPolicy::Disabled is a 3-field struct variant (no disabled() ctor),
     // under x0x::exec. Gates remote x0x-exec-over-gossip only.
     let exec_policy = ExecPolicy::Disabled {
@@ -439,10 +476,22 @@ async fn serve_inprocess(
 /// ...) keep their defaults; self-update is gated off via `ServeOptions` at
 /// the serve call.
 #[allow(clippy::field_reassign_with_default)]
-fn embed_daemon_config(x0xd_data: &std::path::Path, mesh: bool) -> DaemonConfig {
+fn embed_daemon_config(
+    x0xd_data: &std::path::Path,
+    mesh: bool,
+    preferred_api_port: Option<u16>,
+) -> DaemonConfig {
     let mut cfg = DaemonConfig::default();
-    // HTTP control surface: loopback, OS-assigned port (read via local_addr()).
-    cfg.api_address = (std::net::Ipv4Addr::LOCALHOST, 0).into();
+    // HTTP control surface: loopback. Prefer the PREVIOUS run's port so the
+    // API address is stable across mesh flips and app restarts -- long-lived
+    // engine consumers keep working instead of chasing a rolled port. First
+    // start (or a taken port, handled by the caller's fallback) uses an
+    // OS-assigned ephemeral port.
+    cfg.api_address = (
+        std::net::Ipv4Addr::LOCALHOST,
+        preferred_api_port.unwrap_or(0),
+    )
+        .into();
     // QUIC gossip socket: ephemeral, NOT the fixed default -- avoid a
     // fixed-port clash with any other x0xd on the device.
     cfg.bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0).into();
@@ -484,7 +533,7 @@ async fn reserve_embed(
         // ephemeral port, so a slow old socket cannot clash with it.
         log::warn!("[chat_ffi] embed shutdown timed out; proceeding with re-serve");
     }
-    serve_inprocess(x0xd_data, mesh).await
+    serve_inprocess_stable(x0xd_data, mesh).await
 }
 
 /// Receipt for a group send: the message id plus whether it reached the
@@ -817,7 +866,7 @@ impl ChatClient {
                 })?;
         }
 
-        let x0xd = serve_inprocess(&x0xd_data, mesh_active).await?;
+        let x0xd = serve_inprocess_stable(&x0xd_data, mesh_active).await?;
         let x0xd_base = format!("http://{}", x0xd.local_addr());
         // #115 ServerHandle does not expose the API token; the daemon wrote it
         // to <data_dir>/api-token via load_or_generate_api_token during serve(),
@@ -1053,11 +1102,11 @@ impl ChatClient {
                 // previous mode rather than leaving group crypto dead.
                 log::warn!("[chat_ffi] mesh flip re-serve failed ({e}); restoring previous mode");
                 let prev = self.mesh_active.load(Ordering::SeqCst);
-                let restored = serve_inprocess(&self.x0xd_data, prev).await.map_err(|e2| {
-                    ChatFfiError::Network {
+                let restored = serve_inprocess_stable(&self.x0xd_data, prev)
+                    .await
+                    .map_err(|e2| ChatFfiError::Network {
                         reason: format!("mesh flip failed and restore failed: {e}; {e2}"),
-                    }
-                })?;
+                    })?;
                 (restored, prev)
             }
         };
@@ -2907,7 +2956,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let x0xd_data = dir.path().join("x0xd");
         // mesh=false keeps the test hermetic: no public-mesh join from CI.
-        let handle = serve_inprocess(&x0xd_data, false)
+        let handle = serve_inprocess(&x0xd_data, false, None)
             .await
             .expect("in-process serve should come up");
 
@@ -2954,13 +3003,13 @@ mod tests {
     fn embed_daemon_config_maps_mesh_flag_to_bootstrap_peers() {
         let data = std::path::Path::new("/tmp/x0xd-test");
 
-        let meshed = embed_daemon_config(data, true);
+        let meshed = embed_daemon_config(data, true, None);
         assert!(
             meshed.bootstrap_peers.is_none(),
             "mesh=true must leave bootstrap_peers None (hardcoded public seeds)"
         );
 
-        let leaf = embed_daemon_config(data, false);
+        let leaf = embed_daemon_config(data, false, None);
         assert_eq!(
             leaf.bootstrap_peers,
             Some(Vec::new()),
@@ -2988,6 +3037,24 @@ mod tests {
                 "identity stays rooted under app storage"
             );
         }
+
+        // Port stability: a preferred port pins the API address so mesh
+        // flips and app restarts keep the same port -- rolling it strands
+        // long-lived engine consumers on a dead URL (observed live
+        // 2026-07-31 as the outbox /events opener retrying a corpse).
+        let pinned = embed_daemon_config(data, true, Some(45_017));
+        assert_eq!(pinned.api_address.port(), 45_017, "preferred port pins");
+        assert!(pinned.api_address.ip().is_loopback());
+    }
+
+    #[test]
+    fn parse_api_port_reads_host_port_and_rejects_garbage() {
+        assert_eq!(parse_api_port("127.0.0.1:43077"), Some(43_077));
+        assert_eq!(parse_api_port("127.0.0.1:43077\n"), Some(43_077));
+        assert_eq!(parse_api_port("43077"), Some(43_077));
+        assert_eq!(parse_api_port(""), None);
+        assert_eq!(parse_api_port("127.0.0.1:"), None);
+        assert_eq!(parse_api_port("not a port"), None);
     }
 
     /// Swapping mesh mode re-serves the embed in place: the old daemon shuts
@@ -3000,7 +3067,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let x0xd_data = dir.path().join("x0xd");
 
-        let first = serve_inprocess(&x0xd_data, false)
+        let first = serve_inprocess(&x0xd_data, false, None)
             .await
             .expect("first in-process serve should come up");
         let token_before = std::fs::read_to_string(x0xd_data.join("api-token"))
