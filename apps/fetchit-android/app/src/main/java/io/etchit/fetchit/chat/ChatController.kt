@@ -557,6 +557,37 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     }
 
     /**
+     * Rebuild the gateway after the default network changed identity
+     * (Wi-Fi to cellular, cellular to Wi-Fi, one Wi-Fi to another).
+     *
+     * An identity change kills established TCP flows, but the pump has no
+     * in-loop reconnect in v1 and often keeps reading RUNNING against the
+     * dead socket -- so [ensureGateway]'s fast path would happily return a
+     * gateway that can neither send nor receive, and outbox sends queue
+     * forever with no tick (caught on-device 2026-07-29: first meshless
+     * foreground send after a Wi-Fi-off flip). Tear down unconditionally
+     * and rebuild; the reconnect reads [MeshPolicy.active] fresh, so a
+     * flip to mobile data comes back meshless and a flip to Wi-Fi comes
+     * back meshless too until the policy's rise debounce promotes it.
+     *
+     * No-op when chat was never connected -- a network event must not
+     * construct the runtime. Failures are logged and left for the next
+     * recovery edge (another network change, foreground reconnect, or
+     * nav-away+back); state after a failed rebuild is a clean disconnect.
+     */
+    suspend fun rebuildGatewayOnNetworkChange() {
+        if (gateway == null) return
+        disconnect()
+        try {
+            ensureGateway()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("fetchit.chat", "gateway rebuild after network change failed", e)
+        }
+    }
+
+    /**
      * Drop the relay connection and cancel the event pump.
      * Safe and idempotent when the gateway was never started.
      * [ensureGateway] can reconnect after this.

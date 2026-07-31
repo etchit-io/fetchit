@@ -101,9 +101,30 @@ open class FetchitApplication : Application() {
         // pushes network verdicts through the nullable backing field so a
         // network change never constructs a controller; a controller built
         // later seeds itself from the monitor in the getter above.
-        meshNetworkMonitor.start { allowed ->
-            _chatController?.meshPolicy?.onNetworkChanged(allowed)
-        }
+        meshNetworkMonitor.start(
+            onChange = { allowed ->
+                _chatController?.meshPolicy?.onNetworkChanged(allowed)
+            },
+            // A default-network identity change (Wi-Fi <-> cellular, Wi-Fi
+            // roam) kills the relay WebSocket under a pump that has no
+            // in-loop reconnect, so sends queue forever against a dead
+            // socket. Rebuild the gateway; the monitor orders this AFTER
+            // the mesh verdict, so the reconnect sees the new network's
+            // mode. Backing-field guard as everywhere: a network event
+            // never constructs the chat runtime.
+            onDefaultNetworkChanged = {
+                val controller = _chatController ?: return@start
+                appScope.launch {
+                    try {
+                        controller.rebuildGatewayOnNetworkChange()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("fetchit.chat", "network-change gateway rebuild failed", e)
+                    }
+                }
+            },
+        )
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {

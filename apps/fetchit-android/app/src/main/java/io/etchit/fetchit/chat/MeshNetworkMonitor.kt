@@ -29,25 +29,58 @@ class MeshNetworkMonitor(context: Context) {
         private set
 
     private var onChange: ((Boolean) -> Unit)? = null
+    private var onDefaultNetworkChanged: (() -> Unit)? = null
+    private var lastNetwork: Network? = null
 
     /**
      * Seed from the current default network, then follow it for the life of
-     * the process. [onChange] fires on a connectivity handler thread; the
-     * consumer ([MeshPolicy]) is thread-safe.
+     * the process. Callbacks fire on a connectivity handler thread; the
+     * consumers ([MeshPolicy], the gateway rebuild) are thread-safe.
+     *
+     * [onDefaultNetworkChanged] fires when the default network's IDENTITY
+     * changes (Wi-Fi to cellular, cellular to Wi-Fi, one Wi-Fi to another)
+     * -- distinct from the mesh verdict, which can survive such a change.
+     * Any identity change kills established TCP flows, and the relay
+     * WebSocket has no in-pump reconnect in v1, so the shell must rebuild
+     * the gateway or sends queue forever against a dead socket. The initial
+     * network at [start] is a seed, not a change.
      */
-    fun start(onChange: (Boolean) -> Unit) {
+    fun start(onChange: (Boolean) -> Unit, onDefaultNetworkChanged: (() -> Unit)? = null) {
         this.onChange = onChange
-        update(allowsMesh(connectivity.activeNetwork?.let(connectivity::getNetworkCapabilities)))
+        this.onDefaultNetworkChanged = onDefaultNetworkChanged
+        lastNetwork = connectivity.activeNetwork
+        update(allowsMesh(lastNetwork?.let(connectivity::getNetworkCapabilities)))
         connectivity.registerDefaultNetworkCallback(
             object : ConnectivityManager.NetworkCallback() {
+                // Identity is tracked from onCapabilitiesChanged, not
+                // onAvailable: Android delivers onAvailable(new) BEFORE the
+                // new network's capabilities, and the identity-change
+                // consumer reads the mesh verdict when it fires. Ordering
+                // verdict-then-identity here means a Wi-Fi -> cellular flip
+                // can never rebuild the gateway with a stale "unmetered"
+                // verdict and join the mesh on mobile data.
                 override fun onCapabilitiesChanged(
                     network: Network,
                     capabilities: NetworkCapabilities,
-                ) = update(allowsMesh(capabilities))
+                ) {
+                    update(allowsMesh(capabilities))
+                    trackIdentity(network)
+                }
 
                 override fun onLost(network: Network) = update(false)
             },
         )
+    }
+
+    @Synchronized
+    private fun trackIdentity(network: Network) {
+        if (network == lastNetwork) return
+        val first = lastNetwork == null
+        lastNetwork = network
+        // A change FROM a known network is a real handover; the first
+        // network ever seen (seed was null because start() ran before any
+        // network was up) is not.
+        if (!first) onDefaultNetworkChanged?.invoke()
     }
 
     @Synchronized
