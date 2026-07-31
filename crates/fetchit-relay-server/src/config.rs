@@ -83,7 +83,17 @@ impl ServerConfig {
                 env!("FETCHIT_RELAY_GIT_SHORT"),
             ),
             max_envelope_bytes: fetchit_relay_proto::DEFAULT_MAX_ENVELOPE_BYTES,
-            transit_ttl: Duration::from_secs(15 * 60),
+            // 72h, not minutes: the transit buffer is store-and-forward for
+            // recipients that are OFFLINE — phones sleep overnight and
+            // travel weekends, and a TTL of minutes silently destroys
+            // their mail (empirically: every envelope parked overnight
+            // 2026-07-30 was TTL-swept unread). RAM stays bounded by
+            // `transit_per_recipient` and `transit_total_bytes_cap`, and
+            // `FETCHIT_RELAY_TRANSIT_DB` makes the window durable across
+            // restarts. Group history retention (`group_log_window`, 30d)
+            // dwarfs this — 72h is the conservative choice, not the bold
+            // one.
+            transit_ttl: Duration::from_secs(72 * 60 * 60),
             transit_per_recipient: 256,
             transit_total_bytes_cap: 1 << 30,
             group_log_window: Duration::from_secs(30 * 24 * 60 * 60),
