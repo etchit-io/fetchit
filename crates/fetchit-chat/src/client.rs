@@ -2248,6 +2248,7 @@ impl Client {
     ///   the chat-state isn't built, or the seal can't be opened.
     /// - [`ChatError::MessageTransport`] forwarded from x0xd's
     ///   `/publish` rejection.
+    #[allow(clippy::too_many_lines)] // linear unseal->verify->apply dispatch; splitting scatters the wire contract
     pub async fn dispatch_inbound_bridge(
         &self,
         transit: &fetchit_relay_proto::TransitEnvelope,

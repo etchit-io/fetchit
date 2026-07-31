@@ -185,13 +185,16 @@ enum Mode {
         #[arg(long)]
         uri_file: PathBuf,
     },
-    /// Read an invite payload from `invite_file` and call
-    /// `Client::groups().join(invite)`. Used by the `m2_live` cross-NAT
-    /// empirical to drive the joiner-side `/groups/join` -> Welcome-fetch
-    /// path (the surface David's v0.21.3 `63b5c63` retry-fix targets).
+    /// Read an invite payload from `invite_file` and join through the
+    /// DURABLE lane (`Client::join_group_durable`) -- the same
+    /// engine-A-always policy both production shells ship, so a CLI join
+    /// exercises what users actually run. `--native-only` restores the
+    /// plain `Client::groups().join(invite)` used by the `m2_live`
+    /// cross-NAT empirical to drive the bare joiner-side
+    /// `/groups/join` -> Welcome-fetch daemon surface.
     ///
-    /// After `/groups/join` succeeds, this subcommand enters echo mode
-    /// for the just-joined group: any private-group message received
+    /// After the join lands (or parks as a resumable pending-join), this
+    /// subcommand enters echo mode: any private-group message received
     /// from a group peer is echoed back via `send_private_group`. Exits
     /// when the caller sends SIGTERM (or the binary's persistent-mode
     /// signal pipeline catches it).
@@ -201,6 +204,13 @@ enum Mode {
         /// `Client::groups().invite(...)`).
         #[arg(long)]
         invite_file: PathBuf,
+
+        /// Join via the plain gossip-only `Client::groups().join` instead
+        /// of the durable engine-A lane. For protocol empiricals only:
+        /// this is the lane that burns a single-use invite when gossip
+        /// cannot converge the owner in time.
+        #[arg(long)]
+        native_only: bool,
 
         /// Optional path to a UTF-8 file containing the owner's
         /// `x0x://agent/<base64>` share URI. When set, the joiner
@@ -349,6 +359,7 @@ enum Mode {
 /// the `Mode::GroupChat` variant stays a one-line tuple and the `main`
 /// dispatch arm stays short.
 #[derive(clap::Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // each bool is an independently documented clap lane flag; existing harness scripts depend on this surface, and resolve_join_lane folds them into the real enum
 struct GroupChatArgs {
     /// Group id to send into. Validated by [`GroupId::parse`] before
     /// any send so a malformed id can't reach the x0xd path.
@@ -387,10 +398,20 @@ struct GroupChatArgs {
     /// invite ever, and a join that cannot converge now (owner offline)
     /// becomes a persisted `Pending` that the lifetime resume pump
     /// auto-completes when the owner returns -- never a hard error, never a
-    /// re-spent invite. Mutually exclusive with `--auto`/`--engine-a`;
-    /// requires `--invite-file`.
+    /// re-spent invite. This is also the DEFAULT when no lane flag is set,
+    /// so the flag is now a no-op kept for script compatibility. Mutually
+    /// exclusive with `--auto`/`--engine-a`/`--native-only`; requires
+    /// `--invite-file`.
     #[arg(long)]
     durable: bool,
+
+    /// Drive the join through the plain gossip-only `groups().join` --
+    /// the pre-2026-07-31 default. For protocol empiricals that must
+    /// exercise the bare daemon surface: this lane burns the single-use
+    /// invite when gossip cannot converge the owner in time. Mutually
+    /// exclusive with the other lane flags; requires `--invite-file`.
+    #[arg(long)]
+    native_only: bool,
 
     /// Path to a UTF-8 outbox file. When set, outbound group lines are
     /// read from this file (resuming from `--cursor-file`) instead of
@@ -484,12 +505,14 @@ async fn main() -> Result<()> {
         Mode::Import { uri_file } => run_import(&client, &uri_file).await,
         Mode::Join {
             invite_file,
+            native_only,
             owner_card_uri_file,
         } => {
             run_join(
                 &client,
                 &cli.display_name,
                 &invite_file,
+                native_only,
                 owner_card_uri_file.as_deref(),
             )
             .await
@@ -903,49 +926,49 @@ async fn join_via_invite(
     display_name: &str,
     args: &GroupChatArgs,
 ) -> Result<()> {
-    if args.engine_a && args.auto {
-        anyhow::bail!("--engine-a and --auto are mutually exclusive");
-    }
-    if args.durable && (args.auto || args.engine_a) {
-        anyhow::bail!("--durable is mutually exclusive with --auto/--engine-a");
-    }
-    if args.durable {
-        eprintln!("[peer] joining via the durable path (join_group_durable)");
-        match client
-            .join_group_durable(invite, Some(display_name))
-            .await
-            .context("Client::join_group_durable(invite)")?
-        {
-            JoinOutcome::Converged(group) => eprintln!(
-                "[peer] joined group {} (membership convergence confirmed)",
-                group.group_id.as_str(),
-            ),
-            JoinOutcome::Pending { group_id } => eprintln!(
-                "[peer] join PENDING for {group_id} -- owner not yet reachable; the \
-                 resume pump will auto-complete it with no user action. Entering the \
-                 group loop now.",
-            ),
+    let lane = resolve_join_lane(args.auto, args.engine_a, args.native_only, args.durable)?;
+    let group = match lane {
+        JoinLane::Durable => {
+            eprintln!("[peer] joining via the durable path (join_group_durable)");
+            match client
+                .join_group_durable(invite, Some(display_name))
+                .await
+                .context("Client::join_group_durable(invite)")?
+            {
+                JoinOutcome::Converged(group) => eprintln!(
+                    "[peer] joined group {} (membership convergence confirmed)",
+                    group.group_id.as_str(),
+                ),
+                JoinOutcome::Pending { group_id } => eprintln!(
+                    "[peer] join PENDING for {group_id} -- owner not yet reachable; the \
+                     resume pump will auto-complete it with no user action. Entering the \
+                     group loop now.",
+                ),
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
-    let group = if args.auto {
-        eprintln!("[peer] joining via the v1 shared policy (join_group_auto)");
-        client
-            .join_group_auto(invite, Some(display_name))
-            .await
-            .context("Client::join_group_auto(invite)")?
-    } else if args.engine_a {
-        eprintln!("[peer] joining via engine-A cross-NAT bridge (join_group_bridged)");
-        client
-            .join_group_bridged(invite, Some(display_name))
-            .await
-            .context("Client::join_group_bridged(invite)")?
-    } else {
-        client
-            .groups()
-            .join(invite, Some(display_name))
-            .await
-            .context("Client::groups().join(invite)")?
+        JoinLane::Auto => {
+            eprintln!("[peer] joining via the v1 shared policy (join_group_auto)");
+            client
+                .join_group_auto(invite, Some(display_name))
+                .await
+                .context("Client::join_group_auto(invite)")?
+        }
+        JoinLane::Bridged => {
+            eprintln!("[peer] joining via engine-A cross-NAT bridge (join_group_bridged)");
+            client
+                .join_group_bridged(invite, Some(display_name))
+                .await
+                .context("Client::join_group_bridged(invite)")?
+        }
+        JoinLane::NativeOnly => {
+            eprintln!("[peer] native-only join (plain gossip lane, by request)");
+            client
+                .groups()
+                .join(invite, Some(display_name))
+                .await
+                .context("Client::groups().join(invite)")?
+        }
     };
     eprintln!(
         "[peer] joined group {} (membership convergence confirmed)",
@@ -1215,11 +1238,63 @@ fn plan_join_steps(owner_card_uri_file: Option<&std::path::Path>) -> Vec<JoinSte
     steps
 }
 
+/// Which lane a CLI-invoked group join runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinLane {
+    /// `Client::join_group_durable` — the production default everywhere:
+    /// native warm-gossip courtesy wait, then ALWAYS the engine-A relay
+    /// bridge, persisted as a resumable pending-join.
+    Durable,
+    /// `Client::join_group_auto` — durable's policy without persistence.
+    Auto,
+    /// `Client::join_group_bridged` — engine-A relay bridge only.
+    Bridged,
+    /// `Client::groups().join` — the plain gossip-only join. Kept ONLY for
+    /// protocol empiricals that must drive the bare
+    /// `/groups/join` -> Welcome-fetch daemon surface.
+    NativeOnly,
+}
+
+/// Resolve the join lane from the CLI's flag surface. The DURABLE lane is
+/// the default — the same lane both production shells ship (Android
+/// `joinGroupDurable`, desktop `chat_group_join`). 2026-07-31: two live
+/// joins against a phone-owned group burned their single-use invites on
+/// the plain lane's gossip-convergence cliff while the owner's admit
+/// landed minutes later; this CLI was the last caller defaulting to the
+/// plain lane, and its runs are indistinguishable from product bugs when
+/// they fail. Deterministic-first is now the only default; the plain
+/// surface stays reachable, but only by explicit request.
+#[allow(clippy::fn_params_excessive_bools)] // the params mirror the clap flag surface 1:1; this fn IS the bools-to-enum boundary
+fn resolve_join_lane(
+    auto: bool,
+    engine_a: bool,
+    native_only: bool,
+    durable: bool,
+) -> Result<JoinLane> {
+    let picked = [auto, engine_a, native_only, durable]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if picked > 1 {
+        anyhow::bail!("--auto, --engine-a, --native-only and --durable are mutually exclusive");
+    }
+    Ok(if auto {
+        JoinLane::Auto
+    } else if engine_a {
+        JoinLane::Bridged
+    } else if native_only {
+        JoinLane::NativeOnly
+    } else {
+        JoinLane::Durable
+    })
+}
+
 #[allow(clippy::too_many_lines)] // linear join sequence; the bridged and native paths read better inline
 async fn run_join(
     client: &Client,
     display_name: &str,
     invite_file: &std::path::Path,
+    native_only: bool,
     owner_card_uri_file: Option<&std::path::Path>,
 ) -> Result<()> {
     // Pin the ordering invariant at the entry point: every step we run
@@ -1298,28 +1373,68 @@ async fn run_join(
                     invite.0.len(),
                     invite_file.display(),
                 );
-                // The /groups/join call is what David's v0.21.3
-                // 63b5c63 retry-fix patches on the daemon side: if the
-                // Welcome-blob fetch from the inviter's daemon flakes
-                // (transient relay/gossip drop), x0xd now retries with
-                // backoff before failing closed.
-                let group = if std::env::var_os("FETCHIT_BRIDGED_JOIN").is_some() {
-                    // Engine-A activation for the headless cross-NAT
-                    // harness: route through Client::join_group_bridged
-                    // (the relay-bridged join) instead of the plain gossip
-                    // join, which times out across NAT. Unset keeps the
-                    // m2_live plain-join behaviour.
-                    eprintln!("[peer] engine-A bridged join (join_group_bridged)");
-                    client
-                        .join_group_bridged(&invite, Some(display_name))
-                        .await
-                        .context("Client::join_group_bridged(invite)")?
-                } else {
-                    client
-                        .groups()
-                        .join(&invite, Some(display_name))
-                        .await
-                        .context("Client::groups().join(invite)")?
+                // Lane selection: durable by default (the shells' lane),
+                // `--native-only` for the bare daemon surface (the
+                // m2_live `/groups/join` -> Welcome-fetch empirical), and
+                // the FETCHIT_BRIDGED_JOIN env keeps its engine-A-only
+                // meaning for the headless cross-NAT harness.
+                let lane = resolve_join_lane(
+                    false,
+                    std::env::var_os("FETCHIT_BRIDGED_JOIN").is_some(),
+                    native_only,
+                    false,
+                )?;
+                let group = match lane {
+                    JoinLane::Durable | JoinLane::Auto => {
+                        eprintln!(
+                            "[peer] durable join (native courtesy wait, then engine-A bridge)"
+                        );
+                        match client
+                            .join_group_durable(&invite, Some(display_name))
+                            .await
+                            .context("Client::join_group_durable(invite)")?
+                        {
+                            JoinOutcome::Converged(group) => Some(group),
+                            JoinOutcome::Pending { group_id } => {
+                                eprintln!(
+                                    "[peer] join PENDING for {group_id} -- owner not yet \
+                                     reachable; the resume pump auto-completes it without \
+                                     re-spending the invite. Entering the echo loop now.",
+                                );
+                                None
+                            }
+                        }
+                    }
+                    JoinLane::Bridged => {
+                        eprintln!("[peer] engine-A bridged join (join_group_bridged)");
+                        Some(
+                            client
+                                .join_group_bridged(&invite, Some(display_name))
+                                .await
+                                .context("Client::join_group_bridged(invite)")?,
+                        )
+                    }
+                    JoinLane::NativeOnly => {
+                        // The /groups/join call is what David's v0.21.3
+                        // 63b5c63 retry-fix patches on the daemon side: if
+                        // the Welcome-blob fetch from the inviter's daemon
+                        // flakes (transient relay/gossip drop), x0xd
+                        // retries with backoff before failing closed.
+                        eprintln!("[peer] native-only join (plain gossip lane, by request)");
+                        Some(
+                            client
+                                .groups()
+                                .join(&invite, Some(display_name))
+                                .await
+                                .context("Client::groups().join(invite)")?,
+                        )
+                    }
+                };
+                let Some(group) = group else {
+                    // Pending: no roster yet to prefetch against; the echo
+                    // loop below still runs and decrypts once the resume
+                    // pump converges the join.
+                    continue;
                 };
                 eprintln!(
                     "[peer] joined group {} (membership convergence confirmed)",
@@ -2090,6 +2205,47 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    // --- Join-lane routing (2026-07-31 engine-A-first default) ---
+
+    #[test]
+    fn join_lane_defaults_to_durable_like_the_shells() {
+        // No flags: the CLI runs the same lane both production shells ship
+        // (Android joinGroupDurable, desktop chat_group_join). The plain
+        // gossip-only lane burned two single-use invites on 2026-07-31.
+        assert_eq!(
+            resolve_join_lane(false, false, false, false).unwrap(),
+            JoinLane::Durable,
+        );
+    }
+
+    #[test]
+    fn join_lane_flags_map_one_to_one() {
+        assert_eq!(
+            resolve_join_lane(true, false, false, false).unwrap(),
+            JoinLane::Auto,
+        );
+        assert_eq!(
+            resolve_join_lane(false, true, false, false).unwrap(),
+            JoinLane::Bridged,
+        );
+        assert_eq!(
+            resolve_join_lane(false, false, true, false).unwrap(),
+            JoinLane::NativeOnly,
+        );
+        assert_eq!(
+            resolve_join_lane(false, false, false, true).unwrap(),
+            JoinLane::Durable,
+        );
+    }
+
+    #[test]
+    fn join_lane_flags_are_mutually_exclusive() {
+        assert!(resolve_join_lane(true, true, false, false).is_err());
+        assert!(resolve_join_lane(false, true, true, false).is_err());
+        assert!(resolve_join_lane(true, false, false, true).is_err());
+        assert!(resolve_join_lane(true, true, true, true).is_err());
+    }
 
     // --- M2 group-echo guards (the 2026-07-03 trinity-coord storm class) ---
 
