@@ -12,12 +12,14 @@ use fetchit_relay_proto::{
     LogAppend, LogFetch, LogRecordWire, LogRecords, Moved, Ping, Pong, Ready, SendFrame,
     ServerFrame, Throttle, ThrottleReason, TransitAck, WatchPresence,
 };
-use futures_util::{stream::SplitStream, SinkExt, StreamExt};
+use futures_util::{stream::SplitStream, Sink, SinkExt, StreamExt};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
 /// Per-connection outbound queue depth. Bounded to cap RAM under a
@@ -34,6 +36,54 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum records per `LogRecords` reply frame. Keeps any single
 /// frame bounded while a long backlog streams as multiple chunks.
 const LOG_RECORDS_CHUNK: usize = 64;
+
+/// Interval between server-initiated WebSocket protocol pings.
+///
+/// Cloudflare silently drops idle `WebSockets` after ~100s WITHOUT
+/// closing the origin leg, leaving the session table holding a corpse
+/// that accepts writes — `sessions.send` counts a deposit into it as
+/// delivered and the envelope is gone (empirically confirmed
+/// 2026-07-30: every overnight session died with zero close/error
+/// lines at the origin). Pinging well under that cutoff keeps healthy
+/// idle connections alive at the edge, and the pong-silence reap below
+/// bounds how long a corpse can black-hole deposits. Protocol-level
+/// pings are invisible to the app framing, and every shipped client
+/// stack (tokio-tungstenite behind the phone/desktop/peer, browsers)
+/// auto-pongs — no client update required.
+const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Reap the session after this long without a pong: three missed pings
+/// plus grace. Connect counts as the first "pong" so a client is never
+/// reaped faster than the full window.
+const WS_PONG_TIMEOUT: Duration = Duration::from_secs(105);
+
+/// Lock-free pong-freshness clock shared between the reader (records
+/// pongs) and the writer (decides reaping). Milliseconds since the
+/// session's own origin instant, so the tokio test clock drives it.
+struct PongClock {
+    origin: tokio::time::Instant,
+    last_pong_ms: AtomicU64,
+}
+
+impl PongClock {
+    fn new() -> Self {
+        Self {
+            origin: tokio::time::Instant::now(),
+            last_pong_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn record_pong(&self) {
+        let ms = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_pong_ms.store(ms, Ordering::Relaxed);
+    }
+
+    fn since_last_pong(&self) -> Duration {
+        self.origin.elapsed().saturating_sub(Duration::from_millis(
+            self.last_pong_ms.load(Ordering::Relaxed),
+        ))
+    }
+}
 
 /// Query string optionally carrying the bearer token for the WS upgrade.
 /// Legacy transport: newer clients send the token in the `Authorization:
@@ -86,7 +136,7 @@ fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
 
 async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<ServerState>) {
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+    let (tx, rx) = mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
 
     let Some(hello) = await_hello(&mut receiver).await else {
         let _ = sender.send(Message::Close(None)).await;
@@ -134,14 +184,10 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         state.metrics.envelope_delivered();
     }
 
-    let mut writer: JoinHandle<()> = tokio::spawn(async move {
-        while let Some(f) = rx.recv().await {
-            let Ok(bytes) = to_bytes(&f) else { break };
-            if sender.send(Message::Binary(bytes)).await.is_err() {
-                break;
-            }
-        }
-    });
+    let pong_clock = Arc::new(PongClock::new());
+    let writer_clock = Arc::clone(&pong_clock);
+    let mut writer: JoinHandle<()> =
+        tokio::spawn(async move { writer_loop(sender, rx, &writer_clock, session_id).await });
 
     info!(session = session_id, "ws: session opened");
     let exit = run_io_loop(
@@ -152,6 +198,7 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
         &effective_caps,
         &tx,
         session_id,
+        &pong_clock,
     )
     .await;
 
@@ -217,6 +264,55 @@ enum LoopExit {
 /// postcard encode error) the per-connection channel is silently broken. Watching
 /// the writer's `JoinHandle` here ensures the caller's cleanup runs promptly
 /// instead of waiting for the client-side keepalive timeout to force a reconnect.
+/// Writer half of the connection: drains the outbound frame channel
+/// into the WS sink, interleaving keepalive pings on [`WS_PING_INTERVAL`].
+/// Exits — which the io loop observes as [`LoopExit::WriterDied`], so the
+/// session is unregistered promptly — when the channel closes, a write
+/// fails, or the client has gone [`WS_PONG_TIMEOUT`] without a pong
+/// (the Cloudflare-corpse case: the socket still accepts writes but
+/// nothing is listening, and deposits pushed into it are lost).
+async fn writer_loop<S>(
+    mut sink: S,
+    mut rx: mpsc::Receiver<ServerFrame>,
+    pong_clock: &PongClock,
+    session_id: crate::session::SessionId,
+) where
+    S: Sink<Message> + Unpin,
+{
+    let mut ping = tokio::time::interval(WS_PING_INTERVAL);
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // interval() fires immediately; consume that tick so the first ping
+    // lands one full interval after connect.
+    ping.tick().await;
+    loop {
+        tokio::select! {
+            f = rx.recv() => {
+                let Some(f) = f else { break };
+                let Ok(bytes) = to_bytes(&f) else { break };
+                if sink.send(Message::Binary(bytes)).await.is_err() {
+                    break;
+                }
+            }
+            _ = ping.tick() => {
+                let silent = pong_clock.since_last_pong();
+                if silent > WS_PONG_TIMEOUT {
+                    // No agent_id in the log per docs/metrics-policy.md.
+                    warn!(
+                        session = session_id,
+                        silent_ms = u64::try_from(silent.as_millis()).unwrap_or(u64::MAX),
+                        "ws: reaping session — no pong within the keepalive window",
+                    );
+                    break;
+                }
+                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_io_loop(
     receiver: &mut SplitStream<WebSocket>,
     writer: &mut JoinHandle<()>,
@@ -225,6 +321,7 @@ async fn run_io_loop(
     effective_caps: &EffectiveCapabilities,
     tx: &mpsc::Sender<ServerFrame>,
     session_id: crate::session::SessionId,
+    pong_clock: &PongClock,
 ) -> LoopExit {
     loop {
         tokio::select! {
@@ -233,6 +330,10 @@ async fn run_io_loop(
                 let bytes = match msg {
                     Message::Binary(b) => b,
                     Message::Close(_) => return LoopExit::ClientClosed,
+                    Message::Pong(_) => {
+                        pong_clock.record_pong();
+                        continue;
+                    }
                     _ => continue,
                 };
                 let Ok(frame) = from_bytes::<ClientFrame>(&bytes) else {
@@ -575,8 +676,9 @@ mod tests {
     //! regression here would re-introduce ghosted sessions that linger until
     //! the client-side keepalive eventually triggers a reconnect.
     use super::{
-        await_hello_inner, bearer_from_headers, replay_transit, send_log_records, LoopExit,
-        HELLO_TIMEOUT, LOG_RECORDS_CHUNK, WS_OUTBOUND_CAPACITY,
+        await_hello_inner, bearer_from_headers, replay_transit, send_log_records, writer_loop,
+        LoopExit, PongClock, HELLO_TIMEOUT, LOG_RECORDS_CHUNK, WS_OUTBOUND_CAPACITY,
+        WS_PING_INTERVAL, WS_PONG_TIMEOUT,
     };
     use crate::transit::StoredEntry;
     use axum::extract::ws::Message;
@@ -584,6 +686,115 @@ mod tests {
         to_bytes, AgentId, ClientFrame, EnvelopeKind, Hello, MachineId, Pong, ServerFrame,
         TransitEnvelope, WIRE_VERSION,
     };
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    /// Infallible sink that records every message it is sent, so the
+    /// writer-loop tests can assert on the ping cadence.
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<Message>>>);
+
+    impl futures_util::Sink<Message> for RecordingSink {
+        type Error = std::convert::Infallible;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.0.lock().unwrap().push(item);
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn ping_count(sent: &std::sync::Mutex<Vec<Message>>) -> usize {
+        sent.lock()
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(m, Message::Ping(_)))
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn writer_pings_on_interval_and_survives_fresh_pongs() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let clock = Arc::new(PongClock::new());
+        let (tx, rx) = tokio::sync::mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+        let task_clock = Arc::clone(&clock);
+        let sink = RecordingSink(Arc::clone(&sent));
+        let handle = tokio::spawn(async move { writer_loop(sink, rx, &task_clock, 1).await });
+        // Let the task register its interval at t=0 before the clock moves.
+        tokio::task::yield_now().await;
+
+        for _ in 0..4 {
+            tokio::time::advance(WS_PING_INTERVAL).await;
+            tokio::task::yield_now().await;
+            clock.record_pong();
+        }
+
+        assert_eq!(ping_count(&sent), 4, "one ping per elapsed interval");
+        assert!(!handle.is_finished(), "fresh pongs must keep the session");
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn writer_reaps_the_session_after_pong_silence() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let clock = Arc::new(PongClock::new());
+        // Keep the sender alive: the reap itself must end the loop.
+        let (_tx, rx) = tokio::sync::mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+        let sink = RecordingSink(Arc::clone(&sent));
+        let handle = tokio::spawn(async move { writer_loop(sink, rx, &clock, 1).await });
+        // Let the task register its interval at t=0 before the clock moves.
+        tokio::task::yield_now().await;
+
+        // Ticks at 30/60/90s are inside WS_PONG_TIMEOUT (connect counts
+        // as the first pong); the 120s tick is the first past it.
+        for _ in 0..5 {
+            tokio::time::advance(WS_PING_INTERVAL).await;
+            tokio::task::yield_now().await;
+        }
+
+        handle.await.unwrap();
+        assert_eq!(
+            ping_count(&sent),
+            3,
+            "pings stop at the reap tick; nothing is sent to a corpse"
+        );
+        assert!(
+            WS_PONG_TIMEOUT < 4 * WS_PING_INTERVAL,
+            "reap on the 4th tick"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn writer_still_forwards_frames_between_pings() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let clock = Arc::new(PongClock::new());
+        let (tx, rx) = tokio::sync::mpsc::channel::<ServerFrame>(WS_OUTBOUND_CAPACITY);
+        let sink = RecordingSink(Arc::clone(&sent));
+        let handle = tokio::spawn(async move { writer_loop(sink, rx, &clock, 1).await });
+
+        tx.send(ServerFrame::Pong(Pong { nonce: 7 })).await.unwrap();
+        tokio::task::yield_now().await;
+
+        let first = sent.lock().unwrap().first().cloned();
+        assert!(
+            matches!(first, Some(Message::Binary(_))),
+            "app frames still flow through the writer"
+        );
+        drop(tx);
+        handle.await.unwrap();
+    }
 
     fn auth_headers(value: &str) -> axum::http::HeaderMap {
         let mut h = axum::http::HeaderMap::new();
