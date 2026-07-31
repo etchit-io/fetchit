@@ -24,7 +24,7 @@ const X0XD_PIN_VERSION: &str = "0.34.3";
 /// embed opts in). Bump in lockstep with the workflow pins and the
 /// fetchit-ffi `x0x` rev.
 #[allow(dead_code)]
-const X0XD_PIN_SHA: &str = "90e3e62f13b78c152f69c0856a989ca1d0b628fa";
+const X0XD_PIN_SHA: &str = "1c6631ed78ee2b0c9111a034b701375ff6062075";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
