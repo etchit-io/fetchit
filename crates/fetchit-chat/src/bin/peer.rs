@@ -495,13 +495,25 @@ async fn main() -> Result<()> {
             peer,
             outbox_file,
             cursor_file,
-        } => match (outbox_file, cursor_file) {
-            (None, None) => run_chat(&client, &cli.display_name, &peer).await,
-            (Some(o), Some(c)) => run_chat_outbox(&client, &cli.display_name, &peer, &o, &c).await,
-            (None, Some(_)) | (Some(_), None) => {
-                anyhow::bail!("--outbox-file and --cursor-file must both be set or both omitted")
+        } => {
+            // The chat rig is the long-lived peer process (systemd runs
+            // it for days): it must also resume any pending join left
+            // behind by a `join` run that exited while the owner was
+            // unreachable, or the record waits for a `group-chat
+            // --durable` process that may never come.
+            spawn_durable_join_pump(&client);
+            match (outbox_file, cursor_file) {
+                (None, None) => run_chat(&client, &cli.display_name, &peer).await,
+                (Some(o), Some(c)) => {
+                    run_chat_outbox(&client, &cli.display_name, &peer, &o, &c).await
+                }
+                (None, Some(_)) | (Some(_), None) => {
+                    anyhow::bail!(
+                        "--outbox-file and --cursor-file must both be set or both omitted"
+                    )
+                }
             }
-        },
+        }
         Mode::Import { uri_file } => run_import(&client, &uri_file).await,
         Mode::Join {
             invite_file,
@@ -1973,6 +1985,12 @@ where
 }
 
 async fn run_echo(client: &Client, display_name: &str) -> Result<()> {
+    // Echo peers (and the `join` tail that lands here on a PENDING join)
+    // are long-running: this pump is what actually delivers the
+    // "auto-completes without re-spending the invite" promise the join
+    // path prints. Without it a pending join waits for a `group-chat
+    // --durable` process that may never run.
+    spawn_durable_join_pump(client);
     let mut inbound = client
         .take_transport_inbound("relay")
         .context("relay inbound already taken")?;
