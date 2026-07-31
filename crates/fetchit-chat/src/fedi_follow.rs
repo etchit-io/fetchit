@@ -2,7 +2,7 @@
 //!
 //! The bridge holds no keys, so following someone is a device operation:
 //! resolve the target, sign a `Follow` with our actor's RSA key, deliver
-//! it to their inbox via [`FediverseTransport`], then record the pending
+//! it to their inbox via [`FediverseTransport`](fetchit_fedi::transport::FediverseTransport), then record the pending
 //! follow at the bridge under `bridge-auth-v1` (an ML-DSA agent-key
 //! signature over the request). Everything crypto-bearing happens here,
 //! on the device; the bridge only verifies + stores.

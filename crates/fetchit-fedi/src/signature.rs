@@ -216,7 +216,7 @@ pub fn compute_content_digest(body: &[u8]) -> String {
 /// Mastodon-family servers serve. Returns `None` on any decode failure.
 ///
 /// Home for the helper the inbound-verify path needs: it feeds
-/// [`verify_signature_rfc9421`] / [`verify_signature_cavage`], so it
+/// [`verify_signature_rfc9421`] / [`verify_signature_cavage`](crate::signature_cavage::verify_signature_cavage), so it
 /// lives next to them where every inbox consumer (relay + bridge) can
 /// share one parser.
 #[must_use]

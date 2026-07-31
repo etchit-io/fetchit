@@ -362,7 +362,7 @@ const CAVAGE_REQUIRED_COMPONENTS: [&str; 4] = ["(request-target)", "host", "date
 /// # Errors
 /// - [`SignatureVerifyError::HeaderMalformed`] — unparseable
 ///   `Signature` header, or a declared list that fails to cover
-///   [`CAVAGE_REQUIRED_COMPONENTS`].
+///   `CAVAGE_REQUIRED_COMPONENTS`.
 /// - [`SignatureVerifyError::MissingSignedHeader`] — the signer
 ///   declared a header the request does not carry.
 /// - [`SignatureVerifyError::SignatureDecodeFailed`] — undecodable

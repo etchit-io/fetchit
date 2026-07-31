@@ -51,7 +51,7 @@ pub struct BridgeConfig {
     /// Build identifier advertised at `/health`.
     pub server_version: String,
     /// Handles blocked from open registration regardless of attestation
-    /// validity. Seeded from [`DEFAULT_RESERVED_HANDLES`] and extended via
+    /// validity. Seeded from `DEFAULT_RESERVED_HANDLES` and extended via
     /// the `FETCHIT_BRIDGE_RESERVED_HANDLES` env var.
     pub reserved_handles: HashSet<String>,
     /// Burst capacity for the per-IP registration limiter. `0` disables it.
@@ -97,7 +97,7 @@ fn parse_env_or<T: FromStr>(name: &str, default: T) -> T {
 
 impl BridgeConfig {
     /// Returns the built-in reserved-handle set derived from
-    /// [`DEFAULT_RESERVED_HANDLES`]. This is the baseline used by
+    /// `DEFAULT_RESERVED_HANDLES`. This is the baseline used by
     /// [`from_env`](Self::from_env); callers constructing `BridgeConfig`
     /// literals in tests should call this to populate the field.
     #[must_use]

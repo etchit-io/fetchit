@@ -3,7 +3,7 @@
 //! A fedi DM is an ordinary `ActivityPub` `Create(Note)` with
 //! visibility=direct, signed with our actor's RSA key on the device and
 //! delivered straight to the recipient's inbox over the same
-//! [`FediverseTransport`] a public post or a `Follow` uses. The bridge
+//! [`FediverseTransport`](fetchit_fedi::transport::FediverseTransport) a public post or a `Follow` uses. The bridge
 //! holds no keys and is not in this path at all — this is a direct
 //! device-to-inbox delivery.
 //!

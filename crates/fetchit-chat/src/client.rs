@@ -1816,7 +1816,7 @@ impl Client {
     /// the existing durable pending-join resume ([`Self::drive_pending_joins_once`]).
     ///
     /// The warm path is live over the durable relay group-log (#297 Lane A):
-    /// [`LogFetchCommitSource`] fetches the commits (and self-addressed
+    /// [`LogFetchCommitSource`](crate::groups::epoch_recovery::LogFetchCommitSource) fetches the commits (and self-addressed
     /// join-results) with `seq` past our cursor, and `WarmApplier` applies
     /// each through x0xd's signature-verifying apply endpoints
     /// (`apply_metadata_event` / `apply_join_result`) — never a bypass, the

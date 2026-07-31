@@ -7,7 +7,7 @@
 //! which burns a sender ratchet generation per call — unacceptable on a
 //! hot path. So the client records what it already knows: whenever a join
 //! converges or a group frame round-trips the daemon's crypto, this store
-//! notes "keyed at epoch E". [`crate::client::Client::probe_group_state`]
+//! notes "keyed at epoch E". `Client::probe_group_state`
 //! then answers `keyed` from the record for free, and falls back to a
 //! single one-shot encrypt probe only when the record is absent (fresh
 //! install / wiped app data) — which also re-seeds the record.
