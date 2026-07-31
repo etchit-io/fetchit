@@ -91,6 +91,20 @@ pub fn is_due(record: &PendingJoin, now_ms: u64) -> bool {
             .saturating_add(backoff_ms(record.attempts))
 }
 
+/// Whether an engine-A join-result apply may retire the durable
+/// pending-join record. An apply that answered Ok is NOT sufficient
+/// proof of keying: a version-skewed daemon has been observed live
+/// (2026-07-31, an x0x 0.27 daemon applying a 0.34-tail join-result)
+/// answering Ok while installing no `TreeKEM` state — and retiring the
+/// record on that lie strands a keyless roster member with no safety
+/// net, the exact split-brain the durable record exists to prevent.
+/// Only a CONFIRMED keyed probe (`Some(true)`) retires; an unkeyed
+/// probe or a probe failure keeps the record for the resume driver.
+#[must_use]
+pub fn apply_ok_retires_record(probe_keyed: Option<bool>) -> bool {
+    probe_keyed == Some(true)
+}
+
 /// Wall-clock ms since the epoch (saturating), for the production driver.
 #[must_use]
 pub fn now_ms() -> u64 {
@@ -415,6 +429,23 @@ mod tests {
             }
         );
         assert_eq!(bridge.rebridges.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn apply_ok_retires_only_on_confirmed_keyed_probe() {
+        // 2026-07-31 live failure: a version-skewed daemon answered the
+        // join-result apply with Ok while installing nothing; the record
+        // was retired and the joiner stranded keyless with no safety net.
+        // An apply-Ok is not proof — only a keyed probe confirmation is.
+        assert!(apply_ok_retires_record(Some(true)));
+        assert!(
+            !apply_ok_retires_record(Some(false)),
+            "unkeyed keeps the record"
+        );
+        assert!(
+            !apply_ok_retires_record(None),
+            "probe failure keeps the record"
+        );
     }
 
     #[test]

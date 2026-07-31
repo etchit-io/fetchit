@@ -2410,19 +2410,38 @@ impl Client {
                 }
                 Err(e) => return Err(ChatError::from(e)),
             }
-            // Applying the owner's join-result IS the keying event: this
-            // durable pending-join has converged. Remove the intent so the
-            // resume driver stops re-pulling it. This is the authoritative
-            // `ActiveKeyed` signal -- a read-only keyed probe on `/members`
-            // is the deferred x0xd ask, so until it lands convergence is
-            // observed here at the apply site, not by polling. Best-effort:
-            // a stale record only costs one idempotent re-bridge next tick.
-            if let Ok(store) = self.pending_join_store() {
-                let _ = store.remove(&stable_group_id);
+            // Applying the owner's join-result SHOULD be the keying event,
+            // but an apply-Ok is not proof: a version-skewed daemon has
+            // answered Ok while installing no `TreeKEM` state (observed
+            // live 2026-07-31, x0xd 0.27 applying a 0.34-tail result), and
+            // retiring the record on that lie strands a keyless roster
+            // member with no safety net. Confirm with the read-only keyed
+            // probe BEFORE retiring the intent or seeding the convergence
+            // record — a false convergence record would also fool the
+            // resume driver's stock-path probe. The probe runs before any
+            // record write, so the stock fallback settles keyed-ness with
+            // its one-shot encrypt probe rather than reading our own lie
+            // back. On not-keyed or probe failure the record stays; the
+            // resume driver re-requests the join-result on its backoff.
+            let probe_keyed = self
+                .probe_group_state(&stable_group_id)
+                .await
+                .ok()
+                .map(|st| st.keyed);
+            if crate::groups::pending_join_driver::apply_ok_retires_record(probe_keyed) {
+                if let Ok(store) = self.pending_join_store() {
+                    let _ = store.remove(&stable_group_id);
+                }
+                // Refresh the durable convergence record the stock
+                // keyed-probe reads (epoch settled by the next probe).
+                self.note_group_converged(&stable_group_id, 0);
+            } else {
+                log::warn!(
+                    "[chat] engine-a joiner: join-result apply answered Ok but the \
+                     keyed probe did not confirm; keeping the durable pending-join \
+                     for the resume driver"
+                );
             }
-            // Refresh the durable convergence record the stock keyed-probe
-            // reads (epoch is settled by the next probe; 0 = "unknown yet").
-            self.note_group_converged(&stable_group_id, 0);
             return Ok(());
         }
 
