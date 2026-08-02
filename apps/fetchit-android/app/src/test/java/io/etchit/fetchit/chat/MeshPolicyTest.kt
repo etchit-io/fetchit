@@ -289,4 +289,53 @@ class MeshPolicyTest {
         runCurrent()
         assertEquals(listOf(true, false, false), applied)
     }
+
+    /**
+     * The data tripwire is a hard veto: with today's metered budget spent,
+     * foreground + perfect Wi-Fi must not bring the mesh up. This is the
+     * capped-plan protection of last resort.
+     */
+    @Test
+    fun `data tripwire vetoes activation and drops an active mesh immediately`() = runTest {
+        val applied = mutableListOf<Boolean>()
+        val policy = MeshPolicy(backgroundScope) { applied += it; true }
+        policy.onNetworkChanged(allowsMesh = true)
+        policy.onForeground()
+        runCurrent()
+        assertEquals(listOf(true), applied)
+
+        // Trip while active: drop with NO debounce -- every second bills.
+        policy.onDataTripwire(true)
+        runCurrent()
+        assertEquals(listOf(true, false), applied)
+        assertEquals(false, policy.active)
+
+        // While latched, lifecycle and network events cannot re-activate.
+        policy.onForeground()
+        policy.onNetworkChanged(allowsMesh = false)
+        policy.onNetworkChanged(allowsMesh = true)
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals(listOf(true, false), applied)
+        assertEquals(false, policy.active)
+    }
+
+    @Test
+    fun `clearing the tripwire re-activates only when inputs allow it`() = runTest {
+        val applied = mutableListOf<Boolean>()
+        val policy = MeshPolicy(backgroundScope) { applied += it; true }
+        policy.onNetworkChanged(allowsMesh = true)
+        policy.onForeground()
+        runCurrent()
+        policy.onDataTripwire(true)
+        runCurrent()
+        assertEquals(listOf(true, false), applied)
+
+        // Midnight rollover clears the latch; foreground + Wi-Fi still hold,
+        // so the mesh comes back.
+        policy.onDataTripwire(false)
+        runCurrent()
+        assertEquals(listOf(true, false, true), applied)
+        assertEquals(true, policy.active)
+    }
 }

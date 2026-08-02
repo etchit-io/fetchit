@@ -147,6 +147,115 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         }
     }
 
+    private var tripwireJob: Job? = null
+
+    /**
+     * Start the OS-level metered-data tripwire (see [DataTripwire]).
+     * Samples Android's own per-app cumulative byte counter every minute
+     * and attributes deltas to the current network class via [meteredNow].
+     * A trip latches the mesh off through [MeshPolicy.onDataTripwire] and
+     * notifies the user; an escalation (bytes still flowing while
+     * quiesced) posts an urgent restart prompt -- automatic process
+     * recycling is deliberately deferred until foreground-service restart
+     * semantics are device-verified. Idempotent.
+     */
+    fun startDataTripwire(meteredNow: () -> Boolean) {
+        if (tripwireJob != null) return
+        val prefs =
+            appContext.getSharedPreferences("data_tripwire", Context.MODE_PRIVATE)
+        val restored =
+            if (prefs.contains("epoch_day")) {
+                DataTripwire.State(
+                    epochDay = prefs.getLong("epoch_day", 0),
+                    meteredBytes = prefs.getLong("metered_bytes", 0),
+                    tripped = prefs.getBoolean("tripped", false),
+                    escalated = prefs.getBoolean("escalated", false),
+                )
+            } else {
+                null
+            }
+        val tripwire = DataTripwire(restored = restored)
+        if (tripwire.tripped) meshPolicy.onDataTripwire(true)
+        tripwireJob = scope.launch {
+            val uid = android.os.Process.myUid()
+            while (true) {
+                val rx = android.net.TrafficStats.getUidRxBytes(uid)
+                val tx = android.net.TrafficStats.getUidTxBytes(uid)
+                // UNSUPPORTED (-1) on exotic kernels: fail open, the policy
+                // still protects; the tripwire just cannot double-check it.
+                if (rx >= 0 && tx >= 0) {
+                    val day = System.currentTimeMillis() / DAY_MS
+                    when (val v = tripwire.sample(day, rx + tx, meteredNow())) {
+                        is DataTripwire.Verdict.Tripped -> {
+                            android.util.Log.w(
+                                "fetchit.chat",
+                                "data tripwire TRIPPED: ${v.meteredBytesToday} metered bytes today",
+                            )
+                            meshPolicy.onDataTripwire(true)
+                            postDataNotification(
+                                "Mobile data protection on",
+                                "fetch>it used ${v.meteredBytesToday / MB} MB of metered data " +
+                                    "today, so peer-to-peer networking is paused. Messages " +
+                                    "still arrive normally.",
+                            )
+                        }
+                        is DataTripwire.Verdict.Escalated -> {
+                            android.util.Log.e(
+                                "fetchit.chat",
+                                "data tripwire ESCALATED: ${v.meteredBytesToday} metered bytes " +
+                                    "despite quiesce -- engine unreachable by policy",
+                            )
+                            meshPolicy.onDataTripwire(true)
+                            postDataNotification(
+                                "fetch>it needs a restart",
+                                "The app kept using metered data (${v.meteredBytesToday / MB} MB " +
+                                    "today) after protection engaged. Please close and reopen " +
+                                    "fetch>it to stop it.",
+                            )
+                        }
+                        DataTripwire.Verdict.DayReset -> meshPolicy.onDataTripwire(false)
+                        DataTripwire.Verdict.None -> {}
+                    }
+                    val s = tripwire.stateSnapshot
+                    prefs.edit()
+                        .putLong("epoch_day", s.epochDay)
+                        .putLong("metered_bytes", s.meteredBytes)
+                        .putBoolean("tripped", s.tripped)
+                        .putBoolean("escalated", s.escalated)
+                        .apply()
+                }
+                delay(TRIPWIRE_SAMPLE_MS)
+            }
+        }
+    }
+
+    private fun postDataNotification(title: String, text: String) {
+        try {
+            val nm =
+                appContext.getSystemService(Context.NOTIFICATION_SERVICE)
+                    as android.app.NotificationManager
+            nm.createNotificationChannel(
+                android.app.NotificationChannel(
+                    DATA_CHANNEL_ID,
+                    "Data protection",
+                    android.app.NotificationManager.IMPORTANCE_HIGH,
+                ),
+            )
+            val notification =
+                android.app.Notification.Builder(appContext, DATA_CHANNEL_ID)
+                    .setSmallIcon(io.etchit.fetchit.R.drawable.ic_stat_chat)
+                    .setContentTitle(title)
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                    .setContentText(text)
+                    .build()
+            nm.notify(DATA_NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            // Notifications denied is survivable -- the mesh block already
+            // protects the plan; the user just does not hear about it.
+            android.util.Log.w("fetchit.chat", "data-protection notification failed", e)
+        }
+    }
+
     private var pump: Job? = null
     private var pendingJoinPump: Job? = null
     private val connectMutex = Mutex()
@@ -624,6 +733,14 @@ class ChatController(private val appContext: Context, private val scope: Corouti
 
         /** Prefs key holding the JSON-encoded persisted feed ([FeedSerde]). */
         private const val FEED_KEY = "feed_posts_v1"
+
+        /** [DataTripwire] sampling cadence; coarse is fine against a 50MB budget. */
+        private const val TRIPWIRE_SAMPLE_MS: Long = 60_000
+
+        private const val DAY_MS: Long = 24 * 60 * 60 * 1000
+        private const val MB: Long = 1024 * 1024
+        private const val DATA_CHANNEL_ID = "data_protection"
+        private const val DATA_NOTIFICATION_ID = 7401
 
         /**
          * Drain [gw].[ChatGateway.nextEvent] in a loop, routing each event into

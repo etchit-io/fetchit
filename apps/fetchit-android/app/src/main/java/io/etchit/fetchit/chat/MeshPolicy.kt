@@ -69,6 +69,13 @@ class MeshPolicy(
     private var foreground = false
     private var networkAllowsMesh = false
 
+    /**
+     * [DataTripwire] latch: today's metered-data budget is spent, so the
+     * mesh stays off no matter what foreground/network say. Protects
+     * capped plans from any bug class that defeats the normal policy.
+     */
+    private var dataTripped = false
+
     /** Pending debounced commit OR pending failure retry; at most one. */
     private var pending: Job? = null
 
@@ -98,7 +105,20 @@ class MeshPolicy(
     }
 
     /**
-     * Converge toward `foreground && networkAllowsMesh`. Any change of
+     * [DataTripwire] verdict. Tripping commits immediately (every second
+     * on a spent data budget bills); clearing (midnight rollover) also
+     * commits immediately — rejoin only happens if foreground + unmetered
+     * network independently allow it.
+     */
+    @Synchronized
+    fun onDataTripwire(tripped: Boolean) {
+        if (dataTripped == tripped) return
+        dataTripped = tripped
+        reevaluate(delayMs = 0)
+    }
+
+    /**
+     * Converge toward `foreground && networkAllowsMesh && !dataTripped`. Any change of
      * inputs cancels an in-flight transition: the commit re-derives the
      * desired state at fire time, so a stale timer can never apply a mode
      * the inputs no longer want. `applied != active` keeps the state
@@ -108,7 +128,7 @@ class MeshPolicy(
     private fun reevaluate(delayMs: Long) {
         pending?.cancel()
         pending = null
-        if ((foreground && networkAllowsMesh) == active && converging()) return
+        if ((foreground && networkAllowsMesh && !dataTripped) == active && converging()) return
         if (delayMs == 0L) {
             commit()
         } else {
@@ -125,7 +145,7 @@ class MeshPolicy(
     @Synchronized
     private fun commit() {
         pending = null
-        val desired = foreground && networkAllowsMesh
+        val desired = foreground && networkAllowsMesh && !dataTripped
         if (desired == active && converging()) return
         active = desired
         inFlight = desired

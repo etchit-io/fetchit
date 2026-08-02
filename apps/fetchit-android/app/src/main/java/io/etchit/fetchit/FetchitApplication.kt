@@ -69,6 +69,11 @@ open class FetchitApplication : Application() {
                     // onCreate, and a controller born on mobile data must not
                     // mesh on its first foreground.
                     it.meshPolicy.onNetworkChanged(meshNetworkMonitor.latest)
+                    // Metered-data tripwire: OS-level byte accounting that
+                    // latches the mesh off if a day on metered networks
+                    // crosses the budget -- the capped-plan protection of
+                    // last resort against any bug the policy cannot see.
+                    it.startDataTripwire { !meshNetworkMonitor.latest }
                 }
 
     /** Process-lifetime tracker of whether the default network may mesh. */
