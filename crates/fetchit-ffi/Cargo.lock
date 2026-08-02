@@ -4049,7 +4049,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -6334,7 +6334,7 @@ dependencies = [
 [[package]]
 name = "saorsa-gossip-pubsub"
 version = "0.5.67"
-source = "git+https://github.com/josh-clsn/x0x.git?rev=bd78c51f6fea2a4334edb732eb8f21649cd11977#bd78c51f6fea2a4334edb732eb8f21649cd11977"
+source = "git+https://github.com/josh-clsn/x0x.git?rev=55b88459b95f120f5902a27bdf8a3268cda414e7#55b88459b95f120f5902a27bdf8a3268cda414e7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8512,19 +8512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
- "windows-link",
- "windows-result 0.4.1",
- "windows-strings 0.5.1",
-]
-
-[[package]]
 name = "windows-implement"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8547,17 +8534,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "windows-interface"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8573,17 +8549,6 @@ name = "windows-interface"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053c4c462dc91d3b1504c6fe5a726dd15e216ba718e84a0e46a88fbe5ded3515"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9086,7 +9051,7 @@ dependencies = [
 [[package]]
 name = "x0x"
 version = "0.34.3"
-source = "git+https://github.com/josh-clsn/x0x.git?rev=bd78c51f6fea2a4334edb732eb8f21649cd11977#bd78c51f6fea2a4334edb732eb8f21649cd11977"
+source = "git+https://github.com/josh-clsn/x0x.git?rev=55b88459b95f120f5902a27bdf8a3268cda414e7#55b88459b95f120f5902a27bdf8a3268cda414e7"
 dependencies = [
  "ant-quic",
  "anyhow",

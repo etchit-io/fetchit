@@ -1458,7 +1458,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message() != 57470.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 21580.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 61996.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
@@ -2560,25 +2560,21 @@ public interface ChatClientInterface {
     /**
      * Flip the embedded daemon's mesh mode at runtime.
      *
-     * `true` = full public-mesh citizenship (foreground: direct P2P and
-     * native gossip groups). `false` = leaf/off (background: the daemon
-     * stays up serving local group crypto, but never joins the mesh --
-     * inbound messages ride the relay, which is what notifications consume).
-     * The flip re-serves the embed on a fresh ephemeral port; the engine
-     * re-attaches through the `api.port` port-file self-heal. Repeat calls
-     * in the current mode are cheap no-ops while the daemon is up, so the
-     * shell can call this from every lifecycle transition -- and SHOULD
-     * keep calling it: after a failed flip left the daemon down, the next
-     * call (any mode) revives it, so a transient bind/teardown race heals
-     * on the following lifecycle event instead of wedging until app death.
+     * `true` = full public-mesh citizenship (foreground on unmetered:
+     * direct P2P and native gossip groups) via `POST /mesh/join`. `false`
+     * = quiet leaf (background/cellular: every mesh peer disconnected,
+     * inbound rides the relay) via `POST /mesh/quiesce`. The daemon is
+     * NEVER re-served for a flip -- the old teardown-and-re-serve shape
+     * orphaned saorsa-gossip-pubsub tasks (no shutdown API) into a hot
+     * "node not initialized" loop that starved sends and burned mobile
+     * data until process death. Safe to re-assert in the current mode;
+     * the shell's `MeshPolicy` retries a failed flip on a backoff.
      *
      * # Errors
      *
      * [`ChatFfiError::Invalid`] when a flip is already in progress.
-     * [`ChatFfiError::Network`] when serving fails; a best-effort re-serve
-     * in the previous mode is attempted first so group crypto is not left
-     * dead behind a transient bind failure. On a double failure the daemon
-     * is down but the state stays retryable.
+     * [`ChatFfiError::Network`] when a downed embed cannot be revived or
+     * the daemon rejects the REST call -- both retryable.
      */
     suspend fun `setMeshActive`(`active`: kotlin.Boolean)
     
@@ -4108,25 +4104,21 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     /**
      * Flip the embedded daemon's mesh mode at runtime.
      *
-     * `true` = full public-mesh citizenship (foreground: direct P2P and
-     * native gossip groups). `false` = leaf/off (background: the daemon
-     * stays up serving local group crypto, but never joins the mesh --
-     * inbound messages ride the relay, which is what notifications consume).
-     * The flip re-serves the embed on a fresh ephemeral port; the engine
-     * re-attaches through the `api.port` port-file self-heal. Repeat calls
-     * in the current mode are cheap no-ops while the daemon is up, so the
-     * shell can call this from every lifecycle transition -- and SHOULD
-     * keep calling it: after a failed flip left the daemon down, the next
-     * call (any mode) revives it, so a transient bind/teardown race heals
-     * on the following lifecycle event instead of wedging until app death.
+     * `true` = full public-mesh citizenship (foreground on unmetered:
+     * direct P2P and native gossip groups) via `POST /mesh/join`. `false`
+     * = quiet leaf (background/cellular: every mesh peer disconnected,
+     * inbound rides the relay) via `POST /mesh/quiesce`. The daemon is
+     * NEVER re-served for a flip -- the old teardown-and-re-serve shape
+     * orphaned saorsa-gossip-pubsub tasks (no shutdown API) into a hot
+     * "node not initialized" loop that starved sends and burned mobile
+     * data until process death. Safe to re-assert in the current mode;
+     * the shell's `MeshPolicy` retries a failed flip on a backoff.
      *
      * # Errors
      *
      * [`ChatFfiError::Invalid`] when a flip is already in progress.
-     * [`ChatFfiError::Network`] when serving fails; a best-effort re-serve
-     * in the previous mode is attempted first so group crypto is not left
-     * dead behind a transient bind failure. On a double failure the daemon
-     * is down but the state stays retryable.
+     * [`ChatFfiError::Network`] when a downed embed cannot be revived or
+     * the daemon rejects the REST call -- both retryable.
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")

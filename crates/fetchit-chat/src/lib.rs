@@ -69,6 +69,7 @@ pub mod x0xd_seed;
 mod client;
 mod http;
 mod members_singleflight;
+mod mesh_mode;
 
 pub use chat_identity::FetchitIdentity;
 pub use client::restore_identity_from_recovery_phrase;

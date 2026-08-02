@@ -3986,6 +3986,25 @@ impl Client {
         open_stream(&self.http, "/events").await
     }
 
+    /// Flip the attached x0xd's mesh mode without a daemon restart.
+    ///
+    /// `true` POSTs `/mesh/join` (bootstrap dial phases, scheduled — the
+    /// call returns before dialing completes); `false` POSTs
+    /// `/mesh/quiesce` (disconnect every mesh peer; daemon and gossip
+    /// runtime stay up). Replaces the teardown-and-re-serve flip that
+    /// orphaned pubsub tasks into a hot failure loop. Safe to re-assert
+    /// in the current mode. Rides the bearer [`Http`] wrapper, so the
+    /// `api.port` self-heal applies across a daemon restart.
+    ///
+    /// # Errors
+    ///
+    /// Transport/daemon errors surface unchanged — callers retry (the
+    /// Android `MeshPolicy` re-asserts on a backoff until the mode
+    /// sticks).
+    pub async fn x0xd_mesh_set(&self, active: bool) -> Result<()> {
+        crate::mesh_mode::set_mesh_mode(&self.http, active).await
+    }
+
     /// Open the DM-only SSE event stream from x0xd. Kept for API
     /// parity; should not see traffic when chat is relay-routed.
     pub async fn direct_events(

@@ -16,7 +16,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  X0XD_PIN_SHA: "bd78c51f6fea2a4334edb732eb8f21649cd11977"
+  X0XD_PIN_SHA: "55b88459b95f120f5902a27bdf8a3268cda414e7"
 
 jobs:
   build-bundled-x0xd:
