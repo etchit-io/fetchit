@@ -1458,7 +1458,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message() != 57470.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 46561.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 21580.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
@@ -2565,16 +2565,20 @@ public interface ChatClientInterface {
      * stays up serving local group crypto, but never joins the mesh --
      * inbound messages ride the relay, which is what notifications consume).
      * The flip re-serves the embed on a fresh ephemeral port; the engine
-     * re-attaches through the `api.port` port-file self-heal. Idempotent:
-     * repeat calls in the current mode return immediately, so the shell can
-     * call this from every lifecycle transition.
+     * re-attaches through the `api.port` port-file self-heal. Repeat calls
+     * in the current mode are cheap no-ops while the daemon is up, so the
+     * shell can call this from every lifecycle transition -- and SHOULD
+     * keep calling it: after a failed flip left the daemon down, the next
+     * call (any mode) revives it, so a transient bind/teardown race heals
+     * on the following lifecycle event instead of wedging until app death.
      *
      * # Errors
      *
      * [`ChatFfiError::Invalid`] when a flip is already in progress.
-     * [`ChatFfiError::Network`] when the re-serve fails; a best-effort
-     * re-serve in the previous mode is attempted first so group crypto is
-     * not left dead behind a transient bind failure.
+     * [`ChatFfiError::Network`] when serving fails; a best-effort re-serve
+     * in the previous mode is attempted first so group crypto is not left
+     * dead behind a transient bind failure. On a double failure the daemon
+     * is down but the state stays retryable.
      */
     suspend fun `setMeshActive`(`active`: kotlin.Boolean)
     
@@ -4109,16 +4113,20 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * stays up serving local group crypto, but never joins the mesh --
      * inbound messages ride the relay, which is what notifications consume).
      * The flip re-serves the embed on a fresh ephemeral port; the engine
-     * re-attaches through the `api.port` port-file self-heal. Idempotent:
-     * repeat calls in the current mode return immediately, so the shell can
-     * call this from every lifecycle transition.
+     * re-attaches through the `api.port` port-file self-heal. Repeat calls
+     * in the current mode are cheap no-ops while the daemon is up, so the
+     * shell can call this from every lifecycle transition -- and SHOULD
+     * keep calling it: after a failed flip left the daemon down, the next
+     * call (any mode) revives it, so a transient bind/teardown race heals
+     * on the following lifecycle event instead of wedging until app death.
      *
      * # Errors
      *
      * [`ChatFfiError::Invalid`] when a flip is already in progress.
-     * [`ChatFfiError::Network`] when the re-serve fails; a best-effort
-     * re-serve in the previous mode is attempted first so group crypto is
-     * not left dead behind a transient bind failure.
+     * [`ChatFfiError::Network`] when serving fails; a best-effort re-serve
+     * in the previous mode is attempted first so group crypto is not left
+     * dead behind a transient bind failure. On a double failure the daemon
+     * is down but the state stays retryable.
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")

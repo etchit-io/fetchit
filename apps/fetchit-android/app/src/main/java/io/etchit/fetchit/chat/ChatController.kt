@@ -130,18 +130,20 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     /**
      * Foreground/background mesh mode for the embedded x0x daemon -- the
      * data-bill guard (see [MeshPolicy]). Applies through the gateway when
-     * one is connected; a failed flip is logged and the next lifecycle
-     * transition re-converges. Also seeds the initial mode for a fresh
-     * connect, so a background connect (boot receiver, notification
-     * service) never joins the public mesh.
+     * one is connected; a failed flip is reported back so the policy keeps
+     * retrying until the mode sticks (a wedged flip must not leak a
+     * full-mesh daemon onto mobile data). No gateway counts as success:
+     * the eventual connect seeds its initial mode from [MeshPolicy.active].
      */
     val meshPolicy: MeshPolicy = MeshPolicy(scope) { active ->
         try {
             gateway?.setMeshActive(active)
+            true
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            android.util.Log.w("fetchit.chat", "mesh mode apply failed", e)
+            android.util.Log.w("fetchit.chat", "mesh mode apply failed; will retry", e)
+            false
         }
     }
 

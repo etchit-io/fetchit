@@ -275,13 +275,23 @@ pub struct ChatClient {
     /// its sync `shutdown()`. `Option` inside a sync mutex so
     /// [`ChatClient::set_mesh_active`] can take the handle out, re-serve
     /// off-lock, and put the replacement back -- the lock is never held
-    /// across an await.
+    /// across an await. `None` means the daemon is DOWN (a re-serve
+    /// failed); the next `set_mesh_active` call revives it. The busy
+    /// signal lives in `mesh_flip_in_progress`, NOT here.
     x0xd: std::sync::Mutex<Option<ServerHandle>>,
     /// Data dir handed to `serve_inprocess`; a mesh flip re-serves from it.
     x0xd_data: PathBuf,
     /// Current embed mesh mode; makes [`ChatClient::set_mesh_active`]
     /// idempotent so lifecycle-driven repeat calls are free.
     mesh_active: std::sync::atomic::AtomicBool,
+    /// Claim marker for an in-flight [`ChatClient::set_mesh_active`] swap.
+    /// Deliberately separate from the `x0xd` slot: `None` in the slot means
+    /// "daemon down" (a re-serve failed), NOT "flip running". Conflating the
+    /// two made a double-failure permanent -- every later flip call read the
+    /// empty slot as busy and bailed, so the daemon stayed dead (chat outage)
+    /// or a leaked old instance stayed meshing (mobile-data burn) until the
+    /// app process died.
+    mesh_flip_in_progress: std::sync::atomic::AtomicBool,
     events: Mutex<mpsc::UnboundedReceiver<ChatEventFfi>>,
     pump_abort: tokio::task::AbortHandle,
     drain_abort: tokio::task::AbortHandle,
@@ -534,6 +544,61 @@ async fn reserve_embed(
         log::warn!("[chat_ffi] embed shutdown timed out; proceeding with re-serve");
     }
     serve_inprocess_stable(x0xd_data, mesh).await
+}
+
+/// Resets the [`ChatClient::set_mesh_active`] claim flag when the flip
+/// future ends -- including cancellation (the Kotlin caller dropping the
+/// call mid-await), which would otherwise leave the claim stuck and turn
+/// every later flip into a spurious "already in progress".
+struct FlipFlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for FlipFlagGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Execute one mesh-mode transition given the current handle state and
+/// return the handle to store plus the mode it actually serves.
+///
+/// `old == None` means the daemon is DOWN (an earlier re-serve failed after
+/// tearing the previous embed down); the requested mode is served fresh
+/// regardless of `prev`. Leaving that state unreachable was the r10 wedge:
+/// depending on flip direction the daemon stayed dead (chat outage) or a
+/// leaked full-mesh instance kept meshing on mobile data (the multi-GB/day
+/// cellular burn) until the app process died.
+///
+/// Free function so the down-state revive semantics are testable without a
+/// full `ChatClient` (relay, vault, runtime).
+async fn flip_mesh_mode(
+    old: Option<ServerHandle>,
+    x0xd_data: &std::path::Path,
+    prev: bool,
+    active: bool,
+) -> Result<(ServerHandle, bool), ChatFfiError> {
+    match old {
+        // Daemon up and already in the requested mode: nothing to do.
+        Some(handle) if prev == active => Ok((handle, prev)),
+        Some(old) => match reserve_embed(old, x0xd_data, active).await {
+            Ok(handle) => Ok((handle, active)),
+            Err(e) => {
+                // The old embed is gone either way; try to restore the
+                // previous mode rather than leaving group crypto dead.
+                log::warn!("[chat_ffi] mesh flip re-serve failed ({e}); restoring previous mode");
+                let restored = serve_inprocess_stable(x0xd_data, prev)
+                    .await
+                    .map_err(|e2| ChatFfiError::Network {
+                        reason: format!("mesh flip failed and restore failed: {e}; {e2}"),
+                    })?;
+                Ok((restored, prev))
+            }
+        },
+        None => {
+            log::warn!("[chat_ffi] embed daemon down; reviving in requested mode");
+            let handle = serve_inprocess_stable(x0xd_data, active).await?;
+            Ok((handle, active))
+        }
+    }
 }
 
 /// Receipt for a group send: the message id plus whether it reached the
@@ -1025,6 +1090,7 @@ impl ChatClient {
             x0xd: std::sync::Mutex::new(Some(x0xd)),
             x0xd_data,
             mesh_active: std::sync::atomic::AtomicBool::new(mesh_active),
+            mesh_flip_in_progress: std::sync::atomic::AtomicBool::new(false),
             events: Mutex::new(rx),
             pump_abort,
             drain_abort,
@@ -1066,51 +1132,43 @@ impl ChatClient {
     /// stays up serving local group crypto, but never joins the mesh --
     /// inbound messages ride the relay, which is what notifications consume).
     /// The flip re-serves the embed on a fresh ephemeral port; the engine
-    /// re-attaches through the `api.port` port-file self-heal. Idempotent:
-    /// repeat calls in the current mode return immediately, so the shell can
-    /// call this from every lifecycle transition.
+    /// re-attaches through the `api.port` port-file self-heal. Repeat calls
+    /// in the current mode are cheap no-ops while the daemon is up, so the
+    /// shell can call this from every lifecycle transition -- and SHOULD
+    /// keep calling it: after a failed flip left the daemon down, the next
+    /// call (any mode) revives it, so a transient bind/teardown race heals
+    /// on the following lifecycle event instead of wedging until app death.
     ///
     /// # Errors
     ///
     /// [`ChatFfiError::Invalid`] when a flip is already in progress.
-    /// [`ChatFfiError::Network`] when the re-serve fails; a best-effort
-    /// re-serve in the previous mode is attempted first so group crypto is
-    /// not left dead behind a transient bind failure.
+    /// [`ChatFfiError::Network`] when serving fails; a best-effort re-serve
+    /// in the previous mode is attempted first so group crypto is not left
+    /// dead behind a transient bind failure. On a double failure the daemon
+    /// is down but the state stays retryable.
     pub async fn set_mesh_active(&self, active: bool) -> Result<(), ChatFfiError> {
         use std::sync::atomic::Ordering;
-        if self.mesh_active.load(Ordering::SeqCst) == active {
-            return Ok(());
+        // Claim the flip BEFORE touching the handle slot. The slot's `None`
+        // is not a busy signal: it also means "daemon down" after a failed
+        // re-serve, and that state must stay reachable so it can be revived.
+        if self.mesh_flip_in_progress.swap(true, Ordering::SeqCst) {
+            return Err(ChatFfiError::Invalid {
+                reason: "mesh flip already in progress".to_owned(),
+            });
         }
+        let _claim = FlipFlagGuard(&self.mesh_flip_in_progress);
         // Take the handle out under the sync lock; never hold it across an
-        // await. A concurrent flip sees `None` and reports busy instead of
-        // deadlocking or double-serving.
+        // await.
         let old = {
             let mut guard = self.x0xd.lock().map_err(|_| ChatFfiError::Network {
                 reason: "x0xd handle lock poisoned".to_owned(),
             })?;
             guard.take()
         };
-        let Some(old) = old else {
-            return Err(ChatFfiError::Invalid {
-                reason: "mesh flip already in progress".to_owned(),
-            });
-        };
-        let swapped = match reserve_embed(old, &self.x0xd_data, active).await {
-            Ok(handle) => (handle, active),
-            Err(e) => {
-                // The old embed is gone either way; try to restore the
-                // previous mode rather than leaving group crypto dead.
-                log::warn!("[chat_ffi] mesh flip re-serve failed ({e}); restoring previous mode");
-                let prev = self.mesh_active.load(Ordering::SeqCst);
-                let restored = serve_inprocess_stable(&self.x0xd_data, prev)
-                    .await
-                    .map_err(|e2| ChatFfiError::Network {
-                        reason: format!("mesh flip failed and restore failed: {e}; {e2}"),
-                    })?;
-                (restored, prev)
-            }
-        };
-        let (handle, mode) = swapped;
+        let prev = self.mesh_active.load(Ordering::SeqCst);
+        // On Err the slot stays empty (daemon down) and the claim guard
+        // resets, so the next call lands in the revive arm.
+        let (handle, mode) = flip_mesh_mode(old, &self.x0xd_data, prev, active).await?;
         {
             let mut guard = self.x0xd.lock().map_err(|_| ChatFfiError::Network {
                 reason: "x0xd handle lock poisoned".to_owned(),
@@ -3099,6 +3157,86 @@ mod tests {
             "token must persist across a mesh-mode swap"
         );
         second.shutdown();
+    }
+
+    /// The wedge regression: `None` in the handle slot must mean "daemon
+    /// down, revive it", never "busy". A revived embed must rewrite
+    /// `api.port` so the engine's port-file self-heal can re-attach.
+    #[tokio::test]
+    async fn flip_mesh_mode_revives_when_daemon_down() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let x0xd_data = dir.path().join("x0xd");
+
+        let (handle, mode) = flip_mesh_mode(None, &x0xd_data, true, false)
+            .await
+            .expect("down-state flip must serve fresh");
+        assert!(!mode, "revive must serve the REQUESTED mode, not prev");
+        let port_file = std::fs::read_to_string(x0xd_data.join("api.port"))
+            .expect("revive must write api.port for the engine self-heal");
+        assert!(
+            port_file
+                .trim()
+                .ends_with(&handle.local_addr().port().to_string()),
+            "api.port must advertise the revived port; file={port_file:?} addr={}",
+            handle.local_addr()
+        );
+        handle.shutdown();
+    }
+
+    /// Same-mode call with the daemon up is a no-op: the handle survives
+    /// untouched (no port roll, no teardown).
+    #[tokio::test]
+    async fn flip_mesh_mode_same_mode_keeps_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let x0xd_data = dir.path().join("x0xd");
+
+        let first = serve_inprocess(&x0xd_data, false, None)
+            .await
+            .expect("first serve");
+        let addr = first.local_addr();
+        let (handle, mode) = flip_mesh_mode(Some(first), &x0xd_data, false, false)
+            .await
+            .expect("same-mode flip is a no-op");
+        assert!(!mode);
+        assert_eq!(
+            handle.local_addr(),
+            addr,
+            "no-op flip must not re-serve (port would roll)"
+        );
+        handle.shutdown();
+    }
+
+    /// A failed revive (unusable data dir) must surface an error and leave
+    /// nothing behind; retrying with a usable dir must succeed. This is the
+    /// retryability the r10 shape lacked.
+    #[tokio::test]
+    async fn flip_mesh_mode_down_state_failure_is_retryable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A FILE where the data dir should be makes serve fail fast.
+        let clash = dir.path().join("x0xd-clash");
+        std::fs::write(&clash, b"not a dir").unwrap();
+
+        let err = flip_mesh_mode(None, &clash, false, false).await;
+        assert!(err.is_err(), "serve into a file path must fail");
+
+        let good = dir.path().join("x0xd-good");
+        let (handle, mode) = flip_mesh_mode(None, &good, false, false)
+            .await
+            .expect("retry with a usable dir must revive");
+        assert!(!mode);
+        handle.shutdown();
+    }
+
+    /// The claim flag resets when the guard drops -- the cancellation-safety
+    /// half of the busy signal (a Kotlin-side drop mid-flip must not wedge
+    /// every later flip into "already in progress").
+    #[test]
+    fn flip_flag_guard_resets_on_drop() {
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        {
+            let _guard = FlipFlagGuard(&flag);
+        }
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
