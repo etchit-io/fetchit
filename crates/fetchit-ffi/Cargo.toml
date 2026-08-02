@@ -37,7 +37,7 @@ fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"
 # re-arming either. Engine-A is that missing deterministic lane. See
 # fetchit-ops/docs/x0x-defork-plan.md. Rev pin moves in lockstep with the
 # desktop bundle (build.rs X0XD_PIN_SHA) -- PINS.md is the source of truth.
-x0x = { git = "https://github.com/josh-clsn/x0x.git", rev = "1c6631ed78ee2b0c9111a034b701375ff6062075" }
+x0x = { git = "https://github.com/josh-clsn/x0x.git", rev = "bd78c51f6fea2a4334edb732eb8f21649cd11977" }
 # rustls 0.23 cannot auto-pick a CryptoProvider when both aws-lc-rs and ring
 # are in the dependency graph (the x0x embed above pulls both). This direct dep
 # makes rustls::crypto::aws_lc_rs reachable so connect() installs it explicitly.
@@ -78,7 +78,7 @@ uniffi = { version = "=0.29.5", features = ["build"] }
 # must re-declare the patch or the embed fails to compile. Same rev as
 # the x0x pin above -- move them together.
 [patch.crates-io]
-saorsa-gossip-pubsub = { git = "https://github.com/josh-clsn/x0x.git", rev = "1c6631ed78ee2b0c9111a034b701375ff6062075" }
+saorsa-gossip-pubsub = { git = "https://github.com/josh-clsn/x0x.git", rev = "bd78c51f6fea2a4334edb732eb8f21649cd11977" }
 
 [profile.dev]
 # This crate is workspace-EXCLUDED, so the root manifest's profile does not
