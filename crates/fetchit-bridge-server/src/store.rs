@@ -124,6 +124,14 @@ impl Store {
                  published        TEXT NOT NULL,
                  created_ms       INTEGER NOT NULL,
                  UNIQUE (actor_id, note_id)
+             );
+             CREATE TABLE IF NOT EXISTS follow_requests (
+                 actor_id           TEXT NOT NULL,
+                 follower_actor_url TEXT NOT NULL,
+                 follower_inbox_url TEXT NOT NULL,
+                 follow_activity_id TEXT NOT NULL,
+                 received_ms        INTEGER NOT NULL,
+                 PRIMARY KEY (actor_id, follower_actor_url)
              );",
         )?;
         Ok(())

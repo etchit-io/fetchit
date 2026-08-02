@@ -93,6 +93,10 @@ impl Server {
                 "/actors/:handle/followers/confirm",
                 post(routes::follow::confirm_follower),
             )
+            .route(
+                "/actors/:handle/follow-requests",
+                get(routes::follow::follow_requests),
+            )
             .route("/actors/:handle/outbox", get(routes::actors::outbox))
             .route("/actors/:handle/inbox", post(routes::inbox::post_inbox))
             .route("/actors/:handle/messages", get(routes::inbox::get_messages))

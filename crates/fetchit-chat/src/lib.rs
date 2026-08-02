@@ -29,6 +29,7 @@ pub mod fabric;
 pub mod fedi_dm;
 pub mod fedi_feed;
 pub mod fedi_follow;
+pub mod fedi_follow_sync;
 pub mod fedi_identity;
 pub mod fedi_link;
 pub mod fedi_resolutions;

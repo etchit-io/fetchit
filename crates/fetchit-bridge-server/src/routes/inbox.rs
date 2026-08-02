@@ -83,25 +83,44 @@ pub async fn post_inbox(
         return (StatusCode::BAD_REQUEST, "actor is not a url").into_response();
     };
     let Ok(sender) = fetchit_fedi::lookup::fetch_remote_actor(&sender_actor_url).await else {
+        tracing::warn!(handle, sender = %sender_actor_url, "inbox: could not fetch sender actor");
         return (StatusCode::BAD_GATEWAY, "could not fetch sender").into_response();
     };
     let Some(pubkey_pem) = sender.rsa_public_key_pem.as_deref() else {
+        tracing::warn!(handle, sender = %sender_actor_url, "inbox: sender has no key");
         return (StatusCode::UNAUTHORIZED, "sender has no key").into_response();
     };
     if let Err(reason) =
         verify_inbound_signature(&headers, &handle, pubkey_pem, &body, &state.config.domain)
     {
+        // A rejected delivery is invisible to both ends without this line —
+        // the 2026-07-13 lost-Accept class was undiagnosable from logs.
+        tracing::warn!(handle, sender = %sender_actor_url, reason, "inbox: signature rejected");
         return (StatusCode::UNAUTHORIZED, reason).into_response();
     }
 
     // Signature verified. Dispatch on activity type.
-    match activity.get("type").and_then(Value::as_str) {
+    let activity_type = activity.get("type").and_then(Value::as_str);
+    tracing::info!(handle, sender = %sender_actor_url, activity_type, "inbox: verified delivery");
+    match activity_type {
         Some("Create") => match handle_create(&state, &rec, sender.id.as_str(), &activity).await {
             Ok(()) => (StatusCode::ACCEPTED, "accepted").into_response(),
             Err(resp) => resp,
         },
         Some("Accept") => {
             handle_accept(&state, &rec, sender.id.as_str(), &activity).await;
+            (StatusCode::ACCEPTED, "accepted").into_response()
+        }
+        Some("Reject") => {
+            handle_reject(&state, sender.id.as_str(), &activity).await;
+            (StatusCode::ACCEPTED, "accepted").into_response()
+        }
+        Some("Follow") => {
+            handle_follow(&state, &rec, &sender, &activity).await;
+            (StatusCode::ACCEPTED, "accepted").into_response()
+        }
+        Some("Undo") => {
+            handle_undo(&state, &rec, sender.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         // Unknown/unhandled types are acknowledged, never rejected.
@@ -323,11 +342,123 @@ async fn handle_accept(
         .get("object")
         .and_then(|o| o.get("id").and_then(Value::as_str).or_else(|| o.as_str()));
     if let Some(fid) = follow_id {
-        let _ = state
+        match state
             .store
             .follow_accepted(fid, sender_id, &rec.agent_id)
-            .await;
+            .await
+        {
+            Ok(true) => tracing::info!(handle = %rec.handle, follow_id = fid, "follow accepted"),
+            Ok(false) => tracing::warn!(
+                handle = %rec.handle,
+                sender = sender_id,
+                follow_id = fid,
+                "accept matched no pending follow (stale, duplicate, or forged)"
+            ),
+            Err(e) => tracing::warn!(error = %e, "follow_accepted store failure"),
+        }
     }
+}
+
+/// A `Reject(Follow)`: the remote side refused our follow — drop the
+/// pending row, bound to the signature-verified sender so a third party
+/// cannot drop a follow they are not the target of.
+async fn handle_reject(state: &BridgeState, sender_id: &str, activity: &Value) {
+    let follow_id = activity
+        .get("object")
+        .and_then(|o| o.get("id").and_then(Value::as_str).or_else(|| o.as_str()));
+    if let Some(fid) = follow_id {
+        match state.store.follow_rejected(fid, sender_id).await {
+            Ok(true) => tracing::info!(sender = sender_id, follow_id = fid, "follow rejected"),
+            Ok(false) => tracing::warn!(
+                sender = sender_id,
+                follow_id = fid,
+                "reject matched no follow (stale or forged)"
+            ),
+            Err(e) => tracing::warn!(error = %e, "follow_rejected store failure"),
+        }
+    }
+}
+
+/// An inbound `Follow` of one of our actors: queue it for the owner
+/// device, which signs the `Accept` (the bridge holds no keys), delivers
+/// it, and confirms the follower.
+///
+/// The `object` must be OUR actor — a signature-verified sender asking
+/// to follow someone else does not belong in this queue. The activity
+/// `id` is required: the device's `Accept` must echo it or the remote
+/// side cannot correlate the answer.
+async fn handle_follow(
+    state: &BridgeState,
+    rec: &crate::store::ActorRecord,
+    sender: &fetchit_fedi::lookup::RemoteActor,
+    activity: &Value,
+) {
+    let object = activity
+        .get("object")
+        .and_then(|o| o.get("id").and_then(Value::as_str).or_else(|| o.as_str()));
+    if object != Some(rec.actor_url.as_str()) {
+        tracing::warn!(handle = %rec.handle, ?object, "follow object is not this actor; ignored");
+        return;
+    }
+    let Some(follow_id) = activity.get("id").and_then(Value::as_str) else {
+        tracing::warn!(handle = %rec.handle, sender = %sender.id, "follow has no id; ignored");
+        return;
+    };
+    match state
+        .store
+        .add_follow_request(
+            &rec.agent_id,
+            sender.id.as_str(),
+            sender.inbox.as_str(),
+            follow_id,
+            u64::try_from(now_ms()).unwrap_or(0),
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(handle = %rec.handle, sender = %sender.id, "follow request queued");
+        }
+        Err(e) => tracing::warn!(error = %e, "add_follow_request store failure"),
+    }
+}
+
+/// An `Undo(Follow)`: the sender retracts their follow of our actor —
+/// drop both the queued request (if unanswered) and the follower row.
+/// Only an embedded `Follow` object whose `actor` is the
+/// signature-verified sender and whose `object` is our actor counts;
+/// `Undo` of anything else is ignored.
+async fn handle_undo(
+    state: &BridgeState,
+    rec: &crate::store::ActorRecord,
+    sender_id: &str,
+    activity: &Value,
+) {
+    let Some(object) = activity.get("object") else {
+        return;
+    };
+    let is_follow_of_us = object.get("type").and_then(Value::as_str) == Some("Follow")
+        && object.get("actor").and_then(Value::as_str) == Some(sender_id)
+        && object.get("object").and_then(Value::as_str) == Some(rec.actor_url.as_str());
+    if !is_follow_of_us {
+        return;
+    }
+    let dropped_request = state
+        .store
+        .remove_follow_request(&rec.agent_id, sender_id)
+        .await
+        .unwrap_or(false);
+    let dropped_follower = state
+        .store
+        .remove_follower(&rec.agent_id, sender_id)
+        .await
+        .unwrap_or(false);
+    tracing::info!(
+        handle = %rec.handle,
+        sender = sender_id,
+        dropped_request,
+        dropped_follower,
+        "undo(follow) processed"
+    );
 }
 
 /// Query for the owner-only inbox read route.

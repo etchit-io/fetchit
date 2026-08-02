@@ -202,6 +202,7 @@ pub async fn following_list(
                 .map(|f| {
                     json!({
                         "target_actor_url": f.target_actor_url,
+                        "target_inbox_url": f.target_inbox_url,
                         "state": match f.state {
                             crate::store_follow::FollowState::Pending => "pending",
                             crate::store_follow::FollowState::Accepted => "accepted",
@@ -250,6 +251,42 @@ pub async fn followers_list(
     }
 }
 
+/// `GET /actors/:handle/follow-requests` — owner-only queue of inbound
+/// `Follow` requests awaiting the device's signed `Accept`. The device
+/// drains this on its follow-state sync pass: sign + deliver the
+/// `Accept`, then `POST /followers/confirm` (which consumes the entry).
+pub async fn follow_requests(
+    State(state): State<Arc<BridgeState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/actors/{handle}/follow-requests");
+    let rec = match auth_actor(&state, &handle, &headers, &Method::GET, &path, b"").await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match state.store.follow_requests_list(&rec.agent_id).await {
+        Ok(list) => {
+            let items: Vec<_> = list
+                .iter()
+                .map(|r| {
+                    json!({
+                        "follower_actor_url": r.follower_actor_url,
+                        "follower_inbox_url": r.follower_inbox_url,
+                        "follow_activity_id": r.follow_activity_id,
+                        "received_ms": r.received_ms,
+                    })
+                })
+                .collect();
+            Json(json!({ "items": items })).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "follow_requests_list failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "store error").into_response()
+        }
+    }
+}
+
 /// Body of `POST /actors/:handle/followers/confirm`.
 #[derive(Deserialize)]
 pub struct ConfirmFollowerBody {
@@ -288,8 +325,20 @@ pub async fn confirm_follower(
         )
         .await
     {
-        Ok(true) => (StatusCode::CREATED, "recorded").into_response(),
-        Ok(false) => (StatusCode::OK, "already recorded").into_response(),
+        Ok(created) => {
+            // The confirm consumes any queued inbound request for this
+            // follower — the device has answered it. Best-effort: a missing
+            // queue entry (e.g. a re-confirm) is fine.
+            let _ = state
+                .store
+                .remove_follow_request(&rec.agent_id, &req.follower_actor_url)
+                .await;
+            if created {
+                (StatusCode::CREATED, "recorded").into_response()
+            } else {
+                (StatusCode::OK, "already recorded").into_response()
+            }
+        }
         Err(e) => {
             tracing::warn!(error = %e, "add_follower failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "store error").into_response()

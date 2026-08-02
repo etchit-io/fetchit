@@ -5701,6 +5701,20 @@ impl Client {
                 None => reg,
             });
         }
+        // Follow-state sync rides every ensure pass: accept queued inbound
+        // follows and re-assert stuck pending ones (internally damped).
+        // Best-effort — a sync failure never degrades the ensure outcome.
+        match self.sync_fedi_follow_state(handle, now_ms).await {
+            Ok(r) if r.accepted > 0 || r.reasserted > 0 => {
+                log::info!(
+                    "[fedi] follow-state sync: accepted={} reasserted={}",
+                    r.accepted,
+                    r.reasserted
+                );
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("[fedi] follow-state sync failed: {e}"),
+        }
         Ok(EnsureV2Outcome {
             upgraded,
             registered,

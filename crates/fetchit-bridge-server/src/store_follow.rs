@@ -326,6 +326,123 @@ impl Store {
         })
         .await
     }
+
+    /// Queue a verified inbound `Follow` for the owner device to answer.
+    ///
+    /// Upserts on `(actor_id, follower)`: a re-sent `Follow` (remote retry,
+    /// or a re-follow after an unfollow) refreshes the stored activity id —
+    /// the device's `Accept` must echo the follower's LATEST `Follow`, or
+    /// Mastodon cannot correlate it. Queued even when the follower is
+    /// already recorded: each inbound `Follow` deserves an `Accept`.
+    ///
+    /// # Errors
+    /// [`BridgeError::Store`] on a database failure.
+    pub async fn add_follow_request(
+        &self,
+        actor_id: &str,
+        follower_actor_url: &str,
+        follower_inbox_url: &str,
+        follow_activity_id: &str,
+        now_ms: u64,
+    ) -> Result<(), BridgeError> {
+        let (actor_id, follower, inbox, fid) = (
+            actor_id.to_owned(),
+            follower_actor_url.to_owned(),
+            follower_inbox_url.to_owned(),
+            follow_activity_id.to_owned(),
+        );
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO follow_requests
+                     (actor_id, follower_actor_url, follower_inbox_url,
+                      follow_activity_id, received_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(actor_id, follower_actor_url) DO UPDATE SET
+                     follower_inbox_url = excluded.follower_inbox_url,
+                     follow_activity_id = excluded.follow_activity_id,
+                     received_ms = excluded.received_ms",
+                params![
+                    actor_id,
+                    follower,
+                    inbox,
+                    fid,
+                    i64::try_from(now_ms).unwrap_or(i64::MAX)
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Pending inbound follow requests for `actor_id`, newest first.
+    ///
+    /// # Errors
+    /// [`BridgeError::Store`] on a database failure.
+    pub async fn follow_requests_list(
+        &self,
+        actor_id: &str,
+    ) -> Result<Vec<FollowRequestRecord>, BridgeError> {
+        let actor_id = actor_id.to_owned();
+        self.with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT follower_actor_url, follower_inbox_url,
+                        follow_activity_id, received_ms
+                 FROM follow_requests WHERE actor_id = ?1
+                 ORDER BY received_ms DESC",
+            )?;
+            let rows = stmt.query_map(params![actor_id], |row| {
+                let received: i64 = row.get(3)?;
+                Ok(FollowRequestRecord {
+                    follower_actor_url: row.get(0)?,
+                    follower_inbox_url: row.get(1)?,
+                    follow_activity_id: row.get(2)?,
+                    received_ms: u64::try_from(received).unwrap_or(0),
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Drop a queued follow request (the device confirmed its `Accept`, or
+    /// the remote side retracted with `Undo(Follow)`). Returns `false`
+    /// when nothing matched.
+    ///
+    /// # Errors
+    /// [`BridgeError::Store`] on a database failure.
+    pub async fn remove_follow_request(
+        &self,
+        actor_id: &str,
+        follower_actor_url: &str,
+    ) -> Result<bool, BridgeError> {
+        let (actor_id, follower) = (actor_id.to_owned(), follower_actor_url.to_owned());
+        self.with_conn(move |c| {
+            let n = c.execute(
+                "DELETE FROM follow_requests
+                 WHERE actor_id = ?1 AND follower_actor_url = ?2",
+                params![actor_id, follower],
+            )?;
+            Ok(n == 1)
+        })
+        .await
+    }
+}
+
+/// One queued inbound follow request awaiting the device's `Accept`.
+#[derive(Debug, Clone)]
+pub struct FollowRequestRecord {
+    /// The remote actor asking to follow us (AP `id`).
+    pub follower_actor_url: String,
+    /// Their inbox — where the device delivers its signed `Accept`.
+    pub follower_inbox_url: String,
+    /// The `Follow` activity id the `Accept` must echo.
+    pub follow_activity_id: String,
+    /// Millisecond timestamp the request arrived.
+    pub received_ms: u64,
 }
 
 fn row_to_following(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowingRecord> {
@@ -517,5 +634,40 @@ mod tests {
         assert!(s.following_list("agent-b").await.unwrap().is_empty());
         s.add_follower(A, TGT, TGT_INBOX, 1000).await.unwrap();
         assert!(s.followers_list("agent-b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_request_queue_upserts_and_consumes() {
+        let s = store();
+        s.add_follow_request(A, TGT, TGT_INBOX, "their-follow-1", 1000)
+            .await
+            .unwrap();
+        // A re-sent Follow refreshes the stored activity id — the Accept
+        // must echo the follower's LATEST Follow.
+        s.add_follow_request(A, TGT, TGT_INBOX, "their-follow-2", 2000)
+            .await
+            .unwrap();
+        let q = s.follow_requests_list(A).await.unwrap();
+        assert_eq!(q.len(), 1, "upsert, not a duplicate row");
+        assert_eq!(q[0].follow_activity_id, "their-follow-2");
+        assert_eq!(q[0].follower_inbox_url, TGT_INBOX);
+
+        assert!(s.remove_follow_request(A, TGT).await.unwrap());
+        assert!(!s.remove_follow_request(A, TGT).await.unwrap());
+        assert!(s.follow_requests_list(A).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_request_queue_is_per_actor() {
+        let s = store();
+        s.add_follow_request(A, TGT, TGT_INBOX, "their-follow-1", 1000)
+            .await
+            .unwrap();
+        assert!(s.follow_requests_list("agent-b").await.unwrap().is_empty());
+        assert!(
+            !s.remove_follow_request("agent-b", TGT).await.unwrap(),
+            "another actor cannot consume the queue entry"
+        );
+        assert_eq!(s.follow_requests_list(A).await.unwrap().len(), 1);
     }
 }

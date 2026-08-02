@@ -357,6 +357,10 @@ impl Client {
 pub struct FollowingEntry {
     /// Remote actor URL the follow targets.
     pub target_actor_url: String,
+    /// The target's inbox URL (re-assert delivery target). `None` from a
+    /// bridge predating the follow-sync deploy.
+    #[serde(default)]
+    pub target_inbox_url: Option<String>,
     /// `"pending"` (Follow sent) or `"accepted"` (their Accept arrived).
     pub state: String,
     /// The original Follow's activity id (needed to build the Undo).
@@ -392,7 +396,7 @@ pub struct UnfollowReport {
 }
 
 /// `https://<host>` origin of our own actor URL — the bridge base.
-fn actor_origin(identity: &fetchit_fedi::actor::ActorIdentity) -> Result<String> {
+pub(crate) fn actor_origin(identity: &fetchit_fedi::actor::ActorIdentity) -> Result<String> {
     Ok(format!(
         "{}://{}",
         identity.actor_url.scheme(),

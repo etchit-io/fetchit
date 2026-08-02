@@ -1835,8 +1835,12 @@ class ChatModeView(
             }
             runCatching { gw.fediFollow(handle) }.fold(
                 onSuccess = { report ->
-                    // The Follow reached their server either way; remember it
-                    // so the lookup card shows "following ✓" from now on.
+                    // delivered=false means the remote inbox never got the
+                    // Follow — the engine's follow-state sync re-asserts it.
+                    android.util.Log.w(
+                        "FediFollow",
+                        "follow $handle: delivered=${report.delivered} recorded=${report.recorded}",
+                    )
                     followStore.recordFollow(handle)
                     val msg = if (report.recorded) {
                         context.getString(R.string.chat_fedi_follow_sent, handle)
