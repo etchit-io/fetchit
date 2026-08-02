@@ -847,6 +847,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -959,6 +961,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_pair_share_uri(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_pending_joins(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_preview_link_offer(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_reconnect_relay(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact(
 ): Short
@@ -1122,6 +1126,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_pair_share_uri(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_pending_joins(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_preview_link_offer(`ptr`: Pointer,`uri`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_reconnect_relay(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_remove_contact(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,
 ): Long
@@ -1438,6 +1444,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_preview_link_offer() != 7760.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnect_relay() != 52308.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact() != 56807.toShort()) {
@@ -2478,6 +2487,25 @@ public interface ChatClientInterface {
      * [`ChatFfiError::Network`] when no relay serves the blob.
      */
     suspend fun `previewLinkOffer`(`uri`: kotlin.String): LinkOfferPreviewFfi
+    
+    /**
+     * Reconnect the relay session in place after a network-identity
+     * change (Wi-Fi to cellular, Wi-Fi roam).
+     *
+     * The old shell behavior rebuilt the WHOLE client per network change
+     * -- engine, embedded daemon, pumps -- and four transitions in four
+     * minutes stacked engines until Android's low-memory killer shot the
+     * process. This swaps only the relay WebSocket via the failover
+     * primitive: the fresh session is built and verified live BEFORE the
+     * old one is drained, so a failure leaves the existing session
+     * intact and the caller falls back or retries.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError`] when the client is REST-only or the fresh session
+     * never goes live -- the shell falls back to a full rebuild.
+     */
+    suspend fun `reconnectRelay`()
     
     /**
      * Remove a contact, dropping the conversation from the local store.
@@ -3910,6 +3938,45 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeLinkOfferPreviewFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Reconnect the relay session in place after a network-identity
+     * change (Wi-Fi to cellular, Wi-Fi roam).
+     *
+     * The old shell behavior rebuilt the WHOLE client per network change
+     * -- engine, embedded daemon, pumps -- and four transitions in four
+     * minutes stacked engines until Android's low-memory killer shot the
+     * process. This swaps only the relay WebSocket via the failover
+     * primitive: the fresh session is built and verified live BEFORE the
+     * old one is drained, so a failure leaves the existing session
+     * intact and the caller falls back or retries.
+     *
+     * # Errors
+     *
+     * [`ChatFfiError`] when the client is REST-only or the fresh session
+     * never goes live -- the shell falls back to a full rebuild.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `reconnectRelay`() {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_reconnect_relay(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )

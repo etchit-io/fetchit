@@ -1124,6 +1124,28 @@ impl ChatClient {
         Ok(())
     }
 
+    /// Reconnect the relay session in place after a network-identity
+    /// change (Wi-Fi to cellular, Wi-Fi roam).
+    ///
+    /// The old shell behavior rebuilt the WHOLE client per network change
+    /// -- engine, embedded daemon, pumps -- and four transitions in four
+    /// minutes stacked engines until Android's low-memory killer shot the
+    /// process. This swaps only the relay WebSocket via the failover
+    /// primitive: the fresh session is built and verified live BEFORE the
+    /// old one is drained, so a failure leaves the existing session
+    /// intact and the caller falls back or retries.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatFfiError`] when the client is REST-only or the fresh session
+    /// never goes live -- the shell falls back to a full rebuild.
+    pub async fn reconnect_relay(&self) -> Result<(), ChatFfiError> {
+        self.inner
+            .reconnect_relay()
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
     /// The local agent id as lowercase 64-character hex.
     ///
     /// Returns an empty string when the client was built without chat state

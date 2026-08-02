@@ -1974,6 +1974,42 @@ mod tests {
         );
     }
 
+    /// The r14 reconnect case: `replace_primary` to the SAME url must
+    /// still build a fresh session and swap it in — a network-identity
+    /// change (Wi-Fi to cellular) kills the TCP flow while the URL stays
+    /// unchanged. Same-url is deliberately NOT a no-op at this layer;
+    /// the no-op short-circuit lives in `Client::migrate_primary`, where
+    /// "already there" is the right answer.
+    #[tokio::test]
+    async fn replace_primary_same_url_swaps_in_a_fresh_session() {
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://relay-a.test/v1/ws".into(),
+            denylist,
+            Arc::new(|_| {}),
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+        let old_handle = mh.slot_zero_handle().expect("slot 0 present");
+
+        mh.replace_primary("wss://relay-a.test/v1/ws")
+            .await
+            .expect("same-url replace must succeed");
+
+        let new_handle = mh.slot_zero_handle().expect("slot 0 present");
+        assert!(
+            !Arc::ptr_eq(&old_handle, &new_handle),
+            "same-url reconnect must install a FRESH session, not keep the dead one",
+        );
+        assert_eq!(
+            mh.slot_zero_handle().map(|h| h.url().to_string()),
+            Some("wss://relay-a.test/v1/ws".to_string()),
+            "primary URL is unchanged across an in-place reconnect",
+        );
+    }
+
     /// THE CORRECTNESS BAR: inbound liveness follows the swap. An inbound
     /// delivered via the NEW slot-0 handle reaches `on_inbound`; an inbound
     /// delivered via the OLD (torn-down) handle does NOT.

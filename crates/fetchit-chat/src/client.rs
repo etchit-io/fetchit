@@ -1366,6 +1366,53 @@ impl Client {
         Ok(())
     }
 
+    /// Reconnect the primary relay IN PLACE: same URL, fresh session.
+    ///
+    /// The mobile shell calls this when the default network's identity
+    /// changes (Wi-Fi to cellular, Wi-Fi roam): the old TCP flow is dead,
+    /// but nothing else about the client is. The previous shell behavior
+    /// tore down the WHOLE client -- including the embedded daemon -- per
+    /// network change; four transitions in four minutes stacked engines
+    /// until Android's low-memory killer shot the process (observed
+    /// 2026-08-02). This reuses the failover swap primitive
+    /// ([`crate::transport::MultiHomeTransport::replace_primary`]):
+    /// build-and-verify the new session first, then drain the old one, so
+    /// a failed reconnect leaves the existing slot intact and the caller
+    /// simply retries. No migration ceremony -- same relay, so no
+    /// forwarding record, no card regeneration, no failover event.
+    ///
+    /// The pair record is republished best-effort so the relay's live
+    /// agent-to-session mapping re-registers even if the swap raced a
+    /// relay-side reap of the dead session.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::Invalid`] when the client is REST-only or has no
+    /// primary pinned. [`ChatError::MessageTransport`] when the fresh
+    /// session cannot be built or never goes live -- the old slot is
+    /// untouched in that case, so retrying is always safe.
+    pub async fn reconnect_relay(&self) -> Result<()> {
+        let Some(mh) = self.multi_home.as_ref() else {
+            return Err(ChatError::Invalid(
+                "no relay transport; reconnect_relay requires relay mode".into(),
+            ));
+        };
+        let url = {
+            let snapshot = self.primary_relay_url.read().await.clone();
+            snapshot.ok_or_else(|| {
+                ChatError::Invalid("no primary relay pinned; nothing to reconnect".into())
+            })?
+        };
+        mh.replace_primary(&url)
+            .await
+            .map_err(|e| ChatError::MessageTransport(format!("relay reconnect: {e}")))?;
+        log::info!("[chat] relay reconnected in place at {url}");
+        if let Err(e) = self.publish_pair_record().await {
+            log::warn!("[chat] relay reconnect: pair-record republish failed: {e}");
+        }
+        Ok(())
+    }
+
     /// Best-effort T9 layer-2 heal: build, sign, and POST a forwarding
     /// record at the OLD (still-alive) relay pointing at `new_url`. Logs and
     /// returns on any failure; the migration has already committed.

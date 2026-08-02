@@ -42,6 +42,15 @@ interface ChatGateway {
      */
     suspend fun setMeshActive(active: Boolean) {}
 
+    /**
+     * Reconnect the relay session in place after a network-identity
+     * change -- the fresh session is verified live before the old one is
+     * drained, so a thrown error means the existing session is intact and
+     * the caller may fall back to a full rebuild. Default no-op so test
+     * fakes stay valid.
+     */
+    suspend fun reconnectRelay() {}
+
     /** Returns a `x0x://pair/…` URI encoding this agent's pairing offer. */
     suspend fun pairShareUri(): String
 
@@ -326,6 +335,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override fun agentIdHex(): String = inner.agentIdHex()
     override fun pairPublishOutcome(): String? = inner.pairPublishOutcome()
     override suspend fun setMeshActive(active: Boolean) = inner.setMeshActive(active)
+
+    override suspend fun reconnectRelay() = inner.reconnectRelay()
 
     override suspend fun pairShareUri(): String = inner.pairShareUri()
     override suspend fun importPairUri(uri: String) = inner.importPairUri(uri)

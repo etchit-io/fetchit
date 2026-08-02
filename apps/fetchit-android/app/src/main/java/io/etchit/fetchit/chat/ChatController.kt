@@ -687,7 +687,27 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      * nav-away+back); state after a failed rebuild is a clean disconnect.
      */
     suspend fun rebuildGatewayOnNetworkChange() {
-        if (gateway == null) return
+        val gw = gateway ?: return
+        // Reconnect ONLY the relay session in place. The full rebuild below
+        // tears down the whole client -- engine, embedded daemon, pumps --
+        // and a phone crossing networks repeatedly stacked engines until
+        // Android's low-memory killer shot the process (2026-08-02). The
+        // in-place swap verifies the fresh session live BEFORE draining
+        // the old one, so a thrown error means nothing changed and the
+        // full rebuild below is a safe fallback.
+        try {
+            gw.reconnectRelay()
+            android.util.Log.i("fetchit.chat", "relay reconnected in place after network change")
+            return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w(
+                "fetchit.chat",
+                "in-place relay reconnect failed; falling back to full rebuild",
+                e,
+            )
+        }
         disconnect()
         try {
             ensureGateway()
