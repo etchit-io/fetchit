@@ -6334,7 +6334,7 @@ dependencies = [
 [[package]]
 name = "saorsa-gossip-pubsub"
 version = "0.5.67"
-source = "git+https://github.com/josh-clsn/x0x.git?rev=1c6631ed78ee2b0c9111a034b701375ff6062075#1c6631ed78ee2b0c9111a034b701375ff6062075"
+source = "git+https://github.com/josh-clsn/x0x.git?rev=bd78c51f6fea2a4334edb732eb8f21649cd11977#bd78c51f6fea2a4334edb732eb8f21649cd11977"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9086,7 +9086,7 @@ dependencies = [
 [[package]]
 name = "x0x"
 version = "0.34.3"
-source = "git+https://github.com/josh-clsn/x0x.git?rev=1c6631ed78ee2b0c9111a034b701375ff6062075#1c6631ed78ee2b0c9111a034b701375ff6062075"
+source = "git+https://github.com/josh-clsn/x0x.git?rev=bd78c51f6fea2a4334edb732eb8f21649cd11977#bd78c51f6fea2a4334edb732eb8f21649cd11977"
 dependencies = [
  "ant-quic",
  "anyhow",
