@@ -2148,22 +2148,63 @@ impl Client {
             return Ok(false);
         };
         let local_hex = chat.identity.agent_id_hex().to_owned();
+        let peers: Vec<String> = conv
+            .members
+            .iter()
+            .flat_map(|m| &m.devices)
+            .filter(|d| d.agent_id_hex != local_hex)
+            .map(|d| d.agent_id_hex.clone())
+            .collect();
+        if peers.is_empty() {
+            return Ok(false);
+        }
+
+        // Re-resolve each peer's pair-record from the relay FIRST. The
+        // on-disk card is not a trustworthy source on its own: the
+        // receive path's lazy resolve only fires when a card is absent
+        // or carries no ML-DSA key (`card_needs_resolve`), so a peer
+        // that re-mints its vault leaves a stale-but-complete card that
+        // is never refreshed. Best-effort throughout -- no relay
+        // configured (unit-test / REST-only mode), a 404, or an
+        // unreachable relay just falls through to the cards already on
+        // disk. `save_imported` merges, so a resolve can only replace a
+        // key with a signed, agent-id-bound one, never blank it.
+        if let Some(relay) = self
+            .primary_relay_url
+            .read()
+            .await
+            .as_deref()
+            .and_then(|s| url::Url::parse(s).ok())
+        {
+            let http = crate::relay_http::guarded_client();
+            for agent_id_hex in &peers {
+                if let Err(e) = crate::messages::resolve_and_persist_member_card(
+                    &relay,
+                    &http,
+                    &chat.layout,
+                    agent_id_hex,
+                )
+                .await
+                {
+                    log::debug!(
+                        "[chat] roster resolve skipped for {}: {e}",
+                        &agent_id_hex[..8.min(agent_id_hex.len())]
+                    );
+                }
+            }
+        }
+
         // Collect the freshest key material per peer device id.
         let mut fresh: std::collections::HashMap<String, (String, Option<String>)> =
             std::collections::HashMap::new();
-        for member in &conv.members {
-            for device in &member.devices {
-                if device.agent_id_hex == local_hex {
-                    continue;
-                }
-                if let Ok(Some(card)) =
-                    crate::messages::StoredContactCard::load(&chat.layout, &device.agent_id_hex)
-                {
-                    fresh.insert(
-                        device.agent_id_hex.clone(),
-                        (card.kem_public_key_b64, card.agent_public_key_b64),
-                    );
-                }
+        for agent_id_hex in peers {
+            if let Ok(Some(card)) =
+                crate::messages::StoredContactCard::load(&chat.layout, &agent_id_hex)
+            {
+                fresh.insert(
+                    agent_id_hex,
+                    (card.kem_public_key_b64, card.agent_public_key_b64),
+                );
             }
         }
         if fresh.is_empty() {
@@ -7762,6 +7803,248 @@ mod tests {
             recovering: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
         (client, dir)
+    }
+
+    // ── #297 ladder rung 1: roster refresh before re-key ─────────
+
+    /// Build a DM whose peer device carries `stale_kem`, and drop a
+    /// contact card holding `card_kem` on disk. Returns (client, dir,
+    /// `group_id_hex`, `peer_agent_id_hex`).
+    async fn dm_with_card(
+        stale_kem: &str,
+        card_kem: &str,
+    ) -> (Client, tempfile::TempDir, String, String) {
+        let (client, dir) = test_client_no_denylist();
+        let chat = client.chat.as_ref().expect("chat state");
+        let local_hex = chat.identity.agent_id_hex().to_owned();
+        let local_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: local_hex,
+                kem_public_key_b64: B64.encode(chat.identity.kem_public_key()),
+                agent_public_key_b64: None,
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let peer_signer = MlDsaSigner::generate().unwrap();
+        let peer_hex = hex::encode(peer_signer.agent_id());
+        let peer_member = Member {
+            user_id_hex: None,
+            devices: vec![MemberDevice {
+                agent_id_hex: peer_hex.clone(),
+                kem_public_key_b64: stale_kem.to_owned(),
+                agent_public_key_b64: Some(B64.encode(peer_signer.public_key())),
+                added_at_epoch: 0,
+                status: MemberDeviceStatus::Active,
+            }],
+            joined_at_epoch: 0,
+        };
+        let conv = Conversation::new_dm(local_member, peer_member, None).unwrap();
+        let group_id_hex = conv.group_id_hex.clone();
+        chat.registry.save(&conv).await.unwrap();
+
+        crate::messages::StoredContactCard {
+            agent_id_hex: peer_hex.clone(),
+            display_name: "peer".to_owned(),
+            kem_public_key_b64: card_kem.to_owned(),
+            agent_public_key_b64: Some(B64.encode(peer_signer.public_key())),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: None,
+        }
+        .save(&chat.layout)
+        .unwrap();
+
+        (client, dir, group_id_hex, peer_hex)
+    }
+
+    /// The wedge this rung exists for: the peer re-minted its vault, so
+    /// the conversation's recorded KEM key is stale while the contact
+    /// card on disk is current. A re-key that seals against the stale
+    /// key produces a Welcome the peer cannot open (ML-KEM implicit
+    /// rejection surfaces as `AeadOpenFailed`, never a decap error), so
+    /// the refresh must fold the card's key in FIRST.
+    #[tokio::test]
+    async fn refresh_roster_folds_fresh_card_key_over_stale_device_entry() {
+        let stale = B64.encode(vec![0u8; 1184]);
+        let fresh = B64.encode(vec![7u8; 1184]);
+        let (client, _dir, gid, peer_hex) = dm_with_card(&stale, &fresh).await;
+
+        assert!(
+            client.refresh_conversation_roster(&gid).await.unwrap(),
+            "a card key differing from the recorded device key must fold"
+        );
+
+        let after = client
+            .chat
+            .as_ref()
+            .unwrap()
+            .registry
+            .get(&gid)
+            .await
+            .unwrap()
+            .expect("conversation");
+        let device = after
+            .members
+            .iter()
+            .flat_map(|m| &m.devices)
+            .find(|d| d.agent_id_hex == peer_hex)
+            .expect("peer device");
+        assert_eq!(
+            device.kem_public_key_b64, fresh,
+            "the re-key must seal against the peer's CURRENT KEM key"
+        );
+    }
+
+    /// A refresh that changes nothing must report `false` and not
+    /// rewrite the vault -- the watchdog calls this on every forced
+    /// re-key, so a no-op has to stay a no-op.
+    #[tokio::test]
+    async fn refresh_roster_is_a_no_op_when_the_card_already_matches() {
+        let same = B64.encode(vec![3u8; 1184]);
+        let (client, _dir, gid, _peer) = dm_with_card(&same, &same).await;
+        assert!(!client.refresh_conversation_roster(&gid).await.unwrap());
+    }
+
+    /// Build a signed `PairRecordV1` advertising `kem` as the device's
+    /// current ML-KEM public key.
+    fn signed_pair_record(
+        kem: &[u8],
+        relay: &str,
+    ) -> fetchit_relay_proto::pair_record::PairRecordV1 {
+        use fetchit_relay_proto::pair_record::{pair_signing_input, PairRecordV1};
+        use saorsa_pqc::api::sig::{MlDsa, MlDsaVariant};
+
+        let dsa = MlDsa::new(MlDsaVariant::MlDsa65);
+        let (pk, sk) = dsa.generate_keypair().unwrap();
+        let pk_bytes = pk.to_bytes();
+        let agent_id_hex = hex::encode(fetchit_relay_proto::derive_agent_id(&pk_bytes));
+        let relays = vec![relay.to_owned()];
+        let input = pair_signing_input(&agent_id_hex, &pk_bytes, kem, &relays, 1_000).unwrap();
+        let sig = dsa
+            .sign(&sk, &fetchit_relay_proto::agent_sign_input(&input))
+            .unwrap()
+            .to_bytes();
+        PairRecordV1 {
+            record_version: fetchit_relay_proto::pair_record::RECORD_VERSION_V1,
+            agent_id_hex,
+            ml_dsa_pubkey_b64: B64.encode(&pk_bytes),
+            kem_pubkey_b64: B64.encode(kem),
+            machine_id: String::new(),
+            advertised_relays: relays,
+            issued_at_ms: 1_000,
+            sig_b64: B64.encode(sig),
+        }
+    }
+
+    /// The PRODUCTION wedge, end to end. A peer that re-mints its vault
+    /// leaves BOTH the conversation member entry and the on-disk contact
+    /// card holding its dead KEM key: the lazy card-resolve on the
+    /// receive path only fires when a card is missing or has no signing
+    /// key, so a stale-but-complete card is never refreshed. Only the
+    /// peer's relay pair-record carries the live key. A roster refresh
+    /// that reads local disk alone therefore heals nothing -- it must
+    /// re-resolve from the relay first.
+    #[tokio::test]
+    async fn refresh_roster_re_resolves_from_the_relay_when_the_local_card_is_also_stale() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let relay_url = format!("{}/", server.uri());
+        let fresh_kem = vec![7u8; 1184];
+        let record = signed_pair_record(&fresh_kem, &relay_url);
+        let peer_hex = record.agent_id_hex.clone();
+        let stale = B64.encode(vec![0u8; 1184]);
+        let fresh = B64.encode(&fresh_kem);
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/pair-record/{peer_hex}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .mount(&server)
+            .await;
+
+        let (client, _dir) = test_client_no_denylist();
+        *client.primary_relay_url.write().await = Some(relay_url);
+        let chat = client.chat.as_ref().unwrap();
+        let local_hex = chat.identity.agent_id_hex().to_owned();
+        let conv = Conversation::new_dm(
+            Member {
+                user_id_hex: None,
+                devices: vec![MemberDevice {
+                    agent_id_hex: local_hex,
+                    kem_public_key_b64: B64.encode(chat.identity.kem_public_key()),
+                    agent_public_key_b64: None,
+                    added_at_epoch: 0,
+                    status: MemberDeviceStatus::Active,
+                }],
+                joined_at_epoch: 0,
+            },
+            Member {
+                user_id_hex: None,
+                devices: vec![MemberDevice {
+                    agent_id_hex: peer_hex.clone(),
+                    kem_public_key_b64: stale.clone(),
+                    agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
+                    added_at_epoch: 0,
+                    status: MemberDeviceStatus::Active,
+                }],
+                joined_at_epoch: 0,
+            },
+            None,
+        )
+        .unwrap();
+        let gid = conv.group_id_hex.clone();
+        chat.registry.save(&conv).await.unwrap();
+
+        // The card on disk is stale too -- exactly what the receive path
+        // leaves behind, since it holds a signing key and so never
+        // re-resolves.
+        crate::messages::StoredContactCard {
+            agent_id_hex: peer_hex.clone(),
+            display_name: "peer".to_owned(),
+            kem_public_key_b64: stale,
+            agent_public_key_b64: Some(record.ml_dsa_pubkey_b64.clone()),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: None,
+        }
+        .save(&chat.layout)
+        .unwrap();
+
+        assert!(
+            client.refresh_conversation_roster(&gid).await.unwrap(),
+            "the relay's live pair-record must reach the conversation"
+        );
+        let after = chat
+            .registry
+            .get(&gid)
+            .await
+            .unwrap()
+            .expect("conversation");
+        let device = after
+            .members
+            .iter()
+            .flat_map(|m| &m.devices)
+            .find(|d| d.agent_id_hex == peer_hex)
+            .expect("peer device");
+        assert_eq!(
+            device.kem_public_key_b64, fresh,
+            "a Welcome sealed to the old key is silently unopenable"
+        );
+    }
+
+    /// An unknown group is not an error: the watchdog may race a
+    /// conversation being removed.
+    #[tokio::test]
+    async fn refresh_roster_reports_false_for_an_unknown_group() {
+        let (client, _dir) = test_client_no_denylist();
+        assert!(!client
+            .refresh_conversation_roster(&"9".repeat(64))
+            .await
+            .unwrap());
     }
 
     // ── M6.7 PairRecordPush send path ────────────────────────────
