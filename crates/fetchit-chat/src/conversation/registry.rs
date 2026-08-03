@@ -436,7 +436,6 @@ impl ConversationRegistry {
         }
     }
 
-    /// Atomically check `(sender, nonce)` against the conversation's
     /// Wedge-watchdog bookkeeping: note PROGRESS — a successful inbound
     /// decrypt (message or receipt) — on `group_id_hex`. Stamps the
     /// progress + inbound clocks and records the current epoch as the
@@ -465,8 +464,19 @@ impl ConversationRegistry {
         let _ = self
             .mutate_in_place(group_id_hex, |conv| {
                 conv.wedge_last_inbound_ms = now_ms;
+                // Only an epoch AHEAD of ours is evidence the peer moved
+                // on. A frame at or below our epoch is a LATE frame --
+                // a relay outbox flushing after a background stint, past
+                // the 60s prior-key window -- which is not a wedge and
+                // must not drive a re-key. This is also the bound that
+                // keeps a peer-supplied epoch from inflating the forced
+                // jump: the value can only ever exceed our own by
+                // whatever the sender claims, and the ladder clamps that
+                // to `MAX_FORCED_EPOCH_JUMP` before using it.
                 if let Some(e) = frame_epoch {
-                    conv.wedge_max_stale_epoch = conv.wedge_max_stale_epoch.max(e);
+                    if e > conv.current_epoch {
+                        conv.wedge_max_stale_epoch = conv.wedge_max_stale_epoch.max(e);
+                    }
                 }
                 MutateAction::Persist(())
             })
@@ -506,6 +516,7 @@ impl ConversationRegistry {
             .collect()
     }
 
+    /// Atomically check `(sender, nonce)` against the conversation's
     /// replay window and record it if fresh. The whole read-modify-write
     /// runs under `by_group_id`, so concurrent inbound pumps on
     /// the same group serialise rather than both observing an empty

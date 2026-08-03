@@ -971,17 +971,39 @@ mod tests {
         );
 
         let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
-        let stale_member = local_member(&aid_b, &B64.encode(bob_old_id.kem_public_key()));
-        let conv = Conversation::new_dm(alice_member.clone(), stale_member, None).unwrap();
+        let bob_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member, bob_member, None).unwrap();
 
         let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
         install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
         let registry_b =
             ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
 
-        // Half 1 — stale recorded key: the Welcome is undeliverable, and
-        // the error names the wrong layer.
-        let stale_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+        // Setup: pairing succeeded, so Bob HOLDS this conversation and
+        // both halves below are genuine RE-KEYS of one group id rather
+        // than first installs.
+        let install = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        assert!(matches!(
+            dispatch_inbound(install[0].envelope.clone(), &bob_id, &registry_b)
+                .await
+                .unwrap(),
+            InboundDispatch::Welcomed { .. }
+        ));
+
+        // Half 1 — Bob re-mints his vault, so the key Alice has on
+        // record for his device is now dead. Her re-key seals to it.
+        let mut stale_rekey = conv.clone();
+        for member in &mut stale_rekey.members {
+            for device in &mut member.devices {
+                if device.agent_id_hex == aid_b {
+                    device.kem_public_key_b64 = B64.encode(bob_old_id.kem_public_key());
+                }
+            }
+        }
+        stale_rekey.advance_epoch([9u8; 32]);
+        let stale_outbox = build_welcome_outbox(&stale_rekey, &alice_id, [0u8; 32], &alice_signer)
             .await
             .unwrap();
         let stale_result = dispatch_inbound(stale_outbox[0].envelope.clone(), &bob_id, &registry_b)
@@ -992,15 +1014,18 @@ mod tests {
             "a Welcome sealed to a stale KEM key must surface as AeadOpenFailed \
              (ML-KEM implicit rejection), got {stale_result:?}",
         );
-        assert!(
-            !matches!(stale_result, InboundDispatch::KemDecapFailed),
-            "implicit rejection means the decap step CANNOT report the failure",
-        );
 
-        // Half 2 — the roster refresh (ladder rung 1) folds Bob's live
-        // key in; the identical re-key now lands.
-        let fresh_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
-        let healed = Conversation::new_dm(alice_member, fresh_member, None).unwrap();
+        // Half 2 — ladder rung 1 folds Bob's live key into the SAME
+        // conversation; the identical re-key now lands as a re-key.
+        let mut healed = stale_rekey.clone();
+        for member in &mut healed.members {
+            for device in &mut member.devices {
+                if device.agent_id_hex == aid_b {
+                    device.kem_public_key_b64 = B64.encode(bob_id.kem_public_key());
+                }
+            }
+        }
+        healed.advance_epoch([11u8; 32]);
         let fresh_outbox = build_welcome_outbox(&healed, &alice_id, [0u8; 32], &alice_signer)
             .await
             .unwrap();
@@ -1009,11 +1034,12 @@ mod tests {
                 .await
                 .unwrap();
         match healed_result {
-            InboundDispatch::Welcomed { conversation } => {
-                assert_eq!(conversation.group_id_hex, healed.group_id_hex);
+            InboundDispatch::Rekeyed { conversation } => {
+                assert_eq!(conversation.group_id_hex, conv.group_id_hex);
                 assert_eq!(conversation.current_key_b64, healed.current_key_b64);
+                assert_eq!(conversation.current_epoch, healed.current_epoch);
             }
-            other => panic!("refreshed roster must let the re-key land, got {other:?}"),
+            other => panic!("a refreshed roster must let the re-key FOLD, got {other:?}"),
         }
     }
 

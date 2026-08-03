@@ -42,6 +42,15 @@ const WEDGE_RECENT_WINDOW_MS: u64 = 90_000;
 /// Minimum spacing between forced-re-key attempts per conversation
 /// (#297 P2 ladder damping).
 const LADDER_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+/// Ceiling on how far a forced re-key will jump above our own epoch.
+///
+/// The jump target is derived from `wedge_max_stale_epoch`, which is
+/// read off inbound frames and is therefore PEER-SUPPLIED. A real peer
+/// runs at most a couple of epochs ahead; anything larger is a bug or a
+/// forged frame, and an unbounded jump would let one signed frame push
+/// the conversation to `u32::MAX` where no further Welcome can ever
+/// exceed it.
+const MAX_FORCED_EPOCH_JUMP: u32 = 16;
 
 /// Last forced-re-key attempt per conversation, process-wide (a device
 /// runs one client; damping must survive client rebuilds). Size-guarded
@@ -2169,13 +2178,13 @@ impl Client {
         // unreachable relay just falls through to the cards already on
         // disk. `save_imported` merges, so a resolve can only replace a
         // key with a signed, agent-id-bound one, never blank it.
-        if let Some(relay) = self
-            .primary_relay_url
-            .read()
-            .await
-            .as_deref()
-            .and_then(|s| url::Url::parse(s).ok())
-        {
+        // Clone the URL and DROP the guard before the loop: each resolve
+        // below is a 10s-timeout HTTP GET with retry, and holding a read
+        // guard across N of them would park a queued home-relay failover
+        // write (tokio's RwLock is write-preferring) and stall every
+        // later reader -- including the send path -- behind the refresh.
+        let primary = self.primary_relay_url.read().await.clone();
+        if let Some(relay) = primary.as_deref().and_then(|s| url::Url::parse(s).ok()) {
             let http = crate::relay_http::guarded_client();
             for agent_id_hex in &peers {
                 if let Err(e) = crate::messages::resolve_and_persist_member_card(
@@ -2201,6 +2210,24 @@ impl Client {
             if let Ok(Some(card)) =
                 crate::messages::StoredContactCard::load(&chat.layout, &agent_id_hex)
             {
+                // Validate before installing. A pair-record signature
+                // covers the KEM bytes but says nothing about their
+                // LENGTH, so a peer can self-sign a record advertising a
+                // malformed key. Folding one in would replace a
+                // known-good key and then fail `build_welcome_outbox`
+                // for the WHOLE conversation on every later re-key --
+                // one bad device permanently blocking everyone else.
+                // Skip it and keep what pairing established.
+                let usable = base64::engine::general_purpose::STANDARD
+                    .decode(card.kem_public_key_b64.as_bytes())
+                    .is_ok_and(|b| b.len() == crate::chat_crypto::KEM_PUBLIC_KEY_LEN);
+                if !usable {
+                    log::warn!(
+                        "[chat] roster refresh: ignoring malformed KEM key for {}",
+                        &agent_id_hex[..8.min(agent_id_hex.len())]
+                    );
+                    continue;
+                }
                 fresh.insert(
                     agent_id_hex,
                     (card.kem_public_key_b64, card.agent_public_key_b64),
@@ -5562,16 +5589,42 @@ async fn try_rekey_and_build_welcomes(
     // ignores our Welcome (`<=` its epoch) and healing would cost a
     // second damped cycle. The floor is computed from the snapshot so
     // the built Welcomes and the CAS commit land the same epoch.
+    // `wedge_max_stale_epoch` is peer-supplied, so it is clamped to a
+    // bounded jump above our own epoch. Without the clamp one signed
+    // frame claiming `u32::MAX` would drive the conversation to the
+    // ceiling (and, before the saturating fix, wrap it to 0).
     let forced_floor = if force {
-        snapshot.current_epoch.max(snapshot.wedge_max_stale_epoch)
+        snapshot
+            .wedge_max_stale_epoch
+            .min(snapshot.current_epoch.saturating_add(MAX_FORCED_EPOCH_JUMP))
+            .max(snapshot.current_epoch)
     } else {
         snapshot.current_epoch
     };
 
+    // Deterministic tiebreak. Both sides of a wedged DM compute the same
+    // floor (each takes `max(mine, theirs)`), so without this they land
+    // the SAME epoch, the `<=` fold discards BOTH Welcomes, and the pair
+    // sits at one epoch holding two different keys -- a worse wedge than
+    // the one being cured, and a stable loop, since the next cycle
+    // repeats the collision. The device with the higher agent id claims
+    // the higher epoch; the other's Welcome loses the comparison and is
+    // ignored, so exactly one key survives. Agent ids are unique and
+    // both sides evaluate the same predicate with opposite results.
+    let local_agent_hex = identity.agent_id_hex();
+    let highest_peer = snapshot
+        .members
+        .iter()
+        .flat_map(|m| &m.devices)
+        .map(|d| d.agent_id_hex.as_str())
+        .filter(|a| *a != local_agent_hex)
+        .max();
+    let tiebreak = u32::from(force && highest_peer.is_some_and(|p| local_agent_hex > p));
+    let target_floor = forced_floor.saturating_add(tiebreak);
+
     let new_key = random_symmetric_key(&mut OsRng);
     let mut prospective = snapshot.clone();
-    prospective.current_epoch = forced_floor;
-    prospective.advance_epoch(new_key);
+    prospective.advance_epoch_to(target_floor, new_key);
     let welcomes = match build_welcome_outbox(&prospective, identity, machine_id, signer).await {
         Ok(w) => w,
         Err(e) => {
@@ -5594,8 +5647,25 @@ async fn try_rekey_and_build_welcomes(
             if !policy_ok || conv.current_epoch != snapshot_epoch {
                 return MutateAction::Skip(false);
             }
-            conv.current_epoch = forced_floor;
-            conv.advance_epoch(new_key);
+            conv.advance_epoch_to(target_floor, new_key);
+            if force {
+                // Clear the wedge clocks the ladder just acted on.
+                //
+                // `wedge_should_trip` vetoes while `current_epoch >
+                // wedge_progress_epoch`, and `wedge_progress_epoch` only
+                // moves on a SUCCESSFUL decrypt -- which is exactly what
+                // a wedge prevents. Leaving it behind would make the
+                // ladder one-shot per conversation: if this Welcome does
+                // not land (peer offline, roster still wrong), the
+                // watchdog could never trip again and the conversation
+                // would stay wedged forever. Re-basing the mark keeps
+                // the retry available, damped only by
+                // `LADDER_COOLDOWN_MS`.
+                conv.wedge_progress_epoch = conv.current_epoch;
+                // The peer epoch we just jumped past is spent; keeping it
+                // would re-drive the same floor on every later attempt.
+                conv.wedge_max_stale_epoch = 0;
+            }
             MutateAction::Persist(true)
         })
         .await?;

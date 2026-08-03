@@ -370,13 +370,31 @@ impl Conversation {
     /// Bump epoch + install a new `current_key`. Pushes the old key into
     /// `prior_keys` with a 60s expiry.
     pub fn advance_epoch(&mut self, new_key: [u8; AEAD_KEY_LEN]) {
+        self.advance_epoch_to(self.current_epoch, new_key);
+    }
+
+    /// Advance to `floor + 1` (or the normal next epoch, whichever is
+    /// higher), installing `new_key`.
+    ///
+    /// The outgoing key is ALWAYS archived under the epoch it actually
+    /// served — never under `floor`. Setting `current_epoch = floor`
+    /// before calling [`Self::advance_epoch`] would file the live key
+    /// under the peer's epoch instead of its own, which loses every
+    /// in-flight frame at our real epoch AND makes a genuine frame at
+    /// `floor` open with the wrong key — reporting `AeadOpenFailed`,
+    /// the exact corruption signature the wedge ladder exists to cure.
+    ///
+    /// Saturating throughout: `floor` is derived from a peer-supplied
+    /// epoch, and a wrap to 0 would strand the conversation below every
+    /// future Welcome (`<=` is ignored) forever.
+    pub fn advance_epoch_to(&mut self, floor: u32, new_key: [u8; AEAD_KEY_LEN]) {
         let now = now_ms();
         self.prior_keys.push(PriorKey {
             epoch: self.current_epoch,
             key_b64: self.current_key_b64.clone(),
             expires_at_ms: now + PRIOR_KEY_WINDOW_MS,
         });
-        self.current_epoch += 1;
+        self.current_epoch = floor.max(self.current_epoch).saturating_add(1);
         self.current_key_b64 = B64.encode(new_key);
         self.last_rekey_at_ms = now;
         self.sweep_prior_keys();
@@ -959,6 +977,76 @@ mod tests {
             wedge_max_stale_epoch: 0,
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
+    }
+
+    /// Build a conversation at `epoch` holding `key`.
+    fn conv_at(epoch: u32, key: [u8; 32]) -> Conversation {
+        Conversation {
+            group_id_hex: "0".repeat(64),
+            name: None,
+            members: vec![],
+            current_epoch: epoch,
+            current_key_b64: B64.encode(key),
+            prior_keys: vec![],
+            own_role: Role::Admin,
+            created_at_ms: 0,
+            last_rekey_at_ms: 0,
+            auto_rekey_interval_ms: 1,
+            trust_state: TrustState::Confirmed,
+            seen_nonces: BTreeMap::new(),
+            history: VecDeque::new(),
+            own_group_send_seq: 0,
+            group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
+        }
+    }
+
+    /// #297 regression. The forced re-key jumps past the peer's epoch,
+    /// and the outgoing key MUST be archived under the epoch it actually
+    /// served. Filing it under the jump target instead (the original
+    /// `current_epoch = floor; advance_epoch()` form) loses every
+    /// in-flight frame at our real epoch AND makes a genuine frame at
+    /// the target open with the wrong key.
+    #[test]
+    fn advance_epoch_to_archives_the_outgoing_key_at_its_true_epoch() {
+        let live = [7u8; 32];
+        let mut conv = conv_at(3, live);
+
+        conv.advance_epoch_to(7, [9u8; 32]);
+
+        assert_eq!(conv.current_epoch, 8, "must land past the peer's epoch");
+        assert_eq!(
+            conv.key_for_epoch(3).unwrap(),
+            Some(live),
+            "the epoch-3 key must still open epoch-3 frames",
+        );
+        assert_eq!(
+            conv.key_for_epoch(7).unwrap(),
+            None,
+            "we never served epoch 7; claiming that key would decrypt a \
+             genuine epoch-7 frame with the wrong key",
+        );
+    }
+
+    /// A floor at or below our own epoch is the ordinary +1 advance.
+    #[test]
+    fn advance_epoch_to_below_current_still_advances_by_one() {
+        let mut conv = conv_at(5, [1u8; 32]);
+        conv.advance_epoch_to(2, [2u8; 32]);
+        assert_eq!(conv.current_epoch, 6);
+    }
+
+    /// The floor is derived from a peer-supplied epoch. Wrapping to 0
+    /// would strand the conversation below every future Welcome (`<=`
+    /// is ignored) with no way back.
+    #[test]
+    fn advance_epoch_to_saturates_instead_of_wrapping() {
+        let mut conv = conv_at(u32::MAX - 1, [1u8; 32]);
+        conv.advance_epoch_to(u32::MAX, [2u8; 32]);
+        assert_eq!(conv.current_epoch, u32::MAX, "must clamp, never wrap to 0");
     }
 
     #[test]

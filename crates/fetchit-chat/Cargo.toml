@@ -21,6 +21,22 @@ required-features = []
 name = "profile-fixture-gen"
 path = "src/bin/profile_fixture_gen.rs"
 
+# Test-only wedge injector (#297 device proof). It decrypts a vault,
+# rotates conversation epochs, and drops prior keys, so it must NOT be
+# built or shipped by default -- cargo's bin autodiscovery would
+# otherwise pick it up on a plain `cargo build -p fetchit-chat`.
+# Build explicitly: `cargo build -p fetchit-chat --features wedge-inject
+# --bin wedge_inject`.
+[[bin]]
+name = "wedge_inject"
+path = "src/bin/wedge_inject.rs"
+required-features = ["wedge-inject"]
+
+[features]
+# Opt-in gate for the wedge injector above. Never enable in a release
+# or shipped build.
+wedge-inject = []
+
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true

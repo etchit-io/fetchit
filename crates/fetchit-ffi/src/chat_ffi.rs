@@ -1683,12 +1683,6 @@ impl ChatClient {
             .collect())
     }
 
-    /// The accounts following the minted handle, as `@user@host` labels,
-    /// from the directory's owner-only list. Throws when no handle is
-    /// minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
-    ///
-    /// # Errors
-    /// [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
     /// Group ids currently in stale-epoch catch-up (#297 P1.4). The
     /// shell polls this on its pump cadence and renders the quiet
     /// "syncing…" affordance on matching conversations; empty when
@@ -1698,6 +1692,12 @@ impl ChatClient {
         self.inner.reconnecting_groups()
     }
 
+    /// The accounts following the minted handle, as `@user@host` labels,
+    /// from the directory's owner-only list. Throws when no handle is
+    /// minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
     pub async fn fedi_followers(&self) -> Result<Vec<String>, ChatFfiError> {
         let handle = self
             .fedi_actor_status()

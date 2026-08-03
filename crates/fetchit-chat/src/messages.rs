@@ -521,7 +521,38 @@ pub(crate) async fn resolve_and_persist_member_card(
 ) -> Result<bool> {
     match crate::pair::fetch_pair_record_by_id(relay, agent_id_hex, http).await {
         Ok(record) => {
+            // Anti-rollback. `verify_pair_record` deliberately does NOT
+            // check freshness ("callers that maintain per-agent
+            // watermarks must enforce the anti-replay property
+            // themselves"), and a peer's KEM keypair rotates
+            // independently of its agent id -- a re-minted vault leaves
+            // several validly-signed records under one identity. Without
+            // this, a hostile or merely stale relay can serve an OLDER
+            // signed record and we would write a dead KEM key back over
+            // a good one: at best the re-key ladder can never heal that
+            // conversation, at worst the attacker holds the retired KEM
+            // secret and our next Welcome is sealed to a key it can
+            // open. `<` (not `<=`) so re-fetching the current record
+            // stays idempotent.
+            let seen = crate::pair_record::current_watermark(layout, agent_id_hex)?.unwrap_or(0);
+            if record.issued_at_ms < seen {
+                log::warn!(
+                    "[chat] rejected rolled-back pair-record for {}: issued {} < seen {seen}",
+                    &agent_id_hex[..8.min(agent_id_hex.len())],
+                    record.issued_at_ms,
+                );
+                return Ok(false);
+            }
             card_from_pair_record(&record).save_imported(layout)?;
+            // Best-effort: a failed watermark write must not undo the
+            // card we just persisted, it only weakens the next check.
+            if let Err(e) = crate::pair_record::observe_external_watermark(
+                layout,
+                agent_id_hex,
+                record.issued_at_ms,
+            ) {
+                log::debug!("[chat] pair-record watermark write skipped: {e}");
+            }
             Ok(true)
         }
         Err(e) => {
