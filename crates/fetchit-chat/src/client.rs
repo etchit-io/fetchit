@@ -797,6 +797,13 @@ impl Client {
         self.fediverse.as_ref()
     }
 
+    /// The community denylist gate, when installed — the accepting
+    /// device enforces it for inbound follows (the bridge holds neither
+    /// keys nor the trust consumer).
+    pub(crate) fn denylist_gate(&self) -> Option<&Arc<dyn crate::denylist::DenylistCheck>> {
+        self.denylist.as_ref()
+    }
+
     /// Construct an M3 denylist consumer rooted at `denylist_url_base`
     /// (e.g. `https://etchit.io/v1`), spawn its background poll loop
     /// against `http`, and install it into this client's denylist gate.

@@ -579,6 +579,18 @@ pub enum FetchActorError {
     /// [`Actor::from_json_ld`] decoding (missing required field, etc.).
     #[error("Actor parse: {0}")]
     Parse(#[from] ActorError),
+
+    /// The fetched document claims an `id` it could not self-confirm:
+    /// re-fetching AT the claimed id did not return a document naming
+    /// itself. Treated as hostile — accepting it would let any host
+    /// impersonate an actor it does not control.
+    #[error("actor id mismatch: fetched {fetched_from}, document claims {claimed}")]
+    IdMismatch {
+        /// URL the original fetch was issued against.
+        fetched_from: String,
+        /// The unconfirmed `id` the document asserted.
+        claimed: String,
+    },
 }
 
 /// Fetch and parse a remote `ActivityPub` Actor JSON-LD document.

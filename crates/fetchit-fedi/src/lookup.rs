@@ -144,10 +144,39 @@ impl RemoteActor {
 /// [`crate::actor::fetch_actor`] (private-IP pre-flight, DNS pinning,
 /// no redirects, body cap, timeout).
 ///
+/// The returned document's `id` is BOUND to the URL it was fetched
+/// from: an `id` differing from the fetch URL is trusted only after one
+/// re-fetch AT the claimed id confirms the same claim (the Mastodon
+/// rule). Without this, any host could serve a document impersonating
+/// an actor it does not control, and every downstream sender binding —
+/// inbox dispatch, the follow-request queue, follower fan-out records —
+/// would be forgeable by a hostile instance.
+///
 /// # Errors
 ///
-/// Same [`FetchActorError`] surface as the strict fetch.
+/// Same [`FetchActorError`] surface as the strict fetch, plus
+/// [`FetchActorError::IdMismatch`] when the claimed id fails to
+/// self-confirm.
 pub async fn fetch_remote_actor(actor_url: &url::Url) -> Result<RemoteActor, FetchActorError> {
+    let actor = fetch_remote_actor_once(actor_url).await?;
+    if actor.id == *actor_url {
+        return Ok(actor);
+    }
+    // Exactly one hop: the claimed id must serve a document naming
+    // itself. The re-fetch rides the same SSRF-guarded client path.
+    let claimed = actor.id.clone();
+    let refetched = fetch_remote_actor_once(&claimed).await?;
+    if refetched.id == claimed {
+        Ok(refetched)
+    } else {
+        Err(FetchActorError::IdMismatch {
+            fetched_from: actor_url.to_string(),
+            claimed: refetched.id.to_string(),
+        })
+    }
+}
+
+async fn fetch_remote_actor_once(actor_url: &url::Url) -> Result<RemoteActor, FetchActorError> {
     let client = pinned_no_redirect_client(actor_url, ACTOR_FETCH_TIMEOUT).await?;
     let value = fetch_json_ld_at_url(&client, actor_url, ACTOR_FETCH_TIMEOUT).await?;
     RemoteActor::from_json_ld(&value).map_err(FetchActorError::Parse)

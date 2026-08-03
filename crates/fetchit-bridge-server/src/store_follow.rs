@@ -8,9 +8,11 @@
 //!   sender's word alone — the inbox has already HTTP-signature-verified
 //!   the `Accept` against the remote actor's key by the time it calls
 //!   [`Store::follow_accepted`]).
-//! * `followers` — actors following US. v1 policy is open follows: an
-//!   inbound (verified, denylist-passed) `Follow` inserts the row and the
-//!   caller auto-sends `Accept`. Manual approval is post-v1.
+//! * `followers` — actors following US. v1 policy is open follows: a
+//!   verified inbound `Follow` is QUEUED (`follow_requests`), and the
+//!   owner DEVICE — which holds the keys and the denylist consumer —
+//!   gates on the denylist, signs the `Accept`, and confirms the
+//!   follower. Manual approval is post-v1.
 //!
 //! Everything here is storage + state transitions; activity construction
 //! and signing live in the routes/delivery layer.
@@ -19,6 +21,10 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::error::BridgeError;
 use crate::store::Store;
+
+/// Per-actor bound on queued inbound follow requests; beyond it the
+/// oldest rows are evicted. Also the `LIMIT` on the owner's queue read.
+const MAX_QUEUED_FOLLOW_REQUESTS: i64 = 200;
 
 /// Outcome of [`Store::follow_request`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +341,12 @@ impl Store {
     /// Mastodon cannot correlate it. Queued even when the follower is
     /// already recorded: each inbound `Follow` deserves an `Accept`.
     ///
+    /// The queue is bounded per actor at [`MAX_QUEUED_FOLLOW_REQUESTS`]:
+    /// beyond it the OLDEST entries are evicted, so an attacker minting
+    /// endless throwaway follower actors displaces only their own spam
+    /// while the newest genuine requests survive (cross-review
+    /// 2026-08-03 finding 1).
+    ///
     /// # Errors
     /// [`BridgeError::Store`] on a database failure.
     pub async fn add_follow_request(
@@ -369,12 +381,25 @@ impl Store {
                     i64::try_from(now_ms).unwrap_or(i64::MAX)
                 ],
             )?;
+            c.execute(
+                "DELETE FROM follow_requests
+                 WHERE actor_id = ?1 AND follower_actor_url NOT IN (
+                     SELECT follower_actor_url FROM follow_requests
+                     WHERE actor_id = ?1
+                     ORDER BY received_ms DESC
+                     LIMIT ?2
+                 )",
+                params![actor_id, MAX_QUEUED_FOLLOW_REQUESTS],
+            )?;
             Ok(())
         })
         .await
     }
 
-    /// Pending inbound follow requests for `actor_id`, newest first.
+    /// Pending inbound follow requests for `actor_id`, newest first,
+    /// capped at [`MAX_QUEUED_FOLLOW_REQUESTS`] rows (mirrors
+    /// `inbox_list`'s bounded reads — an owner fetch must never scale
+    /// with attacker-controlled queue growth).
     ///
     /// # Errors
     /// [`BridgeError::Store`] on a database failure.
@@ -388,7 +413,8 @@ impl Store {
                 "SELECT follower_actor_url, follower_inbox_url,
                         follow_activity_id, received_ms
                  FROM follow_requests WHERE actor_id = ?1
-                 ORDER BY received_ms DESC",
+                 ORDER BY received_ms DESC
+                 LIMIT 200",
             )?;
             let rows = stmt.query_map(params![actor_id], |row| {
                 let received: i64 = row.get(3)?;
@@ -412,19 +438,28 @@ impl Store {
     /// the remote side retracted with `Undo(Follow)`). Returns `false`
     /// when nothing matched.
     ///
+    /// When `follow_activity_id` is `Some`, only a row carrying exactly
+    /// that id is consumed — a confirm answering an OLDER `Follow` then
+    /// leaves a newer, re-sent request queued for its own `Accept`
+    /// instead of silently dropping it (cross-review TOCTOU note).
+    /// `None` removes regardless (the `Undo` path, and older clients).
+    ///
     /// # Errors
     /// [`BridgeError::Store`] on a database failure.
     pub async fn remove_follow_request(
         &self,
         actor_id: &str,
         follower_actor_url: &str,
+        follow_activity_id: Option<&str>,
     ) -> Result<bool, BridgeError> {
         let (actor_id, follower) = (actor_id.to_owned(), follower_actor_url.to_owned());
+        let fid = follow_activity_id.map(str::to_owned);
         self.with_conn(move |c| {
             let n = c.execute(
                 "DELETE FROM follow_requests
-                 WHERE actor_id = ?1 AND follower_actor_url = ?2",
-                params![actor_id, follower],
+                 WHERE actor_id = ?1 AND follower_actor_url = ?2
+                   AND (?3 IS NULL OR follow_activity_id = ?3)",
+                params![actor_id, follower, fid],
             )?;
             Ok(n == 1)
         })
@@ -652,8 +687,60 @@ mod tests {
         assert_eq!(q[0].follow_activity_id, "their-follow-2");
         assert_eq!(q[0].follower_inbox_url, TGT_INBOX);
 
-        assert!(s.remove_follow_request(A, TGT).await.unwrap());
-        assert!(!s.remove_follow_request(A, TGT).await.unwrap());
+        assert!(s.remove_follow_request(A, TGT, None).await.unwrap());
+        assert!(!s.remove_follow_request(A, TGT, None).await.unwrap());
+        assert!(s.follow_requests_list(A).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_request_queue_evicts_oldest_beyond_cap() {
+        let s = store();
+        for i in 0..205u32 {
+            s.add_follow_request(
+                A,
+                &format!("https://spam.example/users/u{i}"),
+                &format!("https://spam.example/users/u{i}/inbox"),
+                &format!("https://spam.example/users/u{i}#follow/1"),
+                u64::from(1000 + i),
+            )
+            .await
+            .unwrap();
+        }
+        let q = s.follow_requests_list(A).await.unwrap();
+        assert_eq!(q.len(), 200, "queue is bounded per actor");
+        assert_eq!(
+            q[0].follower_actor_url, "https://spam.example/users/u204",
+            "newest survives"
+        );
+        assert!(
+            !q.iter()
+                .any(|r| r.follower_actor_url == "https://spam.example/users/u0"),
+            "oldest evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn matched_remove_spares_a_newer_resent_follow() {
+        // TOCTOU contract: a confirm answering an OLDER Follow must not
+        // consume a NEWER re-sent request that still needs its own Accept.
+        let s = store();
+        s.add_follow_request(A, TGT, TGT_INBOX, "their-follow-1", 1000)
+            .await
+            .unwrap();
+        s.add_follow_request(A, TGT, TGT_INBOX, "their-follow-2", 2000)
+            .await
+            .unwrap();
+        assert!(
+            !s.remove_follow_request(A, TGT, Some("their-follow-1"))
+                .await
+                .unwrap(),
+            "stale-id confirm consumes nothing"
+        );
+        assert_eq!(s.follow_requests_list(A).await.unwrap().len(), 1);
+        assert!(s
+            .remove_follow_request(A, TGT, Some("their-follow-2"))
+            .await
+            .unwrap());
         assert!(s.follow_requests_list(A).await.unwrap().is_empty());
     }
 
@@ -665,7 +752,7 @@ mod tests {
             .unwrap();
         assert!(s.follow_requests_list("agent-b").await.unwrap().is_empty());
         assert!(
-            !s.remove_follow_request("agent-b", TGT).await.unwrap(),
+            !s.remove_follow_request("agent-b", TGT, None).await.unwrap(),
             "another actor cannot consume the queue entry"
         );
         assert_eq!(s.follow_requests_list(A).await.unwrap().len(), 1);

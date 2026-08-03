@@ -82,19 +82,25 @@ pub async fn post_inbox(
     let Ok(sender_actor_url) = sender_url.parse::<url::Url>() else {
         return (StatusCode::BAD_REQUEST, "actor is not a url").into_response();
     };
-    let Ok(sender) = fetchit_fedi::lookup::fetch_remote_actor(&sender_actor_url).await else {
-        // A Delete whose sender is already gone (account erased — the
-        // 2026-08-02 drops were 410 tombstones) is unverifiable BY DESIGN:
-        // the signing key no longer exists anywhere. It is also
-        // unactionable — we hold no state to delete for an unknown actor.
-        // Acknowledge it so the remote stops retrying for two days;
-        // anything else unverifiable stays a retryable 502.
-        if activity.get("type").and_then(Value::as_str) == Some("Delete") {
-            tracing::info!(handle, sender = %sender_actor_url, "unverifiable Delete from gone sender ignored");
-            return (StatusCode::ACCEPTED, "ignored").into_response();
+    let sender = match fetchit_fedi::lookup::fetch_remote_actor(&sender_actor_url).await {
+        Ok(s) => s,
+        Err(e) => {
+            // A Delete whose sender is AUTHORITATIVELY gone (account
+            // erased — the 2026-08-02 drops were 410 tombstones) is
+            // unverifiable BY DESIGN: the signing key died with the
+            // account, and we hold no state for an unknown actor.
+            // Acknowledge it so the remote stops retrying for two days.
+            // Every transient failure class (timeout, 5xx, DNS, parse)
+            // stays a retryable 502 for EVERY activity type, Delete
+            // included — a momentary outage must never eat a delivery
+            // (cross-review 2026-08-03 finding 3).
+            if gone_delete_shortcut(&e, &activity) {
+                tracing::info!(handle, sender = %sender_actor_url, "unverifiable Delete from gone sender ignored");
+                return (StatusCode::ACCEPTED, "ignored").into_response();
+            }
+            tracing::warn!(handle, sender = %sender_actor_url, error = %e, "inbox: could not fetch sender actor");
+            return (StatusCode::BAD_GATEWAY, "could not fetch sender").into_response();
         }
-        tracing::warn!(handle, sender = %sender_actor_url, "inbox: could not fetch sender actor");
-        return (StatusCode::BAD_GATEWAY, "could not fetch sender").into_response();
     };
     let Some(pubkey_pem) = sender.rsa_public_key_pem.as_deref() else {
         tracing::warn!(handle, sender = %sender_actor_url, "inbox: sender has no key");
@@ -454,7 +460,7 @@ async fn handle_undo(
     }
     let dropped_request = state
         .store
-        .remove_follow_request(&rec.agent_id, sender_id)
+        .remove_follow_request(&rec.agent_id, sender_id, None)
         .await
         .unwrap_or(false);
     let dropped_follower = state
@@ -555,6 +561,21 @@ async fn auth_owner(
         _ => (StatusCode::FORBIDDEN, format!("auth: {e}")).into_response(),
     })?;
     Ok(rec)
+}
+
+/// True only for the one acknowledged-drop shape: a `Delete` activity
+/// whose sender fetch failed with an authoritative not-found (404) or
+/// tombstone (410). Every other failure is possibly transient and the
+/// caller must keep the delivery retryable.
+fn gone_delete_shortcut(err: &fetchit_fedi::actor::FetchActorError, activity: &Value) -> bool {
+    let authoritative_gone = matches!(
+        err,
+        fetchit_fedi::actor::FetchActorError::Http {
+            status: 404 | 410,
+            ..
+        }
+    );
+    authoritative_gone && activity.get("type").and_then(Value::as_str) == Some("Delete")
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -727,5 +748,40 @@ mod tests {
     fn to_as_single_string_direct_is_a_dm() {
         let note = json!({ "to": OURS });
         assert!(is_direct_to(&note, OURS));
+    }
+
+    #[test]
+    fn gone_delete_shortcut_fires_only_on_authoritative_gone_plus_delete() {
+        use fetchit_fedi::actor::FetchActorError;
+        let gone = FetchActorError::Http {
+            status: 410,
+            body: "Gone".into(),
+        };
+        let missing = FetchActorError::Http {
+            status: 404,
+            body: "Not Found".into(),
+        };
+        let flaky = FetchActorError::Http {
+            status: 503,
+            body: "maintenance".into(),
+        };
+        let transport = FetchActorError::Transport("dns timeout".into());
+        let delete = json!({ "type": "Delete" });
+        let follow = json!({ "type": "Follow" });
+
+        assert!(gone_delete_shortcut(&gone, &delete));
+        assert!(gone_delete_shortcut(&missing, &delete));
+        assert!(
+            !gone_delete_shortcut(&gone, &follow),
+            "a Follow from a gone sender is not the acknowledged shape"
+        );
+        assert!(
+            !gone_delete_shortcut(&flaky, &delete),
+            "5xx is transient — the Delete must stay retryable"
+        );
+        assert!(
+            !gone_delete_shortcut(&transport, &delete),
+            "transport failure is transient — the Delete must stay retryable"
+        );
     }
 }

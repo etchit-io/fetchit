@@ -1,13 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
-//! Unverifiable-sender inbox contract: a `Delete` whose sender cannot be
-//! fetched is acknowledged (202) so the remote stops retrying — the
-//! sender's key is gone with the account, so verification is impossible
-//! by design. Every other activity type stays a retryable 502.
-//!
-//! The unfetchable sender is simulated with a loopback actor URL: the
-//! SSRF guard refuses private addresses, so the fetch fails exactly like
-//! a 410 tombstone does in production.
+//! Unverifiable-sender inbox contract: only a `Delete` whose sender is
+//! AUTHORITATIVELY gone (HTTP 404/410 on the actor fetch) is
+//! acknowledged with 202 — that decision is unit-tested on
+//! `gone_delete_shortcut` in `routes/inbox.rs`, since an authoritative
+//! tombstone cannot be produced hermetically through the SSRF-guarded
+//! fetch. What CAN be exercised end-to-end is the transient class: a
+//! loopback sender URL fails the SSRF pre-flight, which must stay a
+//! retryable 502 for EVERY activity type, `Delete` included — a
+//! momentary outage must never eat a delivery.
 
 use std::net::SocketAddr;
 
@@ -75,7 +76,7 @@ async fn start() -> SocketAddr {
 const GONE_SENDER: &str = "https://127.0.0.1:1/users/erased";
 
 #[tokio::test]
-async fn delete_from_unfetchable_sender_is_acknowledged() {
+async fn delete_with_transient_sender_failure_stays_retryable() {
     let addr = start().await;
     let doc = mint_owner_doc("carol");
     let client = reqwest::Client::new();
@@ -100,8 +101,8 @@ async fn delete_from_unfetchable_sender_is_acknowledged() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        202,
-        "unverifiable Delete must be dropped, not retried"
+        502,
+        "a non-authoritative fetch failure must keep even a Delete retryable"
     );
 }
 

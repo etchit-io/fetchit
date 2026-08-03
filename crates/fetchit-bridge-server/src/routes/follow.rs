@@ -294,6 +294,11 @@ pub struct ConfirmFollowerBody {
     pub follower_actor_url: String,
     /// Their inbox (post fan-out target).
     pub follower_inbox_url: String,
+    /// The `Follow` activity id the device's `Accept` answered. When
+    /// present, only the matching queue entry is consumed, so a newer
+    /// re-sent `Follow` keeps its place; absent from older clients.
+    #[serde(default)]
+    pub follow_activity_id: Option<String>,
 }
 
 /// `POST /actors/:handle/followers/confirm` — the device delivered its
@@ -331,7 +336,11 @@ pub async fn confirm_follower(
             // queue entry (e.g. a re-confirm) is fine.
             let _ = state
                 .store
-                .remove_follow_request(&rec.agent_id, &req.follower_actor_url)
+                .remove_follow_request(
+                    &rec.agent_id,
+                    &req.follower_actor_url,
+                    req.follow_activity_id.as_deref(),
+                )
                 .await;
             if created {
                 (StatusCode::CREATED, "recorded").into_response()

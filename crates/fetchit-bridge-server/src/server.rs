@@ -30,6 +30,14 @@ const MAX_REGISTER_BODY_BYTES: usize = 64 * 1024;
 /// against a spray-many-source-IPs attack (cross-review pre-public).
 const MAX_TRACKED_IPS: usize = 100_000;
 
+/// Inbox per-IP burst. Generous — a big instance's shared outbox
+/// delivers from few IPs in clusters — but bounds a single-source
+/// flood of the unauthenticated federation endpoint (cross-review
+/// 2026-08-03 finding 1).
+const INBOX_BURST: u32 = 60;
+/// Inbox per-IP sustained refill, tokens per second (120/min).
+const INBOX_REFILL_PER_SEC: f64 = 2.0;
+
 /// Shared state handed to every handler.
 pub struct BridgeState {
     /// Durable actor/follower store.
@@ -40,6 +48,8 @@ pub struct BridgeState {
     pub metrics: BridgeMetrics,
     /// Per-IP token-bucket limiter guarding `POST /actors`.
     pub rate_limiter: RateLimiter,
+    /// Per-IP token-bucket limiter guarding `POST /actors/:handle/inbox`.
+    pub rate_limiter_inbox: RateLimiter,
 }
 
 /// The bridge server.
@@ -63,11 +73,14 @@ impl Server {
             f64::from(self.config.register_per_min) / 60.0,
             MAX_TRACKED_IPS,
         );
+        let rate_limiter_inbox =
+            RateLimiter::new(INBOX_BURST, INBOX_REFILL_PER_SEC, MAX_TRACKED_IPS);
         let state = Arc::new(BridgeState {
             store: self.store,
             config: self.config,
             metrics,
             rate_limiter,
+            rate_limiter_inbox,
         });
         let router = Router::new()
             .route("/health", get(routes::health::health))
@@ -98,7 +111,11 @@ impl Server {
                 get(routes::follow::follow_requests),
             )
             .route("/actors/:handle/outbox", get(routes::actors::outbox))
-            .route("/actors/:handle/inbox", post(routes::inbox::post_inbox))
+            .route(
+                "/actors/:handle/inbox",
+                post(routes::inbox::post_inbox)
+                    .layer(from_fn_with_state(state.clone(), rate_limit_inbox)),
+            )
             .route("/actors/:handle/messages", get(routes::inbox::get_messages))
             .route("/.well-known/webfinger", get(routes::webfinger::webfinger))
             .with_state(state.clone());
@@ -160,6 +177,27 @@ async fn rate_limit_register(
         state.config.trusted_proxy_hops,
     );
     if state.rate_limiter.check(ip, Instant::now()) {
+        next.run(request).await
+    } else {
+        (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response()
+    }
+}
+
+/// Per-IP limiter for the unauthenticated federation inbox. 429 is a
+/// retryable signal to well-behaved remote queues, so legitimate bursts
+/// beyond the bucket only delay, never lose, deliveries.
+async fn rate_limit_inbox(
+    State(state): State<Arc<BridgeState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let ip = client_ip(
+        peer.ip(),
+        request.headers(),
+        state.config.trusted_proxy_hops,
+    );
+    if state.rate_limiter_inbox.check(ip, Instant::now()) {
         next.run(request).await
     } else {
         (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response()

@@ -42,13 +42,42 @@ pub const REASSERT_MIN_AGE_MS: u64 = 10 * 60 * 1000;
 /// ensure path can run every few seconds while the hub is open; without
 /// this the remote inbox would be hammered.
 pub const REASSERT_COOLDOWN_MS: u64 = 30 * 60 * 1000;
+/// Minimum spacing between `Accept` delivery attempts for one queued
+/// inbound follow whose previous attempt failed. A fresh request (no
+/// prior attempt) is answered immediately; only failures repeat, and
+/// they must not repeat on every ensure tick (cross-review 2026-08-03
+/// finding 2).
+pub const ACCEPT_RETRY_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+/// Marks-map size guard: far above any real follow graph; a wrap just
+/// resets damping, never correctness.
+const MAX_TRACKED_MARKS: usize = 10_000;
 
-/// Last re-assert attempt per follow activity id. Process-wide by
-/// design: a device runs one client, and damping must survive client
-/// rebuilds (the shell tears the gateway down on network changes).
-fn reassert_marks() -> &'static Mutex<HashMap<String, u64>> {
+/// Last delivery attempt per follow activity id (both directions —
+/// re-asserted outbound follows and answered inbound ones; the id sets
+/// are disjoint). Process-wide by design: a device runs one client, and
+/// damping must survive client rebuilds (the shell tears the gateway
+/// down on network changes).
+fn attempt_marks() -> &'static Mutex<HashMap<String, u64>> {
     static MARKS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     MARKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn last_attempt_ms(follow_id: &str) -> Option<u64> {
+    attempt_marks()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(follow_id).copied())
+}
+
+/// Record an attempt BEFORE delivering: a failing remote must be spaced
+/// out exactly like a succeeding one.
+fn mark_attempt(follow_id: &str, now_ms: u64) {
+    if let Ok(mut m) = attempt_marks().lock() {
+        if m.len() > MAX_TRACKED_MARKS {
+            m.clear();
+        }
+        m.insert(follow_id.to_owned(), now_ms);
+    }
 }
 
 /// Pure damping decision for one pending follow row.
@@ -58,6 +87,15 @@ fn should_reassert(now_ms: u64, created_ms: u64, last_attempt_ms: Option<u64>) -
     }
     match last_attempt_ms {
         Some(last) => now_ms.saturating_sub(last) >= REASSERT_COOLDOWN_MS,
+        None => true,
+    }
+}
+
+/// Pure damping decision for answering one queued inbound follow:
+/// immediately when never attempted, else only past the cooldown.
+fn should_attempt_accept(now_ms: u64, last_attempt_ms: Option<u64>) -> bool {
+    match last_attempt_ms {
+        Some(last) => now_ms.saturating_sub(last) >= ACCEPT_RETRY_COOLDOWN_MS,
         None => true,
     }
 }
@@ -147,10 +185,29 @@ impl Client {
         };
         let mut accepted = 0u32;
         for (i, req) in requests.iter().enumerate() {
+            if !should_attempt_accept(now_ms, last_attempt_ms(&req.follow_activity_id)) {
+                continue;
+            }
+            // The denylist gate lives HERE, on the accepting device —
+            // the bridge holds neither keys nor the trust consumer. A
+            // blocked requester stays queued (cheap under damping) and
+            // is simply never answered.
+            if let Some(dl) = self.denylist_gate() {
+                if dl.is_blocked_actor(&req.follower_actor_url).await {
+                    log::info!(
+                        "[fedi] denylisted inbound follow ignored: {}",
+                        req.follower_actor_url
+                    );
+                    mark_attempt(&req.follow_activity_id, now_ms);
+                    continue;
+                }
+            }
             let Ok(inbox) = req.follower_inbox_url.parse::<url::Url>() else {
                 log::warn!("[fedi] bad follower inbox url {}", req.follower_inbox_url);
+                mark_attempt(&req.follow_activity_id, now_ms);
                 continue;
             };
+            mark_attempt(&req.follow_activity_id, now_ms);
             // Rebuild THEIR Follow so the Accept echoes it in full.
             let follow = FollowActivity {
                 context: "https://www.w3.org/ns/activitystreams".to_owned(),
@@ -178,6 +235,7 @@ impl Client {
                             identity,
                             &req.follower_actor_url,
                             &req.follower_inbox_url,
+                            &req.follow_activity_id,
                             now_ms,
                         )
                         .await
@@ -216,11 +274,11 @@ impl Client {
         };
         let mut reasserted = 0u32;
         for row in rows.iter().filter(|r| r.state == "pending") {
-            let last = reassert_marks()
-                .lock()
-                .ok()
-                .and_then(|m| m.get(&row.follow_activity_id).copied());
-            if !should_reassert(now_ms, row.created_ms, last) {
+            if !should_reassert(
+                now_ms,
+                row.created_ms,
+                last_attempt_ms(&row.follow_activity_id),
+            ) {
                 continue;
             }
             let Some(inbox_str) = row.target_inbox_url.as_deref() else {
@@ -229,11 +287,7 @@ impl Client {
             let Ok(inbox) = inbox_str.parse::<url::Url>() else {
                 continue;
             };
-            // Mark the attempt BEFORE delivering: a failing remote must be
-            // spaced out exactly like a succeeding one.
-            if let Ok(mut m) = reassert_marks().lock() {
-                m.insert(row.follow_activity_id.clone(), now_ms);
-            }
+            mark_attempt(&row.follow_activity_id, now_ms);
             let follow = FollowActivity {
                 context: "https://www.w3.org/ns/activitystreams".to_owned(),
                 id: row.follow_activity_id.clone(),
@@ -309,6 +363,7 @@ impl Client {
         identity: &fetchit_fedi::actor::ActorIdentity,
         follower_actor_url: &str,
         follower_inbox_url: &str,
+        follow_activity_id: &str,
         now_ms: u64,
     ) -> Result<bool> {
         let origin = crate::fedi_follow::actor_origin(identity)?;
@@ -316,6 +371,7 @@ impl Client {
         let body = serde_json::to_vec(&serde_json::json!({
             "follower_actor_url": follower_actor_url,
             "follower_inbox_url": follower_inbox_url,
+            "follow_activity_id": follow_activity_id,
         }))
         .map_err(|e| ChatError::Invalid(format!("serialize confirm: {e}")))?;
         let canonical = canonical_request("POST", &path, now_ms, &body);
@@ -350,6 +406,22 @@ mod tests {
             1_000_000 + REASSERT_MIN_AGE_MS - 1,
             1_000_000,
             None
+        ));
+    }
+
+    #[test]
+    fn fresh_inbound_requests_are_answered_immediately_then_cooled() {
+        assert!(
+            should_attempt_accept(1_000_000, None),
+            "never-attempted request is answered on the spot"
+        );
+        assert!(
+            !should_attempt_accept(1_000_000 + 1, Some(1_000_000)),
+            "a failed attempt must not repeat on the next ensure tick"
+        );
+        assert!(should_attempt_accept(
+            1_000_000 + ACCEPT_RETRY_COOLDOWN_MS,
+            Some(1_000_000)
         ));
     }
 
