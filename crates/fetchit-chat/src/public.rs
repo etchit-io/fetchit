@@ -20,20 +20,35 @@ use crate::error::ChatError;
 use fetchit_fedi::{parse_mention, resolve_handle, PublicPost};
 use url::Url;
 
-/// Single-shot denylist check against one canonical-form actor URL.
+/// Single-shot denylist check against one actor URL.
 ///
-/// Returns [`ChatError::DeniedActor`] when the URL is blocked,
-/// `Ok(())` when not. Cheap (one trait-method call); intended for
-/// per-mention gating from Stage 5.2 after `WebFinger` resolution.
+/// The URL is CANONICALIZED here (same rules the denylist publish side
+/// enforces — one trailing slash stripped, no query/fragment/userinfo)
+/// before the lookup, because the consumer index matches exact
+/// canonical form: without this, a denylisted actor evades the gate by
+/// self-serving its `id` with a trailing slash or a stray `?x`
+/// (cross-review 2026-08-03 round 2). A URL that fails
+/// canonicalization is DENIED outright: no legitimate `ActivityPub`
+/// actor id carries those shapes, and a gate against hostile actors
+/// must fail closed on degenerate input.
+///
+/// Returns [`ChatError::DeniedActor`] when the URL is blocked (or
+/// degenerate), `Ok(())` when not. Intended for per-mention gating
+/// after `WebFinger` resolution and for the inbound follow-accept gate.
 ///
 /// # Errors
 /// Surfaces [`ChatError::DeniedActor`] when `actor_url` is on the
-/// community denylist.
+/// community denylist or cannot be canonicalized.
 pub async fn check_actor_url_denylist(
     denylist: &dyn DenylistCheck,
     actor_url: &str,
 ) -> Result<(), ChatError> {
-    if denylist.is_blocked_actor(actor_url).await {
+    let Ok(canonical) = fetchit_trust_types::canonicalize_url_value(actor_url) else {
+        return Err(ChatError::DeniedActor {
+            actor_url: actor_url.to_owned(),
+        });
+    };
+    if denylist.is_blocked_actor(&canonical).await {
         return Err(ChatError::DeniedActor {
             actor_url: actor_url.to_owned(),
         });
@@ -161,6 +176,39 @@ mod tests {
         check_actor_url_denylist(&d, "https://mastodon.example/users/alice")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_variant_cannot_evade_the_denylist() {
+        // Cross-review round 2: the consumer index matches exact
+        // canonical form, so the gate must canonicalize the remote's
+        // self-served id before the lookup.
+        let d = StubDenylist::new(["https://attacker.example/users/eve"]);
+        assert!(
+            check_actor_url_denylist(&d, "https://attacker.example/users/eve/")
+                .await
+                .is_err(),
+            "a trailing slash must not bypass the blocklist"
+        );
+    }
+
+    #[tokio::test]
+    async fn degenerate_actor_ids_fail_closed() {
+        // No legitimate ActivityPub actor id carries a query, fragment,
+        // or userinfo — a gate against hostile actors denies them
+        // outright rather than passing an uncanonicalizable value to an
+        // exact-match index.
+        let d = StubDenylist::new(["https://attacker.example/users/eve"]);
+        for degenerate in [
+            "https://attacker.example/users/eve?x=1",
+            "https://attacker.example/users/eve#frag",
+            "https://user@attacker.example/users/eve",
+        ] {
+            assert!(
+                check_actor_url_denylist(&d, degenerate).await.is_err(),
+                "{degenerate} must fail closed"
+            );
+        }
     }
 
     #[tokio::test]

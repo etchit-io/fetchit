@@ -80,6 +80,18 @@ fn mark_attempt(follow_id: &str, now_ms: u64) {
     }
 }
 
+/// Marks keys are namespaced by direction: an inbound `Follow`'s id is
+/// remote-chosen, so without the prefix a hostile follower could name
+/// its Follow after one of OUR outbound follow ids and suppress that
+/// follow's re-assert for a cooldown window (cross-review round-2 note).
+fn inbound_mark_key(follow_id: &str) -> String {
+    format!("in:{follow_id}")
+}
+
+fn outbound_mark_key(follow_id: &str) -> String {
+    format!("out:{follow_id}")
+}
+
 /// Pure damping decision for one pending follow row.
 fn should_reassert(now_ms: u64, created_ms: u64, last_attempt_ms: Option<u64>) -> bool {
     if now_ms.saturating_sub(created_ms) < REASSERT_MIN_AGE_MS {
@@ -185,29 +197,36 @@ impl Client {
         };
         let mut accepted = 0u32;
         for (i, req) in requests.iter().enumerate() {
-            if !should_attempt_accept(now_ms, last_attempt_ms(&req.follow_activity_id)) {
+            let mark_key = inbound_mark_key(&req.follow_activity_id);
+            if !should_attempt_accept(now_ms, last_attempt_ms(&mark_key)) {
                 continue;
             }
             // The denylist gate lives HERE, on the accepting device —
-            // the bridge holds neither keys nor the trust consumer. A
-            // blocked requester stays queued (cheap under damping) and
-            // is simply never answered.
+            // the bridge holds neither keys nor the trust consumer. The
+            // shared helper canonicalizes before matching (a raw
+            // self-served id with a trailing slash or query must not
+            // evade the exact-form index) and fails closed on
+            // degenerate ids. A blocked requester stays queued (cheap
+            // under damping) and is simply never answered.
             if let Some(dl) = self.denylist_gate() {
-                if dl.is_blocked_actor(&req.follower_actor_url).await {
+                if crate::public::check_actor_url_denylist(dl.as_ref(), &req.follower_actor_url)
+                    .await
+                    .is_err()
+                {
                     log::info!(
                         "[fedi] denylisted inbound follow ignored: {}",
                         req.follower_actor_url
                     );
-                    mark_attempt(&req.follow_activity_id, now_ms);
+                    mark_attempt(&mark_key, now_ms);
                     continue;
                 }
             }
             let Ok(inbox) = req.follower_inbox_url.parse::<url::Url>() else {
                 log::warn!("[fedi] bad follower inbox url {}", req.follower_inbox_url);
-                mark_attempt(&req.follow_activity_id, now_ms);
+                mark_attempt(&mark_key, now_ms);
                 continue;
             };
-            mark_attempt(&req.follow_activity_id, now_ms);
+            mark_attempt(&mark_key, now_ms);
             // Rebuild THEIR Follow so the Accept echoes it in full.
             let follow = FollowActivity {
                 context: "https://www.w3.org/ns/activitystreams".to_owned(),
@@ -274,11 +293,8 @@ impl Client {
         };
         let mut reasserted = 0u32;
         for row in rows.iter().filter(|r| r.state == "pending") {
-            if !should_reassert(
-                now_ms,
-                row.created_ms,
-                last_attempt_ms(&row.follow_activity_id),
-            ) {
+            let mark_key = outbound_mark_key(&row.follow_activity_id);
+            if !should_reassert(now_ms, row.created_ms, last_attempt_ms(&mark_key)) {
                 continue;
             }
             let Some(inbox_str) = row.target_inbox_url.as_deref() else {
@@ -287,7 +303,7 @@ impl Client {
             let Ok(inbox) = inbox_str.parse::<url::Url>() else {
                 continue;
             };
-            mark_attempt(&row.follow_activity_id, now_ms);
+            mark_attempt(&mark_key, now_ms);
             let follow = FollowActivity {
                 context: "https://www.w3.org/ns/activitystreams".to_owned(),
                 id: row.follow_activity_id.clone(),
