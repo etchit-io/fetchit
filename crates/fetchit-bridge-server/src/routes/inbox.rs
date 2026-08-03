@@ -83,6 +83,16 @@ pub async fn post_inbox(
         return (StatusCode::BAD_REQUEST, "actor is not a url").into_response();
     };
     let Ok(sender) = fetchit_fedi::lookup::fetch_remote_actor(&sender_actor_url).await else {
+        // A Delete whose sender is already gone (account erased — the
+        // 2026-08-02 drops were 410 tombstones) is unverifiable BY DESIGN:
+        // the signing key no longer exists anywhere. It is also
+        // unactionable — we hold no state to delete for an unknown actor.
+        // Acknowledge it so the remote stops retrying for two days;
+        // anything else unverifiable stays a retryable 502.
+        if activity.get("type").and_then(Value::as_str) == Some("Delete") {
+            tracing::info!(handle, sender = %sender_actor_url, "unverifiable Delete from gone sender ignored");
+            return (StatusCode::ACCEPTED, "ignored").into_response();
+        }
         tracing::warn!(handle, sender = %sender_actor_url, "inbox: could not fetch sender actor");
         return (StatusCode::BAD_GATEWAY, "could not fetch sender").into_response();
     };
