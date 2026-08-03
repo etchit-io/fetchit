@@ -2122,7 +2122,19 @@ impl Client {
         }
         if let Some(registry) = self.registry_arc() {
             if let Ok(Some(conv)) = registry.get(group_id_hex).await {
-                return conv.own_group_send_seq > 0 || !conv.group_seq_windows.is_empty();
+                // Member count, NOT the sequence ledgers. The ledgers
+                // (`own_group_send_seq` / `group_seq_windows`) were the
+                // original discriminator and they are simply wrong:
+                // chat-v2 DMs keep the same per-sender ledgers for gap
+                // detection, so ONE exchanged message made every DM look
+                // like an x0xd group. Both the reactive trigger and the
+                // watchdog then handed wedged DMs to the x0xd recovery
+                // driver, which has nothing to do for a conversation
+                // that never lived in x0xd -- so the DM ladder never ran
+                // in production. A two-party conversation is a DM by
+                // construction; a genuine two-member x0xd group is
+                // already covered by the `group_kinds` map above.
+                return conv.members.len() > 2;
             }
         }
         false
@@ -2369,7 +2381,31 @@ impl Client {
         }
         let client = self.clone();
         tokio::spawn(async move {
-            let _ = client.recover_group_once(&group_id, target_epoch).await;
+            // Route by conversation kind. `recover_group_once` fetches and
+            // applies an x0xd GROUP log; a chat-v2 DM has no such log, so
+            // sending a wedged DM down that path is a silent no-op -- the
+            // reactive trigger fired, the status flipped to Reconnecting,
+            // and nothing ever healed. Wedged DMs take the re-key ladder
+            // (roster refresh, then a forced epoch jump past the peer).
+            if client.is_x0xd_group(&group_id).await {
+                let _ = client.recover_group_once(&group_id, target_epoch).await;
+            } else if ladder_cooled_down(&group_id) {
+                // Same damping as the watchdog path, same marks. Without
+                // it every stale frame forces another re-key: after the
+                // first heal each side's new-epoch frames read as
+                // "future epoch" to the other until its Welcome lands,
+                // and an undamped reactive trigger turns that window
+                // into an epoch-climbing ping-pong (observed 3 -> 10 on
+                // the live proof before this guard existed). One attempt
+                // per LADDER_COOLDOWN_MS; the redelivered frames that
+                // motivated the trigger are healed by that one attempt.
+                mark_ladder_attempt(&group_id);
+                if let Err(e) = client.force_rekey_dm(&group_id).await {
+                    log::warn!("[chat] DM recovery failed for {group_id}: {e}");
+                }
+            } else {
+                log::debug!("[chat] DM recovery for {group_id} damped by ladder cooldown");
+            }
             if let Ok(mut inflight) = client.recovering.lock() {
                 inflight.remove(&group_id);
             }
@@ -8252,6 +8288,47 @@ mod tests {
         assert_eq!(
             device.kem_public_key_b64, fresh,
             "a Welcome sealed to the old key is silently unopenable"
+        );
+    }
+
+    /// #297 regression, caught by the live proof: the recovery router
+    /// must NOT classify by the sequence ledgers. Chat-v2 DMs populate
+    /// the same per-sender ledgers for gap detection, so ONE exchanged
+    /// message made every DM read as an x0xd group — wedged DMs were
+    /// then handed to the group-log recovery driver, a silent no-op for
+    /// a conversation that never lived in x0xd, and the re-key ladder
+    /// never ran in production.
+    #[tokio::test]
+    async fn dm_with_seq_ledgers_routes_to_the_ladder_not_group_recovery() {
+        let kem = B64.encode(vec![0u8; 1184]);
+        let (client, _dir, gid, _peer) = dm_with_card(&kem, &kem).await;
+        let chat = client.chat.as_ref().unwrap();
+
+        // One send is enough to trip the old ledger heuristic.
+        chat.registry
+            .mutate_in_place(&gid, |c| {
+                c.own_group_send_seq = 5;
+                MutateAction::Persist(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            !client.is_x0xd_group(&gid).await,
+            "a two-member DM with populated seq ledgers must take the re-key ladder",
+        );
+
+        // A third member makes it a multi-member conversation → group path.
+        chat.registry
+            .mutate_in_place(&gid, |c| {
+                let extra = c.members[0].clone();
+                c.members.push(extra);
+                MutateAction::Persist(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            client.is_x0xd_group(&gid).await,
+            "a multi-member conversation must route to group recovery",
         );
     }
 
