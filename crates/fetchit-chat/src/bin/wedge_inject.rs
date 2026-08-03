@@ -119,10 +119,14 @@ fn main() {
         touched += 1;
     }
     if touched == 0 {
-        eprintln!("no conversations wedged (wrong --group, or empty vault)");
+        eprintln!("no conversations matched (wrong --group, or empty vault)");
         std::process::exit(1);
     }
-    println!("wedged {touched} conversation(s); restart the peer to load them");
+    if bump == 0 {
+        println!("inspected {touched} conversation(s); nothing was modified");
+    } else {
+        println!("wedged {touched} conversation(s); restart the peer to load them");
+    }
 }
 
 fn getrandom_key(out: &mut [u8; 32]) {
