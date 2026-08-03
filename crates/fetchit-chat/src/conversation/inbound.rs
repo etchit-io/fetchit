@@ -935,6 +935,88 @@ mod tests {
         }
     }
 
+    /// #297: the wedge that motivated the re-key ladder's roster refresh.
+    ///
+    /// Bob re-mints his vault. Alice's conversation still records his OLD
+    /// device KEM public key, so her re-key Welcome is encapsulated
+    /// against a key Bob no longer holds. ML-KEM uses IMPLICIT REJECTION:
+    /// decapsulating with the wrong secret returns a well-formed but
+    /// different shared secret rather than an error. The failure
+    /// therefore does NOT surface as `KemDecapFailed` — it surfaces one
+    /// layer later as `AeadOpenFailed`, which is indistinguishable from
+    /// corruption and is why this rotted undetected in production.
+    ///
+    /// Both halves are asserted together because the CONTRAST is the
+    /// point: same conversation, same sender, same code path — only the
+    /// recorded KEM key differs, and that alone decides whether the heal
+    /// lands. If this test ever reports `KemDecapFailed` on the first
+    /// half, the underlying KEM changed its rejection behaviour and the
+    /// ladder's diagnosis needs revisiting.
+    #[tokio::test]
+    async fn welcome_to_a_stale_kem_key_fails_as_aead_and_a_refreshed_key_lands() {
+        let tmp_a = tempdir().unwrap();
+        let (alice_signer, alice_id, _master_a, _salt_a, aid_a) =
+            fresh_signer_with_identity(tmp_a.path());
+        let tmp_b = tempdir().unwrap();
+        let (_bob_signer, bob_id, master_b, salt_b, aid_b) =
+            fresh_signer_with_identity(tmp_b.path());
+        // Bob's PREVIOUS vault: a real, well-formed ML-KEM key that is
+        // simply not the one his current identity can decapsulate with.
+        let tmp_b_old = tempdir().unwrap();
+        let (_old_signer, bob_old_id, _m, _s, _aid) = fresh_signer_with_identity(tmp_b_old.path());
+        assert_ne!(
+            bob_old_id.kem_public_key(),
+            bob_id.kem_public_key(),
+            "fixture must model a genuine re-mint"
+        );
+
+        let alice_member = local_member(&aid_a, &B64.encode(alice_id.kem_public_key()));
+        let stale_member = local_member(&aid_b, &B64.encode(bob_old_id.kem_public_key()));
+        let conv = Conversation::new_dm(alice_member.clone(), stale_member, None).unwrap();
+
+        let layout_b = StoreLayout::ensure(tmp_b.path().join("store")).unwrap();
+        install_card(&layout_b, &aid_a, &alice_signer, alice_id.kem_public_key());
+        let registry_b =
+            ConversationRegistry::new(layout_b, Arc::new(master_b), kdf_id_argon2(), Some(salt_b));
+
+        // Half 1 — stale recorded key: the Welcome is undeliverable, and
+        // the error names the wrong layer.
+        let stale_outbox = build_welcome_outbox(&conv, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let stale_result = dispatch_inbound(stale_outbox[0].envelope.clone(), &bob_id, &registry_b)
+            .await
+            .unwrap();
+        assert!(
+            matches!(stale_result, InboundDispatch::AeadOpenFailed { .. }),
+            "a Welcome sealed to a stale KEM key must surface as AeadOpenFailed \
+             (ML-KEM implicit rejection), got {stale_result:?}",
+        );
+        assert!(
+            !matches!(stale_result, InboundDispatch::KemDecapFailed),
+            "implicit rejection means the decap step CANNOT report the failure",
+        );
+
+        // Half 2 — the roster refresh (ladder rung 1) folds Bob's live
+        // key in; the identical re-key now lands.
+        let fresh_member = local_member(&aid_b, &B64.encode(bob_id.kem_public_key()));
+        let healed = Conversation::new_dm(alice_member, fresh_member, None).unwrap();
+        let fresh_outbox = build_welcome_outbox(&healed, &alice_id, [0u8; 32], &alice_signer)
+            .await
+            .unwrap();
+        let healed_result =
+            dispatch_inbound(fresh_outbox[0].envelope.clone(), &bob_id, &registry_b)
+                .await
+                .unwrap();
+        match healed_result {
+            InboundDispatch::Welcomed { conversation } => {
+                assert_eq!(conversation.group_id_hex, healed.group_id_hex);
+                assert_eq!(conversation.current_key_b64, healed.current_key_b64);
+            }
+            other => panic!("refreshed roster must let the re-key land, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn receipt_round_trip_after_message() {
         // Alice and Bob set up a conversation. Bob receives a message,
