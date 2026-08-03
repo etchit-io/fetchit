@@ -2212,6 +2212,12 @@ impl<'a> Endpoint<'a> {
                         return MutateAction::Skip(None);
                     }
                     conv.push_history(entry_for_closure.clone());
+                    // Wedge signal: a successful group decrypt is PROGRESS
+                    // (#297) — stamped in the same locked persist.
+                    let wedge_now = now_ms();
+                    conv.wedge_last_progress_ms = wedge_now;
+                    conv.wedge_last_inbound_ms = wedge_now;
+                    conv.wedge_progress_epoch = conv.current_epoch;
                     // Gap detection rides the same locked mutation as the
                     // dedup check so the per-sender ledger and the replay
                     // window can never diverge under concurrent receives.
@@ -2800,6 +2806,9 @@ fn self_only_private_group_conversation<S: Signer + ?Sized>(
         history: VecDeque::new(),
         own_group_send_seq: 0,
         group_seq_windows: BTreeMap::new(),
+        wedge_last_progress_ms: 0,
+        wedge_last_inbound_ms: 0,
+        wedge_progress_epoch: 0,
     }
 }
 

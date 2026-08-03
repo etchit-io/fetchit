@@ -149,6 +149,24 @@ pub struct Conversation {
     /// `#[serde(default)]` for pre-gap-detection vault files.
     #[serde(default)]
     pub group_seq_windows: BTreeMap<String, SenderSeqState>,
+    /// Wedge-watchdog: Unix-ms of the last successful inbound decrypt
+    /// (message or receipt) for this conversation — "progress" in
+    /// [`crate::groups::epoch_recovery::WedgeSignals`] terms. Zero on
+    /// conversations that predate the watchdog (`#[serde(default)]`),
+    /// which the watchdog reads as "never observed", never as wedged.
+    #[serde(default)]
+    pub wedge_last_progress_ms: u64,
+    /// Wedge-watchdog: Unix-ms of the last inbound frame ADDRESSED to
+    /// this conversation regardless of decrypt outcome. A frame that
+    /// fails with a stale epoch still proves the peer is live on the
+    /// transport — inbound-newer-than-progress is the wedge signature
+    /// (the old "receipts flowing but chat dead").
+    #[serde(default)]
+    pub wedge_last_inbound_ms: u64,
+    /// Wedge-watchdog: our epoch at the last progress point. An epoch
+    /// advance since then is itself progress and vetoes the trip.
+    #[serde(default)]
+    pub wedge_progress_epoch: u32,
 }
 
 impl Conversation {
@@ -184,6 +202,9 @@ impl Conversation {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         })
     }
 
@@ -211,6 +232,9 @@ impl Conversation {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         }
     }
 
@@ -835,6 +859,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -863,6 +890,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -886,6 +916,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         assert!(conv.auto_rekey_due());
     }
@@ -908,6 +941,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -930,6 +966,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -959,6 +998,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         let nonce = [0xAB; 12];
         assert!(!conv.check_and_record_nonce("alice", nonce));
@@ -994,6 +1036,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         for i in 0..64u8 {
             assert!(!conv.check_and_record_nonce("alice", [i; 12]));
@@ -1027,6 +1072,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         // Fill Alice's window completely.
         for i in 0..64u8 {
@@ -1080,6 +1128,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         };
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);
@@ -1105,6 +1156,9 @@ mod tests {
             history: VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         }
     }
 

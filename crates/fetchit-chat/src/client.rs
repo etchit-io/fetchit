@@ -1794,7 +1794,9 @@ impl Client {
                 // epoch (the target so an empty log does not falsely converge);
                 // it drains the group-log, applies the missed commits, and
                 // clears `Live` once keyed at target.
-                self.group_recovery.set_reconnecting(&group_id_hex);
+                if let Some(registry) = self.registry_arc() {
+                    registry.note_wedge_inbound(&group_id_hex).await;
+                }
                 self.trigger_group_recovery(group_id_hex.clone(), Some(u64::from(transit.epoch)));
             }
         } else if let (Some(identity), Some(registry)) = (self.identity_arc(), self.registry_arc())
@@ -1975,6 +1977,11 @@ impl Client {
     /// it. Fire-and-forget: a recovery error just leaves the group
     /// `Reconnecting` for the next trigger.
     pub fn trigger_group_recovery(&self, group_id: String, target_epoch: Option<u64>) {
+        // Every trigger site wants the shell to see catch-up rather than a
+        // silently-dead group, so the status flip lives HERE — callers
+        // (dispatchers, the FFI pump, the wedge watchdog) cannot forget it.
+        // Idempotent when already Reconnecting.
+        self.group_recovery.set_reconnecting(&group_id);
         {
             let Ok(mut inflight) = self.recovering.lock() else {
                 return;

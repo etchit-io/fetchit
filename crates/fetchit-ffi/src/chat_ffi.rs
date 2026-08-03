@@ -2615,8 +2615,22 @@ async fn run_inbound_pump(
                     }
                 }
                 // StaleEpoch-class decrypt failures: hold the ack so the
-                // relay redelivers after re-key / epoch catch-up.
-                Err(e) => log::warn!("[chat_ffi] private_group_decrypt_failed: {e}"),
+                // relay redelivers after re-key / epoch catch-up — and
+                // TRIGGER the recovery driver toward this frame's epoch.
+                // Without this the entire epoch-recovery subsystem is dead
+                // code on mobile: the only other trigger site lives in
+                // `Client::default_dispatch_one`, which this pump bypasses
+                // (#297 P1.1).
+                Err(e) => {
+                    log::warn!("[chat_ffi] private_group_decrypt_failed: {e}");
+                    if let Some(registry) = client.registry_arc() {
+                        registry.note_wedge_inbound(&group_id_hex).await;
+                    }
+                    client.trigger_group_recovery(
+                        group_id_hex.clone(),
+                        Some(u64::from(transit.epoch)),
+                    );
+                }
             }
             continue;
         }

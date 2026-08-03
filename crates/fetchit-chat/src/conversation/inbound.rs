@@ -291,6 +291,9 @@ async fn dispatch_receipt(
         });
     };
     let Some(key) = conv.key_for_epoch(envelope.epoch)? else {
+        // Wedge signal: a receipt reached us but we hold no key for its
+        // epoch — liveness without progress (#297).
+        registry.note_wedge_inbound(&group_id_hex).await;
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -324,11 +327,14 @@ async fn dispatch_receipt(
     }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
+        registry.note_wedge_inbound(&group_id_hex).await;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
         });
     };
+    // Wedge signal: a successful receipt decrypt is PROGRESS (#297).
+    registry.note_wedge_progress(&group_id_hex).await;
     let payload: DeliveryReceiptPayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("receipt payload parse: {e}")))?;
     // Persist delivery-state into the conversation history so headless
@@ -378,6 +384,9 @@ async fn dispatch_message(
         });
     };
     let Some(key) = conv.key_for_epoch(envelope.epoch)? else {
+        // Wedge signal: the frame reached us but we hold no key for its
+        // epoch — liveness without progress (#297).
+        registry.note_wedge_inbound(&group_id_hex).await;
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -406,11 +415,14 @@ async fn dispatch_message(
     }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
+        registry.note_wedge_inbound(&group_id_hex).await;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
         });
     };
+    // Wedge signal: a successful decrypt is PROGRESS (#297).
+    registry.note_wedge_progress(&group_id_hex).await;
     let mut payload: MessagePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| ChatError::Invalid(format!("message payload parse: {e}")))?;
     // Receive-side attachment validation (spec 2.4): a hostile peer could

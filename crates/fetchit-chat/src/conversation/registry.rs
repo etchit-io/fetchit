@@ -437,6 +437,72 @@ impl ConversationRegistry {
     }
 
     /// Atomically check `(sender, nonce)` against the conversation's
+    /// Wedge-watchdog bookkeeping: note PROGRESS — a successful inbound
+    /// decrypt (message or receipt) — on `group_id_hex`. Stamps the
+    /// progress + inbound clocks and records the current epoch as the
+    /// progress epoch (an epoch advance since a mark is itself progress
+    /// and vetoes a wedge trip). A missing conversation is a silent
+    /// no-op: the watchdog only reasons about conversations that exist.
+    pub async fn note_wedge_progress(&self, group_id_hex: &str) {
+        let now_ms = super::types::now_ms();
+        let _ = self
+            .mutate_in_place(group_id_hex, |conv| {
+                conv.wedge_last_progress_ms = now_ms;
+                conv.wedge_last_inbound_ms = now_ms;
+                conv.wedge_progress_epoch = conv.current_epoch;
+                MutateAction::Persist(())
+            })
+            .await;
+    }
+
+    /// Wedge-watchdog bookkeeping: note an inbound frame ADDRESSED to
+    /// `group_id_hex` that did NOT decrypt (stale epoch, AEAD failure,
+    /// group-decrypt error). Liveness without progress is the wedge
+    /// signature — the peer is demonstrably reaching us and only the
+    /// key state is wrong. A missing conversation is a silent no-op.
+    pub async fn note_wedge_inbound(&self, group_id_hex: &str) {
+        let now_ms = super::types::now_ms();
+        let _ = self
+            .mutate_in_place(group_id_hex, |conv| {
+                conv.wedge_last_inbound_ms = now_ms;
+                MutateAction::Persist(())
+            })
+            .await;
+    }
+
+    /// Wedge signals for every HYDRATED conversation, ready for
+    /// [`crate::groups::epoch_recovery::groups_to_recover`]. In-memory
+    /// only by design: a conversation receiving frames (the wedge
+    /// precondition) is always hydrated, and cold conversations cannot
+    /// be wedged — nothing is arriving for them.
+    ///
+    /// `recent_window_ms` bounds how fresh the last undecryptable
+    /// inbound must be to count as "the peer is live right now".
+    pub async fn wedge_snapshot(
+        &self,
+        now_ms: u64,
+        recent_window_ms: u64,
+    ) -> Vec<(String, crate::groups::epoch_recovery::WedgeSignals)> {
+        let guard = self.by_group_id.lock().await;
+        guard
+            .iter()
+            .map(|(id, conv)| {
+                let recent_receipt_activity = conv.wedge_last_inbound_ms
+                    > conv.wedge_last_progress_ms
+                    && now_ms.saturating_sub(conv.wedge_last_inbound_ms) <= recent_window_ms;
+                (
+                    id.clone(),
+                    crate::groups::epoch_recovery::WedgeSignals {
+                        last_progress_ms: conv.wedge_last_progress_ms,
+                        recent_receipt_activity,
+                        current_epoch: u64::from(conv.current_epoch),
+                        last_seen_epoch: u64::from(conv.wedge_progress_epoch),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// replay window and record it if fresh. The whole read-modify-write
     /// runs under `by_group_id`, so concurrent inbound pumps on
     /// the same group serialise rather than both observing an empty
@@ -671,6 +737,9 @@ mod tests {
             history: std::collections::VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: std::collections::BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         }
     }
 
@@ -823,6 +892,9 @@ mod tests {
             history: std::collections::VecDeque::new(),
             own_group_send_seq: 0,
             group_seq_windows: std::collections::BTreeMap::new(),
+            wedge_last_progress_ms: 0,
+            wedge_last_inbound_ms: 0,
+            wedge_progress_epoch: 0,
         }
     }
 
