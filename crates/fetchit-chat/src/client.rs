@@ -2300,6 +2300,19 @@ impl Client {
         if snapshot.fanout_devices(local_hex).next().is_none() {
             return Ok(false); // nobody to welcome
         }
+        // Two-party only, as the name says. `force` deliberately bypasses
+        // the Admin-role gate so a wedged non-Admin can heal itself, and
+        // the receive side folds a higher-epoch Welcome by replacing the
+        // whole member list. In a DM that is harmless -- the only other
+        // party is the peer. In a multi-member conversation it would let
+        // any Member rewrite everyone's roster from its own view, which
+        // is a far larger blast radius than the wedge being cured.
+        if snapshot.members.len() > 2 {
+            log::debug!(
+                "[chat] forced re-key skipped for multi-member conversation {group_id_hex}",
+            );
+            return Ok(false);
+        }
         let Some(welcomes) = try_rekey_and_build_welcomes(
             &chat.registry,
             &snapshot,

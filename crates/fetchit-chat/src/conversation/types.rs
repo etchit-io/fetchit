@@ -152,8 +152,16 @@ pub struct Conversation {
     /// Wedge-watchdog: Unix-ms of the last successful inbound decrypt
     /// (message or receipt) for this conversation — "progress" in
     /// [`crate::groups::epoch_recovery::WedgeSignals`] terms. Zero on
-    /// conversations that predate the watchdog (`#[serde(default)]`),
-    /// which the watchdog reads as "never observed", never as wedged.
+    /// conversations that predate the watchdog (`#[serde(default)]`).
+    ///
+    /// Note that zero does NOT read as "never observed": it makes
+    /// `stalled_for` equal `now_ms`, which exceeds any threshold. What
+    /// actually holds the trip back on a freshly-upgraded vault is the
+    /// separate `wedge_last_inbound_ms > wedge_last_progress_ms` gate,
+    /// so the first UNDECRYPTABLE frame after upgrade can trip with no
+    /// observation window. That is the intended bias — an inbound frame
+    /// that will not open is the wedge signature regardless of how long
+    /// we have been watching — but it is a trip, not a grace period.
     #[serde(default)]
     pub wedge_last_progress_ms: u64,
     /// Wedge-watchdog: Unix-ms of the last inbound frame ADDRESSED to
