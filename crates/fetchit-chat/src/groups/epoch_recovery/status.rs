@@ -69,6 +69,22 @@ impl GroupStatusMap {
         }
     }
 
+    /// Every group currently `Reconnecting`, for shells that poll
+    /// rather than subscribe (#297 P1.4 — the Android controller polls
+    /// on its existing pump cadence).
+    #[must_use]
+    pub fn reconnecting(&self) -> Vec<String> {
+        self.inner.lock().map_or_else(
+            |_| Vec::new(),
+            |m| {
+                m.iter()
+                    .filter(|(_, s)| matches!(s, GroupRecoveryStatus::Reconnecting))
+                    .map(|(g, _)| g.clone())
+                    .collect()
+            },
+        )
+    }
+
     /// Current status of `group_id`. A group never marked is `Live`.
     #[must_use]
     pub fn get(&self, group_id: &str) -> GroupRecoveryStatus {

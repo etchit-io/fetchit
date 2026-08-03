@@ -39,6 +39,40 @@ const WEDGE_TICK_MS: u64 = 60_000;
 /// treat the peer as "live right now". Slightly over one tick so a
 /// frame that arrived just before the previous tick still counts.
 const WEDGE_RECENT_WINDOW_MS: u64 = 90_000;
+/// Minimum spacing between forced-re-key attempts per conversation
+/// (#297 P2 ladder damping).
+const LADDER_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+
+/// Last forced-re-key attempt per conversation, process-wide (a device
+/// runs one client; damping must survive client rebuilds). Size-guarded
+/// like the fedi sync marks.
+fn ladder_marks() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static MARKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    MARKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn ladder_cooled_down(group_id: &str) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    ladder_marks().lock().is_ok_and(|m| {
+        m.get(group_id)
+            .is_none_or(|last| now.saturating_sub(*last) >= LADDER_COOLDOWN_MS)
+    })
+}
+
+fn mark_ladder_attempt(group_id: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    if let Ok(mut m) = ladder_marks().lock() {
+        if m.len() > 10_000 {
+            m.clear();
+        }
+        m.insert(group_id.to_owned(), now);
+    }
+}
 
 const AUTO_REKEY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
@@ -2043,10 +2077,23 @@ impl Client {
                 );
                 self.trigger_group_recovery(group_id, None);
             } else {
-                // Chat-v2 wedge: the P2 forced-re-key ladder owns this
-                // class. Logged so the device proof can observe detection
-                // before the ladder lands.
-                log::warn!("[chat] wedge watchdog: chat-v2 conversation {group_id} looks wedged (re-key ladder pending)");
+                // Chat-v2 wedge (#297 P2): forced re-key, damped to one
+                // attempt per conversation per cooldown so a peer that
+                // stays broken is not hammered every tick.
+                if !ladder_cooled_down(&group_id) {
+                    continue;
+                }
+                mark_ladder_attempt(&group_id);
+                log::warn!(
+                    "[chat] wedge watchdog: chat-v2 conversation {group_id} wedged; forcing re-key"
+                );
+                match self.force_rekey_dm(&group_id).await {
+                    Ok(true) => {}
+                    Ok(false) => log::warn!(
+                        "[chat] forced re-key was a no-op for {group_id} (missing, peerless, or raced)"
+                    ),
+                    Err(e) => log::warn!("[chat] forced re-key failed for {group_id}: {e}"),
+                }
             }
         }
     }
@@ -2068,6 +2115,68 @@ impl Client {
             }
         }
         false
+    }
+
+    /// Force an immediate epoch rotation on a chat-v2 conversation
+    /// (#297 P2, the wedge ladder): bypasses the Admin-role and 7-day
+    /// policy gates of the auto-rekey sweep, keeping only the epoch CAS
+    /// race guard. Fresh Welcomes at `epoch + 1` fan to every active
+    /// peer device; the receive side folds them via
+    /// `install_or_rekey_conversation` with history preserved, and the
+    /// higher-epoch-wins rule makes simultaneous forced re-keys from
+    /// both sides converge without coordination. Relay ack-holding then
+    /// redelivers every frame stalled behind the dead epoch.
+    ///
+    /// Returns `Ok(false)` when the conversation is missing, has no
+    /// peers to welcome, or lost the epoch CAS (someone re-keyed first
+    /// — which is itself the healed state).
+    ///
+    /// # Errors
+    /// [`ChatError::Invalid`] when chat state is not initialised, plus
+    /// registry I/O failures.
+    pub async fn force_rekey_dm(&self, group_id_hex: &str) -> Result<bool> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let Some(snapshot) = chat.registry.get(group_id_hex).await? else {
+            return Ok(false);
+        };
+        let local_hex = chat.identity.agent_id_hex();
+        if snapshot.fanout_devices(local_hex).next().is_none() {
+            return Ok(false); // nobody to welcome
+        }
+        let Some(welcomes) = try_rekey_and_build_welcomes(
+            &chat.registry,
+            &snapshot,
+            &chat.identity,
+            chat.local_machine_id,
+            chat.signer.as_ref(),
+            true,
+        )
+        .await?
+        else {
+            return Ok(false);
+        };
+        let primary = self.primary_relay_url.read().await.clone();
+        send_rekey_welcomes(
+            &self.router,
+            chat.local_machine_id,
+            &chat.layout,
+            primary.as_deref(),
+            welcomes,
+        )
+        .await;
+        log::warn!("[chat] forced re-key issued for wedged conversation {group_id_hex}");
+        Ok(true)
+    }
+
+    /// Every group currently in stale-epoch catch-up (#297 P1.4) — the
+    /// polling counterpart of [`Self::subscribe_group_recovery`] for
+    /// shells without a broadcast pump.
+    #[must_use]
+    pub fn reconnecting_groups(&self) -> Vec<String> {
+        self.group_recovery.reconnecting()
     }
 
     /// Kick one background recovery pass for `group_id` (#297): flips the
@@ -5313,6 +5422,7 @@ async fn try_rekey_and_build_welcomes(
     identity: &FetchitIdentity,
     machine_id: [u8; 32],
     signer: &dyn Signer,
+    force: bool,
 ) -> Result<Option<Vec<crate::conversation::OutboundEnvelope>>> {
     use crate::chat_crypto::random_symmetric_key;
     use rand::rngs::OsRng;
@@ -5335,7 +5445,14 @@ async fn try_rekey_and_build_welcomes(
 
     let committed = registry
         .mutate_in_place(&group_id_hex, |conv| {
-            if !conv.auto_rekey_due() || conv.current_epoch != snapshot_epoch {
+            // The epoch CAS is the race guard either way; `force` (the
+            // #297 wedge ladder) bypasses only the Admin-role + 7-day
+            // interval policy gates — the receive side accepts a
+            // higher-epoch Welcome from any existing member, and the
+            // higher-epoch-wins fold makes concurrent forced re-keys
+            // from both sides converge safely.
+            let policy_ok = force || conv.auto_rekey_due();
+            if !policy_ok || conv.current_epoch != snapshot_epoch {
                 return MutateAction::Skip(false);
             }
             conv.advance_epoch(new_key);
@@ -5397,6 +5514,45 @@ fn decode_pushed_pair_record_v4(
         .map_err(|e| ChatError::Invalid(format!("pushed pair record decode: {e}")))
 }
 
+/// Deliver a batch of rekey Welcomes, one per recipient device, routing
+/// each via the contact's primary-relay hints (M3 R-tail-5) with our own
+/// primary as the legacy fallback. Per-recipient send failures are
+/// logged, never fatal — the relay outbox + the next sweep cover them.
+async fn send_rekey_welcomes(
+    router: &Arc<Router>,
+    machine_id: [u8; 32],
+    layout: &StoreLayout,
+    primary_relay_url: Option<&str>,
+    welcomes: Vec<crate::conversation::OutboundEnvelope>,
+) {
+    for ob in welcomes {
+        let recipient = identity::AgentId(hex::encode(ob.recipient_agent_id.as_bytes()));
+        let timestamp_ms = ob.envelope.timestamp_ms;
+        let transport_out = OutboundEnvelope {
+            kind: OutboundKind::Dm,
+            from_machine_id: Some(machine_id),
+            payload: Vec::new(),
+            timestamp_ms,
+            transit: Some(ob.envelope),
+        };
+        let hints =
+            crate::messages::StoredContactCard::resolve_recipient_hints(layout, &recipient.0)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    primary_relay_url.map(|url| crate::card::RendezvousHintsV1 {
+                        relays: vec![url.to_owned()],
+                    })
+                });
+        if let Err(e) = router.send(&recipient, transport_out, hints.as_ref()).await {
+            log::warn!(
+                "[chat] rekey welcome send to {} failed: {e}",
+                recipient.short()
+            );
+        }
+    }
+}
+
 /// Walk the in-memory conversation cache, rotating every Admin
 /// conversation whose `auto_rekey_due()` returns true. Returns the
 /// count of rotated conversations.
@@ -5425,41 +5581,13 @@ async fn sweep_auto_rekey(
             identity,
             machine_id,
             signer.as_ref(),
+            false,
         )
         .await?
         else {
             continue;
         };
-        for ob in welcomes {
-            let recipient = identity::AgentId(hex::encode(ob.recipient_agent_id.as_bytes()));
-            let timestamp_ms = ob.envelope.timestamp_ms;
-            let transport_out = OutboundEnvelope {
-                kind: OutboundKind::Dm,
-                from_machine_id: Some(machine_id),
-                payload: Vec::new(),
-                timestamp_ms,
-                transit: Some(ob.envelope),
-            };
-            // M3 R-tail-5: thread per-recipient hints — auto-rekey
-            // welcomes are exactly the kind of relay traffic
-            // multi-home wants to route via the contact's primary
-            // slot. Legacy v1 contacts fall back to our own primary.
-            let hints =
-                crate::messages::StoredContactCard::resolve_recipient_hints(layout, &recipient.0)
-                    .ok()
-                    .flatten()
-                    .or_else(|| {
-                        primary_relay_url.map(|url| crate::card::RendezvousHintsV1 {
-                            relays: vec![url.to_owned()],
-                        })
-                    });
-            if let Err(e) = router.send(&recipient, transport_out, hints.as_ref()).await {
-                log::warn!(
-                    "[chat] auto-rekey: send to {} failed: {e}",
-                    recipient.short()
-                );
-            }
-        }
+        send_rekey_welcomes(router, machine_id, layout, primary_relay_url, welcomes).await;
         rekeyed += 1;
     }
     Ok(rekeyed)
@@ -6797,6 +6925,7 @@ mod tests {
             &identity,
             [0u8; 32],
             &signer,
+            false,
         )
         .await
         .expect("helper must not error on the happy path");
@@ -6853,6 +6982,7 @@ mod tests {
             &identity,
             [0u8; 32],
             &signer,
+            false,
         )
         .await
         .expect("first call must succeed");
@@ -6874,6 +7004,7 @@ mod tests {
             &identity,
             [0u8; 32],
             &signer,
+            false,
         )
         .await
         .expect("second call must not error");
@@ -6912,6 +7043,7 @@ mod tests {
             &identity,
             [0u8; 32],
             &err_signer,
+            false,
         )
         .await
         .expect("sweep helper itself must not error on signer failure");

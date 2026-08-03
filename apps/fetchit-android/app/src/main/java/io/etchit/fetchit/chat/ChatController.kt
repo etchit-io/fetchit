@@ -118,6 +118,11 @@ class ChatController(private val appContext: Context, private val scope: Corouti
 
     private val _pendingJoins = MutableStateFlow<List<String>>(emptyList())
 
+    /** Group ids the engine is silently catching up (#297): the UI shows a
+     * quiet syncing affordance on these instead of a dead conversation. */
+    private val _reconnectingGroups = MutableStateFlow<Set<String>>(emptySet())
+    val reconnectingGroups: StateFlow<Set<String>> = _reconnectingGroups.asStateFlow()
+
     /**
      * Group ids with a durable join still completing. The list screen draws
      * these as "joining…"; they clear themselves when the resume pump
@@ -414,6 +419,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             }
             val converged = _pendingJoins.value.any { it !in stillPending }
             _pendingJoins.value = stillPending
+            // Recovery status rides the same tick: cheap map read engine-side.
+            _reconnectingGroups.value =
+                runCatching { gw.reconnectingGroups().toSet() }
+                    .getOrDefault(_reconnectingGroups.value)
             if (converged) {
                 runCatching { refreshGroups() }
             }

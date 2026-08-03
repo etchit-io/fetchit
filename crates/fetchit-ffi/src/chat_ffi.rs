@@ -1689,6 +1689,15 @@ impl ChatClient {
     ///
     /// # Errors
     /// [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
+    /// Group ids currently in stale-epoch catch-up (#297 P1.4). The
+    /// shell polls this on its pump cadence and renders the quiet
+    /// "syncing…" affordance on matching conversations; empty when
+    /// everything is Live. Never errors — a REST-only client simply has
+    /// no recovering groups.
+    pub fn reconnecting_groups(&self) -> Vec<String> {
+        self.inner.reconnecting_groups()
+    }
+
     pub async fn fedi_followers(&self) -> Result<Vec<String>, ChatFfiError> {
         let handle = self
             .fedi_actor_status()

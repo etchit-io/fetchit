@@ -220,6 +220,9 @@ interface ChatGateway {
      */
     suspend fun fediFollowers(): List<String>
 
+    /** Group ids currently in stale-epoch catch-up (#297 P1.4). */
+    fun reconnectingGroups(): List<String> = emptyList()
+
     /**
      * Send a "go private" invite to [target] over the fediverse: it carries
      * this device's pair link plus an install nudge. Records the pending
@@ -379,6 +382,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> =
         inner.fediThreadsOverview()
     override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
+
+    override fun reconnectingGroups(): List<String> = inner.reconnectingGroups()
     override suspend fun fediGoPrivateInvite(target: String, displayName: String): GoPrivateReportFfi =
         inner.fediGoPrivateInvite(target, displayName)
     override fun fediPendingInvites(): List<String> = inner.fediPendingInvites()
