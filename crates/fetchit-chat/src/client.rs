@@ -2119,6 +2119,83 @@ impl Client {
         false
     }
 
+    /// Ladder rung 1 (#297 P2): refresh a conversation's peer device
+    /// roster from the stored contact cards before a re-key fans
+    /// Welcomes to it.
+    ///
+    /// **Why this is load-bearing, not a nicety** (2026-08-03 device
+    /// proof): a Welcome is sealed with a key derived from an ML-KEM
+    /// encapsulation against the recipient's `kem_public_key_b64` **as
+    /// recorded in this conversation's member list**. ML-KEM uses
+    /// implicit rejection — decapsulating with the wrong secret yields a
+    /// well-formed but DIFFERENT shared secret rather than an error — so
+    /// a stale member KEM key never surfaces as a decap failure; the
+    /// peer reports `AeadOpenFailed` and stays wedged. Ordinary messages
+    /// ride the symmetric conversation key and keep working, and
+    /// signature checks read the contact card (which pairing refreshes),
+    /// so the rot is invisible until a re-key must land.
+    ///
+    /// Returns `true` when any device record changed.
+    ///
+    /// # Errors
+    /// Registry I/O failures; a missing conversation is `Ok(false)`.
+    pub async fn refresh_conversation_roster(&self, group_id_hex: &str) -> Result<bool> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        let Some(conv) = chat.registry.get(group_id_hex).await? else {
+            return Ok(false);
+        };
+        let local_hex = chat.identity.agent_id_hex().to_owned();
+        // Collect the freshest key material per peer device id.
+        let mut fresh: std::collections::HashMap<String, (String, Option<String>)> =
+            std::collections::HashMap::new();
+        for member in &conv.members {
+            for device in &member.devices {
+                if device.agent_id_hex == local_hex {
+                    continue;
+                }
+                if let Ok(Some(card)) =
+                    crate::messages::StoredContactCard::load(&chat.layout, &device.agent_id_hex)
+                {
+                    fresh.insert(
+                        device.agent_id_hex.clone(),
+                        (card.kem_public_key_b64, card.agent_public_key_b64),
+                    );
+                }
+            }
+        }
+        if fresh.is_empty() {
+            return Ok(false);
+        }
+        chat.registry
+            .mutate_in_place(group_id_hex, |c| {
+                let mut changed = false;
+                for member in &mut c.members {
+                    for device in &mut member.devices {
+                        let Some((kem, sig)) = fresh.get(&device.agent_id_hex) else {
+                            continue;
+                        };
+                        if device.kem_public_key_b64 != *kem {
+                            device.kem_public_key_b64 = kem.clone();
+                            changed = true;
+                        }
+                        if sig.is_some() && device.agent_public_key_b64 != *sig {
+                            device.agent_public_key_b64 = sig.clone();
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    MutateAction::Persist(true)
+                } else {
+                    MutateAction::Skip(false)
+                }
+            })
+            .await
+    }
+
     /// Force an immediate epoch rotation on a chat-v2 conversation
     /// (#297 P2, the wedge ladder): bypasses the Admin-role and 7-day
     /// policy gates of the auto-rekey sweep, keeping only the epoch CAS
@@ -2141,6 +2218,13 @@ impl Client {
             .chat
             .as_ref()
             .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        // Rung 1 BEFORE rung 2: a Welcome sealed to a stale member KEM
+        // key is silently unopenable (see refresh_conversation_roster).
+        match self.refresh_conversation_roster(group_id_hex).await {
+            Ok(true) => log::warn!("[chat] roster refreshed before re-key: {group_id_hex}"),
+            Ok(false) => {}
+            Err(e) => log::warn!("[chat] roster refresh failed for {group_id_hex}: {e}"),
+        }
         let Some(snapshot) = chat.registry.get(group_id_hex).await? else {
             return Ok(false);
         };
@@ -6669,6 +6753,12 @@ mod provision_tests {
     }
 }
 
+/// Resolve the vault master key from an identity vault + optional
+/// passphrase (`None` = OS-keychain custody).
+///
+/// # Errors
+/// [`ChatError`] when the vault header cannot be read or the passphrase
+/// does not derive the stored key.
 pub fn resolve_master_key(
     identity_vault_path: &std::path::Path,
     passphrase: Option<&str>,

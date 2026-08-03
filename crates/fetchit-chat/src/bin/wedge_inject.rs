@@ -41,17 +41,16 @@ fn main() {
         eprintln!("--passphrase-file <path> is required");
         std::process::exit(2);
     };
-    let bump: u32 = arg("--bump")
-        .and_then(|b| b.parse().ok())
-        .unwrap_or(3);
+    let bump: u32 = arg("--bump").and_then(|b| b.parse().ok()).unwrap_or(3);
     let only_group = arg("--group");
 
-    let passphrase = std::fs::read_to_string(&pass_file)
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_else(|e| {
+    let passphrase = std::fs::read_to_string(&pass_file).map_or_else(
+        |e| {
             eprintln!("read passphrase file {pass_file}: {e}");
             std::process::exit(1);
-        });
+        },
+        |s| s.trim().to_owned(),
+    );
 
     let layout = StoreLayout::ensure(PathBuf::from(&data_dir)).unwrap_or_else(|e| {
         eprintln!("open layout: {e}");
@@ -89,9 +88,16 @@ fn main() {
             }
         }
         let before = conv.current_epoch;
+        if bump == 0 {
+            // Inspect-only: `--bump 0` must never mutate (this tool is
+            // pointed at live vaults during the device proof).
+            println!("{} : epoch {before} (inspect only)", conv.group_id_hex);
+            touched += 1;
+            continue;
+        }
         // Advance the epoch + key WITHOUT emitting Welcomes: the peer now
         // seals at an epoch the counterpart cannot open.
-        for _ in 0..bump.max(1) {
+        for _ in 0..bump {
             let mut key = [0u8; 32];
             getrandom_key(&mut key);
             conv.advance_epoch(key);
