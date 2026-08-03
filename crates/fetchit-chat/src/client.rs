@@ -6669,7 +6669,7 @@ mod provision_tests {
     }
 }
 
-pub(crate) fn resolve_master_key(
+pub fn resolve_master_key(
     identity_vault_path: &std::path::Path,
     passphrase: Option<&str>,
 ) -> Result<(MasterKey, u8, Option<[u8; ARGON_SALT_LEN]>)> {

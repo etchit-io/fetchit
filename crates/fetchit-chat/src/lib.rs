@@ -74,6 +74,11 @@ mod mesh_mode;
 
 pub use chat_identity::FetchitIdentity;
 pub use client::restore_identity_from_recovery_phrase;
+/// Test-only: resolve a vault master key from a passphrase, for the
+/// #297 wedge-injection harness (`src/bin/wedge_inject.rs`). Not part
+/// of the supported surface — the shells never call this.
+#[doc(hidden)]
+pub use client::resolve_master_key;
 pub use client::{
     provision_local_signer_keypair, Client, ClientBuilder, EnsureV2Outcome, FediLookup,
     FediLookupKind, MintOutcome, ProvisionedSignerKey, RelayFailoverEvent,
