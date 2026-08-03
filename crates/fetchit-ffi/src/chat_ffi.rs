@@ -2504,6 +2504,36 @@ fn spawn_inbound_pump(
     .abort_handle()
 }
 
+/// Which inbound dispatch outcomes mean "this conversation is wedged"
+/// — feed the wedge clocks and trip recovery — and at what peer epoch.
+///
+/// Extracted so the decision is unit-testable: it is the ONLY thing
+/// standing between a wedged mobile DM and a permanent silent failure.
+/// Chat-v2 DMs never surface in the x0xd group-decrypt error arm; they
+/// fail HERE as an `Ok`-shaped dispatch outcome, and before #326 nothing
+/// acted on it, so the re-key ladder had no reach on Android at all.
+///
+/// `AeadOpenFailed` counts even though it CONFIRMS delivery (the bytes
+/// are sealed to a key we will never hold, so redelivery is pointless
+/// and the relay's copy is released) — the frame is still proof the
+/// peer is live and our key state is wrong, which is exactly the wedge
+/// signature. `KemDecapFailed` is excluded: ML-KEM implicit rejection
+/// means a key mismatch does NOT surface there, so it indicates a
+/// malformed frame rather than a desync.
+fn wedge_recovery_signal(dispatch: &InboundDispatch) -> Option<(&str, u32)> {
+    match dispatch {
+        InboundDispatch::StaleEpoch {
+            group_id_hex,
+            epoch,
+        }
+        | InboundDispatch::AeadOpenFailed {
+            group_id_hex,
+            epoch,
+        } => Some((group_id_hex.as_str(), *epoch)),
+        _ => None,
+    }
+}
+
 async fn run_inbound_pump(
     client: Client,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<fetchit_chat::transport::InboundEnvelope>,
@@ -2539,6 +2569,29 @@ async fn run_inbound_pump(
             .identity_arc()
             .map(|id| id.agent_id_hex().to_owned())
             .unwrap_or_default();
+
+        // Arrival trace. The headless peer prints an equivalent line and
+        // that is the ONLY reason its failures were ever diagnosable;
+        // mobile had no inbound logging at all, so "the phone is silent"
+        // was indistinguishable from "no frame arrived", "arrived but
+        // undecryptable", and "decrypted but not surfaced". Cheap: one
+        // line per inbound envelope, ids truncated to 8 hex chars, and
+        // NO plaintext or key material (docs/metrics-policy.md).
+        log::info!(
+            "[chat_ffi] inbound kind={:?} sender={} group={} epoch={} ct={} kem={}",
+            transit.kind,
+            &sender_hex[..8.min(sender_hex.len())],
+            transit.group_id.map_or_else(
+                || "-".to_owned(),
+                |g| {
+                    let h = hex::encode(g.0);
+                    h[..8.min(h.len())].to_owned()
+                },
+            ),
+            transit.epoch,
+            transit.ciphertext.len(),
+            transit.kem_ciphertext.len(),
+        );
 
         match route_envelope(&transit.kind, &sender_hex, &self_hex) {
             // Own echo: permanently uninteresting, reclaim.
@@ -2633,7 +2686,9 @@ async fn run_inbound_pump(
                 Err(e) => {
                     log::warn!("[chat_ffi] private_group_decrypt_failed: {e}");
                     if let Some(registry) = client.registry_arc() {
-                        registry.note_wedge_inbound(&group_id_hex, Some(transit.epoch)).await;
+                        registry
+                            .note_wedge_inbound(&group_id_hex, Some(transit.epoch))
+                            .await;
                     }
                     client.trigger_group_recovery(
                         group_id_hex.clone(),
@@ -2676,6 +2731,53 @@ async fn run_inbound_pump(
                 continue;
             }
         };
+        // Outcome trace, EVERY variant. Ok-shaped non-delivery is the
+        // most common way mobile chat "goes quiet", and logging only the
+        // non-confirming half hid the most interesting case:
+        // `AeadOpenFailed` CONFIRMS delivery (immutable bytes, so
+        // redelivery cannot help and the relay releases its copy) yet
+        // the user still sees nothing -- in a silent log that is
+        // indistinguishable from a clean delivery. Variant discriminant
+        // only: no payload, no ids, no key material.
+        {
+            let outcome = match &dispatch {
+                InboundDispatch::Message { .. } => "message",
+                InboundDispatch::Receipt { .. } => "receipt",
+                InboundDispatch::Welcomed { .. } => "welcomed",
+                InboundDispatch::WelcomedPending { .. } => "welcomed-pending",
+                InboundDispatch::Rekeyed { .. } => "rekeyed",
+                InboundDispatch::StaleEpoch { .. } => "stale-epoch",
+                InboundDispatch::KemDecapFailed => "kem-decap-failed",
+                InboundDispatch::AeadOpenFailed { .. } => "aead-open-failed",
+                other => {
+                    log::info!("[chat_ffi] inbound outcome: other {other:?}");
+                    ""
+                }
+            };
+            if !outcome.is_empty() {
+                log::info!(
+                    "[chat_ffi] inbound outcome: {outcome} (acked={})",
+                    fetchit_chat::conversation::confirms_delivery(&dispatch)
+                );
+            }
+        }
+        // Wedge signal + recovery for CHAT-V2 conversations (#297/#326).
+        //
+        // This was the last hole in the mobile self-heal: the group
+        // (x0xd) decrypt-error arm already triggered recovery, but a
+        // chat-v2 DM never fails there -- it fails HERE, as an Ok-shaped
+        // `StaleEpoch`/`AeadOpenFailed` dispatch outcome, which nothing
+        // acted on. Device-proven 2026-08-03: the phone logged
+        // `aead-open-failed` on every inbound from a wedged peer and did
+        // nothing, so the ladder never ran on Android at all. The
+        // engine's `trigger_group_recovery` routes DM vs group and
+        // applies the ladder cooldown, so this is a plain hand-off.
+        if let Some((group_id_hex, epoch)) = wedge_recovery_signal(&dispatch) {
+            if let Some(reg) = client.registry_arc() {
+                reg.note_wedge_inbound(group_id_hex, Some(epoch)).await;
+            }
+            client.trigger_group_recovery(group_id_hex.to_owned(), Some(u64::from(epoch)));
+        }
         // Variant-aware: StaleEpoch / KemDecapFailed / missing-card drops
         // are Ok-shaped but NOT terminal -- the classifier holds exactly
         // those for redelivery.
@@ -2815,6 +2917,49 @@ pub async fn enroll_confirmed_device(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+
+    /// #326 regression. A wedged chat-v2 DM fails as an `Ok`-shaped
+    /// dispatch outcome, NOT in the x0xd group-decrypt error arm — and
+    /// before this, nothing acted on it, so the re-key ladder never ran
+    /// on Android. Device-proven 2026-08-03: the phone logged
+    /// `aead-open-failed` on every inbound from a wedged peer and sat
+    /// there. If this ever returns `None` for these two variants, mobile
+    /// self-heal is silently dead again.
+    #[test]
+    fn wedge_recovery_signal_trips_on_the_two_desync_outcomes() {
+        use fetchit_chat::conversation::InboundDispatch as D;
+
+        let stale = D::StaleEpoch {
+            group_id_hex: "aa".repeat(32),
+            epoch: 7,
+        };
+        assert_eq!(
+            super::wedge_recovery_signal(&stale).map(|(_, e)| e),
+            Some(7),
+            "a stale-epoch frame is the classic wedge signal",
+        );
+
+        let aead = D::AeadOpenFailed {
+            group_id_hex: "bb".repeat(32),
+            epoch: 4,
+        };
+        assert_eq!(
+            super::wedge_recovery_signal(&aead).map(|(_, e)| e),
+            Some(4),
+            "AEAD-open failure must trip recovery even though it ACKS: the \
+             frame still proves the peer is live and our key state is wrong",
+        );
+
+        // Healthy + genuinely-unrelated outcomes must NOT trip a re-key.
+        assert!(super::wedge_recovery_signal(&D::KemDecapFailed).is_none());
+        assert!(super::wedge_recovery_signal(&D::WelcomeIgnored).is_none());
+        assert!(super::wedge_recovery_signal(&D::Dropped {
+            kind: "no-card".to_owned(),
+            sender: "cc".repeat(32),
+        })
+        .is_none());
+    }
+
     use super::*;
 
     // All-zeros hex is the bridge sentinel: 32 zero bytes = 64 '0' chars.
