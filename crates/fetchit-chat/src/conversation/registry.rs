@@ -460,11 +460,14 @@ impl ConversationRegistry {
     /// group-decrypt error). Liveness without progress is the wedge
     /// signature — the peer is demonstrably reaching us and only the
     /// key state is wrong. A missing conversation is a silent no-op.
-    pub async fn note_wedge_inbound(&self, group_id_hex: &str) {
+    pub async fn note_wedge_inbound(&self, group_id_hex: &str, frame_epoch: Option<u32>) {
         let now_ms = super::types::now_ms();
         let _ = self
             .mutate_in_place(group_id_hex, |conv| {
                 conv.wedge_last_inbound_ms = now_ms;
+                if let Some(e) = frame_epoch {
+                    conv.wedge_max_stale_epoch = conv.wedge_max_stale_epoch.max(e);
+                }
                 MutateAction::Persist(())
             })
             .await;
@@ -740,6 +743,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         }
     }
 
@@ -895,6 +899,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         }
     }
 

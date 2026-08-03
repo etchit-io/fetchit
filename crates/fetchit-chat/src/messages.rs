@@ -2809,6 +2809,7 @@ fn self_only_private_group_conversation<S: Signer + ?Sized>(
         wedge_last_progress_ms: 0,
         wedge_last_inbound_ms: 0,
         wedge_progress_epoch: 0,
+        wedge_max_stale_epoch: 0,
     }
 }
 

@@ -2633,7 +2633,7 @@ async fn run_inbound_pump(
                 Err(e) => {
                     log::warn!("[chat_ffi] private_group_decrypt_failed: {e}");
                     if let Some(registry) = client.registry_arc() {
-                        registry.note_wedge_inbound(&group_id_hex).await;
+                        registry.note_wedge_inbound(&group_id_hex, Some(transit.epoch)).await;
                     }
                     client.trigger_group_recovery(
                         group_id_hex.clone(),

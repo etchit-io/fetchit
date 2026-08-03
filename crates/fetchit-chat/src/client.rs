@@ -1847,7 +1847,9 @@ impl Client {
                 // it drains the group-log, applies the missed commits, and
                 // clears `Live` once keyed at target.
                 if let Some(registry) = self.registry_arc() {
-                    registry.note_wedge_inbound(&group_id_hex).await;
+                    registry
+                        .note_wedge_inbound(&group_id_hex, Some(transit.epoch))
+                        .await;
                 }
                 self.trigger_group_recovery(group_id_hex.clone(), Some(u64::from(transit.epoch)));
             }
@@ -5430,8 +5432,20 @@ async fn try_rekey_and_build_welcomes(
     let group_id_hex = snapshot.group_id_hex.clone();
     let snapshot_epoch = snapshot.current_epoch;
 
+    // Forced re-keys (the #297 wedge ladder) must land PAST the highest
+    // epoch the peer was observed sealing at: at an epoch tie the peer
+    // ignores our Welcome (`<=` its epoch) and healing would cost a
+    // second damped cycle. The floor is computed from the snapshot so
+    // the built Welcomes and the CAS commit land the same epoch.
+    let forced_floor = if force {
+        snapshot.current_epoch.max(snapshot.wedge_max_stale_epoch)
+    } else {
+        snapshot.current_epoch
+    };
+
     let new_key = random_symmetric_key(&mut OsRng);
     let mut prospective = snapshot.clone();
+    prospective.current_epoch = forced_floor;
     prospective.advance_epoch(new_key);
     let welcomes = match build_welcome_outbox(&prospective, identity, machine_id, signer).await {
         Ok(w) => w,
@@ -5455,6 +5469,7 @@ async fn try_rekey_and_build_welcomes(
             if !policy_ok || conv.current_epoch != snapshot_epoch {
                 return MutateAction::Skip(false);
             }
+            conv.current_epoch = forced_floor;
             conv.advance_epoch(new_key);
             MutateAction::Persist(true)
         })

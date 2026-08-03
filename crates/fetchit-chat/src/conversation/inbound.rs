@@ -293,7 +293,9 @@ async fn dispatch_receipt(
     let Some(key) = conv.key_for_epoch(envelope.epoch)? else {
         // Wedge signal: a receipt reached us but we hold no key for its
         // epoch — liveness without progress (#297).
-        registry.note_wedge_inbound(&group_id_hex).await;
+        registry
+            .note_wedge_inbound(&group_id_hex, Some(envelope.epoch))
+            .await;
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -327,7 +329,9 @@ async fn dispatch_receipt(
     }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
-        registry.note_wedge_inbound(&group_id_hex).await;
+        registry
+            .note_wedge_inbound(&group_id_hex, Some(envelope.epoch))
+            .await;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,
@@ -386,7 +390,9 @@ async fn dispatch_message(
     let Some(key) = conv.key_for_epoch(envelope.epoch)? else {
         // Wedge signal: the frame reached us but we hold no key for its
         // epoch — liveness without progress (#297).
-        registry.note_wedge_inbound(&group_id_hex).await;
+        registry
+            .note_wedge_inbound(&group_id_hex, Some(envelope.epoch))
+            .await;
         return Ok(InboundDispatch::StaleEpoch {
             group_id_hex,
             epoch: envelope.epoch,
@@ -415,7 +421,9 @@ async fn dispatch_message(
     }
     let aad = message_aad(&group_id_bytes, envelope.epoch);
     let Ok(plaintext) = aead_open(&key, &nonce, &envelope.ciphertext, &aad) else {
-        registry.note_wedge_inbound(&group_id_hex).await;
+        registry
+            .note_wedge_inbound(&group_id_hex, Some(envelope.epoch))
+            .await;
         return Ok(InboundDispatch::AeadOpenFailed {
             group_id_hex,
             epoch: envelope.epoch,

@@ -167,6 +167,13 @@ pub struct Conversation {
     /// advance since then is itself progress and vetoes the trip.
     #[serde(default)]
     pub wedge_progress_epoch: u32,
+    /// Highest epoch observed on an UNDECRYPTABLE inbound frame — what
+    /// the peer is currently sealing at. A forced re-key must advance
+    /// PAST this (not merely `current + 1`): at an epoch tie the peer
+    /// ignores our Welcome (`<=` its epoch) and healing would take a
+    /// second damped cycle.
+    #[serde(default)]
+    pub wedge_max_stale_epoch: u32,
 }
 
 impl Conversation {
@@ -205,6 +212,7 @@ impl Conversation {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         })
     }
 
@@ -235,6 +243,7 @@ impl Conversation {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         }
     }
 
@@ -862,6 +871,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -893,6 +903,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -919,6 +930,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         assert!(conv.auto_rekey_due());
     }
@@ -944,6 +956,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -969,6 +982,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -1001,6 +1015,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         let nonce = [0xAB; 12];
         assert!(!conv.check_and_record_nonce("alice", nonce));
@@ -1039,6 +1054,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         for i in 0..64u8 {
             assert!(!conv.check_and_record_nonce("alice", [i; 12]));
@@ -1075,6 +1091,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         // Fill Alice's window completely.
         for i in 0..64u8 {
@@ -1131,6 +1148,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         };
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);
@@ -1159,6 +1177,7 @@ mod tests {
             wedge_last_progress_ms: 0,
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
+            wedge_max_stale_epoch: 0,
         }
     }
 
