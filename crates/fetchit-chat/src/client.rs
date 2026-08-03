@@ -31,6 +31,15 @@ use x0xd_client::X0xdVersion;
 use zeroize::Zeroizing;
 
 /// How often the auto-rekey sweeper fires.
+/// Wedge-watchdog tick cadence (#297 P1.3). Matches
+/// [`crate::groups::epoch_recovery::WEDGE_THRESHOLD_MS`] so a wedge is
+/// caught within roughly one threshold window of forming.
+const WEDGE_TICK_MS: u64 = 60_000;
+/// How fresh the last undecryptable inbound must be for the watchdog to
+/// treat the peer as "live right now". Slightly over one tick so a
+/// frame that arrived just before the previous tick still counts.
+const WEDGE_RECENT_WINDOW_MS: u64 = 90_000;
+
 const AUTO_REKEY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// T8b: how long slot 0 may stay continuously
@@ -743,6 +752,15 @@ impl Client {
             recovery_cursors: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recovering: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
+
+        // Wedge watchdog (#297 P1.3): a 60 s tick that reads the
+        // per-conversation wedge clocks and trips the recovery driver for
+        // silently-stuck x0xd groups — the proactive half the reactive
+        // decrypt-failure trigger can't cover (a group with NO inbound
+        // after the wedge never re-enters the failure arm).
+        if client.chat.is_some() {
+            client.spawn_wedge_watchdog();
+        }
 
         // Best-effort pair-record publish: runs once at connect time so
         // peers can discover this agent via `GET /v1/pair-record/<id>`.
@@ -1976,6 +1994,87 @@ impl Client {
     /// when it finishes (success or error), so the next stale frame re-arms
     /// it. Fire-and-forget: a recovery error just leaves the group
     /// `Reconnecting` for the next trigger.
+    /// Spawn the wedge watchdog (#297 P1.3): every
+    /// [`WEDGE_TICK_MS`] the per-conversation wedge clocks feed the pure
+    /// decision core ([`crate::groups::epoch_recovery::groups_to_recover`])
+    /// and each tripped x0xd group is handed to the recovery driver.
+    /// Chat-v2 conversations (DMs) that trip are logged only — their
+    /// self-heal is the P2 forced-re-key ladder, not the group driver,
+    /// and mis-routing one here would wedge its status at Reconnecting.
+    fn spawn_wedge_watchdog(&self) {
+        let client = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(WEDGE_TICK_MS));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                client.wedge_watchdog_once().await;
+            }
+        });
+    }
+
+    /// One watchdog pass. Public for tests and for shells that want an
+    /// on-demand sweep (e.g. on foreground).
+    pub async fn wedge_watchdog_once(&self) {
+        let Some(registry) = self.registry_arc() else {
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let snapshot = registry
+            .wedge_snapshot(now_ms, WEDGE_RECENT_WINDOW_MS)
+            .await;
+        let wedged = crate::groups::epoch_recovery::groups_to_recover(
+            now_ms,
+            crate::groups::epoch_recovery::WEDGE_THRESHOLD_MS,
+            &snapshot,
+        );
+        for group_id in wedged {
+            if matches!(
+                self.group_recovery.get(&group_id),
+                crate::groups::epoch_recovery::GroupRecoveryStatus::Reconnecting
+            ) {
+                continue; // a recovery pass is already in flight
+            }
+            if self.is_x0xd_group(&group_id).await {
+                log::warn!(
+                    "[chat] wedge watchdog tripped for group {group_id}; triggering recovery"
+                );
+                self.trigger_group_recovery(group_id, None);
+            } else {
+                // Chat-v2 wedge: the P2 forced-re-key ladder owns this
+                // class. Logged so the device proof can observe detection
+                // before the ladder lands.
+                log::warn!("[chat] wedge watchdog: chat-v2 conversation {group_id} looks wedged (re-key ladder pending)");
+            }
+        }
+    }
+
+    /// Is `group_id_hex` an x0xd MLS group (vs a chat-v2 engine
+    /// conversation)? Two evidence sources, either sufficient: the
+    /// runtime kind map (populated on group list/join), or persisted
+    /// group-seq state on the conversation row — those ledgers only ever
+    /// populate on the private-group receive/send path.
+    async fn is_x0xd_group(&self, group_id_hex: &str) -> bool {
+        if let Ok(kinds) = self.group_kinds.lock() {
+            if kinds.contains_key(group_id_hex) {
+                return true;
+            }
+        }
+        if let Some(registry) = self.registry_arc() {
+            if let Ok(Some(conv)) = registry.get(group_id_hex).await {
+                return conv.own_group_send_seq > 0 || !conv.group_seq_windows.is_empty();
+            }
+        }
+        false
+    }
+
+    /// Kick one background recovery pass for `group_id` (#297): flips the
+    /// status to `Reconnecting`, singleflights per group, and drives
+    /// [`Self::recover_group_once`] toward `target_epoch` (`Some` from
+    /// the inbound-frame triggers, `None` from the wedge watchdog —
+    /// drain whatever commits exist and re-check keyed).
     pub fn trigger_group_recovery(&self, group_id: String, target_epoch: Option<u64>) {
         // Every trigger site wants the shell to see catch-up rather than a
         // silently-dead group, so the status flip lives HERE — callers
