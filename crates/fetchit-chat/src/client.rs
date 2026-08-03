@@ -7138,6 +7138,142 @@ mod tests {
         (dir, alice_signer, identity, registry, conv)
     }
 
+    /// The tiebreak bit this side adds when forcing: 1 when our agent
+    /// id orders above every peer device's (we claim the higher epoch),
+    /// else 0. Mirrors the production predicate exactly so the expected
+    /// epochs below stay deterministic even though the fixture's ML-DSA
+    /// keys (and hence agent-id ordering) are random per run.
+    fn tiebreak_bit(identity: &FetchitIdentity, conv: &Conversation) -> u32 {
+        let local = identity.agent_id_hex();
+        let highest_peer = conv
+            .members
+            .iter()
+            .flat_map(|m| &m.devices)
+            .map(|d| d.agent_id_hex.as_str())
+            .filter(|a| *a != local)
+            .max();
+        u32::from(highest_peer.is_some_and(|p| local > p))
+    }
+
+    /// #297 forced path, end to end: the jump lands PAST the peer's
+    /// observed epoch, the outgoing key is archived under the epoch it
+    /// actually served (NOT the jump target — the mislabel that shipped
+    /// with zero coverage), and the wedge clocks are re-based so the
+    /// watchdog can re-trip if this very Welcome fails to land.
+    #[tokio::test]
+    async fn forced_rekey_jumps_past_peer_epoch_archives_true_key_and_rearms() {
+        let (_dir, signer, identity, registry, mut conv) = fixture_real_peer_conv().await;
+        let live_key = conv.current_key_b64.clone();
+        conv.wedge_max_stale_epoch = 7; // peer observed sealing at 7
+        registry.save(&conv).await.unwrap();
+        let t = tiebreak_bit(&identity, &conv);
+
+        let welcomes = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &conv,
+            &identity,
+            [0u8; 32],
+            &signer,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("forced path must commit");
+        assert!(!welcomes.is_empty());
+
+        let after = registry.get(&conv.group_id_hex).await.unwrap().unwrap();
+        assert_eq!(
+            after.current_epoch,
+            8 + t,
+            "must land strictly past the peer's epoch 7 (+ our tiebreak bit)",
+        );
+        assert_eq!(
+            after.prior_keys.last().unwrap().epoch,
+            0,
+            "the outgoing key served epoch 0 and must be archived there",
+        );
+        assert_eq!(after.prior_keys.last().unwrap().key_b64, live_key);
+        assert_eq!(
+            after.key_for_epoch(7).unwrap(),
+            None,
+            "we never served epoch 7; claiming a key for it would open a \
+             genuine epoch-7 frame with the wrong key",
+        );
+        // Re-arm: a failed heal must stay retryable (cooldown-damped),
+        // and the spent peer epoch must not re-drive the same jump.
+        assert_eq!(after.wedge_progress_epoch, after.current_epoch);
+        assert_eq!(after.wedge_max_stale_epoch, 0);
+    }
+
+    /// `wedge_max_stale_epoch` is read off the wire. A frame claiming
+    /// `u32::MAX` must produce a bounded jump — never a wrap to 0 (which
+    /// would strand the conversation below every future Welcome) and
+    /// never a leap to the ceiling.
+    #[tokio::test]
+    async fn forced_rekey_clamps_a_hostile_peer_epoch() {
+        let (_dir, signer, identity, registry, mut conv) = fixture_real_peer_conv().await;
+        conv.wedge_max_stale_epoch = u32::MAX;
+        registry.save(&conv).await.unwrap();
+        let t = tiebreak_bit(&identity, &conv);
+
+        try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &conv,
+            &identity,
+            [0u8; 32],
+            &signer,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("forced path must commit");
+
+        let after = registry.get(&conv.group_id_hex).await.unwrap().unwrap();
+        assert_eq!(
+            after.current_epoch,
+            MAX_FORCED_EPOCH_JUMP + 1 + t,
+            "a hostile epoch claim must clamp to a bounded jump",
+        );
+    }
+
+    /// `force` exists so a wedged NON-Admin can heal its own DM — the
+    /// one policy gate it is allowed to bypass. The unforced call on the
+    /// same conversation must still respect the gate.
+    #[tokio::test]
+    async fn forced_rekey_bypasses_the_admin_gate_a_plain_rekey_respects() {
+        let (_dir, signer, identity, registry, mut conv) = fixture_real_peer_conv().await;
+        conv.own_role = crate::conversation::Role::Member;
+        conv.auto_rekey_interval_ms = u64::MAX;
+        registry.save(&conv).await.unwrap();
+
+        let unforced = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &conv,
+            &identity,
+            [0u8; 32],
+            &signer,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            unforced.is_none(),
+            "a Member outside the interval must not plain-rekey",
+        );
+
+        let forced = try_rekey_and_build_welcomes(
+            registry.as_ref(),
+            &conv,
+            &identity,
+            [0u8; 32],
+            &signer,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(forced.is_some(), "the wedge ladder must heal a Member DM");
+    }
+
     /// Round-6 P2: successful rekey advances epoch by exactly 1,
     /// pushes the old key into `prior_keys`, and produces welcomes
     /// for each peer device.

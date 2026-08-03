@@ -1371,7 +1371,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_follow() != 31415.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_followers() != 47747.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_followers() != 9197.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following() != 3672.toShort()) {
@@ -1455,7 +1455,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnect_relay() != 52308.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnecting_groups() != 2748.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnecting_groups() != 12997.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact() != 56807.toShort()) {
@@ -2165,6 +2165,14 @@ public interface ChatClientInterface {
      */
     suspend fun `fediFollow`(`target`: kotlin.String): FollowReportFfi
     
+    /**
+     * The accounts following the minted handle, as `@user@host` labels,
+     * from the directory's owner-only list. Throws when no handle is
+     * minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
+     */
     suspend fun `fediFollowers`(): List<kotlin.String>
     
     /**
@@ -2509,12 +2517,6 @@ public interface ChatClientInterface {
     suspend fun `reconnectRelay`()
     
     /**
-     * The accounts following the minted handle, as `@user@host` labels,
-     * from the directory's owner-only list. Throws when no handle is
-     * minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
-     *
-     * # Errors
-     * [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
      * Group ids currently in stale-epoch catch-up (#297 P1.4). The
      * shell polls this on its pump cadence and renders the quiet
      * "syncing…" affordance on matching conversations; empty when
@@ -3174,6 +3176,14 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     }
 
     
+    /**
+     * The accounts following the minted handle, as `@user@host` labels,
+     * from the directory's owner-only list. Throws when no handle is
+     * minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
+     */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `fediFollowers`() : List<kotlin.String> {
@@ -3992,12 +4002,6 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * The accounts following the minted handle, as `@user@host` labels,
-     * from the directory's owner-only list. Throws when no handle is
-     * minted or the directory is unreachable (mirrors [`Self::fedi_following`]).
-     *
-     * # Errors
-     * [`ChatFfiError::Invalid`] when no handle is minted or the fetch fails.
      * Group ids currently in stale-epoch catch-up (#297 P1.4). The
      * shell polls this on its pump cadence and renders the quiet
      * "syncing…" affordance on matching conversations; empty when
