@@ -100,6 +100,10 @@ impl Client {
             .await
             .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
         let recipient_actor_url = target_actor.id.to_string();
+        self.note_fedi_avatar_source(
+            &crate::fedi_feed::author_label(&recipient_actor_url),
+            target_actor.icon_url.as_deref(),
+        );
 
         // Thread the reply under the correspondent's most recent inbound
         // note so the recipient's client nests it into the ongoing

@@ -7,15 +7,16 @@
 //!
 //! - https only — an `http://` or `file://` icon is rejected before any
 //!   socket opens;
-//! - the same resolver-pinned, redirect-disabled client the actor fetch
-//!   uses ([`crate::actor::pinned_no_redirect_client`]), so the private
-//!   / loopback / link-local / CGNAT gate in [`crate::ssrf`] runs on the
-//!   literal host AND on every address DNS returns, with the addresses
-//!   pinned so a TTL=0 rebind can't land elsewhere at connect time;
+//! - the same resolver-pinned, redirect-disabled client
+//!   [`crate::actor::fetch_actor`] builds (`pinned_no_redirect_client`),
+//!   so the private / loopback / link-local / CGNAT gate in
+//!   [`crate::ssrf`] runs on the literal host AND on every address DNS
+//!   returns, with the addresses pinned so a TTL=0 rebind can't land
+//!   elsewhere at connect time;
 //! - `redirect::Policy::none()` means there are **zero** redirect hops
 //!   to re-check: a 3xx surfaces as [`FetchAvatarError::Http`] rather
 //!   than being followed. The post-flight host re-check is kept as a
-//!   backstop anyway, mirroring [`crate::actor::fetch_json_ld_at_url`];
+//!   backstop anyway, mirroring the actor JSON-LD fetch;
 //! - a hard [`MAX_AVATAR_BYTES`] body cap, pre-checked against
 //!   `Content-Length` and enforced again by a streaming accumulator;
 //! - a `Content-Type` allowlist ([`ALLOWED_AVATAR_CONTENT_TYPES`]).

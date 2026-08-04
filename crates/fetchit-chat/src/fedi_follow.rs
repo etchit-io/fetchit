@@ -80,6 +80,10 @@ impl Client {
             .await
             .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
         let target_actor_url = target_actor.id.to_string();
+        self.note_fedi_avatar_source(
+            &crate::fedi_feed::author_label(&target_actor_url),
+            target_actor.icon_url.as_deref(),
+        );
 
         // Build + sign + deliver the Follow.
         let follow = build_follow(identity.actor_url.as_str(), &target_actor_url, now_ms);
