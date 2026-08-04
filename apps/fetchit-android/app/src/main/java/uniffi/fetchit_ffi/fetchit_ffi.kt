@@ -861,6 +861,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -917,6 +919,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar_cached(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm(
 ): Short
@@ -1094,6 +1098,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentId
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar(`ptr`: Pointer,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar_cached(`ptr`: Pointer,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_dm(`ptr`: Pointer,`target`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,
 ): Long
@@ -1395,7 +1401,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 12315.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar() != 10386.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar() != 42381.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar_cached() != 39356.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 53381.toShort()) {
@@ -2218,8 +2227,34 @@ public interface ChatClientInterface {
      * 24h refresh window and a 1h failure backoff), so a later call for the
      * same label can succeed. Nothing here blocks — an avatar is decoration,
      * and every fedi surface must render identically without one.
+     *
+     * Because a `None` can fetch, this call belongs to the FEDIVERSE
+     * surfaces only. Anything private (LIT) reads
+     * [`Self::fedi_avatar_cached`] instead.
      */
     fun `fediAvatar`(`label`: kotlin.String): kotlin.ByteArray?
+    
+    /**
+     * Cached avatar image bytes for the fediverse correspondent `label`,
+     * or `None`. Reads the on-disk cache and returns -- nothing else.
+     *
+     * The difference from [`Self::fedi_avatar`] is the whole point: a
+     * `None` here is final for this call. No background fetch is spawned,
+     * no refresh cadence is consulted, no failure backoff is armed. A
+     * stale face is fine; a request is not.
+     *
+     * This is the ONLY avatar call a private (LIT) surface may make.
+     * A LIT contact whose person is linked to a fediverse identity reuses
+     * that identity's picture, and rendering that row must not be
+     * observable to anyone: if drawing it could fetch, then the arrival of
+     * a private message would produce a request to a fediverse server, and
+     * fetch timing on that server's access log would correlate with LIT
+     * activity -- leaking, to a third party, when an end-to-end encrypted
+     * conversation is happening. The fediverse surfaces call
+     * [`Self::fedi_avatar`] and keep the cache warm; LIT rows only ever
+     * read what those surfaces already fetched.
+     */
+    fun `fediAvatarCached`(`label`: kotlin.String): kotlin.ByteArray?
     
     /**
      * Send a plaintext fediverse DM (`@user@instance`) from our minted
@@ -3276,11 +3311,47 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * 24h refresh window and a 1h failure backoff), so a later call for the
      * same label can succeed. Nothing here blocks — an avatar is decoration,
      * and every fedi surface must render identically without one.
+     *
+     * Because a `None` can fetch, this call belongs to the FEDIVERSE
+     * surfaces only. Anything private (LIT) reads
+     * [`Self::fedi_avatar_cached`] instead.
      */override fun `fediAvatar`(`label`: kotlin.String): kotlin.ByteArray? {
             return FfiConverterOptionalByteArray.lift(
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar(
+        it, FfiConverterString.lower(`label`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Cached avatar image bytes for the fediverse correspondent `label`,
+     * or `None`. Reads the on-disk cache and returns -- nothing else.
+     *
+     * The difference from [`Self::fedi_avatar`] is the whole point: a
+     * `None` here is final for this call. No background fetch is spawned,
+     * no refresh cadence is consulted, no failure backoff is armed. A
+     * stale face is fine; a request is not.
+     *
+     * This is the ONLY avatar call a private (LIT) surface may make.
+     * A LIT contact whose person is linked to a fediverse identity reuses
+     * that identity's picture, and rendering that row must not be
+     * observable to anyone: if drawing it could fetch, then the arrival of
+     * a private message would produce a request to a fediverse server, and
+     * fetch timing on that server's access log would correlate with LIT
+     * activity -- leaking, to a third party, when an end-to-end encrypted
+     * conversation is happening. The fediverse surfaces call
+     * [`Self::fedi_avatar`] and keep the cache warm; LIT rows only ever
+     * read what those surfaces already fetched.
+     */override fun `fediAvatarCached`(`label`: kotlin.String): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar_cached(
         it, FfiConverterString.lower(`label`),_status)
 }
     }

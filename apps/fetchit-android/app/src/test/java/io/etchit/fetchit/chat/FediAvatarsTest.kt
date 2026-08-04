@@ -112,4 +112,66 @@ class FediAvatarsTest {
         avatars.clear()
         assertTrue(avatars.shouldQuery("a@host", 1L))
     }
+
+    // ----- the cache-only lane (LIT contact rows) -----
+
+    @Test
+    fun a_cache_only_miss_does_not_suppress_the_fetching_lane() {
+        // A LIT row's miss must not stand in for a fediverse surface's miss:
+        // the fedi surfaces are the only thing that keeps the cache warm, so
+        // silencing them for 30s because a private row looked would starve
+        // the very cache the private row reads.
+        val avatars = FediAvatars(96)
+        val label = "happyborg@fosstodon.org"
+        assertTrue(avatars.shouldQuery(label, 0L, cacheOnly = true))
+        avatars.noteAbsent(label, 0L, cacheOnly = true)
+        assertFalse(
+            "the cache-only lane holds its own re-check window",
+            avatars.shouldQuery(label, 1L, cacheOnly = true),
+        )
+        assertTrue(
+            "the fetching lane is untouched by a cache-only miss",
+            avatars.shouldQuery(label, 1L),
+        )
+    }
+
+    @Test
+    fun a_fetching_lane_miss_does_not_block_a_cache_only_read() {
+        // The converse: a cache-only read is free (one disk read, no network),
+        // so a fedi surface's backoff must not stop a LIT row from picking up
+        // bytes that landed in the meantime.
+        val avatars = FediAvatars(96)
+        val label = "happyborg@fosstodon.org"
+        avatars.noteAbsent(label, 0L)
+        assertFalse(avatars.shouldQuery(label, 1L))
+        assertTrue(avatars.shouldQuery(label, 1L, cacheOnly = true))
+    }
+
+    @Test
+    fun the_cache_only_lane_is_single_flight_too() {
+        val avatars = FediAvatars(96)
+        val label = "a@host"
+        assertTrue(avatars.shouldQuery(label, 0L, cacheOnly = true))
+        assertFalse(avatars.shouldQuery(label, 0L, cacheOnly = true))
+        avatars.releaseQuery(label, cacheOnly = true)
+        assertTrue(avatars.shouldQuery(label, 0L, cacheOnly = true))
+    }
+
+    @Test
+    fun a_cache_only_miss_arms_only_its_own_window_on_undecodable_bytes() {
+        val avatars = FediAvatars(96)
+        val label = "a@host"
+        assertEquals(null, avatars.decodeAndCache(label, ByteArray(0), 0L, cacheOnly = true))
+        assertFalse(avatars.shouldQuery(label, 1L, cacheOnly = true))
+        assertTrue(avatars.shouldQuery(label, 1L))
+    }
+
+    @Test
+    fun clear_forgets_the_cache_only_window_too() {
+        val avatars = FediAvatars(96)
+        avatars.noteAbsent("a@host", 0L, cacheOnly = true)
+        assertFalse(avatars.shouldQuery("a@host", 1L, cacheOnly = true))
+        avatars.clear()
+        assertTrue(avatars.shouldQuery("a@host", 1L, cacheOnly = true))
+    }
 }

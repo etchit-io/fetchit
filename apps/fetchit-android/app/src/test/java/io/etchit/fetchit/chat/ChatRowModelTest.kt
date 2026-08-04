@@ -127,6 +127,73 @@ class ChatRowModelTest {
     }
 
     @Test
+    fun aLinkedContactRowCarriesItsFediLabelForTheAvatar() {
+        // The link that folds the globe row away is the same link that hands
+        // the 🔒 row a face: one person, one picture.
+        val peer = "c".repeat(64)
+        val rows = buildChatRows(
+            contacts = listOf(ChatContact(agentIdHex = peer, displayName = "Happy", addedAtMs = 0L)),
+            groups = emptyList(),
+            groupPreview = { null },
+            contactPreview = { "let's talk" to 400L },
+            fediThreads = listOf(fedi("happyborg@fosstodon.org", 300)),
+            linkedFediLabels = setOf("happyborg@fosstodon.org"),
+            linkedFediLabelByAgent = mapOf(peer to "happyborg@fosstodon.org"),
+        )
+        assertEquals(1, rows.size)
+        assertEquals("happyborg@fosstodon.org", (rows[0] as ChatRow.Contact).fediLabel)
+    }
+
+    @Test
+    fun anUnlinkedContactRowHasNoFediLabel() {
+        // No link, no face: an unlinked contact keeps its existing placeholder
+        // and the row must not offer a label that would be looked up at all.
+        val peer = "d".repeat(64)
+        val rows = buildChatRows(
+            contacts = listOf(ChatContact(agentIdHex = peer, displayName = "Mum", addedAtMs = 0L)),
+            groups = emptyList(),
+            groupPreview = { null },
+            contactPreview = { "hi" to 100L },
+            fediThreads = emptyList(),
+            linkedFediLabelByAgent = mapOf("e".repeat(64) to "someone@else.example"),
+        )
+        assertEquals(null, (rows[0] as ChatRow.Contact).fediLabel)
+    }
+
+    @Test
+    fun aBlankLinkedLabelDoesNotBecomeAnAvatarLookup() {
+        // A malformed/empty stored label must read as "no avatar" rather than
+        // as a key the row would query the cache for.
+        val peer = "f".repeat(64)
+        val rows = buildChatRows(
+            contacts = listOf(ChatContact(agentIdHex = peer, displayName = "Mum", addedAtMs = 0L)),
+            groups = emptyList(),
+            groupPreview = { null },
+            contactPreview = { "hi" to 100L },
+            fediThreads = emptyList(),
+            linkedFediLabelByAgent = mapOf(peer to "   "),
+        )
+        assertEquals(null, (rows[0] as ChatRow.Contact).fediLabel)
+    }
+
+    @Test
+    fun groupRowsAreNeverGivenAFediLabel() {
+        // Only a person can be linked to a fediverse identity; a group id that
+        // happens to collide with a linked agent id must not inherit a face.
+        val hex = "a".repeat(64)
+        val rows = buildChatRows(
+            contacts = emptyList(),
+            groups = listOf(group(hex, "Book club")),
+            groupPreview = { "welcome" to 200L },
+            contactPreview = { null },
+            fediThreads = emptyList(),
+            linkedFediLabelByAgent = mapOf(hex to "happyborg@fosstodon.org"),
+        )
+        assertEquals(1, rows.filterIsInstance<ChatRow.Group>().size)
+        assertEquals(0, rows.filterIsInstance<ChatRow.Contact>().size)
+    }
+
+    @Test
     fun aFediThreadWithNoContactsStillProducesARow() {
         // The unseen-correspondent gap: a fedi thread must appear even with
         // zero private contacts and zero groups.

@@ -294,6 +294,17 @@ owns the bounded on-disk cache (`<root>/fedi/avatars/`, 24h refresh, 1h failure
 backoff, oldest-first eviction past 32 entries / 8 MiB); avatars are
 best-effort and never block or fail follow, DM, or feed.
 
+A LIT contact linked to a fediverse identity reuses that identity's picture,
+and does so **cache-only**. `ChatClient::fedi_avatar` may spawn a background
+fetch on a miss and belongs to the fediverse surfaces; private surfaces call
+`ChatClient::fedi_avatar_cached`, a disk read with no fetch, no spawn, and no
+freshness logic. The reason is a correlation leak, not politeness: if drawing
+a private row could fetch, the arrival of an end-to-end encrypted message
+would appear as a request in a fediverse server's access log. Android holds
+the same split in `FediAvatars` (separate in-flight / re-check lanes over one
+shared bitmap cache) so a private row's re-check can never land on the
+fetching call either. A stale face on a private row is the accepted cost.
+
 **Key entry points:** `fetchit_fedi::ssrf`,
 `fetchit_fedi::webfinger::resolve_handle`, `fetchit_fedi::actor::fetch_actor`,
 `fetchit_fedi::avatar::fetch_avatar`,

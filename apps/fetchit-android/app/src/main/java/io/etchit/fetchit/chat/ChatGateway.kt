@@ -247,6 +247,21 @@ interface ChatGateway {
     fun fediAvatar(label: String): ByteArray? = null
 
     /**
+     * Cached profile-picture bytes for [label] with no side effects at all:
+     * a disk read that returns. No background fetch, no refresh cadence, no
+     * failure backoff.
+     *
+     * This is the only avatar call a private (LIT) surface may make. A LIT
+     * contact whose person is linked to a fediverse identity reuses that
+     * picture, and drawing that row must stay unobservable: if it could
+     * fetch, the arrival of a private message would show up as a request in
+     * a fediverse server's access log, correlating fetch timing with
+     * end-to-end encrypted activity. A stale face is fine — the fediverse
+     * surfaces call [fediAvatar] and keep the cache warm.
+     */
+    fun fediAvatarCached(label: String): ByteArray? = null
+
+    /**
      * The `@user@host` labels of accounts following the minted handle,
      * newest first. Throws when no handle is minted or the directory is
      * unreachable.
@@ -435,6 +450,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediMarkThreadRead(label: String): Boolean =
         inner.fediMarkThreadRead(label)
     override fun fediAvatar(label: String): ByteArray? = inner.fediAvatar(label)
+    override fun fediAvatarCached(label: String): ByteArray? = inner.fediAvatarCached(label)
     override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
 
     override fun reconnectingGroups(): List<String> = inner.reconnectingGroups()

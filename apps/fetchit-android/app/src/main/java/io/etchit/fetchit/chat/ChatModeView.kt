@@ -164,8 +164,14 @@ class ChatModeView(
      * nothing or adds a circle beside it. Bytes come from the engine's
      * SSRF-guarded cache; a miss quietly asks the engine to fetch in the
      * background, so the next bind of the same row can succeed.
+     *
+     * [cacheOnly] is the private-row contract: it routes to the engine's
+     * side-effect-free read and takes its own single-flight lane, so a LIT
+     * row can never cause a fediverse request — not directly, and not by way
+     * of a re-check that lands on the fetching call. See
+     * [ChatGateway.fediAvatarCached] for why that matters.
      */
-    private fun bindFediAvatar(target: ImageView, label: String) {
+    private fun bindFediAvatar(target: ImageView, label: String, cacheOnly: Boolean = false) {
         // Recycled holders must never show the previous row's face.
         target.setImageDrawable(null)
         target.visibility = View.GONE
@@ -176,19 +182,22 @@ class ChatModeView(
         fediAvatars.cached(label)?.let { showCircle(target, key, it); return }
 
         val now = System.currentTimeMillis()
-        if (!fediAvatars.shouldQuery(label, now)) return
+        if (!fediAvatars.shouldQuery(label, now, cacheOnly)) return
         lifecycleScope.launch {
             try {
                 // Read AND decode off the main thread: a 512 KiB image is
                 // real work, and a scroll must not stutter for a face.
                 val bmp = withContext(Dispatchers.IO) {
-                    val bytes = runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
-                    fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
+                    val bytes = runCatching {
+                        val gw = controller.gateway()
+                        if (cacheOnly) gw?.fediAvatarCached(label) else gw?.fediAvatar(label)
+                    }.getOrNull()
+                    fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis(), cacheOnly)
                 } ?: return@launch
                 showCircle(target, key, bmp)
             } finally {
                 // A screen closed mid-fetch must not strand the label.
-                fediAvatars.releaseQuery(label)
+                fediAvatars.releaseQuery(label, cacheOnly)
             }
         }
     }
@@ -682,6 +691,10 @@ class ChatModeView(
                 // A fediverse thread whose person is linked to a PQ agent is
                 // folded into that contact's 🔒 row, so suppress its globe row.
                 val linkedLabels = links.filter { it.linked }.map { it.label }.toSet()
+                // ...and that same contact row inherits the fediverse face.
+                val labelByAgent = links
+                    .mapNotNull { l -> l.agentIdHex?.let { it to l.label } }
+                    .toMap()
                 buildChatRows(
                     contacts = contacts,
                     groups = groups,
@@ -696,6 +709,7 @@ class ChatModeView(
                     fediThreads = fedi,
                     linkedFediLabels = linkedLabels,
                     litUnread = unread,
+                    linkedFediLabelByAgent = labelByAgent,
                 )
             }
                 .collect { rows ->
@@ -3824,8 +3838,14 @@ class ChatModeView(
                     (holder as GroupViewHolder)
                         .bind(row.group, row.preview, row.unread, onGroupTap, onLeaveGroup)
                 is ChatRow.Contact ->
-                    (holder as ContactViewHolder)
-                        .bind(row.contact, row.preview, row.unread, onContactTap, onRemoveContact)
+                    (holder as ContactViewHolder).bind(
+                        row.contact,
+                        row.preview,
+                        row.unread,
+                        row.fediLabel,
+                        onContactTap,
+                        onRemoveContact,
+                    )
             }
         }
     }
@@ -3878,6 +3898,7 @@ class ChatModeView(
     }
 
     private inner class ContactViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        private val avatar: ImageView = itemView.findViewById(R.id.contactAvatar)
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
@@ -3888,12 +3909,19 @@ class ChatModeView(
             contact: ChatContact,
             lastPreview: String,
             unreadCount: Int,
+            fediLabel: String?,
             onTap: (ChatContact) -> Unit,
             onMore: (View, ChatContact) -> Unit,
         ) {
             // A lock marks a private (PQ) DM — matching the group lock and the
             // fediverse globe, and never the raw 64-hex (grandma rule 1).
             shortId.text = "🔒"
+            // A person the user confirmed is the same human as a fediverse
+            // account borrows that account's face. CACHE-ONLY: a private row
+            // must never put a request on a fediverse server's access log.
+            // Unlinked contacts (and a recycled holder) get the placeholder
+            // back, which is what this row looked like before avatars.
+            bindFediAvatar(avatar, fediLabel.orEmpty(), cacheOnly = true)
             name.text = contact.displayName
             preview.text = lastPreview
             bindUnreadBadge(unread, unreadCount)
