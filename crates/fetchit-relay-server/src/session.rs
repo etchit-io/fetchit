@@ -137,6 +137,21 @@ impl SessionRegistry {
         self.by_agent.len()
     }
 
+    /// Number of agents with at least one live presence watcher. Both
+    /// watch indexes are keyed by something that churns (watched agent,
+    /// session id), so this is the growth signal that must return to
+    /// baseline once every watcher disconnects.
+    #[must_use]
+    pub fn watched_agent_count(&self) -> usize {
+        self.watchers.len()
+    }
+
+    /// Number of sessions holding at least one presence watch.
+    #[must_use]
+    pub fn watching_session_count(&self) -> usize {
+        self.watches_by_session.len()
+    }
+
     /// `true` when `agent` currently has a live session.
     #[must_use]
     pub fn is_online(&self, agent: &AgentId) -> bool {
@@ -181,9 +196,7 @@ impl SessionRegistry {
             }
         }
         for agent in agents {
-            if let Some(mut entry) = self.watchers.get_mut(agent) {
-                entry.retain(|(id, _)| *id != watcher_id);
-            }
+            self.unwatch(watcher_id, agent);
         }
     }
 
@@ -195,10 +208,31 @@ impl SessionRegistry {
             return;
         };
         for agent in agents {
-            if let Some(mut entry) = self.watchers.get_mut(&agent) {
-                entry.retain(|(id, _)| *id != watcher_id);
+            self.unwatch(watcher_id, &agent);
+        }
+    }
+
+    /// Pull `watcher_id` out of `agent`'s watcher list, reclaiming the
+    /// map key once the last watcher leaves.
+    ///
+    /// #295: retaining alone left an empty vector behind under a key
+    /// that is never revisited, so the index grew by one entry (plus the
+    /// vector's high-water capacity) for every distinct agent ever
+    /// watched and never shrank. The emptiness re-check runs inside
+    /// `remove_if`, under the map's own lock and after this thread's
+    /// per-key guard is dropped, so a watcher that arrives in between
+    /// keeps its key.
+    fn unwatch(&self, watcher_id: SessionId, agent: &AgentId) {
+        {
+            let Some(mut entry) = self.watchers.get_mut(agent) else {
+                return;
+            };
+            entry.retain(|(id, _)| *id != watcher_id);
+            if !entry.is_empty() {
+                return;
             }
         }
+        self.watchers.remove_if(agent, |_, v| v.is_empty());
     }
 
     fn broadcast_presence(&self, agent: AgentId, online: bool) {
@@ -423,6 +457,87 @@ mod tests {
             }
             other => panic!("expected offline PresenceUpdate, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn disconnect_churn_returns_the_watch_index_to_baseline() {
+        // #295: the watcher index is keyed by WATCHED agent, and
+        // dropping a session only pulled that session out of the
+        // per-agent vector — the key (and the vector's grown capacity)
+        // stayed forever. One entry per distinct agent ever watched
+        // survives every disconnect, which grows with the user base and
+        // never comes back down.
+        let r = SessionRegistry::new();
+        assert_eq!(r.watched_agent_count(), 0, "baseline");
+
+        for cycle in 0..50u8 {
+            let watcher = AgentId::from_bytes([cycle; 32]);
+            let (tx, _rx) = mpsc::channel(16);
+            let id = r.register(watcher, tx.clone());
+            // Each cycle watches a fresh set — the churn a relay sees
+            // as its user base turns over.
+            let watched: Vec<AgentId> = (0..20u8)
+                .map(|i| {
+                    AgentId::from_bytes([
+                        cycle, i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0,
+                    ])
+                })
+                .collect();
+            r.add_watches(id, &tx, &watched);
+            r.drop_all_watches(id);
+            r.unregister(&watcher, id);
+        }
+
+        assert_eq!(
+            r.watched_agent_count(),
+            0,
+            "every watch was dropped; no watched-agent entry may survive",
+        );
+        assert_eq!(
+            r.watching_session_count(),
+            0,
+            "no session's reverse index may survive its disconnect",
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_watches_drops_the_key_once_the_last_watcher_leaves() {
+        let r = SessionRegistry::new();
+        let watched = AgentId::from_bytes([70u8; 32]);
+        let (tx, _rx) = mpsc::channel(16);
+        let id = r.register(AgentId::from_bytes([71u8; 32]), tx.clone());
+
+        r.add_watches(id, &tx, &[watched]);
+        assert_eq!(r.watched_agent_count(), 1);
+        r.remove_watches(id, &[watched]);
+        assert_eq!(
+            r.watched_agent_count(),
+            0,
+            "an explicit unwatch must reclaim the key, not leave an empty vector",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_surviving_watcher_keeps_the_key_alive() {
+        // The eviction must be last-watcher-out, not first.
+        let r = SessionRegistry::new();
+        let watched = AgentId::from_bytes([80u8; 32]);
+        let (tx_a, _rx_a) = mpsc::channel(16);
+        let (tx_b, _rx_b) = mpsc::channel(16);
+        let a = r.register(AgentId::from_bytes([81u8; 32]), tx_a.clone());
+        let b = r.register(AgentId::from_bytes([82u8; 32]), tx_b.clone());
+        r.add_watches(a, &tx_a, &[watched]);
+        r.add_watches(b, &tx_b, &[watched]);
+
+        r.drop_all_watches(a);
+        assert_eq!(
+            r.watched_agent_count(),
+            1,
+            "b is still watching; the key must stay",
+        );
+        r.drop_all_watches(b);
+        assert_eq!(r.watched_agent_count(), 0);
     }
 
     #[tokio::test]
