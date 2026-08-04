@@ -550,6 +550,39 @@ pub struct GroupSendReceiptFfi {
 /// `DEFAULT_FEDI_DOMAIN`; the registry base is `https://{FEDI_DOMAIN}/`.
 const FEDI_DOMAIN: &str = "etchit.io";
 
+/// How the fediverse directory answered a registration attempt. The three
+/// arms are materially different to the user: a conflict is terminal and
+/// needs a different name, a transient failure clears on its own.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum MintRegistrationFfi {
+    /// The directory holds our record.
+    Registered,
+    /// The handle belongs to a different identity (HTTP 409). Terminal:
+    /// show "that name is taken" and let the user pick another.
+    NameTaken {
+        /// The handle that is taken -- the one to offer for editing.
+        handle: String,
+    },
+    /// Bridge unreachable / server fault. The retry path stays armed.
+    Retrying {
+        /// User-facing failure text.
+        reason: String,
+    },
+}
+
+impl MintRegistrationFfi {
+    fn from_state(state: fetchit_chat::fedi_mint_state::RegistrationState, handle: &str) -> Self {
+        use fetchit_chat::fedi_mint_state::RegistrationState as S;
+        match state {
+            S::Registered => Self::Registered,
+            S::NameTaken => Self::NameTaken {
+                handle: handle.to_owned(),
+            },
+            S::Transient { reason } => Self::Retrying { reason },
+        }
+    }
+}
+
 /// Result of [`ChatClient::fedi_mint`]: the identity is always created +
 /// persisted locally on success; directory registration is best-effort and
 /// reported honestly (mirrors the desktop mint-outcome DTO).
@@ -557,10 +590,21 @@ const FEDI_DOMAIN: &str = "etchit.io";
 pub struct MintOutcomeFfi {
     /// Canonical actor URL of the minted identity.
     pub actor_url: String,
-    /// True when the directory accepted the registration.
-    pub registered: bool,
-    /// Why registration is pending, when it is (bridge unreachable, etc.).
-    pub registration_error: Option<String>,
+    /// How the directory answered.
+    pub registration: MintRegistrationFfi,
+}
+
+/// The directory outcome of the last mint attempt on this device, from
+/// [`ChatClient::fedi_mint_state`] -- a local read that survives a restart,
+/// so an unresolved name conflict is still visible on a cold start.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MintStateFfi {
+    /// Handle local-part the attempt was for.
+    pub handle: String,
+    /// How the directory answered.
+    pub registration: MintRegistrationFfi,
+    /// When the attempt was classified (epoch ms).
+    pub at_ms: i64,
 }
 
 /// One inbox that rejected a published post. uniffi has no tuples, so the
@@ -694,8 +738,9 @@ pub struct FediPostFfi {
 pub struct EnsureV2Ffi {
     /// True when a fresh v2 attestation was signed + stored this pass.
     pub upgraded: bool,
-    /// True when the directory holds the current record.
-    pub registered: bool,
+    /// How the directory answered. A `NameTaken` means the caller must stop
+    /// re-running the pass and ask the user for a different handle.
+    pub registration: MintRegistrationFfi,
     /// Why the pass could not complete (profile unpublished, bridge down).
     pub pending: Option<String>,
 }
@@ -1473,12 +1518,15 @@ impl ChatClient {
     /// The active minted fediverse handle, or `None` when the user has not
     /// opted in to public posting. Reads the local vault only (no network),
     /// so the onboarding gate can query it before anything connects.
+    ///
+    /// A handle the directory refused as someone else's reads as `None`: it
+    /// is not a working public identity, and the shells gate their
+    /// "mint a handle" affordance on this being absent.
     #[must_use]
     pub fn fedi_actor_status(&self) -> Option<String> {
         self.inner
             .layout()
-            .map(fetchit_chat::fedi_vault::list_actor_handles)
-            .and_then(|handles| handles.into_iter().next())
+            .and_then(fetchit_chat::fedi_mint_state::active_handle)
     }
 
     /// Opt in to public posting: mint the actor identity for `handle` (with
@@ -1487,7 +1535,9 @@ impl ChatClient {
     /// profile is published yet the engine publishes a minimal handle-only
     /// profile-index record first, then mints against it. Directory-
     /// registration failure is NOT an error -- it lands in the returned
-    /// [`MintOutcomeFfi`].
+    /// [`MintOutcomeFfi`], where
+    /// [`MintRegistrationFfi::NameTaken`] means the handle belongs to
+    /// someone else: offer the user a different name rather than a retry.
     ///
     /// # Errors
     /// [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
@@ -1513,8 +1563,20 @@ impl ChatClient {
             .map_err(ChatFfiError::from)?;
         Ok(MintOutcomeFfi {
             actor_url: outcome.actor_url,
-            registered: outcome.registered,
-            registration_error: outcome.registration_error,
+            registration: MintRegistrationFfi::from_state(outcome.registration, &handle),
+        })
+    }
+
+    /// The directory outcome of the last mint attempt, or `None` when none
+    /// has been made. Local vault read (no network), so the mint screen can
+    /// render an unresolved name conflict on a cold start instead of an
+    /// eternal "pending".
+    #[must_use]
+    pub fn fedi_mint_state(&self) -> Option<MintStateFfi> {
+        self.inner.fedi_mint_state().map(|s| MintStateFfi {
+            registration: MintRegistrationFfi::from_state(s.registration, &s.handle),
+            at_ms: i64::try_from(s.at_ms).unwrap_or(i64::MAX),
+            handle: s.handle,
         })
     }
 
@@ -1965,7 +2027,9 @@ impl ChatClient {
         let Some(handle) = self.fedi_actor_status() else {
             return Ok(EnsureV2Ffi {
                 upgraded: false,
-                registered: false,
+                registration: MintRegistrationFfi::Retrying {
+                    reason: "no public handle minted".to_owned(),
+                },
                 pending: None,
             });
         };
@@ -1987,7 +2051,7 @@ impl ChatClient {
             .map_err(ChatFfiError::from)?;
         Ok(EnsureV2Ffi {
             upgraded: outcome.upgraded,
-            registered: outcome.registered,
+            registration: MintRegistrationFfi::from_state(outcome.registration, &handle),
             pending: outcome.pending,
         })
     }

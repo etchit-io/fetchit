@@ -262,6 +262,7 @@
     <string name="chat_fedi_needs_handle_title">get your public @name first</string>
     <string name="chat_fedi_needs_handle_body">to follow people or message them across the fediverse, you need your own public @name. create one from your profile — it takes a few seconds.</string>
     <string name="chat_fedi_setup_pending">still setting up your public @name — we\'ll keep trying in the background</string>
+    <string name="chat_fedi_name_taken">@%1$s belongs to someone else — pick a new @name to finish setting up</string>
     <string name="chat_fedi_dm">message</string>
     <string name="chat_fedi_thread_sub">fediverse · not encrypted</string>
     <string name="chat_fedi_thread_hint">message %1$s (not encrypted)</string>
@@ -402,6 +403,7 @@
     <string name="fedi_mint_done">You\'re @%1$s — you\'re on the fediverse!</string>
     <string name="fedi_mint_done_pending">Created @%1$s — directory registration is pending, it\'ll retry.</string>
     <string name="fedi_mint_failed">couldn\'t create your handle — that\'s on us, not you. handles are almost ready.</string>
+    <string name="fedi_mint_name_taken">@%1$s is already taken — try another name</string>
     <string name="fedi_handle_err_empty">enter a handle</string>
     <string name="fedi_handle_err_long">too long — 64 characters max</string>
     <string name="fedi_handle_err_chars">letters, numbers, - and _ only</string>

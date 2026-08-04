@@ -441,6 +441,14 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     fun fediActorStatus(): String? = gateway?.fediActorStatus()
 
     /**
+     * The @handle the directory refused as someone else's on the last mint,
+     * or `null` when the last attempt was anything else. Survives a restart,
+     * so the mint screen can reopen on the failing name instead of leaving
+     * the user staring at an eternal "pending".
+     */
+    fun fediMintConflictHandle(): String? = takenHandle(gateway?.fediMintState())
+
+    /**
      * Pull the current fediverse DM thread overview from the engine into
      * [fediThreads]. Quiet on failure (leaves the last value). No-op without a
      * connected gateway or a minted handle.

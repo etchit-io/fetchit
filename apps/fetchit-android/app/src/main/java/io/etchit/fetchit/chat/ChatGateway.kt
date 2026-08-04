@@ -10,6 +10,7 @@ import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
+import uniffi.fetchit_ffi.MintStateFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.EnsureV2Ffi
 import uniffi.fetchit_ffi.FediFollowingFfi
@@ -130,11 +131,20 @@ interface ChatGateway {
     fun fediActorStatus(): String?
 
     /**
+     * How the directory answered the last mint attempt, or `null` when none
+     * was made. Local vault read (no network) that survives a restart, so a
+     * name the directory refused is still visible on a cold start.
+     */
+    fun fediMintState(): MintStateFfi?
+
+    /**
      * Opt in to public posting: mint the actor identity for [handle] and
      * register it with the directory. One-tap on a fresh identity — the engine
      * publishes a minimal handle-only profile when none exists yet, so no
      * pre-published profile is required. Directory-registration failure is
-     * reported in the result, not thrown.
+     * reported in the result, not thrown — including
+     * [uniffi.fetchit_ffi.MintRegistrationFfi.NameTaken], which no retry can
+     * clear.
      */
     suspend fun fediMint(handle: String): MintOutcomeFfi
 
@@ -365,6 +375,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun listGroups(): List<GroupFfi> = inner.listGroups()
     override suspend fun groupInvite(groupId: String): String = inner.groupInvite(groupId)
     override fun fediActorStatus(): String? = inner.fediActorStatus()
+    override fun fediMintState(): MintStateFfi? = inner.fediMintState()
     override suspend fun fediMint(handle: String): MintOutcomeFfi = inner.fediMint(handle)
     override suspend fun fediLookup(handle: String): LookupFfi = inner.fediLookup(handle)
     override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =

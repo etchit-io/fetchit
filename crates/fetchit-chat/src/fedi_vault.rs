@@ -205,6 +205,22 @@ pub fn load_actor_identity(
     Ok(Some(vault))
 }
 
+/// Delete the sealed identity for `handle`, returning whether a file was
+/// removed. Used to discard an identity the directory refused as a name
+/// conflict, which would otherwise linger in
+/// [`list_actor_handles`] and shadow the handle the user goes on to
+/// mint.
+///
+/// # Errors
+/// IO errors other than "already absent".
+pub fn remove_actor_identity(handle: &str, layout: &StoreLayout) -> Result<bool, ChatError> {
+    match fs::remove_file(layout.actor_identity_path(handle)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(ChatError::from(e)),
+    }
+}
+
 /// Read and open one `magic ‖ nonce ‖ ciphertext` sealed file.
 /// `Ok(None)` when `path` does not exist — the caller decides what an
 /// absent store means. Shared with [`crate::fedi_thread`].
@@ -345,6 +361,21 @@ mod tests {
             vec!["alice".to_string(), "bob".to_string()],
             "enumerates *.json.enc handles, sorted, skipping the ledger"
         );
+    }
+
+    #[test]
+    fn remove_actor_identity_drops_the_handle_from_the_listing() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = fixture_master(0x42);
+        let mut a = sample_vault();
+        a.handle = "alice".into();
+        save_actor_identity(&a, &master, &layout).unwrap();
+
+        assert!(remove_actor_identity("alice", &layout).unwrap());
+        assert!(list_actor_handles(&layout).is_empty());
+        // Idempotent: removing an absent identity is not an error.
+        assert!(!remove_actor_identity("alice", &layout).unwrap());
     }
 
     #[test]

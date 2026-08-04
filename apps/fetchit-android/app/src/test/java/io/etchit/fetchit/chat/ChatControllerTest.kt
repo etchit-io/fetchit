@@ -26,6 +26,8 @@ import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
+import uniffi.fetchit_ffi.MintRegistrationFfi
+import uniffi.fetchit_ffi.MintStateFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
 import uniffi.fetchit_ffi.OutboxStatusFfi
 import uniffi.fetchit_ffi.PublishReportFfi
@@ -76,6 +78,7 @@ class FakeGateway : ChatGateway {
     val requestedHistory = mutableListOf<String>()
     var conversationHistoryThrows = false
     var fediHandle: String? = null
+    var mintState: MintStateFfi? = null
     val mintedHandles = mutableListOf<String>()
     val lookedUpHandles = mutableListOf<String>()
     var lookupResult: LookupFfi =
@@ -116,10 +119,14 @@ class FakeGateway : ChatGateway {
         invitesRequested += groupId; return "x0x://invite/$groupId"
     }
     override fun fediActorStatus(): String? = fediHandle
+    override fun fediMintState(): MintStateFfi? = mintState
     override suspend fun fediMint(handle: String): MintOutcomeFfi {
         mintedHandles += handle
         fediHandle = handle
-        return MintOutcomeFfi("https://etchit.io/actors/$handle", true, null)
+        return MintOutcomeFfi(
+            "https://etchit.io/actors/$handle",
+            MintRegistrationFfi.Registered,
+        )
     }
     override suspend fun fediLookup(handle: String): LookupFfi {
         lookedUpHandles += handle
@@ -144,7 +151,11 @@ class FakeGateway : ChatGateway {
             delivered = true,
         )
     override suspend fun fediEnsureV2(): EnsureV2Ffi =
-        EnsureV2Ffi(upgraded = false, registered = true, pending = null)
+        EnsureV2Ffi(
+            upgraded = false,
+            registration = MintRegistrationFfi.Registered,
+            pending = null,
+        )
     override suspend fun fediFollowing(): List<FediFollowingFfi> = emptyList()
     override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
         UnfollowReportFfi(delivered = true, removed = true)
@@ -559,8 +570,9 @@ class ChatControllerTest {
             override suspend fun listGroups(): List<GroupFfi> = emptyList()
             override suspend fun groupInvite(groupId: String): String = ""
             override fun fediActorStatus(): String? = null
+            override fun fediMintState(): MintStateFfi? = null
             override suspend fun fediMint(handle: String): MintOutcomeFfi =
-                MintOutcomeFfi("", true, null)
+                MintOutcomeFfi("", MintRegistrationFfi.Registered)
             override suspend fun fediLookup(handle: String): LookupFfi =
                 LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
             override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
@@ -570,7 +582,11 @@ class ChatControllerTest {
             override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
                 FediDmReportFfi(target, "test-note-id", delivered = true)
             override suspend fun fediEnsureV2(): EnsureV2Ffi =
-                EnsureV2Ffi(upgraded = false, registered = true, pending = null)
+                EnsureV2Ffi(
+                    upgraded = false,
+                    registration = MintRegistrationFfi.Registered,
+                    pending = null,
+                )
             override suspend fun fediFollowing(): List<FediFollowingFfi> = emptyList()
             override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
                 UnfollowReportFfi(delivered = true, removed = true)

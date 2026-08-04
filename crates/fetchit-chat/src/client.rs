@@ -6080,6 +6080,13 @@ impl Client {
     /// (`fetch_index_record_by_id`, `sign_minimal_index_record`,
     /// `mint_actor_identity_v2`, `register_or_update_actor`).
     ///
+    /// A name conflict
+    /// ([`RegistrationState::NameTaken`](crate::fedi_mint_state::RegistrationState::NameTaken))
+    /// is persisted so the shell can say so after a restart, and the local
+    /// identity this call just minted is discarded — that handle can never
+    /// be ours, and leaving it behind would shadow the name the user picks
+    /// instead. An identity that already existed before this call is kept.
+    ///
     /// # Errors
     /// - [`ChatError::Invalid`] on a transient relay error fetching the
     ///   profile record, or if publishing the minimal fallback fails.
@@ -6114,16 +6121,62 @@ impl Client {
             }
             Err(e) => return Err(ChatError::Invalid(format!("profile record: {e}"))),
         };
+        // Captured BEFORE the mint: only an identity this call created may be
+        // discarded on a name conflict. A handle the user already held (and
+        // may have fedi threads under) is never deleted by a failed re-mint.
+        let minted_before = self
+            .layout()
+            .is_some_and(|layout| layout.actor_identity_path(handle).exists());
         let identity = self
             .mint_actor_identity_v2(handle, domain, &profile_addr, relay.as_str(), now_ms)
             .await?;
-        let (registered, registration_error) =
+        let registration =
             crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        self.record_mint_state(handle, &registration, now_ms, !minted_before);
         Ok(MintOutcome {
             actor_url: identity.actor_url.to_string(),
-            registered,
-            registration_error,
+            registration,
         })
+    }
+
+    /// Persist the classified registration outcome for `handle` so a
+    /// conflict outlives the process, and — when `discard_on_conflict` —
+    /// drop the local identity a name conflict just orphaned.
+    ///
+    /// Best-effort by design: this is a UI hint, so a write failure is
+    /// logged and never turned into a failed mint.
+    fn record_mint_state(
+        &self,
+        handle: &str,
+        registration: &crate::fedi_mint_state::RegistrationState,
+        now_ms: u64,
+        discard_on_conflict: bool,
+    ) {
+        let Some(layout) = self.layout() else {
+            return;
+        };
+        if registration.is_terminal() && discard_on_conflict {
+            if let Err(e) = crate::fedi_vault::remove_actor_identity(handle, layout) {
+                log::warn!("[fedi] could not discard the conflicted identity {handle}: {e}");
+            }
+        }
+        let state = crate::fedi_mint_state::MintState {
+            handle: handle.to_owned(),
+            registration: registration.clone(),
+            at_ms: now_ms,
+        };
+        if let Err(e) = crate::fedi_mint_state::save(layout, &state) {
+            log::warn!("[fedi] could not record the mint state for {handle}: {e}");
+        }
+    }
+
+    /// The directory outcome of the last mint attempt on this device, or
+    /// `None` when nothing has been attempted. Local read (no network), so
+    /// a shell can render the honest state — including an unresolved name
+    /// conflict — before anything connects.
+    #[must_use]
+    pub fn fedi_mint_state(&self) -> Option<crate::fedi_mint_state::MintState> {
+        self.layout().and_then(crate::fedi_mint_state::load)
     }
 
     /// Run the heal + v2 upgrade + re-register pass for the active `handle`
@@ -6149,6 +6202,21 @@ impl Client {
             .chat
             .as_ref()
             .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        // A recorded name conflict ends this loop: the directory row belongs
+        // to another agent id, so every further pass would re-POST, re-409,
+        // and leave the shell re-arming the retry forever. Report the
+        // conflict instead; an explicit re-mint (the user picking a name) is
+        // what asks the directory again.
+        if self
+            .layout()
+            .is_some_and(|layout| crate::fedi_mint_state::is_name_taken(layout, handle))
+        {
+            return Ok(EnsureV2Outcome {
+                upgraded: false,
+                registration: crate::fedi_mint_state::RegistrationState::NameTaken,
+                pending: None,
+            });
+        }
         let agent_id_hex = chat.identity.agent_id_hex().to_string();
         let http = crate::relay_http::guarded_client();
         // Heal stale attestations FIRST: identities minted before the x0x
@@ -6186,16 +6254,22 @@ impl Client {
         let Some(identity) = self.load_actor_identity(handle).await? else {
             return Ok(EnsureV2Outcome {
                 upgraded,
-                registered: false,
+                registration: crate::fedi_mint_state::RegistrationState::Transient {
+                    reason: format!("no actor identity minted for {handle}"),
+                },
                 pending: Some(format!("no actor identity minted for {handle}")),
             });
         };
-        let (registered, reg_pending) =
+        let registration =
             crate::fedi_identity::register_or_update_actor(registry_base, &identity, &http).await;
+        // This pass re-asserts an EXISTING identity, so a conflict never
+        // discards it: the vault may hold threads minted while the handle
+        // still resolved to us.
+        self.record_mint_state(handle, &registration, now_ms, false);
         // A registration failure is actionable — surface it, but never at the
         // cost of hiding an earlier heal/profile note (a masked heal error
         // makes the resulting 403 undiagnosable from the outcome alone).
-        if let Some(reg) = reg_pending {
+        if let Some(reg) = registration.error_text() {
             pending = Some(match pending {
                 Some(prior) => format!("{reg} (also: {prior})"),
                 None => reg,
@@ -6217,7 +6291,7 @@ impl Client {
         }
         Ok(EnsureV2Outcome {
             upgraded,
-            registered,
+            registration,
             pending,
         })
     }
@@ -6606,10 +6680,9 @@ impl Client {
 pub struct MintOutcome {
     /// Canonical actor URL of the minted identity.
     pub actor_url: String,
-    /// True when the directory accepted the registration.
-    pub registered: bool,
-    /// Why registration is pending, when it is (bridge unreachable, etc.).
-    pub registration_error: Option<String>,
+    /// How the directory answered: accepted, the name is taken (terminal —
+    /// offer another name), or a retryable failure.
+    pub registration: crate::fedi_mint_state::RegistrationState,
 }
 
 /// Outcome of [`Client::ensure_actor_v2_and_register`]: a hub-open upgrade
@@ -6618,8 +6691,11 @@ pub struct MintOutcome {
 pub struct EnsureV2Outcome {
     /// True when a fresh v2 attestation was signed + stored this pass.
     pub upgraded: bool,
-    /// True when the directory holds the current record.
-    pub registered: bool,
+    /// How the directory answered this pass. A
+    /// [`NameTaken`](crate::fedi_mint_state::RegistrationState::NameTaken)
+    /// tells the caller to stop re-running the pass and ask the user for a
+    /// different handle.
+    pub registration: crate::fedi_mint_state::RegistrationState,
     /// Why the pass could not complete (profile unpublished, bridge
     /// unreachable); user-facing copy.
     pub pending: Option<String>,
@@ -9107,10 +9183,107 @@ mod tests {
             "minted actor url, got {}",
             outcome.actor_url
         );
-        // Registry was unreachable: registration is pending, not a failure.
-        assert!(!outcome.registered);
-        assert!(outcome.registration_error.is_some());
+        // Registry was unreachable: registration is pending, not a failure,
+        // and it stays retryable.
+        assert!(!outcome.registration.registered());
+        assert!(!outcome.registration.is_terminal());
+        assert!(outcome.registration.error_text().is_some());
         // relay_server drop asserts the .expect(1) minimal-publish POST fired.
+    }
+
+    /// Mock relay + registry for a mint: the relay has no profile (404, so
+    /// the one-tap minimal publish fires) and the registry answers
+    /// `registry_status` to `POST /actors`.
+    async fn mint_against_registry(
+        client: &Client,
+        handle: &str,
+        registry_status: u16,
+    ) -> MintOutcome {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v1/profile/.+$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&relay_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/profile"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&relay_server)
+            .await;
+        let registry_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/actors"))
+            .respond_with(ResponseTemplate::new(registry_status))
+            .mount(&registry_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = format!("{}/", registry_server.uri()).parse().unwrap();
+        client
+            .mint_and_register_actor(handle, "etchit.io", &relay, &registry, 1)
+            .await
+            .expect("a directory refusal is reported, never a failed mint")
+    }
+
+    #[tokio::test]
+    async fn mint_surfaces_a_409_as_a_terminal_name_conflict() {
+        // Issue #331: the directory answers 409 only when ANOTHER agent id
+        // holds the handle. That must read as "that name is taken" (terminal,
+        // pick another) rather than decaying into an eternal pending.
+        let (client, _dir) = test_client_no_denylist();
+        let outcome = mint_against_registry(&client, "alice", 409).await;
+        assert_eq!(
+            outcome.registration,
+            crate::fedi_mint_state::RegistrationState::NameTaken
+        );
+        // Persisted, so the UI still knows after a restart.
+        let recorded = client.fedi_mint_state().expect("mint state recorded");
+        assert_eq!(recorded.handle, "alice");
+        assert!(recorded.registration.is_terminal());
+        // The identity this mint just created can never be ours: discarded so
+        // it cannot shadow the handle the user picks instead.
+        let layout = client.layout().expect("layout");
+        assert!(
+            crate::fedi_vault::list_actor_handles(layout).is_empty(),
+            "the conflicted identity must not linger in the vault"
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_records_success_when_the_directory_updates_our_own_record() {
+        // The idempotent half of the contract: 200 ("updated") is the bridge
+        // re-accepting the SAME agent id, so it is success, the identity is
+        // kept, and no conflict is recorded.
+        let (client, _dir) = test_client_no_denylist();
+        let outcome = mint_against_registry(&client, "alice", 200).await;
+        assert!(outcome.registration.registered());
+        let recorded = client.fedi_mint_state().expect("mint state recorded");
+        assert!(!recorded.registration.is_terminal());
+        let layout = client.layout().expect("layout");
+        assert_eq!(
+            crate::fedi_vault::list_actor_handles(layout),
+            vec!["alice".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_keeps_a_pre_existing_identity_when_the_name_conflicts() {
+        // A handle the user already held (and may have threads under) is NOT
+        // deleted by a re-mint that 409s — only an identity this call minted.
+        let (client, _dir) = test_client_no_denylist();
+        client
+            .mint_actor_identity("alice", "etchit.io")
+            .await
+            .expect("pre-existing identity");
+        let outcome = mint_against_registry(&client, "alice", 409).await;
+        assert!(outcome.registration.is_terminal());
+        let layout = client.layout().expect("layout");
+        assert_eq!(
+            crate::fedi_vault::list_actor_handles(layout),
+            vec!["alice".to_string()],
+            "an identity that predates this mint must survive the conflict"
+        );
     }
 
     #[tokio::test]
@@ -9152,8 +9325,76 @@ mod tests {
             .await
             .expect("ensure pass reports pending, never errors on a blocker");
         assert!(!outcome.upgraded);
-        assert!(!outcome.registered);
+        assert!(!outcome.registration.registered());
         assert!(outcome.pending.is_some());
+    }
+
+    #[tokio::test]
+    async fn ensure_pass_stops_retrying_a_handle_recorded_as_taken() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // Issue #331: once the directory has said the name belongs to another
+        // agent, the self-heal pass must stop — it can only 409 again, and the
+        // shell re-arms on "not registered", which is the eternal-pending
+        // loop. The relay mock asserts NO request is made at all.
+        let (client, _dir) = test_client_no_denylist();
+        let layout = client.layout().expect("layout");
+        crate::fedi_mint_state::save(
+            layout,
+            &crate::fedi_mint_state::MintState {
+                handle: "alice".into(),
+                registration: crate::fedi_mint_state::RegistrationState::NameTaken,
+                at_ms: 1,
+            },
+        )
+        .expect("record the conflict");
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&relay_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = "http://unused.invalid/".parse().unwrap();
+        let outcome = client
+            .ensure_actor_v2_and_register("alice", &relay, &registry, 2)
+            .await
+            .expect("a recorded conflict is reported, not an error");
+        assert!(outcome.registration.is_terminal());
+        assert!(!outcome.upgraded);
+        // relay_server drop asserts the .expect(0): the pass short-circuited.
+    }
+
+    #[tokio::test]
+    async fn ensure_pass_still_runs_for_a_different_handle() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // The conflict is scoped to the name it was recorded against: a
+        // freshly picked handle must not inherit the dead end.
+        let (client, _dir) = test_client_no_denylist();
+        let layout = client.layout().expect("layout");
+        crate::fedi_mint_state::save(
+            layout,
+            &crate::fedi_mint_state::MintState {
+                handle: "alice".into(),
+                registration: crate::fedi_mint_state::RegistrationState::NameTaken,
+                at_ms: 1,
+            },
+        )
+        .expect("record the conflict");
+        let relay_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1..)
+            .mount(&relay_server)
+            .await;
+        let relay = format!("{}/", relay_server.uri()).parse().unwrap();
+        let registry = "http://unused.invalid/".parse().unwrap();
+        let outcome = client
+            .ensure_actor_v2_and_register("alice2", &relay, &registry, 2)
+            .await
+            .expect("ensure pass reports pending, never errors on a blocker");
+        assert!(!outcome.registration.is_terminal());
     }
 
     #[tokio::test]

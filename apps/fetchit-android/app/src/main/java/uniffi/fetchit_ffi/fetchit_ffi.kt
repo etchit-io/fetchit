@@ -851,6 +851,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -923,6 +925,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint_state(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_pending_invites(
 ): Short
@@ -1091,6 +1095,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`:
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint_state(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_pending_invites(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1356,7 +1362,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 2558.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 19997.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 12315.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 53381.toShort()) {
@@ -1389,7 +1395,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 43138.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 10830.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint_state() != 8229.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_pending_invites() != 39972.toShort()) {
@@ -2112,6 +2121,10 @@ public interface ChatClientInterface {
      * The active minted fediverse handle, or `None` when the user has not
      * opted in to public posting. Reads the local vault only (no network),
      * so the onboarding gate can query it before anything connects.
+     *
+     * A handle the directory refused as someone else's reads as `None`: it
+     * is not a working public identity, and the shells gate their
+     * "mint a handle" affordance on this being absent.
      */
     fun `fediActorStatus`(): kotlin.String?
     
@@ -2238,7 +2251,9 @@ public interface ChatClientInterface {
      * profile is published yet the engine publishes a minimal handle-only
      * profile-index record first, then mints against it. Directory-
      * registration failure is NOT an error -- it lands in the returned
-     * [`MintOutcomeFfi`].
+     * [`MintOutcomeFfi`], where
+     * [`MintRegistrationFfi::NameTaken`] means the handle belongs to
+     * someone else: offer the user a different name rather than a retry.
      *
      * # Errors
      * [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
@@ -2246,6 +2261,14 @@ public interface ChatClientInterface {
      * the mint failing.
      */
     suspend fun `fediMint`(`handle`: kotlin.String): MintOutcomeFfi
+    
+    /**
+     * The directory outcome of the last mint attempt, or `None` when none
+     * has been made. Local vault read (no network), so the mint screen can
+     * render an unresolved name conflict on a cold start instead of an
+     * eternal "pending".
+     */
+    fun `fediMintState`(): MintStateFfi?
     
     /**
      * Fediverse handles invited to private chat but not yet linked.
@@ -3037,6 +3060,10 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * The active minted fediverse handle, or `None` when the user has not
      * opted in to public posting. Reads the local vault only (no network),
      * so the onboarding gate can query it before anything connects.
+     *
+     * A handle the directory refused as someone else's reads as `None`: it
+     * is not a working public identity, and the shells gate their
+     * "mint a handle" affordance on this being absent.
      */override fun `fediActorStatus`(): kotlin.String? {
             return FfiConverterOptionalString.lift(
     callWithPointer {
@@ -3346,7 +3373,9 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * profile is published yet the engine publishes a minimal handle-only
      * profile-index record first, then mints against it. Directory-
      * registration failure is NOT an error -- it lands in the returned
-     * [`MintOutcomeFfi`].
+     * [`MintOutcomeFfi`], where
+     * [`MintRegistrationFfi::NameTaken`] means the handle belongs to
+     * someone else: offer the user a different name rather than a retry.
      *
      * # Errors
      * [`ChatFfiError::Invalid`] on a bad relay/registry URL, a transient
@@ -3372,6 +3401,24 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         ChatFfiException.ErrorHandler,
     )
     }
+
+    
+    /**
+     * The directory outcome of the last mint attempt, or `None` when none
+     * has been made. Local vault read (no network), so the mint screen can
+     * render an unresolved name conflict on a cold start instead of an
+     * eternal "pending".
+     */override fun `fediMintState`(): MintStateFfi? {
+            return FfiConverterOptionalTypeMintStateFfi.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint_state(
+        it, _status)
+}
+    }
+    )
+    }
+    
 
     
     /**
@@ -4922,9 +4969,10 @@ data class EnsureV2Ffi (
      */
     var `upgraded`: kotlin.Boolean, 
     /**
-     * True when the directory holds the current record.
+     * How the directory answered. A `NameTaken` means the caller must stop
+     * re-running the pass and ask the user for a different handle.
      */
-    var `registered`: kotlin.Boolean, 
+    var `registration`: MintRegistrationFfi, 
     /**
      * Why the pass could not complete (profile unpublished, bridge down).
      */
@@ -4941,20 +4989,20 @@ public object FfiConverterTypeEnsureV2Ffi: FfiConverterRustBuffer<EnsureV2Ffi> {
     override fun read(buf: ByteBuffer): EnsureV2Ffi {
         return EnsureV2Ffi(
             FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
+            FfiConverterTypeMintRegistrationFfi.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: EnsureV2Ffi) = (
             FfiConverterBoolean.allocationSize(value.`upgraded`) +
-            FfiConverterBoolean.allocationSize(value.`registered`) +
+            FfiConverterTypeMintRegistrationFfi.allocationSize(value.`registration`) +
             FfiConverterOptionalString.allocationSize(value.`pending`)
     )
 
     override fun write(value: EnsureV2Ffi, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`upgraded`, buf)
-            FfiConverterBoolean.write(value.`registered`, buf)
+            FfiConverterTypeMintRegistrationFfi.write(value.`registration`, buf)
             FfiConverterOptionalString.write(value.`pending`, buf)
     }
 }
@@ -5700,13 +5748,9 @@ data class MintOutcomeFfi (
      */
     var `actorUrl`: kotlin.String, 
     /**
-     * True when the directory accepted the registration.
+     * How the directory answered.
      */
-    var `registered`: kotlin.Boolean, 
-    /**
-     * Why registration is pending, when it is (bridge unreachable, etc.).
-     */
-    var `registrationError`: kotlin.String?
+    var `registration`: MintRegistrationFfi
 ) {
     
     companion object
@@ -5719,21 +5763,68 @@ public object FfiConverterTypeMintOutcomeFfi: FfiConverterRustBuffer<MintOutcome
     override fun read(buf: ByteBuffer): MintOutcomeFfi {
         return MintOutcomeFfi(
             FfiConverterString.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeMintRegistrationFfi.read(buf),
         )
     }
 
     override fun allocationSize(value: MintOutcomeFfi) = (
             FfiConverterString.allocationSize(value.`actorUrl`) +
-            FfiConverterBoolean.allocationSize(value.`registered`) +
-            FfiConverterOptionalString.allocationSize(value.`registrationError`)
+            FfiConverterTypeMintRegistrationFfi.allocationSize(value.`registration`)
     )
 
     override fun write(value: MintOutcomeFfi, buf: ByteBuffer) {
             FfiConverterString.write(value.`actorUrl`, buf)
-            FfiConverterBoolean.write(value.`registered`, buf)
-            FfiConverterOptionalString.write(value.`registrationError`, buf)
+            FfiConverterTypeMintRegistrationFfi.write(value.`registration`, buf)
+    }
+}
+
+
+
+/**
+ * The directory outcome of the last mint attempt on this device, from
+ * [`ChatClient::fedi_mint_state`] -- a local read that survives a restart,
+ * so an unresolved name conflict is still visible on a cold start.
+ */
+data class MintStateFfi (
+    /**
+     * Handle local-part the attempt was for.
+     */
+    var `handle`: kotlin.String, 
+    /**
+     * How the directory answered.
+     */
+    var `registration`: MintRegistrationFfi, 
+    /**
+     * When the attempt was classified (epoch ms).
+     */
+    var `atMs`: kotlin.Long
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMintStateFfi: FfiConverterRustBuffer<MintStateFfi> {
+    override fun read(buf: ByteBuffer): MintStateFfi {
+        return MintStateFfi(
+            FfiConverterString.read(buf),
+            FfiConverterTypeMintRegistrationFfi.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MintStateFfi) = (
+            FfiConverterString.allocationSize(value.`handle`) +
+            FfiConverterTypeMintRegistrationFfi.allocationSize(value.`registration`) +
+            FfiConverterLong.allocationSize(value.`atMs`)
+    )
+
+    override fun write(value: MintStateFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`handle`, buf)
+            FfiConverterTypeMintRegistrationFfi.write(value.`registration`, buf)
+            FfiConverterLong.write(value.`atMs`, buf)
     }
 }
 
@@ -6551,6 +6642,111 @@ public object FfiConverterTypeLookupKindFfi: FfiConverterRustBuffer<LookupKindFf
 
 
 /**
+ * How the fediverse directory answered a registration attempt. The three
+ * arms are materially different to the user: a conflict is terminal and
+ * needs a different name, a transient failure clears on its own.
+ */
+sealed class MintRegistrationFfi {
+    
+    /**
+     * The directory holds our record.
+     */
+    object Registered : MintRegistrationFfi()
+    
+    
+    /**
+     * The handle belongs to a different identity (HTTP 409). Terminal:
+     * show "that name is taken" and let the user pick another.
+     */
+    data class NameTaken(
+        /**
+         * The handle that is taken -- the one to offer for editing.
+         */
+        val `handle`: kotlin.String) : MintRegistrationFfi() {
+        companion object
+    }
+    
+    /**
+     * Bridge unreachable / server fault. The retry path stays armed.
+     */
+    data class Retrying(
+        /**
+         * User-facing failure text.
+         */
+        val `reason`: kotlin.String) : MintRegistrationFfi() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMintRegistrationFfi : FfiConverterRustBuffer<MintRegistrationFfi>{
+    override fun read(buf: ByteBuffer): MintRegistrationFfi {
+        return when(buf.getInt()) {
+            1 -> MintRegistrationFfi.Registered
+            2 -> MintRegistrationFfi.NameTaken(
+                FfiConverterString.read(buf),
+                )
+            3 -> MintRegistrationFfi.Retrying(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: MintRegistrationFfi) = when(value) {
+        is MintRegistrationFfi.Registered -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is MintRegistrationFfi.NameTaken -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`handle`)
+            )
+        }
+        is MintRegistrationFfi.Retrying -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+        }
+    }
+
+    override fun write(value: MintRegistrationFfi, buf: ByteBuffer) {
+        when(value) {
+            is MintRegistrationFfi.Registered -> {
+                buf.putInt(1)
+                Unit
+            }
+            is MintRegistrationFfi.NameTaken -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`handle`, buf)
+                Unit
+            }
+            is MintRegistrationFfi.Retrying -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
  * Delivery state of an outbound DM bubble, mirrored from
  * [`fetchit_chat::outbox::OutboxStatus`] for the uniffi surface.
  */
@@ -7093,6 +7289,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMintStateFfi: FfiConverterRustBuffer<MintStateFfi?> {
+    override fun read(buf: ByteBuffer): MintStateFfi? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMintStateFfi.read(buf)
+    }
+
+    override fun allocationSize(value: MintStateFfi?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMintStateFfi.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MintStateFfi?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMintStateFfi.write(value, buf)
         }
     }
 }
