@@ -44,6 +44,7 @@ import uniffi.fetchit_ffi.JoinOutcomeFfi
 import uniffi.fetchit_ffi.LinkOfferPreviewFfi
 import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.LookupKindFfi
+import uniffi.fetchit_ffi.MintRegistrationFfi
 import uniffi.fetchit_ffi.enrollConfirmedDevice
 import java.io.File
 import java.text.SimpleDateFormat
@@ -757,14 +758,26 @@ class ChatModeView(
      * open with an inline error. On success [onMinted] refreshes the hub with
      * the new handle and the directory outcome is surfaced honestly
      * (registered vs pending).
+     *
+     * A name already held by someone else ([takenHandle]) is a dead end no
+     * retry can clear, so it keeps the dialog open on the same inline-error
+     * path as invalid input — edit the name, tap create again.
+     * [takenName] reopens the dialog on a conflict the engine recorded in an
+     * earlier session, field seeded and error shown, so a restart never loses
+     * the reason.
      */
-    private fun showFediMintDialog(onMinted: (String) -> Unit) {
+    private fun showFediMintDialog(takenName: String? = null, onMinted: (String) -> Unit) {
         val editText = EditText(context).apply {
             hint = context.getString(R.string.fedi_mint_handle_hint)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             maxLines = 1
             filters = arrayOf(android.text.InputFilter.LengthFilter(64))
+            if (takenName != null) {
+                setText(takenName)
+                setSelection(text.length)
+                error = context.getString(R.string.fedi_mint_name_taken, takenName)
+            }
         }
         val layout = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -794,12 +807,25 @@ class ChatModeView(
                 lifecycleScope.launch {
                     runCatching { controller.fediMint(handle) }
                         .onSuccess { outcome ->
+                            val taken = takenHandle(outcome.registration)
+                            if (taken != null) {
+                                // Nothing was claimed, so the hub must not be
+                                // told a handle exists — edit and try again.
+                                createBtn.isEnabled = true
+                                editText.error =
+                                    context.getString(R.string.fedi_mint_name_taken, taken)
+                                editText.setSelection(editText.text.length)
+                                return@onSuccess
+                            }
                             dialog.dismiss()
                             onMinted(handle)
                             snackbar(
                                 context.getString(
-                                    if (outcome.registered) R.string.fedi_mint_done
-                                    else R.string.fedi_mint_done_pending,
+                                    if (outcome.registration is MintRegistrationFfi.Registered) {
+                                        R.string.fedi_mint_done
+                                    } else {
+                                        R.string.fedi_mint_done_pending
+                                    },
                                     handle,
                                 ),
                             )
@@ -843,7 +869,10 @@ class ChatModeView(
             shortId.text = context.getString(R.string.fedi_hub_join)
             shortId.setTextColor(themeColor(R.attr.fetchitCopper))
             shortId.setOnClickListener {
-                showFediMintDialog {
+                // A name the directory refused reopens the dialog on itself,
+                // so the user picks up where the conflict left them even after
+                // a restart.
+                showFediMintDialog(controller.fediMintConflictHandle()) {
                     renderFediHubHeader(shortId, onMinted)
                     onMinted()
                 }
@@ -2495,7 +2524,11 @@ class ChatModeView(
                 setTextColor(themeColor(R.attr.fetchitCopper))
                 setPadding(0, px16, 0, px8)
                 isClickable = true
-                setOnClickListener { showFediMintDialog { showRoot(Screen.People) } }
+                setOnClickListener {
+                    showFediMintDialog(controller.fediMintConflictHandle()) {
+                        showRoot(Screen.People)
+                    }
+                }
             })
         }
 
@@ -2969,7 +3002,9 @@ class ChatModeView(
             composeRow.visibility = View.GONE
             mintCard.visibility = View.VISIBLE
             mintCard.setOnClickListener {
-                showFediMintDialog {
+                // Seeded with a name the directory refused, so a conflict from
+                // an earlier session reopens where it left off.
+                showFediMintDialog(controller.fediMintConflictHandle()) {
                     bindFeedCompose(view)
                     refreshPulledFeed()
                 }
@@ -3048,15 +3083,28 @@ class ChatModeView(
                 .onSuccess {
                     android.util.Log.w(
                         "FediSelfHeal",
-                        "ensure: registered=${it.registered} upgraded=${it.upgraded} pending=${it.pending}",
+                        "ensure: registration=${it.registration} upgraded=${it.upgraded} pending=${it.pending}",
                     )
-                    if (!it.registered) {
+                    when (val reg = it.registration) {
+                        is MintRegistrationFfi.Registered -> {}
+                        // The directory says the @name is someone else's. Retrying
+                        // can only 409 again, so the loop stops here: the user is
+                        // told once, and the engine now reports "no public handle"
+                        // so the mint prompt comes back with the name to edit.
+                        is MintRegistrationFfi.NameTaken -> if (!fediSetupNagged) {
+                            fediSetupNagged = true
+                            snackbar(
+                                context.getString(R.string.chat_fedi_name_taken, reg.handle),
+                            )
+                        }
                         // Not registered yet: re-arm so the next connect retries,
                         // and tell the user once (quietly) that setup is ongoing.
-                        fediEnsureDone = false
-                        if (!fediSetupNagged) {
-                            fediSetupNagged = true
-                            snackbar(context.getString(R.string.chat_fedi_setup_pending))
+                        is MintRegistrationFfi.Retrying -> {
+                            fediEnsureDone = false
+                            if (!fediSetupNagged) {
+                                fediSetupNagged = true
+                                snackbar(context.getString(R.string.chat_fedi_setup_pending))
+                            }
                         }
                     }
                 }

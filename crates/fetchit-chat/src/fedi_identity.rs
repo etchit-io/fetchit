@@ -21,6 +21,7 @@
 use crate::at_rest::MasterKey;
 use crate::chat_crypto::{derive_aead_key, AEAD_KEY_LEN};
 use crate::error::ChatError;
+use crate::fedi_mint_state::RegistrationState;
 use fetchit_fedi::attestation::{
     signing_input, signing_input_v2, ActorAttestationV2, MlDsaAttestation,
 };
@@ -282,21 +283,25 @@ pub async fn heal_actor_attestations(
 /// Register (or re-assert) `identity` with the fediverse directory at
 /// `base` by posting the actor's own JSON-LD document to `actors` — the
 /// shape the deployed bridge ingests, verifies (embedded ML-DSA
-/// attestation), stores, and serves. Re-registration of the same identity
-/// is idempotent bridge-side, so re-asserting our OWN handle after an
-/// attestation refresh self-heals; a genuine squat by another agent
-/// answers 409 and surfaces honestly. Lifted into the engine so the
+/// attestation), stores, and serves. Lifted into the engine so the
 /// desktop command and the FFI mint/ensure paths share one registration
 /// path (DRY).
 ///
-/// Returns `(registered, error)`. Registration failure is REPORTED, never
-/// fatal: a mint/ensure degrades to "pending" rather than failing, so a
-/// bridge outage never blocks getting a local identity.
+/// The returned [`RegistrationState`] is the classification the shells
+/// act on. The bridge answers `200` when the SAME agent id re-registers
+/// (an idempotent update — success, and how an attestation refresh
+/// self-heals) and `409` ONLY when the handle row belongs to a different
+/// agent id, so a conflict is unambiguous and terminal: no amount of
+/// retrying wins that name back. Everything else is transient.
+///
+/// Registration failure is REPORTED, never fatal: a mint/ensure degrades
+/// rather than failing, so a bridge outage never blocks getting a local
+/// identity.
 pub async fn register_or_update_actor(
     base: &url::Url,
     identity: &fetchit_fedi::actor::ActorIdentity,
     http: &reqwest::Client,
-) -> (bool, Option<String>) {
+) -> RegistrationState {
     // The deployed bridge registers by ingesting the actor's own JSON-LD
     // document (the shape it stores + serves), NOT the compact
     // RegisterActorRequest. Build it from the identity and POST it; the bridge
@@ -304,12 +309,19 @@ pub async fn register_or_update_actor(
     // of the same identity, so re-asserting our own handle self-heals.
     let actor = match fetchit_fedi::actor::Actor::from_identity(identity) {
         Ok(a) => a,
-        Err(e) => return (false, Some(format!("build actor doc: {e}"))),
+        Err(e) => {
+            return RegistrationState::Transient {
+                reason: format!("build actor doc: {e}"),
+            }
+        }
     };
     let doc = actor.to_json_ld();
     match fetchit_fedi::registry::register_actor_doc(base, &doc, http).await {
-        Ok(()) => (true, None),
-        Err(e) => (false, Some(e.to_string())),
+        Ok(()) => RegistrationState::Registered,
+        Err(fetchit_fedi::registry::RegistryError::HandleTaken) => RegistrationState::NameTaken,
+        Err(e) => RegistrationState::Transient {
+            reason: e.to_string(),
+        },
     }
 }
 
@@ -353,17 +365,17 @@ mod tests {
             .mount(&server)
             .await;
         let base = format!("{}/", server.uri()).parse().unwrap();
-        let (registered, err) =
+        let state =
             register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
-        assert!(registered);
-        assert!(err.is_none());
+        assert_eq!(state, RegistrationState::Registered);
     }
 
     #[tokio::test]
-    async fn register_or_update_actor_reports_conflict_on_409() {
+    async fn register_or_update_actor_classifies_409_as_terminal_name_taken() {
         // A 409 means a DIFFERENT identity holds the handle (a squat); the
         // bridge answers our own re-registration with 200, so 409 is a real
-        // error surfaced honestly, never claimed as success.
+        // conflict surfaced honestly, never claimed as success — and never
+        // retried, because re-POSTing the same handle can only 409 again.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/actors"))
@@ -371,10 +383,49 @@ mod tests {
             .mount(&server)
             .await;
         let base = format!("{}/", server.uri()).parse().unwrap();
-        let (registered, err) =
+        let state =
             register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
-        assert!(!registered);
-        assert!(err.unwrap().contains("already registered"));
+        assert_eq!(state, RegistrationState::NameTaken);
+        assert!(state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn register_or_update_actor_treats_our_own_re_register_as_success() {
+        // The idempotent half of the 409 contract: the bridge answers 200
+        // ("updated") when the SAME agent id re-registers, which is how an
+        // attestation refresh self-heals. That must stay success, NOT be
+        // mistaken for a conflict.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/actors"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("updated"))
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri()).parse().unwrap();
+        let state =
+            register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
+        assert_eq!(state, RegistrationState::Registered);
+        assert!(!state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn register_or_update_actor_classifies_5xx_as_retryable() {
+        // A bridge fault is NOT the user's problem to solve: it stays
+        // retryable so the self-heal pass keeps trying.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/actors"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri()).parse().unwrap();
+        let state =
+            register_or_update_actor(&base, &actor_fixture(true), &reqwest::Client::new()).await;
+        assert!(
+            matches!(state, RegistrationState::Transient { ref reason } if reason.contains("503")),
+            "got {state:?}"
+        );
+        assert!(!state.is_terminal());
     }
 
     #[tokio::test]
@@ -389,10 +440,9 @@ mod tests {
             .mount(&server)
             .await;
         let base = format!("{}/", server.uri()).parse().unwrap();
-        let (registered, err) =
+        let state =
             register_or_update_actor(&base, &actor_fixture(false), &reqwest::Client::new()).await;
-        assert!(registered);
-        assert!(err.is_none());
+        assert_eq!(state, RegistrationState::Registered);
     }
 
     #[tokio::test]

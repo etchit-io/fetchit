@@ -32,6 +32,7 @@ pub mod fedi_follow;
 pub mod fedi_follow_sync;
 pub mod fedi_identity;
 pub mod fedi_link;
+pub mod fedi_mint_state;
 pub mod fedi_resolutions;
 pub mod fedi_thread;
 pub mod fedi_vault;

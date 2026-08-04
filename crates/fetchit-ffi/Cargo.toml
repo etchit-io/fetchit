@@ -15,6 +15,12 @@ authors = ["the fetch>it contributors"]
 # tree is large. Etchit hits the same behaviour and uses the same
 # fix — keep the FFI crate in its own Cargo island, with path deps
 # back into the main workspace's library crates.
+#
+# Declared as its own workspace root rather than relying only on the root
+# manifest's `exclude`: that exclude is a path relative to the checkout, so
+# in a git worktree nested under the repo (`.claude/worktrees/...`) cargo
+# walks up, finds the outer workspace, and refuses to build this crate.
+[workspace]
 
 [lib]
 crate-type = ["cdylib", "staticlib", "lib"]

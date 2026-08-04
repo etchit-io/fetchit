@@ -155,6 +155,15 @@ impl StoreLayout {
         self.fedi_dir.join("handle_resolutions.json")
     }
 
+    /// Path of the mint-state record (M5.1): the directory-registration
+    /// outcome of the last mint attempt, so a "name taken" conflict
+    /// survives a restart. Plaintext: it holds a public handle and a
+    /// status, no key material.
+    #[must_use]
+    pub fn fedi_mint_state_path(&self) -> PathBuf {
+        self.fedi_dir.join("mint_state.json")
+    }
+
     /// Path of the per-group metadata-bridge consent vault
     /// (`bridge/consent.json.enc`): a single file holding the whole
     /// `GroupId -> GroupBridgeConsent` map, sealed at rest under the

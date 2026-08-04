@@ -155,8 +155,8 @@ pub async fn fediverse_mint(
     }
     Ok(MintOutcomeDto {
         actor_url: outcome.actor_url,
-        registered: outcome.registered,
-        registration_error: outcome.registration_error,
+        registered: outcome.registration.registered(),
+        registration_error: outcome.registration.error_text(),
     })
 }
 
