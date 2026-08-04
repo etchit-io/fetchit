@@ -46,7 +46,7 @@ jobs:
     name: build + publish APK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Derive version from tag
         id: ver
@@ -57,16 +57,16 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # ── toolchains ────────────────────────────────────────────────
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07 # v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: crates/fetchit-ffi
 
@@ -78,7 +78,7 @@ jobs:
 
       - name: Set up Android NDK r27
         id: ndk
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         with:
           ndk-version: r27
           add-to-path: true
@@ -131,7 +131,7 @@ jobs:
 
       # ── publish ──────────────────────────────────────────────────
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
@@ -165,7 +165,7 @@ jobs:
             label: windows-x86_64
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Derive version from tag
         id: ver
@@ -177,13 +177,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # ── toolchains ────────────────────────────────────────────────
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: apps/fetchit-desktop/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           # The macOS universal build needs both Mac targets installed
           # so the linker can produce a fat binary in one pass.
@@ -191,7 +191,7 @@ jobs:
 
       # `fetchit-desktop` is workspace-excluded — cache its own Cargo.lock
       # tree, not the root workspace.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/fetchit-desktop/src-tauri
 
@@ -288,7 +288,7 @@ jobs:
           git checkout "$X0XD_PIN_SHA"
 
       - name: Cache x0x build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ${{ runner.temp }}/x0x
           shared-key: x0x-${{ matrix.label }}
@@ -369,7 +369,7 @@ jobs:
       # Windows steps above export them into $GITHUB_ENV ONLY when the
       # secrets are populated. Unset → unsigned but installable bundle.
       - name: Build and upload Tauri bundles
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

@@ -38,17 +38,17 @@ jobs:
        || (inputs.platform || 'windows') == 'linux'   && 'ubuntu-22.04'
        ||                                                 'macos-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: apps/fetchit-desktop/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/fetchit-desktop/src-tauri
 
@@ -97,7 +97,7 @@ jobs:
       # Tauri emits bundles under src-tauri/target/release/bundle/<format>/
       # on every host. Grab everything in that tree.
       - name: Upload bundles as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fetchit-desktop-${{ runner.os }}-${{ github.run_number }}
           path: apps/fetchit-desktop/src-tauri/target/release/bundle/**/*
