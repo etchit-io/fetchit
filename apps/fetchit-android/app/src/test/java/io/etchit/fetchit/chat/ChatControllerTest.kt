@@ -27,7 +27,7 @@ import uniffi.fetchit_ffi.LookupFfi
 import uniffi.fetchit_ffi.LookupKindFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
-import uniffi.fetchit_ffi.OutboxStatusFfi
+import uniffi.fetchit_ffi.SendStateFfi
 import uniffi.fetchit_ffi.PublishReportFfi
 
 /** Regex-based HTML stripper used in place of [android.text.Html.fromHtml] so these tests run on the plain JVM. */
@@ -637,7 +637,7 @@ class ChatControllerTest {
         val gw = FakeGateway()
         val convo = ConversationStore()
         val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
-        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.SENDING)))
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = SendStateFfi.QUEUED)))
         gw.events.send(null)
         pump.join()
         val msg = convo.messagesFor("a".repeat(64)).value.single()
@@ -652,8 +652,8 @@ class ChatControllerTest {
         val gw = FakeGateway()
         val convo = ConversationStore()
         val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
-        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.SENDING)))
-        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.DELIVERED, messageId = "m1")))
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = SendStateFfi.QUEUED)))
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = SendStateFfi.DELIVERED, messageId = "m1")))
         gw.events.send(null)
         pump.join()
         val msgs = convo.messagesFor("a".repeat(64)).value
@@ -667,7 +667,7 @@ class ChatControllerTest {
         val gw = FakeGateway()
         val convo = ConversationStore()
         val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
-        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = OutboxStatusFfi.FAILED, lastError = "no route")))
+        gw.events.send(ChatEventFfi.Outbox(bubble("ob-1", status = SendStateFfi.FAILED, lastError = "no route")))
         gw.events.send(null)
         pump.join()
         val msg = convo.messagesFor("a".repeat(64)).value.single()
@@ -693,13 +693,14 @@ class ChatControllerTest {
         // with the member, and must not flip the tick yet.
         gw.events.send(
             ChatEventFfi.Outbox(
-                bubble("ob-1", peer = member, status = OutboxStatusFfi.SENDING, groupClientMessageId = "cm-1"),
+                bubble("ob-1", peer = member, status = SendStateFfi.QUEUED, groupClientMessageId = "cm-1"),
             ),
         )
-        // The first copy reaching the relay flips the ONE group message.
+        // The first copy the relay accepts (SENT -- a group fan-out copy
+        // never gets a per-member receipt) flips the ONE group message.
         gw.events.send(
             ChatEventFfi.Outbox(
-                bubble("ob-1", peer = member, status = OutboxStatusFfi.DELIVERED, groupClientMessageId = "cm-1"),
+                bubble("ob-1", peer = member, status = SendStateFfi.SENT, groupClientMessageId = "cm-1"),
             ),
         )
         gw.events.send(null)
@@ -839,13 +840,15 @@ class ChatControllerTest {
         sentAtMs = sentAtMs.toULong(),
         messageId = messageId,
         delivered = delivered,
+        sendState = if (delivered) SendStateFfi.DELIVERED else SendStateFfi.SENT,
+        stateChangedAtMs = sentAtMs.toULong(),
     )
 
     private fun bubble(
         id: String,
         peer: String = "a".repeat(64),
         body: String = "hi",
-        status: OutboxStatusFfi = OutboxStatusFfi.SENDING,
+        status: SendStateFfi = SendStateFfi.QUEUED,
         messageId: String? = null,
         lastError: String? = null,
         groupClientMessageId: String? = null,
@@ -856,6 +859,7 @@ class ChatControllerTest {
         status = status,
         messageId = messageId,
         enqueuedAtMs = 1uL,
+        stateChangedAtMs = 1uL,
         lastError = lastError,
         groupClientMessageId = groupClientMessageId,
     )

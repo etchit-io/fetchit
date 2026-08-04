@@ -1353,7 +1353,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once() != 45686.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 2558.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 61912.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 19997.toShort()) {
@@ -1479,7 +1479,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 61996.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 25178.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_client_fetch() != 41047.toShort()) {
@@ -2087,9 +2087,12 @@ public interface ChatClientInterface {
     
     /**
      * Enqueue an outbound DM through the durable outbox: persist a
-     * `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
-     * optimistic echo, then send. The terminal state (Delivered/Failed)
-     * arrives as a later `Outbox` event keyed by the returned bubble id.
+     * `Queued` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+     * optimistic echo, then send. Later states (`Sent` on the relay's ack,
+     * `Delivered` on the recipient's receipt) arrive as further `Outbox`
+     * events keyed by the returned bubble id. A send that fails for a
+     * reason a retry could fix stays `Queued` -- the shell must not
+     * render that as a failure.
      *
      * Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
      * outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
@@ -2625,9 +2628,10 @@ public interface ChatClientInterface {
     suspend fun `setMeshActive`(`active`: kotlin.Boolean)
     
     /**
-     * Start the background outbox retry driver: re-sends failed/unacked
-     * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
-     * services [`ChatClient::retry_outbox`]. Call once after `connect`,
+     * Start the background outbox retry driver: re-sends queued/unacked
+     * bubbles on relay reconnect, reclaims stalled send claims (at boot
+     * and periodically -- never turning a queued message into a failed
+     * one), and services [`ChatClient::retry_outbox`]. Call once after `connect`,
      * passing the user's display name (used for body-only resends, so it
      * should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
      * Calling again aborts the previous driver before starting a new one.
@@ -2993,9 +2997,12 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     
     /**
      * Enqueue an outbound DM through the durable outbox: persist a
-     * `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
-     * optimistic echo, then send. The terminal state (Delivered/Failed)
-     * arrives as a later `Outbox` event keyed by the returned bubble id.
+     * `Queued` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+     * optimistic echo, then send. Later states (`Sent` on the relay's ack,
+     * `Delivered` on the recipient's receipt) arrive as further `Outbox`
+     * events keyed by the returned bubble id. A send that fails for a
+     * reason a retry could fix stays `Queued` -- the shell must not
+     * render that as a failure.
      *
      * Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
      * outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
@@ -4247,9 +4254,10 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * Start the background outbox retry driver: re-sends failed/unacked
-     * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
-     * services [`ChatClient::retry_outbox`]. Call once after `connect`,
+     * Start the background outbox retry driver: re-sends queued/unacked
+     * bubbles on relay reconnect, reclaims stalled send claims (at boot
+     * and periodically -- never turning a queued message into a failed
+     * one), and services [`ChatClient::retry_outbox`]. Call once after `connect`,
      * passing the user's display name (used for body-only resends, so it
      * should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
      * Calling again aborts the previous driver before starting a new one.
@@ -4765,9 +4773,22 @@ data class ChatHistoryMessageFfi (
     var `messageId`: kotlin.String, 
     /**
      * `true` once the recipient's delivery receipt arrived. Only meaningful
-     * for entries this device sent (`outbound`).
+     * for entries this device sent (`outbound`). Equivalent to
+     * `send_state == SendStateFfi::Delivered`.
      */
-    var `delivered`: kotlin.Boolean
+    var `delivered`: kotlin.Boolean, 
+    /**
+     * How far this device's send of the message actually got, folding in
+     * any copy still live in the outbox. Only meaningful on `outbound`
+     * entries (an inbound entry reports `Sent`, exactly as `delivered`
+     * is meaningless there).
+     */
+    var `sendState`: SendStateFfi, 
+    /**
+     * Unix-ms of the last `send_state` transition, for the same
+     * "still sending" affordance the outbox bubble carries.
+     */
+    var `stateChangedAtMs`: kotlin.ULong
 ) {
     
     companion object
@@ -4786,6 +4807,8 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterTypeSendStateFfi.read(buf),
+            FfiConverterULong.read(buf),
         )
     }
 
@@ -4796,7 +4819,9 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterString.allocationSize(value.`body`) +
             FfiConverterULong.allocationSize(value.`sentAtMs`) +
             FfiConverterString.allocationSize(value.`messageId`) +
-            FfiConverterBoolean.allocationSize(value.`delivered`)
+            FfiConverterBoolean.allocationSize(value.`delivered`) +
+            FfiConverterTypeSendStateFfi.allocationSize(value.`sendState`) +
+            FfiConverterULong.allocationSize(value.`stateChangedAtMs`)
     )
 
     override fun write(value: ChatHistoryMessageFfi, buf: ByteBuffer) {
@@ -4807,6 +4832,8 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterULong.write(value.`sentAtMs`, buf)
             FfiConverterString.write(value.`messageId`, buf)
             FfiConverterBoolean.write(value.`delivered`, buf)
+            FfiConverterTypeSendStateFfi.write(value.`sendState`, buf)
+            FfiConverterULong.write(value.`stateChangedAtMs`, buf)
     }
 }
 
@@ -5758,11 +5785,11 @@ data class OutboxBubbleFfi (
      */
     var `body`: kotlin.String, 
     /**
-     * Delivery state.
+     * How far this copy got.
      */
-    var `status`: OutboxStatusFfi, 
+    var `status`: SendStateFfi, 
     /**
-     * Relay dedupe-key hex, set once the first send is acked.
+     * Logical message id of the accepted send, set once a relay acks.
      */
     var `messageId`: kotlin.String?, 
     /**
@@ -5770,7 +5797,16 @@ data class OutboxBubbleFfi (
      */
     var `enqueuedAtMs`: kotlin.ULong, 
     /**
-     * Last send error, populated when `status` is `Failed`.
+     * Unix-ms of the last `status` transition. Its age is what a shell
+     * reads to tell "sending" from "still sending"; the engine sets no
+     * threshold of its own.
+     */
+    var `stateChangedAtMs`: kotlin.ULong, 
+    /**
+     * Last send error. Populated on a terminal `Failed` AND on a
+     * retryable failure that left the bubble `Queued`, where it is
+     * diagnostics, not a verdict -- render it as failure only when
+     * `status` is `Failed`.
      */
     var `lastError`: kotlin.String?, 
     /**
@@ -5794,8 +5830,9 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterTypeOutboxStatusFfi.read(buf),
+            FfiConverterTypeSendStateFfi.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -5806,9 +5843,10 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterString.allocationSize(value.`peerAgentIdHex`) +
             FfiConverterString.allocationSize(value.`body`) +
-            FfiConverterTypeOutboxStatusFfi.allocationSize(value.`status`) +
+            FfiConverterTypeSendStateFfi.allocationSize(value.`status`) +
             FfiConverterOptionalString.allocationSize(value.`messageId`) +
             FfiConverterULong.allocationSize(value.`enqueuedAtMs`) +
+            FfiConverterULong.allocationSize(value.`stateChangedAtMs`) +
             FfiConverterOptionalString.allocationSize(value.`lastError`) +
             FfiConverterOptionalString.allocationSize(value.`groupClientMessageId`)
     )
@@ -5817,9 +5855,10 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`peerAgentIdHex`, buf)
             FfiConverterString.write(value.`body`, buf)
-            FfiConverterTypeOutboxStatusFfi.write(value.`status`, buf)
+            FfiConverterTypeSendStateFfi.write(value.`status`, buf)
             FfiConverterOptionalString.write(value.`messageId`, buf)
             FfiConverterULong.write(value.`enqueuedAtMs`, buf)
+            FfiConverterULong.write(value.`stateChangedAtMs`, buf)
             FfiConverterOptionalString.write(value.`lastError`, buf)
             FfiConverterOptionalString.write(value.`groupClientMessageId`, buf)
     }
@@ -5968,8 +6007,10 @@ sealed class ChatEventFfi {
     }
     
     /**
-     * An outbox change for an outbound DM: optimistic echo, delivery, or
-     * failure. Upsert keyed by `bubble.id`; drives the send-status UI.
+     * An outbox change for an outbound DM: the optimistic echo, then
+     * every send-state transition (queued -> sent -> delivered, or a
+     * terminal failure). Upsert keyed by `bubble.id`; drives the
+     * send-status UI.
      */
     data class Outbox(
         /**
@@ -6551,50 +6592,6 @@ public object FfiConverterTypeLookupKindFfi: FfiConverterRustBuffer<LookupKindFf
 
 
 /**
- * Delivery state of an outbound DM bubble, mirrored from
- * [`fetchit_chat::outbox::OutboxStatus`] for the uniffi surface.
- */
-
-enum class OutboxStatusFfi {
-    
-    /**
-     * Send attempted, not yet confirmed delivered.
-     */
-    SENDING,
-    /**
-     * Recipient acknowledged delivery.
-     */
-    DELIVERED,
-    /**
-     * The attempt errored or timed out; eligible for retry.
-     */
-    FAILED;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeOutboxStatusFfi: FfiConverterRustBuffer<OutboxStatusFfi> {
-    override fun read(buf: ByteBuffer) = try {
-        OutboxStatusFfi.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: OutboxStatusFfi) = 4UL
-
-    override fun write(value: OutboxStatusFfi, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-/**
  * FFI-shaped rendition.
  */
 sealed class RenditionFfi {
@@ -6964,6 +6961,62 @@ public object FfiConverterTypeRenditionFFI : FfiConverterRustBuffer<RenditionFfi
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * How far one outbound message actually got, mirrored from
+ * [`fetchit_chat::send_state::SendState`] for the uniffi surface.
+ *
+ * What the shell may render from each:
+ * - `Queued`: still sending. The engine retries indefinitely; a queued
+ * message is NEVER a failed one, however long it sits. Pair it with
+ * `state_changed_at_ms` to show a "still sending" affordance.
+ * - `Sent`: a relay took durable custody (single tick).
+ * - `Delivered`: the recipient's delivery receipt arrived (double tick).
+ * - `Failed`: terminal, and only for outcomes no retry could fix.
+ */
+
+enum class SendStateFfi {
+    
+    /**
+     * In the durable outbox, not yet accepted by any relay.
+     */
+    QUEUED,
+    /**
+     * A relay acked acceptance.
+     */
+    SENT,
+    /**
+     * The recipient acknowledged delivery.
+     */
+    DELIVERED,
+    /**
+     * Terminal failure; no retry can help.
+     */
+    FAILED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSendStateFfi: FfiConverterRustBuffer<SendStateFfi> {
+    override fun read(buf: ByteBuffer) = try {
+        SendStateFfi.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SendStateFfi) = 4UL
+
+    override fun write(value: SendStateFfi, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 

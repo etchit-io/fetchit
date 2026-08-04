@@ -33,7 +33,7 @@ use fetchit_net::{set_data_home as set_data_home_inner, AutonomiClient, DEFAULT_
 
 pub use chat_error::ChatFfiError;
 pub use chat_ffi::{
-    ChatClient, ChatEventFfi, ChatHistoryMessageFfi, OutboxBubbleFfi, OutboxStatusFfi,
+    ChatClient, ChatEventFfi, ChatHistoryMessageFfi, OutboxBubbleFfi, SendStateFfi,
 };
 pub use error::FetchitError;
 pub use group_ffi::{GroupFfi, JoinOutcomeFfi};

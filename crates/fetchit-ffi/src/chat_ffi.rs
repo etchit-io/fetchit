@@ -48,8 +48,10 @@ pub enum ChatEventFfi {
         /// rendering.
         activity_json: Vec<u8>,
     },
-    /// An outbox change for an outbound DM: optimistic echo, delivery, or
-    /// failure. Upsert keyed by `bubble.id`; drives the send-status UI.
+    /// An outbox change for an outbound DM: the optimistic echo, then
+    /// every send-state transition (queued -> sent -> delivered, or a
+    /// terminal failure). Upsert keyed by `bubble.id`; drives the
+    /// send-status UI.
     Outbox {
         /// The bubble's current state.
         bubble: OutboxBubbleFfi,
@@ -73,24 +75,35 @@ pub enum ChatEventFfi {
     },
 }
 
-/// Delivery state of an outbound DM bubble, mirrored from
-/// [`fetchit_chat::outbox::OutboxStatus`] for the uniffi surface.
+/// How far one outbound message actually got, mirrored from
+/// [`fetchit_chat::send_state::SendState`] for the uniffi surface.
+///
+/// What the shell may render from each:
+/// - `Queued`: still sending. The engine retries indefinitely; a queued
+///   message is NEVER a failed one, however long it sits. Pair it with
+///   `state_changed_at_ms` to show a "still sending" affordance.
+/// - `Sent`: a relay took durable custody (single tick).
+/// - `Delivered`: the recipient's delivery receipt arrived (double tick).
+/// - `Failed`: terminal, and only for outcomes no retry could fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum OutboxStatusFfi {
-    /// Send attempted, not yet confirmed delivered.
-    Sending,
-    /// Recipient acknowledged delivery.
+pub enum SendStateFfi {
+    /// In the durable outbox, not yet accepted by any relay.
+    Queued,
+    /// A relay acked acceptance.
+    Sent,
+    /// The recipient acknowledged delivery.
     Delivered,
-    /// The attempt errored or timed out; eligible for retry.
+    /// Terminal failure; no retry can help.
     Failed,
 }
 
-impl From<fetchit_chat::outbox::OutboxStatus> for OutboxStatusFfi {
-    fn from(status: fetchit_chat::outbox::OutboxStatus) -> Self {
+impl From<fetchit_chat::send_state::SendState> for SendStateFfi {
+    fn from(status: fetchit_chat::send_state::SendState) -> Self {
         match status {
-            fetchit_chat::outbox::OutboxStatus::Sending => Self::Sending,
-            fetchit_chat::outbox::OutboxStatus::Delivered => Self::Delivered,
-            fetchit_chat::outbox::OutboxStatus::Failed => Self::Failed,
+            fetchit_chat::send_state::SendState::Queued => Self::Queued,
+            fetchit_chat::send_state::SendState::Sent => Self::Sent,
+            fetchit_chat::send_state::SendState::Delivered => Self::Delivered,
+            fetchit_chat::send_state::SendState::Failed => Self::Failed,
         }
     }
 }
@@ -106,13 +119,20 @@ pub struct OutboxBubbleFfi {
     pub peer_agent_id_hex: String,
     /// Plaintext body.
     pub body: String,
-    /// Delivery state.
-    pub status: OutboxStatusFfi,
-    /// Relay dedupe-key hex, set once the first send is acked.
+    /// How far this copy got.
+    pub status: SendStateFfi,
+    /// Logical message id of the accepted send, set once a relay acks.
     pub message_id: Option<String>,
     /// Unix epoch ms when first enqueued.
     pub enqueued_at_ms: u64,
-    /// Last send error, populated when `status` is `Failed`.
+    /// Unix-ms of the last `status` transition. Its age is what a shell
+    /// reads to tell "sending" from "still sending"; the engine sets no
+    /// threshold of its own.
+    pub state_changed_at_ms: u64,
+    /// Last send error. Populated on a terminal `Failed` AND on a
+    /// retryable failure that left the bubble `Queued`, where it is
+    /// diagnostics, not a verdict -- render it as failure only when
+    /// `status` is `Failed`.
     pub last_error: Option<String>,
     /// For a private-group fan-out bubble, the UI message anchor
     /// (`GroupOutbound.client_message_id`) so the shell can correlate this
@@ -130,6 +150,7 @@ impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
             status: bubble.status.into(),
             message_id: bubble.message_id,
             enqueued_at_ms: bubble.enqueued_at_ms,
+            state_changed_at_ms: bubble.state_changed_at_ms,
             last_error: bubble.last_error,
             group_client_message_id: bubble.group.map(|g| g.client_message_id),
         }
@@ -162,8 +183,17 @@ pub struct ChatHistoryMessageFfi {
     /// live message of the same id. Empty for legacy pre-id entries.
     pub message_id: String,
     /// `true` once the recipient's delivery receipt arrived. Only meaningful
-    /// for entries this device sent (`outbound`).
+    /// for entries this device sent (`outbound`). Equivalent to
+    /// `send_state == SendStateFfi::Delivered`.
     pub delivered: bool,
+    /// How far this device's send of the message actually got, folding in
+    /// any copy still live in the outbox. Only meaningful on `outbound`
+    /// entries (an inbound entry reports `Sent`, exactly as `delivered`
+    /// is meaningless there).
+    pub send_state: SendStateFfi,
+    /// Unix-ms of the last `send_state` transition, for the same
+    /// "still sending" affordance the outbox bubble carries.
+    pub state_changed_at_ms: u64,
 }
 
 /// Map one persisted [`HistoryEntry`](fetchit_chat::conversation::HistoryEntry)
@@ -175,6 +205,7 @@ fn history_entry_to_ffi(
     entry: fetchit_chat::conversation::HistoryEntry,
     local_agent_id_hex: &str,
 ) -> ChatHistoryMessageFfi {
+    let progress = entry.send_progress();
     ChatHistoryMessageFfi {
         outbound: entry.sender_agent_id_hex == local_agent_id_hex,
         from_agent_id_hex: entry.sender_agent_id_hex,
@@ -182,7 +213,9 @@ fn history_entry_to_ffi(
         body: entry.body,
         sent_at_ms: entry.ts_ms,
         message_id: entry.message_id,
-        delivered: entry.delivered_at_ms.is_some(),
+        delivered: progress.state == fetchit_chat::send_state::SendState::Delivered,
+        send_state: progress.state.into(),
+        state_changed_at_ms: progress.changed_at_ms,
     }
 }
 
@@ -2314,14 +2347,27 @@ impl ChatClient {
                 .map_err(ChatFfiError::from)?;
             return Ok(msgs
                 .into_iter()
-                .map(|m| ChatHistoryMessageFfi {
-                    outbound: m.outbound,
-                    from_agent_id_hex: String::new(),
-                    sender_name: None,
-                    body: m.text,
-                    sent_at_ms: u64::try_from(m.at_ms).unwrap_or(0),
-                    message_id: m.note_id,
-                    delivered: m.delivered,
+                .map(|m| {
+                    let at_ms = u64::try_from(m.at_ms).unwrap_or(0);
+                    ChatHistoryMessageFfi {
+                        outbound: m.outbound,
+                        from_agent_id_hex: String::new(),
+                        sender_name: None,
+                        body: m.text,
+                        sent_at_ms: at_ms,
+                        message_id: m.note_id,
+                        delivered: m.delivered,
+                        // The fedi rails carry no outbox and no relay ack:
+                        // a delivered note was accepted by the remote inbox,
+                        // anything else is still being retried by the fedi
+                        // thread store, which is exactly "queued".
+                        send_state: if m.delivered {
+                            SendStateFfi::Delivered
+                        } else {
+                            SendStateFfi::Queued
+                        },
+                        state_changed_at_ms: at_ms,
+                    }
                 })
                 .collect());
         }
@@ -2355,8 +2401,15 @@ impl ChatClient {
             return Ok(Vec::new());
         };
         let local = self.inner.local_agent_id_hex().unwrap_or_default();
-        Ok(conv
-            .history
+        // Fold the live outbox over the persisted transcript before
+        // reporting: a message whose copies went back in the queue after a
+        // relay outage must not keep claiming it was sent.
+        let mut entries: Vec<_> = conv.history.into_iter().collect();
+        fetchit_chat::outbox::overlay::overlay_history_send_state(
+            &mut entries,
+            &self.inner.outbox_snapshot().await,
+        );
+        Ok(entries
             .into_iter()
             .map(|entry| history_entry_to_ffi(entry, &local))
             .collect())
@@ -2377,9 +2430,12 @@ impl ChatClient {
     }
 
     /// Enqueue an outbound DM through the durable outbox: persist a
-    /// `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
-    /// optimistic echo, then send. The terminal state (Delivered/Failed)
-    /// arrives as a later `Outbox` event keyed by the returned bubble id.
+    /// `Queued` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+    /// optimistic echo, then send. Later states (`Sent` on the relay's ack,
+    /// `Delivered` on the recipient's receipt) arrive as further `Outbox`
+    /// events keyed by the returned bubble id. A send that fails for a
+    /// reason a retry could fix stays `Queued` -- the shell must not
+    /// render that as a failure.
     ///
     /// Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
     /// outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
@@ -2424,9 +2480,10 @@ impl ChatClient {
             .collect()
     }
 
-    /// Start the background outbox retry driver: re-sends failed/unacked
-    /// bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
-    /// services [`ChatClient::retry_outbox`]. Call once after `connect`,
+    /// Start the background outbox retry driver: re-sends queued/unacked
+    /// bubbles on relay reconnect, reclaims stalled send claims (at boot
+    /// and periodically -- never turning a queued message into a failed
+    /// one), and services [`ChatClient::retry_outbox`]. Call once after `connect`,
     /// passing the user's display name (used for body-only resends, so it
     /// should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
     /// Calling again aborts the previous driver before starting a new one.
@@ -3322,6 +3379,8 @@ mod tests {
             message_id: "mid-7".to_owned(),
             attachment: None,
             delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
         };
         let projected = project_group_receive(
             group_id.clone(),
@@ -3356,44 +3415,42 @@ mod tests {
     }
 
     #[test]
-    fn outbox_status_ffi_maps_all_variants() {
-        use fetchit_chat::outbox::OutboxStatus;
+    fn send_state_ffi_maps_all_variants() {
+        use fetchit_chat::send_state::SendState;
+        assert_eq!(SendStateFfi::from(SendState::Queued), SendStateFfi::Queued);
+        assert_eq!(SendStateFfi::from(SendState::Sent), SendStateFfi::Sent);
         assert_eq!(
-            OutboxStatusFfi::from(OutboxStatus::Sending),
-            OutboxStatusFfi::Sending
+            SendStateFfi::from(SendState::Delivered),
+            SendStateFfi::Delivered
         );
-        assert_eq!(
-            OutboxStatusFfi::from(OutboxStatus::Delivered),
-            OutboxStatusFfi::Delivered
-        );
-        assert_eq!(
-            OutboxStatusFfi::from(OutboxStatus::Failed),
-            OutboxStatusFfi::Failed
-        );
+        assert_eq!(SendStateFfi::from(SendState::Failed), SendStateFfi::Failed);
     }
 
     #[test]
     fn outbox_bubble_ffi_maps_fields_and_peer_hex() {
         use fetchit_chat::identity::AgentId;
-        use fetchit_chat::outbox::{OutboxBubble, OutboxStatus};
+        use fetchit_chat::outbox::{OutboxBubble, SendState};
         let peer_hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
         let bubble = OutboxBubble {
-            id: "bid-1".into(),
-            peer: AgentId(peer_hex.into()),
-            body: "hello".into(),
-            status: OutboxStatus::Failed,
+            status: SendState::Failed,
             message_id: Some("mid-9".into()),
-            enqueued_at_ms: 1_700_000_000_000,
+            state_changed_at_ms: 1_700_000_000_009,
             last_error: Some("boom".into()),
-            group: None,
+            ..OutboxBubble::queued(
+                "bid-1".into(),
+                AgentId(peer_hex.into()),
+                "hello".into(),
+                1_700_000_000_000,
+            )
         };
         let ffi = OutboxBubbleFfi::from(bubble);
         assert_eq!(ffi.id, "bid-1");
         assert_eq!(ffi.peer_agent_id_hex, peer_hex);
         assert_eq!(ffi.body, "hello");
-        assert_eq!(ffi.status, OutboxStatusFfi::Failed);
+        assert_eq!(ffi.status, SendStateFfi::Failed);
         assert_eq!(ffi.message_id.as_deref(), Some("mid-9"));
         assert_eq!(ffi.enqueued_at_ms, 1_700_000_000_000);
+        assert_eq!(ffi.state_changed_at_ms, 1_700_000_000_009);
         assert_eq!(ffi.last_error.as_deref(), Some("boom"));
         // A DM bubble carries no group correlation id.
         assert_eq!(ffi.group_client_message_id, None);
@@ -3402,22 +3459,19 @@ mod tests {
     #[test]
     fn outbox_bubble_ffi_surfaces_group_client_message_id() {
         use fetchit_chat::identity::AgentId;
-        use fetchit_chat::outbox::{GroupOutbound, OutboxBubble, OutboxStatus};
+        use fetchit_chat::outbox::{GroupOutbound, OutboxBubble};
         let peer_hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-        let bubble = OutboxBubble {
-            id: "bid-2".into(),
-            peer: AgentId(peer_hex.into()),
-            body: "group hello".into(),
-            status: OutboxStatus::Sending,
-            message_id: None,
-            enqueued_at_ms: 1_700_000_000_001,
-            last_error: None,
-            group: Some(GroupOutbound {
-                group_id: "cafe".into(),
-                envelope: vec![1, 2, 3],
-                client_message_id: "ui-anchor-7".into(),
-            }),
-        };
+        let bubble = OutboxBubble::queued(
+            "bid-2".into(),
+            AgentId(peer_hex.into()),
+            "group hello".into(),
+            1_700_000_000_001,
+        )
+        .with_group(GroupOutbound {
+            group_id: "cafe".into(),
+            envelope: vec![1, 2, 3],
+            client_message_id: "ui-anchor-7".into(),
+        });
         let ffi = OutboxBubbleFfi::from(bubble);
         // The fan-out bubble carries the UI anchor so the shell can flip the tick.
         assert_eq!(ffi.group_client_message_id.as_deref(), Some("ui-anchor-7"));
@@ -3434,6 +3488,8 @@ mod tests {
             message_id: "mid-1".to_owned(),
             attachment: None,
             delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
         };
         // Local agent id differs from the sender -> inbound.
         let ffi = history_entry_to_ffi(entry, ZEROS_HEX);
@@ -3457,11 +3513,38 @@ mod tests {
             message_id: "mid-2".to_owned(),
             attachment: None,
             delivered_at_ms: Some(1_700_000_000_500),
+            send_state: None,
+            state_changed_at_ms: 0,
         };
         // Local agent id EQUALS the sender -> outbound; receipt present -> delivered.
         let ffi = history_entry_to_ffi(entry, REAL_HEX);
         assert!(ffi.outbound, "a message from self is outbound");
         assert!(ffi.delivered, "a present delivered_at_ms maps to delivered");
         assert_eq!(ffi.message_id, "mid-2");
+        // A pre-send-state-truth entry derives its state rather than
+        // reporting a default: a receipt landed, so Delivered at its time.
+        assert_eq!(ffi.send_state, SendStateFfi::Delivered);
+        assert_eq!(ffi.state_changed_at_ms, 1_700_000_000_500);
+    }
+
+    #[test]
+    fn history_entry_carries_its_persisted_send_state() {
+        use fetchit_chat::conversation::HistoryEntry;
+        use fetchit_chat::send_state::SendState;
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: None,
+            body: "still going out".to_owned(),
+            ts_ms: 1_700_000_000_001,
+            message_id: "mid-3".to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+            send_state: Some(SendState::Queued),
+            state_changed_at_ms: 1_700_000_000_400,
+        };
+        let ffi = history_entry_to_ffi(entry, REAL_HEX);
+        assert_eq!(ffi.send_state, SendStateFfi::Queued);
+        assert_eq!(ffi.state_changed_at_ms, 1_700_000_000_400);
+        assert!(!ffi.delivered);
     }
 }
