@@ -17,13 +17,20 @@ field has a typed accessor.
 |---|---|---|
 | Connected agent count | gauge | `{region, version}` |
 | Envelopes in transit | gauge | `{region, version}` |
-| Envelopes sent / delivered / buffered / dropped-TTL | counter | `{region, version}` |
+| Envelopes sent / pushed / delivered / buffered / dropped-TTL | counter | `{region, version}` |
 | Auth challenges issued / verified-ok / verified-failed | counter | `{region, version}` |
 | Throttles per-recipient / per-sender / envelope-too-large | counter | `{region, version}` |
 | Process uptime seconds | gauge | `{region, version}` |
 
 Only `{region, version}` labels — never `{agent_id}`, `{group_id}`,
 `{machine_id}`, `{tenant_id}`, IP, country, ASN, or user-agent.
+
+`envelopes_pushed_total` and `envelopes_delivered_total` are distinct
+on purpose: a push is the hand-off to a live session's outbound queue,
+which a dying socket can still swallow, while a delivery is the
+recipient's `TransitAck` reclaiming the durable entry. `pushed -
+delivered` is the un-acked backlog; only `delivered` means the client
+has the bytes.
 
 ## What the tracing/log surface emits
 

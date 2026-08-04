@@ -81,9 +81,11 @@ pub trait TransitStore: Send + Sync {
     /// (delivery is confirmed separately via [`TransitStore::delete`]).
     fn read_all(&self, to: &AgentId) -> Vec<StoredEntry>;
 
-    /// Delete the listed ids for `to` (called on a client delivery-ack).
-    /// Unknown ids are ignored.
-    fn delete(&self, to: &AgentId, ids: &[u64]);
+    /// Delete the listed ids for `to` (called on a client delivery-ack),
+    /// returning how many entries were actually reclaimed. Unknown ids
+    /// are ignored and count nothing, so a re-ack of an entry a previous
+    /// ack already reclaimed cannot inflate the delivery count.
+    fn delete(&self, to: &AgentId, ids: &[u64]) -> usize;
 
     /// Evict every entry older than the configured TTL; returns the
     /// count evicted.
@@ -187,19 +189,22 @@ impl TransitStore for TransitBuffer {
             .unwrap_or_default()
     }
 
-    fn delete(&self, to: &AgentId, ids: &[u64]) {
-        if let Some(mut q) = self.by_recipient.get_mut(to) {
-            let mut freed = 0usize;
-            q.retain(|item| {
-                let (id, e) = item;
-                let keep = !ids.contains(id);
-                if !keep {
-                    freed = freed.saturating_add(envelope_size(&e.envelope));
-                }
-                keep
-            });
-            self.total_bytes.fetch_sub(freed, Ordering::Relaxed);
-        }
+    fn delete(&self, to: &AgentId, ids: &[u64]) -> usize {
+        let Some(mut q) = self.by_recipient.get_mut(to) else {
+            return 0;
+        };
+        let before = q.len();
+        let mut freed = 0usize;
+        q.retain(|item| {
+            let (id, e) = item;
+            let keep = !ids.contains(id);
+            if !keep {
+                freed = freed.saturating_add(envelope_size(&e.envelope));
+            }
+            keep
+        });
+        self.total_bytes.fetch_sub(freed, Ordering::Relaxed);
+        before.saturating_sub(q.len())
     }
 
     fn sweep_expired(&self) -> usize {
@@ -286,10 +291,28 @@ mod tests {
         let second = b.read_all(&to);
         assert_eq!(second.len(), 2, "read_all is non-destructive");
 
-        b.delete(&to, &[id1]);
+        assert_eq!(b.delete(&to, &[id1]), 1, "one entry reclaimed");
         let after = b.read_all(&to);
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, id2);
+    }
+
+    #[test]
+    fn delete_reports_only_entries_it_actually_reclaimed() {
+        let b = TransitBuffer::new(Duration::from_secs(60), 10, usize::MAX);
+        let to = AgentId::from_bytes([9u8; 32]);
+        let id = b.enqueue(to, env_for(1)).unwrap();
+        assert_eq!(b.delete(&to, &[id, id + 999]), 1, "unknown ids count zero");
+        assert_eq!(
+            b.delete(&to, &[id]),
+            0,
+            "re-acking a reclaimed id is a no-op"
+        );
+        assert_eq!(
+            b.delete(&AgentId::from_bytes([2u8; 32]), &[id]),
+            0,
+            "an unknown recipient reclaims nothing",
+        );
     }
 
     #[test]

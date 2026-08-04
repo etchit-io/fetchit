@@ -563,6 +563,195 @@ async fn unacked_delivery_replays_on_reconnect_until_acked() {
     assert_no_deliver(&mut erin, Duration::from_millis(400)).await;
 }
 
+/// #327: a push into a LIVE session is provisional. The recipient's
+/// socket can be a Cloudflare-idle-killed corpse that still accepts
+/// writes, so an envelope handed to a connected session is not proof of
+/// receipt — it stays in transit until the client's `TransitAck`.
+#[tokio::test]
+async fn live_delivery_stays_in_transit_until_acked() {
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let gina_pk = b"gina-pubkey-bytes-here";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let gina_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(gina_pk));
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    // Gina is ONLINE for the deposit — the live-push path.
+    let gina_tok = obtain_bearer(addr, gina_pk).await;
+    let mut gina = connect_ws(addr, &gina_tok).await;
+    send_hello(&mut gina).await;
+    let _ = expect_ready(&mut gina).await;
+
+    let payload = b"pushed into a dying socket";
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: gina_id,
+        envelope: envelope_from(alice_id, payload),
+        dedupe_key: DedupeKey::from_bytes([0x11; 16]),
+    });
+    alice
+        .send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+    wait_for_ack(&mut alice).await;
+
+    let live = wait_for_deliver(&mut gina).await;
+    assert_eq!(live.envelope.ciphertext, payload);
+    assert!(
+        live.transit_seq > 0,
+        "a live push must carry its durable id so the client can ack it",
+    );
+
+    // The socket dies before the client persisted anything.
+    drop(gina);
+
+    let gina_tok = obtain_bearer(addr, gina_pk).await;
+    let mut gina = connect_ws(addr, &gina_tok).await;
+    send_hello(&mut gina).await;
+    let _ = expect_ready(&mut gina).await;
+    let replayed = wait_for_deliver(&mut gina).await;
+    assert_eq!(replayed.envelope.ciphertext, payload);
+    assert_eq!(
+        replayed.transit_seq, live.transit_seq,
+        "the un-acked live push is redelivered under its stable durable id",
+    );
+}
+
+/// The other half of the contract: an acked live delivery is reclaimed,
+/// so reconnecting does not replay it.
+#[tokio::test]
+async fn acked_live_delivery_is_reclaimed_and_not_replayed() {
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let hank_pk = b"hank-pubkey-bytes-here";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let hank_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(hank_pk));
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    let hank_tok = obtain_bearer(addr, hank_pk).await;
+    let mut hank = connect_ws(addr, &hank_tok).await;
+    send_hello(&mut hank).await;
+    let _ = expect_ready(&mut hank).await;
+
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: hank_id,
+        envelope: envelope_from(alice_id, b"acked in flight"),
+        dedupe_key: DedupeKey::from_bytes([0x22; 16]),
+    });
+    alice
+        .send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+    wait_for_ack(&mut alice).await;
+
+    let live = wait_for_deliver(&mut hank).await;
+    let ack = ClientFrame::TransitAck(TransitAck {
+        acked_ids: vec![live.transit_seq],
+    });
+    hank.send(Message::Binary(to_bytes(&ack).unwrap()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(hank);
+
+    let hank_tok = obtain_bearer(addr, hank_pk).await;
+    let mut hank = connect_ws(addr, &hank_tok).await;
+    send_hello(&mut hank).await;
+    let _ = expect_ready(&mut hank).await;
+    assert_no_deliver(&mut hank, Duration::from_millis(400)).await;
+}
+
+/// `envelopes_delivered_total` counts ACKED deliveries; the provisional
+/// hand-off to a live socket is its own counter.
+#[tokio::test]
+async fn delivered_metric_counts_acks_and_pushes_count_separately() {
+    let addr = start_test_server().await;
+
+    let alice_pk = b"alice-pubkey-bytes";
+    let iris_pk = b"iris-pubkey-bytes-here";
+    let alice_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(alice_pk));
+    let iris_id = AgentId::from_bytes(fetchit_relay_server::signature::derive_agent_id(iris_pk));
+
+    let alice_tok = obtain_bearer(addr, alice_pk).await;
+    let mut alice = connect_ws(addr, &alice_tok).await;
+    send_hello(&mut alice).await;
+    let _ = expect_ready(&mut alice).await;
+
+    let iris_tok = obtain_bearer(addr, iris_pk).await;
+    let mut iris = connect_ws(addr, &iris_tok).await;
+    send_hello(&mut iris).await;
+    let _ = expect_ready(&mut iris).await;
+
+    let send_frame = ClientFrame::Send(SendFrame {
+        to: iris_id,
+        envelope: envelope_from(alice_id, b"count me once"),
+        dedupe_key: DedupeKey::from_bytes([0x33; 16]),
+    });
+    alice
+        .send(Message::Binary(to_bytes(&send_frame).unwrap()))
+        .await
+        .unwrap();
+    wait_for_ack(&mut alice).await;
+    let live = wait_for_deliver(&mut iris).await;
+
+    assert_eq!(
+        counter(addr, "fetchit_relay_envelopes_pushed_total").await,
+        1,
+        "the provisional push is counted immediately",
+    );
+    assert_eq!(
+        counter(addr, "fetchit_relay_envelopes_delivered_total").await,
+        0,
+        "nothing is delivered until the client acks",
+    );
+
+    let ack = ClientFrame::TransitAck(TransitAck {
+        acked_ids: vec![live.transit_seq],
+    });
+    iris.send(Message::Binary(to_bytes(&ack).unwrap()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        counter(addr, "fetchit_relay_envelopes_delivered_total").await,
+        1,
+        "the ack is what makes a delivery real",
+    );
+    // Re-acking a reclaimed id must not double-count.
+    iris.send(Message::Binary(to_bytes(&ack).unwrap()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        counter(addr, "fetchit_relay_envelopes_delivered_total").await,
+        1,
+        "an ack for an already-reclaimed id counts nothing",
+    );
+}
+
+/// Scrape one allow-listed counter's value out of `/v1/metrics`.
+async fn counter(addr: SocketAddr, name: &str) -> u64 {
+    let body = reqwest::get(format!("http://{addr}/v1/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    body.lines()
+        .find_map(|l| l.strip_prefix(name)?.rsplit(' ').next()?.parse().ok())
+        .unwrap_or_else(|| panic!("counter {name} not found in:\n{body}"))
+}
+
 #[tokio::test]
 async fn duplicate_agent_connect_displaces_with_bye() {
     let addr = start_test_server().await;
