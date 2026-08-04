@@ -1108,6 +1108,8 @@ mod tests {
             message_id: "m2".to_owned(),
             attachment: None,
             delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
         });
         r1.save(&conv).await.unwrap();
         assert_eq!(r1.get("aa").await.unwrap().unwrap().unread(LOCAL), 1);

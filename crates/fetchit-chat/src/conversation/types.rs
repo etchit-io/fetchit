@@ -1509,6 +1509,8 @@ mod tests {
             message_id: format!("{sender}-{ts_ms}"),
             attachment: None,
             delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
         }
     }
 
