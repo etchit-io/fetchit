@@ -137,7 +137,7 @@ impl InboxRateLimit {
     }
 
     /// Drop buckets unused for at least `idle`. Explicit form of the
-    /// self-sweep in [`Self::maybe_sweep`], for operators and tests.
+    /// self-sweep in `Self::maybe_sweep`, for operators and tests.
     pub fn sweep_idle(&self, idle: Duration) {
         let now = Instant::now();
         self.per_instance
