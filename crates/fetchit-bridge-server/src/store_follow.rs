@@ -341,7 +341,7 @@ impl Store {
     /// Mastodon cannot correlate it. Queued even when the follower is
     /// already recorded: each inbound `Follow` deserves an `Accept`.
     ///
-    /// The queue is bounded per actor at [`MAX_QUEUED_FOLLOW_REQUESTS`]:
+    /// The queue is bounded per actor at `MAX_QUEUED_FOLLOW_REQUESTS`:
     /// beyond it the OLDEST entries are evicted, so an attacker minting
     /// endless throwaway follower actors displaces only their own spam
     /// while the newest genuine requests survive (cross-review
@@ -397,7 +397,7 @@ impl Store {
     }
 
     /// Pending inbound follow requests for `actor_id`, newest first,
-    /// capped at [`MAX_QUEUED_FOLLOW_REQUESTS`] rows (mirrors
+    /// capped at `MAX_QUEUED_FOLLOW_REQUESTS` rows (mirrors
     /// `inbox_list`'s bounded reads — an owner fetch must never scale
     /// with attacker-controlled queue growth).
     ///

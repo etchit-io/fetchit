@@ -68,12 +68,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          # Version-pinned: 0.20 moved --config from `check` to the root
+          # command; an unpinned install broke this job when 0.20 shipped.
+          tool: cargo-deny@0.20.2
       - name: cargo-deny check licenses (all three lockfiles)
         run: |
           for m in Cargo.toml apps/fetchit-desktop/src-tauri/Cargo.toml crates/fetchit-ffi/Cargo.toml; do
             echo "::group::cargo-deny licenses :: $m"
-            cargo deny --manifest-path "$m" check licenses --config deny.toml
+            cargo deny --manifest-path "$m" --config deny.toml check licenses
             echo "::endgroup::"
           done
 
