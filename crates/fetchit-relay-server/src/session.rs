@@ -16,6 +16,17 @@ use tokio::sync::mpsc::Sender;
 /// otherwise tear down the newer entry that overwrote it.
 pub type SessionId = u64;
 
+/// Maximum agents one session may watch at a time.
+///
+/// `WatchPresence.add` is an unbounded wire list and the frame carries
+/// no rate limit, so without this an authenticated client can grow both
+/// watch indexes — a map key plus a cloned outbound `Sender` per agent
+/// named — for as long as its session lives. The cap is on the live
+/// set, not on a single frame, so splitting the flood across frames
+/// buys nothing; unwatching returns budget. Generous against real use:
+/// a roster is contacts, not a directory.
+pub const MAX_WATCHES_PER_SESSION: usize = 1_024;
+
 /// Maps an agent id to its live WebSocket channel, plus the per-connection
 /// presence watch index.
 #[derive(Default)]
@@ -165,6 +176,10 @@ impl SessionRegistry {
     ///
     /// Re-watching an already-watched agent is a no-op (no duplicate entry,
     /// no duplicate immediate-state echo).
+    ///
+    /// Silently ignores agents past [`MAX_WATCHES_PER_SESSION`] — the
+    /// session keeps the watches it already holds and simply stops
+    /// indexing new ones.
     pub fn add_watches(
         &self,
         watcher_id: SessionId,
@@ -173,6 +188,9 @@ impl SessionRegistry {
     ) {
         let mut session_watches = self.watches_by_session.entry(watcher_id).or_default();
         for agent in agents {
+            if session_watches.len() >= MAX_WATCHES_PER_SESSION {
+                break;
+            }
             if !session_watches.insert(*agent) {
                 continue;
             }
@@ -498,6 +516,61 @@ mod tests {
             r.watching_session_count(),
             0,
             "no session's reverse index may survive its disconnect",
+        );
+    }
+
+    fn distinct_agents(n: usize) -> Vec<AgentId> {
+        (0..n)
+            .map(|i| {
+                let mut b = [0u8; 32];
+                b[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                AgentId::from_bytes(b)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn watch_set_is_capped_per_session() {
+        // #295: `WatchPresence.add` is an unbounded wire list and the
+        // frame is not rate-limited, so an authenticated client could
+        // grow both watch indexes for as long as its session lived —
+        // one map key plus a cloned Sender per agent named.
+        let r = SessionRegistry::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let id = r.register(AgentId::from_bytes([90u8; 32]), tx.clone());
+
+        r.add_watches(id, &tx, &distinct_agents(MAX_WATCHES_PER_SESSION + 500));
+
+        assert_eq!(
+            r.watched_agent_count(),
+            MAX_WATCHES_PER_SESSION,
+            "watches past the cap must not be indexed",
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_cap_counts_across_frames_and_unwatching_frees_room() {
+        // The cap is on the live set, not on one frame — otherwise a
+        // client just splits the flood across frames.
+        let r = SessionRegistry::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let id = r.register(AgentId::from_bytes([91u8; 32]), tx.clone());
+
+        let all = distinct_agents(MAX_WATCHES_PER_SESSION + 10);
+        for chunk in all.chunks(64) {
+            r.add_watches(id, &tx, chunk);
+        }
+        assert_eq!(r.watched_agent_count(), MAX_WATCHES_PER_SESSION);
+
+        // Dropping a watch frees a slot for a new one.
+        r.remove_watches(id, &all[..1]);
+        assert_eq!(r.watched_agent_count(), MAX_WATCHES_PER_SESSION - 1);
+        let fresh = AgentId::from_bytes([0xfe; 32]);
+        r.add_watches(id, &tx, &[fresh]);
+        assert_eq!(
+            r.watched_agent_count(),
+            MAX_WATCHES_PER_SESSION,
+            "an unwatch must return budget to the session",
         );
     }
 
