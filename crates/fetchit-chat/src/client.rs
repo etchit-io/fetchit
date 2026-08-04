@@ -4387,10 +4387,19 @@ impl Client {
             // task that died holding its claim cannot wedge its message
             // for long, and cheap: one lock plus a scan of the claim map.
             const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+            // Clock-driven retry cadence. The per-bubble backoff
+            // (`RETRY_BACKOFF_BASE_MS`) decides WHICH bubbles are due; this
+            // is just how often the driver asks. Finer than the backoff
+            // floor so the first re-attempt lands close to its due time.
+            const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
             driver.boot_sweep().await;
             let mut backoff = MIN_BACKOFF;
             let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
             sweep.tick().await; // consume the immediate first tick (boot_sweep already ran)
+            let mut retry = tokio::time::interval(RETRY_INTERVAL);
+            // The immediate first tick is KEPT: it is the restart re-attempt
+            // of everything the vault restored still queued.
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 let mut stream = match client.events().await {
                     Ok(s) => {
@@ -4403,7 +4412,18 @@ impl Client {
                         log::warn!(
                             "outbox driver: open /events failed: {e}; retrying in {backoff:?}",
                         );
-                        tokio::time::sleep(backoff).await;
+                        // Keep servicing the retry clock while /events is
+                        // down: a queued message must not depend on the
+                        // daemon's event stream being up to be re-attempted.
+                        let deadline = tokio::time::Instant::now() + backoff;
+                        loop {
+                            tokio::select! {
+                                () = tokio::time::sleep_until(deadline) => break,
+                                _ = retry.tick() => {
+                                    driver.flush_due(crate::outbox::now_ms()).await;
+                                }
+                            }
+                        }
                         backoff = (backoff * 2).min(MAX_BACKOFF);
                         continue;
                     }
