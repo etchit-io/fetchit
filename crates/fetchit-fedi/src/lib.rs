@@ -26,6 +26,7 @@
 pub mod activity;
 pub mod actor;
 pub mod attestation;
+pub mod avatar;
 pub mod bridge_auth;
 pub mod lookup;
 pub mod registry;

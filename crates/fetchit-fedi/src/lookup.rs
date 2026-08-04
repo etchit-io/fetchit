@@ -35,6 +35,11 @@ pub struct RemoteActor {
     /// v2 attestation when served. Present-but-malformed is a decode
     /// error, never silently `None`.
     pub attestation_v2: Option<ActorAttestationV2>,
+    /// The actor's avatar URL as served in `icon`, when present. Pure
+    /// remote input: nothing here is validated at decode time —
+    /// [`crate::avatar::fetch_avatar`] owns the https + SSRF + size +
+    /// content-type gates. `None` for an actor with no usable icon.
+    pub icon_url: Option<String>,
 }
 
 impl RemoteActor {
@@ -99,6 +104,7 @@ impl RemoteActor {
                     .map_err(|e| ActorError::Attestation(format!("v2: {e}")))?,
             ),
         };
+        let icon_url = crate::avatar::icon_url_from_actor_doc(value);
         Ok(Self {
             id,
             inbox,
@@ -106,6 +112,7 @@ impl RemoteActor {
             outbox,
             rsa_public_key_pem,
             attestation_v2,
+            icon_url,
         })
     }
 
@@ -484,6 +491,29 @@ mod tests {
         let mut bare = fixture();
         bare.as_object_mut().unwrap().remove("outbox");
         assert!(RemoteActor::from_json_ld(&bare).unwrap().outbox.is_none());
+    }
+
+    #[test]
+    fn remote_actor_carries_the_icon_url_when_served() {
+        let mut v = fixture();
+        v.as_object_mut()
+            .unwrap()
+            .remove(crate::actor::PQ_ATTESTATION_PROPERTY_URI);
+        v["icon"] = serde_json::json!({
+            "type": "Image", "mediaType": "image/png",
+            "url": "https://files.mastodon.example/avatars/1.png"
+        });
+        let actor = RemoteActor::from_json_ld(&v).unwrap();
+        assert_eq!(
+            actor.icon_url.as_deref(),
+            Some("https://files.mastodon.example/avatars/1.png")
+        );
+
+        // An actor with no icon decodes exactly as before — the avatar
+        // is additive, never a decode requirement.
+        let mut bare = fixture();
+        bare.as_object_mut().unwrap().remove("icon");
+        assert!(RemoteActor::from_json_ld(&bare).unwrap().icon_url.is_none());
     }
 
     fn outbox_page() -> Value {
