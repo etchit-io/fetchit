@@ -5,26 +5,37 @@
 //! The driver owns the [`OutboxStore`] behind a mutex and re-sends
 //! retryable bubbles on each peer offline->online edge, warming the link
 //! first (so the initial and retry sends skip the cold-QUIC timeout). It
-//! runs a 24h timeout sweep and a boot sweep, and broadcasts an
-//! [`OutboxEvent`] for every bubble mutation so the shell can project
-//! live status. The transport is abstracted ([`OutboxTransport`]) so the
-//! loop is unit-testable with scripted doubles; production wires it to the
-//! `Router` + `messages().connect()`.
+//! reclaims stalled in-flight claims (at boot and periodically) and
+//! broadcasts an [`OutboxEvent`] for every bubble mutation so the shell
+//! can project live status. The transport is abstracted
+//! ([`OutboxTransport`]) so the loop is unit-testable with scripted
+//! doubles; production wires it to the `Router` + `messages().connect()`.
+//!
+//! What the driver deliberately does NOT do: give up. No sweep here ever
+//! turns a queued message into a failed one -- only a terminal verdict
+//! from a send attempt does (`crate::send_state::SendFailure`).
 
 use super::store::OutboxStore;
+use super::{is_retryable, now_ms, OutboxBubble, OutboxEvent};
 #[cfg(test)]
-use super::OutboxStatus;
-use super::{is_retryable, OutboxBubble, OutboxEvent};
+use super::{SendState, PRIOR_MESSAGE_ID_CAP};
 use crate::error::ChatError;
 use crate::identity::AgentId;
+use crate::send_state::SendFailure;
 use crate::transport::SendReceipt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
-/// How long a bubble may sit `Sending` before the timeout sweep flips it
-/// to `Failed`. 24h, matching desktop's `outboxDriver`.
-pub const SEND_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+/// How long an in-flight claim may sit before the periodic sweep releases
+/// it so the bubble can be re-sent.
+///
+/// Long enough that no live send attempt is ever cut in half (transport
+/// timeouts are seconds), short enough that a send task killed between
+/// claim and release does not wedge the message for the life of the
+/// process. This is a claim timeout, NOT a delivery deadline: the message
+/// itself keeps its state and keeps retrying.
+pub const STALLED_CLAIM_MS: u64 = 15 * 60 * 1000;
 
 /// The transport the driver re-sends through. Abstracted so the driver is
 /// unit-testable; production wires it to the `Router` + the existing
@@ -68,7 +79,6 @@ pub struct OutboxDriver<T: OutboxTransport> {
     events: broadcast::Sender<OutboxEvent>,
     transport: T,
     last_online: Mutex<HashMap<AgentId, bool>>,
-    process_start_ms: u64,
     /// Optional no-send-before-registered gate. When set, every flush awaits
     /// it before sending; `None` (the default) means "always ready", which
     /// keeps relay-less / scripted-transport tests unchanged.
@@ -77,20 +87,16 @@ pub struct OutboxDriver<T: OutboxTransport> {
 
 impl<T: OutboxTransport> OutboxDriver<T> {
     /// Build a driver over `store`, broadcasting changes on `events`.
-    /// `process_start_ms` anchors the boot sweep (bubbles enqueued before
-    /// it with no `message_id` are treated as orphaned).
     pub fn new(
         store: Arc<Mutex<OutboxStore>>,
         events: broadcast::Sender<OutboxEvent>,
         transport: T,
-        process_start_ms: u64,
     ) -> Self {
         Self {
             store,
             events,
             transport,
             last_online: Mutex::new(HashMap::new()),
-            process_start_ms,
             ready_gate: None,
         }
     }
@@ -128,6 +134,7 @@ impl<T: OutboxTransport> OutboxDriver<T> {
         // Claim the eligible bubbles under the lock, then release it for
         // the awaits below.
         let claims: Vec<OutboxBubble> = {
+            let claimed_at = now_ms();
             let mut store = self.store.lock().await;
             let candidates: Vec<OutboxBubble> = store
                 .snapshot()
@@ -136,7 +143,7 @@ impl<T: OutboxTransport> OutboxDriver<T> {
                 .collect();
             candidates
                 .into_iter()
-                .filter(|b| store.try_mark_inflight(&b.id))
+                .filter(|b| store.try_mark_inflight(&b.id, claimed_at))
                 .collect()
         };
         for claimed in claims {
@@ -144,17 +151,17 @@ impl<T: OutboxTransport> OutboxDriver<T> {
             let result = self.transport.send(claimed.clone()).await;
             let emitted = {
                 let mut store = self.store.lock().await;
-                // Status mapping + the Delivered-guard (a receipt may have
-                // landed during the send await; Delivered is authoritative
-                // and must not be clobbered) + the bubble-still-present
-                // check all live in one place -- OutboxStore::record_send_outcome
-                // -- shared with the initial send (Client::enqueue_dm) so the
+                // Every transition + the terminal-state guard (a receipt may
+                // have landed during the send await; it is authoritative and
+                // must not be clobbered) + the bubble-still-present check
+                // live in one place -- OutboxStore::record_send_outcome --
+                // shared with the initial send (Client::enqueue_dm) so the
                 // two paths cannot drift. clear_inflight stays unconditional.
-                let (message_id, error) = match &result {
+                let (message_id, failure) = match &result {
                     Ok(receipt) => (receipt.message_id.clone(), None),
-                    Err(e) => (None, Some(e.to_string())),
+                    Err(e) => (None, Some(SendFailure::classify(e))),
                 };
-                let updated = store.record_send_outcome(&claimed.id, message_id, error);
+                let updated = store.record_send_outcome(&claimed.id, message_id, failure, now_ms());
                 store.clear_inflight(&claimed.id);
                 updated
             };
@@ -177,38 +184,50 @@ impl<T: OutboxTransport> OutboxDriver<T> {
         }
     }
 
-    /// Run the 24h timeout sweep against `now_ms`, emitting any changes.
-    pub async fn sweep_timeouts(&self, now_ms: u64) {
+    /// Release in-flight claims stalled past [`STALLED_CLAIM_MS`] and
+    /// re-flush the peers they were blocking.
+    ///
+    /// The bubbles keep their state -- a stalled attempt leaves a queued
+    /// message queued -- so this emits nothing; it just un-wedges the
+    /// retry path for sends whose task died holding a claim.
+    pub async fn sweep_stalled(&self, now_ms: u64) {
+        let peers: Vec<AgentId> = {
+            let freed = self
+                .store
+                .lock()
+                .await
+                .clear_stalled_inflight(now_ms, STALLED_CLAIM_MS);
+            let mut seen = HashSet::new();
+            freed
+                .into_iter()
+                .filter_map(|b| seen.insert(b.peer.clone()).then_some(b.peer))
+                .collect()
+        };
+        for peer in peers {
+            log::warn!("outbox: releasing a stalled send claim; re-flushing");
+            self.flush_peer(&peer).await;
+        }
+    }
+
+    /// Startup reclaim, run once per driver (re)start: drop every
+    /// in-flight claim left by a prior driver that died mid-flush.
+    ///
+    /// A freshly started driver implies any prior one is dead, so no claim
+    /// can be legitimate. No bubble STATE changes: a queued message
+    /// interrupted by a restart is still a queued message, and the next
+    /// presence edge re-sends it.
+    pub async fn boot_sweep(&self) {
+        self.store.lock().await.clear_all_inflight();
+    }
+
+    /// Mark the bubble a `DeliveryReceipt` for `message_id` belongs to
+    /// Delivered at `received_at_ms`, emitting the change.
+    pub async fn mark_delivered(&self, message_id: &str, received_at_ms: u64) {
         let changed = self
             .store
             .lock()
             .await
-            .sweep_timeouts(now_ms, SEND_TIMEOUT_MS);
-        self.emit(changed);
-    }
-
-    /// Startup reclaim, run once per driver (re)start: drop any orphaned
-    /// in-flight claims left by a prior driver aborted mid-flush, then flip
-    /// truly-orphaned `Sending` bubbles (no `message_id`, enqueued before this
-    /// process) to `Failed`. Emits any status changes.
-    ///
-    /// The claim-clear is what rescues an in-session rebuild orphan: its bubble
-    /// was enqueued after `process_start_ms`, so the `Sending`->`Failed` sweep
-    /// skips it, but its leaked claim would otherwise block `try_mark_inflight`
-    /// forever (un-retried until the 24h timeout).
-    pub async fn boot_sweep(&self) {
-        let changed = {
-            let mut store = self.store.lock().await;
-            store.clear_all_inflight();
-            store.boot_sweep(self.process_start_ms)
-        };
-        self.emit(changed);
-    }
-
-    /// Mark the bubble carrying `message_id` Delivered (`DeliveryReceipt`
-    /// inbound path), emitting the change.
-    pub async fn mark_delivered(&self, message_id: &str) {
-        let changed = self.store.lock().await.mark_delivered(message_id);
+            .mark_delivered(message_id, received_at_ms);
         self.emit(changed);
     }
 
@@ -249,19 +268,14 @@ mod tests {
 
     fn bubble(
         id: &str,
-        status: OutboxStatus,
+        status: SendState,
         message_id: Option<&str>,
         enqueued_at_ms: u64,
     ) -> OutboxBubble {
         OutboxBubble {
-            id: id.into(),
-            peer: peer_a(),
-            body: "hi".into(),
             status,
             message_id: message_id.map(Into::into),
-            enqueued_at_ms,
-            last_error: None,
-            group: None,
+            ..OutboxBubble::queued(id.into(), peer_a(), "hi".into(), enqueued_at_ms)
         }
     }
 
@@ -310,11 +324,9 @@ mod tests {
     fn driver_with<T: OutboxTransport>(
         store: OutboxStore,
         transport: T,
-        process_start_ms: u64,
     ) -> (OutboxDriver<T>, broadcast::Receiver<OutboxEvent>) {
         let (tx, rx) = broadcast::channel(16);
-        let driver =
-            OutboxDriver::new(Arc::new(Mutex::new(store)), tx, transport, process_start_ms);
+        let driver = OutboxDriver::new(Arc::new(Mutex::new(store)), tx, transport);
         (driver, rx)
     }
 
@@ -358,7 +370,7 @@ mod tests {
         // until the gate flips ready. Models the wss race -- a flush before
         // the relay registers must not drive an AllRelaysUnreachable send.
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let gate = ScriptedGate::new();
         let (tx, _rx) = broadcast::channel(16);
@@ -369,7 +381,6 @@ mod tests {
                 connected: Arc::new(Mutex::new(Vec::new())),
                 sent: sent.clone(),
             },
-            0,
         )
         .with_ready_gate(gate.clone());
 
@@ -403,7 +414,7 @@ mod tests {
     async fn ready_gate_already_ready_sends_immediately() {
         // Gate ready before the edge: behaves exactly like the no-gate path.
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let gate = ScriptedGate::new();
         gate.mark_ready();
@@ -415,7 +426,6 @@ mod tests {
                 connected: Arc::new(Mutex::new(Vec::new())),
                 sent: sent.clone(),
             },
-            0,
         )
         .with_ready_gate(gate);
         driver.on_presence(&peer_a(), true).await;
@@ -423,9 +433,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn online_edge_flushes_failed_bubble_and_warms() {
+    async fn online_edge_flushes_queued_bubble_and_warms() {
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
         let connected = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
@@ -434,21 +444,25 @@ mod tests {
                 connected: connected.clone(),
                 sent: sent.clone(),
             },
-            0,
         );
         driver.on_presence(&peer_a(), true).await; // offline(default)->online edge
         assert_eq!(sent.lock().await.as_slice(), &["b1".to_string()]);
         assert_eq!(connected.lock().await.len(), 1, "warmed before send (C1)");
         let store = driver.store.lock().await;
         let b = store.get("b1").unwrap();
-        assert_eq!(b.status, OutboxStatus::Sending); // markSent keeps sending
+        assert_eq!(b.status, SendState::Sent, "the relay ack, and only it");
         assert_eq!(b.message_id.as_deref(), Some("relay-1"));
     }
 
     #[tokio::test]
-    async fn sending_without_message_id_is_not_resent() {
+    async fn a_claimed_bubble_is_not_resent() {
+        // The in-flight claim -- not the state -- is the double-send guard:
+        // a send already in progress (here, the initial send from
+        // Client::enqueue_dm) holds the claim, so a presence edge that
+        // lands mid-send must not fire a second copy.
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Sending, None, 0));
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        assert!(store.try_mark_inflight("b1", 0));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
             store,
@@ -456,7 +470,6 @@ mod tests {
                 connected: Arc::new(Mutex::new(Vec::new())),
                 sent: sent.clone(),
             },
-            0,
         );
         driver.on_presence(&peer_a(), true).await;
         assert!(
@@ -468,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn no_flush_when_already_online() {
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
             store,
@@ -476,7 +489,6 @@ mod tests {
                 connected: Arc::new(Mutex::new(Vec::new())),
                 sent: sent.clone(),
             },
-            0,
         );
         driver.on_presence(&peer_a(), true).await; // edge -> flush
         sent.lock().await.clear();
@@ -488,55 +500,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_error_marks_failed_with_reason() {
+    async fn a_failing_send_leaves_the_message_queued_forever() {
+        // The lane's headline: a peer that cannot be reached must never
+        // turn a message into a lie. The bubble keeps its Queued state,
+        // records the reason as diagnostics, and stays retryable.
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Failed, None, 0));
-        let (driver, _rx) = driver_with(store, ErrTransport, 0);
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        let (driver, _rx) = driver_with(store, ErrTransport);
         driver.on_presence(&peer_a(), true).await;
         let store = driver.store.lock().await;
         let b = store.get("b1").unwrap();
-        assert_eq!(b.status, OutboxStatus::Failed);
+        assert_eq!(b.status, SendState::Queued);
         assert!(b.last_error.is_some());
+        assert!(is_retryable(b));
     }
 
     #[tokio::test]
-    async fn timeout_sweep_fails_and_emits() {
+    async fn sweep_stalled_releases_the_claim_and_re_sends() {
+        // A send task that died holding its claim is the one way a queued
+        // message can wedge. The sweep releases the claim and re-flushes;
+        // the message's state never changes.
         let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Sending, None, 0));
-        let (driver, mut rx) = driver_with(store, ErrTransport, 0);
-        driver.sweep_timeouts(SEND_TIMEOUT_MS + 1).await;
-        assert_eq!(
-            driver.store.lock().await.get("b1").unwrap().status,
-            OutboxStatus::Failed
-        );
-        let ev = rx.try_recv().unwrap();
-        assert_eq!(ev.bubble.id, "b1");
-        assert_eq!(ev.bubble.status, OutboxStatus::Failed);
-    }
-
-    #[tokio::test]
-    async fn boot_sweep_fails_orphan_and_emits() {
-        let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Sending, None, 10));
-        let (driver, mut rx) = driver_with(store, ErrTransport, 100); // process started after enqueue
-        driver.boot_sweep().await;
-        assert_eq!(
-            driver.store.lock().await.get("b1").unwrap().status,
-            OutboxStatus::Failed
-        );
-        assert_eq!(rx.try_recv().unwrap().bubble.id, "b1");
-    }
-
-    #[tokio::test]
-    async fn boot_sweep_reclaims_orphaned_inflight_for_resend() {
-        // A retryable bubble (Sending + acked message_id) whose in-flight claim
-        // leaked when a prior driver was aborted mid-flush. A fresh driver must
-        // clear the orphan claim at boot_sweep so the next presence edge
-        // re-sends it -- without the clear, try_mark_inflight stays false and
-        // the bubble is stuck until the 24h timeout.
-        let mut store = OutboxStore::new();
-        store.upsert(bubble("b1", OutboxStatus::Sending, Some("relay-1"), 0));
-        assert!(store.try_mark_inflight("b1"), "simulate the leaked claim");
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        assert!(store.try_mark_inflight("b1", 0), "simulate the dead task");
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (driver, _rx) = driver_with(
             store,
@@ -544,7 +530,38 @@ mod tests {
                 connected: Arc::new(Mutex::new(Vec::new())),
                 sent: sent.clone(),
             },
-            100, // process_start_ms > enqueue, but boot_sweep skips an acked bubble
+        );
+        // Not yet stalled: nothing moves.
+        driver.sweep_stalled(STALLED_CLAIM_MS - 1).await;
+        assert!(sent.lock().await.is_empty());
+        // Past the claim timeout: released and re-sent.
+        driver.sweep_stalled(STALLED_CLAIM_MS + 1).await;
+        assert_eq!(sent.lock().await.as_slice(), &["b1".to_string()]);
+        assert_eq!(
+            driver.store.lock().await.get("b1").unwrap().status,
+            SendState::Sent
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_sweep_reclaims_orphaned_inflight_for_resend() {
+        // A retryable bubble whose in-flight claim leaked when a prior
+        // driver was aborted mid-flush. A fresh driver must clear the
+        // orphan claim at boot_sweep so the next presence edge re-sends
+        // it -- without the clear, try_mark_inflight stays false forever.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Sent, Some("relay-1"), 0));
+        assert!(
+            store.try_mark_inflight("b1", 0),
+            "simulate the leaked claim"
+        );
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (driver, _rx) = driver_with(
+            store,
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
         );
         driver.boot_sweep().await;
         driver.on_presence(&peer_a(), true).await; // offline->online edge
@@ -553,6 +570,43 @@ mod tests {
             &["b1".to_string()],
             "reclaimed bubble re-sends after its orphan claim is cleared"
         );
+    }
+
+    #[tokio::test]
+    async fn boot_sweep_leaves_every_state_alone() {
+        // A restart is not a delivery verdict: nothing a boot sweep does
+        // may change what the user was told about a message.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Queued, None, 10));
+        store.upsert(bubble("b2", SendState::Sent, Some("m1"), 10));
+        let (driver, mut rx) = driver_with(store, ErrTransport);
+        driver.boot_sweep().await;
+        let store = driver.store.lock().await;
+        assert_eq!(store.get("b1").unwrap().status, SendState::Queued);
+        assert_eq!(store.get("b2").unwrap().status, SendState::Sent);
+        assert!(rx.try_recv().is_err(), "no state change, no event");
+    }
+
+    #[tokio::test]
+    async fn a_dm_resend_keeps_the_earlier_id_for_receipt_matching() {
+        // Each DM resend mints a fresh logical message id. The receipt for
+        // whichever copy the peer decrypted must still close the bubble.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Sent, Some("relay-0"), 0));
+        let (driver, _rx) = driver_with(
+            store,
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+        );
+        driver.on_presence(&peer_a(), true).await; // resend -> "relay-1"
+        driver.mark_delivered("relay-0", 42).await;
+        let store = driver.store.lock().await;
+        let b = store.get("b1").unwrap();
+        assert_eq!(b.status, SendState::Delivered);
+        assert_eq!(b.state_changed_at_ms, 42);
+        assert!(b.prior_message_ids.len() <= PRIOR_MESSAGE_ID_CAP);
     }
 
     /// Simulates a `DeliveryReceipt` landing during the send await: its
@@ -573,7 +627,7 @@ mod tests {
             let store = self.store.clone();
             let mid = self.message_id.clone();
             async move {
-                store.lock().await.mark_delivered(&mid);
+                store.lock().await.mark_delivered(&mid, 7);
                 Ok(SendReceipt {
                     accepted_at_ms: 1,
                     message_id: Some(mid),
@@ -589,7 +643,7 @@ mod tests {
         store
             .lock()
             .await
-            .upsert(bubble("b1", OutboxStatus::Sending, Some("m1"), 0));
+            .upsert(bubble("b1", SendState::Sent, Some("m1"), 0));
         let (tx, _rx) = broadcast::channel(16);
         let driver = OutboxDriver::new(
             store.clone(),
@@ -598,14 +652,13 @@ mod tests {
                 store: store.clone(),
                 message_id: "m1".into(),
             },
-            0,
         );
         // Edge -> flush_peer claims the retryable bubble; the send marks it
         // Delivered mid-flight; the post-send update must NOT clobber it.
         driver.on_presence(&peer_a(), true).await;
         assert_eq!(
             store.lock().await.get("b1").unwrap().status,
-            OutboxStatus::Delivered
+            SendState::Delivered
         );
     }
 }

@@ -1047,6 +1047,8 @@ mod tests {
             message_id: message_id.to_owned(),
             attachment: None,
             delivered_at_ms: None,
+            send_state: Some(crate::send_state::SendState::Sent),
+            state_changed_at_ms: 1,
         });
         c
     }
@@ -1321,6 +1323,8 @@ mod tests {
                 message_id: format!("{i:032x}"),
                 attachment: None,
                 delivered_at_ms: None,
+                send_state: None,
+                state_changed_at_ms: 0,
             };
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;

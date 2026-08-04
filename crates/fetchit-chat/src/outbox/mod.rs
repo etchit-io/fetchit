@@ -3,26 +3,27 @@
 //! of desktop's `outboxDriver.ts` so desktop and Android share one
 //! implementation.
 //!
-//! - [`OutboxBubble`] + [`OutboxStatus`]: per-send state.
+//! - [`OutboxBubble`]: one outbound message copy, carrying the
+//!   [`SendState`] the user is shown.
 //! - [`is_retryable`]: the pure retry-eligibility rule.
 //! - `store::OutboxStore`: vault-persisted bubble map.
 //! - `driver::OutboxDriver`: the presence-driven retry loop.
+//! - `overlay::overlay_history_send_state`: folds live bubble state onto a
+//!   persisted transcript so a listing never over-reports a send.
 
 use crate::identity::AgentId;
+pub use crate::send_state::SendState;
 use serde::{Deserialize, Serialize};
 
 pub mod driver;
+pub mod overlay;
 pub mod store;
 
-/// Delivery state of a single outbound DM bubble.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutboxStatus {
-    /// Send attempted, not yet confirmed delivered.
-    Sending,
-    /// Recipient acknowledged delivery.
-    Delivered,
-    /// The attempt errored or timed out; eligible for retry.
-    Failed,
+/// Unix-ms now, saturating rather than panicking on a broken clock.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Group-send context attached to a bubble that carries one fan-out copy of
@@ -61,12 +62,11 @@ pub struct GroupOutbound {
 
 /// One outbound message, tracked from enqueue through delivery.
 ///
-/// `message_id` carries the relay's dedupe-key hex once the initial send
-/// is acked (`Some`); a `Sending` bubble with `None` is still in flight
-/// and must not be re-fired (double-send guard -- see [`is_retryable`]).
-/// A DM leaves `group` `None` and re-encrypts `body` per send; a private
-/// group fan-out copy sets `group` and re-sends its sealed frame verbatim
-/// (see [`GroupOutbound`]).
+/// `message_id` carries the logical message id the send was accepted
+/// under, set once a relay acks (`Some` from [`SendState::Sent`] on);
+/// delivery receipts echo it back. A DM leaves `group` `None` and
+/// re-encrypts `body` per send; a private group fan-out copy sets `group`
+/// and re-sends its sealed frame verbatim (see [`GroupOutbound`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxBubble {
     /// Client-assigned bubble id (stable across retries).
@@ -76,18 +76,80 @@ pub struct OutboxBubble {
     /// Plaintext body (the UI echo; the wire payload for a group bubble is
     /// the sealed `group.envelope`, not this).
     pub body: String,
-    /// Delivery state.
-    pub status: OutboxStatus,
-    /// Relay dedupe-key hex, set once the first send is acked.
+    /// What the sender actually knows about this copy.
+    pub status: SendState,
+    /// Logical message id of the most recent accepted send, set once a
+    /// relay acks. Delivery receipts are matched against it (and against
+    /// [`Self::prior_message_ids`]).
     pub message_id: Option<String>,
     /// Unix epoch ms when first enqueued.
     pub enqueued_at_ms: u64,
-    /// Last send error, populated on [`OutboxStatus::Failed`].
+    /// Unix-ms of the last [`SendState`] transition -- the age a shell
+    /// reads to distinguish "sending" from "still sending". Zero on
+    /// bubbles restored from a vault sealed before send-state truth
+    /// (`#[serde(default)]`), which the store's load migration re-stamps.
+    #[serde(default)]
+    pub state_changed_at_ms: u64,
+    /// Logical message ids earlier accepted sends of THIS bubble used,
+    /// newest last, capped at [`PRIOR_MESSAGE_ID_CAP`].
+    ///
+    /// A DM resend re-encrypts the body and mints a fresh logical message
+    /// id, so without this a receipt for an earlier copy would match
+    /// nothing and a delivered message would sit on `Sent` forever.
+    #[serde(default)]
+    pub prior_message_ids: Vec<String>,
+    /// Last send error, whatever the current state: populated on a
+    /// terminal [`SendState::Failed`] AND on a retryable failure that
+    /// left the bubble [`SendState::Queued`], where it is diagnostics
+    /// rather than a verdict.
     pub last_error: Option<String>,
     /// Private-group fan-out context; `None` for a DM. Additive so vaults
     /// sealed before group durability landed load with `None`.
     #[serde(default)]
     pub group: Option<GroupOutbound>,
+}
+
+/// How many superseded logical message ids a bubble remembers for receipt
+/// matching. Bounds vault growth on a peer that never acks; eight covers
+/// far more resends than a live peer needs.
+pub const PRIOR_MESSAGE_ID_CAP: usize = 8;
+
+impl OutboxBubble {
+    /// A fresh [`SendState::Queued`] bubble for `peer`, enqueued at
+    /// `now_ms`. The one constructor every send path uses so a bubble can
+    /// never start life claiming more than "queued".
+    #[must_use]
+    pub fn queued(id: String, peer: AgentId, body: String, now_ms: u64) -> Self {
+        Self {
+            id,
+            peer,
+            body,
+            status: SendState::Queued,
+            message_id: None,
+            enqueued_at_ms: now_ms,
+            state_changed_at_ms: now_ms,
+            prior_message_ids: Vec::new(),
+            last_error: None,
+            group: None,
+        }
+    }
+
+    /// Attach private-group fan-out context (builder form of
+    /// [`Self::group`]).
+    #[must_use]
+    pub fn with_group(mut self, group: GroupOutbound) -> Self {
+        self.group = Some(group);
+        self
+    }
+
+    /// Does a delivery receipt for `message_id` belong to this bubble?
+    /// Matches the current id and every superseded one, so a receipt for
+    /// a copy an earlier attempt sent still lands.
+    #[must_use]
+    pub fn matches_receipt(&self, message_id: &str) -> bool {
+        self.message_id.as_deref() == Some(message_id)
+            || self.prior_message_ids.iter().any(|id| id == message_id)
+    }
 }
 
 /// A single outbox change broadcast to shells (upsert by `bubble.id`).
@@ -99,14 +161,24 @@ pub struct OutboxEvent {
 
 /// Whether `bubble` is eligible for an automatic resend.
 ///
-/// Eligible when the previous attempt `Failed`, or it is still `Sending`
-/// but the relay already assigned a `message_id` (the initial ACK landed,
-/// so re-firing is safe). A `Sending` bubble with no `message_id` is still
-/// in flight -- re-firing would double-send.
+/// - [`SendState::Queued`]: always. No relay ever took custody, so the
+///   only way the message arrives is another attempt. The in-flight claim
+///   (`OutboxStore::try_mark_inflight`), not the state, is what stops a
+///   send in progress from being fired twice.
+/// - [`SendState::Sent`]: a DM keeps retrying until its delivery receipt
+///   lands -- relay acceptance is not receipt, and a wedged peer that
+///   never decrypts is exactly the case this exists for. A private-group
+///   fan-out copy does NOT: it re-sends one sealed `TreeKEM` frame that
+///   the receiver would show twice, and no per-member receipt exists to
+///   ever close it.
+/// - [`SendState::Delivered`] / [`SendState::Failed`]: terminal.
 #[must_use]
 pub fn is_retryable(bubble: &OutboxBubble) -> bool {
-    matches!(bubble.status, OutboxStatus::Failed)
-        || (matches!(bubble.status, OutboxStatus::Sending) && bubble.message_id.is_some())
+    match bubble.status {
+        SendState::Queued => true,
+        SendState::Sent => bubble.group.is_none(),
+        SendState::Delivered | SendState::Failed => false,
+    }
 }
 
 /// A fresh client-assigned bubble id: 128 bits of randomness, hex-encoded.
@@ -125,31 +197,81 @@ pub(crate) fn new_bubble_id() -> String {
 mod tests {
     use super::*;
 
-    fn bubble(status: OutboxStatus, message_id: Option<&str>) -> OutboxBubble {
+    fn bubble(status: SendState, message_id: Option<&str>) -> OutboxBubble {
         OutboxBubble {
-            id: "b1".into(),
-            peer: AgentId("aa".repeat(32)),
-            body: "hi".into(),
             status,
             message_id: message_id.map(Into::into),
-            enqueued_at_ms: 1_000,
-            last_error: None,
-            group: None,
+            ..OutboxBubble::queued("b1".into(), AgentId("aa".repeat(32)), "hi".into(), 1_000)
         }
+    }
+
+    fn group_bubble(status: SendState) -> OutboxBubble {
+        bubble(status, Some("m")).with_group(GroupOutbound {
+            group_id: "aa".repeat(32),
+            envelope: vec![1, 2, 3],
+            client_message_id: "cm-1".into(),
+        })
     }
 
     #[test]
     fn bubble_serde_round_trips() {
-        let b = bubble(OutboxStatus::Sending, Some("m1"));
+        let mut b = bubble(SendState::Sent, Some("m1"));
+        b.prior_message_ids = vec!["m0".into()];
         let j = serde_json::to_vec(&b).unwrap();
         assert_eq!(serde_json::from_slice::<OutboxBubble>(&j).unwrap(), b);
     }
 
     #[test]
+    fn legacy_bubble_json_loads_without_the_new_fields() {
+        // A vault sealed before send-state truth: "Sending" status, no
+        // state stamp, no prior ids. It must load (a parse failure would
+        // drop every pending send) as Queued.
+        let legacy = serde_json::json!({
+            "id": "b1",
+            "peer": "aa".repeat(32),
+            "body": "hi",
+            "status": "Sending",
+            "message_id": null,
+            "enqueued_at_ms": 1_000,
+            "last_error": null,
+        });
+        let b: OutboxBubble = serde_json::from_value(legacy).unwrap();
+        assert_eq!(b.status, SendState::Queued);
+        assert_eq!(b.state_changed_at_ms, 0);
+        assert!(b.prior_message_ids.is_empty());
+    }
+
+    #[test]
+    fn queued_constructor_starts_at_queued() {
+        let b = OutboxBubble::queued("b1".into(), AgentId("aa".repeat(32)), "hi".into(), 42);
+        assert_eq!(b.status, SendState::Queued);
+        assert_eq!(b.state_changed_at_ms, 42);
+        assert!(b.message_id.is_none());
+    }
+
+    #[test]
     fn is_retryable_matrix() {
-        assert!(is_retryable(&bubble(OutboxStatus::Failed, None)));
-        assert!(is_retryable(&bubble(OutboxStatus::Sending, Some("m"))));
-        assert!(!is_retryable(&bubble(OutboxStatus::Sending, None)));
-        assert!(!is_retryable(&bubble(OutboxStatus::Delivered, Some("m"))));
+        // Queued retries whether or not an id was ever assigned.
+        assert!(is_retryable(&bubble(SendState::Queued, None)));
+        assert!(is_retryable(&bubble(SendState::Queued, Some("m"))));
+        // A relay-accepted DM keeps retrying until its receipt lands.
+        assert!(is_retryable(&bubble(SendState::Sent, Some("m"))));
+        // A relay-accepted group copy never re-fires (it would duplicate).
+        assert!(!is_retryable(&group_bubble(SendState::Sent)));
+        assert!(is_retryable(&group_bubble(SendState::Queued)));
+        // Terminal states never retry.
+        assert!(!is_retryable(&bubble(SendState::Delivered, Some("m"))));
+        assert!(!is_retryable(&bubble(SendState::Failed, None)));
+    }
+
+    #[test]
+    fn matches_receipt_covers_superseded_ids() {
+        let mut b = bubble(SendState::Sent, Some("m2"));
+        b.prior_message_ids = vec!["m0".into(), "m1".into()];
+        assert!(b.matches_receipt("m2"));
+        // A receipt for the copy the FIRST attempt sent still lands: the
+        // resend minted a new id, the message still arrived.
+        assert!(b.matches_receipt("m0"));
+        assert!(!b.matches_receipt("nope"));
     }
 }

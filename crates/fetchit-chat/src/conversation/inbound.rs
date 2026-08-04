@@ -355,15 +355,19 @@ async fn dispatch_receipt(
         );
     }
     // Outbox lift (T5d): flip the matching outbound bubble to Delivered so
-    // the SENDER's UI advances Sending -> Delivered, then broadcast it.
+    // the SENDER's UI advances Sent -> Delivered, then broadcast it.
     // Engine-side so every shell (incl. Android via the default dispatcher)
     // inherits Delivered without threading receipts through the UI layer.
-    // Match by message_id only -- the globally-unique relay dedupe hex --
-    // exactly like desktop markDelivered. A LAN-direct send whose receipt
-    // never carries a message_id stays Sending until the 24h sweep, the
-    // same as desktop today.
+    // Matched against the bubble's current AND superseded logical message
+    // ids, so a receipt for whichever copy the peer decrypted still closes
+    // it. A receipt that matches nothing leaves the bubble Sent -- an
+    // under-report, never a claim of delivery.
     if let (Some(outbox), Some(events)) = (outbox, outbox_events) {
-        if let Some(bubble) = outbox.lock().await.mark_delivered(&payload.message_id) {
+        if let Some(bubble) = outbox
+            .lock()
+            .await
+            .mark_delivered(&payload.message_id, payload.received_at_ms)
+        {
             let _ = events.send(crate::outbox::OutboxEvent { bubble });
         }
     }
@@ -473,6 +477,9 @@ async fn dispatch_message(
         message_id: payload.message_id.clone().unwrap_or_default(),
         attachment: payload.attachment.clone(),
         delivered_at_ms: None,
+        // Inbound: nothing was sent from here, so no send state.
+        send_state: None,
+        state_changed_at_ms: 0,
     };
     if let Err(e) = registry
         .mutate_in_place(&group_id_hex, |conv| {
@@ -1094,6 +1101,8 @@ mod tests {
             message_id: "deadbeef".into(),
             attachment: None,
             delivered_at_ms: None,
+            send_state: Some(crate::send_state::SendState::Sent),
+            state_changed_at_ms: 1,
         });
         registry_a.save(&conv_a).await.unwrap();
 
@@ -2178,14 +2187,14 @@ mod tests {
             crate::outbox::store::OutboxStore::new(),
         ));
         outbox.lock().await.upsert(crate::outbox::OutboxBubble {
-            id: "bubble-1".into(),
-            peer: crate::identity::AgentId(aid_b.clone()),
-            body: "hi".into(),
-            status: crate::outbox::OutboxStatus::Sending,
+            status: crate::outbox::SendState::Sent,
             message_id: Some("deadbeef".into()),
-            enqueued_at_ms: 1_700_000_000_000,
-            last_error: None,
-            group: None,
+            ..crate::outbox::OutboxBubble::queued(
+                "bubble-1".into(),
+                crate::identity::AgentId(aid_b.clone()),
+                "hi".into(),
+                1_700_000_000_000,
+            )
         });
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
 
@@ -2203,11 +2212,15 @@ mod tests {
         // The bubble flipped to Delivered, and the change was broadcast.
         assert_eq!(
             outbox.lock().await.get("bubble-1").unwrap().status,
-            crate::outbox::OutboxStatus::Delivered,
+            crate::outbox::SendState::Delivered,
         );
         let evt = rx.try_recv().expect("outbox event emitted");
         assert_eq!(evt.bubble.id, "bubble-1");
-        assert_eq!(evt.bubble.status, crate::outbox::OutboxStatus::Delivered);
+        assert_eq!(evt.bubble.status, crate::outbox::SendState::Delivered);
+        assert_eq!(
+            evt.bubble.state_changed_at_ms, 1_700_000_000_001,
+            "the transition is stamped with the receipt time"
+        );
     }
 
     /// Hand-roll a welcome envelope around a caller-supplied

@@ -587,14 +587,17 @@ fn card_needs_resolve(layout: &StoreLayout, agent_id_hex: &str) -> Result<bool> 
 /// Receipt for a group send: the message id plus whether it reached the
 /// relay or was durably queued.
 ///
-/// `delivered` is the honest signal the delivery tick renders: `true` when
-/// the relay accepted the send (at least one member reached, or a solo group
-/// with no members to deliver to); `false` when every member's send failed
-/// and the message was durably QUEUED by the outbox (relay down) -- it will
-/// flush + flip to delivered on reconnect. A naive optimistic tick would lie
-/// here, since a queued send now returns `Ok`. `message_id` is the client UI
-/// anchor for a private group (`Some`) and `None` for a public group (a
-/// direct `SignedPublic` send that mints no anchor).
+/// `delivered` names the tick, not a delivery receipt: it is `true` when
+/// the relay accepted the send (at least one member reached, or a solo
+/// group with no members to deliver to) -- i.e.
+/// [`SendState::Sent`](crate::send_state::SendState::Sent), the furthest a
+/// group message can honestly get, since a group fan-out copy never gets a
+/// per-member `DeliveryReceipt`. `false` means every member's send failed
+/// and the message was durably QUEUED by the outbox (relay down); it
+/// flushes on reconnect. A naive optimistic tick would lie here, since a
+/// queued send now returns `Ok`. `message_id` is the client UI anchor for a
+/// private group (`Some`) and `None` for a public group (a direct
+/// `SignedPublic` send that mints no anchor).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupSendReceipt {
     /// Client message id (the UI bubble anchor); `Some` for a private group,
@@ -1143,16 +1146,21 @@ impl<'a> Endpoint<'a> {
         // disk. Bookkeeping — the send already succeeded, so log rather than
         // fail.
         if let Some(gid) = anchor_group_id {
+            let sent_at_ms = crate::outbox::now_ms();
             let entry = HistoryEntry {
                 sender_agent_id_hex: identity.agent_id_hex().to_owned(),
                 sender_name: Some(sender_name.to_owned()),
                 body: body.to_owned(),
-                ts_ms: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                ts_ms: sent_at_ms,
                 message_id: message_id.clone(),
                 attachment: attachment.cloned(),
                 delivered_at_ms: None,
+                // Reached here only after a relay accepted a copy (the
+                // no-device-reached arm returned above), so the honest
+                // state is Sent -- never "delivered" until a receipt says
+                // so.
+                send_state: Some(crate::send_state::SendState::Sent),
+                state_changed_at_ms: sent_at_ms,
             };
             if let Err(e) = registry
                 .mutate_in_place(&gid, |c| {
@@ -1670,18 +1678,18 @@ impl<'a> Endpoint<'a> {
                     if let (Some(sink), Some(frame)) = (self.outbox.as_ref(), sealed_frame.as_ref())
                     {
                         let bubble = crate::outbox::OutboxBubble {
-                            id: crate::outbox::new_bubble_id(),
-                            peer: member.clone(),
-                            body: body.to_owned(),
-                            status: crate::outbox::OutboxStatus::Failed,
-                            message_id: None,
-                            enqueued_at_ms: timestamp_ms,
                             last_error: Some(reason),
-                            group: Some(crate::outbox::GroupOutbound {
+                            ..crate::outbox::OutboxBubble::queued(
+                                crate::outbox::new_bubble_id(),
+                                member.clone(),
+                                body.to_owned(),
+                                timestamp_ms,
+                            )
+                            .with_group(crate::outbox::GroupOutbound {
                                 group_id: group_id.to_owned(),
                                 envelope: frame.clone(),
                                 client_message_id: message_id.clone(),
-                            }),
+                            })
                         };
                         sink.store.lock().await.upsert(bubble.clone());
                         let _ = sink.events.send(crate::outbox::OutboxEvent { bubble });
@@ -1715,6 +1723,17 @@ impl<'a> Endpoint<'a> {
         // still gets a seeded transcript. Bookkeeping only: the send has
         // already succeeded, so a persist failure is logged, not returned.
         if let Some(registry) = self.registry {
+            // A group message is only as far along as its least advanced
+            // fan-out copy: every attempted member reached (or a solo group
+            // with nobody to reach) => Sent; ANY member short of that =>
+            // Queued, and the copy flipping to Sent later is what the
+            // listing overlay folds back in
+            // (`outbox::overlay::overlay_history_send_state`).
+            let send_state = if delivered == attempted {
+                crate::send_state::SendState::Sent
+            } else {
+                crate::send_state::SendState::Queued
+            };
             let entry = HistoryEntry {
                 sender_agent_id_hex: local_agent_hex.to_owned(),
                 sender_name: Some(sender_name.to_owned()),
@@ -1723,6 +1742,8 @@ impl<'a> Endpoint<'a> {
                 message_id: message_id.clone(),
                 attachment: None,
                 delivered_at_ms: None,
+                send_state: Some(send_state),
+                state_changed_at_ms: timestamp_ms,
             };
             persist_own_group_message(registry, group_id, entry, send_seq, identity, signer).await;
         }
@@ -2192,6 +2213,9 @@ impl<'a> Endpoint<'a> {
             message_id: hex::encode(envelope_dedupe_bytes(env)),
             attachment: None,
             delivered_at_ms: None,
+            // Inbound: nothing was sent from here, so no send state.
+            send_state: None,
+            state_changed_at_ms: 0,
         };
         let entry_for_closure = entry.clone();
 
@@ -4552,8 +4576,12 @@ mod tests {
         for b in &bubbles {
             assert_eq!(
                 b.status,
-                crate::outbox::OutboxStatus::Failed,
-                "a failed send is retryable"
+                crate::outbox::SendState::Queued,
+                "an unreached member's copy is queued, never failed"
+            );
+            assert!(
+                crate::outbox::is_retryable(b),
+                "and it keeps retrying until the relay takes it"
             );
             let g = b
                 .group
