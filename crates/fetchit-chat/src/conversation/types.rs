@@ -182,6 +182,17 @@ pub struct Conversation {
     /// second damped cycle.
     #[serde(default)]
     pub wedge_max_stale_epoch: u32,
+    /// Read high-water mark: the newest [`HistoryEntry::ts_ms`] the user
+    /// has actually had this conversation open on. Inbound messages
+    /// stamped above it are what the conversation row badges as unread.
+    ///
+    /// Sealed in the same vault file as [`Self::history`], so the mark
+    /// can never outlive — or be outlived by — the messages it covers.
+    /// `#[serde(default)]` leaves a vault sealed before read marks at
+    /// zero, which reads as "never opened": everything already on disk
+    /// comes back unread rather than silently pre-read.
+    #[serde(default)]
+    pub read_ms: u64,
 }
 
 impl Conversation {
@@ -221,6 +232,7 @@ impl Conversation {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         })
     }
 
@@ -252,6 +264,7 @@ impl Conversation {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         }
     }
 
@@ -354,6 +367,50 @@ impl Conversation {
             self.history.pop_front();
         }
         self.history.push_back(entry);
+    }
+
+    /// Messages from anyone but this device stamped after the last time
+    /// the conversation was opened — the count its row badges. Saturates
+    /// at [`u32::MAX`].
+    ///
+    /// `local_agent_id_hex` is the same discriminator
+    /// [`crate::conversation::HistoryEntry::sender_agent_id_hex`] is read
+    /// against everywhere else, so a message that renders as an outbound
+    /// bubble can never also be counted unread — including a group send,
+    /// which this device persists into its own history.
+    ///
+    /// A conversation that has never been opened counts its whole inbound
+    /// history: messages that landed while the app was closed are exactly
+    /// what the badge exists to announce.
+    #[must_use]
+    pub fn unread(&self, local_agent_id_hex: &str) -> u32 {
+        let n = self
+            .history
+            .iter()
+            .filter(|e| e.sender_agent_id_hex != local_agent_id_hex && e.ts_ms > self.read_ms)
+            .count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// Mark every message currently in `history` read. Returns `true`
+    /// when the mark moved, so a caller can skip re-sealing the vault on
+    /// a re-open that changed nothing. A conversation with no messages
+    /// stores no mark.
+    ///
+    /// The mark is the HIGHEST stamp in history, not the last-arrived
+    /// one: relay store-and-forward replays out of order, and the thread
+    /// screen renders everything it holds sorted by stamp. Marking only
+    /// up to the last arrival would leave a newer, already-displayed
+    /// message badged forever.
+    pub fn mark_read(&mut self) -> bool {
+        let Some(newest) = self.history.iter().map(|e| e.ts_ms).max() else {
+            return false;
+        };
+        if newest <= self.read_ms {
+            return false;
+        }
+        self.read_ms = newest;
+        true
     }
 
     /// Mark the history entry whose `message_id` a delivery receipt
@@ -898,6 +955,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         let fanout: Vec<&MemberDevice> = conv.fanout_devices(&local_hex).collect();
         assert_eq!(fanout.len(), 1);
@@ -930,6 +988,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         conv.sweep_prior_keys();
         assert!(conv.prior_keys.is_empty());
@@ -957,6 +1016,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         assert!(conv.auto_rekey_due());
     }
@@ -983,6 +1043,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         assert!(!conv.auto_rekey_due(), "Member role must not auto-rekey");
     }
@@ -1009,6 +1070,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         }
     }
 
@@ -1079,6 +1141,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         assert!(conv.auto_rekey_due());
         conv.advance_epoch([2u8; 32]);
@@ -1112,6 +1175,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         let nonce = [0xAB; 12];
         assert!(!conv.check_and_record_nonce("alice", nonce));
@@ -1151,6 +1215,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         for i in 0..64u8 {
             assert!(!conv.check_and_record_nonce("alice", [i; 12]));
@@ -1188,6 +1253,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         // Fill Alice's window completely.
         for i in 0..64u8 {
@@ -1245,6 +1311,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         };
         conv.confirm_trust();
         assert_eq!(conv.trust_state, TrustState::Confirmed);
@@ -1274,6 +1341,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         }
     }
 
@@ -1337,6 +1405,102 @@ mod tests {
         assert!(!conv.apply_delivery_receipt("aa", 999));
         let e = conv.history.iter().find(|e| e.message_id == "aa").unwrap();
         assert_eq!(e.delivered_at_ms, Some(100));
+    }
+
+    const LOCAL: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const PEER: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn entry_from(sender: &str, ts_ms: u64) -> HistoryEntry {
+        HistoryEntry {
+            sender_agent_id_hex: sender.to_owned(),
+            sender_name: None,
+            body: format!("m{ts_ms}"),
+            ts_ms,
+            message_id: format!("{sender}-{ts_ms}"),
+            attachment: None,
+            delivered_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_never_opened_conversation_counts_its_whole_inbound_history() {
+        // The badge is the only signal a message landed while the app was
+        // closed, so an unopened conversation is unread by construction.
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(entry_from(PEER, 100));
+        conv.push_history(entry_from(PEER, 200));
+        assert_eq!(conv.unread(LOCAL), 2);
+    }
+
+    #[test]
+    fn our_own_sends_are_never_unread() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(entry_from(LOCAL, 100));
+        conv.push_history(entry_from(LOCAL, 200));
+        assert_eq!(conv.unread(LOCAL), 0);
+        // Including the group echo shape: our own send sits between two
+        // peer messages and must not inflate the count.
+        conv.push_history(entry_from(PEER, 300));
+        assert_eq!(conv.unread(LOCAL), 1);
+    }
+
+    #[test]
+    fn mark_read_clears_unread_and_a_later_message_re_arms_it() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(entry_from(PEER, 100));
+        conv.push_history(entry_from(PEER, 200));
+        assert!(conv.mark_read(), "the mark moved");
+        assert_eq!(conv.unread(LOCAL), 0);
+        assert!(!conv.mark_read(), "re-opening a read thread is a no-op");
+
+        conv.push_history(entry_from(PEER, 300));
+        assert_eq!(conv.unread(LOCAL), 1);
+    }
+
+    #[test]
+    fn mark_read_covers_everything_on_screen_not_just_the_last_arrival() {
+        // Relay store-and-forward replays out of order: a message that
+        // arrives last can carry an older stamp. The thread screen sorts
+        // by stamp and shows all of it, so reading it reads all of it —
+        // marking only up to the LAST arrival would leave the newest
+        // message permanently badged.
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(entry_from(PEER, 300));
+        conv.push_history(entry_from(PEER, 100));
+        assert!(conv.mark_read());
+        assert_eq!(conv.unread(LOCAL), 0);
+    }
+
+    #[test]
+    fn mark_read_on_an_empty_conversation_stores_nothing() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        assert!(!conv.mark_read());
+        assert_eq!(conv.read_ms, 0);
+        assert_eq!(conv.unread(LOCAL), 0);
+    }
+
+    #[test]
+    fn read_mark_survives_the_json_round_trip() {
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(entry_from(PEER, 100));
+        assert!(conv.mark_read());
+        let back: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conv).unwrap()).unwrap();
+        assert_eq!(back.read_ms, conv.read_ms);
+        assert_eq!(back.unread(LOCAL), 0);
+    }
+
+    #[test]
+    fn a_vault_sealed_before_read_marks_decodes_as_all_unread() {
+        // Pre-existing conversations have no read_ms; they must come back
+        // unread rather than failing to decode or starting silenced.
+        let mut conv = make_minimal_conversation_for_history_test();
+        conv.push_history(entry_from(PEER, 100));
+        let mut v: serde_json::Value = serde_json::to_value(&conv).unwrap();
+        assert!(v.as_object_mut().unwrap().remove("read_ms").is_some());
+        let back: Conversation = serde_json::from_value(v).unwrap();
+        assert_eq!(back.read_ms, 0);
+        assert_eq!(back.unread(LOCAL), 1);
     }
 
     #[test]

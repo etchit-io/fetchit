@@ -755,6 +755,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         }
     }
 
@@ -911,6 +912,7 @@ mod tests {
             wedge_last_inbound_ms: 0,
             wedge_progress_epoch: 0,
             wedge_max_stale_epoch: 0,
+            read_ms: 0,
         }
     }
 
@@ -1077,6 +1079,55 @@ mod tests {
             .find(|e| e.message_id == "m1")
             .expect("entry survives reload");
         assert_eq!(entry.delivered_at_ms, Some(123));
+    }
+
+    #[tokio::test]
+    async fn read_mark_persists_across_cold_restart() {
+        // The badge must not come back after a process kill: the mark is
+        // sealed in the same vault file as the transcript it covers.
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let salt = fresh_argon_salt();
+        let master = Arc::new(
+            MasterKey::resolve(
+                &MasterKeySource::Passphrase(Zeroizing::new("p".into())),
+                Some(&salt),
+            )
+            .unwrap(),
+        );
+        let r1 =
+            ConversationRegistry::new(layout.clone(), master.clone(), kdf_id_argon2(), Some(salt));
+        let mut conv = dm_with_history_entry("m1");
+        conv.push_history(crate::conversation::HistoryEntry {
+            sender_agent_id_hex: PEER.to_owned(),
+            sender_name: None,
+            body: "in".into(),
+            ts_ms: 2,
+            message_id: "m2".to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+        });
+        r1.save(&conv).await.unwrap();
+        assert_eq!(r1.get("aa").await.unwrap().unwrap().unread(LOCAL), 1);
+
+        let moved = r1
+            .mutate_in_place("aa", |c| {
+                if c.mark_read() {
+                    MutateAction::Persist(true)
+                } else {
+                    MutateAction::Skip(false)
+                }
+            })
+            .await
+            .unwrap();
+        assert!(moved);
+
+        let r2 = ConversationRegistry::new(layout, master, kdf_id_argon2(), Some(salt));
+        assert_eq!(
+            r2.get("aa").await.unwrap().unwrap().unread(LOCAL),
+            0,
+            "a read conversation stays read across a restart",
+        );
     }
 
     #[tokio::test]
