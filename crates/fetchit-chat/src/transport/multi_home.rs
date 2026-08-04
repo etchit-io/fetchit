@@ -753,6 +753,14 @@ impl MultiHomeTransport {
                     continue;
                 };
                 let Ok(nonce) = <[u8; 12]>::try_from(transit.nonce.as_slice()) else {
+                    // Deterministic verdict on immutable bytes: a
+                    // malformed nonce can never become processable, so the
+                    // drop is terminal and the durable copy reclaims —
+                    // otherwise it redelivers on every reconnect until the
+                    // transit TTL (#327 made every push durable).
+                    if let Some(a) = &env.ack {
+                        a.confirm();
+                    }
                     log::debug!(
                         "multi-home fan-in: skipping envelope with non-12-byte nonce: url={url}"
                     );
@@ -766,6 +774,13 @@ impl MultiHomeTransport {
                 if pass {
                     on_inbound(env);
                 } else {
+                    // Provable duplicate — terminal per the
+                    // `confirms_delivery` contract: the first copy owns
+                    // delivery, so this durable copy reclaims instead of
+                    // redelivering unconfirmed until the transit TTL.
+                    if let Some(a) = &env.ack {
+                        a.confirm();
+                    }
                     log::debug!("multi-home dedup dropped duplicate: url={url}");
                 }
             }
@@ -1510,6 +1525,49 @@ mod tests {
             count.load(Ordering::SeqCst),
             1,
             "duplicate (sender, nonce) across slots dedups to one",
+        );
+    }
+
+    /// #338: the dedup-dropped duplicate CONFIRMS its `DeliveryAck` —
+    /// a provable duplicate is terminal, so the durable relay copy
+    /// reclaims instead of redelivering on every reconnect until the
+    /// transit TTL.
+    #[tokio::test]
+    async fn dedup_dropped_duplicate_confirms_its_ack() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = Arc::clone(&count);
+        let on_inbound: Arc<dyn Fn(InboundEnvelope) + Send + Sync> = Arc::new(move |_| {
+            count_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let builder = Arc::new(StubRelayBuilder::default());
+        let denylist: Arc<dyn fetchit_trust::DenylistQuery> = Arc::new(NoopDenylist);
+        let mh = MultiHomeTransport::new(
+            "wss://primary.test/v1/ws".into(),
+            denylist,
+            on_inbound,
+            Arc::clone(&builder) as Arc<dyn RelayBuilder>,
+        )
+        .await
+        .unwrap();
+
+        let slot0_handle = Arc::clone(&mh.slots_for_test()[0].as_ref().unwrap().handle);
+        slot0_handle.deliver_inbound(sample_inbound_envelope("alice", [7u8; 12]));
+
+        let confirmed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&confirmed);
+        let mut dup = sample_inbound_envelope("alice", [7u8; 12]);
+        dup.ack = Some(crate::transport::DeliveryAck::new(move || {
+            flag.store(true, Ordering::SeqCst);
+        }));
+        slot0_handle.deliver_inbound(dup);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 1, "duplicate never surfaces");
+        assert!(
+            confirmed.load(Ordering::SeqCst),
+            "the dropped duplicate's ack must confirm so transit reclaims",
         );
     }
 

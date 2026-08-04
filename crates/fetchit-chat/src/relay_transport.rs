@@ -570,21 +570,40 @@ fn map_inbound_delivery(env: TransitEnvelope, ack: Option<DeliveryAck>) -> Optio
                     .unwrap_or_default(),
             }
         }
-        RelayKind::AdminEvent => return None,
+        // No chat-layer route exists by design, so the drop is terminal —
+        // a deterministic verdict on immutable bytes per the
+        // `confirms_delivery` contract. Confirm the ack: with every push
+        // durable (#327), an unconfirmed drop would redeliver the same
+        // unroutable frame on every reconnect until the transit TTL.
+        RelayKind::AdminEvent => {
+            if let Some(a) = &ack {
+                a.confirm();
+            }
+            return None;
+        }
         // Forward-compat: a newer sender used a kind we don't recognise
         // yet. The relay passed it through verbatim; we drop it since the
-        // chat layer has no semantics to map it to. Logged so an
-        // unexpectedly-common Unknown stream surfaces in journals.
+        // chat layer has no semantics to map it to. The ack is
+        // deliberately HELD (unlike the terminal drops above): the verdict
+        // is deterministic only for THIS binary, and an app upgrade inside
+        // the transit TTL is the recovery that can process the redelivered
+        // frame — the same reasoning that keeps `StaleEpoch` unconfirmed.
+        // Logged so an unexpectedly-common Unknown stream surfaces in
+        // journals.
         RelayKind::Unknown(disc) => {
             log::warn!("relay inbound: dropping envelope with unknown kind disc={disc}");
             return None;
         }
         // Reserved7 is a historical M2.5 Welcome-bridge discriminator kept
         // reserved for wire-stability. Drop here; the bridge is no longer
-        // shipped, so no chat-layer route exists. (Slot 6 graduated from
-        // Reserved6 to PairRecordPush, which forwards above.)
+        // shipped, so no chat-layer route exists and none can return —
+        // terminal, so the ack confirms. (Slot 6 graduated from Reserved6
+        // to PairRecordPush, which forwards above.)
         RelayKind::Reserved7 => {
             log::warn!("relay inbound: dropping envelope with reserved (M2.5 Welcome-bridge) kind");
+            if let Some(a) = &ack {
+                a.confirm();
+            }
             return None;
         }
     };
@@ -959,6 +978,39 @@ mod tests {
         assert!(
             map_inbound_delivery(env, None).is_none(),
             "AdminEvent has no chat-layer route and must stay dropped",
+        );
+    }
+
+    /// #338: a drop with no possible route EVER (`AdminEvent`,
+    /// `Reserved7`) confirms its `DeliveryAck` so the durable relay copy
+    /// reclaims; an `Unknown` kind HOLDS the ack — an app upgrade inside
+    /// the transit TTL is the recovery that can still process the
+    /// redelivered frame, the same reasoning that keeps `StaleEpoch`
+    /// unconfirmed.
+    #[test]
+    fn terminal_unroutable_drops_confirm_but_unknown_holds() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ack_confirmed_for = |kind: RelayKind| {
+            let mut env =
+                TransitEnvelope::public_post("https://x.example/u/a", b"{}".to_vec(), 1).unwrap();
+            env.kind = kind;
+            let flag = std::sync::Arc::new(AtomicBool::new(false));
+            let f = std::sync::Arc::clone(&flag);
+            let ack = crate::transport::DeliveryAck::new(move || f.store(true, Ordering::SeqCst));
+            assert!(map_inbound_delivery(env, Some(ack)).is_none());
+            flag.load(Ordering::SeqCst)
+        };
+        assert!(
+            ack_confirmed_for(RelayKind::AdminEvent),
+            "AdminEvent's drop is terminal: the ack must confirm",
+        );
+        assert!(
+            ack_confirmed_for(RelayKind::Reserved7),
+            "Reserved7's drop is terminal: the ack must confirm",
+        );
+        assert!(
+            !ack_confirmed_for(RelayKind::Unknown(200)),
+            "an Unknown kind holds its ack for a binary that can process it",
         );
     }
 
