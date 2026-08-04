@@ -173,9 +173,10 @@ describe("mountConversation — reply flow", () => {
       id: "o1",
       peer: PEER,
       body: "my answer",
-      status: "Sending",
+      status: "Queued",
       message_id: null,
       enqueued_at_ms: 1,
+      state_changed_at_ms: 1,
       last_error: null,
     });
 

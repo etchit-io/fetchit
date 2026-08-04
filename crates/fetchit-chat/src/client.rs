@@ -2498,13 +2498,19 @@ impl Client {
         }
     }
 
-    /// Enqueue an outbound DM: persist a `Sending` bubble and broadcast it
-    /// immediately (optimistic echo), then warm-connect and send. The
-    /// bubble's terminal state is recorded via
+    /// Enqueue an outbound DM: persist a
+    /// [`Queued`](crate::send_state::SendState::Queued) bubble and
+    /// broadcast it immediately (optimistic echo), then warm-connect and
+    /// send. The outcome is recorded via
     /// [`crate::outbox::store::OutboxStore::record_send_outcome`] -- the
     /// same path the retry driver uses, so an initial send and a resend
-    /// converge on identical status transitions (and the Delivered-guard).
+    /// converge on identical transitions. A failure that a later attempt
+    /// could fix leaves the bubble queued and retrying, never "failed".
     /// Returns the client-assigned bubble id.
+    ///
+    /// The send is claimed in-flight for its duration so a presence edge
+    /// landing mid-send cannot fire a second copy (a queued bubble is
+    /// always retry-eligible; the claim is the guard).
     ///
     /// `sender_name` is shell-supplied (the engine holds no canonical
     /// display name); `reply_to_message_id` + `attachment` mirror
@@ -2528,24 +2534,21 @@ impl Client {
                 "enqueue_dm requires chat state (no data_dir/relay configured)".into(),
             ));
         };
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        let bubble = crate::outbox::OutboxBubble {
-            id: crate::outbox::new_bubble_id(),
-            peer: peer.clone(),
-            body: body.to_owned(),
-            status: crate::outbox::OutboxStatus::Sending,
-            message_id: None,
-            enqueued_at_ms: now_ms,
-            last_error: None,
-            group: None,
-        };
+        let now_ms = crate::outbox::now_ms();
+        let bubble = crate::outbox::OutboxBubble::queued(
+            crate::outbox::new_bubble_id(),
+            peer.clone(),
+            body.to_owned(),
+            now_ms,
+        );
         // Optimistic echo: persist + broadcast BEFORE the send so the UI
         // shows the bubble the instant the user hits enter (desktop parity).
+        // The in-flight claim is taken in the same lock so a concurrent
+        // flush can never pick the bubble up mid-send.
         {
             let mut outbox = chat.outbox.lock().await;
             outbox.upsert(bubble.clone());
+            outbox.try_mark_inflight(&bubble.id, now_ms);
         }
         let _ = chat.outbox_tx.send(crate::outbox::OutboxEvent {
             bubble: bubble.clone(),
@@ -2556,13 +2559,20 @@ impl Client {
             .messages()
             .send(peer, body, sender_name, reply_to_message_id, attachment)
             .await;
-        let (message_id, error) = match &result {
+        let (message_id, failure) = match &result {
             Ok(mid) => (mid.clone(), None),
-            Err(e) => (None, Some(e.to_string())),
+            Err(e) => (None, Some(crate::send_state::SendFailure::classify(e))),
         };
         let updated = {
             let mut outbox = chat.outbox.lock().await;
-            outbox.record_send_outcome(&bubble.id, message_id, error)
+            let updated = outbox.record_send_outcome(
+                &bubble.id,
+                message_id,
+                failure,
+                crate::outbox::now_ms(),
+            );
+            outbox.clear_inflight(&bubble.id);
+            updated
         };
         if let Some(u) = updated {
             let _ = chat
@@ -4326,10 +4336,13 @@ impl Client {
     }
 
     /// Start the engine-owned outbox retry loop. Boot-sweeps orphaned
-    /// in-flight sends, then on each peer offline->online edge re-sends that
-    /// peer's retryable bubbles (warming the link first), and runs the 24h
-    /// timeout sweep hourly. Returns the task handle; `None` for a client
-    /// with no chat state. Dropping the handle does not stop the loop
+    /// in-flight claims, then on each peer offline->online edge re-sends
+    /// that peer's retryable bubbles (warming the link first), and sweeps
+    /// stalled send claims periodically
+    /// ([`crate::outbox::driver::STALLED_CLAIM_MS`]). No sweep here ever
+    /// declares a message failed -- a queued message keeps retrying for as
+    /// long as it takes. Returns the task handle; `None` for a client with
+    /// no chat state. Dropping the handle does not stop the loop
     /// (fire-and-forget, like the dispatcher); abort it to stop.
     ///
     /// `name_provider` supplies the sender display name at send time -- the
@@ -4349,9 +4362,6 @@ impl Client {
         if let Ok(mut slot) = chat.outbox_retry_tx.lock() {
             *slot = Some(retry_tx);
         }
-        let process_start_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         // No-send-before-registered: gate flushes on the primary relay
         // reaching ConnState::Connected. On a wss client a flush fired before
         // registration surfaces AllRelaysUnreachable and crash-loops; the gate
@@ -4367,14 +4377,16 @@ impl Client {
                 client: self.clone(),
                 name_provider,
             },
-            process_start_ms,
         )
         .with_ready_gate(ready_gate);
         let client = self.clone();
         Some(tokio::spawn(async move {
             const MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
             const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
-            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+            // Stalled-claim sweep cadence. Well under an hour so a send
+            // task that died holding its claim cannot wedge its message
+            // for long, and cheap: one lock plus a scan of the claim map.
+            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
             driver.boot_sweep().await;
             let mut backoff = MIN_BACKOFF;
             let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
@@ -4414,10 +4426,7 @@ impl Client {
                             }
                         }
                         _ = sweep.tick() => {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                            driver.sweep_timeouts(now).await;
+                            driver.sweep_stalled(crate::outbox::now_ms()).await;
                         }
                         maybe_retry = retry_rx.recv() => {
                             match maybe_retry {
@@ -4465,8 +4474,9 @@ impl Client {
     /// `/mesh/quiesce` (disconnect every mesh peer; daemon and gossip
     /// runtime stay up). Replaces the teardown-and-re-serve flip that
     /// orphaned pubsub tasks into a hot failure loop. Safe to re-assert
-    /// in the current mode. Rides the bearer `Http` wrapper, so the
-    /// `api.port` self-heal applies across a daemon restart.
+    /// in the current mode. Rides the bearer `Http` wrapper (crate-private,
+    /// so not linked), so the `api.port` self-heal applies across a daemon
+    /// restart.
     ///
     /// # Errors
     ///
@@ -8661,7 +8671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_dm_optimistic_echo_then_failed_on_unreachable() {
+    async fn enqueue_dm_optimistic_echo_then_stays_queued_on_unreachable() {
         let (client, _dir) = test_client_no_denylist();
         let mut rx = client.subscribe_outbox().expect("chat state present");
         let peer = crate::identity::AgentId("bb".repeat(32));
@@ -8671,26 +8681,38 @@ mod tests {
             .await
             .expect("enqueue returns a bubble id");
 
-        // Optimistic echo: the Sending bubble is broadcast BEFORE the send
+        // Optimistic echo: the queued bubble is broadcast BEFORE the send
         // is attempted (desktop parity -- the UI shows it immediately).
         let first = rx.recv().await.expect("optimistic echo");
         assert_eq!(first.bubble.id, id);
-        assert_eq!(first.bubble.status, crate::outbox::OutboxStatus::Sending);
+        assert_eq!(first.bubble.status, crate::outbox::SendState::Queued);
         assert_eq!(first.bubble.body, "hello");
         assert_eq!(first.bubble.peer, peer);
 
-        // The empty Router reaches no peer, so the send fails and the
-        // bubble is recorded Failed via the shared record_send_outcome path.
+        // The empty Router reaches no peer. That is a retryable condition,
+        // so the message stays QUEUED with the reason recorded -- the user
+        // is never told a send failed when the engine will try again.
         let second = rx.recv().await.expect("outcome echo");
         assert_eq!(second.bubble.id, id);
-        assert_eq!(second.bubble.status, crate::outbox::OutboxStatus::Failed);
+        assert_eq!(second.bubble.status, crate::outbox::SendState::Queued);
         assert!(second.bubble.last_error.is_some());
+        assert!(crate::outbox::is_retryable(&second.bubble));
 
-        // Snapshot reflects the single terminal-state bubble.
+        // Snapshot agrees, and the send released its in-flight claim so a
+        // presence edge can pick the bubble up.
         let snap = client.outbox_snapshot().await;
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].id, id);
-        assert_eq!(snap[0].status, crate::outbox::OutboxStatus::Failed);
+        assert_eq!(snap[0].status, crate::outbox::SendState::Queued);
+        assert!(
+            client
+                .outbox_arc()
+                .expect("chat state present")
+                .lock()
+                .await
+                .try_mark_inflight(&id, 0),
+            "the initial send must not leak its claim"
+        );
     }
 
     #[tokio::test]
@@ -8714,14 +8736,14 @@ mod tests {
         let outbox = client.outbox_arc().expect("chat state present");
 
         let bubble = crate::outbox::OutboxBubble {
-            id: "b1".into(),
-            peer: crate::identity::AgentId("cc".repeat(32)),
-            body: "hi".into(),
-            status: crate::outbox::OutboxStatus::Delivered,
+            status: crate::outbox::SendState::Delivered,
             message_id: Some("m1".into()),
-            enqueued_at_ms: 1,
-            last_error: None,
-            group: None,
+            ..crate::outbox::OutboxBubble::queued(
+                "b1".into(),
+                crate::identity::AgentId("cc".repeat(32)),
+                "hi".into(),
+                1,
+            )
         };
 
         // The returned sender feeds the channel subscribe_outbox reads.
@@ -8732,7 +8754,7 @@ mod tests {
             .expect("a receiver is subscribed");
         let got = rx.recv().await.expect("event delivered");
         assert_eq!(got.bubble.id, "b1");
-        assert_eq!(got.bubble.status, crate::outbox::OutboxStatus::Delivered);
+        assert_eq!(got.bubble.status, crate::outbox::SendState::Delivered);
 
         // The returned Arc is the live, mutable store.
         outbox.lock().await.upsert(bubble);

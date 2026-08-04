@@ -26,7 +26,7 @@ import uniffi.fetchit_ffi.GroupFfi
 import uniffi.fetchit_ffi.GroupMemberFfi
 import uniffi.fetchit_ffi.MintOutcomeFfi
 import uniffi.fetchit_ffi.OutboxBubbleFfi
-import uniffi.fetchit_ffi.OutboxStatusFfi
+import uniffi.fetchit_ffi.SendStateFfi
 import java.io.File
 
 /**
@@ -1126,14 +1126,20 @@ class ChatController(private val appContext: Context, private val scope: Corouti
          * per-member fan-out copy of a queued GROUP message, not a DM —
          * upserting it by `peerAgentIdHex` would fabricate a phantom DM thread
          * with that member. Instead it backs the ONE message in the group
-         * thread: the first copy to reach the relay flips that message's
-         * delivery tick (honest "sent"); Sending/Failed copies leave the
-         * queued clock in place while the engine outbox keeps retrying.
+         * thread: the first copy the relay accepts flips that message's
+         * delivery tick (honest "sent" — a group copy never gets a
+         * per-member receipt, so SENT is as far as it can go); QUEUED and
+         * FAILED copies leave the queued clock in place while the engine
+         * outbox keeps retrying.
+         *
+         * For a DM, [SendStateFfi.QUEUED] is NOT a failure however long it
+         * sits: the engine retries it indefinitely, so only a terminal
+         * FAILED sets the failed flag.
          */
         fun projectOutbox(convo: ConversationStore, bubble: OutboxBubbleFfi) {
             val groupAnchor = bubble.groupClientMessageId
             if (groupAnchor != null) {
-                if (bubble.status == OutboxStatusFfi.DELIVERED) {
+                if (bubble.status == SendStateFfi.SENT || bubble.status == SendStateFfi.DELIVERED) {
                     convo.markDelivered(groupAnchor)
                 }
                 return
@@ -1144,8 +1150,8 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                 body = bubble.body,
                 sentAtMs = bubble.enqueuedAtMs.toLong(),
                 messageId = bubble.messageId,
-                delivered = bubble.status == OutboxStatusFfi.DELIVERED,
-                failed = bubble.status == OutboxStatusFfi.FAILED,
+                delivered = bubble.status == SendStateFfi.DELIVERED,
+                failed = bubble.status == SendStateFfi.FAILED,
                 lastError = bubble.lastError,
             )
         }

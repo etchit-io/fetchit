@@ -4,6 +4,7 @@
 use super::seq_gap::{SenderSeqState, SeqObservation};
 use crate::chat_crypto::AEAD_KEY_LEN;
 use crate::error::ChatError;
+use crate::send_state::{SendProgress, SendState};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use rand::rngs::OsRng;
@@ -357,11 +358,12 @@ impl Conversation {
     }
 
     /// Mark the history entry whose `message_id` a delivery receipt
-    /// echoed as delivered. Scans newest-first (receipts arrive for
-    /// recent sends). Returns `true` when an entry was newly marked;
-    /// `false` when nothing matched (entry evicted past
-    /// [`Self::HISTORY_CAP`], an id this side never recorded, or a
-    /// duplicate receipt) so callers can skip a redundant persist.
+    /// echoed as delivered, advancing its [`SendState`] with it. Scans
+    /// newest-first (receipts arrive for recent sends). Returns `true`
+    /// when an entry was newly marked; `false` when nothing matched
+    /// (entry evicted past [`Self::HISTORY_CAP`], an id this side never
+    /// recorded, or a duplicate receipt) so callers can skip a redundant
+    /// persist.
     pub fn apply_delivery_receipt(&mut self, message_id: &str, received_at_ms: u64) -> bool {
         for entry in self.history.iter_mut().rev() {
             if entry.message_id == message_id {
@@ -369,6 +371,8 @@ impl Conversation {
                     return false;
                 }
                 entry.delivered_at_ms = Some(received_at_ms);
+                entry.send_state = Some(SendState::Delivered);
+                entry.state_changed_at_ms = received_at_ms;
                 return true;
             }
         }
@@ -643,6 +647,47 @@ pub struct HistoryEntry {
     /// see delivery state without replaying receipt events.
     #[serde(default)]
     pub delivered_at_ms: Option<u64>,
+    /// How far THIS side's send of this message got, or `None` on an
+    /// inbound entry (nothing was sent) and on entries from a vault
+    /// sealed before send-state truth. Read it through
+    /// [`Self::send_progress`], which supplies the legacy reading rather
+    /// than guessing.
+    #[serde(default)]
+    pub send_state: Option<SendState>,
+    /// Unix-ms of the last [`Self::send_state`] transition. Zero when
+    /// unknown (inbound, or a pre-send-state-truth vault).
+    #[serde(default)]
+    pub state_changed_at_ms: u64,
+}
+
+impl HistoryEntry {
+    /// The entry's send state and the moment it was entered, filling in
+    /// for vaults sealed before send-state truth.
+    ///
+    /// The legacy reading is sound because the old engine persisted an
+    /// outbound entry only AFTER a relay accepted it: no state plus a
+    /// receipt reads as [`SendState::Delivered`] at the receipt time, no
+    /// state and no receipt reads as [`SendState::Sent`] at the send
+    /// time. Meaningless (but harmless) on inbound entries, exactly like
+    /// `delivered_at_ms`.
+    #[must_use]
+    pub fn send_progress(&self) -> SendProgress {
+        let state = self.send_state.unwrap_or({
+            if self.delivered_at_ms.is_some() {
+                SendState::Delivered
+            } else {
+                SendState::Sent
+            }
+        });
+        let changed_at_ms = match self.state_changed_at_ms {
+            0 => self.delivered_at_ms.unwrap_or(self.ts_ms),
+            stamped => stamped,
+        };
+        SendProgress {
+            state,
+            changed_at_ms,
+        }
+    }
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -1289,6 +1334,8 @@ mod tests {
                 message_id: format!("id{i}"),
                 attachment: None,
                 delivered_at_ms: None,
+                send_state: None,
+                state_changed_at_ms: 0,
             });
         }
         assert_eq!(conv.history.len(), Conversation::HISTORY_CAP);
@@ -1305,6 +1352,8 @@ mod tests {
             message_id: message_id.into(),
             attachment: None,
             delivered_at_ms: None,
+            send_state: Some(SendState::Sent),
+            state_changed_at_ms: 1,
         }
     }
 
@@ -1316,8 +1365,49 @@ mod tests {
         assert!(conv.apply_delivery_receipt("aa", 777));
         let marked = conv.history.iter().find(|e| e.message_id == "aa").unwrap();
         assert_eq!(marked.delivered_at_ms, Some(777));
+        // The receipt is what moves the send state -- and only for the
+        // message it names.
+        assert_eq!(marked.send_state, Some(SendState::Delivered));
+        assert_eq!(marked.state_changed_at_ms, 777);
         let other = conv.history.iter().find(|e| e.message_id == "bb").unwrap();
         assert_eq!(other.delivered_at_ms, None);
+        assert_eq!(other.send_state, Some(SendState::Sent));
+    }
+
+    #[test]
+    fn send_progress_reads_a_pre_send_state_truth_entry() {
+        // Vault entries sealed before send-state truth carry neither
+        // field. They were only ever persisted AFTER a relay accepted the
+        // send, so no receipt reads as Sent at the send time and a receipt
+        // reads as Delivered at the receipt time -- never a default.
+        let mut legacy = history_entry("aa");
+        legacy.send_state = None;
+        legacy.state_changed_at_ms = 0;
+        legacy.ts_ms = 500;
+        let progress = legacy.send_progress();
+        assert_eq!(progress.state, SendState::Sent);
+        assert_eq!(progress.changed_at_ms, 500);
+        legacy.delivered_at_ms = Some(900);
+        let progress = legacy.send_progress();
+        assert_eq!(progress.state, SendState::Delivered);
+        assert_eq!(progress.changed_at_ms, 900);
+    }
+
+    #[test]
+    fn history_entry_without_send_state_fields_deserializes() {
+        // A pre-send-state-truth entry must still load (a parse failure
+        // would drop the whole transcript).
+        let json = serde_json::json!({
+            "sender_agent_id_hex": "a".repeat(64),
+            "sender_name": null,
+            "body": "hi",
+            "ts_ms": 7,
+            "message_id": "m1",
+        });
+        let entry: HistoryEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.send_state, None);
+        assert_eq!(entry.state_changed_at_ms, 0);
+        assert_eq!(entry.send_progress().state, SendState::Sent);
     }
 
     #[test]

@@ -144,9 +144,19 @@ by reachability (LAN-direct when the peer shares the network, the
 always-available relay otherwise). Group MLS control-plane events do not use this
 Router: they ride x0xd gossip as primary with the relay only as a cross-NAT
 contingency (`crate::groups_reachability`). A durable, vault-persisted **DM
-outbox** (`crate::outbox`) owns resend: a presence-edge retry loop, a 24h
-timeout sweep, a boot/restart orphan reclaim, and a double-send guard, surfaced
-as `OutboxEvent`s so both shells render one shared delivery state. Group receive
+outbox** (`crate::outbox`) owns resend: a presence-edge retry loop, a
+stalled-claim sweep, a boot/restart claim reclaim, and a double-send guard,
+surfaced as `OutboxEvent`s so both shells render one shared delivery state.
+That state is a truthful four-step machine (`crate::send_state::SendState`):
+**queued** (in the outbox, retried indefinitely -- a dropped socket or a lost
+ack never reads as failure), **sent** (a relay acked durable acceptance, the
+only transition into it), **delivered** (a `DeliveryReceipt` attributed
+receipt), and **failed**, reserved for verdicts no retry can change
+(`SendFailure::classify`: denylisted recipient, unsealed-envelope caller
+error). Both the bubble and the persisted `HistoryEntry` carry the state plus
+its transition timestamp, and a listing folds the live outbox over the
+transcript (`outbox::overlay`) so a message is only ever as far along as its
+least advanced copy. Group receive
 additionally runs **missed-message detection** (`crate::conversation::seq_gap`):
 senders seal a monotonic per-group counter inside the encrypted frame and the
 receive-side ledger flags a skipped one as a gap (detection only; recovery

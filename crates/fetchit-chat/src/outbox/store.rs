@@ -8,10 +8,11 @@
 //! `inflight` guard prevents the retry driver from re-firing a bubble whose
 //! send is already in progress.
 
-use super::{OutboxBubble, OutboxStatus};
+use super::{OutboxBubble, SendState, PRIOR_MESSAGE_ID_CAP};
 use crate::at_rest::{open_from_path, seal_to_path, MasterKey, ARGON_SALT_LEN};
 use crate::local_store::StoreLayout;
-use std::collections::{HashMap, HashSet};
+use crate::send_state::SendFailure;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Everything [`OutboxStore`] needs to seal its map to disk, mirroring the
@@ -41,7 +42,10 @@ impl std::fmt::Debug for OutboxPersist {
 pub struct OutboxStore {
     inner: HashMap<String, OutboxBubble>,
     persist: Option<OutboxPersist>,
-    inflight: HashSet<String>,
+    /// Bubble ids with a send in progress, mapped to the Unix-ms the
+    /// claim was taken. Never persisted -- in-flight tasks die with the
+    /// process, and a driver (re)start clears the whole set.
+    inflight: HashMap<String, u64>,
 }
 
 impl OutboxStore {
@@ -59,6 +63,11 @@ impl OutboxStore {
     /// mismatch), or a truncated/corrupt/unparseable file all fall back to
     /// an empty map rather than erroring -- a damaged outbox never blocks
     /// client startup.
+    ///
+    /// Bubbles sealed before send-state truth are migrated as they load:
+    /// a legacy `Failed` (which meant "retry me") comes back
+    /// [`SendState::Queued`], and a legacy `Sending` splits on whether a
+    /// relay ever acked it.
     #[must_use]
     pub fn load(
         layout: &StoreLayout,
@@ -66,7 +75,8 @@ impl OutboxStore {
         kdf_id: u8,
         argon_salt: Option<&[u8; ARGON_SALT_LEN]>,
     ) -> Self {
-        let inner = Self::read_map(&layout.outbox_path(), master).unwrap_or_default();
+        let mut inner = Self::read_map(&layout.outbox_path(), master).unwrap_or_default();
+        Self::migrate_legacy(&mut inner);
         Self {
             inner,
             persist: Some(OutboxPersist {
@@ -75,7 +85,37 @@ impl OutboxStore {
                 kdf_id,
                 argon_salt: argon_salt.copied(),
             }),
-            inflight: HashSet::new(),
+            inflight: HashMap::new(),
+        }
+    }
+
+    /// Re-read the pre-send-state-truth statuses honestly.
+    ///
+    /// A bubble with no `state_changed_at_ms` was written by the old
+    /// three-state machine, where `Failed` meant "the attempt errored,
+    /// retry me" and `Sending` covered both "not yet acked" and "acked,
+    /// awaiting receipt". Carrying those verbatim would strand every
+    /// legacy failed bubble in the NEW terminal `Failed`, so:
+    ///
+    /// - legacy `Failed` -> [`SendState::Queued`] (keep retrying; the
+    ///   reason survives in `last_error` as diagnostics),
+    /// - legacy `Sending` (deserialized as `Queued`) with a `message_id`
+    ///   -> [`SendState::Sent`], since only a relay ack ever set one,
+    /// - `Delivered` is unchanged.
+    ///
+    /// Every migrated bubble is stamped with `enqueued_at_ms` so the UI
+    /// has a transition age to render instead of a zero.
+    fn migrate_legacy(map: &mut HashMap<String, OutboxBubble>) {
+        for bubble in map.values_mut() {
+            if bubble.state_changed_at_ms != 0 {
+                continue;
+            }
+            bubble.status = match bubble.status {
+                SendState::Failed => SendState::Queued,
+                SendState::Queued if bubble.message_id.is_some() => SendState::Sent,
+                other => other,
+            };
+            bubble.state_changed_at_ms = bubble.enqueued_at_ms;
         }
     }
 
@@ -138,12 +178,16 @@ impl OutboxStore {
         dropped
     }
 
-    /// Claim `id` as in-flight. Returns `true` if newly claimed, `false`
-    /// if a send for it is already in progress (double-send guard). Not
-    /// persisted -- in-flight tasks die with the process; the boot sweep
-    /// reclaims orphans.
-    pub fn try_mark_inflight(&mut self, id: &str) -> bool {
-        self.inflight.insert(id.to_string())
+    /// Claim `id` as in-flight at `now_ms`. Returns `true` if newly
+    /// claimed, `false` if a send for it is already in progress.
+    ///
+    /// This claim -- not the bubble's state -- is the double-send guard:
+    /// a [`SendState::Queued`] bubble is always retry-eligible, so every
+    /// send path (the initial send included) must hold a claim for the
+    /// duration of its attempt. Not persisted; in-flight tasks die with
+    /// the process and [`Self::clear_all_inflight`] reclaims the rest.
+    pub fn try_mark_inflight(&mut self, id: &str, now_ms: u64) -> bool {
+        self.inflight.insert(id.to_string(), now_ms).is_none()
     }
 
     /// Release the in-flight claim on `id`.
@@ -161,59 +205,52 @@ impl OutboxStore {
         self.inflight.clear();
     }
 
-    /// Flip every `Sending` bubble older than `timeout_ms` (relative to
-    /// `now_ms`) to `Failed`. Returns the changed bubbles (for event
-    /// emission); persists once if anything changed.
-    pub fn sweep_timeouts(&mut self, now_ms: u64, timeout_ms: u64) -> Vec<OutboxBubble> {
-        let mut changed = Vec::new();
-        for bubble in self.inner.values_mut() {
-            if matches!(bubble.status, OutboxStatus::Sending)
-                && now_ms.saturating_sub(bubble.enqueued_at_ms) >= timeout_ms
-            {
-                bubble.status = OutboxStatus::Failed;
-                bubble.last_error = Some("delivery timed out".to_string());
-                changed.push(bubble.clone());
-            }
-        }
-        if !changed.is_empty() {
-            self.flush();
-        }
-        changed
+    /// Release in-flight claims older than `stall_ms` (relative to
+    /// `now_ms`) on bubbles that are not terminal, returning them.
+    ///
+    /// The claim is the only thing that can wedge a message: a
+    /// [`SendState::Queued`] bubble is otherwise always retry-eligible,
+    /// but a send task killed between claim and release (an aborted
+    /// runtime, a transport that never returns) would hold its claim for
+    /// the life of the process and the message would sit there forever,
+    /// silently. Nothing about the bubble's STATE changes -- a stalled
+    /// attempt is still a queued message, never a failed one.
+    pub fn clear_stalled_inflight(&mut self, now_ms: u64, stall_ms: u64) -> Vec<OutboxBubble> {
+        let stalled: Vec<String> = self
+            .inflight
+            .iter()
+            .filter(|(id, claimed_at)| {
+                now_ms.saturating_sub(**claimed_at) >= stall_ms
+                    && self.inner.get(*id).is_some_and(|b| !b.status.is_terminal())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        stalled
+            .into_iter()
+            .filter_map(|id| {
+                self.inflight.remove(&id);
+                self.inner.get(&id).cloned()
+            })
+            .collect()
     }
 
-    /// Flip orphaned in-flight bubbles to `Failed` at startup: a `Sending`
-    /// bubble with no `message_id` enqueued before `process_start_ms` lost
-    /// its in-flight task when the previous process exited, so it is safe
-    /// to re-drive via the normal retry path. Returns the changed bubbles;
-    /// persists once if anything changed.
-    pub fn boot_sweep(&mut self, process_start_ms: u64) -> Vec<OutboxBubble> {
-        let mut changed = Vec::new();
-        for bubble in self.inner.values_mut() {
-            if matches!(bubble.status, OutboxStatus::Sending)
-                && bubble.message_id.is_none()
-                && bubble.enqueued_at_ms < process_start_ms
-            {
-                bubble.status = OutboxStatus::Failed;
-                bubble.last_error = Some("send interrupted by restart".to_string());
-                changed.push(bubble.clone());
-            }
-        }
-        if !changed.is_empty() {
-            self.flush();
-        }
-        changed
-    }
-
-    /// Mark the bubble carrying `message_id` as `Delivered` (called from
-    /// the `DeliveryReceipt` inbound path). Returns the updated bubble, or
-    /// `None` when no bubble carries that id. Persists on a hit.
-    pub fn mark_delivered(&mut self, message_id: &str) -> Option<OutboxBubble> {
+    /// Mark the bubble a delivery receipt for `message_id` belongs to as
+    /// [`SendState::Delivered`] at `received_at_ms`. Matches superseded
+    /// ids too ([`OutboxBubble::matches_receipt`]), so a receipt for the
+    /// copy an earlier attempt sent still closes the bubble. Returns the
+    /// updated bubble, or `None` when nothing matches. Persists on a hit.
+    pub fn mark_delivered(
+        &mut self,
+        message_id: &str,
+        received_at_ms: u64,
+    ) -> Option<OutboxBubble> {
         let updated = {
             let bubble = self
                 .inner
                 .values_mut()
-                .find(|b| b.message_id.as_deref() == Some(message_id))?;
-            bubble.status = OutboxStatus::Delivered;
+                .find(|b| b.matches_receipt(message_id))?;
+            bubble.status = SendState::Delivered;
+            bubble.state_changed_at_ms = received_at_ms;
             bubble.clone()
         };
         self.flush();
@@ -222,47 +259,62 @@ impl OutboxStore {
 
     /// Apply the result of a send attempt to bubble `bubble_id`, returning
     /// the updated bubble for the caller to broadcast (or `None` if the
-    /// bubble is gone or already `Delivered`). Shared by the initial send
-    /// (`Client::enqueue_dm`) and the retry driver so the status mapping +
-    /// the Delivered-guard live in ONE place.
+    /// bubble is gone or already terminal). Shared by the initial send
+    /// (`Client::enqueue_dm`) and the retry driver so the transitions live
+    /// in ONE place.
     ///
-    /// `error.is_some()` -> the send failed (`Failed` + `last_error`);
-    /// otherwise it succeeded, recording `message_id` when the relay assigned
-    /// one: a DM becomes `Sending` (awaiting its `DeliveryReceipt`), while a
-    /// group fan-out copy -- which gets no receipt -- becomes `Delivered`,
-    /// its terminal state (relay-accept is the client-side durability
-    /// guarantee, and re-firing would duplicate at the receiver). A bubble
-    /// already `Delivered` (a receipt landed during the send await) is never
-    /// clobbered -- on either arm.
+    /// The state machine, in full:
+    /// - success -> [`SendState::Sent`], recording the accepted
+    ///   `message_id` (the previous one, if any, is kept for receipt
+    ///   matching). A relay ack is the ONLY way into `Sent`.
+    /// - retryable failure -> stays [`SendState::Queued`] with the reason
+    ///   in `last_error`. A dropped socket or a lost ack must never read
+    ///   as failure.
+    /// - terminal failure ([`SendFailure::terminal`]) -> [`SendState::Failed`].
+    /// - a bubble already [`SendState::Sent`] never goes backwards: a
+    ///   later attempt that fails cannot un-accept what a relay durably
+    ///   took, so the state holds and only `last_error` updates.
+    /// - a bubble already terminal ([`SendState::Delivered`] from a
+    ///   receipt that won the race with this send, or [`SendState::Failed`])
+    ///   is never clobbered -- on either arm.
     pub fn record_send_outcome(
         &mut self,
         bubble_id: &str,
         message_id: Option<String>,
-        error: Option<String>,
+        failure: Option<SendFailure>,
+        now_ms: u64,
     ) -> Option<OutboxBubble> {
         let updated = {
             let bubble = self.inner.get_mut(bubble_id)?;
-            if matches!(bubble.status, OutboxStatus::Delivered) {
+            if bubble.status.is_terminal() {
                 return None;
             }
-            if let Some(reason) = error {
-                bubble.status = OutboxStatus::Failed;
-                bubble.last_error = Some(reason);
-            } else {
-                if message_id.is_some() {
-                    bubble.message_id = message_id;
+            if let Some(f) = failure {
+                bubble.last_error = Some(f.reason);
+                // Terminal only from Queued: once a relay has custody the
+                // message is out, whatever a later retry reports.
+                if f.terminal && !bubble.status.reached_relay() {
+                    bubble.status = SendState::Failed;
+                    bubble.state_changed_at_ms = now_ms;
                 }
-                // A group fan-out copy has no delivery receipt to close it (a
-                // receipt carries the receiver's message id, not the relay
-                // dedup key stored here), so a relay-accepted (re)send is
-                // terminal -- Delivered, so it never re-fires and duplicates
-                // at the receiver. A DM stays Sending until its
-                // DeliveryReceipt marks it Delivered.
-                bubble.status = if bubble.group.is_some() {
-                    OutboxStatus::Delivered
-                } else {
-                    OutboxStatus::Sending
-                };
+            } else {
+                if let Some(new_id) = message_id {
+                    if let Some(old) = bubble.message_id.replace(new_id) {
+                        // A DM resend re-encrypts and mints a fresh id;
+                        // remember the superseded one so its receipt still
+                        // matches. Bounded: oldest drops first.
+                        if !bubble.prior_message_ids.contains(&old) {
+                            if bubble.prior_message_ids.len() >= PRIOR_MESSAGE_ID_CAP {
+                                bubble.prior_message_ids.remove(0);
+                            }
+                            bubble.prior_message_ids.push(old);
+                        }
+                    }
+                }
+                if bubble.status != SendState::Sent {
+                    bubble.state_changed_at_ms = now_ms;
+                }
+                bubble.status = SendState::Sent;
                 bubble.last_error = None;
             }
             bubble.clone()
@@ -303,8 +355,8 @@ impl OutboxStore {
 mod tests {
     use super::*;
     use crate::chat_crypto::AEAD_KEY_LEN;
+    use crate::error::ChatError;
     use crate::identity::AgentId;
-    use crate::outbox::OutboxStatus;
     use tempfile::tempdir;
 
     fn test_master() -> MasterKey {
@@ -312,16 +364,13 @@ mod tests {
     }
 
     fn bubble(id: &str, peer: &str) -> OutboxBubble {
-        OutboxBubble {
-            id: id.into(),
-            peer: AgentId(peer.repeat(64)),
-            body: "hi".into(),
-            status: OutboxStatus::Sending,
-            message_id: None,
-            enqueued_at_ms: 1,
-            last_error: None,
-            group: None,
-        }
+        OutboxBubble::queued(id.into(), AgentId(peer.repeat(64)), "hi".into(), 1)
+    }
+
+    /// A retryable transport failure -- the "socket dropped" shape that
+    /// must never surface as a failed message.
+    fn transport_failure() -> SendFailure {
+        SendFailure::classify(&ChatError::MessageTransport("relay send: eof".into()))
     }
 
     #[test]
@@ -443,162 +492,353 @@ mod tests {
     fn inflight_guard_blocks_double_claim() {
         let mut s = OutboxStore::new();
         s.upsert(bubble("b1", "a"));
-        assert!(s.try_mark_inflight("b1"));
-        assert!(!s.try_mark_inflight("b1"));
+        assert!(s.try_mark_inflight("b1", 10));
+        assert!(!s.try_mark_inflight("b1", 11));
         s.clear_inflight("b1");
-        assert!(s.try_mark_inflight("b1"));
+        assert!(s.try_mark_inflight("b1", 12));
     }
 
     #[test]
     fn clear_all_inflight_releases_orphan_claims() {
         let mut s = OutboxStore::new();
-        assert!(s.try_mark_inflight("b1"));
-        assert!(s.try_mark_inflight("b2"));
+        assert!(s.try_mark_inflight("b1", 0));
+        assert!(s.try_mark_inflight("b2", 0));
         // Both claims are held; a re-claim is refused.
-        assert!(!s.try_mark_inflight("b1"));
+        assert!(!s.try_mark_inflight("b1", 1));
         s.clear_all_inflight();
         // After a driver (re)start clears orphans, both are claimable again.
-        assert!(s.try_mark_inflight("b1"));
-        assert!(s.try_mark_inflight("b2"));
+        assert!(s.try_mark_inflight("b1", 2));
+        assert!(s.try_mark_inflight("b2", 2));
     }
 
-    fn sending(id: &str, enqueued_at_ms: u64, message_id: Option<&str>) -> OutboxBubble {
+    #[test]
+    fn clear_stalled_inflight_unwedges_without_touching_state() {
+        let mut s = OutboxStore::new();
+        s.upsert(bubble("b1", "a"));
+        assert!(s.try_mark_inflight("b1", 1_000));
+        // Fresh claim: left alone, still blocking a second send.
+        assert!(s.clear_stalled_inflight(1_500, 1_000).is_empty());
+        assert!(!s.try_mark_inflight("b1", 1_500));
+        // Stalled claim: released, and the message is STILL queued -- a
+        // send task that never returned is not a failed message.
+        let freed = s.clear_stalled_inflight(3_000, 1_000);
+        assert_eq!(freed.len(), 1);
+        assert_eq!(freed[0].status, SendState::Queued);
+        assert!(s.try_mark_inflight("b1", 3_000), "re-claimable after");
+    }
+
+    #[test]
+    fn clear_stalled_inflight_leaves_terminal_bubbles_claimed() {
+        let mut s = OutboxStore::new();
+        let mut delivered = bubble("b1", "a");
+        delivered.status = SendState::Delivered;
+        s.upsert(delivered);
+        assert!(s.try_mark_inflight("b1", 0));
+        assert!(s.clear_stalled_inflight(999_999, 1_000).is_empty());
+    }
+
+    fn queued(id: &str, enqueued_at_ms: u64, message_id: Option<&str>) -> OutboxBubble {
         OutboxBubble {
-            id: id.into(),
-            peer: AgentId("aa".repeat(32)),
-            body: "hi".into(),
-            status: OutboxStatus::Sending,
             message_id: message_id.map(Into::into),
-            enqueued_at_ms,
-            last_error: None,
-            group: None,
+            ..OutboxBubble::queued(
+                id.into(),
+                AgentId("aa".repeat(32)),
+                "hi".into(),
+                enqueued_at_ms,
+            )
         }
     }
 
     #[test]
-    fn sweep_timeouts_fails_stale_sending() {
+    fn mark_delivered_by_message_id_stamps_the_receipt_time() {
         let mut s = OutboxStore::new();
-        s.upsert(sending("b1", 0, None));
-        let changed = s.sweep_timeouts(86_400_001, 86_400_000);
-        assert_eq!(changed.len(), 1);
-        assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Failed);
+        s.upsert(queued("b1", 1, Some("m1")));
+        assert!(s.mark_delivered("m1", 555).is_some());
+        let b = s.get("b1").unwrap();
+        assert_eq!(b.status, SendState::Delivered);
+        assert_eq!(b.state_changed_at_ms, 555);
+        assert!(s.mark_delivered("nope", 556).is_none());
     }
 
     #[test]
-    fn sweep_timeouts_leaves_fresh_sending() {
+    fn mark_delivered_matches_a_superseded_message_id() {
+        // A resend minted a new logical id; the receipt for the FIRST copy
+        // still proves the message arrived, so it must close the bubble.
         let mut s = OutboxStore::new();
-        s.upsert(sending("b1", 1_000, None));
-        let changed = s.sweep_timeouts(1_001, 86_400_000);
-        assert!(changed.is_empty());
-        assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Sending);
+        s.upsert(queued("b1", 1, None));
+        s.record_send_outcome("b1", Some("m1".into()), None, 10);
+        s.record_send_outcome("b1", Some("m2".into()), None, 20);
+        assert!(s.mark_delivered("m1", 30).is_some());
+        assert_eq!(s.get("b1").unwrap().status, SendState::Delivered);
     }
 
     #[test]
-    fn boot_sweep_fails_orphaned_sending() {
+    fn record_send_outcome_ok_sets_sent_and_records_message_id() {
         let mut s = OutboxStore::new();
-        s.upsert(sending("b1", 10, None));
-        let changed = s.boot_sweep(100);
-        assert_eq!(changed.len(), 1);
-        assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Failed);
-    }
-
-    #[test]
-    fn boot_sweep_keeps_acked_and_in_session() {
-        let mut s = OutboxStore::new();
-        // ACKed (message_id Some) -> not orphaned even if old.
-        s.upsert(sending("b1", 10, Some("m")));
-        // Enqueued after process start -> still this session, not orphaned.
-        s.upsert(sending("b2", 200, None));
-        let changed = s.boot_sweep(100);
-        assert!(changed.is_empty());
-    }
-
-    #[test]
-    fn mark_delivered_by_message_id() {
-        let mut s = OutboxStore::new();
-        s.upsert(sending("b1", 1, Some("m1")));
-        assert!(s.mark_delivered("m1").is_some());
-        assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Delivered);
-        assert!(s.mark_delivered("nope").is_none());
-    }
-
-    #[test]
-    fn record_send_outcome_ok_sets_sending_and_records_message_id() {
-        let mut s = OutboxStore::new();
-        s.upsert(sending("b1", 0, None));
+        s.upsert(queued("b1", 0, None));
         let updated = s
-            .record_send_outcome("b1", Some("m1".into()), None)
+            .record_send_outcome("b1", Some("m1".into()), None, 77)
             .expect("bubble present");
-        assert_eq!(updated.status, OutboxStatus::Sending);
+        assert_eq!(
+            updated.status,
+            SendState::Sent,
+            "relay ack is the only Sent"
+        );
         assert_eq!(updated.message_id.as_deref(), Some("m1"));
+        assert_eq!(updated.state_changed_at_ms, 77);
         assert_eq!(updated.last_error, None);
     }
 
     #[test]
-    fn record_send_outcome_err_sets_failed_with_reason() {
+    fn record_send_outcome_keeps_a_retryable_failure_queued() {
+        // The headline lie this replaces: a dropped socket used to read as
+        // "Failed" in the UI. It must stay Queued and keep retrying, with
+        // the reason kept only as diagnostics.
         let mut s = OutboxStore::new();
-        s.upsert(sending("b1", 0, None));
+        s.upsert(queued("b1", 0, None));
         let updated = s
-            .record_send_outcome("b1", None, Some("boom".into()))
+            .record_send_outcome("b1", None, Some(transport_failure()), 5)
             .expect("bubble present");
-        assert_eq!(updated.status, OutboxStatus::Failed);
-        assert_eq!(updated.last_error.as_deref(), Some("boom"));
+        assert_eq!(updated.status, SendState::Queued);
+        assert_eq!(updated.state_changed_at_ms, 0, "no transition happened");
+        assert!(updated.last_error.is_some());
+        assert!(crate::outbox::is_retryable(&updated));
     }
 
     #[test]
-    fn record_send_outcome_never_clobbers_delivered() {
+    fn record_send_outcome_fails_only_on_a_terminal_verdict() {
         let mut s = OutboxStore::new();
-        let mut delivered = sending("b1", 0, Some("m1"));
-        delivered.status = OutboxStatus::Delivered;
+        s.upsert(queued("b1", 0, None));
+        let denied = SendFailure::classify(&ChatError::Denied {
+            agent_id_hex: "aa".repeat(32),
+        });
+        let updated = s
+            .record_send_outcome("b1", None, Some(denied), 9)
+            .expect("bubble present");
+        assert_eq!(updated.status, SendState::Failed);
+        assert_eq!(updated.state_changed_at_ms, 9);
+        assert!(!crate::outbox::is_retryable(&updated));
+    }
+
+    #[test]
+    fn a_sent_bubble_never_goes_backwards() {
+        // Relay custody is a fact; a later failing retry -- even a terminal
+        // one -- cannot un-accept it, so the state holds at Sent.
+        let mut s = OutboxStore::new();
+        s.upsert(queued("b1", 0, None));
+        s.record_send_outcome("b1", Some("m1".into()), None, 10);
+        let after = s
+            .record_send_outcome("b1", None, Some(transport_failure()), 20)
+            .expect("bubble present");
+        assert_eq!(after.status, SendState::Sent);
+        assert_eq!(after.state_changed_at_ms, 10, "no new transition");
+        let denied = SendFailure::classify(&ChatError::Denied {
+            agent_id_hex: "aa".repeat(32),
+        });
+        let after_denied = s
+            .record_send_outcome("b1", None, Some(denied), 30)
+            .expect("bubble present");
+        assert_eq!(after_denied.status, SendState::Sent);
+    }
+
+    #[test]
+    fn a_wedged_peer_never_advances_a_message_past_sent() {
+        // The live failure this lane exists for: the peer cannot decrypt,
+        // so no receipt ever comes back. However many times the relay
+        // accepts a resend, the message stays Sent -- the engine never
+        // manufactures a delivery the recipient never made.
+        let mut s = OutboxStore::new();
+        s.upsert(queued("b1", 0, None));
+        for i in 0..5 {
+            let updated = s
+                .record_send_outcome("b1", Some(format!("m{i}")), None, 100 + i)
+                .expect("bubble present");
+            assert_eq!(updated.status, SendState::Sent);
+        }
+        let b = s.get("b1").unwrap();
+        assert_eq!(b.status, SendState::Sent);
+        // And the transition stamp still points at the FIRST acceptance,
+        // so a shell can see how long it has sat unconfirmed.
+        assert_eq!(b.state_changed_at_ms, 100);
+    }
+
+    #[test]
+    fn record_send_outcome_never_clobbers_a_terminal_state() {
+        let mut s = OutboxStore::new();
+        let mut delivered = queued("b1", 0, Some("m1"));
+        delivered.status = SendState::Delivered;
         s.upsert(delivered);
-        // A receipt won the race during the send await; neither the Ok nor
-        // the Err arm may overwrite Delivered.
+        // A receipt won the race during the send await; neither arm may
+        // overwrite Delivered.
         assert!(s
-            .record_send_outcome("b1", Some("m1".into()), None)
+            .record_send_outcome("b1", Some("m1".into()), None, 1)
             .is_none());
         assert!(s
-            .record_send_outcome("b1", None, Some("boom".into()))
+            .record_send_outcome("b1", None, Some(transport_failure()), 2)
             .is_none());
-        assert_eq!(s.get("b1").unwrap().status, OutboxStatus::Delivered);
+        assert_eq!(s.get("b1").unwrap().status, SendState::Delivered);
     }
 
     #[test]
     fn record_send_outcome_absent_bubble_is_none() {
         let mut s = OutboxStore::new();
-        assert!(s.record_send_outcome("nope", None, None).is_none());
+        assert!(s.record_send_outcome("nope", None, None, 0).is_none());
     }
 
     #[test]
-    fn record_send_outcome_marks_a_group_bubble_delivered_on_success() {
-        // A group fan-out copy has no delivery receipt to confirm it (a
-        // receipt carries the receiver's message id, never the relay dedup
-        // key the bubble stores), so a relay-accepted (re)send IS its
-        // terminal success: Delivered, not Sending. Otherwise it would stay
-        // retryable and re-fire on every reconnect -- a duplicate at the
-        // receiver. A DM stays Sending until its DeliveryReceipt lands.
+    fn superseded_message_ids_are_bounded() {
         let mut s = OutboxStore::new();
-        let mut g = bubble("g1", "b");
-        g.group = Some(crate::outbox::GroupOutbound {
+        s.upsert(queued("b1", 0, None));
+        for i in 0..(PRIOR_MESSAGE_ID_CAP + 3) {
+            s.record_send_outcome("b1", Some(format!("m{i}")), None, 10);
+        }
+        let b = s.get("b1").unwrap();
+        assert_eq!(b.prior_message_ids.len(), PRIOR_MESSAGE_ID_CAP);
+        // Oldest dropped, newest-but-one kept, current id is the latest.
+        assert_eq!(b.message_id.as_deref(), Some("m10"));
+        assert_eq!(b.prior_message_ids.first().map(String::as_str), Some("m2"));
+    }
+
+    #[test]
+    fn a_relay_accepted_group_copy_is_sent_and_never_re_fires() {
+        // A group fan-out copy gets no per-member receipt, so relay
+        // acceptance is as far as it can honestly go: Sent, not Delivered
+        // (nobody confirmed receipt) and not retryable (re-sending one
+        // sealed TreeKEM frame duplicates at the receiver).
+        let mut s = OutboxStore::new();
+        let g = bubble("g1", "b").with_group(crate::outbox::GroupOutbound {
             group_id: "aa".repeat(32),
             envelope: postcard::to_allocvec(&test_envelope()).unwrap(),
             client_message_id: "cmid-1".to_owned(),
         });
         s.upsert(g);
         let updated = s
-            .record_send_outcome("g1", Some("relay-9".into()), None)
+            .record_send_outcome("g1", Some("relay-9".into()), None, 3)
             .expect("bubble present");
-        assert_eq!(
-            updated.status,
-            OutboxStatus::Delivered,
-            "a relay-accepted group resend is terminal"
-        );
-        assert!(!crate::outbox::is_retryable(&updated), "and never re-fires");
+        assert_eq!(updated.status, SendState::Sent);
+        assert!(!crate::outbox::is_retryable(&updated), "never re-fires");
 
-        // A DM with the same successful outcome stays Sending (awaits receipt).
-        s.upsert(sending("d1", 0, None));
+        // A DM with the same outcome IS retryable until its receipt lands.
+        s.upsert(queued("d1", 0, None));
         let dm = s
-            .record_send_outcome("d1", Some("relay-10".into()), None)
+            .record_send_outcome("d1", Some("relay-10".into()), None, 4)
             .expect("bubble present");
-        assert_eq!(dm.status, OutboxStatus::Sending);
+        assert_eq!(dm.status, SendState::Sent);
+        assert!(crate::outbox::is_retryable(&dm));
+    }
+
+    #[test]
+    fn legacy_vault_statuses_are_migrated_on_load() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let m = test_master();
+        // Hand-seal a pre-send-state-truth map: the old three states, no
+        // transition stamps.
+        let legacy = serde_json::json!({
+            "failed": {
+                "id": "failed", "peer": "aa".repeat(32), "body": "hi",
+                "status": "Failed", "message_id": null,
+                "enqueued_at_ms": 40, "last_error": "relay send: eof",
+            },
+            "unacked": {
+                "id": "unacked", "peer": "aa".repeat(32), "body": "hi",
+                "status": "Sending", "message_id": null,
+                "enqueued_at_ms": 50, "last_error": null,
+            },
+            "acked": {
+                "id": "acked", "peer": "aa".repeat(32), "body": "hi",
+                "status": "Sending", "message_id": "m1",
+                "enqueued_at_ms": 60, "last_error": null,
+            },
+            "done": {
+                "id": "done", "peer": "aa".repeat(32), "body": "hi",
+                "status": "Delivered", "message_id": "m2",
+                "enqueued_at_ms": 70, "last_error": null,
+            },
+        });
+        crate::at_rest::seal_to_path(
+            &layout.outbox_path(),
+            &serde_json::to_vec(&legacy).unwrap(),
+            &m,
+            0,
+            None,
+        )
+        .unwrap();
+
+        let s = OutboxStore::load(&layout, &m, 0, None);
+        // Legacy "Failed" meant "retry me" -- it must NOT land in the new
+        // terminal Failed, or every pending send from an old vault dies.
+        let failed = s.get("failed").unwrap();
+        assert_eq!(failed.status, SendState::Queued);
+        assert_eq!(failed.last_error.as_deref(), Some("relay send: eof"));
+        assert!(crate::outbox::is_retryable(failed));
+        // Legacy "Sending" splits on whether a relay ever acked.
+        assert_eq!(s.get("unacked").unwrap().status, SendState::Queued);
+        assert_eq!(s.get("acked").unwrap().status, SendState::Sent);
+        assert_eq!(s.get("done").unwrap().status, SendState::Delivered);
+        // Every migrated bubble gets a transition age to render.
+        assert_eq!(s.get("acked").unwrap().state_changed_at_ms, 60);
+    }
+
+    #[test]
+    fn a_queued_message_survives_a_restart_still_queued() {
+        // Restart recovery: the state a user was shown before the process
+        // died is the state they see after it comes back, and the message
+        // is still eligible for the next flush.
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let m = test_master();
+        let mut s = OutboxStore::load(&layout, &m, 0, None);
+        s.upsert(queued("b1", 10, None));
+        s.record_send_outcome("b1", None, Some(transport_failure()), 20);
+        // Mid-send when the process died: the claim is in RAM only.
+        assert!(s.try_mark_inflight("b1", 20));
+        drop(s);
+
+        let s2 = OutboxStore::load(&layout, &m, 0, None);
+        let b = s2.get("b1").unwrap();
+        assert_eq!(b.status, SendState::Queued);
+        assert!(b.last_error.is_some(), "the reason survives as diagnostics");
+        assert!(crate::outbox::is_retryable(b));
+    }
+
+    #[test]
+    fn a_sent_message_survives_a_restart_still_sent() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let m = test_master();
+        let mut s = OutboxStore::load(&layout, &m, 0, None);
+        s.upsert(queued("b1", 10, None));
+        s.record_send_outcome("b1", Some("m1".into()), None, 33);
+        drop(s);
+
+        let s2 = OutboxStore::load(&layout, &m, 0, None);
+        let b = s2.get("b1").unwrap();
+        assert_eq!(b.status, SendState::Sent);
+        assert_eq!(b.state_changed_at_ms, 33, "the transition stamp persists");
+        assert_eq!(b.message_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn migration_leaves_current_vault_entries_alone() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let m = test_master();
+        let mut s = OutboxStore::load(&layout, &m, 0, None);
+        s.upsert(queued("b1", 10, None));
+        // A genuinely terminal failure written by THIS engine carries a
+        // transition stamp, so the legacy re-queue must not touch it.
+        s.record_send_outcome(
+            "b1",
+            None,
+            Some(SendFailure::classify(&ChatError::Denied {
+                agent_id_hex: "aa".repeat(32),
+            })),
+            99,
+        );
+        drop(s);
+        let s2 = OutboxStore::load(&layout, &m, 0, None);
+        assert_eq!(s2.get("b1").unwrap().status, SendState::Failed);
+        assert_eq!(s2.get("b1").unwrap().state_changed_at_ms, 99);
     }
 }

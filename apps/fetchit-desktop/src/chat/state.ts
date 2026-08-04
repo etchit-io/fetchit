@@ -935,10 +935,12 @@ export function convKey(k: ConversationKey): string {
   return k.kind === "dm" ? `dm:${k.peer}` : `g:${k.groupId}`;
 }
 
-/// Map the engine `OutboxStatus` variant name (as serialized by the
-/// engine `OutboxBubble`) onto the shell `BubbleStatus`. Anything
-/// unexpected falls back to "sending" so a not-yet-confirmed bubble
-/// shows the in-flight clock rather than a wrong terminal state.
+/// Map the engine `SendState` variant name (as serialized by the engine
+/// `OutboxBubble`) onto the shell `BubbleStatus`. "Queued" and "Sent" are
+/// both in-flight from the shell's point of view; only the engine's
+/// terminal "Failed" renders as a failure. Anything unexpected falls back
+/// to "sending" so a not-yet-confirmed bubble shows the in-flight clock
+/// rather than a wrong terminal state.
 function outboxStatus(s: OutboxBubbleDto["status"]): BubbleStatus {
   switch (s) {
     case "Delivered":
