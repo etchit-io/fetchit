@@ -23,25 +23,43 @@
         android:textStyle="bold"
         android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/messageBubble"
+    <!-- The bubble itself: carries the background drawable and padding so the
+         body and its meta line (time, send state) sit inside one rounded
+         shape. A timestamp outside the bubble reads as belonging to no
+         message in particular. -->
+    <LinearLayout
+        android:id="@+id/messageBubbleFrame"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:maxWidth="280dp"
-        android:padding="10dp"
-        android:textColor="?attr/fetchitBone"
-        android:fontFamily="monospace"
-        android:textSize="16sp"
-        android:lineSpacingExtra="2dp"
-        android:textIsSelectable="true" />
+        android:orientation="vertical"
+        android:padding="10dp">
 
-    <TextView
-        android:id="@+id/messageMeta"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:textColor="?attr/fetchitAsh"
-        android:fontFamily="monospace"
-        android:textSize="10sp" />
+        <TextView
+            android:id="@+id/messageBubble"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxWidth="280dp"
+            android:textColor="?attr/fetchitBone"
+            android:fontFamily="monospace"
+            android:textSize="16sp"
+            android:lineSpacingExtra="2dp"
+            android:textIsSelectable="true" />
+
+        <!-- Time (+ send state on outbound), bottom-end inside the bubble —
+             the standard messenger placement. Always end-aligned, inbound and
+             outbound alike, so the eye finds it in one place. -->
+        <TextView
+            android:id="@+id/messageMeta"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginTop="3dp"
+            android:layout_marginStart="16dp"
+            android:maxWidth="280dp"
+            android:textColor="?attr/fetchitAsh"
+            android:fontFamily="monospace"
+            android:textSize="10sp" />
+
+    </LinearLayout>
 
 </LinearLayout>

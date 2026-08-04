@@ -3406,6 +3406,7 @@ class ChatModeView(
 
         inner class VH(itemView: View) : RecyclerView.ViewHolder(itemView) {
             private val sender: TextView = itemView.findViewById(R.id.messageSender)
+            private val bubbleFrame: LinearLayout = itemView.findViewById(R.id.messageBubbleFrame)
             private val bubble: TextView = itemView.findViewById(R.id.messageBubble)
             private val meta: TextView = itemView.findViewById(R.id.messageMeta)
 
@@ -3418,26 +3419,20 @@ class ChatModeView(
                     // Self keeps the copper out-bubble; the who-is-who accent is
                     // inbound-only, so no sender label or identity tint here.
                     sender.visibility = View.GONE
-                    bubble.setBackgroundResource(R.drawable.bg_bubble_out)
-                    (bubble.layoutParams as? LinearLayout.LayoutParams)?.gravity =
-                        android.view.Gravity.END
-                    (itemView.layoutParams as? RecyclerView.LayoutParams)?.let { _ ->
-                        bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
-                    }
+                    bubbleFrame.setBackgroundResource(R.drawable.bg_bubble_out)
                     (itemView as? LinearLayout)?.gravity = android.view.Gravity.END
                     bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
                     bubble.text = msg.body
                     // Send status: failed bubbles are tappable to retry the whole
                     // outbox; delivered show a tick; in-flight show plain time.
+                    // It rides the same in-bubble meta line as the time so the
+                    // two read as one group.
                     val status = when {
                         msg.failed -> " " + context.getString(R.string.chat_msg_failed_retry)
                         msg.delivered -> " ✓"
                         else -> ""
                     }
                     meta.text = "${timeFmt.format(Date(msg.sentAtMs))}$status"
-                    meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_END
-                    (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
-                        android.view.Gravity.END
                     if (msg.failed) {
                         itemView.setOnClickListener { onRetry() }
                     } else {
@@ -3446,9 +3441,6 @@ class ChatModeView(
                 } else {
                     (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                     bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
-                    meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
-                    (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
-                        android.view.Gravity.START
                     val time = timeFmt.format(Date(msg.sentAtMs))
                     val groupSender = msg.senderAgentIdHex
                     if (groupSender != null) {
@@ -3456,7 +3448,7 @@ class ChatModeView(
                         // keyed off the sender's agent id, matching the avatar and
                         // (on desktop) the bubble accent — so "who is who" is
                         // scannable at a glance, pixel-for-pixel with desktop.
-                        bubble.background = identityBubbleBackground(groupSender)
+                        bubbleFrame.background = identityBubbleBackground(groupSender)
                         // Name the sender once at the top of a consecutive run, in
                         // their identity hue (desktop's groupAttribution + the
                         // chat-sender--id label color).
@@ -3471,7 +3463,7 @@ class ChatModeView(
                         // DM: the peer IS the thread, so no per-identity accent or
                         // sender label — the bare inbound bubble + time.
                         sender.visibility = View.GONE
-                        bubble.setBackgroundResource(R.drawable.bg_bubble_in)
+                        bubbleFrame.setBackgroundResource(R.drawable.bg_bubble_in)
                     }
                     meta.text = time
                     // Linkify autonomi:// addresses in inbound text.
@@ -3488,15 +3480,12 @@ class ChatModeView(
                 sender.visibility = View.VISIBLE
                 sender.text = fediActorDisplay(post.actorUrl)
                 sender.setTextColor(themeColor(R.attr.fetchitCopper))
-                bubble.setBackgroundResource(R.drawable.bg_bubble_in)
+                bubbleFrame.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                 // Feed body is plain text (HTML stripped by the pump); linkify any
                 // autonomi:// addresses so they open in the reader, like DM bubbles.
                 applyAutonomiLinkedText(bubble, post.body, onLinkTap)
-                meta.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
-                (meta.layoutParams as? LinearLayout.LayoutParams)?.gravity =
-                    android.view.Gravity.START
                 // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
                 meta.text = context.getString(R.string.chat_feed_post_public_badge)
             }
@@ -3574,6 +3563,10 @@ class ChatModeView(
                 }
                 val layers = android.graphics.drawable.LayerDrawable(arrayOf(accent, fill))
                 layers.setLayerInset(1, stripe, 0, 0, 0)
+                // Nested padding would hand the stripe inset back to the view as
+                // padding, overwriting the bubble's own — stack mode keeps the
+                // inset purely visual.
+                layers.paddingMode = android.graphics.drawable.LayerDrawable.PADDING_MODE_STACK
                 return layers
             }
         }
