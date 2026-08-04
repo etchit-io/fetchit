@@ -282,6 +282,22 @@ pub fn enforce_cache_bounds(layout: &StoreLayout) -> Result<usize, ChatError> {
     Ok(evicted)
 }
 
+/// Re-apply the cache bounds, logging rather than propagating.
+///
+/// Called after EVERY write that can add an entry, not just after a
+/// successful image fetch. A sidecar written for a correspondent who
+/// publishes no icon, or whose avatar host is unreachable, is still a
+/// cache entry — eviction that ran on success alone would let those
+/// grow without limit on a device that mostly meets picture-less
+/// accounts.
+fn apply_cache_bounds(layout: &StoreLayout) {
+    match enforce_cache_bounds(layout) {
+        Ok(n) if n > 0 => log::debug!("[fedi] avatar cache evicted {n} entries"),
+        Ok(_) => {}
+        Err(e) => log::debug!("[fedi] avatar cache eviction failed: {e}"),
+    }
+}
+
 impl crate::client::Client {
     /// Cached avatar bytes for a fediverse correspondent, or `None`.
     /// Pure disk read: never blocks on the network.
@@ -300,8 +316,11 @@ impl crate::client::Client {
         if url.is_empty() {
             return;
         }
-        if let Err(e) = note_icon_url(layout, label, url) {
-            log::debug!("[fedi] avatar source note failed for {label}: {e}");
+        match note_icon_url(layout, label, url) {
+            // A new sidecar is a new cache entry; re-bound immediately.
+            Ok(true) => apply_cache_bounds(layout),
+            Ok(false) => {}
+            Err(e) => log::debug!("[fedi] avatar source note failed for {label}: {e}"),
         }
     }
 
@@ -337,28 +356,27 @@ impl crate::client::Client {
             // get the failure backoff so a picture-less correspondent
             // costs one resolve an hour, not one per screen paint.
             store_failure(layout, label, "", now_ms)?;
+            apply_cache_bounds(layout);
             return Ok(false);
         };
         let Ok(url) = source.parse::<url::Url>() else {
             store_failure(layout, label, &source, now_ms)?;
+            apply_cache_bounds(layout);
             return Ok(false);
         };
-        match fetchit_fedi::avatar::fetch_avatar(&url).await {
+        let stored = match fetchit_fedi::avatar::fetch_avatar(&url).await {
             Ok(fetched) => {
                 store_success(layout, label, &source, &fetched, now_ms)?;
-                match enforce_cache_bounds(layout) {
-                    Ok(n) if n > 0 => log::debug!("[fedi] avatar cache evicted {n} entries"),
-                    Ok(_) => {}
-                    Err(e) => log::debug!("[fedi] avatar cache eviction failed: {e}"),
-                }
-                Ok(true)
+                true
             }
             Err(e) => {
                 log::debug!("[fedi] avatar fetch for {label} rejected: {e}");
                 store_failure(layout, label, &source, now_ms)?;
-                Ok(false)
+                false
             }
-        }
+        };
+        apply_cache_bounds(layout);
+        Ok(stored)
     }
 
     /// `WebFinger` + actor fetch purely to learn a correspondent's icon
@@ -612,6 +630,60 @@ mod tests {
             total <= AVATAR_CACHE_MAX_BYTES,
             "cache must fit the byte bound; got {total}",
         );
+    }
+
+    #[test]
+    fn byteless_sidecars_count_toward_the_entry_bound() {
+        // note_icon_url / store_failure write a sidecar with no image.
+        // Those are real cache entries: a device that mostly meets
+        // picture-less or unreachable accounts must still be bounded,
+        // which is why every write re-applies the bounds, not just a
+        // successful fetch.
+        let (layout, _t) = layout();
+        let n = max_entries();
+        for i in 1..=(n + 4) {
+            note_icon_url(
+                &layout,
+                &format!("user{i}@host"),
+                &format!("https://cdn.example/{i}.png"),
+            )
+            .unwrap();
+        }
+        assert_eq!(scan_entries(&layout).len(), AVATAR_CACHE_MAX_ENTRIES + 4);
+        assert_eq!(enforce_cache_bounds(&layout).unwrap(), 4);
+        assert_eq!(scan_entries(&layout).len(), AVATAR_CACHE_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn a_fetched_avatar_outlives_a_never_fetched_sidecar() {
+        // Sidecars carry fetched_at_ms == 0, so they sort oldest and are
+        // dropped first — eviction never trades a rendering avatar for a
+        // placeholder that has no bytes.
+        let (layout, _t) = layout();
+        let n = max_entries();
+        store_success(
+            &layout,
+            "real@host",
+            "https://cdn.example/a.png",
+            &png(16),
+            1,
+        )
+        .unwrap();
+        for i in 1..=n {
+            note_icon_url(
+                &layout,
+                &format!("pending{i}@host"),
+                "https://cdn.example/p.png",
+            )
+            .unwrap();
+        }
+        // n + 1 entries: exactly one goes, and it must be a sidecar.
+        assert_eq!(enforce_cache_bounds(&layout).unwrap(), 1);
+        assert!(cached_bytes(&layout, "real@host").is_some());
+        let surviving_sidecars = (1..=n)
+            .filter(|i| load_meta(&layout, &format!("pending{i}@host")).is_some())
+            .count();
+        assert_eq!(i64::try_from(surviving_sidecars).unwrap(), n - 1);
     }
 
     #[test]
