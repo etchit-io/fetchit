@@ -42,6 +42,15 @@ const DEFAULT_DENYLIST_URL: &str = "https://trust.etchit.io/v1";
 /// HTTP-Signature capability cache.
 const PUBKEY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Hard ceiling on cached actor public keys.
+///
+/// The cache key is a remote-supplied `keyId` URL, so the TTL alone
+/// bounds nothing: an expired entry is merely not *returned*, and
+/// before this it was never removed. Mirrors the bounded-memory shape
+/// of [`crate::inbox::ReplayWindow`] — expire, then evict oldest.
+/// 50k PEMs ≈ 40 MB worst case.
+const PUBKEY_CACHE_CAP: usize = 50_000;
+
 /// `true` when the operator opted this relay into the fediverse-inbox
 /// role via `FETCHIT_FEDIVERSE_INBOX=1` (or `true`).
 #[must_use]
@@ -87,6 +96,7 @@ impl InboxDenylistCheck for DenylistConsumerCheck {
 pub struct FediverseWebFinger {
     cache: RwLock<HashMap<String, CacheEntry>>,
     ttl: Duration,
+    cap: usize,
 }
 
 struct CacheEntry {
@@ -101,13 +111,27 @@ impl Default for FediverseWebFinger {
 }
 
 impl FediverseWebFinger {
-    /// New resolver with the default `PUBKEY_CACHE_TTL`.
+    /// New resolver with the default `PUBKEY_CACHE_TTL` and cap.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_limits(PUBKEY_CACHE_TTL, PUBKEY_CACHE_CAP)
+    }
+
+    /// New resolver with explicit limits, so tests can drive eviction
+    /// without waiting out the production TTL.
+    #[must_use]
+    pub fn with_limits(ttl: Duration, cap: usize) -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
-            ttl: PUBKEY_CACHE_TTL,
+            ttl,
+            cap,
         }
+    }
+
+    /// Number of cached public keys, expired-but-not-yet-evicted
+    /// included.
+    pub async fn cached_len(&self) -> usize {
+        self.cache.read().await.len()
     }
 
     async fn cached(&self, key_id: &str) -> Option<String> {
@@ -117,11 +141,27 @@ impl FediverseWebFinger {
     }
 
     async fn store(&self, key_id: &str, pem: String) {
-        self.cache.write().await.insert(
+        let now = Instant::now();
+        let mut guard = self.cache.write().await;
+        // #295: `keyId` is remote-supplied, and a TTL that only gates
+        // reads bounds nothing — an expired entry was never removed.
+        // Drop what has aged out, then, if the live set is still at the
+        // ceiling, the oldest entry, so the insert cannot exceed it.
+        guard.retain(|_, e| now.duration_since(e.fetched_at) < self.ttl);
+        if guard.len() >= self.cap && !guard.contains_key(key_id) {
+            if let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, e)| e.fetched_at)
+                .map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(
             key_id.to_owned(),
             CacheEntry {
                 pem,
-                fetched_at: Instant::now(),
+                fetched_at: now,
             },
         );
     }
@@ -303,12 +343,54 @@ mod tests {
     async fn webfinger_cache_expires_past_ttl() {
         // Zero TTL: a stored entry is immediately stale, so the resolver
         // would re-fetch rather than serve a cached pubkey.
-        let wf = FediverseWebFinger {
-            cache: RwLock::new(HashMap::new()),
-            ttl: Duration::from_secs(0),
-        };
+        let wf = FediverseWebFinger::with_limits(Duration::from_secs(0), PUBKEY_CACHE_CAP);
         wf.store("k", "pem".to_owned()).await;
         assert!(wf.cached("k").await.is_none(), "zero-TTL entry is stale");
+    }
+
+    #[tokio::test]
+    async fn webfinger_cache_evicts_expired_entries_instead_of_hoarding_them() {
+        // #295: the TTL only ever gated reads — an aged-out entry stayed
+        // in the map forever, and the key is a remote-supplied keyId, so
+        // the map grew with every distinct signer ever seen.
+        let wf = FediverseWebFinger::with_limits(Duration::from_millis(30), PUBKEY_CACHE_CAP);
+        for i in 0..100 {
+            wf.store(
+                &format!("https://host{i}.example/actor#main-key"),
+                "pem".to_owned(),
+            )
+            .await;
+        }
+        assert_eq!(wf.cached_len().await, 100, "all still inside the TTL");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        wf.store("https://live.example/actor#main-key", "pem".to_owned())
+            .await;
+        assert_eq!(
+            wf.cached_len().await,
+            1,
+            "the aged-out flood is reclaimed, leaving only the fresh entry",
+        );
+    }
+
+    #[tokio::test]
+    async fn webfinger_cache_honours_its_hard_cap() {
+        // A long TTL cannot be the only bound: an attacker that keeps
+        // serving fresh actor documents would otherwise grow the map
+        // without limit inside a single TTL window.
+        let wf = FediverseWebFinger::with_limits(Duration::from_secs(3600), 8);
+        for i in 0..200 {
+            wf.store(
+                &format!("https://host{i}.example/actor#main-key"),
+                "pem".to_owned(),
+            )
+            .await;
+        }
+        assert_eq!(
+            wf.cached_len().await,
+            8,
+            "the cap holds regardless of how many distinct keyIds arrive",
+        );
     }
 
     /// Never-returning HTTP stub: the denylist poll loop's first tick

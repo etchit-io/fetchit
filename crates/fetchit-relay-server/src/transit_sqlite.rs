@@ -159,17 +159,22 @@ impl TransitStore for SqliteTransitStore {
         out
     }
 
-    fn delete(&self, to: &AgentId, ids: &[u64]) {
+    fn delete(&self, to: &AgentId, ids: &[u64]) -> usize {
         let rid: &[u8] = to.as_bytes();
         let Ok(conn) = self.conn.lock() else {
-            return;
+            return 0;
         };
+        let mut reclaimed = 0usize;
         for id in ids {
-            let _ = conn.execute(
-                "DELETE FROM transit WHERE recipient = ?1 AND id = ?2",
-                params![rid, i64::try_from(*id).unwrap_or(i64::MAX)],
+            reclaimed = reclaimed.saturating_add(
+                conn.execute(
+                    "DELETE FROM transit WHERE recipient = ?1 AND id = ?2",
+                    params![rid, i64::try_from(*id).unwrap_or(i64::MAX)],
+                )
+                .unwrap_or(0),
             );
         }
+        reclaimed
     }
 
     fn sweep_expired(&self) -> usize {
@@ -265,7 +270,8 @@ mod tests {
         let to = AgentId::from_bytes([4u8; 32]);
         let s = SqliteTransitStore::open(&path, Duration::from_secs(3600), 256, 1 << 30).unwrap();
         let id = s.enqueue(to, env()).unwrap();
-        s.delete(&to, &[id]);
+        assert_eq!(s.delete(&to, &[id]), 1, "the ack reclaimed one row");
+        assert_eq!(s.delete(&to, &[id]), 0, "re-acking reclaims nothing");
         drop(s);
         let s2 = SqliteTransitStore::open(&path, Duration::from_secs(3600), 256, 1 << 30).unwrap();
         assert!(s2.read_all(&to).is_empty());

@@ -37,6 +37,21 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// frame bounded while a long backlog streams as multiple chunks.
 const LOG_RECORDS_CHUNK: usize = 64;
 
+/// Maximum durable entries replayed into one session.
+///
+/// Replay is non-destructive and driven by connect, so a client that
+/// never acks cannot spin a redelivery loop within a session — but it
+/// can reconnect. This caps the frames one connect can be made to push
+/// independently of `transit_per_recipient`, which an operator may
+/// raise. Nothing is lost when it bites: the remainder stays stored and
+/// replays on the next connect.
+const REPLAY_BATCH_MAX: usize = 256;
+
+/// Maximum ids honoured from a single `TransitAck` frame. The wire type
+/// carries an unbounded list and each id is one indexed delete under
+/// the transit store's lock.
+const MAX_ACK_IDS_PER_FRAME: usize = 1_024;
+
 /// Interval between server-initiated WebSocket protocol pings.
 ///
 /// Cloudflare silently drops idle `WebSockets` after ~100s WITHOUT
@@ -181,7 +196,7 @@ async fn handle_socket(socket: WebSocket, auth: AuthTokenState, state: Arc<Serve
     let ReplayOutcome { delivered } =
         replay_transit(state.transit.read_all(&auth.agent_id), &tx, now_ms());
     for _ in 0..delivered {
-        state.metrics.envelope_delivered();
+        state.metrics.envelope_pushed();
     }
 
     let pong_clock = Arc::new(PongClock::new());
@@ -410,106 +425,150 @@ fn handle_client_frame(
             // Scoped to the authenticated agent: a client can only
             // reclaim durable entries addressed to itself, so a
             // malicious ack cannot evict another recipient's backlog.
-            state.transit.delete(&auth.agent_id, &acked_ids);
+            // The id list is capped because every id costs one indexed
+            // delete under the store's lock, and this arm is now on the
+            // path of every delivered envelope; a truncated ack simply
+            // redelivers the remainder on the next connect.
+            let ids = &acked_ids[..acked_ids.len().min(MAX_ACK_IDS_PER_FRAME)];
+            let reclaimed = state.transit.delete(&auth.agent_id, ids);
+            state
+                .metrics
+                .envelopes_delivered(u64::try_from(reclaimed).unwrap_or(u64::MAX));
             true
         }
-        ClientFrame::Send(SendFrame {
-            to,
-            envelope,
-            dedupe_key,
-        }) => {
-            let encoded = envelope.encoded_len().unwrap_or(usize::MAX);
-            if encoded > caps.max_envelope_bytes as usize {
-                state.metrics.throttle_envelope_too_large();
-                let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
-                    retry_after_ms: 0,
-                    reason: ThrottleReason::EnvelopeTooLarge,
-                }));
-                return true;
-            }
-            if !state
-                .ratelimit
-                .allow(&auth.agent_id, caps.max_envelopes_per_min)
-            {
-                state.metrics.throttle_per_sender();
-                let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
-                    retry_after_ms: 1_000,
-                    reason: ThrottleReason::PerSenderRate,
-                }));
-                return true;
-            }
-            if envelope.sender_agent_id != auth.agent_id {
-                return true;
-            }
-            // Accept v2 (pre-M2 sealed wire) and v3 (M2 post-cut wire)
-            // during the transition window. v3 is the only version
-            // emitted on send paths after M2; v2 stays accepted until
-            // all live peers upgrade. Anything else is silently dropped
-            // — the relay never decrypts, but it gates schema drift.
-            //
-            // Sunset date: `fetchit_relay_proto::WIRE_VERSION_V2_SUNSET`.
-            // CI fails (via the trip-wire test on that constant) once
-            // the date is past — forcing a deliberate revisit instead
-            // of letting the v2-accept window drift indefinitely.
-            if !matches!(envelope.version, 2 | 3) {
-                state.metrics.envelope_dropped_version_gate();
-                return true;
-            }
-            // Burn-down counter for the v2-accept window: bumped on
-            // every accepted legacy envelope so operators can see when
-            // the active-peer set has fully migrated and the gate can
-            // be narrowed to v3-only.
-            if envelope.version == 2 {
-                state.metrics.envelope_accepted_legacy_v2();
-            }
-
-            let direct_pushed = state.sessions.send(
-                &to,
-                ServerFrame::Deliver(Deliver {
-                    envelope: envelope.clone(),
-                    transit_seq: 0,
-                    delivered_at_ms: now_ms(),
-                }),
-            );
-            if direct_pushed {
-                state.metrics.envelope_delivered();
-            } else {
-                // T7b: a recipient that migrated away leaves a signed
-                // forwarding record behind. Buffering here would be a
-                // silent black hole — the recipient no longer reads this
-                // relay, yet the deposit would Ack — so answer `Moved`
-                // and let the SENDER re-resolve the signed record and
-                // retry at the new relay. Offline WITHOUT a forwarding
-                // record keeps today's buffer+Ack: `Moved` fires only on
-                // the unambiguous departed signal, only while the record
-                // is live (the TB2 TTL sweep bounds it), and only while
-                // the agent's own pair-record hasn't superseded it (an
-                // agent that returned home publishes a newer pair-record,
-                // which retires the stale pointer without any removal).
-                let to_hex = hex::encode(to.as_bytes());
-                if crate::forwarding::get_live_unsuperseded(state, &to_hex, now_ms()).is_some() {
-                    state.metrics.envelope_moved();
-                    let _ = self_tx.try_send(ServerFrame::Moved(Moved { dedupe_key }));
-                    return true;
-                }
-                if state.transit.enqueue(to, envelope).is_err() {
-                    state.metrics.throttle_per_recipient();
-                    let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
-                        retry_after_ms: 5_000,
-                        reason: ThrottleReason::PerRecipientCapacity,
-                    }));
-                    return true;
-                }
-                state.metrics.envelope_buffered();
-            }
-            state.metrics.envelope_sent();
-            let _ = self_tx.try_send(ServerFrame::Ack(Ack {
-                dedupe_key,
-                accepted_at_ms: now_ms(),
-            }));
+        ClientFrame::Send(send) => {
+            handle_send(state, auth, caps, self_tx, send);
             true
         }
     }
+}
+
+/// Route one `Send` deposit.
+///
+/// Gates (size cap, per-sender rate, sender-id match, wire version)
+/// run first, then the T7b `Moved` answer for a departed recipient,
+/// then durable-first routing: the envelope is stored before it is
+/// pushed so delivery stays provisional until the recipient's
+/// `TransitAck`. Always answers the depositor — `Ack`, `Moved`, or
+/// `Throttle`.
+fn handle_send(
+    state: &Arc<ServerState>,
+    auth: &AuthTokenState,
+    caps: &EffectiveCapabilities,
+    self_tx: &mpsc::Sender<ServerFrame>,
+    send: SendFrame,
+) {
+    let SendFrame {
+        to,
+        envelope,
+        dedupe_key,
+    } = send;
+    let encoded = envelope.encoded_len().unwrap_or(usize::MAX);
+    if encoded > caps.max_envelope_bytes as usize {
+        state.metrics.throttle_envelope_too_large();
+        let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+            retry_after_ms: 0,
+            reason: ThrottleReason::EnvelopeTooLarge,
+        }));
+        return;
+    }
+    if !state
+        .ratelimit
+        .allow(&auth.agent_id, caps.max_envelopes_per_min)
+    {
+        state.metrics.throttle_per_sender();
+        let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+            retry_after_ms: 1_000,
+            reason: ThrottleReason::PerSenderRate,
+        }));
+        return;
+    }
+    if envelope.sender_agent_id != auth.agent_id {
+        return;
+    }
+    // Accept v2 (pre-M2 sealed wire) and v3 (M2 post-cut wire)
+    // during the transition window. v3 is the only version
+    // emitted on send paths after M2; v2 stays accepted until
+    // all live peers upgrade. Anything else is silently dropped
+    // — the relay never decrypts, but it gates schema drift.
+    //
+    // Sunset date: `fetchit_relay_proto::WIRE_VERSION_V2_SUNSET`.
+    // CI fails (via the trip-wire test on that constant) once
+    // the date is past — forcing a deliberate revisit instead
+    // of letting the v2-accept window drift indefinitely.
+    if !matches!(envelope.version, 2 | 3) {
+        state.metrics.envelope_dropped_version_gate();
+        return;
+    }
+    // Burn-down counter for the v2-accept window: bumped on
+    // every accepted legacy envelope so operators can see when
+    // the active-peer set has fully migrated and the gate can
+    // be narrowed to v3-only.
+    if envelope.version == 2 {
+        state.metrics.envelope_accepted_legacy_v2();
+    }
+
+    // T7b: a recipient that migrated away leaves a signed
+    // forwarding record behind. Buffering here would be a
+    // silent black hole — the recipient no longer reads this
+    // relay, yet the deposit would Ack — so answer `Moved`
+    // and let the SENDER re-resolve the signed record and
+    // retry at the new relay. Offline WITHOUT a forwarding
+    // record keeps today's buffer+Ack: `Moved` fires only on
+    // the unambiguous departed signal, only while the record
+    // is live (the TB2 TTL sweep bounds it), and only while
+    // the agent's own pair-record hasn't superseded it (an
+    // agent that returned home publishes a newer pair-record,
+    // which retires the stale pointer without any removal).
+    if !state.sessions.is_online(&to) {
+        let to_hex = hex::encode(to.as_bytes());
+        if crate::forwarding::get_live_unsuperseded(state, &to_hex, now_ms()).is_some() {
+            state.metrics.envelope_moved();
+            let _ = self_tx.try_send(ServerFrame::Moved(Moved { dedupe_key }));
+            return;
+        }
+    }
+    // #327: durable FIRST, push second. A live session is not
+    // proof of reachability — a Cloudflare-idle-killed socket
+    // still accepts writes, and a writer task can die with the
+    // frame unflushed — so an envelope handed straight to a
+    // session could be counted delivered and lost. Storing
+    // before the push makes delivery provisional: the entry is
+    // reclaimed only by the recipient's `TransitAck`, and
+    // anything unacked replays on the next connect. The
+    // order also closes the race where the recipient connects
+    // and replays between the online check and the enqueue —
+    // the entry would otherwise sit unnoticed until the
+    // following connect. Cost of the same order: a recipient
+    // that registers mid-flight can see the envelope twice
+    // under one transit id, which one ack clears and the
+    // client's inbound replay guard absorbs.
+    let Ok(transit_seq) = state.transit.enqueue(to, envelope.clone()) else {
+        state.metrics.throttle_per_recipient();
+        let _ = self_tx.try_send(ServerFrame::Throttle(Throttle {
+            retry_after_ms: 5_000,
+            reason: ThrottleReason::PerRecipientCapacity,
+        }));
+        return;
+    };
+    let pushed = state.sessions.send(
+        &to,
+        ServerFrame::Deliver(Deliver {
+            envelope,
+            transit_seq,
+            delivered_at_ms: now_ms(),
+        }),
+    );
+    if pushed {
+        state.metrics.envelope_pushed();
+    } else {
+        state.metrics.envelope_buffered();
+    }
+    state.metrics.envelope_sent();
+    let _ = self_tx.try_send(ServerFrame::Ack(Ack {
+        dedupe_key,
+        accepted_at_ms: now_ms(),
+    }));
 }
 
 fn now_ms() -> u64 {
@@ -645,13 +704,14 @@ struct ReplayOutcome {
 /// still holds every entry, so this stops at the first `try_send`
 /// error (`Full` and `Closed` alike mean no further send can succeed)
 /// and the unsent remainder is simply replayed on the next connect.
+/// Bounded by [`REPLAY_BATCH_MAX`] for the same reason.
 fn replay_transit(
     stored: Vec<StoredEntry>,
     tx: &mpsc::Sender<ServerFrame>,
     delivered_at_ms: u64,
 ) -> ReplayOutcome {
     let mut delivered = 0usize;
-    for entry in stored {
+    for entry in stored.into_iter().take(REPLAY_BATCH_MAX) {
         let frame = ServerFrame::Deliver(Deliver {
             envelope: entry.envelope,
             transit_seq: entry.id,
@@ -677,8 +737,8 @@ mod tests {
     //! the client-side keepalive eventually triggers a reconnect.
     use super::{
         await_hello_inner, bearer_from_headers, replay_transit, send_log_records, writer_loop,
-        LoopExit, PongClock, HELLO_TIMEOUT, LOG_RECORDS_CHUNK, WS_OUTBOUND_CAPACITY,
-        WS_PING_INTERVAL, WS_PONG_TIMEOUT,
+        LoopExit, PongClock, HELLO_TIMEOUT, LOG_RECORDS_CHUNK, REPLAY_BATCH_MAX,
+        WS_OUTBOUND_CAPACITY, WS_PING_INTERVAL, WS_PONG_TIMEOUT,
     };
     use crate::transit::StoredEntry;
     use axum::extract::ws::Message;
@@ -901,6 +961,29 @@ mod tests {
             .unwrap();
         let outcome = replay_transit(stored_with_tags(&[1, 2, 3]), &tx, 0);
         assert_eq!(outcome.delivered, 0);
+    }
+
+    #[tokio::test]
+    async fn replay_transit_stops_at_the_per_session_batch_bound() {
+        // A client that connects and never acks keeps its backlog, so
+        // every connect replays it. One session must never be made to
+        // push more than REPLAY_BATCH_MAX frames; the remainder stays
+        // stored (replay is non-destructive) for the next connect.
+        let (tx, mut rx) = mpsc::channel::<ServerFrame>(REPLAY_BATCH_MAX * 2);
+        let stored: Vec<StoredEntry> = (1..=(REPLAY_BATCH_MAX as u64 + 50))
+            .map(|id| StoredEntry {
+                id,
+                envelope: marked_envelope(1),
+                enqueued_at_ms: 1,
+            })
+            .collect();
+        let outcome = replay_transit(stored, &tx, 0);
+        assert_eq!(outcome.delivered, REPLAY_BATCH_MAX);
+        let mut received = 0usize;
+        while rx.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, REPLAY_BATCH_MAX, "nothing beyond the bound lands");
     }
 
     #[tokio::test]

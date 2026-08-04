@@ -22,9 +22,21 @@ pub struct Metrics {
     transit_buffer_envelopes: AtomicI64,
     /// Send frames accepted into routing.
     envelopes_sent_total: AtomicU64,
-    /// Deliver frames pushed to a connected recipient.
+    /// Envelopes the recipient confirmed with a `TransitAck`, reclaiming
+    /// the durable entry. Delivery to a socket is provisional — only the
+    /// ack proves the client has the bytes — so this counts acks, not
+    /// pushes. The provisional hand-off is
+    /// [`Self::envelopes_pushed_total`].
     envelopes_delivered_total: AtomicU64,
-    /// Envelopes that went into transit because recipient was offline.
+    /// Deliver frames handed to a live session's outbound queue. A push
+    /// can still be lost (the socket may be a Cloudflare-idle-killed
+    /// corpse that accepts writes), which is why it is not the delivery
+    /// signal. `pushed - delivered` is the in-flight/un-acked backlog.
+    envelopes_pushed_total: AtomicU64,
+    /// Envelopes stored with no live push behind them — the recipient
+    /// had no session, or its outbound queue refused the frame. Every
+    /// envelope is stored; this counts the ones parked for a later
+    /// connect rather than pushed straight away.
     envelopes_buffered_total: AtomicU64,
     /// Deposits answered with `Moved` because the recipient migrated
     /// away (no live session + live forwarding record) — the T7b
@@ -80,6 +92,7 @@ impl Metrics {
             transit_buffer_envelopes: AtomicI64::new(0),
             envelopes_sent_total: AtomicU64::new(0),
             envelopes_delivered_total: AtomicU64::new(0),
+            envelopes_pushed_total: AtomicU64::new(0),
             envelopes_buffered_total: AtomicU64::new(0),
             envelopes_moved_total: AtomicU64::new(0),
             envelopes_dropped_ttl_total: AtomicU64::new(0),
@@ -118,10 +131,21 @@ impl Metrics {
         self.envelopes_sent_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Bump the delivered-envelopes counter.
-    pub fn envelope_delivered(&self) {
-        self.envelopes_delivered_total
-            .fetch_add(1, Ordering::Relaxed);
+    /// Bump the delivered-envelopes counter by `count` — called from the
+    /// `TransitAck` arm with the number of durable entries the ack
+    /// actually reclaimed, so a re-ack of an already-reclaimed id counts
+    /// nothing.
+    pub fn envelopes_delivered(&self, count: u64) {
+        if count > 0 {
+            self.envelopes_delivered_total
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    /// Bump the provisional-push counter — one per `Deliver` accepted by
+    /// a live session's outbound queue.
+    pub fn envelope_pushed(&self) {
+        self.envelopes_pushed_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Bump the buffered-envelopes counter.
@@ -253,7 +277,7 @@ impl Metrics {
     /// table. Split out of [`Self::render_prometheus`] so adding a
     /// counter doesn't push the render function over the workspace
     /// clippy too-many-lines budget.
-    fn counter_snapshot(&self) -> [(&'static str, &'static str, u64); 13] {
+    fn counter_snapshot(&self) -> [(&'static str, &'static str, u64); 14] {
         [
             (
                 "fetchit_relay_envelopes_sent_total",
@@ -262,8 +286,15 @@ impl Metrics {
             ),
             (
                 "fetchit_relay_envelopes_delivered_total",
-                "Deliver frames pushed to a connected recipient",
+                "Envelopes the recipient acked, reclaiming the durable entry \
+                 — delivery to a socket is provisional until the ack",
                 self.envelopes_delivered_total.load(Ordering::Relaxed),
+            ),
+            (
+                "fetchit_relay_envelopes_pushed_total",
+                "Deliver frames handed to a live session's outbound queue \
+                 (provisional; pushed minus delivered is the un-acked backlog)",
+                self.envelopes_pushed_total.load(Ordering::Relaxed),
             ),
             (
                 "fetchit_relay_envelopes_buffered_total",
@@ -340,7 +371,8 @@ mod tests {
         let m = Metrics::new(Region::Nyc, "fetchit-relay/0.0.1-test".to_owned());
         m.connection_opened();
         m.envelope_sent();
-        m.envelope_delivered();
+        m.envelopes_delivered(1);
+        m.envelope_pushed();
         m.throttle_per_sender();
 
         let out = m.render_prometheus();
@@ -350,6 +382,7 @@ mod tests {
             "fetchit_relay_transit_buffer_envelopes",
             "fetchit_relay_envelopes_sent_total",
             "fetchit_relay_envelopes_delivered_total",
+            "fetchit_relay_envelopes_pushed_total",
             "fetchit_relay_envelopes_buffered_total",
             "fetchit_relay_envelopes_dropped_ttl_total",
             "fetchit_relay_auth_challenges_issued_total",
@@ -432,11 +465,42 @@ mod tests {
         for _ in 0..3 {
             m.envelope_sent();
         }
-        m.envelope_delivered();
+        m.envelopes_delivered(1);
         let out = m.render_prometheus();
         assert!(out.contains("fetchit_relay_envelopes_sent_total{region=\"nyc\",version=\"x\"} 3"));
         assert!(
             out.contains("fetchit_relay_envelopes_delivered_total{region=\"nyc\",version=\"x\"} 1")
+        );
+    }
+
+    #[test]
+    fn pushing_is_not_delivering() {
+        // The counters must stay orthogonal: a push into a socket that
+        // never acks moves `pushed` only, so `pushed - delivered` reads
+        // as the un-acked backlog rather than collapsing to zero.
+        let m = Metrics::new(Region::Nyc, "p".to_owned());
+        for _ in 0..5 {
+            m.envelope_pushed();
+        }
+        m.envelopes_delivered(2);
+        let out = m.render_prometheus();
+        assert!(
+            out.contains("fetchit_relay_envelopes_pushed_total{region=\"nyc\",version=\"p\"} 5")
+        );
+        assert!(
+            out.contains("fetchit_relay_envelopes_delivered_total{region=\"nyc\",version=\"p\"} 2")
+        );
+    }
+
+    #[test]
+    fn delivered_counter_ignores_a_zero_count_ack() {
+        // A `TransitAck` naming only already-reclaimed ids reclaims
+        // nothing and must not inflate the delivery count.
+        let m = Metrics::new(Region::Nyc, "z".to_owned());
+        m.envelopes_delivered(0);
+        let out = m.render_prometheus();
+        assert!(
+            out.contains("fetchit_relay_envelopes_delivered_total{region=\"nyc\",version=\"z\"} 0")
         );
     }
 }
