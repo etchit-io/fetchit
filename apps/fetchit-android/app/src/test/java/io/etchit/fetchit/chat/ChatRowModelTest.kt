@@ -6,8 +6,14 @@ import uniffi.fetchit_ffi.FediThreadSummaryFfi
 
 class ChatRowModelTest {
 
-    private fun fedi(label: String, atMs: Long) =
-        FediThreadSummaryFfi(label = label, lastBody = "hi $label", lastAtMs = atMs, lastOutbound = false)
+    private fun fedi(label: String, atMs: Long, unread: UInt = 0u) =
+        FediThreadSummaryFfi(
+            label = label,
+            lastBody = "hi $label",
+            lastAtMs = atMs,
+            lastOutbound = false,
+            unread = unread,
+        )
 
     @Test
     fun rowsAreSortedNewestFirstAcrossAllKinds() {
@@ -40,6 +46,20 @@ class ChatRowModelTest {
         )
         assertEquals(1, rows.size)
         assertEquals("Happy", (rows[0] as ChatRow.Contact).contact.displayName)
+    }
+
+    @Test
+    fun anUnreadFirstContactKeepsItsCountOnTheRow() {
+        // The engine's unread count must survive into the row that renders
+        // the badge — it is the only signal a never-seen correspondent gets.
+        val rows = buildChatRows(
+            contacts = emptyList(),
+            groups = emptyList(),
+            groupPreview = { null },
+            contactPreview = { null },
+            fediThreads = listOf(fedi("stranger@mas.to", 100, unread = 3u)),
+        )
+        assertEquals(3u, (rows[0] as ChatRow.Fedi).summary.unread)
     }
 
     @Test
