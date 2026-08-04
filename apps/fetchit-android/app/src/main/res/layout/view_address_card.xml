@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One autonomi:// content card. Inflated under a message body or a feed
+  post, once per address the text mentions. It renders from the address
+  alone; the kind glyph, title, and size only appear after the reader
+  taps to preview (AddressCardBinder). Nothing here fetches on bind.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/addressCardRoot"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="6dp"
+    android:minWidth="220dp"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@drawable/bg_address_card"
+    android:padding="8dp"
+    android:clickable="true"
+    android:focusable="true">
+
+    <TextView
+        android:id="@+id/addressCardGlyph"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:textSize="16sp"
+        tools:text="🌐" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <!-- Title once previewed, otherwise the truncated address. -->
+        <TextView
+            android:id="@+id/addressCardTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="?attr/fetchitBone"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            tools:text="0123abcd…ef01" />
+
+        <!-- Affordance before a preview; kind · size · address after one. -->
+        <TextView
+            android:id="@+id/addressCardMeta"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:fontFamily="monospace"
+            android:textColor="?attr/fetchitAsh"
+            android:textSize="11sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            tools:text="tap to preview" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/addressCardOpen"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="6dp"
+        android:padding="6dp"
+        android:fontFamily="monospace"
+        android:textColor="?attr/fetchitCopper"
+        android:textSize="12sp"
+        android:text="@string/address_card_open"
+        android:clickable="true"
+        android:focusable="true"
+        android:background="?android:attr/selectableItemBackgroundBorderless" />
+
+</LinearLayout>

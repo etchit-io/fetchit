@@ -535,11 +535,30 @@
     <string name="chat_link_enrolled_syncing">Device linked — it will finish syncing in a moment.</string>
 
     <!-- Browse-to-chat share bridge -->
-    <string name="share_send_in_chat">send in chat</string>
-    <string name="share_no_contacts">no chat contacts yet - pair in chat mode first</string>
+    <string name="share_send_in_chat">share to chat</string>
+    <string name="share_no_contacts">no conversations yet - pair or join a group in chat mode first</string>
     <string name="share_sent_in_chat">sent</string>
     <string name="share_open_thread">open</string>
-    <string name="share_pick_contact_title">send to</string>
+    <string name="share_pick_contact_title">share to</string>
+    <string name="share_note_hint">say something about it (optional)</string>
+    <string name="share_post_to_feed">post to feed</string>
+
+    <!-- autonomi:// content cards under chat messages and feed posts -->
+    <string name="address_card_open">open ›</string>
+    <string name="address_card_tap_to_preview">tap to preview</string>
+    <string name="address_card_previewing">looking…</string>
+    <string name="address_card_failed">couldn\'t load — tap to retry</string>
+    <string name="address_card_kind_web">web page</string>
+    <string name="address_card_kind_text">text</string>
+    <string name="address_card_kind_image">image</string>
+    <string name="address_card_kind_audio">audio</string>
+    <string name="address_card_kind_video">video</string>
+    <string name="address_card_kind_pdf">pdf</string>
+    <string name="address_card_kind_data">data</string>
+    <string name="address_card_kind_table">table</string>
+    <string name="address_card_kind_archive">archive</string>
+    <string name="address_card_kind_etch">etch</string>
+    <string name="address_card_kind_binary">file</string>
     <string name="notify_channel_messages">Messages</string>
     <string name="notify_channel_background">Background connection</string>
     <string name="notify_background_title">Connected for messages</string>
