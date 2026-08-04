@@ -26,7 +26,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.fetchit_ffi.Client
 import uniffi.fetchit_ffi.FetchitException
 import uniffi.fetchit_ffi.RenditionFfi
 import uniffi.fetchit_ffi.detect
@@ -616,10 +615,9 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         renderer.clear()
         lastBinary = null
         try {
+            val peers = settingsSheet.savedPeers()
             val (rendition, bytes) = withContext(Dispatchers.IO) {
-                val client = ensureConnectedClient()
-                val b = client.fetch(addr)
-                app.bytesCache.put(addr, b)
+                val b = app.fetchAutonomiBytes(addr, peers)
                 detect(b) to b
             }
             afterRender(addr, rendition, bytes, query)
@@ -685,13 +683,6 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         backStack.clear()
         backCallback.isEnabled = false
         binding.swipeRefresh.isRefreshing = false
-    }
-
-    private suspend fun ensureConnectedClient(): Client {
-        val app = fetchitApp()
-        app.client()?.let { return it }
-        val peers = settingsSheet.savedPeers()
-        return withContext(Dispatchers.IO) { app.ensureConnected(peers) }
     }
 
     private fun setFetchInFlight(inFlight: Boolean) {
@@ -855,23 +846,37 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
      * branded PNG card, or fall back to plain-text share. Visible only
      * while content is rendered (see [`RenditionRenderer`]).
      *
-     * Passes [openThreadFromBrowse] so the dialog can surface the
-     * "send in chat" action alongside the existing share affordances.
+     * Passes the two share-out bridges so the dialog can surface "share to
+     * chat" and "post to feed" alongside the existing share affordances.
      */
     private fun onShareCurrentClicked() {
         val addr = lastFetchAddr ?: return
-        showQrPreviewDialog(this, addr, onOpenThread = ::openThreadFromBrowse)
+        showQrPreviewDialog(
+            this,
+            addr,
+            onOpenConversation = ::openConversationFromBrowse,
+            onPostToFeed = ::postToFeedFromBrowse,
+        )
     }
 
     /**
-     * Switch to chat mode and open the thread for [agentIdHex].
-     * Used as the "open" callback from the browse-to-chat share bridge
-     * (mirrors how [onOpenAutonomi] crosses the boundary in the other
-     * direction).
+     * Switch to chat mode and open the conversation the share landed in —
+     * a DM or a group, resolved from [convKey]. Used as the "open" callback
+     * from the browse-to-chat share bridge (mirrors how [onOpenAutonomi]
+     * crosses the boundary in the other direction).
      */
-    private fun openThreadFromBrowse(agentIdHex: String) {
+    private fun openConversationFromBrowse(convKey: String) {
         setMode(Mode.CHAT)
-        chatModeView.openThread(agentIdHex)
+        chatModeView.openConversationByKey(convKey)
+    }
+
+    /**
+     * Switch to chat mode and open the feed composer prefilled with [uri],
+     * so sharing a page publicly is the same two taps as sharing it privately.
+     */
+    private fun postToFeedFromBrowse(uri: String) {
+        setMode(Mode.CHAT)
+        chatModeView.composeFeedPost(uri)
     }
 
     private companion object {

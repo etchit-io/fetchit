@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import io.etchit.fetchit.chat.AddressCardStates
 import io.etchit.fetchit.chat.ChatController
 import io.etchit.fetchit.chat.MeshNetworkMonitor
 import java.io.File
@@ -92,6 +93,14 @@ open class FetchitApplication : Application() {
     val bytesCache: BytesCache by lazy {
         BytesCache(File(filesDir, "autonomi_cache"))
     }
+
+    /**
+     * State of the `autonomi://` content cards drawn under chat messages and
+     * feed posts. Process-scoped so an address the user previewed stays
+     * previewed as they scroll, leave the conversation, and come back —
+     * a preview costs one fetch, ever.
+     */
+    val addressCards: AddressCardStates by lazy { AddressCardStates() }
 
     override fun onCreate() {
         super.onCreate()

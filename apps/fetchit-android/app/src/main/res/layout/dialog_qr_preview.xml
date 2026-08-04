@@ -168,7 +168,8 @@
                 android:text="@string/qr_preview_copy_image" />
         </LinearLayout>
 
-        <!-- Send in chat — only visible when the host passes onSendInChat. -->
+        <!-- Share-out. Both only visible when the host wires the callback:
+             the bookmark surfaces have no chat or feed context. -->
         <Button
             android:id="@+id/qr_send_in_chat"
             android:layout_width="match_parent"
@@ -177,6 +178,15 @@
             android:visibility="gone"
             android:maxLines="1"
             android:text="@string/share_send_in_chat" />
+
+        <Button
+            android:id="@+id/qr_post_to_feed"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:visibility="gone"
+            android:maxLines="1"
+            android:text="@string/share_post_to_feed" />
 
         <!-- Brand footer. Matches the desktop modal's etchit.io copper accent. -->
         <TextView

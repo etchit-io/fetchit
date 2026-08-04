@@ -148,6 +148,23 @@ class ChatModeView(
 
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+    /** Draws the `autonomi://` content cards under message and post bodies.
+     *  Lazy so a session that never renders a body never builds it; the state
+     *  it reads is process-scoped, not per-screen, so a previewed address
+     *  stays previewed across conversations. */
+    private val addressCards by lazy {
+        AddressCardBinder(
+            context = context,
+            scope = lifecycleScope,
+            states = context.fetchitApp().addressCards,
+            onOpen = onOpenAutonomi,
+        )
+    }
+
+    /** Draft handed over by [composeFeedPost] (the reader's "post to feed"),
+     *  consumed by the next bind of the feed compose row. */
+    private var pendingFeedCompose: String? = null
+
     /** Decoded fediverse profile pictures, keyed by canonical `user@host`. */
     private val fediAvatars = FediAvatars(
         (AVATAR_TARGET_DP * context.resources.displayMetrics.density).toInt(),
@@ -508,6 +525,21 @@ class ChatModeView(
     /** Open the group thread for [groupId]. */
     fun openGroupThread(groupId: String) {
         showScreen(Screen.GroupThread(groupId), pushToStack = true)
+    }
+
+    /**
+     * Open the feed with [text] waiting in the composer — the public half of
+     * the reader's share-out. When there is no `@handle` yet the feed shows
+     * the mint card instead of a compose row, so the draft is held until a
+     * successful mint re-binds the composer and it lands there.
+     */
+    fun composeFeedPost(text: String) {
+        // Tab first: selecting it fires the nav listener, which re-shows the
+        // root and rebuilds the compose row. Handing over the draft after
+        // that means the composer that receives it is the one on screen.
+        tabBar.selectedItemId = R.id.tabFeed
+        pendingFeedCompose = text
+        showRoot(Screen.Feed)
     }
 
     /**
@@ -3176,6 +3208,14 @@ class ChatModeView(
         val messageInput = view.findViewById<EditText>(R.id.feedComposeInput)
         val sendButton = view.findViewById<View>(R.id.feedSendButton)
         messageInput.hint = context.getString(R.string.feed_compose_hint, handle)
+        // A draft handed over by the reader's "post to feed": drop the caret
+        // in front of the address so the first thing typed is the comment.
+        pendingFeedCompose?.let { draft ->
+            pendingFeedCompose = null
+            messageInput.setText(draft)
+            messageInput.setSelection(0)
+            messageInput.requestFocus()
+        }
         bindSendEnabled(messageInput, sendButton)
         sendButton.setOnClickListener {
             val body = messageInput.text.toString().trim()
@@ -3618,6 +3658,7 @@ class ChatModeView(
             private val sender: TextView = itemView.findViewById(R.id.messageSender)
             private val bubbleFrame: LinearLayout = itemView.findViewById(R.id.messageBubbleFrame)
             private val bubble: TextView = itemView.findViewById(R.id.messageBubble)
+            private val cards: LinearLayout = itemView.findViewById(R.id.messageCards)
             private val meta: TextView = itemView.findViewById(R.id.messageMeta)
 
             fun bindDm(
@@ -3685,6 +3726,11 @@ class ChatModeView(
                     // Clear any retry listener left by a recycled outbound bubble.
                     itemView.setOnClickListener(null)
                 }
+                // A content card per address the body mentions, on both sides
+                // of the conversation — what you shared is a thing, not a hex
+                // string. Renders from the address alone; the preview fetch
+                // only ever happens on a tap.
+                addressCards.bind(cards, msg.body)
             }
 
             fun bindPost(post: FeedPost) {
@@ -3704,6 +3750,7 @@ class ChatModeView(
                 // Feed body is plain text (HTML stripped by the pump); linkify any
                 // autonomi:// addresses so they open in the reader, like DM bubbles.
                 applyAutonomiLinkedText(bubble, post.body, onLinkTap)
+                addressCards.bind(cards, post.body)
                 // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
                 meta.text = context.getString(R.string.chat_feed_post_public_badge)
             }

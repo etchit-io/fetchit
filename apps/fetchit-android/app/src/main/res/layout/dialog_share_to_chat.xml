@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  "share to chat": an optional note, then the list of existing
+  conversations. Tapping a conversation sends and dismisses — the pick
+  IS the send, so there is no second confirm step.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="20dp"
+    android:paddingEnd="20dp"
+    android:paddingTop="8dp">
+
+    <EditText
+        android:id="@+id/shareNote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="@string/share_note_hint"
+        android:inputType="textMultiLine|textCapSentences"
+        android:maxLines="3"
+        android:textColor="?attr/fetchitBone"
+        android:textColorHint="?attr/fetchitAsh"
+        android:textSize="15sp" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp">
+
+        <LinearLayout
+            android:id="@+id/shareTargets"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </ScrollView>
+
+</LinearLayout>

@@ -45,6 +45,16 @@
             android:lineSpacingExtra="2dp"
             android:textIsSelectable="true" />
 
+        <!-- autonomi:// content cards for every address the body mentions.
+             Filled by AddressCardBinder; gone when the body has none. Each
+             card renders from the address alone — no fetch happens here. -->
+        <LinearLayout
+            android:id="@+id/messageCards"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
         <!-- Time (+ send state on outbound), bottom-end inside the bubble —
              the standard messenger placement. Always end-aligned, inbound and
              outbound alike, so the eye finds it in one place. -->
