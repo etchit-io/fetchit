@@ -70,7 +70,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
         if: env.BOT_TOKEN != ''
-        uses: contributor-assistant/github-action@v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         with:
           # Phrase a contributor types to record consent.
           custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
