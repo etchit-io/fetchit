@@ -64,8 +64,10 @@ impl OutboxStore {
     /// an empty map rather than erroring -- a damaged outbox never blocks
     /// client startup.
     ///
-    /// Bubbles sealed before send-state truth are migrated by
-    /// [`Self::migrate_legacy`] as they load.
+    /// Bubbles sealed before send-state truth are migrated as they load:
+    /// a legacy `Failed` (which meant "retry me") comes back
+    /// [`SendState::Queued`], and a legacy `Sending` splits on whether a
+    /// relay ever acked it.
     #[must_use]
     pub fn load(
         layout: &StoreLayout,

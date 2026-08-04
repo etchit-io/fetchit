@@ -4474,8 +4474,9 @@ impl Client {
     /// `/mesh/quiesce` (disconnect every mesh peer; daemon and gossip
     /// runtime stay up). Replaces the teardown-and-re-serve flip that
     /// orphaned pubsub tasks into a hot failure loop. Safe to re-assert
-    /// in the current mode. Rides the bearer [`Http`] wrapper, so the
-    /// `api.port` self-heal applies across a daemon restart.
+    /// in the current mode. Rides the bearer `Http` wrapper (crate-private,
+    /// so not linked), so the `api.port` self-heal applies across a daemon
+    /// restart.
     ///
     /// # Errors
     ///

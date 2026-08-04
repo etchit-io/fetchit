@@ -1,7 +1,7 @@
 //! Fold live outbox state onto a persisted transcript.
 //!
-//! A conversation's [`HistoryEntry`](crate::conversation::HistoryEntry)
-//! records what was true when the entry was written; the outbox records
+//! A conversation's [`HistoryEntry`] records what was true when the entry
+//! was written; the outbox records
 //! what is true now for every copy still in flight. A listing that showed
 //! only the former would keep claiming "sent" for a group message whose
 //! copies are back in the queue after a relay outage.
