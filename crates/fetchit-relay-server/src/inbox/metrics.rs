@@ -16,6 +16,13 @@ use dashmap::DashMap;
 
 use super::DropReason;
 
+/// Maximum distinct `instance` labels the rate-limit counter family may
+/// carry. A scrape target's series count is a shared resource — both
+/// relay RAM and the collector's — and this label is remote-chosen, so
+/// it needs a ceiling rather than an assumption. Overflow is counted,
+/// not discarded.
+pub const RATE_LIMITED_INSTANCE_CAP: usize = 1_024;
+
 /// Atomic counter family backing the inbox Prom metrics.
 ///
 /// Construct via [`Self::new`] (zero-valued) and share a single
@@ -37,10 +44,16 @@ pub struct InboxMetrics {
     dropped_missing_keyid: AtomicU64,
     dropped_sink_rejected: AtomicU64,
 
-    // Per-source-instance rate-limit hits. `instance` is `host[:port]`
-    // — bounded by the unique sender set we receive from. Community
-    // relays see 10s-100s of instances; not a cardinality risk.
+    // Per-source-instance rate-limit hits. `instance` is `host[:port]`,
+    // taken from the signing keyId — remote-chosen, so the honest
+    // 10s-100s of real peers is not a bound anything enforces. Capped
+    // at RATE_LIMITED_INSTANCE_CAP distinct labels; past that, hits
+    // land in `dropped_rate_limited_overflow` so the total stays
+    // truthful while the series count cannot grow (#295).
     dropped_rate_limited: DashMap<String, AtomicU64>,
+
+    // Rate-limit drops from instances beyond the label cap.
+    dropped_rate_limited_overflow: AtomicU64,
 
     // Per-`SignatureVerifyError::reason_label` — bounded to the 4
     // static-string slots in fetchit-fedi.
@@ -95,10 +108,7 @@ impl InboxMetrics {
                 self.dropped_sink_rejected.fetch_add(1, Ordering::Relaxed);
             }
             DropReason::RateLimited(instance) => {
-                self.dropped_rate_limited
-                    .entry(instance.clone())
-                    .or_default()
-                    .fetch_add(1, Ordering::Relaxed);
+                self.record_rate_limited(instance);
             }
             DropReason::SigFail(reason_label) => {
                 self.dropped_sig_fail
@@ -113,6 +123,41 @@ impl InboxMetrics {
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Bump the per-instance rate-limit counter, holding the label set
+    /// to [`RATE_LIMITED_INSTANCE_CAP`].
+    ///
+    /// An instance already carrying a label always increments its own
+    /// series, so a real peer never silently stops being counted once
+    /// the cap is reached; only labels that would be NEW spill into the
+    /// overflow counter.
+    fn record_rate_limited(&self, instance: &str) {
+        if let Some(counter) = self.dropped_rate_limited.get(instance) {
+            counter.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if self.dropped_rate_limited.len() >= RATE_LIMITED_INSTANCE_CAP {
+            self.dropped_rate_limited_overflow
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.dropped_rate_limited
+            .entry(instance.to_owned())
+            .or_default()
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Snapshot of rate-limit drops from instances past the label cap.
+    #[must_use]
+    pub fn rate_limited_overflow_count(&self) -> u64 {
+        self.dropped_rate_limited_overflow.load(Ordering::Relaxed)
+    }
+
+    /// Number of distinct instance labels currently carried.
+    #[must_use]
+    pub fn rate_limited_label_count(&self) -> usize {
+        self.dropped_rate_limited.len()
     }
 
     /// Snapshot value of `fedi_inbox_accepted_total`.
@@ -246,6 +291,12 @@ impl InboxMetrics {
                 entry.value().load(Ordering::Relaxed)
             );
         }
+        emit_scalar(
+            &mut out,
+            "fedi_inbox_dropped_rate_limited_overflow_total",
+            "Rate-limit drops from source instances past the label cap, counted without a label.",
+            self.dropped_rate_limited_overflow.load(Ordering::Relaxed),
+        );
 
         // Per-reason sig-fail counter.
         let _ = writeln!(
@@ -338,6 +389,47 @@ mod tests {
         let m = InboxMetrics::new();
         assert_eq!(m.accepted_total(), 0);
         assert_eq!(m.scalar_drops(), ScalarDropSnapshot::default());
+    }
+
+    #[test]
+    fn rate_limited_label_set_is_capped_and_overflow_stays_counted() {
+        // #295: `instance` comes from the signing keyId, so the label
+        // set is remote-chosen. Unbounded, it grows the map AND the
+        // scrape's series count for as long as the process lives.
+        let m = InboxMetrics::new();
+        for i in 0..(RATE_LIMITED_INSTANCE_CAP + 300) {
+            m.record_drop(&DropReason::RateLimited(format!("host-{i}.example")));
+        }
+        assert_eq!(
+            m.rate_limited_label_count(),
+            RATE_LIMITED_INSTANCE_CAP,
+            "the label set must stop growing at the cap",
+        );
+        assert_eq!(
+            m.rate_limited_overflow_count(),
+            300,
+            "drops past the cap are counted without a label, not lost",
+        );
+        assert!(m
+            .render_prometheus()
+            .contains("fedi_inbox_dropped_rate_limited_overflow_total 300"));
+    }
+
+    #[test]
+    fn an_instance_already_labelled_keeps_counting_past_the_cap() {
+        // A real peer that earned a label before a flood must not stop
+        // being counted because the cap has since been reached.
+        let m = InboxMetrics::new();
+        m.record_drop(&DropReason::RateLimited("real.example".into()));
+        for i in 0..(RATE_LIMITED_INSTANCE_CAP + 50) {
+            m.record_drop(&DropReason::RateLimited(format!("flood-{i}.example")));
+        }
+        m.record_drop(&DropReason::RateLimited("real.example".into()));
+        assert_eq!(
+            m.rate_limited_count("real.example"),
+            2,
+            "an existing label always increments its own series",
+        );
     }
 
     #[test]
