@@ -13,9 +13,10 @@ function outboxEvent(
   return {
     peer: PEER,
     body: "hi",
-    status: "Sending",
+    status: "Queued",
     message_id: null,
     enqueued_at_ms: 1,
+    state_changed_at_ms: 1,
     last_error: null,
     ...over,
   };
@@ -342,23 +343,23 @@ describe("ChatStore — outbox projection (applyOutboxEvent)", () => {
     expect(b.failureReason).toBe("peer unreachable");
   });
 
-  it("clears failureReason when a failed bubble re-enters sending (retry)", () => {
+  it("clears failureReason when a failed bubble re-enters the queue (retry)", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
     s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Failed", last_error: "boom" }));
-    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Sending" }));
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Queued" }));
     const b = s.conversationsSorted()[0].messages[0];
     expect(b.status).toBe("sending");
     expect(b.failureReason).toBeUndefined();
   });
 
-  it("delivered-guard: a stale Sending event never downgrades a delivered bubble", () => {
+  it("delivered-guard: a stale Queued event never downgrades a delivered bubble", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
     s.applyOutboxEvent(
       outboxEvent({ id: "o1", status: "Delivered", message_id: "m9" }),
     );
-    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Sending" }));
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Queued" }));
     expect(s.conversationsSorted()[0].messages[0].status).toBe("delivered");
   });
 
@@ -392,7 +393,7 @@ describe("ChatStore — outbox projection (applyOutboxEvent)", () => {
     const s = new ChatStore();
     s.setIdentity({ agent_id: ME, machine_id: "m" });
     s.stageOutboundMeta(PEER, { attachment: ATT });
-    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Sending" }));
+    s.applyOutboxEvent(outboxEvent({ id: "o1", status: "Queued" }));
     s.applyOutboxEvent(
       outboxEvent({ id: "o1", status: "Delivered", message_id: "m9" }),
     );

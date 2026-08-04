@@ -79,9 +79,15 @@ export interface OutboxBubbleDto {
   id: string;
   peer: AgentId;
   body: string;
-  status: "Sending" | "Delivered" | "Failed";
+  /// Engine `SendState`, serialized by variant name. "Queued" means the
+  /// engine is still retrying -- never a failure, however long it sits;
+  /// "Failed" is terminal only.
+  status: "Queued" | "Sent" | "Delivered" | "Failed";
   message_id?: string | null;
   enqueued_at_ms: number;
+  /// Unix-ms of the last `status` transition; its age is what a "still
+  /// sending" affordance measures.
+  state_changed_at_ms: number;
   last_error?: string | null;
 }
 
