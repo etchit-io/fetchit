@@ -10,7 +10,7 @@ use std::process::Command;
 /// upstream x0x 0.34.3 (which absorbed the 0.29-era fork tail — re-key,
 /// actor-authz `committed_by`, `GET /secure/self`) plus the short engine-A
 /// tail on the `engine-a-34` branch: relay-delivered group-join apply
-/// endpoints for gossip-isolated peers and the TreeKEM join-retry
+/// endpoints for gossip-isolated peers and the `TreeKEM` join-retry
 /// convergence fixes. The bundled daemon and the Android embed (fetchit-ffi
 /// `x0x` git pin) move together on this rev.
 const X0XD_PIN_VERSION: &str = "0.34.3";

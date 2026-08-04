@@ -3268,6 +3268,7 @@ dependencies = [
  "fetchit-relay-proto",
  "fetchit-trust",
  "fetchit-trust-client",
+ "fetchit-trust-types",
  "fetchit-words",
  "flate2",
  "futures-util",
