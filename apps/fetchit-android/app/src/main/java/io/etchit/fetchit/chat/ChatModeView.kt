@@ -147,6 +147,112 @@ class ChatModeView(
 
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+    /** Decoded fediverse profile pictures, keyed by canonical `user@host`. */
+    private val fediAvatars = FediAvatars(
+        (AVATAR_TARGET_DP * context.resources.displayMetrics.density).toInt(),
+    )
+
+    // ── fediverse avatars ──────────────────────────────────────────────
+
+    /**
+     * Paint [label]'s fediverse profile picture into [target] as a circle,
+     * or leave the row exactly as it was when there is nothing to paint.
+     *
+     * Purely additive: the caller has already bound its placeholder (the 🌐
+     * rail glyph, a monogram, a plain text line), and this either replaces
+     * nothing or adds a circle beside it. Bytes come from the engine's
+     * SSRF-guarded cache; a miss quietly asks the engine to fetch in the
+     * background, so the next bind of the same row can succeed.
+     */
+    private fun bindFediAvatar(target: ImageView, label: String) {
+        // Recycled holders must never show the previous row's face.
+        target.setImageDrawable(null)
+        target.visibility = View.GONE
+        if (label.isBlank()) return
+        val key = FediAvatars.key(label)
+        target.tag = key
+
+        fediAvatars.cached(label)?.let { showCircle(target, key, it); return }
+
+        val now = System.currentTimeMillis()
+        if (!fediAvatars.shouldQuery(label, now)) return
+        lifecycleScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
+            }
+            val bmp = fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
+                ?: return@launch
+            showCircle(target, key, bmp)
+        }
+    }
+
+    /**
+     * A GONE-by-default circular avatar slot sized for a People/Feed row,
+     * already bound to [label]. Handed straight to `addView`.
+     */
+    private fun fediAvatarSlot(label: String, sizeDp: Int): ImageView {
+        val density = context.resources.displayMetrics.density
+        val px = (sizeDp * density).toInt()
+        return ImageView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(px, px).apply {
+                marginEnd = (8 * density).toInt()
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            bindFediAvatar(this, label)
+        }
+    }
+
+    /** Draw [bmp] circular, but only if [target] still belongs to [key]. */
+    private fun showCircle(target: ImageView, key: String, bmp: android.graphics.Bitmap) {
+        if (target.tag != key) return
+        target.setImageDrawable(circleOf(bmp))
+        target.visibility = View.VISIBLE
+    }
+
+    /**
+     * Put [label]'s avatar inline, ahead of [target]'s text, as a compound
+     * drawable.
+     *
+     * Feed posts render as bubbles whose author line is a plain `TextView`;
+     * a compound drawable adds the face without restructuring the message
+     * row (and without disturbing the sender label's own show/hide logic).
+     */
+    private fun bindFediAvatarInline(target: TextView, label: String, sizeDp: Int) {
+        target.setCompoundDrawablesRelative(null, null, null, null)
+        if (label.isBlank()) return
+        val key = FediAvatars.key(label)
+        target.setTag(R.id.messageSender, key)
+
+        fediAvatars.cached(label)?.let { showInline(target, key, it, sizeDp); return }
+
+        val now = System.currentTimeMillis()
+        if (!fediAvatars.shouldQuery(label, now)) return
+        lifecycleScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
+            }
+            val bmp = fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
+                ?: return@launch
+            showInline(target, key, bmp, sizeDp)
+        }
+    }
+
+    private fun showInline(target: TextView, key: String, bmp: android.graphics.Bitmap, sizeDp: Int) {
+        if (target.getTag(R.id.messageSender) != key) return
+        val density = context.resources.displayMetrics.density
+        val px = (sizeDp * density).toInt()
+        val round = circleOf(bmp)
+        round.setBounds(0, 0, px, px)
+        target.setCompoundDrawablesRelative(round, null, null, null)
+        target.compoundDrawablePadding = (6 * density).toInt()
+    }
+
+    private fun circleOf(bmp: android.graphics.Bitmap) =
+        androidx.core.graphics.drawable.RoundedBitmapDrawableFactory
+            .create(context.resources, bmp)
+            .apply { isCircular = true }
+
     // ── public entry points ────────────────────────────────────────────
 
     /**
@@ -990,6 +1096,7 @@ class ChatModeView(
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
+                row.addView(fediAvatarSlot(e.label, PEOPLE_AVATAR_DP))
                 row.addView(TextView(context).apply {
                     text = if (e.state == "accepted") {
                         atHandle
@@ -2631,6 +2738,7 @@ class ChatModeView(
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
+                row.addView(fediAvatarSlot(e.label, PEOPLE_AVATAR_DP))
                 row.addView(TextView(context).apply {
                     text = if (e.state == "accepted") {
                         atHandle
@@ -2700,7 +2808,13 @@ class ChatModeView(
                         followersBox.addView(line(context.getString(R.string.fedi_people_followers_empty)))
                     } else {
                         followers.forEach { f ->
-                            followersBox.addView(line(context.getString(R.string.fedi_handle_at, f)))
+                            val row = android.widget.LinearLayout(context).apply {
+                                orientation = android.widget.LinearLayout.HORIZONTAL
+                                gravity = android.view.Gravity.CENTER_VERTICAL
+                            }
+                            row.addView(fediAvatarSlot(f, PEOPLE_AVATAR_DP))
+                            row.addView(line(context.getString(R.string.fedi_handle_at, f)))
+                            followersBox.addView(row)
                         }
                     }
                 },
@@ -2799,6 +2913,7 @@ class ChatModeView(
         val convKey = ConversationStore.convKeyFedi(handle)
 
         view.findViewById<TextView>(R.id.threadPeerName).text = handle
+        bindFediAvatar(view.findViewById(R.id.threadPeerAvatar), handle)
         view.findViewById<TextView>(R.id.threadPeerShortId).apply {
             text = context.getString(R.string.chat_fedi_thread_sub)
             setTextColor(themeColor(R.attr.fetchitAsh))
@@ -3415,6 +3530,10 @@ class ChatModeView(
                 onLinkTap: (String) -> Unit,
                 prevSenderAgentIdHex: String?,
             ) {
+                // A recycled feed row must not leak its author's face onto a
+                // LIT message: LIT has no avatar concept.
+                sender.setCompoundDrawablesRelative(null, null, null, null)
+                sender.setTag(R.id.messageSender, null)
                 if (msg.outbound) {
                     // Self keeps the copper out-bubble; the who-is-who accent is
                     // inbound-only, so no sender label or identity tint here.
@@ -3478,8 +3597,12 @@ class ChatModeView(
                 // body-asserted actor), formatted as a readable @user@domain in
                 // the fediverse (copper) hue.
                 sender.visibility = View.VISIBLE
-                sender.text = fediActorDisplay(post.actorUrl)
+                val display = fediActorDisplay(post.actorUrl)
+                sender.text = display
                 sender.setTextColor(themeColor(R.attr.fetchitCopper))
+                // `fediActorDisplay` renders "@user@host"; the engine keys
+                // avatars on the bare canonical label.
+                bindFediAvatarInline(sender, display, PEOPLE_AVATAR_DP)
                 bubbleFrame.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
@@ -3627,6 +3750,7 @@ class ChatModeView(
     }
 
     private inner class FediViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        private val avatar: ImageView = itemView.findViewById(R.id.contactAvatar)
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
@@ -3637,8 +3761,10 @@ class ChatModeView(
             summary: uniffi.fetchit_ffi.FediThreadSummaryFfi,
             onTap: (String) -> Unit,
         ) {
-            // A globe marks the open-fediverse (not-encrypted) rail.
+            // A globe marks the open-fediverse (not-encrypted) rail. It stays
+            // put whether or not a profile picture lands beside it.
             shortId.text = "🌐"
+            bindFediAvatar(avatar, summary.label)
             name.text = summary.label
             preview.text = summary.lastBody
             // Unread messages from someone who has never been replied to are
@@ -3734,5 +3860,15 @@ class ChatModeView(
         // section divider.
         private const val VIEW_MESSAGE = 0
         private const val VIEW_DIVIDER = 1
+
+        // Target edge for a decoded avatar. Matches the 36dp row circle with
+        // headroom for a denser thread/People row; inSampleSize only halves,
+        // so decoding to this and letting the ImageView scale down beats
+        // decoding per-surface.
+        private const val AVATAR_TARGET_DP = 96
+
+        // Avatar edge on the People rows and feed post rows — smaller than
+        // the 36dp chat-list circle so a dense list stays scannable.
+        private const val PEOPLE_AVATAR_DP = 28
     }
 }

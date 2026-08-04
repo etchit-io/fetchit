@@ -1825,6 +1825,41 @@ impl ChatClient {
             .collect())
     }
 
+    /// Cached avatar image bytes for the fediverse correspondent `label`
+    /// (`user@host`), or `None` when nothing is cached yet.
+    ///
+    /// Bytes are the image exactly as the remote server served it — one of
+    /// JPEG / PNG / WebP / GIF, capped at 512 KiB, fetched through the
+    /// fediverse SSRF guard. The engine never decodes them; the shell
+    /// decodes with its platform decoder, bounds-checked.
+    ///
+    /// A `None` is not final: it kicks off a background fetch (subject to a
+    /// 24h refresh window and a 1h failure backoff), so a later call for the
+    /// same label can succeed. Nothing here blocks — an avatar is decoration,
+    /// and every fedi surface must render identically without one.
+    pub fn fedi_avatar(&self, label: String) -> Option<Vec<u8>> {
+        if let Some(bytes) = self.inner.fedi_avatar_cached(&label) {
+            return Some(bytes);
+        }
+        // Kotlin calls this from the UI thread, which has no ambient tokio
+        // runtime -- enter the captured handle so the spawn has a reactor
+        // (same reason start_outbox / retry_outbox do).
+        let _guard = self.rt_handle.enter();
+        let client = self.inner.clone();
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX);
+        tokio::spawn(async move {
+            if let Err(e) = client.refresh_fedi_avatar(&label, now_ms).await {
+                log::debug!("[chat_ffi] avatar refresh for {label} failed: {e}");
+            }
+        });
+        None
+    }
+
     /// Mark the fediverse DM thread with `label` read up to its newest
     /// message: the row's unread count clears, durably (the mark is
     /// sealed alongside the messages). Returns `true` when the mark

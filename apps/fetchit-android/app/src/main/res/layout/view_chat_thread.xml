@@ -33,6 +33,17 @@
             android:insetBottom="0dp"
             android:contentDescription="@string/thread_back_desc" />
 
+        <!-- Fediverse correspondent's profile picture. GONE on DM and group
+             headers, and on a fedi header with no cached avatar. -->
+        <ImageView
+            android:id="@+id/threadPeerAvatar"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="8dp"
+            android:scaleType="centerCrop"
+            android:visibility="gone"
+            android:importantForAccessibility="no" />
+
         <TextView
             android:id="@+id/threadPeerName"
             android:layout_width="0dp"
