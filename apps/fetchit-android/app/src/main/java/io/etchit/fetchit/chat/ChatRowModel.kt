@@ -14,10 +14,22 @@ sealed interface ChatRow {
     val sortMs: Long
 
     /** A private (PQ) direct message thread. */
-    data class Contact(val contact: ChatContact, val preview: String, override val sortMs: Long) : ChatRow
+    data class Contact(
+        val contact: ChatContact,
+        val preview: String,
+        override val sortMs: Long,
+        /** Inbound messages since the thread was last opened; 0 renders no badge. */
+        val unread: Int = 0,
+    ) : ChatRow
 
     /** A private/public group thread. */
-    data class Group(val group: GroupFfi, val preview: String, override val sortMs: Long) : ChatRow
+    data class Group(
+        val group: GroupFfi,
+        val preview: String,
+        override val sortMs: Long,
+        /** Inbound messages since the thread was last opened; 0 renders no badge. */
+        val unread: Int = 0,
+    ) : ChatRow
 
     /** A fediverse (plaintext-rails) DM thread. */
     data class Fedi(val summary: FediThreadSummaryFfi, override val sortMs: Long) : ChatRow
@@ -31,6 +43,11 @@ sealed interface ChatRow {
  * live [ConversationStore]. A source with no messages sorts oldest
  * (stamp 0) rather than being dropped, so a brand-new contact/group
  * still shows.
+ *
+ * [litUnread] maps a conversation key to the engine's unread count for
+ * private DMs and groups (fediverse rows carry theirs on their own
+ * summary). A key that is absent is not-yet-known, which renders as no
+ * badge rather than a guess.
  */
 fun buildChatRows(
     contacts: List<ChatContact>,
@@ -39,15 +56,18 @@ fun buildChatRows(
     contactPreview: (convKey: String) -> Pair<String, Long>?,
     fediThreads: List<FediThreadSummaryFfi>,
     linkedFediLabels: Set<String> = emptySet(),
+    litUnread: Map<String, Int> = emptyMap(),
 ): List<ChatRow> {
     val rows = ArrayList<ChatRow>(contacts.size + groups.size + fediThreads.size)
     groups.forEach { g ->
-        val (body, ms) = groupPreview(ConversationStore.convKeyGroup(g.groupId)) ?: ("" to 0L)
-        rows.add(ChatRow.Group(g, body, ms))
+        val key = ConversationStore.convKeyGroup(g.groupId)
+        val (body, ms) = groupPreview(key) ?: ("" to 0L)
+        rows.add(ChatRow.Group(g, body, ms, litUnread[key] ?: 0))
     }
     contacts.forEach { c ->
-        val (body, ms) = contactPreview(ConversationStore.convKeyDm(c.agentIdHex)) ?: ("" to 0L)
-        rows.add(ChatRow.Contact(c, body, ms))
+        val key = ConversationStore.convKeyDm(c.agentIdHex)
+        val (body, ms) = contactPreview(key) ?: ("" to 0L)
+        rows.add(ChatRow.Contact(c, body, ms, litUnread[key] ?: 0))
     }
     // A fediverse thread linked to a PQ contact is suppressed — its
     // contact row (🔒) already represents the person, merged in the thread.

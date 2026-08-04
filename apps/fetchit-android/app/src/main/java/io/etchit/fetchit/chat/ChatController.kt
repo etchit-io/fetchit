@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -102,6 +103,19 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      */
     val fediThreads: StateFlow<List<uniffi.fetchit_ffi.FediThreadSummaryFfi>> =
         _fediThreads.asStateFlow()
+
+    private val _litUnread = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /**
+     * Unread counts for private (LIT) conversations, keyed by shell
+     * conversation key ([ConversationStore.convKeyDm] /
+     * [ConversationStore.convKeyGroup]). The engine owns the read marks —
+     * this is a projection of them, refreshed by [refreshUnread] /
+     * [refreshAllUnread] and cleared for one conversation by
+     * [markConversationRead]. Fediverse rows carry their own count on
+     * [fediThreads] and are absent from this map.
+     */
+    val litUnread: StateFlow<Map<String, Int>> = _litUnread.asStateFlow()
 
     private val _personLinks =
         MutableStateFlow<List<uniffi.fetchit_ffi.FediPersonLinkFfi>>(emptyList())
@@ -349,7 +363,22 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                         _pumpState.value =
                             if (error) PumpState.STOPPED_ERROR else PumpState.STOPPED_CLEAN
                     },
-                    onInbound = { inbound -> inboundSink?.invoke(inbound) },
+                    onInbound = { inbound ->
+                        // Notification delivery first, always: the unread
+                        // projection is a bystander on this tap.
+                        inboundSink?.invoke(inbound)
+                        // Badge the row the moment the message lands rather
+                        // than on the next connect. One conversation only —
+                        // the pump fires per message.
+                        //
+                        // Skipped for the thread on screen: that view marks
+                        // itself read as it renders, and a refresh racing
+                        // that mark could leave a badge on a conversation
+                        // the user is looking at.
+                        if (inbound.convKey != visibleConvKey) {
+                            scope.launch { refreshUnread(inbound.convKey) }
+                        }
+                    },
                 )
                 // Durable-join resume pump: advance any pending join on a timer so a
                 // join that could not converge now (owner offline) auto-completes
@@ -366,6 +395,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                 // Hydrate known contacts' DM threads from the persisted vault so the
                 // list shows previews and threads are not empty on reopen.
                 hydrateContacts(gw)
+                // Now that groups and contacts are known, paint their unread
+                // badges from the engine's durable read marks — messages that
+                // landed while the app was closed are exactly what they say.
+                refreshAllUnread()
                 // Surface the connect-time pair-record publish outcome. On Android
                 // its failure is otherwise invisible (fetchit_chat log records do not
                 // reach logcat), so a relay/TLS failure would look like a phantom
@@ -468,6 +501,48 @@ class ChatController(private val appContext: Context, private val scope: Corouti
         val gw = gateway ?: return
         val moved = runCatching { gw.fediMarkThreadRead(label) }.getOrDefault(false)
         if (moved) refreshFediThreads()
+    }
+
+    /**
+     * Re-read one private conversation's unread count from the engine into
+     * [litUnread]. Quiet on failure (leaves the last value) and a no-op
+     * without a connected gateway — a badge that lags is a far smaller harm
+     * than a crash on an inbound message.
+     */
+    suspend fun refreshUnread(convKey: String) {
+        val gw = gateway ?: return
+        val n = runCatching { gw.conversationUnread(convKey).toInt() }.getOrNull() ?: return
+        // Atomic: the inbound pump and the list refresh both write this map.
+        _litUnread.update { it + (convKey to n) }
+    }
+
+    /**
+     * Re-read the unread count for every known contact DM and group. Called
+     * on connect (after the transcripts hydrate) and on entering the Chats
+     * list, so the badges paint from the engine's marks rather than from
+     * whatever this process happened to observe live.
+     */
+    suspend fun refreshAllUnread() {
+        if (gateway == null) return
+        for (c in contacts.contacts.value) {
+            refreshUnread(ConversationStore.convKeyDm(c.agentIdHex))
+        }
+        for (g in _groups.value) {
+            refreshUnread(ConversationStore.convKeyGroup(g.groupId))
+        }
+    }
+
+    /**
+     * Mark the private conversation [convKey] read (the engine persists the
+     * mark), then re-read its count so the row's badge clears immediately.
+     * The re-read rather than an assumed zero is deliberate: a message can
+     * land between the mark and this line, and the engine is the truth.
+     * Quiet on failure.
+     */
+    suspend fun markConversationRead(convKey: String) {
+        val gw = gateway ?: return
+        val moved = runCatching { gw.conversationMarkRead(convKey) }.getOrDefault(false)
+        if (moved) refreshUnread(convKey)
     }
 
     /**

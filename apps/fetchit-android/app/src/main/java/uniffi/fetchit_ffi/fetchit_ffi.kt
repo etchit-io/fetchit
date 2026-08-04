@@ -851,6 +851,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -888,6 +894,10 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_ban_member(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_mark_read(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_unread(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_group(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_link_offer(
@@ -921,6 +931,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mark_thread_read(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
 ): Short
@@ -1055,6 +1067,10 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_ban_member(`ptr`: Pointer,`groupId`:
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_history(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_mark_read(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_unread(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_group(`ptr`: Pointer,`name`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,`private`: Byte,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_link_offer(`ptr`: Pointer,`ttlSecs`: Long,
@@ -1088,6 +1104,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_link_person(`ptr`: Pointer,`tar
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_linked_label_for_agent(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mark_thread_read(`ptr`: Pointer,`label`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
@@ -1338,6 +1356,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history() != 28009.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_mark_read() != 49638.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_unread() != 12012.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_group() != 1975.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1353,7 +1377,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once() != 45686.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 61912.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 2558.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 19997.toShort()) {
@@ -1387,6 +1411,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mark_thread_read() != 7906.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 43138.toShort()) {
@@ -1479,7 +1506,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_set_mesh_active() != 61996.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 25178.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_start_outbox() != 39356.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_client_fetch() != 41047.toShort()) {
@@ -2021,6 +2048,44 @@ public interface ChatClientInterface {
     suspend fun `conversationHistory`(`convKey`: kotlin.String): List<ChatHistoryMessageFfi>
     
     /**
+     * Mark the conversation `conv_key` names read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed into the same vault file as the transcript). Returns `true`
+     * when the mark moved, so a caller can skip a redundant refresh.
+     *
+     * A conversation that does not exist yet, or an `f:` fediverse key
+     * (see [`Self::conversation_unread`]), is a quiet `false`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / seal failure.
+     */
+    suspend fun `conversationMarkRead`(`convKey`: kotlin.String): kotlin.Boolean
+    
+    /**
+     * Messages waiting in the conversation `conv_key` names -- the count
+     * its row in the chat list badges.
+     *
+     * Same key scheme as [`Self::conversation_history`], and the same
+     * resolution: a `g:`-prefixed group id is a direct lookup, a bare
+     * 64-hex peer id resolves that peer's current DM. Counting rides the
+     * engine's durable read mark, so a badge survives a process kill and
+     * clears only when [`Self::conversation_mark_read`] runs.
+     *
+     * An unknown or not-yet-persisted conversation is `0`, never an
+     * error. So is an `f:` fediverse key: those rows carry their unread
+     * count on [`FediThreadSummaryFfi`] already and clear through
+     * [`Self::fedi_mark_thread_read`].
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / AEAD / parse failure.
+     */
+    suspend fun `conversationUnread`(`convKey`: kotlin.String): kotlin.UInt
+    
+    /**
      * Create a group. `private=true` is the PQ MLS/`TreeKEM` path
      * (the default the UI offers); `false` is a plaintext public room.
      *
@@ -2087,12 +2152,9 @@ public interface ChatClientInterface {
     
     /**
      * Enqueue an outbound DM through the durable outbox: persist a
-     * `Queued` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
-     * optimistic echo, then send. Later states (`Sent` on the relay's ack,
-     * `Delivered` on the recipient's receipt) arrive as further `Outbox`
-     * events keyed by the returned bubble id. A send that fails for a
-     * reason a retry could fix stays `Queued` -- the shell must not
-     * render that as a failure.
+     * `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+     * optimistic echo, then send. The terminal state (Delivered/Failed)
+     * arrives as a later `Outbox` event keyed by the returned bubble id.
      *
      * Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
      * outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
@@ -2233,6 +2295,19 @@ public interface ChatClientInterface {
      * returned as a `NotFound` card, not an error.
      */
     suspend fun `fediLookup`(`handle`: kotlin.String): LookupFfi
+    
+    /**
+     * Mark the fediverse DM thread with `label` read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed alongside the messages). Returns `true` when the mark
+     * moved. A device with no minted handle has no threads and returns
+     * `false` rather than erroring, mirroring
+     * [`Self::fedi_threads_overview`].
+     *
+     * # Errors
+     * [`ChatFfiError`] on a thread-store load/save failure.
+     */
+    suspend fun `fediMarkThreadRead`(`label`: kotlin.String): kotlin.Boolean
     
     /**
      * Opt in to public posting: mint the actor identity for `handle` (with
@@ -2628,10 +2703,9 @@ public interface ChatClientInterface {
     suspend fun `setMeshActive`(`active`: kotlin.Boolean)
     
     /**
-     * Start the background outbox retry driver: re-sends queued/unacked
-     * bubbles on relay reconnect, reclaims stalled send claims (at boot
-     * and periodically -- never turning a queued message into a failed
-     * one), and services [`ChatClient::retry_outbox`]. Call once after `connect`,
+     * Start the background outbox retry driver: re-sends failed/unacked
+     * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
+     * services [`ChatClient::retry_outbox`]. Call once after `connect`,
      * passing the user's display name (used for body-only resends, so it
      * should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
      * Calling again aborts the previous driver before starting a new one.
@@ -2845,6 +2919,82 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Mark the conversation `conv_key` names read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed into the same vault file as the transcript). Returns `true`
+     * when the mark moved, so a caller can skip a redundant refresh.
+     *
+     * A conversation that does not exist yet, or an `f:` fediverse key
+     * (see [`Self::conversation_unread`]), is a quiet `false`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / seal failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `conversationMarkRead`(`convKey`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_conversation_mark_read(
+                thisPtr,
+                FfiConverterString.lower(`convKey`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Messages waiting in the conversation `conv_key` names -- the count
+     * its row in the chat list badges.
+     *
+     * Same key scheme as [`Self::conversation_history`], and the same
+     * resolution: a `g:`-prefixed group id is a direct lookup, a bare
+     * 64-hex peer id resolves that peer's current DM. Counting rides the
+     * engine's durable read mark, so a badge survives a process kill and
+     * clears only when [`Self::conversation_mark_read`] runs.
+     *
+     * An unknown or not-yet-persisted conversation is `0`, never an
+     * error. So is an `f:` fediverse key: those rows carry their unread
+     * count on [`FediThreadSummaryFfi`] already and clear through
+     * [`Self::fedi_mark_thread_read`].
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / AEAD / parse failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `conversationUnread`(`convKey`: kotlin.String) : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_conversation_unread(
+                thisPtr,
+                FfiConverterString.lower(`convKey`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Create a group. `private=true` is the PQ MLS/`TreeKEM` path
      * (the default the UI offers); `false` is a plaintext public room.
      *
@@ -2997,12 +3147,9 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     
     /**
      * Enqueue an outbound DM through the durable outbox: persist a
-     * `Queued` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
-     * optimistic echo, then send. Later states (`Sent` on the relay's ack,
-     * `Delivered` on the recipient's receipt) arrive as further `Outbox`
-     * events keyed by the returned bubble id. A send that fails for a
-     * reason a retry could fix stays `Queued` -- the shell must not
-     * render that as a failure.
+     * `Sending` bubble, surface it immediately as a [`ChatEventFfi::Outbox`]
+     * optimistic echo, then send. The terminal state (Delivered/Failed)
+     * arrives as a later `Outbox` event keyed by the returned bubble id.
      *
      * Prefer this over [`ChatClient::send_dm`] for user-visible sends: the
      * outbox survives restarts and (once [`ChatClient::start_outbox`] runs)
@@ -3340,6 +3487,38 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeLookupFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Mark the fediverse DM thread with `label` read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed alongside the messages). Returns `true` when the mark
+     * moved. A device with no minted handle has no threads and returns
+     * `false` rather than erroring, mirroring
+     * [`Self::fedi_threads_overview`].
+     *
+     * # Errors
+     * [`ChatFfiError`] on a thread-store load/save failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediMarkThreadRead`(`label`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_mark_thread_read(
+                thisPtr,
+                FfiConverterString.lower(`label`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4254,10 +4433,9 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
-     * Start the background outbox retry driver: re-sends queued/unacked
-     * bubbles on relay reconnect, reclaims stalled send claims (at boot
-     * and periodically -- never turning a queued message into a failed
-     * one), and services [`ChatClient::retry_outbox`]. Call once after `connect`,
+     * Start the background outbox retry driver: re-sends failed/unacked
+     * bubbles on relay reconnect, runs the 24h + boot timeout sweeps, and
+     * services [`ChatClient::retry_outbox`]. Call once after `connect`,
      * passing the user's display name (used for body-only resends, so it
      * should match the `sender_name` given to [`ChatClient::enqueue_dm`]).
      * Calling again aborts the previous driver before starting a new one.
@@ -4773,22 +4951,9 @@ data class ChatHistoryMessageFfi (
     var `messageId`: kotlin.String, 
     /**
      * `true` once the recipient's delivery receipt arrived. Only meaningful
-     * for entries this device sent (`outbound`). Equivalent to
-     * `send_state == SendStateFfi::Delivered`.
+     * for entries this device sent (`outbound`).
      */
-    var `delivered`: kotlin.Boolean, 
-    /**
-     * How far this device's send of the message actually got, folding in
-     * any copy still live in the outbox. Only meaningful on `outbound`
-     * entries (an inbound entry reports `Sent`, exactly as `delivered`
-     * is meaningless there).
-     */
-    var `sendState`: SendStateFfi, 
-    /**
-     * Unix-ms of the last `send_state` transition, for the same
-     * "still sending" affordance the outbox bubble carries.
-     */
-    var `stateChangedAtMs`: kotlin.ULong
+    var `delivered`: kotlin.Boolean
 ) {
     
     companion object
@@ -4807,8 +4972,6 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
-            FfiConverterTypeSendStateFfi.read(buf),
-            FfiConverterULong.read(buf),
         )
     }
 
@@ -4819,9 +4982,7 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterString.allocationSize(value.`body`) +
             FfiConverterULong.allocationSize(value.`sentAtMs`) +
             FfiConverterString.allocationSize(value.`messageId`) +
-            FfiConverterBoolean.allocationSize(value.`delivered`) +
-            FfiConverterTypeSendStateFfi.allocationSize(value.`sendState`) +
-            FfiConverterULong.allocationSize(value.`stateChangedAtMs`)
+            FfiConverterBoolean.allocationSize(value.`delivered`)
     )
 
     override fun write(value: ChatHistoryMessageFfi, buf: ByteBuffer) {
@@ -4832,8 +4993,6 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterULong.write(value.`sentAtMs`, buf)
             FfiConverterString.write(value.`messageId`, buf)
             FfiConverterBoolean.write(value.`delivered`, buf)
-            FfiConverterTypeSendStateFfi.write(value.`sendState`, buf)
-            FfiConverterULong.write(value.`stateChangedAtMs`, buf)
     }
 }
 
@@ -5275,7 +5434,13 @@ data class FediThreadSummaryFfi (
     /**
      * `true` when the newest message was outbound.
      */
-    var `lastOutbound`: kotlin.Boolean
+    var `lastOutbound`: kotlin.Boolean, 
+    /**
+     * Inbound messages arrived since the thread was last opened. `0`
+     * renders no badge; a never-opened thread from a new correspondent
+     * counts its whole history, which is what makes it discoverable.
+     */
+    var `unread`: kotlin.UInt
 ) {
     
     companion object
@@ -5291,6 +5456,7 @@ public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediT
             FfiConverterString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
         )
     }
 
@@ -5298,7 +5464,8 @@ public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediT
             FfiConverterString.allocationSize(value.`label`) +
             FfiConverterString.allocationSize(value.`lastBody`) +
             FfiConverterLong.allocationSize(value.`lastAtMs`) +
-            FfiConverterBoolean.allocationSize(value.`lastOutbound`)
+            FfiConverterBoolean.allocationSize(value.`lastOutbound`) +
+            FfiConverterUInt.allocationSize(value.`unread`)
     )
 
     override fun write(value: FediThreadSummaryFfi, buf: ByteBuffer) {
@@ -5306,6 +5473,7 @@ public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediT
             FfiConverterString.write(value.`lastBody`, buf)
             FfiConverterLong.write(value.`lastAtMs`, buf)
             FfiConverterBoolean.write(value.`lastOutbound`, buf)
+            FfiConverterUInt.write(value.`unread`, buf)
     }
 }
 
@@ -5785,11 +5953,11 @@ data class OutboxBubbleFfi (
      */
     var `body`: kotlin.String, 
     /**
-     * How far this copy got.
+     * Delivery state.
      */
-    var `status`: SendStateFfi, 
+    var `status`: OutboxStatusFfi, 
     /**
-     * Logical message id of the accepted send, set once a relay acks.
+     * Relay dedupe-key hex, set once the first send is acked.
      */
     var `messageId`: kotlin.String?, 
     /**
@@ -5797,16 +5965,7 @@ data class OutboxBubbleFfi (
      */
     var `enqueuedAtMs`: kotlin.ULong, 
     /**
-     * Unix-ms of the last `status` transition. Its age is what a shell
-     * reads to tell "sending" from "still sending"; the engine sets no
-     * threshold of its own.
-     */
-    var `stateChangedAtMs`: kotlin.ULong, 
-    /**
-     * Last send error. Populated on a terminal `Failed` AND on a
-     * retryable failure that left the bubble `Queued`, where it is
-     * diagnostics, not a verdict -- render it as failure only when
-     * `status` is `Failed`.
+     * Last send error, populated when `status` is `Failed`.
      */
     var `lastError`: kotlin.String?, 
     /**
@@ -5830,9 +5989,8 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterTypeSendStateFfi.read(buf),
+            FfiConverterTypeOutboxStatusFfi.read(buf),
             FfiConverterOptionalString.read(buf),
-            FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -5843,10 +6001,9 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterString.allocationSize(value.`peerAgentIdHex`) +
             FfiConverterString.allocationSize(value.`body`) +
-            FfiConverterTypeSendStateFfi.allocationSize(value.`status`) +
+            FfiConverterTypeOutboxStatusFfi.allocationSize(value.`status`) +
             FfiConverterOptionalString.allocationSize(value.`messageId`) +
             FfiConverterULong.allocationSize(value.`enqueuedAtMs`) +
-            FfiConverterULong.allocationSize(value.`stateChangedAtMs`) +
             FfiConverterOptionalString.allocationSize(value.`lastError`) +
             FfiConverterOptionalString.allocationSize(value.`groupClientMessageId`)
     )
@@ -5855,10 +6012,9 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`peerAgentIdHex`, buf)
             FfiConverterString.write(value.`body`, buf)
-            FfiConverterTypeSendStateFfi.write(value.`status`, buf)
+            FfiConverterTypeOutboxStatusFfi.write(value.`status`, buf)
             FfiConverterOptionalString.write(value.`messageId`, buf)
             FfiConverterULong.write(value.`enqueuedAtMs`, buf)
-            FfiConverterULong.write(value.`stateChangedAtMs`, buf)
             FfiConverterOptionalString.write(value.`lastError`, buf)
             FfiConverterOptionalString.write(value.`groupClientMessageId`, buf)
     }
@@ -6007,10 +6163,8 @@ sealed class ChatEventFfi {
     }
     
     /**
-     * An outbox change for an outbound DM: the optimistic echo, then
-     * every send-state transition (queued -> sent -> delivered, or a
-     * terminal failure). Upsert keyed by `bubble.id`; drives the
-     * send-status UI.
+     * An outbox change for an outbound DM: optimistic echo, delivery, or
+     * failure. Upsert keyed by `bubble.id`; drives the send-status UI.
      */
     data class Outbox(
         /**
@@ -6592,6 +6746,50 @@ public object FfiConverterTypeLookupKindFfi: FfiConverterRustBuffer<LookupKindFf
 
 
 /**
+ * Delivery state of an outbound DM bubble, mirrored from
+ * [`fetchit_chat::outbox::OutboxStatus`] for the uniffi surface.
+ */
+
+enum class OutboxStatusFfi {
+    
+    /**
+     * Send attempted, not yet confirmed delivered.
+     */
+    SENDING,
+    /**
+     * Recipient acknowledged delivery.
+     */
+    DELIVERED,
+    /**
+     * The attempt errored or timed out; eligible for retry.
+     */
+    FAILED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOutboxStatusFfi: FfiConverterRustBuffer<OutboxStatusFfi> {
+    override fun read(buf: ByteBuffer) = try {
+        OutboxStatusFfi.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: OutboxStatusFfi) = 4UL
+
+    override fun write(value: OutboxStatusFfi, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * FFI-shaped rendition.
  */
 sealed class RenditionFfi {
@@ -6961,62 +7159,6 @@ public object FfiConverterTypeRenditionFFI : FfiConverterRustBuffer<RenditionFfi
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-/**
- * How far one outbound message actually got, mirrored from
- * [`fetchit_chat::send_state::SendState`] for the uniffi surface.
- *
- * What the shell may render from each:
- * - `Queued`: still sending. The engine retries indefinitely; a queued
- * message is NEVER a failed one, however long it sits. Pair it with
- * `state_changed_at_ms` to show a "still sending" affordance.
- * - `Sent`: a relay took durable custody (single tick).
- * - `Delivered`: the recipient's delivery receipt arrived (double tick).
- * - `Failed`: terminal, and only for outcomes no retry could fix.
- */
-
-enum class SendStateFfi {
-    
-    /**
-     * In the durable outbox, not yet accepted by any relay.
-     */
-    QUEUED,
-    /**
-     * A relay acked acceptance.
-     */
-    SENT,
-    /**
-     * The recipient acknowledged delivery.
-     */
-    DELIVERED,
-    /**
-     * Terminal failure; no retry can help.
-     */
-    FAILED;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeSendStateFfi: FfiConverterRustBuffer<SendStateFfi> {
-    override fun read(buf: ByteBuffer) = try {
-        SendStateFfi.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: SendStateFfi) = 4UL
-
-    override fun write(value: SendStateFfi, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
     }
 }
 

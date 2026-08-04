@@ -8,7 +8,9 @@
 use crate::chat_error::ChatFfiError;
 use crate::group_ffi::{GroupFfi, JoinOutcomeFfi};
 use crate::member_ffi::GroupMemberFfi;
-use fetchit_chat::conversation::{dispatch_inbound_with_outbox, InboundDispatch};
+use fetchit_chat::conversation::{
+    dispatch_inbound_with_outbox, ConversationRegistry, InboundDispatch, MutateAction,
+};
 use fetchit_chat::messages::is_private_group_envelope;
 use fetchit_chat::Client;
 use std::path::PathBuf;
@@ -217,6 +219,46 @@ fn history_entry_to_ffi(
         send_state: progress.state.into(),
         state_changed_at_ms: progress.changed_at_ms,
     }
+}
+
+/// The client's conversation registry, or the "no chat state" error the
+/// unread paths report when the client was built without one.
+fn registry_or_err(client: &Client) -> Result<Arc<ConversationRegistry>, ChatFfiError> {
+    client.registry_arc().ok_or(ChatFfiError::Invalid {
+        reason: "no chat state".to_owned(),
+    })
+}
+
+/// Resolve a shell conversation key to the engine conversation it names,
+/// mirroring [`ChatClient::conversation_history`]: `g:<hex>` is a direct
+/// group lookup, bare 64-hex resolves that peer's current DM (the engine
+/// has no stable peer-keyed DM id). `None` when nothing is persisted for
+/// it yet.
+///
+/// Deliberately the SAME resolution the transcript getter uses: a DM with
+/// duplicate shells picks one winner, and the unread count must be read
+/// from -- and the read mark written to -- the conversation the user is
+/// actually looking at.
+async fn resolve_conversation(
+    registry: &Arc<ConversationRegistry>,
+    conv_key: &str,
+) -> Result<Option<fetchit_chat::conversation::Conversation>, ChatFfiError> {
+    if let Some(group_id) = conv_key.strip_prefix("g:") {
+        let gid =
+            fetchit_chat::groups::GroupId::parse(group_id).map_err(|e| ChatFfiError::Invalid {
+                reason: e.to_string(),
+            })?;
+        return registry.get(gid.as_str()).await.map_err(ChatFfiError::from);
+    }
+    let peer = fetchit_chat::identity::AgentId::parse(conv_key.to_owned()).map_err(|e| {
+        ChatFfiError::Invalid {
+            reason: e.to_string(),
+        }
+    })?;
+    registry
+        .find_dm_with(&peer.0)
+        .await
+        .map_err(ChatFfiError::from)
 }
 
 /// Routing verdict for one inbound transit envelope, in evaluation
@@ -2500,6 +2542,72 @@ impl ChatClient {
             .into_iter()
             .map(|entry| history_entry_to_ffi(entry, &local))
             .collect())
+    }
+
+    /// Messages waiting in the conversation `conv_key` names -- the count
+    /// its row in the chat list badges.
+    ///
+    /// Same key scheme as [`Self::conversation_history`], and the same
+    /// resolution: a `g:`-prefixed group id is a direct lookup, a bare
+    /// 64-hex peer id resolves that peer's current DM. Counting rides the
+    /// engine's durable read mark, so a badge survives a process kill and
+    /// clears only when [`Self::conversation_mark_read`] runs.
+    ///
+    /// An unknown or not-yet-persisted conversation is `0`, never an
+    /// error. So is an `f:` fediverse key: those rows carry their unread
+    /// count on [`FediThreadSummaryFfi`] already and clear through
+    /// [`Self::fedi_mark_thread_read`].
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+    /// 64-hex agent id, or when the client has no chat state.
+    /// [`ChatFfiError::Network`] on a vault open / AEAD / parse failure.
+    pub async fn conversation_unread(&self, conv_key: String) -> Result<u32, ChatFfiError> {
+        if conv_key.starts_with("f:") {
+            return Ok(0);
+        }
+        let registry = registry_or_err(&self.inner)?;
+        let Some(conv) = resolve_conversation(&registry, &conv_key).await? else {
+            return Ok(0);
+        };
+        let local = self.inner.local_agent_id_hex().unwrap_or_default();
+        Ok(conv.unread(&local))
+    }
+
+    /// Mark the conversation `conv_key` names read up to its newest
+    /// message: the row's unread count clears, durably (the mark is
+    /// sealed into the same vault file as the transcript). Returns `true`
+    /// when the mark moved, so a caller can skip a redundant refresh.
+    ///
+    /// A conversation that does not exist yet, or an `f:` fediverse key
+    /// (see [`Self::conversation_unread`]), is a quiet `false`.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+    /// 64-hex agent id, or when the client has no chat state.
+    /// [`ChatFfiError::Network`] on a vault open / seal failure.
+    pub async fn conversation_mark_read(&self, conv_key: String) -> Result<bool, ChatFfiError> {
+        if conv_key.starts_with("f:") {
+            return Ok(false);
+        }
+        let registry = registry_or_err(&self.inner)?;
+        let Some(conv) = resolve_conversation(&registry, &conv_key).await? else {
+            return Ok(false);
+        };
+        // Re-read under the registry's per-group lock rather than marking
+        // the clone resolved above: a message landing between the resolve
+        // and the mark must be covered by the mark, not stranded behind
+        // a stale high-water stamp.
+        registry
+            .mutate_in_place(&conv.group_id_hex, |c| {
+                if c.mark_read() {
+                    MutateAction::Persist(true)
+                } else {
+                    MutateAction::Skip(false)
+                }
+            })
+            .await
+            .map_err(ChatFfiError::from)
     }
 
     /// Drain the next inbound event. Returns `None` when the pump has

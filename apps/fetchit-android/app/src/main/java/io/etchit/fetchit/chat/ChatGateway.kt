@@ -323,6 +323,23 @@ interface ChatGateway {
     suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi>
 
     /**
+     * Messages waiting in the conversation [convKey] names — the count its
+     * row badges. Same key scheme as [conversationHistory]; counted against
+     * the engine's durable read mark, so a badge survives a process kill.
+     * Our own sends never count. Zero for an unknown conversation; the
+     * default no-op keeps test doubles simple.
+     */
+    suspend fun conversationUnread(convKey: String): UInt = 0u
+
+    /**
+     * Mark the conversation [convKey] names read up to its newest message:
+     * the row's unread count clears, and stays clear across restarts (the
+     * engine seals the mark next to the transcript). Returns true when the
+     * mark moved. Quiet no-op default, mirroring [fediMarkThreadRead].
+     */
+    suspend fun conversationMarkRead(convKey: String): Boolean = false
+
+    /**
      * Mint a device-link offer from this device's own identity and publish it
      * to the relay (M6.4). Called by the device that wants to BE linked (the
      * "new" device): it returns a `fetchit://link/v1/…` QR pointer plus a short
@@ -428,6 +445,10 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.renameGroup(groupId, newName)
     override suspend fun conversationHistory(convKey: String): List<ChatHistoryMessageFfi> =
         inner.conversationHistory(convKey)
+    override suspend fun conversationUnread(convKey: String): UInt =
+        inner.conversationUnread(convKey)
+    override suspend fun conversationMarkRead(convKey: String): Boolean =
+        inner.conversationMarkRead(convKey)
     override suspend fun createLinkOffer(ttlSecs: ULong): CreatedLinkOfferFfi =
         inner.createLinkOffer(ttlSecs)
     override suspend fun previewLinkOffer(uri: String): LinkOfferPreviewFfi =
