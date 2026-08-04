@@ -853,6 +853,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -889,6 +893,10 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_agent_id_hex(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_ban_member(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_mark_read(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_conversation_unread(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_create_group(
 ): Short
@@ -1058,6 +1066,10 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_agent_id_hex(`ptr`: Pointer,uniffi_o
 fun uniffi_fetchit_ffi_fn_method_chatclient_ban_member(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,`agentIdHex`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_history(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_mark_read(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_conversation_unread(`ptr`: Pointer,`convKey`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_create_group(`ptr`: Pointer,`name`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,`private`: Byte,
 ): Long
@@ -1342,6 +1354,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_history() != 28009.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_mark_read() != 49638.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_conversation_unread() != 12012.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_create_group() != 1975.toShort()) {
@@ -2028,6 +2046,44 @@ public interface ChatClientInterface {
      * hydrating from disk.
      */
     suspend fun `conversationHistory`(`convKey`: kotlin.String): List<ChatHistoryMessageFfi>
+    
+    /**
+     * Mark the conversation `conv_key` names read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed into the same vault file as the transcript). Returns `true`
+     * when the mark moved, so a caller can skip a redundant refresh.
+     *
+     * A conversation that does not exist yet, or an `f:` fediverse key
+     * (see [`Self::conversation_unread`]), is a quiet `false`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / seal failure.
+     */
+    suspend fun `conversationMarkRead`(`convKey`: kotlin.String): kotlin.Boolean
+    
+    /**
+     * Messages waiting in the conversation `conv_key` names -- the count
+     * its row in the chat list badges.
+     *
+     * Same key scheme as [`Self::conversation_history`], and the same
+     * resolution: a `g:`-prefixed group id is a direct lookup, a bare
+     * 64-hex peer id resolves that peer's current DM. Counting rides the
+     * engine's durable read mark, so a badge survives a process kill and
+     * clears only when [`Self::conversation_mark_read`] runs.
+     *
+     * An unknown or not-yet-persisted conversation is `0`, never an
+     * error. So is an `f:` fediverse key: those rows carry their unread
+     * count on [`FediThreadSummaryFfi`] already and clear through
+     * [`Self::fedi_mark_thread_read`].
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / AEAD / parse failure.
+     */
+    suspend fun `conversationUnread`(`convKey`: kotlin.String): kotlin.UInt
     
     /**
      * Create a group. `private=true` is the PQ MLS/`TreeKEM` path
@@ -2856,6 +2912,82 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeChatHistoryMessageFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Mark the conversation `conv_key` names read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed into the same vault file as the transcript). Returns `true`
+     * when the mark moved, so a caller can skip a redundant refresh.
+     *
+     * A conversation that does not exist yet, or an `f:` fediverse key
+     * (see [`Self::conversation_unread`]), is a quiet `false`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / seal failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `conversationMarkRead`(`convKey`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_conversation_mark_read(
+                thisPtr,
+                FfiConverterString.lower(`convKey`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Messages waiting in the conversation `conv_key` names -- the count
+     * its row in the chat list badges.
+     *
+     * Same key scheme as [`Self::conversation_history`], and the same
+     * resolution: a `g:`-prefixed group id is a direct lookup, a bare
+     * 64-hex peer id resolves that peer's current DM. Counting rides the
+     * engine's durable read mark, so a badge survives a process kill and
+     * clears only when [`Self::conversation_mark_read`] runs.
+     *
+     * An unknown or not-yet-persisted conversation is `0`, never an
+     * error. So is an `f:` fediverse key: those rows carry their unread
+     * count on [`FediThreadSummaryFfi`] already and clear through
+     * [`Self::fedi_mark_thread_read`].
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `conv_key` is not a valid group id /
+     * 64-hex agent id, or when the client has no chat state.
+     * [`ChatFfiError::Network`] on a vault open / AEAD / parse failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `conversationUnread`(`convKey`: kotlin.String) : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_conversation_unread(
+                thisPtr,
+                FfiConverterString.lower(`convKey`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
