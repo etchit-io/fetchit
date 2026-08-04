@@ -299,8 +299,8 @@ best-effort and never block or fail follow, DM, or feed.
 `fetchit_fedi::avatar::fetch_avatar`,
 `fetchit_fedi::signature::HttpSignatureKey`.
 
-<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=6321a28 -->
-_Last verified: 2026-07-08 (`6321a28`) -- bob._
+<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=8ded009 -->
+_Last verified: 2026-08-04 (`8ded009`) -- bob._
 
 ## Android shell
 

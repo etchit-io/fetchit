@@ -177,12 +177,18 @@ class ChatModeView(
         val now = System.currentTimeMillis()
         if (!fediAvatars.shouldQuery(label, now)) return
         lifecycleScope.launch {
-            val bytes = withContext(Dispatchers.IO) {
-                runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
+            try {
+                // Read AND decode off the main thread: a 512 KiB image is
+                // real work, and a scroll must not stutter for a face.
+                val bmp = withContext(Dispatchers.IO) {
+                    val bytes = runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
+                    fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
+                } ?: return@launch
+                showCircle(target, key, bmp)
+            } finally {
+                // A screen closed mid-fetch must not strand the label.
+                fediAvatars.releaseQuery(label)
             }
-            val bmp = fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
-                ?: return@launch
-            showCircle(target, key, bmp)
         }
     }
 
@@ -229,12 +235,15 @@ class ChatModeView(
         val now = System.currentTimeMillis()
         if (!fediAvatars.shouldQuery(label, now)) return
         lifecycleScope.launch {
-            val bytes = withContext(Dispatchers.IO) {
-                runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
+            try {
+                val bmp = withContext(Dispatchers.IO) {
+                    val bytes = runCatching { controller.gateway()?.fediAvatar(label) }.getOrNull()
+                    fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
+                } ?: return@launch
+                showInline(target, key, bmp, sizeDp)
+            } finally {
+                fediAvatars.releaseQuery(label)
             }
-            val bmp = fediAvatars.decodeAndCache(label, bytes, System.currentTimeMillis())
-                ?: return@launch
-            showInline(target, key, bmp, sizeDp)
         }
     }
 

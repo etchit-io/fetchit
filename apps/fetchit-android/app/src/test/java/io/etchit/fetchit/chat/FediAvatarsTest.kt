@@ -71,6 +71,21 @@ class FediAvatarsTest {
     }
 
     @Test
+    fun a_second_query_for_the_same_label_is_suppressed_while_one_is_in_flight() {
+        val avatars = FediAvatars(96)
+        val label = "happyborg@fosstodon.org"
+        assertTrue(avatars.shouldQuery(label, 0L))
+        assertFalse(
+            "one author across several feed rows must fetch once, not once per row",
+            avatars.shouldQuery(label, 0L),
+        )
+        // Releasing without an answer (screen closed mid-fetch) must not
+        // strand the label as permanently in-flight.
+        avatars.releaseQuery(label)
+        assertTrue(avatars.shouldQuery(label, 0L))
+    }
+
+    @Test
     fun the_absent_window_is_tracked_per_canonical_label() {
         val avatars = FediAvatars(96)
         avatars.noteAbsent("@A@Host", 1_000L)

@@ -27,25 +27,48 @@ class FediAvatars(private val targetPx: Int) {
 
     private val bitmaps = LruCache<String, Bitmap>(MAX_DECODED)
     private val absentUntil = HashMap<String, Long>()
+    private val inFlight = HashSet<String>()
 
     /** The decoded avatar for [label], or null when nothing is cached. */
     fun cached(label: String): Bitmap? = bitmaps.get(key(label))
 
     /**
-     * Whether the engine is worth asking for [label] right now: false when we
-     * already hold a bitmap, or when a recent miss is still inside its
-     * re-check window.
+     * Claim the right to ask the engine for [label]: false when we already
+     * hold a bitmap, when a query for the same label is already running, or
+     * when a recent miss is still inside its re-check window.
+     *
+     * Single-flight matters on the feed, where one author can occupy several
+     * visible rows — without it a screenful of posts would fire one engine
+     * fetch each for the same face.
      */
     fun shouldQuery(label: String, nowMs: Long): Boolean {
         val k = key(label)
         if (bitmaps.get(k) != null) return false
-        val until = synchronized(absentUntil) { absentUntil[k] } ?: return true
-        return nowMs >= until
+        synchronized(absentUntil) {
+            if (k in inFlight) return false
+            val until = absentUntil[k]
+            if (until != null && nowMs < until) return false
+            inFlight.add(k)
+        }
+        return true
+    }
+
+    /**
+     * Give back a claim taken by [shouldQuery] without recording an answer.
+     * Callers run this in a `finally` so a screen closed mid-fetch cannot
+     * strand the label as permanently in-flight.
+     */
+    fun releaseQuery(label: String) {
+        synchronized(absentUntil) { inFlight.remove(key(label)) }
     }
 
     /** Remember that the engine had no bytes for [label]. */
     fun noteAbsent(label: String, nowMs: Long) {
-        synchronized(absentUntil) { absentUntil[key(label)] = nowMs + ABSENT_RECHECK_MS }
+        val k = key(label)
+        synchronized(absentUntil) {
+            absentUntil[k] = nowMs + ABSENT_RECHECK_MS
+            inFlight.remove(k)
+        }
     }
 
     /**
@@ -60,7 +83,10 @@ class FediAvatars(private val targetPx: Int) {
             noteAbsent(label, nowMs)
             return null
         }
-        synchronized(absentUntil) { absentUntil.remove(k) }
+        synchronized(absentUntil) {
+            absentUntil.remove(k)
+            inFlight.remove(k)
+        }
         bitmaps.put(k, bmp)
         return bmp
     }
@@ -68,7 +94,10 @@ class FediAvatars(private val targetPx: Int) {
     /** Drop everything; used when the chat identity changes. */
     fun clear() {
         bitmaps.evictAll()
-        synchronized(absentUntil) { absentUntil.clear() }
+        synchronized(absentUntil) {
+            absentUntil.clear()
+            inFlight.clear()
+        }
     }
 
     companion object {
