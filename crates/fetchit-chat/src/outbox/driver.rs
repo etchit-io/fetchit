@@ -11,14 +11,24 @@
 //! ([`OutboxTransport`]) so the loop is unit-testable with scripted
 //! doubles; production wires it to the `Router` + `messages().connect()`.
 //!
+//! Retries are NOT edge-only. A presence edge is a hint, not a guarantee:
+//! a peer that never re-announces (a quiesced mesh emits no presence at
+//! all) would otherwise leave a queued message parked forever, never
+//! re-resolving the recipient and never reaching the relay's durable
+//! transit. [`OutboxDriver::flush_due`] is the clock-driven floor --
+//! every bubble no relay has acked is re-attempted on a bounded
+//! per-bubble backoff, and every attempt runs the full send path again,
+//! so the recipient's transport identity is resolved fresh and the
+//! transport fallback chain is walked from the top.
+//!
 //! What the driver deliberately does NOT do: give up. No sweep here ever
 //! turns a queued message into a failed one -- only a terminal verdict
 //! from a send attempt does (`crate::send_state::SendFailure`).
 
 use super::store::OutboxStore;
-use super::{is_retryable, now_ms, OutboxBubble, OutboxEvent};
 #[cfg(test)]
-use super::{SendState, PRIOR_MESSAGE_ID_CAP};
+use super::PRIOR_MESSAGE_ID_CAP;
+use super::{is_retryable, now_ms, OutboxBubble, OutboxEvent, SendState};
 use crate::error::ChatError;
 use crate::identity::AgentId;
 use crate::send_state::SendFailure;
@@ -36,6 +46,53 @@ use tokio::sync::{broadcast, Mutex};
 /// process. This is a claim timeout, NOT a delivery deadline: the message
 /// itself keeps its state and keeps retrying.
 pub const STALLED_CLAIM_MS: u64 = 15 * 60 * 1000;
+
+/// Delay before the first clock-driven re-attempt of a bubble no relay
+/// has acked, and the unit the per-bubble backoff doubles from.
+///
+/// Short enough that a message queued against a peer that was mid-restart
+/// re-resolves and lands within seconds of the peer coming back, long
+/// enough that a genuinely dead path is not hammered.
+pub const RETRY_BACKOFF_BASE_MS: u64 = 15_000;
+
+/// Ceiling on the per-bubble retry backoff. The driver never gives up, so
+/// the interval has to settle somewhere sustainable on cellular: a
+/// message queued against an unreachable peer costs one attempt per
+/// quarter hour, indefinitely.
+pub const RETRY_BACKOFF_MAX_MS: u64 = 15 * 60 * 1000;
+
+/// How long after its `attempts`-th attempt a bubble is due again:
+/// [`RETRY_BACKOFF_BASE_MS`] doubling per attempt, capped at
+/// [`RETRY_BACKOFF_MAX_MS`].
+fn backoff_ms(attempts: u32) -> u64 {
+    let doublings = attempts.saturating_sub(1).min(6);
+    RETRY_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << doublings)
+        .min(RETRY_BACKOFF_MAX_MS)
+}
+
+/// Clock-driven retry eligibility: a bubble that is retryable AND that no
+/// relay has taken custody of.
+///
+/// The timed path deliberately stops at [`SendState::Queued`]. A `Sent` DM
+/// is already in the relay's durable transit, which redelivers on its own;
+/// re-sending it on a timer would mint a second copy for the recipient to
+/// dedup with nothing gained. Presence edges and the shell's manual Retry
+/// keep their wider [`is_retryable`] reach.
+fn is_queued_retryable(bubble: &OutboxBubble) -> bool {
+    is_retryable(bubble) && bubble.status == SendState::Queued
+}
+
+/// In-memory retry pacing for one bubble. Never persisted: a fresh driver
+/// starts with an empty map, which is exactly what makes a restart
+/// re-attempt every queued bubble instead of inheriting a stale schedule.
+#[derive(Clone, Copy)]
+struct RetryPace {
+    /// Attempts this driver has fired for the bubble.
+    attempts: u32,
+    /// Unix-ms the most recent attempt was claimed at.
+    last_attempt_ms: u64,
+}
 
 /// The transport the driver re-sends through. Abstracted so the driver is
 /// unit-testable; production wires it to the `Router` + the existing
@@ -83,6 +140,8 @@ pub struct OutboxDriver<T: OutboxTransport> {
     /// it before sending; `None` (the default) means "always ready", which
     /// keeps relay-less / scripted-transport tests unchanged.
     ready_gate: Option<Arc<dyn ReadyGate>>,
+    /// Per-bubble backoff clock for [`Self::flush_due`], keyed by bubble id.
+    retry_pace: Mutex<HashMap<String, RetryPace>>,
 }
 
 impl<T: OutboxTransport> OutboxDriver<T> {
@@ -98,6 +157,7 @@ impl<T: OutboxTransport> OutboxDriver<T> {
             transport,
             last_online: Mutex::new(HashMap::new()),
             ready_gate: None,
+            retry_pace: Mutex::new(HashMap::new()),
         }
     }
 
@@ -122,6 +182,23 @@ impl<T: OutboxTransport> OutboxDriver<T> {
     /// Re-send every retryable bubble for `peer` not already in flight,
     /// warming the link first.
     pub async fn flush_peer(&self, peer: &AgentId) {
+        self.flush_matching(peer, is_retryable, now_ms()).await;
+    }
+
+    /// Re-send every bubble for `peer` that `eligible` accepts and that is
+    /// not already in flight, warming the link first. `now_ms` stamps both
+    /// the in-flight claim and the retry-backoff clock.
+    ///
+    /// Whole-peer granularity is deliberate: one warm-connect covers every
+    /// bubble waiting on that peer, and a bubble re-attempted marginally
+    /// early costs one send, where per-bubble flushes would cost a
+    /// re-connect each.
+    async fn flush_matching(
+        &self,
+        peer: &AgentId,
+        eligible: fn(&OutboxBubble) -> bool,
+        now_ms: u64,
+    ) {
         // No-send-before-registered: wait for the routing relay to be ready
         // before claiming anything. A presence edge can arrive before the
         // relay supervisor reaches Connected; sending then yields
@@ -134,18 +211,32 @@ impl<T: OutboxTransport> OutboxDriver<T> {
         // Claim the eligible bubbles under the lock, then release it for
         // the awaits below.
         let claims: Vec<OutboxBubble> = {
-            let claimed_at = now_ms();
             let mut store = self.store.lock().await;
             let candidates: Vec<OutboxBubble> = store
                 .snapshot()
                 .into_iter()
-                .filter(|b| &b.peer == peer && is_retryable(b))
+                .filter(|b| &b.peer == peer && eligible(b))
                 .collect();
             candidates
                 .into_iter()
-                .filter(|b| store.try_mark_inflight(&b.id, claimed_at))
+                .filter(|b| store.try_mark_inflight(&b.id, now_ms))
                 .collect()
         };
+        // Stamp the backoff clock for everything this flush is about to
+        // attempt, whichever path fired it -- a presence edge counts as an
+        // attempt, so the timed retry paces off it rather than piling a
+        // second send on top moments later.
+        {
+            let mut pace = self.retry_pace.lock().await;
+            for claimed in &claims {
+                let entry = pace.entry(claimed.id.clone()).or_insert(RetryPace {
+                    attempts: 0,
+                    last_attempt_ms: now_ms,
+                });
+                entry.attempts = entry.attempts.saturating_add(1);
+                entry.last_attempt_ms = now_ms;
+            }
+        }
         for claimed in claims {
             self.transport.connect(peer.clone()).await;
             let result = self.transport.send(claimed.clone()).await;
@@ -161,7 +252,7 @@ impl<T: OutboxTransport> OutboxDriver<T> {
                     Ok(receipt) => (receipt.message_id.clone(), None),
                     Err(e) => (None, Some(SendFailure::classify(e))),
                 };
-                let updated = store.record_send_outcome(&claimed.id, message_id, failure, now_ms());
+                let updated = store.record_send_outcome(&claimed.id, message_id, failure, now_ms);
                 store.clear_inflight(&claimed.id);
                 updated
             };
@@ -205,7 +296,58 @@ impl<T: OutboxTransport> OutboxDriver<T> {
         };
         for peer in peers {
             log::warn!("outbox: releasing a stalled send claim; re-flushing");
-            self.flush_peer(&peer).await;
+            // Deliberately NOT gated on the retry backoff: a reclaimed
+            // claim means the previous attempt never reported an outcome,
+            // so the message has effectively had no attempt at all and
+            // must re-resolve immediately.
+            self.flush_matching(&peer, is_retryable, now_ms).await;
+        }
+    }
+
+    /// Re-attempt every bubble no relay has acked whose per-bubble backoff
+    /// has elapsed. The clock-driven floor under the presence-edge path.
+    ///
+    /// This is what stops a message from being welded to the conditions of
+    /// its first attempt. A send that failed against a peer mid-restart
+    /// leaves the bubble [`SendState::Queued`]; nothing about the failure
+    /// is cached, so the re-attempt re-runs the whole send path -- the
+    /// recipient's device list and relay hints are resolved fresh, and the
+    /// transport chain is walked from the top down to the relay's durable
+    /// transit.
+    ///
+    /// A bubble this driver has never attempted is due immediately, which
+    /// is what heals the restart case: a fresh driver over a persisted
+    /// outbox re-attempts rather than waiting for a presence edge that may
+    /// never come.
+    pub async fn flush_due(&self, now_ms: u64) {
+        let queued: Vec<OutboxBubble> = self
+            .store
+            .lock()
+            .await
+            .snapshot()
+            .into_iter()
+            .filter(is_queued_retryable)
+            .collect();
+        let peers: Vec<AgentId> = {
+            let mut pace = self.retry_pace.lock().await;
+            // Bound the map: forget bubbles that are gone or that a relay
+            // has since taken custody of.
+            let live: HashSet<String> = queued.iter().map(|b| b.id.clone()).collect();
+            pace.retain(|id, _| live.contains(id));
+            let mut seen = HashSet::new();
+            queued
+                .into_iter()
+                .filter(|b| {
+                    pace.get(&b.id).is_none_or(|p| {
+                        now_ms.saturating_sub(p.last_attempt_ms) >= backoff_ms(p.attempts)
+                    })
+                })
+                .filter_map(|b| seen.insert(b.peer.clone()).then_some(b.peer))
+                .collect()
+        };
+        for peer in peers {
+            self.flush_matching(&peer, is_queued_retryable, now_ms)
+                .await;
         }
     }
 
@@ -305,6 +447,72 @@ mod tests {
                 })
             }
         }
+    }
+
+    /// Resolves its destination from a shared cell AT SEND TIME and records
+    /// what it resolved, so a test can prove a retry re-resolves instead of
+    /// reusing whatever the first attempt bound. Sending to `dead` fails the
+    /// way a restart-cycled peer does.
+    struct ReresolvingTransport {
+        target: Arc<Mutex<String>>,
+        dialed: Arc<Mutex<Vec<String>>>,
+        dead: &'static str,
+    }
+    impl OutboxTransport for ReresolvingTransport {
+        fn connect(&self, _peer: AgentId) -> impl std::future::Future<Output = ()> + Send {
+            async {}
+        }
+        fn send(
+            &self,
+            _b: OutboxBubble,
+        ) -> impl std::future::Future<Output = Result<SendReceipt, ChatError>> + Send {
+            let target = self.target.clone();
+            let dialed = self.dialed.clone();
+            let dead = self.dead;
+            async move {
+                let resolved = target.lock().await.clone();
+                dialed.lock().await.push(resolved.clone());
+                if resolved == dead {
+                    return Err(ChatError::MessageTransport(format!(
+                        "send failed peer_id={resolved}: Peer not found"
+                    )));
+                }
+                Ok(SendReceipt {
+                    accepted_at_ms: 1,
+                    message_id: Some(format!("relay-{resolved}")),
+                    transport_name: "test",
+                })
+            }
+        }
+    }
+
+    /// A driver over [`ReresolvingTransport`] plus the shared target cell
+    /// the test moves and the dial log it asserts on.
+    type ReresolvingRig = (
+        OutboxDriver<ReresolvingTransport>,
+        Arc<Mutex<String>>,
+        Arc<Mutex<Vec<String>>>,
+    );
+
+    /// Build a driver whose transport re-resolves `target` per attempt.
+    fn reresolving_driver(
+        store: OutboxStore,
+        initial_target: &str,
+        dead: &'static str,
+    ) -> ReresolvingRig {
+        let target = Arc::new(Mutex::new(initial_target.to_owned()));
+        let dialed = Arc::new(Mutex::new(Vec::new()));
+        let (tx, _rx) = broadcast::channel(16);
+        let driver = OutboxDriver::new(
+            Arc::new(Mutex::new(store)),
+            tx,
+            ReresolvingTransport {
+                target: target.clone(),
+                dialed: dialed.clone(),
+                dead,
+            },
+        );
+        (driver, target, dialed)
     }
 
     /// Always errors (for the failed-send path).
@@ -635,6 +843,258 @@ mod tests {
                 })
             }
         }
+    }
+
+    #[test]
+    fn backoff_doubles_per_attempt_then_caps() {
+        assert_eq!(backoff_ms(0), RETRY_BACKOFF_BASE_MS, "never attempted");
+        assert_eq!(backoff_ms(1), RETRY_BACKOFF_BASE_MS);
+        assert_eq!(backoff_ms(2), 2 * RETRY_BACKOFF_BASE_MS);
+        assert_eq!(backoff_ms(3), 4 * RETRY_BACKOFF_BASE_MS);
+        // Capped, and monotone forever after -- the driver never gives up,
+        // so the interval has to settle somewhere sustainable.
+        assert_eq!(backoff_ms(60), RETRY_BACKOFF_MAX_MS);
+        assert_eq!(backoff_ms(u32::MAX), RETRY_BACKOFF_MAX_MS);
+    }
+
+    #[tokio::test]
+    async fn a_timed_retry_re_resolves_the_recipient_it_does_not_reuse_the_first_attempt() {
+        // The device-caught shape: the DM was sent while the recipient's
+        // daemon was restart-cycling, so the first attempt resolved a
+        // transport identity that is already dead. Nothing about that
+        // identity may survive into the retry -- the whole send path runs
+        // again, so the peer is resolved fresh.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        let (driver, target, dialed) = reresolving_driver(store, "pre-restart", "pre-restart");
+
+        driver.flush_due(0).await;
+        assert_eq!(dialed.lock().await.as_slice(), &["pre-restart".to_string()]);
+        assert_eq!(
+            driver.store.lock().await.get("b1").unwrap().status,
+            SendState::Queued,
+            "a peer-not-found send is retryable, never a failure verdict"
+        );
+
+        // The peer comes back under a new transport identity. No presence
+        // edge fires -- the ONLY thing that moves is the clock.
+        *target.lock().await = "post-restart".to_owned();
+        driver.flush_due(RETRY_BACKOFF_BASE_MS).await;
+        assert_eq!(
+            dialed.lock().await.as_slice(),
+            &["pre-restart".to_string(), "post-restart".to_string()],
+            "the retry dials the CURRENT identity, not the one that failed"
+        );
+        assert_eq!(
+            driver.store.lock().await.get("b1").unwrap().status,
+            SendState::Sent
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queued_message_waits_out_its_backoff_between_attempts() {
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        let (driver, _target, dialed) = reresolving_driver(store, "dead", "dead");
+
+        driver.flush_due(0).await; // never attempted => due immediately
+        assert_eq!(dialed.lock().await.len(), 1);
+        driver.flush_due(RETRY_BACKOFF_BASE_MS - 1).await;
+        assert_eq!(dialed.lock().await.len(), 1, "too soon");
+        driver.flush_due(RETRY_BACKOFF_BASE_MS).await;
+        assert_eq!(dialed.lock().await.len(), 2);
+        // Second failure doubles the wait, measured from the LAST attempt.
+        let third_due = RETRY_BACKOFF_BASE_MS + 2 * RETRY_BACKOFF_BASE_MS;
+        driver.flush_due(third_due - 1).await;
+        assert_eq!(dialed.lock().await.len(), 2, "backoff doubled");
+        driver.flush_due(third_due).await;
+        assert_eq!(dialed.lock().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_driver_re_attempts_a_persisted_queued_bubble_with_no_presence_edge() {
+        // App restart over a vault that still holds a queued message. The
+        // new driver has no pacing state and no presence history, so the
+        // message is due at once -- and the attempt resolves the peer's
+        // CURRENT identity rather than resuming the pre-restart binding.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        let (driver, _target, dialed) = reresolving_driver(store, "post-restart", "pre-restart");
+
+        driver.boot_sweep().await;
+        driver.flush_due(1).await;
+
+        assert_eq!(
+            dialed.lock().await.as_slice(),
+            &["post-restart".to_string()],
+            "a restart re-attempts rather than waiting for an edge that may never come"
+        );
+        assert_eq!(
+            driver.store.lock().await.get("b1").unwrap().status,
+            SendState::Sent
+        );
+    }
+
+    #[tokio::test]
+    async fn the_timed_retry_leaves_a_relay_acked_dm_to_the_relay() {
+        // Once a relay has durable custody, redelivery is the relay's job.
+        // A timer that re-sent anyway would mint a duplicate for nothing.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Sent, Some("relay-0"), 0));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (driver, _rx) = driver_with(
+            store,
+            OkTransport {
+                connected: Arc::new(Mutex::new(Vec::new())),
+                sent: sent.clone(),
+            },
+        );
+        driver.flush_due(RETRY_BACKOFF_MAX_MS * 10).await;
+        assert!(sent.lock().await.is_empty());
+        // A presence edge still re-fires it: that path is unchanged.
+        driver.on_presence(&peer_a(), true).await;
+        assert_eq!(sent.lock().await.as_slice(), &["b1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_reclaimed_stall_re_attempts_against_a_freshly_resolved_target() {
+        // A send task that died holding its claim is the one way a queued
+        // message wedges. After the sweep releases the claim, the re-flush
+        // must take the same re-resolving path as any other attempt.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        assert!(store.try_mark_inflight("b1", 0), "simulate the dead task");
+        let (driver, _target, dialed) = reresolving_driver(store, "post-restart", "pre-restart");
+
+        driver.sweep_stalled(STALLED_CLAIM_MS + 1).await;
+
+        assert_eq!(
+            dialed.lock().await.as_slice(),
+            &["post-restart".to_string()]
+        );
+        assert_eq!(
+            driver.store.lock().await.get("b1").unwrap().status,
+            SendState::Sent
+        );
+    }
+
+    /// One leg of the production transport chain, scripted.
+    struct ScriptedLeg {
+        name: &'static str,
+        reach: crate::transport::Reachability,
+        succeeds: bool,
+        attempts: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::transport::Transport for ScriptedLeg {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn reachability(&self, _: &AgentId) -> crate::transport::Reachability {
+            self.reach
+        }
+        async fn send(
+            &self,
+            _: &AgentId,
+            _: crate::transport::OutboundEnvelope,
+            _: Option<&crate::card::RendezvousHintsV1>,
+        ) -> crate::error::Result<SendReceipt> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.succeeds {
+                Ok(SendReceipt {
+                    accepted_at_ms: 1,
+                    message_id: Some(format!("{}-1", self.name)),
+                    transport_name: self.name,
+                })
+            } else {
+                Err(ChatError::MessageTransport(format!(
+                    "{}: send failed: Peer not found",
+                    self.name
+                )))
+            }
+        }
+        fn take_inbound(
+            &self,
+        ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::transport::InboundEnvelope>>
+        {
+            None
+        }
+    }
+
+    /// Retries through a REAL [`crate::transport::Router`], so the test
+    /// exercises production fallback ordering rather than a stand-in.
+    struct RouterOutboxTransport {
+        router: Arc<crate::transport::Router>,
+    }
+
+    impl OutboxTransport for RouterOutboxTransport {
+        fn connect(&self, _peer: AgentId) -> impl std::future::Future<Output = ()> + Send {
+            async {}
+        }
+        fn send(
+            &self,
+            b: OutboxBubble,
+        ) -> impl std::future::Future<Output = Result<SendReceipt, ChatError>> + Send {
+            let router = self.router.clone();
+            async move {
+                router
+                    .send(
+                        &b.peer,
+                        crate::transport::OutboundEnvelope {
+                            kind: crate::transport::OutboundKind::Dm,
+                            from_machine_id: None,
+                            payload: b.body.into_bytes(),
+                            timestamp_ms: 1,
+                            transit: None,
+                        },
+                        None,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timed_retry_falls_through_to_the_relay_when_the_direct_leg_fails() {
+        // The chain is the backstop: a retry that cannot reach the peer
+        // directly must still land in the relay's durable transit rather
+        // than stopping at the first failing leg.
+        let mut store = OutboxStore::new();
+        store.upsert(bubble("b1", SendState::Queued, None, 0));
+        let direct_attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let relay_attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut router = crate::transport::Router::new();
+        router.add(Arc::new(ScriptedLeg {
+            name: "direct",
+            reach: crate::transport::Reachability::IfReachable,
+            succeeds: false,
+            attempts: direct_attempts.clone(),
+        }));
+        router.add(Arc::new(ScriptedLeg {
+            name: "relay",
+            reach: crate::transport::Reachability::Always,
+            succeeds: true,
+            attempts: relay_attempts.clone(),
+        }));
+        let (tx, _rx) = broadcast::channel(16);
+        let driver = OutboxDriver::new(
+            Arc::new(Mutex::new(store)),
+            tx,
+            RouterOutboxTransport {
+                router: Arc::new(router),
+            },
+        );
+
+        driver.flush_due(0).await;
+
+        assert_eq!(direct_attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(relay_attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let store = driver.store.lock().await;
+        let b = store.get("b1").unwrap();
+        assert_eq!(b.status, SendState::Sent, "the relay took custody");
+        assert_eq!(b.message_id.as_deref(), Some("relay-1"));
     }
 
     #[tokio::test]

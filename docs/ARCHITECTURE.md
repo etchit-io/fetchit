@@ -145,8 +145,14 @@ always-available relay otherwise). Group MLS control-plane events do not use thi
 Router: they ride x0xd gossip as primary with the relay only as a cross-NAT
 contingency (`crate::groups_reachability`). A durable, vault-persisted **DM
 outbox** (`crate::outbox`) owns resend: a presence-edge retry loop, a
-stalled-claim sweep, a boot/restart claim reclaim, and a double-send guard,
-surfaced as `OutboxEvent`s so both shells render one shared delivery state.
+clock-driven retry (`OutboxDriver::flush_due`) that re-attempts every
+relay-unacked bubble on a bounded per-bubble backoff so a message never
+depends on a presence edge that may never arrive, a stalled-claim sweep, a
+boot/restart claim reclaim, and a double-send guard, surfaced as
+`OutboxEvent`s so both shells render one shared delivery state. A retry
+carries no routing state forward -- the bubble stores the recipient's agent
+id and body only, so every attempt re-resolves the recipient's devices and
+relay hints and re-walks the transport chain from the top.
 That state is a truthful four-step machine (`crate::send_state::SendState`):
 **queued** (in the outbox, retried indefinitely -- a dropped socket or a lost
 ack never reads as failure), **sent** (a relay acked durable acceptance, the
@@ -170,8 +176,8 @@ request chains to the account and admits it via x0xd's invite-free direct-add.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
 schema it gates on: `crates/fetchit-trust-types/**`.
 
-<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=6321a28 -->
-_Last verified: 2026-07-08 (`6321a28`) -- bob._
+<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=bb7a046 -->
+_Last verified: 2026-08-04 (`bb7a046`) -- bob._
 
 ## fetchit-relay-proto
 
