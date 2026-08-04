@@ -285,12 +285,22 @@ guard (`pub mod ssrf`): every resolved host is checked against private,
 loopback, link-local, and CGNAT ranges before and after redirects, on both
 fediverse and other outbound dial paths.
 
+`fetchit_fedi::avatar` fetches actor profile pictures over that same
+resolver-pinned, redirect-disabled client, adding https-only, a 512 KiB body
+cap, and an image `Content-Type` allowlist. It never decodes the bytes -- a
+Rust image parser would add an attack surface for attacker-supplied data, so
+decoding belongs to the shells' platform decoders. `fetchit_chat::fedi_avatar`
+owns the bounded on-disk cache (`<root>/fedi/avatars/`, 24h refresh, 1h failure
+backoff, oldest-first eviction past 32 entries / 8 MiB); avatars are
+best-effort and never block or fail follow, DM, or feed.
+
 **Key entry points:** `fetchit_fedi::ssrf`,
 `fetchit_fedi::webfinger::resolve_handle`, `fetchit_fedi::actor::fetch_actor`,
+`fetchit_fedi::avatar::fetch_avatar`,
 `fetchit_fedi::signature::HttpSignatureKey`.
 
-<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=6321a28 -->
-_Last verified: 2026-07-08 (`6321a28`) -- bob._
+<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=8ded009 -->
+_Last verified: 2026-08-04 (`8ded009`) -- bob._
 
 ## Android shell
 

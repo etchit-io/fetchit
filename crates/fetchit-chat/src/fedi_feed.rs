@@ -74,6 +74,13 @@ impl Client {
             let Ok(actor) = fetchit_fedi::lookup::fetch_remote_actor(&actor_url).await else {
                 continue;
             };
+            // Free ride: the actor doc is already in hand, so record its
+            // avatar URL. No image is fetched here — the feed must not
+            // slow down for a profile picture.
+            self.note_fedi_avatar_source(
+                &author_label(&entry.target_actor_url),
+                actor.icon_url.as_deref(),
+            );
             let Some(outbox) = actor.outbox else {
                 continue;
             };

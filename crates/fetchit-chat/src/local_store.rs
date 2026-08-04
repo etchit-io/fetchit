@@ -155,6 +155,39 @@ impl StoreLayout {
         self.fedi_dir.join("handle_resolutions.json")
     }
 
+    /// Directory holding cached fediverse avatars
+    /// (`<root>/fedi/avatars/`). Nested under `fedi/` like
+    /// `threads/` and `links/`, so
+    /// [`crate::fedi_vault::list_actor_handles`]'s `fedi/*.json.enc`
+    /// scan never mistakes a cache entry for a minted identity.
+    #[must_use]
+    pub fn fedi_avatar_dir(&self) -> PathBuf {
+        self.fedi_dir.join("avatars")
+    }
+
+    /// Cached avatar bytes for a correspondent, keyed by
+    /// [`crate::fedi_avatar::avatar_cache_key`]. Plaintext: a profile
+    /// picture served from a public URL is public directory data, same
+    /// class as [`Self::fedi_resolutions_path`].
+    #[must_use]
+    pub fn fedi_avatar_path(&self, label: &str) -> PathBuf {
+        self.fedi_avatar_dir().join(format!(
+            "{}.img",
+            crate::fedi_avatar::avatar_cache_key(label)
+        ))
+    }
+
+    /// Metadata sidecar beside [`Self::fedi_avatar_path`]: the source
+    /// icon URL, the last fetch stamp, and the failure marker that
+    /// drives the retry backoff.
+    #[must_use]
+    pub fn fedi_avatar_meta_path(&self, label: &str) -> PathBuf {
+        self.fedi_avatar_dir().join(format!(
+            "{}.json",
+            crate::fedi_avatar::avatar_cache_key(label)
+        ))
+    }
+
     /// Path of the mint-state record (M5.1): the directory-registration
     /// outcome of the last mint attempt, so a "name taken" conflict
     /// survives a restart. Plaintext: it holds a public handle and a
@@ -195,10 +228,21 @@ impl StoreLayout {
 /// # Errors
 /// IO or JSON serialization failures.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), ChatError> {
-    use std::io::Write;
-
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| ChatError::Invalid(format!("json to_vec: {e}")))?;
+    write_bytes_atomic(path, &bytes)
+}
+
+/// Atomic opaque-bytes write at 0600 perms — the non-JSON twin of
+/// [`write_json_atomic`], used for cached binary blobs (fediverse
+/// avatars). Same unique-tmp-then-rename discipline, same
+/// no-umask-window file creation.
+///
+/// # Errors
+/// IO failures on directory creation, write, or rename.
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), ChatError> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -220,7 +264,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Cha
         opts.mode(0o600);
     }
     let mut f = opts.open(&tmp)?;
-    f.write_all(&bytes)?;
+    f.write_all(bytes)?;
     drop(f);
 
     fs::rename(&tmp, path)?;

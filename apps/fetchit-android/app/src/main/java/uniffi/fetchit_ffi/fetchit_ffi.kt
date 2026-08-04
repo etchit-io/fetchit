@@ -859,6 +859,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -913,6 +915,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm(
 ): Short
@@ -1088,6 +1092,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_drive_pending_joins_once(`ptr`: Poin
 fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar(`ptr`: Pointer,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_dm(`ptr`: Pointer,`target`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,
 ): Long
@@ -1387,6 +1393,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 12315.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar() != 10386.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 53381.toShort()) {
@@ -2195,6 +2204,22 @@ public interface ChatClientInterface {
      * "mint a handle" affordance on this being absent.
      */
     fun `fediActorStatus`(): kotlin.String?
+    
+    /**
+     * Cached avatar image bytes for the fediverse correspondent `label`
+     * (`user@host`), or `None` when nothing is cached yet.
+     *
+     * Bytes are the image exactly as the remote server served it — one of
+     * JPEG / PNG / WebP / GIF, capped at 512 KiB, fetched through the
+     * fediverse SSRF guard. The engine never decodes them; the shell
+     * decodes with its platform decoder, bounds-checked.
+     *
+     * A `None` is not final: it kicks off a background fetch (subject to a
+     * 24h refresh window and a 1h failure backoff), so a later call for the
+     * same label can succeed. Nothing here blocks — an avatar is decoration,
+     * and every fedi surface must render identically without one.
+     */
+    fun `fediAvatar`(`label`: kotlin.String): kotlin.ByteArray?
     
     /**
      * Send a plaintext fediverse DM (`@user@instance`) from our minted
@@ -3231,6 +3256,32 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(
         it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Cached avatar image bytes for the fediverse correspondent `label`
+     * (`user@host`), or `None` when nothing is cached yet.
+     *
+     * Bytes are the image exactly as the remote server served it — one of
+     * JPEG / PNG / WebP / GIF, capped at 512 KiB, fetched through the
+     * fediverse SSRF guard. The engine never decodes them; the shell
+     * decodes with its platform decoder, bounds-checked.
+     *
+     * A `None` is not final: it kicks off a background fetch (subject to a
+     * 24h refresh window and a 1h failure backoff), so a later call for the
+     * same label can succeed. Nothing here blocks — an avatar is decoration,
+     * and every fedi surface must render identically without one.
+     */override fun `fediAvatar`(`label`: kotlin.String): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar(
+        it, FfiConverterString.lower(`label`),_status)
 }
     }
     )
@@ -7537,6 +7588,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
         }
     }
 }

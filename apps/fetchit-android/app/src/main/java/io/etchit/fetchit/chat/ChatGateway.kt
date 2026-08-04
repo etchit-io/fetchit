@@ -233,6 +233,20 @@ interface ChatGateway {
     suspend fun fediMarkThreadRead(label: String): Boolean = false
 
     /**
+     * Cached profile-picture bytes for the fediverse correspondent [label],
+     * or null when nothing is cached.
+     *
+     * The engine fetched these behind its SSRF guard (https only, image
+     * content-types only, 512 KiB cap) and never decoded them — decoding is
+     * the platform's job, bounds-checked, in [FediAvatars]. A null is not
+     * final: it asks the engine to fetch in the background, so a later call
+     * for the same label can succeed. Never throws; an avatar is decoration
+     * and every fedi surface renders identically without one. The default
+     * no-op keeps test doubles simple.
+     */
+    fun fediAvatar(label: String): ByteArray? = null
+
+    /**
      * The `@user@host` labels of accounts following the minted handle,
      * newest first. Throws when no handle is minted or the directory is
      * unreachable.
@@ -420,6 +434,7 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.fediThreadsOverview()
     override suspend fun fediMarkThreadRead(label: String): Boolean =
         inner.fediMarkThreadRead(label)
+    override fun fediAvatar(label: String): ByteArray? = inner.fediAvatar(label)
     override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
 
     override fun reconnectingGroups(): List<String> = inner.reconnectingGroups()

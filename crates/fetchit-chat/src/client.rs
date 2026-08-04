@@ -6352,6 +6352,10 @@ impl Client {
             .await
             .map_err(|e| ChatError::Invalid(format!("couldn't fetch that account: {e}")))?;
         let actor_url_str = actor.id.to_string();
+        self.note_fedi_avatar_source(
+            &crate::fedi_feed::author_label(&actor_url_str),
+            actor.icon_url.as_deref(),
+        );
 
         let Some(att) = actor.attestation_v2.clone() else {
             return Ok(FediLookup::public_only(canonical, actor_url_str, None));
