@@ -442,6 +442,12 @@ class ChatModeView(
                     listView?.let { bindOnboardFediCopy(it) }
                 }
                 refreshChatsFediThreads()
+                // The cached list view keeps ONE collector for the whole
+                // ChatModeView lifetime, so arriving here is the moment to
+                // re-read the private rows' badges from the engine's durable
+                // read marks: a message that landed while the user was on
+                // another tab is counted, not merely what this process saw.
+                lifecycleScope.launch { controller.refreshAllUnread() }
             }
             is Screen.People -> {
                 threadCollectJob?.cancel()
@@ -554,7 +560,8 @@ class ChatModeView(
                 controller.groups,
                 controller.fediThreads,
                 controller.personLinks,
-            ) { contacts, groups, fedi, links ->
+                controller.litUnread,
+            ) { contacts, groups, fedi, links, unread ->
                 // A fediverse thread whose person is linked to a PQ agent is
                 // folded into that contact's 🔒 row, so suppress its globe row.
                 val linkedLabels = links.filter { it.linked }.map { it.label }.toSet()
@@ -571,6 +578,7 @@ class ChatModeView(
                     },
                     fediThreads = fedi,
                     linkedFediLabels = linkedLabels,
+                    litUnread = unread,
                 )
             }
                 .collect { rows ->
@@ -2326,6 +2334,11 @@ class ChatModeView(
                 adapter.submitList(rows)
                 // Scroll only when new messages arrive, not on receipt-tick rebinds.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+                // Read AFTER the render, never before: the mark may only claim
+                // what was actually put on screen. Fires on the first emission
+                // (opening the thread) and on every message that lands while it
+                // is still up, so the row never badges what the user is reading.
+                controller.markConversationRead(ConversationStore.convKeyDm(peer))
             }
         }
     }
@@ -2444,6 +2457,9 @@ class ChatModeView(
                 val rows = msgs.map { MessageRow.Dm(it) }
                 adapter.submitList(rows)
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
+                // Read AFTER the render (see the DM thread): on open, and again
+                // for every message that arrives while the group is on screen.
+                controller.markConversationRead(ConversationStore.convKeyGroup(groupId))
             }
         }
     }
@@ -3560,9 +3576,11 @@ class ChatModeView(
             when (val row = rows[position]) {
                 is ChatRow.Fedi -> (holder as FediViewHolder).bind(row.summary, onFediTap)
                 is ChatRow.Group ->
-                    (holder as GroupViewHolder).bind(row.group, row.preview, onGroupTap, onLeaveGroup)
+                    (holder as GroupViewHolder)
+                        .bind(row.group, row.preview, row.unread, onGroupTap, onLeaveGroup)
                 is ChatRow.Contact ->
-                    (holder as ContactViewHolder).bind(row.contact, row.preview, onContactTap, onRemoveContact)
+                    (holder as ContactViewHolder)
+                        .bind(row.contact, row.preview, row.unread, onContactTap, onRemoveContact)
             }
         }
     }
@@ -3615,11 +3633,13 @@ class ChatModeView(
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+        private val unread: TextView = itemView.findViewById(R.id.contactUnreadBadge)
         private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
         fun bind(
             contact: ChatContact,
             lastPreview: String,
+            unreadCount: Int,
             onTap: (ChatContact) -> Unit,
             onMore: (View, ChatContact) -> Unit,
         ) {
@@ -3628,6 +3648,7 @@ class ChatModeView(
             shortId.text = "🔒"
             name.text = contact.displayName
             preview.text = lastPreview
+            bindUnreadBadge(unread, unreadCount)
             itemView.setOnClickListener { onTap(contact) }
             more.visibility = View.VISIBLE
             more.setOnClickListener { anchor -> onMore(anchor, contact) }
@@ -3638,11 +3659,13 @@ class ChatModeView(
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+        private val unread: TextView = itemView.findViewById(R.id.contactUnreadBadge)
         private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
         fun bind(
             group: GroupFfi,
             lastPreview: String,
+            unreadCount: Int,
             onTap: (GroupFfi) -> Unit,
             onMore: (View, GroupFfi) -> Unit,
         ) {
@@ -3652,6 +3675,7 @@ class ChatModeView(
                 if (group.isPrivate == true) context.getString(R.string.chat_group_lock_glyph) else "#"
             name.text = groupTitle(group, group.groupId)
             preview.text = lastPreview
+            bindUnreadBadge(unread, unreadCount)
             itemView.setOnClickListener { onTap(group) }
             more.visibility = View.VISIBLE
             more.setOnClickListener { anchor -> onMore(anchor, group) }
