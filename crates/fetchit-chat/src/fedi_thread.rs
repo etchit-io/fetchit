@@ -2,7 +2,8 @@
 //!
 //! One sealed file per minted handle (`<root>/fedi/threads/<handle>.json.enc`)
 //! holds every fediverse direct message this device has sent or pulled,
-//! grouped by correspondent, plus the bridge-inbox `since_ms` cursor.
+//! grouped by correspondent, plus the bridge-inbox `since_ms` cursor and
+//! a per-correspondent read mark.
 //! Messages and cursor persist in a single atomic write so a cursor
 //! advance can never outlive the messages it covers — the loss class
 //! behind fedi DMs vanishing on-device (2026-07-14): the shell kept the
@@ -77,6 +78,27 @@ pub struct FediThreads {
     /// Thread per correspondent, keyed by [`canonical_thread_label`].
     #[serde(default)]
     pub threads: BTreeMap<String, Vec<FediThreadMsg>>,
+    /// Per-thread read high-water mark: the newest
+    /// [`FediThreadMsg::at_ms`] the user has actually opened the thread
+    /// on, keyed by [`canonical_thread_label`].
+    ///
+    /// Deliberately NOT [`Self::cursor_ms`]: that one is the bridge-pull
+    /// cursor and advances on a background sync, so reusing it as read
+    /// state would mark a first contact read before the user ever saw
+    /// the row. Absent for a thread that has never been opened, which is
+    /// what makes an unheralded DM show up unread.
+    #[serde(default)]
+    pub read_ms: BTreeMap<String, i64>,
+}
+
+/// Inbound messages in `msgs` newer than `read_ms`, saturating at
+/// [`u32::MAX`]. Our own sends are never unread.
+fn unread_since(msgs: &[FediThreadMsg], read_ms: i64) -> u32 {
+    let n = msgs
+        .iter()
+        .filter(|m| !m.outbound && m.at_ms > read_ms)
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// A one-line summary of a fediverse DM thread, for the unified
@@ -92,6 +114,10 @@ pub struct FediThreadSummary {
     pub last_at_ms: i64,
     /// `true` when the most recent message was sent by this device.
     pub last_outbound: bool,
+    /// Inbound messages the user has not opened the thread on yet. `0`
+    /// renders no badge; anything higher is the only signal a brand-new
+    /// correspondent gets.
+    pub unread: u32,
 }
 
 impl FediThreads {
@@ -150,6 +176,40 @@ impl FediThreads {
         inserted
     }
 
+    /// Inbound messages in `label`'s thread (canonicalised) that arrived
+    /// after the last time it was opened. A thread that has never been
+    /// opened counts its whole inbound history, so a first contact is
+    /// unread by construction.
+    #[must_use]
+    pub fn unread(&self, label: &str) -> u32 {
+        let label = canonical_thread_label(label);
+        let read = self.read_ms.get(&label).copied().unwrap_or(i64::MIN);
+        self.threads
+            .get(&label)
+            .map_or(0, |msgs| unread_since(msgs, read))
+    }
+
+    /// Mark `label`'s thread (canonicalised) read up to its newest
+    /// message. Returns `true` when the mark moved — a caller can skip
+    /// re-sealing the store on a re-open that changed nothing. A thread
+    /// with no messages stores no mark.
+    pub fn mark_read(&mut self, label: &str) -> bool {
+        let label = canonical_thread_label(label);
+        let Some(newest) = self
+            .threads
+            .get(&label)
+            .and_then(|msgs| msgs.last())
+            .map(|m| m.at_ms)
+        else {
+            return false;
+        };
+        if newest <= self.read_ms.get(&label).copied().unwrap_or(i64::MIN) {
+            return false;
+        }
+        self.read_ms.insert(label, newest);
+        true
+    }
+
     /// One [`FediThreadSummary`] per non-empty thread, newest activity
     /// first (ties broken by label ascending so the order is stable). The
     /// render source for fediverse rows in the unified conversation list.
@@ -160,11 +220,13 @@ impl FediThreads {
             .iter()
             .filter_map(|(label, msgs)| {
                 let last = msgs.last()?;
+                let read = self.read_ms.get(label).copied().unwrap_or(i64::MIN);
                 Some(FediThreadSummary {
                     label: label.clone(),
                     last_body: last.text.clone(),
                     last_at_ms: last.at_ms,
                     last_outbound: last.outbound,
+                    unread: unread_since(msgs, read),
                 })
             })
             .collect();
@@ -378,6 +440,111 @@ mod tests {
         assert!(!ov[0].last_outbound, "last row was an inbound reply");
         assert_eq!(ov[1].label, "stranger@mas.to");
         assert_eq!(ov[1].last_at_ms, 150);
+    }
+
+    #[test]
+    fn first_contact_lands_in_the_overview_as_unread() {
+        // Inbound from someone we have never messaged: the thread has no
+        // prior local activity, so the ONLY way the user learns it exists
+        // is this row carrying an unread count.
+        let mut t = FediThreads::default();
+        t.fold_inbox(&[inbound("https://mas.to/users/stranger", "r1", 100)]);
+        let ov = t.overview();
+        assert_eq!(ov.len(), 1);
+        assert_eq!(ov[0].label, "stranger@mas.to");
+        assert_eq!(ov[0].unread, 1, "an unheralded first contact is unread");
+    }
+
+    #[test]
+    fn our_own_sends_are_never_unread() {
+        let mut t = FediThreads::default();
+        t.insert("@happyborg@fosstodon.org", outbound("s1", 100));
+        assert_eq!(t.unread("happyborg@fosstodon.org"), 0);
+        assert_eq!(t.overview()[0].unread, 0);
+    }
+
+    #[test]
+    fn mark_read_clears_unread_and_later_inbound_re_arms_it() {
+        let mut t = FediThreads::default();
+        t.fold_inbox(&[
+            inbound("https://mas.to/users/stranger", "r1", 100),
+            inbound("https://mas.to/users/stranger", "r2", 200),
+        ]);
+        assert_eq!(t.unread("stranger@mas.to"), 2);
+
+        assert!(t.mark_read("@Stranger@Mas.to"), "the mark moved");
+        assert_eq!(t.unread("stranger@mas.to"), 0);
+        assert!(!t.mark_read("stranger@mas.to"), "re-open is a no-op");
+
+        // A reply that arrives after the read makes the row unread again.
+        t.fold_inbox(&[inbound("https://mas.to/users/stranger", "r3", 300)]);
+        assert_eq!(t.unread("stranger@mas.to"), 1);
+        assert_eq!(t.overview()[0].unread, 1);
+    }
+
+    #[test]
+    fn mark_read_is_per_thread() {
+        let mut t = FediThreads::default();
+        t.fold_inbox(&[
+            inbound("https://mas.to/users/stranger", "r1", 100),
+            inbound("https://fosstodon.org/users/happyborg", "r2", 200),
+        ]);
+        t.mark_read("stranger@mas.to");
+        assert_eq!(t.unread("stranger@mas.to"), 0);
+        assert_eq!(
+            t.unread("happyborg@fosstodon.org"),
+            1,
+            "reading one thread must not silence the other",
+        );
+    }
+
+    #[test]
+    fn mark_read_on_an_unknown_thread_stores_nothing() {
+        let mut t = FediThreads::default();
+        assert!(!t.mark_read("nobody@nowhere"));
+        assert!(
+            t.read_ms.is_empty(),
+            "no mark for a thread with no messages"
+        );
+        assert_eq!(t.unread("nobody@nowhere"), 0);
+    }
+
+    #[test]
+    fn the_pull_cursor_is_not_read_state() {
+        // cursor_ms advances on a BACKGROUND bridge sync. If it doubled as
+        // the read mark, a first contact would be marked read before the
+        // user ever saw the row -- the #306 discoverability failure.
+        let mut t = FediThreads::default();
+        t.fold_inbox(&[inbound("https://mas.to/users/stranger", "r1", 100)]);
+        assert_eq!(t.cursor_ms, 100);
+        assert_eq!(t.unread("stranger@mas.to"), 1);
+    }
+
+    #[test]
+    fn read_marks_survive_the_seal_round_trip() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = fixture_master(0x24);
+
+        let mut t = FediThreads::default();
+        t.fold_inbox(&[inbound("https://mas.to/users/stranger", "r1", 100)]);
+        t.mark_read("stranger@mas.to");
+        save_fedi_threads("josh", &t, &master, &layout).unwrap();
+
+        let back = load_fedi_threads("josh", &master, &layout).unwrap();
+        assert_eq!(back.unread("stranger@mas.to"), 0, "read state is durable");
+    }
+
+    #[test]
+    fn a_store_written_before_read_marks_existed_loads_as_all_unread() {
+        // Forward-compat: `read_ms` is #[serde(default)], so a pre-#306
+        // sealed store decodes rather than erroring -- its threads simply
+        // start unread.
+        let legacy = r#"{"cursor_ms":100,"threads":{"stranger@mas.to":[
+            {"outbound":false,"text":"hi","note_id":"r1","at_ms":100,
+             "peer_actor_url":"https://mas.to/users/stranger"}]}}"#;
+        let t: FediThreads = serde_json::from_str(legacy).unwrap();
+        assert_eq!(t.unread("stranger@mas.to"), 1);
     }
 
     #[test]
