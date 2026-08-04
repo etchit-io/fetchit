@@ -301,6 +301,13 @@ fn apply_cache_bounds(layout: &StoreLayout) {
 impl crate::client::Client {
     /// Cached avatar bytes for a fediverse correspondent, or `None`.
     /// Pure disk read: never blocks on the network.
+    ///
+    /// No side effects at all — no fetch, no spawn, no refresh cadence
+    /// touched. That is what makes this the only avatar call a private
+    /// (LIT) surface may make: a linked contact's row reuses the
+    /// fediverse face, and fetch timing must never correlate with LIT
+    /// activity. Refreshing stays with the fediverse surfaces, where a
+    /// request is already expected.
     #[must_use]
     pub fn fedi_avatar_cached(&self, label: &str) -> Option<Vec<u8>> {
         cached_bytes(self.layout()?, label)
@@ -397,6 +404,7 @@ mod tests {
     use super::*;
     use fetchit_fedi::avatar::FetchedAvatar;
     use tempfile::{tempdir, TempDir};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn layout() -> (StoreLayout, TempDir) {
         let dir = tempdir().unwrap();
@@ -698,6 +706,63 @@ mod tests {
     fn eviction_on_an_empty_cache_is_a_no_op() {
         let (layout, _t) = layout();
         assert_eq!(enforce_cache_bounds(&layout).unwrap(), 0);
+    }
+
+    // ----- the cache-only read path -----
+
+    #[tokio::test]
+    async fn the_cached_read_path_issues_no_request_even_when_a_refresh_is_due() {
+        // [`cached_bytes`] is what [`crate::client::Client::fedi_avatar_cached`]
+        // and, above it, the shells' LIT contact rows read through. A LIT row
+        // must never cause an observable request to a fediverse server:
+        // receiving a private message would otherwise show up as fetch timing
+        // on someone else's access log. Assert the property, not the intent.
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![0x89; 16]),
+            )
+            .mount(&server)
+            .await;
+
+        let (layout, _t) = layout();
+        let source = format!("{}/avatar.png", server.uri());
+        // The adversarial fixture: an entry a fetch-capable path WOULD
+        // refresh right now, whose icon URL is a live server. Without this
+        // the zero below could be zero for the wrong reason.
+        store_success(&layout, "linked@host", &source, &png(48), 1).unwrap();
+        let now = 1 + AVATAR_REFRESH_MS;
+        assert!(
+            due_for_refresh(load_meta(&layout, "linked@host").as_ref(), now),
+            "fixture must be due for refresh or the assertion below is vacuous",
+        );
+
+        assert_eq!(cached_bytes(&layout, "linked@host").unwrap().len(), 48);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "a cache-only avatar read must issue zero requests",
+        );
+        // Nor may it leave state behind that arms one later: the sidecar is
+        // untouched, so no "due" stamp moved and no failure backoff started.
+        let meta = load_meta(&layout, "linked@host").unwrap();
+        assert_eq!(meta.fetched_at_ms, 1);
+        assert_eq!(meta.source_url, source);
+        assert!(!meta.failed);
+
+        // Control: the server does record requests, so the emptiness above
+        // is a property of the read path and not of the harness.
+        reqwest::get(&source).await.expect("control request");
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "the mock server counts requests; the cached read simply made none",
+        );
     }
 
     #[test]

@@ -1837,6 +1837,10 @@ impl ChatClient {
     /// 24h refresh window and a 1h failure backoff), so a later call for the
     /// same label can succeed. Nothing here blocks — an avatar is decoration,
     /// and every fedi surface must render identically without one.
+    ///
+    /// Because a `None` can fetch, this call belongs to the FEDIVERSE
+    /// surfaces only. Anything private (LIT) reads
+    /// [`Self::fedi_avatar_cached`] instead.
     pub fn fedi_avatar(&self, label: String) -> Option<Vec<u8>> {
         if let Some(bytes) = self.inner.fedi_avatar_cached(&label) {
             return Some(bytes);
@@ -1858,6 +1862,28 @@ impl ChatClient {
             }
         });
         None
+    }
+
+    /// Cached avatar image bytes for the fediverse correspondent `label`,
+    /// or `None`. Reads the on-disk cache and returns -- nothing else.
+    ///
+    /// The difference from [`Self::fedi_avatar`] is the whole point: a
+    /// `None` here is final for this call. No background fetch is spawned,
+    /// no refresh cadence is consulted, no failure backoff is armed. A
+    /// stale face is fine; a request is not.
+    ///
+    /// This is the ONLY avatar call a private (LIT) surface may make.
+    /// A LIT contact whose person is linked to a fediverse identity reuses
+    /// that identity's picture, and rendering that row must not be
+    /// observable to anyone: if drawing it could fetch, then the arrival of
+    /// a private message would produce a request to a fediverse server, and
+    /// fetch timing on that server's access log would correlate with LIT
+    /// activity -- leaking, to a third party, when an end-to-end encrypted
+    /// conversation is happening. The fediverse surfaces call
+    /// [`Self::fedi_avatar`] and keep the cache warm; LIT rows only ever
+    /// read what those surfaces already fetched.
+    pub fn fedi_avatar_cached(&self, label: String) -> Option<Vec<u8>> {
+        self.inner.fedi_avatar_cached(&label)
     }
 
     /// Mark the fediverse DM thread with `label` read up to its newest
