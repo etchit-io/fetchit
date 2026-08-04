@@ -176,8 +176,8 @@ request chains to the account and admits it via x0xd's invite-free direct-add.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
 schema it gates on: `crates/fetchit-trust-types/**`.
 
-<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=6321a28 -->
-_Last verified: 2026-07-08 (`6321a28`) -- bob._
+<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=bb7a046 -->
+_Last verified: 2026-08-04 (`bb7a046`) -- bob._
 
 ## fetchit-relay-proto
 
