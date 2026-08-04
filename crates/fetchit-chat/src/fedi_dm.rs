@@ -284,6 +284,24 @@ impl Client {
         let (master, layout) = self.fedi_at_rest()?;
         Ok(load_fedi_threads(handle, &master, &layout)?.overview())
     }
+
+    /// Mark the fediverse DM thread with `label` read up to its newest
+    /// message — the unread count in the conversation list clears and
+    /// stays clear across restarts, because the mark is sealed into the
+    /// same store as the messages. Returns `true` when the mark moved;
+    /// a re-open that changes nothing skips the write.
+    ///
+    /// # Errors
+    /// [`ChatError`] on store load/save failures.
+    pub fn mark_fedi_thread_read(&self, handle: &str, label: &str) -> Result<bool> {
+        let (master, layout) = self.fedi_at_rest()?;
+        let mut threads = load_fedi_threads(handle, &master, &layout)?;
+        if !threads.mark_read(label) {
+            return Ok(false);
+        }
+        save_fedi_threads(handle, &threads, &master, &layout)?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

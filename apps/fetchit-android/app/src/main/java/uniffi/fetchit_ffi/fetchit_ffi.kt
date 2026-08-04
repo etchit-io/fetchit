@@ -851,6 +851,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -921,6 +923,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mark_thread_read(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint(
 ): Short
@@ -1088,6 +1092,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_link_person(`ptr`: Pointer,`tar
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_linked_label_for_agent(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_lookup(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mark_thread_read(`ptr`: Pointer,`label`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_mint(`ptr`: Pointer,`handle`: RustBuffer.ByValue,
 ): Long
@@ -1387,6 +1393,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_lookup() != 41602.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mark_thread_read() != 7906.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_mint() != 43138.toShort()) {
@@ -2230,6 +2239,19 @@ public interface ChatClientInterface {
      * returned as a `NotFound` card, not an error.
      */
     suspend fun `fediLookup`(`handle`: kotlin.String): LookupFfi
+    
+    /**
+     * Mark the fediverse DM thread with `label` read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed alongside the messages). Returns `true` when the mark
+     * moved. A device with no minted handle has no threads and returns
+     * `false` rather than erroring, mirroring
+     * [`Self::fedi_threads_overview`].
+     *
+     * # Errors
+     * [`ChatFfiError`] on a thread-store load/save failure.
+     */
+    suspend fun `fediMarkThreadRead`(`label`: kotlin.String): kotlin.Boolean
     
     /**
      * Opt in to public posting: mint the actor identity for `handle` (with
@@ -3333,6 +3355,38 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeLookupFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Mark the fediverse DM thread with `label` read up to its newest
+     * message: the row's unread count clears, durably (the mark is
+     * sealed alongside the messages). Returns `true` when the mark
+     * moved. A device with no minted handle has no threads and returns
+     * `false` rather than erroring, mirroring
+     * [`Self::fedi_threads_overview`].
+     *
+     * # Errors
+     * [`ChatFfiError`] on a thread-store load/save failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediMarkThreadRead`(`label`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_mark_thread_read(
+                thisPtr,
+                FfiConverterString.lower(`label`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -5248,7 +5302,13 @@ data class FediThreadSummaryFfi (
     /**
      * `true` when the newest message was outbound.
      */
-    var `lastOutbound`: kotlin.Boolean
+    var `lastOutbound`: kotlin.Boolean, 
+    /**
+     * Inbound messages arrived since the thread was last opened. `0`
+     * renders no badge; a never-opened thread from a new correspondent
+     * counts its whole history, which is what makes it discoverable.
+     */
+    var `unread`: kotlin.UInt
 ) {
     
     companion object
@@ -5264,6 +5324,7 @@ public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediT
             FfiConverterString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
         )
     }
 
@@ -5271,7 +5332,8 @@ public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediT
             FfiConverterString.allocationSize(value.`label`) +
             FfiConverterString.allocationSize(value.`lastBody`) +
             FfiConverterLong.allocationSize(value.`lastAtMs`) +
-            FfiConverterBoolean.allocationSize(value.`lastOutbound`)
+            FfiConverterBoolean.allocationSize(value.`lastOutbound`) +
+            FfiConverterUInt.allocationSize(value.`unread`)
     )
 
     override fun write(value: FediThreadSummaryFfi, buf: ByteBuffer) {
@@ -5279,6 +5341,7 @@ public object FfiConverterTypeFediThreadSummaryFfi: FfiConverterRustBuffer<FediT
             FfiConverterString.write(value.`lastBody`, buf)
             FfiConverterLong.write(value.`lastAtMs`, buf)
             FfiConverterBoolean.write(value.`lastOutbound`, buf)
+            FfiConverterUInt.write(value.`unread`, buf)
     }
 }
 

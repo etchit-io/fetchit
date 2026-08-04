@@ -435,6 +435,10 @@
     <string name="chat_group_sender_unknown">someone</string>
     <string name="chat_group_lock_glyph">🔒</string>
 
+    <!-- Chat: unread count pill on a conversation row -->
+    <string name="chat_unread_overflow">99+</string>
+    <string name="chat_unread_desc">%1$d unread</string>
+
     <!-- Chat: remove a chat / leave a group from the list row overflow -->
     <string name="chat_row_more">more</string>
     <string name="chat_remove_chat">Remove this chat</string>

@@ -214,6 +214,15 @@ interface ChatGateway {
     suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi>
 
     /**
+     * Mark the fediverse DM thread with [label] read up to its newest
+     * message: the row's unread count clears, and stays clear across
+     * restarts (the engine seals the read mark next to the messages).
+     * Returns true when the mark moved. Quiet no-op without a minted
+     * handle; the default no-op keeps test doubles simple.
+     */
+    suspend fun fediMarkThreadRead(label: String): Boolean = false
+
+    /**
      * The `@user@host` labels of accounts following the minted handle,
      * newest first. Throws when no handle is minted or the directory is
      * unreachable.
@@ -381,6 +390,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediSyncInbox(): UInt = inner.fediSyncInbox()
     override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> =
         inner.fediThreadsOverview()
+    override suspend fun fediMarkThreadRead(label: String): Boolean =
+        inner.fediMarkThreadRead(label)
     override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
 
     override fun reconnectingGroups(): List<String> = inner.reconnectingGroups()

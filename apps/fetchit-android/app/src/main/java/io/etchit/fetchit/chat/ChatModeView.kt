@@ -2292,6 +2292,9 @@ class ChatModeView(
             val fediRows: List<MessageRow> = if (linkedLabel != null) {
                 val fkey = ConversationStore.convKeyFedi(linkedLabel)
                 controller.hydrateConversation(fkey)
+                // The merged thread shows this person's fediverse history
+                // here, so reading it here is reading it.
+                controller.markFediThreadRead(linkedLabel)
                 val fediMsgs = controller.conversations.messagesFor(fkey).value
                 if (fediMsgs.isEmpty()) {
                     emptyList()
@@ -2808,6 +2811,9 @@ class ChatModeView(
 
         threadCollectJob = lifecycleScope.launch {
             controller.hydrateConversation(convKey)
+            // Opening the thread IS reading it: clear the unread badge for
+            // what is already on disk before the pull below adds more.
+            controller.markFediThreadRead(handle)
             controller.conversations.messagesFor(convKey).collect { msgs ->
                 val prevSize = adapter.itemCount
                 val rows = msgs.map { MessageRow.Dm(it) }
@@ -2815,7 +2821,7 @@ class ChatModeView(
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
         }
-        pullFediReplies(convKey)
+        pullFediReplies(convKey, handle)
     }
 
     /** Resend is offered only after this cooldown, so a tap can't spam the
@@ -2926,8 +2932,13 @@ class ChatModeView(
      * atomic save — a process death can no longer lose a reply the
      * cursor already passed, which is how replies used to vanish.
      * Quiet on failure: the thread simply shows what it already has.
+     *
+     * Anything the pull lands in [handle]'s own thread is being read
+     * right now — this screen is open on it — so the read mark advances
+     * again afterwards and the row never carries a badge for messages
+     * the user is looking at. Other senders' threads keep theirs.
      */
-    private fun pullFediReplies(convKey: String) {
+    private fun pullFediReplies(convKey: String, handle: String) {
         lifecycleScope.launch {
             val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
             runCatching { gw.fediSyncInbox() }.getOrElse {
@@ -2935,6 +2946,7 @@ class ChatModeView(
                 return@launch
             }
             controller.hydrateConversation(convKey)
+            controller.markFediThreadRead(handle)
         }
     }
 
@@ -3559,6 +3571,7 @@ class ChatModeView(
         private val shortId: TextView = itemView.findViewById(R.id.contactShortId)
         private val name: TextView = itemView.findViewById(R.id.contactName)
         private val preview: TextView = itemView.findViewById(R.id.contactPreview)
+        private val unread: TextView = itemView.findViewById(R.id.contactUnreadBadge)
         private val more: ImageButton = itemView.findViewById(R.id.contactRowMore)
 
         fun bind(
@@ -3569,12 +3582,33 @@ class ChatModeView(
             shortId.text = "🌐"
             name.text = summary.label
             preview.text = summary.lastBody
+            // Unread messages from someone who has never been replied to are
+            // the whole point of the row: without the badge a first contact
+            // is just another quiet line in the list.
+            bindUnreadBadge(unread, summary.unread.toInt())
             // Fediverse threads have no per-row overflow yet (block/unfollow
             // live on the profile card); detach any recycled listener.
             more.visibility = View.GONE
             more.setOnClickListener(null)
             itemView.setOnClickListener { onTap(summary.label) }
         }
+    }
+
+    /**
+     * Paint (or hide) a conversation row's unread pill. Zero hides it, so
+     * a read row is visually identical to how it was before badges
+     * existed; big counts cap at "99+" so the row can't be pushed around.
+     */
+    private fun bindUnreadBadge(badge: TextView, count: Int) {
+        if (count <= 0) {
+            badge.visibility = View.GONE
+            badge.contentDescription = null
+            return
+        }
+        badge.visibility = View.VISIBLE
+        badge.text =
+            if (count > 99) context.getString(R.string.chat_unread_overflow) else count.toString()
+        badge.contentDescription = context.getString(R.string.chat_unread_desc, count)
     }
 
     private inner class ContactViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {

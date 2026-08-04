@@ -451,6 +451,18 @@ class ChatController(private val appContext: Context, private val scope: Corouti
     }
 
     /**
+     * Mark the fediverse DM thread with [label] read (the engine persists
+     * the mark), then republish [fediThreads] so the row's unread badge
+     * clears immediately. Quiet on failure — an unread badge that lingers
+     * is a far smaller harm than a crash on opening a thread.
+     */
+    suspend fun markFediThreadRead(label: String) {
+        val gw = gateway ?: return
+        val moved = runCatching { gw.fediMarkThreadRead(label) }.getOrDefault(false)
+        if (moved) refreshFediThreads()
+    }
+
+    /**
      * Pull the current fediverse-person link table (linked + pending-invite)
      * from the engine into [personLinks]. Quiet on failure. No-op without a
      * connected gateway or a minted handle.

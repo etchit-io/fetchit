@@ -635,6 +635,10 @@ pub struct FediThreadSummaryFfi {
     pub last_at_ms: i64,
     /// `true` when the newest message was outbound.
     pub last_outbound: bool,
+    /// Inbound messages arrived since the thread was last opened. `0`
+    /// renders no badge; a never-opened thread from a new correspondent
+    /// counts its whole history, which is what makes it discoverable.
+    pub unread: u32,
 }
 
 /// One fediverse↔LIT person link -- mirrors
@@ -1679,8 +1683,27 @@ impl ChatClient {
                 last_body: s.last_body,
                 last_at_ms: s.last_at_ms,
                 last_outbound: s.last_outbound,
+                unread: s.unread,
             })
             .collect())
+    }
+
+    /// Mark the fediverse DM thread with `label` read up to its newest
+    /// message: the row's unread count clears, durably (the mark is
+    /// sealed alongside the messages). Returns `true` when the mark
+    /// moved. A device with no minted handle has no threads and returns
+    /// `false` rather than erroring, mirroring
+    /// [`Self::fedi_threads_overview`].
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] on a thread-store load/save failure.
+    pub async fn fedi_mark_thread_read(&self, label: String) -> Result<bool, ChatFfiError> {
+        let Some(handle) = self.fedi_actor_status() else {
+            return Ok(false);
+        };
+        self.inner
+            .mark_fedi_thread_read(&handle, &label)
+            .map_err(ChatFfiError::from)
     }
 
     /// Group ids currently in stale-epoch catch-up (#297 P1.4). The
