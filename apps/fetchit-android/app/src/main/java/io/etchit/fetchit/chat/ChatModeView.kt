@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.text.SpannableString
 import android.text.Spanned
+import android.text.format.DateUtils
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
 import android.util.Log
@@ -2336,7 +2337,7 @@ class ChatModeView(
                 if (fediMsgs.isEmpty()) {
                     emptyList()
                 } else {
-                    fediMsgs.map { MessageRow.Dm(it) } + listOf(
+                    dmRowsWithDays(fediMsgs) + listOf(
                         MessageRow.Divider(context.getString(R.string.thread_divider_fedi)),
                         MessageRow.Divider(context.getString(R.string.thread_divider_pq)),
                     )
@@ -2359,7 +2360,7 @@ class ChatModeView(
                 // The composer sends ONLY PQ (enqueueDm above) — a lock on the
                 // row means nothing typed here is ever plaintext. Fediverse
                 // messaging to this person stays deliberately out of the way.
-                val rows = fediRows + msgs.map { MessageRow.Dm(it) }
+                val rows = fediRows + dmRowsWithDays(msgs)
                 adapter.submitList(rows)
                 // Scroll only when new messages arrive, not on receipt-tick rebinds.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
@@ -2483,7 +2484,7 @@ class ChatModeView(
             controller.hydrateConversation(ConversationStore.convKeyGroup(groupId))
             controller.conversations.messagesFor(ConversationStore.convKeyGroup(groupId)).collect { msgs ->
                 val prevSize = adapter.itemCount
-                val rows = msgs.map { MessageRow.Dm(it) }
+                val rows = dmRowsWithDays(msgs)
                 adapter.submitList(rows)
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
                 // Read AFTER the render (see the DM thread): on open, and again
@@ -2733,9 +2734,14 @@ class ChatModeView(
         feedCollectJob = lifecycleScope.launch {
             controller.feed.posts.collect { posts ->
                 val prevSize = adapter.itemCount
-                val rows = posts
-                    .filterNot { blockStore.isBlocked(it.actorUrl) }
-                    .map { MessageRow.Post(it) }
+                // Posts carry the published stamp (0 when the remote date
+                // failed to parse), so undated posts simply sit under the
+                // day above them rather than minting a header.
+                val rows = rowsWithDays(
+                    posts.filterNot { blockStore.isBlocked(it.actorUrl) },
+                    { it.receivedAtMs },
+                    { MessageRow.Post(it) },
+                )
                 adapter.submitList(rows)
                 // Scroll only when new posts arrive, not on content-only updates.
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
@@ -2865,7 +2871,7 @@ class ChatModeView(
             controller.markFediThreadRead(handle)
             controller.conversations.messagesFor(convKey).collect { msgs ->
                 val prevSize = adapter.itemCount
-                val rows = msgs.map { MessageRow.Dm(it) }
+                val rows = dmRowsWithDays(msgs)
                 adapter.submitList(rows)
                 if (rows.size > prevSize) rv.scrollToPosition(rows.size - 1)
             }
@@ -3334,7 +3340,57 @@ class ChatModeView(
         /** A centered caption separating merged-thread sections (fediverse
          *  history above, post-quantum private messages below). */
         data class Divider(val text: String) : MessageRow()
+
+        /** A centered caption naming the calendar day the messages below it
+         *  arrived on. [dayStartMs] is local midnight — the stable identity,
+         *  since [label] flips from a date to "Yesterday" to "Today". */
+        data class DaySeparator(val dayStartMs: Long, val label: String) : MessageRow()
     }
+
+    /**
+     * Turn [items] into adapter rows, interleaving a day separator wherever
+     * the calendar day changes (and above the first dated item, so an opened
+     * thread shows its date context).
+     *
+     * Sections are separated independently — the merged thread's fediverse
+     * history and its private messages each restart their own day run.
+     */
+    private fun <T> rowsWithDays(
+        items: List<T>,
+        stampMs: (T) -> Long,
+        row: (T) -> MessageRow,
+    ): List<MessageRow> {
+        val breaks = dayBreaks(items.map(stampMs))
+        if (breaks.isEmpty()) return items.map(row)
+        val byIndex = breaks.associateBy { it.index }
+        val rows = ArrayList<MessageRow>(items.size + breaks.size)
+        items.forEachIndexed { i, item ->
+            byIndex[i]?.let {
+                rows.add(MessageRow.DaySeparator(it.dayStartMs, dayLabel(it.dayStartMs)))
+            }
+            rows.add(row(item))
+        }
+        return rows
+    }
+
+    private fun dmRowsWithDays(msgs: List<ChatMessage>): List<MessageRow> =
+        rowsWithDays(msgs, { it.sentAtMs }, { MessageRow.Dm(it) })
+
+    /** Localized name for a day-separator row: the near days get a word,
+     *  everything older gets the platform's abbreviated weekday + date
+     *  (which adds the year itself once the day is not in this one). */
+    private fun dayLabel(dayStartMs: Long): String =
+        when (dayLabelKind(dayStartMs, System.currentTimeMillis())) {
+            DayLabelKind.TODAY -> context.getString(R.string.chat_day_today)
+            DayLabelKind.YESTERDAY -> context.getString(R.string.chat_day_yesterday)
+            DayLabelKind.DATE -> DateUtils.formatDateTime(
+                context,
+                dayStartMs,
+                DateUtils.FORMAT_SHOW_DATE or
+                    DateUtils.FORMAT_SHOW_WEEKDAY or
+                    DateUtils.FORMAT_ABBREV_ALL,
+            )
+        }
 
     private val msgDiff = object : DiffUtil.ItemCallback<MessageRow>() {
         override fun areItemsTheSame(old: MessageRow, new: MessageRow): Boolean =
@@ -3353,6 +3409,8 @@ class ChatModeView(
                         old.post.body == new.post.body
                 old is MessageRow.Divider && new is MessageRow.Divider ->
                     old.text == new.text
+                old is MessageRow.DaySeparator && new is MessageRow.DaySeparator ->
+                    old.dayStartMs == new.dayStartMs
                 else -> false
             }
 
@@ -3366,14 +3424,20 @@ class ChatModeView(
     ) : ListAdapter<MessageRow, RecyclerView.ViewHolder>(msgDiff) {
 
         override fun getItemViewType(position: Int): Int =
-            if (getItem(position) is MessageRow.Divider) VIEW_DIVIDER else VIEW_MESSAGE
+            when (getItem(position)) {
+                is MessageRow.Divider -> VIEW_DIVIDER
+                is MessageRow.DaySeparator -> VIEW_DAY
+                else -> VIEW_MESSAGE
+            }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
             val inflater = LayoutInflater.from(parent.context)
-            return if (viewType == VIEW_DIVIDER) {
-                DividerVH(inflater.inflate(R.layout.item_chat_divider, parent, false))
-            } else {
-                VH(inflater.inflate(R.layout.item_chat_message, parent, false))
+            return when (viewType) {
+                VIEW_DIVIDER ->
+                    DividerVH(inflater.inflate(R.layout.item_chat_divider, parent, false))
+                VIEW_DAY ->
+                    DayVH(inflater.inflate(R.layout.item_chat_day, parent, false))
+                else -> VH(inflater.inflate(R.layout.item_chat_message, parent, false))
             }
         }
 
@@ -3394,11 +3458,19 @@ class ChatModeView(
                 }
                 is MessageRow.Post -> (holder as VH).bindPost(row.post)
                 is MessageRow.Divider -> (holder as DividerVH).bind(row.text)
+                is MessageRow.DaySeparator -> (holder as DayVH).bind(row.label)
             }
         }
 
         inner class DividerVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
             private val caption: TextView = itemView.findViewById(R.id.dividerCaption)
+            fun bind(text: String) {
+                caption.text = text
+            }
+        }
+
+        inner class DayVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+            private val caption: TextView = itemView.findViewById(R.id.dayCaption)
             fun bind(text: String) {
                 caption.text = text
             }
@@ -3730,9 +3802,10 @@ class ChatModeView(
         // the desktop self identity. Drawn behind the own-identity badge avatar.
         private const val SELF_HUE = 0xFFC9732B.toInt()
 
-        // MessageAdapter view types: normal message bubble vs merged-thread
-        // section divider.
+        // MessageAdapter view types: normal message bubble, merged-thread
+        // section divider, calendar-day separator.
         private const val VIEW_MESSAGE = 0
         private const val VIEW_DIVIDER = 1
+        private const val VIEW_DAY = 2
     }
 }

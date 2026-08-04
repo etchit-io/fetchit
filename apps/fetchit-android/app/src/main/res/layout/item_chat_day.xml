@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A centered day-separator row naming the calendar day the messages below
+     it arrived on ("Today", "Yesterday", or a short date). Non-interactive. -->
+<TextView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/dayCaption"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingTop="12dp"
+    android:paddingBottom="6dp"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:gravity="center"
+    android:textAlignment="center"
+    android:fontFamily="monospace"
+    android:textColor="?attr/fetchitAsh"
+    android:textSize="12sp" />

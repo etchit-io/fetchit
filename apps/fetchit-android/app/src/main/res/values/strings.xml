@@ -355,6 +355,11 @@
     <string name="thread_divider_fedi">messages above traveled the open fediverse</string>
     <string name="thread_divider_pq">🔒 private from here — post-quantum encrypted</string>
 
+    <!-- Day separators between messages that arrived on different days.
+         Older days use the platform short-date format, not a string here. -->
+    <string name="chat_day_today">Today</string>
+    <string name="chat_day_yesterday">Yesterday</string>
+
     <!-- Private rail down: honest banner + one explicit, labeled fallback.
          Never an automatic downgrade (that would make the lock a lie). -->
     <string name="thread_fallback_banner">can\'t reach %1$s privately right now — your messages will send when reconnected</string>
