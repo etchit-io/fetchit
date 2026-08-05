@@ -134,6 +134,12 @@ impl Store {
                  PRIMARY KEY (actor_id, follower_actor_url)
              );",
         )?;
+        // Columns added after the first deploy. `CREATE TABLE IF NOT
+        // EXISTS` is a no-op on an existing database, so anything new on
+        // an OLD table has to arrive by ALTER or the production file
+        // opens without it.
+        add_column_if_missing(conn, "actors", "avatar", "BLOB")?;
+        add_column_if_missing(conn, "actors", "avatar_ct", "TEXT")?;
         Ok(())
     }
 
@@ -313,6 +319,30 @@ impl Store {
         })
         .await
     }
+}
+
+/// Add `column` to `table` when the opened database does not already
+/// carry it. Idempotent, so it runs on every open.
+///
+/// `table`/`column`/`decl` are compile-time literals from [`Store::migrate`],
+/// never request data — `ALTER TABLE` takes no bind parameters for
+/// identifiers, so they are formatted in.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<(), BridgeError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let present = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|name| name == column);
+    drop(stmt);
+    if !present {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
 }
 
 /// One inbound fediverse message as stored for its recipient. `text` is

@@ -44,6 +44,41 @@ pub const AVATAR_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 pub const ALLOWED_AVATAR_CONTENT_TYPES: [&str; 4] =
     ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
+/// `Content-Type` allowlist for an avatar the USER uploads to our own
+/// bridge. Narrower than [`ALLOWED_AVATAR_CONTENT_TYPES`], which governs
+/// what we accept FROM a remote instance: GIF is dropped because our
+/// shells re-encode to a still image before upload, so a GIF here could
+/// only arrive from a hand-rolled client.
+///
+/// One definition shared by the bridge (verify side) and the chat client
+/// (pre-flight side), so the two ends cannot drift.
+pub const UPLOADABLE_AVATAR_CONTENT_TYPES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
+
+/// Whether `bytes` open with the file-format magic that `content_type`
+/// claims. Signature inspection only — nothing is decoded.
+///
+/// Uploads land on a domain we serve, so a declared-but-false content
+/// type would let a registered user park arbitrary bytes (an HTML
+/// phishing page, a binary) under `etchit.io`. `nosniff` plus a strict
+/// stored `Content-Type` already stops a browser rendering them; this
+/// check stops them being stored at all.
+///
+/// Unknown content types answer `false` — the caller has already applied
+/// [`UPLOADABLE_AVATAR_CONTENT_TYPES`], so reaching here with anything
+/// else is a bug, and failing closed is the right shape for one.
+#[must_use]
+pub fn magic_matches_content_type(content_type: &str, bytes: &[u8]) -> bool {
+    match content_type {
+        // SOI marker. The third byte is the first segment's marker
+        // introducer, which is 0xFF for every JPEG variant.
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        // RIFF container with a WEBP form type at offset 8.
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
 /// Recursion bound for [`icon_url_from_actor_doc`]. Actor bodies are
 /// already capped at [`crate::actor::MAX_ACTOR_BODY_BYTES`] and serde
 /// caps nesting depth, but the walk states its own bound rather than
@@ -150,6 +185,36 @@ fn url_from_icon_value(v: &Value, depth: u8) -> Option<String> {
                 map.get("href")
                     .and_then(|h| url_from_icon_value(h, depth + 1))
             }),
+        _ => None,
+    }
+}
+
+/// Pull the `mediaType` an actor document declares beside its `icon`
+/// URL, when it declares one.
+///
+/// Companion to [`icon_url_from_actor_doc`] and equally liberal: the
+/// object shape and the first entry of an array shape both work. The
+/// value is advisory — the served `Content-Type` is what
+/// [`fetch_avatar`] gates on — so a missing or nonsense `mediaType`
+/// costs nothing.
+#[must_use]
+pub fn icon_media_type_from_actor_doc(doc: &Value) -> Option<String> {
+    media_type_from_icon_value(doc.get("icon")?, 0)
+}
+
+fn media_type_from_icon_value(v: &Value, depth: u8) -> Option<String> {
+    if depth > MAX_ICON_DEPTH {
+        return None;
+    }
+    match v {
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| media_type_from_icon_value(item, depth + 1)),
+        Value::Object(map) => map
+            .get("mediaType")
+            .and_then(Value::as_str)
+            .map(normalize_content_type)
+            .filter(|s| !s.is_empty()),
         _ => None,
     }
 }
@@ -358,6 +423,87 @@ mod tests {
             v = json!({ "url": v });
         }
         assert!(icon_url_from_actor_doc(&json!({ "icon": v })).is_none());
+    }
+
+    // ----- media type beside the icon -----
+
+    #[test]
+    fn icon_media_type_is_read_from_object_and_array_shapes() {
+        let obj = json!({ "icon": { "type": "Image", "mediaType": "Image/JPEG",
+                                    "url": "https://cdn.example/a.jpg" } });
+        assert_eq!(
+            icon_media_type_from_actor_doc(&obj).as_deref(),
+            Some("image/jpeg")
+        );
+        let arr = json!({ "icon": [{ "mediaType": "image/png",
+                                     "url": "https://cdn.example/a.png" }] });
+        assert_eq!(
+            icon_media_type_from_actor_doc(&arr).as_deref(),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_icon_media_type_is_none() {
+        assert!(icon_media_type_from_actor_doc(&json!({})).is_none());
+        assert!(
+            icon_media_type_from_actor_doc(&json!({ "icon": "https://cdn.example/a.png" }))
+                .is_none()
+        );
+        assert!(
+            icon_media_type_from_actor_doc(&json!({ "icon": { "mediaType": "  " } })).is_none()
+        );
+    }
+
+    // ----- upload magic-byte gate -----
+
+    #[test]
+    fn upload_allowlist_excludes_gif_and_is_a_subset() {
+        assert!(!UPLOADABLE_AVATAR_CONTENT_TYPES.contains(&"image/gif"));
+        for ct in UPLOADABLE_AVATAR_CONTENT_TYPES {
+            assert!(
+                ALLOWED_AVATAR_CONTENT_TYPES.contains(&ct),
+                "{ct} must also be fetchable"
+            );
+        }
+    }
+
+    #[test]
+    fn magic_matches_the_declared_type() {
+        assert!(magic_matches_content_type(
+            "image/jpeg",
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00]
+        ));
+        assert!(magic_matches_content_type(
+            "image/png",
+            b"\x89PNG\r\n\x1a\nrest"
+        ));
+        assert!(magic_matches_content_type(
+            "image/webp",
+            b"RIFF\x24\x00\x00\x00WEBPVP8 "
+        ));
+    }
+
+    #[test]
+    fn magic_rejects_mislabelled_or_truncated_bytes() {
+        // The whole point: a page or a script claiming to be an image
+        // must not become a file we host under our own domain.
+        assert!(!magic_matches_content_type(
+            "image/png",
+            b"<!doctype html><script>"
+        ));
+        assert!(!magic_matches_content_type(
+            "image/jpeg",
+            b"\x89PNG\r\n\x1a\n"
+        ));
+        assert!(!magic_matches_content_type("image/webp", b"RIFF\x00\x00"));
+        assert!(!magic_matches_content_type("image/png", b""));
+        // A type outside the upload allowlist fails closed.
+        assert!(!magic_matches_content_type("image/gif", b"GIF89a"));
+        assert!(!magic_matches_content_type(
+            "image/svg+xml",
+            b"<svg xmlns=\"\">"
+        ));
     }
 
     // ----- content-type normalisation -----

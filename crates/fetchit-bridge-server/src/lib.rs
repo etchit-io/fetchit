@@ -15,4 +15,5 @@ pub mod ratelimit;
 pub mod routes;
 pub mod server;
 pub mod store;
+pub mod store_avatar;
 pub mod store_follow;

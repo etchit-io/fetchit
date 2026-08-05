@@ -91,6 +91,15 @@ pub struct ActorIdentity {
     /// v2 attestation extending the binding with the profile address
     /// and relay hint (M5.1). `None` on identities minted before v2.
     pub ml_dsa_attestation_v2: Option<crate::attestation::ActorAttestationV2>,
+    /// Avatar URL published as the actor's `icon`, when the user has set
+    /// a profile picture. Deliberately OUTSIDE both attestations: the
+    /// picture is mutable presentation, and re-signing the identity
+    /// binding every time someone changes their photo would put an
+    /// avatar change on the same footing as a key rotation.
+    pub icon_url: Option<String>,
+    /// `mediaType` to publish beside [`Self::icon_url`]. Advisory —
+    /// consumers gate on the served `Content-Type`.
+    pub icon_media_type: Option<String>,
 }
 
 impl ActorIdentity {
@@ -113,6 +122,8 @@ impl ActorIdentity {
             spki_der,
             ml_dsa_attestation,
             ml_dsa_attestation_v2: None,
+            icon_url: None,
+            icon_media_type: None,
         }
     }
 
@@ -136,6 +147,8 @@ impl ActorIdentity {
             spki_der,
             ml_dsa_attestation,
             ml_dsa_attestation_v2: None,
+            icon_url: None,
+            icon_media_type: None,
         }
     }
 
@@ -143,6 +156,16 @@ impl ActorIdentity {
     #[must_use]
     pub fn with_attestation_v2(mut self, att: crate::attestation::ActorAttestationV2) -> Self {
         self.ml_dsa_attestation_v2 = Some(att);
+        self
+    }
+
+    /// Attach the published avatar (builder-style; the vault reload uses
+    /// this). Both halves move together — a URL with no media type is
+    /// fine, a media type with no URL publishes nothing.
+    #[must_use]
+    pub fn with_icon(mut self, url: Option<String>, media_type: Option<String>) -> Self {
+        self.icon_url = url;
+        self.icon_media_type = media_type;
         self
     }
 }
@@ -157,6 +180,8 @@ impl std::fmt::Debug for ActorIdentity {
             .field("spki_der", &self.spki_der)
             .field("ml_dsa_attestation", &self.ml_dsa_attestation)
             .field("ml_dsa_attestation_v2", &self.ml_dsa_attestation_v2)
+            .field("icon_url", &self.icon_url)
+            .field("icon_media_type", &self.icon_media_type)
             .finish()
     }
 }
@@ -191,6 +216,11 @@ pub struct Actor {
     /// v2 attestation when the identity carries one. Emitted under
     /// [`PQ_ATTESTATION_V2_PROPERTY_URI`]; absent on pre-M5 documents.
     pub ml_dsa_attestation_v2: Option<crate::attestation::ActorAttestationV2>,
+    /// Avatar URL emitted as the AP `icon`. `None` publishes no `icon`
+    /// at all, which is what an actor with no profile picture serves.
+    pub icon_url: Option<String>,
+    /// `mediaType` emitted inside the `icon` object.
+    pub icon_media_type: Option<String>,
 }
 
 impl Actor {
@@ -214,6 +244,8 @@ impl Actor {
             rsa_public_key_pem: spki_der_to_pem(&id.spki_der),
             ml_dsa_attestation: id.ml_dsa_attestation.clone(),
             ml_dsa_attestation_v2: id.ml_dsa_attestation_v2.clone(),
+            icon_url: id.icon_url.clone(),
+            icon_media_type: id.icon_media_type.clone(),
         })
     }
 
@@ -332,6 +364,14 @@ impl Actor {
             ),
         };
 
+        // The avatar is presentation, not identity: an unparsable or
+        // absent `icon` is simply no picture, never a decode failure.
+        // Parsing it here is load-bearing all the same — the bridge
+        // re-renders a registered document through this decoder, so an
+        // icon it dropped would be an icon the user lost.
+        let icon_url = crate::avatar::icon_url_from_actor_doc(value);
+        let icon_media_type = crate::avatar::icon_media_type_from_actor_doc(value);
+
         Ok(Self {
             id,
             preferred_username,
@@ -340,6 +380,8 @@ impl Actor {
             rsa_public_key_pem,
             ml_dsa_attestation,
             ml_dsa_attestation_v2,
+            icon_url,
+            icon_media_type,
         })
     }
 
@@ -371,6 +413,20 @@ impl Actor {
         if let Some(att2) = &self.ml_dsa_attestation_v2 {
             if let (Some(obj), Ok(val)) = (v.as_object_mut(), serde_json::to_value(att2)) {
                 obj.insert(PQ_ATTESTATION_V2_PROPERTY_URI.to_string(), val);
+            }
+        }
+        // Mastodon's own `icon` shape, so Mastodon-class consumers show
+        // the picture with no special-casing. Omitted entirely when
+        // unset — an empty `icon` object renders as a broken image.
+        if let Some(icon_url) = &self.icon_url {
+            let mut icon = serde_json::Map::new();
+            icon.insert("type".into(), Value::String("Image".into()));
+            if let Some(mt) = &self.icon_media_type {
+                icon.insert("mediaType".into(), Value::String(mt.clone()));
+            }
+            icon.insert("url".into(), Value::String(icon_url.clone()));
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("icon".into(), Value::Object(icon));
             }
         }
         v
@@ -809,6 +865,63 @@ mod tests {
         );
 
         assert_eq!(minted, reloaded);
+    }
+
+    // ----- avatar `icon` on our own actor document -----
+
+    #[test]
+    fn an_actor_without_an_avatar_emits_no_icon_key() {
+        // Back-compat both ways: every actor minted before profile
+        // pictures existed renders exactly the document it rendered
+        // before, and decodes back with no icon.
+        let doc = Actor::from_identity(&sample_identity())
+            .unwrap()
+            .to_json_ld();
+        assert!(doc.get("icon").is_none(), "no icon key at all when unset");
+        let back = Actor::from_json_ld(&doc).unwrap();
+        assert!(back.icon_url.is_none());
+        assert!(back.icon_media_type.is_none());
+    }
+
+    #[test]
+    fn icon_survives_the_json_ld_round_trip() {
+        let identity = sample_identity().with_icon(
+            Some("https://etchit.io/actors/josh/avatar".into()),
+            Some("image/jpeg".into()),
+        );
+        let actor = Actor::from_identity(&identity).unwrap();
+        assert_eq!(
+            actor.icon_url.as_deref(),
+            Some("https://etchit.io/actors/josh/avatar")
+        );
+
+        let doc = actor.to_json_ld();
+        // The Mastodon shape, so Mastodon-class consumers show it.
+        assert_eq!(doc["icon"]["type"], "Image");
+        assert_eq!(doc["icon"]["mediaType"], "image/jpeg");
+        assert_eq!(doc["icon"]["url"], "https://etchit.io/actors/josh/avatar");
+
+        // The bridge re-renders a registered document through this
+        // decode, so a dropped icon here is a lost profile picture.
+        let back = Actor::from_json_ld(&doc).unwrap();
+        assert_eq!(back, actor);
+        assert_eq!(back.to_json_ld(), doc);
+    }
+
+    #[test]
+    fn a_foreign_icon_shape_decodes_and_re_renders_canonically() {
+        // Other implementations serve a bare string; the re-render
+        // normalises it to the object shape without losing the URL.
+        let mut doc = Actor::from_identity(&sample_identity())
+            .unwrap()
+            .to_json_ld();
+        doc["icon"] = serde_json::json!("https://cdn.example/a.png");
+        let back = Actor::from_json_ld(&doc).unwrap();
+        assert_eq!(back.icon_url.as_deref(), Some("https://cdn.example/a.png"));
+        assert!(back.icon_media_type.is_none());
+        let re = back.to_json_ld();
+        assert_eq!(re["icon"]["url"], "https://cdn.example/a.png");
+        assert!(re["icon"].get("mediaType").is_none());
     }
 
     #[test]

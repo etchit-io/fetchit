@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -38,6 +38,17 @@ const INBOX_BURST: u32 = 60;
 /// Inbox per-IP sustained refill, tokens per second (120/min).
 const INBOX_REFILL_PER_SEC: f64 = 2.0;
 
+/// Body cap for `POST /actors/:handle/avatar`, mirroring the cap the
+/// avatar FETCH path enforces on remote images. Oversized uploads are
+/// rejected as `413` by the layer, before the handler allocates them.
+const MAX_AVATAR_BODY_BYTES: usize = fetchit_fedi::avatar::MAX_AVATAR_BYTES;
+
+/// Avatar-write per-IP burst. A user sets a picture once in a while;
+/// this only has to be above a double-tap.
+const AVATAR_WRITE_BURST: u32 = 10;
+/// Avatar-write per-IP sustained refill, tokens per second (12/min).
+const AVATAR_WRITE_REFILL_PER_SEC: f64 = 0.2;
+
 /// Shared state handed to every handler.
 pub struct BridgeState {
     /// Durable actor/follower store.
@@ -50,6 +61,10 @@ pub struct BridgeState {
     pub rate_limiter: RateLimiter,
     /// Per-IP token-bucket limiter guarding `POST /actors/:handle/inbox`.
     pub rate_limiter_inbox: RateLimiter,
+    /// Per-IP token-bucket limiter guarding the avatar WRITE verbs. The
+    /// public avatar GET is deliberately outside it — whole instances
+    /// fetch avatars from one egress IP.
+    pub rate_limiter_avatar: RateLimiter,
 }
 
 /// The bridge server.
@@ -75,12 +90,18 @@ impl Server {
         );
         let rate_limiter_inbox =
             RateLimiter::new(INBOX_BURST, INBOX_REFILL_PER_SEC, MAX_TRACKED_IPS);
+        let rate_limiter_avatar = RateLimiter::new(
+            AVATAR_WRITE_BURST,
+            AVATAR_WRITE_REFILL_PER_SEC,
+            MAX_TRACKED_IPS,
+        );
         let state = Arc::new(BridgeState {
             store: self.store,
             config: self.config,
             metrics,
             rate_limiter,
             rate_limiter_inbox,
+            rate_limiter_avatar,
         });
         let router = Router::new()
             .route("/health", get(routes::health::health))
@@ -109,6 +130,14 @@ impl Server {
             .route(
                 "/actors/:handle/follow-requests",
                 get(routes::follow::follow_requests),
+            )
+            .route(
+                "/actors/:handle/avatar",
+                get(routes::avatar::get_avatar)
+                    .post(routes::avatar::post_avatar)
+                    .delete(routes::avatar::delete_avatar)
+                    .layer(DefaultBodyLimit::max(MAX_AVATAR_BODY_BYTES))
+                    .layer(from_fn_with_state(state.clone(), rate_limit_avatar_write)),
             )
             .route("/actors/:handle/outbox", get(routes::actors::outbox))
             .route(
@@ -177,6 +206,33 @@ async fn rate_limit_register(
         state.config.trusted_proxy_hops,
     );
     if state.rate_limiter.check(ip, Instant::now()) {
+        next.run(request).await
+    } else {
+        (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response()
+    }
+}
+
+/// Per-IP limiter for the avatar WRITE verbs only.
+///
+/// `GET` is exempt on purpose: it is the public `icon` URL, and a large
+/// instance renders many timelines from behind one egress IP, so
+/// bucketing reads would blank avatars for whole servers. Only the
+/// authenticated, state-changing verbs are throttled.
+async fn rate_limit_avatar_write(
+    State(state): State<Arc<BridgeState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matches!(*request.method(), Method::GET | Method::HEAD) {
+        return next.run(request).await;
+    }
+    let ip = client_ip(
+        peer.ip(),
+        request.headers(),
+        state.config.trusted_proxy_hops,
+    );
+    if state.rate_limiter_avatar.check(ip, Instant::now()) {
         next.run(request).await
     } else {
         (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response()
