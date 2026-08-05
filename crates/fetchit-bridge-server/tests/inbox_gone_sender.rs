@@ -77,6 +77,19 @@ async fn start() -> SocketAddr {
 
 const GONE_SENDER: &str = "https://127.0.0.1:1/users/erased";
 
+/// A `Signature` header naming [`GONE_SENDER`] as the signer.
+///
+/// The gate resolves its verification key from `keyId`, so a request
+/// with no signature at all now 401s before any fetch is attempted —
+/// which would test the wrong thing here. The payload is deliberately
+/// junk: these tests never get past the key fetch.
+fn signature_header_naming_gone_sender() -> String {
+    format!(
+        "keyId=\"{GONE_SENDER}#main-key\",algorithm=\"rsa-sha256\",\
+         headers=\"(request-target) host date digest\",signature=\"AA==\""
+    )
+}
+
 #[tokio::test]
 async fn delete_with_transient_sender_failure_stays_retryable() {
     let addr = start().await;
@@ -97,6 +110,7 @@ async fn delete_with_transient_sender_failure_stays_retryable() {
     let resp = client
         .post(format!("http://{addr}/actors/carol/inbox"))
         .header("content-type", "application/activity+json")
+        .header("signature", signature_header_naming_gone_sender())
         .json(&delete)
         .send()
         .await
@@ -128,6 +142,7 @@ async fn non_delete_from_unfetchable_sender_stays_retryable() {
     let resp = client
         .post(format!("http://{addr}/actors/dave/inbox"))
         .header("content-type", "application/activity+json")
+        .header("signature", signature_header_naming_gone_sender())
         .json(&follow)
         .send()
         .await

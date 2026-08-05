@@ -7,6 +7,22 @@
 //! verify against the sender's fetched public key — exactly the
 //! Mastodon-federation contract.
 //!
+//! # Signer vs author
+//!
+//! The signature proves who DELIVERED a request; the activity's `actor`
+//! only claims who wrote it. They are the same for a direct delivery
+//! and different for a FORWARDED one — Mastodon forwards replies in
+//! threads its users are part of, signing with the forwarder's key
+//! while `actor` names the author on a third instance.
+//!
+//! So the verification key is fetched from the signature's `keyId`, and
+//! the two identities are compared afterwards. A forwarded activity is
+//! acknowledged (the delivery was valid) but its object is dropped
+//! unread: nothing in the request authenticates the embedded object, so
+//! trusting it would let any peer holding a key fabricate a message
+//! attributed to any actor. `docs/INBOX-KEYID.md` records the incident
+//! and what accepting forwarded objects would take.
+//!
 //! Accepted activities:
 //! * `Create(Note)` addressed to the recipient → stored as an inbox
 //!   message (the reply the app renders in the fedi thread). The Note's
@@ -40,6 +56,7 @@ use serde_json::{json, Value};
 use fetchit_fedi::actor::Actor;
 
 use crate::auth::{parse_headers, verify_request, AuthError};
+use crate::routes::signature_meta::{self, SignatureDiagnostics};
 use crate::server::BridgeState;
 use crate::store::{ActorRecord, InboxMessage};
 
@@ -74,18 +91,34 @@ pub async fn post_inbox(
     let Ok(activity) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, "malformed activity").into_response();
     };
-    // The signer is the activity's `actor`; fetch their key (SSRF-guarded)
-    // and verify the HTTP signature before trusting a single field.
-    let Some(sender_url) = activity.get("actor").and_then(Value::as_str) else {
+    // The CLAIMED author. Not yet trusted: an activity's `actor` is
+    // just a string in a body anyone can POST.
+    let Some(claimed_actor) = activity.get("actor").and_then(Value::as_str) else {
         return (StatusCode::BAD_REQUEST, "activity has no actor").into_response();
     };
-    let Ok(sender_actor_url) = sender_url.parse::<url::Url>() else {
+    let Ok(claimed_actor_url) = claimed_actor.parse::<url::Url>() else {
         return (StatusCode::BAD_REQUEST, "actor is not a url").into_response();
     };
-    let sender = match fetchit_fedi::lookup::fetch_remote_actor(&sender_actor_url).await {
+    // The verification key is the one the SIGNER names in `keyId`, not
+    // one inferred from the payload. Deriving it from `activity.actor`
+    // (as this route did until 2026-08-05) makes every FORWARDED
+    // delivery permanently unverifiable: Mastodon forwards replies in
+    // threads our user is part of, signed by the FORWARDER's key while
+    // `actor` names the reply's real author on a third instance. Those
+    // deliveries 401'd and were retried for days.
+    let key_id = signature_meta::presented_key_id(&headers);
+    let Ok(signer_url) = signature_meta::key_id_owner(&key_id).parse::<url::Url>() else {
+        let reason = if key_id.is_empty() {
+            "missing keyId"
+        } else {
+            "keyId is not a url"
+        };
+        return reject_signature(&state, &headers, &handle, claimed_actor, reason);
+    };
+    let signer = match fetchit_fedi::lookup::fetch_remote_actor(&signer_url).await {
         Ok(s) => s,
         Err(e) => {
-            // A Delete whose sender is AUTHORITATIVELY gone (account
+            // A Delete whose signer is AUTHORITATIVELY gone (account
             // erased — the 2026-08-02 drops were 410 tombstones) is
             // unverifiable BY DESIGN: the signing key died with the
             // account, and we hold no state for an unknown actor.
@@ -95,67 +128,194 @@ pub async fn post_inbox(
             // included — a momentary outage must never eat a delivery
             // (cross-review 2026-08-03 finding 3).
             if gone_delete_shortcut(&e, &activity) {
-                tracing::info!(handle, sender = %sender_actor_url, "unverifiable Delete from gone sender ignored");
+                tracing::info!(handle, signer = %signer_url, "unverifiable Delete from gone signer ignored");
                 return (StatusCode::ACCEPTED, "ignored").into_response();
             }
-            tracing::warn!(handle, sender = %sender_actor_url, error = %e, "inbox: could not fetch sender actor");
+            tracing::warn!(handle, signer = %signer_url, claimed_actor, error = %e, "inbox: could not fetch signer actor");
             return (StatusCode::BAD_GATEWAY, "could not fetch sender").into_response();
         }
     };
-    let Some(pubkey_pem) = sender.rsa_public_key_pem.as_deref() else {
-        tracing::warn!(handle, sender = %sender_actor_url, "inbox: sender has no key");
+    let Some(pubkey_pem) = signer.rsa_public_key_pem.as_deref() else {
+        tracing::warn!(handle, signer = %signer.id, "inbox: signer has no key");
         return (StatusCode::UNAUTHORIZED, "sender has no key").into_response();
     };
     if let Err(reason) =
         verify_inbound_signature(&headers, &handle, pubkey_pem, &body, &state.config.domain)
     {
-        // A rejected delivery is invisible to both ends without this line —
-        // the 2026-07-13 lost-Accept class was undiagnosable from logs.
-        tracing::warn!(handle, sender = %sender_actor_url, reason, "inbox: signature rejected");
-        return (StatusCode::UNAUTHORIZED, reason).into_response();
+        return reject_signature(&state, &headers, &handle, claimed_actor, reason);
     }
 
-    // Signature verified, so `sender.id` is an AUTHENTICATED actor URL
-    // (the key that signed this request is published by that document).
-    // Gate it against the community denylist BEFORE any dispatch arm
-    // runs, which is what puts it before every store write: a moderated
-    // actor's Create, Follow, Accept, Reject and Undo all die here.
+    // Authenticated. `signer.id` is who DELIVERED this request -- not
+    // necessarily who authored the activity it carries.
+    //
+    // Gate the AUTHENTICATED signer against the community denylist
+    // before anything else, which is what puts it before every store
+    // write: a moderated actor's Create, Follow, Accept, Reject and Undo
+    // all die here. It runs ahead of the forwarded check on purpose --
+    // 403 is terminal and stops the remote retrying, whereas the
+    // forwarded path answers 202, and a moderated actor should get the
+    // stricter answer whichever role it is playing.
     //
     // 403 mirrors the relay-server's `DropReason::Denylisted` answer
     // (`inbox/router.rs`), so a moderated instance sees the same
     // terminal, non-retryable status from either fetch>it inbox.
-    if crate::denylist::is_blocked_actor(state.denylist.as_ref(), sender.id.as_str()) {
+    if crate::denylist::is_blocked_actor(state.denylist.as_ref(), signer.id.as_str()) {
         state.metrics.inc_inbox_denylisted();
-        tracing::info!(handle, sender = %sender.id, "inbox: denylisted sender dropped");
+        tracing::info!(handle, sender = %signer.id, "inbox: denylisted sender dropped");
         return (StatusCode::FORBIDDEN, "denylisted").into_response();
     }
-
-    // Dispatch on activity type.
     let activity_type = activity.get("type").and_then(Value::as_str);
-    tracing::info!(handle, sender = %sender_actor_url, activity_type, "inbox: verified delivery");
+    if is_forwarded(&state, &signer, &claimed_actor_url).await {
+        // A forwarded activity is hearsay: the forwarder proved only
+        // that IT sent the bytes, and the embedded object is signed by
+        // nothing we check. Trusting it would let any peer with a key
+        // fabricate a message attributed to any actor, so the object is
+        // dropped unread. 202 rather than 401 because the DELIVERY was
+        // valid — a 4xx here is what produced the multi-day retries.
+        state.metrics.inc_inbox_forwarded_ignored();
+        tracing::warn!(
+            handle,
+            signer = %signer.id,
+            claimed_actor,
+            activity_type,
+            "inbox: forwarded activity ignored (object not authenticated)"
+        );
+        return (StatusCode::ACCEPTED, "ignored (forwarded)").into_response();
+    }
+
+    // Self-delivered: the signer IS the claimed author, so every
+    // downstream `sender_id` binding means what it has always meant.
+    tracing::info!(handle, sender = %signer.id, activity_type, "inbox: verified delivery");
     match activity_type {
-        Some("Create") => match handle_create(&state, &rec, sender.id.as_str(), &activity).await {
+        Some("Create") => match handle_create(&state, &rec, signer.id.as_str(), &activity).await {
             Ok(()) => (StatusCode::ACCEPTED, "accepted").into_response(),
             Err(resp) => resp,
         },
         Some("Accept") => {
-            handle_accept(&state, &rec, sender.id.as_str(), &activity).await;
+            handle_accept(&state, &rec, signer.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         Some("Reject") => {
-            handle_reject(&state, sender.id.as_str(), &activity).await;
+            handle_reject(&state, signer.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         Some("Follow") => {
-            handle_follow(&state, &rec, &sender, &activity).await;
+            handle_follow(&state, &rec, &signer, &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         Some("Undo") => {
-            handle_undo(&state, &rec, sender.id.as_str(), &activity).await;
+            handle_undo(&state, &rec, signer.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         // Unknown/unhandled types are acknowledged, never rejected.
         _ => (StatusCode::ACCEPTED, "ignored").into_response(),
+    }
+}
+
+/// Log a signature rejection with everything needed to explain it, bump
+/// the counter, and build the 401.
+///
+/// `reason` alone buckets several distinct failures under "signature
+/// invalid", so the signature's own metadata rides along: wire format,
+/// declared component list and whether each component actually arrived,
+/// the presented `keyId` and whether it is owned by the activity's
+/// actor, and the exact host candidates / path the base was rebuilt
+/// from. Header NAMES and identifiers only — never a header value, the
+/// body, or the signature bytes (see `signature_meta`'s privacy
+/// contract).
+fn reject_signature(
+    state: &BridgeState,
+    headers: &HeaderMap,
+    handle: &str,
+    claimed_actor: &str,
+    reason: &'static str,
+) -> Response {
+    state.metrics.inc_inbox_signature_rejected();
+    let diag = SignatureDiagnostics::collect(headers, handle, &state.config.domain, claimed_actor);
+    tracing::warn!(
+        handle,
+        sender = claimed_actor,
+        reason,
+        sig_format = diag.format,
+        sig_label = diag.label.as_str(),
+        key_id = diag.key_id.as_str(),
+        key_id_owner_matches_actor = diag.key_id_owner_matches_actor,
+        algorithm = diag.algorithm.as_str(),
+        signed_headers = diag.signed_headers.as_str(),
+        signed_header_presence = diag.signed_header_presence.as_str(),
+        host_candidates = diag.host_candidates.as_str(),
+        request_path = diag.request_path.as_str(),
+        "inbox: signature rejected"
+    );
+    (StatusCode::UNAUTHORIZED, reason).into_response()
+}
+
+/// How an authenticated delivery relates its SIGNER to the activity's
+/// claimed `actor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Provenance {
+    /// The signer is the claimed author. Every existing binding holds.
+    SelfDelivered,
+    /// The signer authored nothing here — a third party delivered
+    /// someone else's activity.
+    Forwarded,
+    /// Same host, different URL. Mastodon serves an actor at more than
+    /// one id (`/users/<name>` and `/ap/users/<numeric>`), so this may
+    /// be one account under two spellings; only an authoritative
+    /// resolution of the claimed actor can tell.
+    NeedsActorResolution,
+}
+
+/// Classify a delivery from the two canonical URLs alone.
+///
+/// Split out from [`is_forwarded`] because it is the whole security
+/// decision and the network half around it cannot be exercised
+/// hermetically (the SSRF guard refuses loopback — see
+/// `tests/inbox_gone_sender.rs`).
+fn classify_provenance(signer_id: &url::Url, claimed_actor: &url::Url) -> Provenance {
+    if signer_id == claimed_actor {
+        Provenance::SelfDelivered
+    } else if signer_id.host_str().is_some() && signer_id.host_str() == claimed_actor.host_str() {
+        Provenance::NeedsActorResolution
+    } else {
+        Provenance::Forwarded
+    }
+}
+
+/// Did a third party deliver someone else's activity?
+///
+/// `signer.id` is canonical: [`fetchit_fedi::lookup::fetch_remote_actor`]
+/// re-fetches at any `id` that differs from the URL it fetched, so an
+/// aliased `keyId` already resolves to the account's real id. The
+/// claimed actor gets the same treatment — but only on the
+/// [`Provenance::NeedsActorResolution`] path, so the common case costs
+/// no extra fetch and a cross-host forward is settled without one.
+///
+/// Fails CLOSED: a claimed actor that cannot be resolved has not been
+/// shown to be the signer, so the activity counts as forwarded.
+async fn is_forwarded(
+    state: &BridgeState,
+    signer: &fetchit_fedi::lookup::RemoteActor,
+    claimed_actor_url: &url::Url,
+) -> bool {
+    match classify_provenance(&signer.id, claimed_actor_url) {
+        Provenance::SelfDelivered => false,
+        Provenance::Forwarded => true,
+        Provenance::NeedsActorResolution => {
+            match fetchit_fedi::lookup::fetch_remote_actor(claimed_actor_url).await {
+                Ok(resolved) => resolved.id != signer.id,
+                Err(e) => {
+                    state.metrics.inc_inbox_actor_resolution_failed();
+                    tracing::warn!(
+                        signer = %signer.id,
+                        claimed_actor = %claimed_actor_url,
+                        error = %e,
+                        "inbox: same-host actor unresolvable; treating as forwarded"
+                    );
+                    true
+                }
+            }
+        }
     }
 }
 
@@ -627,7 +787,7 @@ fn check_date_skew(date: &str) -> Result<(), ()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+    use axum::http::{HeaderName, HeaderValue};
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
     use rsa::pkcs1v15::SigningKey;
@@ -635,16 +795,35 @@ mod tests {
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::RsaPrivateKey;
     use sha2::Sha256;
+    use std::sync::OnceLock;
+
+    /// One RSA-2048 keypair for the whole module: keygen costs ~200 ms
+    /// and the tables below would otherwise pay it two dozen times over.
+    fn test_signing_key() -> &'static (SigningKey<Sha256>, String) {
+        static KEY: OnceLock<(SigningKey<Sha256>, String)> = OnceLock::new();
+        KEY.get_or_init(|| {
+            let priv_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+            let pubkey_pem = priv_key
+                .to_public_key()
+                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+            (SigningKey::<Sha256>::new(priv_key), pubkey_pem)
+        })
+    }
+
+    /// RSA-SHA256 over `base`, base64 — the payload of a `signature=`
+    /// parameter.
+    fn sign_b64(base: &str) -> String {
+        let (key, _) = test_signing_key();
+        B64.encode(key.sign(base.as_bytes()).to_bytes())
+    }
 
     /// A request exactly as prod receives a Mastodon delivery: signed
     /// over the PUBLIC domain and Mastodon's 5-header list, arriving
     /// with the edge-worker's ORIGIN vhost in `Host`.
     fn mastodon_delivery() -> (HeaderMap, Vec<u8>, String) {
-        let priv_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
-        let pubkey_pem = priv_key
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
+        let (_, pubkey_pem) = test_signing_key();
+        let pubkey_pem = pubkey_pem.clone();
         let body = br#"{"type":"Create","actor":"https://fosstodon.org/users/happyborg"}"#.to_vec();
         let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
         let digest = compute_digest_cavage(&body);
@@ -655,8 +834,7 @@ mod tests {
              digest: {digest}\n\
              content-type: application/activity+json"
         );
-        let signing_key = SigningKey::<Sha256>::new(priv_key);
-        let sig = B64.encode(signing_key.sign(base.as_bytes()).to_bytes());
+        let sig = sign_b64(&base);
         let signature = format!(
             "keyId=\"https://fosstodon.org/users/happyborg#main-key\",\
              algorithm=\"rsa-sha256\",\
@@ -703,6 +881,618 @@ mod tests {
         let err = verify_inbound_signature(&headers, "josh", &pubkey_pem, b"{}", "etchit.io")
             .unwrap_err();
         assert_eq!(err, "digest mismatch");
+    }
+
+    // ---------------------------------------------------------------
+    // Inbound-signature variation map.
+    //
+    // The fixtures above model ONE sender shape — the fosstodon.org
+    // delivery that works in production. The fediverse is not that
+    // uniform: senders differ in which components they cover, how they
+    // spell them, whether they name an algorithm, and whether the
+    // `keyId` they sign with is even owned by the activity's actor.
+    //
+    // The two tables below are an executable map of what this gate
+    // ACCEPTS, not an argument that any given row should flip. Each row
+    // pins CURRENT behaviour, so a change to the verifier has to change
+    // a row and say why.
+    // ---------------------------------------------------------------
+
+    /// The body every table row signs over.
+    const CASE_BODY: &[u8] = br#"{"type":"Create","actor":"https://mastodon.social/users/alice"}"#;
+    /// `keyId` of the actor whose key the rows are verified against.
+    const CASE_KEY_ID: &str = "https://mastodon.social/users/alice#main-key";
+    /// Inbox path the rows are delivered to.
+    const CASE_PATH: &str = "/actors/josh/inbox";
+    /// The public fediverse domain remote signers see and sign.
+    const CASE_PUBLIC_HOST: &str = "etchit.io";
+    /// The vhost the edge worker forwards to, i.e. the `Host` we
+    /// actually receive.
+    const CASE_ORIGIN_HOST: &str = "bridge-origin.etchit.io";
+
+    /// One point in the inbound draft-cavage variation space.
+    struct CavageCase {
+        /// Row label, echoed on assertion failure.
+        name: &'static str,
+        /// `headers="..."` exactly as it goes on the wire, case
+        /// preserved — signers do not all lowercase. The signing base
+        /// is always built from the lowercased names, which is what
+        /// draft-cavage §2.3 requires of a signer.
+        declared: &'static str,
+        /// Request headers beyond the four every Mastodon delivery
+        /// carries (`host`, `date`, `digest`, `content-type`). Visible
+        /// to the signer too.
+        extra: &'static [(&'static str, &'static str)],
+        /// Headers the signer covered that never reach us — a hop in
+        /// front of the origin stripped them.
+        stripped: &'static [&'static str],
+        /// `algorithm="..."`; `None` omits the parameter entirely.
+        algorithm: Option<&'static str>,
+        /// `keyId="..."` as the signer writes it.
+        key_id: &'static str,
+        /// The host the signer bound into its `host:` line.
+        signed_host: &'static str,
+        /// `Ok(())`, or the exact reason string the 401 body carries.
+        expect: Result<(), &'static str>,
+    }
+
+    const CAVAGE_CASES: &[CavageCase] = &[
+        // -- expected-pass ------------------------------------------
+        CavageCase {
+            name: "mastodon_classic_five_components",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "minimal_four_components_no_content_type",
+            declared: "(request-target) host date digest",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "user_agent_covered_and_delivered",
+            declared: "(request-target) host date digest content-type user-agent",
+            extra: &[("user-agent", "http.rb/5.1.1 (Mastodon/4.3.1)")],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "accept_encoding_covered_and_delivered",
+            declared: "(request-target) host date digest accept-encoding",
+            extra: &[("accept-encoding", "gzip")],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "component_names_upper_cased_on_the_wire",
+            declared: "(request-target) Host Date Digest Content-Type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "algorithm_parameter_omitted",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: None,
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "signed_over_the_received_origin_vhost",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            // Second host candidate: a sender that reached the origin
+            // directly signed the vhost, not the public domain.
+            signed_host: CASE_ORIGIN_HOST,
+            expect: Ok(()),
+        },
+        // `verify_inbound_signature` is handed a key and asked whether
+        // this request was signed with it; WHICH key that is belongs to
+        // `post_inbox` (which resolves it from `keyId`). These two rows
+        // pin that separation: the verifier does not second-guess the
+        // caller's key choice. `classify_provenance` is where a signer
+        // that is not the author gets caught.
+        CavageCase {
+            name: "key_id_owned_by_a_different_actor_is_still_accepted",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: "https://relay.example/actor#main-key",
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "empty_key_id_is_still_accepted",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: "",
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        // -- expected-fail ------------------------------------------
+        CavageCase {
+            name: "content_type_covered_but_stripped_in_transit",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["content-type"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signed header missing from request"),
+        },
+        CavageCase {
+            name: "user_agent_covered_but_stripped_in_transit",
+            declared: "(request-target) host date digest user-agent",
+            extra: &[("user-agent", "http.rb/5.1.1 (Mastodon/4.3.1)")],
+            stripped: &["user-agent"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signed header missing from request"),
+        },
+        CavageCase {
+            // hs2019 signers carry `(created)`/`(expires)` in the
+            // signature PARAMETERS, not as HTTP headers. The verifier
+            // resolves every declared name through the header map, so
+            // these can only ever come back missing.
+            name: "created_and_expires_pseudo_components",
+            declared: "(request-target) (created) (expires) host date digest",
+            extra: &[],
+            stripped: &[],
+            algorithm: None,
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signed header missing from request"),
+        },
+        CavageCase {
+            name: "algorithm_hs2019_rejected_before_any_verify",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("hs2019"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("unsupported algorithm"),
+        },
+        CavageCase {
+            name: "request_target_not_covered",
+            declared: "host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            name: "digest_not_covered",
+            declared: "(request-target) host date content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            name: "host_not_covered",
+            declared: "(request-target) date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            name: "date_not_covered",
+            declared: "(request-target) host digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            // RFC 9530 naming without RFC 9421 framing: no
+            // `Signature-Input`, so the cavage branch runs and demands
+            // the legacy `Digest` header regardless of what was covered.
+            name: "content_digest_header_instead_of_digest",
+            declared: "(request-target) host date content-digest",
+            extra: &[(
+                "content-digest",
+                "sha-256=:uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=:",
+            )],
+            stripped: &["digest"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing digest"),
+        },
+        CavageCase {
+            name: "digest_header_stripped",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["digest"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing digest"),
+        },
+        CavageCase {
+            name: "date_header_stripped",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["date"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing date"),
+        },
+        CavageCase {
+            name: "host_header_stripped",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["host"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing host"),
+        },
+        CavageCase {
+            name: "signed_over_a_host_we_never_advertise",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: "evil.example",
+            expect: Err("signature invalid"),
+        },
+    ];
+
+    /// Build and verify one draft-cavage row.
+    fn run_cavage_case(case: &CavageCase) {
+        let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
+        let digest = compute_digest_cavage(CASE_BODY);
+        // Everything the SIGNER can see, before the stripping hop.
+        let mut visible: Vec<(String, String)> = vec![
+            ("host".to_owned(), CASE_ORIGIN_HOST.to_owned()),
+            ("date".to_owned(), date),
+            ("digest".to_owned(), digest),
+            (
+                "content-type".to_owned(),
+                "application/activity+json".to_owned(),
+            ),
+        ];
+        for (k, v) in case.extra {
+            visible.push(((*k).to_owned(), (*v).to_owned()));
+        }
+
+        let lines: Vec<String> = case
+            .declared
+            .split_whitespace()
+            .map(|raw| {
+                let name = raw.to_lowercase();
+                let value = match name.as_str() {
+                    "(request-target)" => format!("post {CASE_PATH}"),
+                    "host" => case.signed_host.to_owned(),
+                    // hs2019 signature parameters, echoed into the base
+                    // the way an hs2019 signer would.
+                    "(created)" => "1785000000".to_owned(),
+                    "(expires)" => "1785003600".to_owned(),
+                    other => {
+                        let Some((_, value)) = visible.iter().find(|(k, _)| k == other) else {
+                            panic!("case `{}` covers unknown header `{other}`", case.name)
+                        };
+                        value.clone()
+                    }
+                };
+                format!("{name}: {value}")
+            })
+            .collect();
+        let sig = sign_b64(&lines.join("\n"));
+
+        let mut parts = vec![format!("keyId=\"{}\"", case.key_id)];
+        if let Some(algorithm) = case.algorithm {
+            parts.push(format!("algorithm=\"{algorithm}\""));
+        }
+        parts.push(format!("headers=\"{}\"", case.declared));
+        parts.push(format!("signature=\"{sig}\""));
+        let params = parts.join(",");
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in &visible {
+            if case.stripped.contains(&name.as_str()) {
+                continue;
+            }
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers.insert("signature", HeaderValue::from_str(&params).unwrap());
+
+        let (_, pubkey_pem) = test_signing_key();
+        let got =
+            verify_inbound_signature(&headers, "josh", pubkey_pem, CASE_BODY, CASE_PUBLIC_HOST);
+        assert_eq!(got, case.expect, "cavage case `{}`", case.name);
+    }
+
+    #[test]
+    fn cavage_variation_map_matches_current_behaviour() {
+        for case in CAVAGE_CASES {
+            run_cavage_case(case);
+        }
+    }
+
+    /// One point in the inbound RFC 9421 variation space.
+    ///
+    /// Rows always sign HONESTLY — the signing base is rebuilt from the
+    /// components the row declares. That is what makes the table
+    /// meaningful: the receiver reconstructs a FIXED five-component
+    /// base regardless of what was declared, so any row whose component
+    /// list is not exactly our own shape cannot verify.
+    struct Rfc9421Case {
+        /// Row label, echoed on assertion failure.
+        name: &'static str,
+        /// Signature label — the `sig1` in `sig1=(...)`.
+        label: &'static str,
+        /// Covered components, verbatim, including the quotes.
+        components: &'static str,
+        /// Drop the `Content-Digest` header from the request.
+        omit_content_digest: bool,
+        /// `Ok(())`, or the exact reason string the 401 body carries.
+        expect: Result<(), &'static str>,
+    }
+
+    const RFC9421_CASES: &[Rfc9421Case] = &[
+        Rfc9421Case {
+            // The one shape this receiver can reconstruct: our own
+            // emitter's component list, in our own order.
+            name: "our_own_five_component_shape",
+            label: "sig1",
+            components: "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\"",
+            omit_content_digest: false,
+            expect: Ok(()),
+        },
+        Rfc9421Case {
+            // A leaner covered set — the shape a proxy-tolerant RFC 9421
+            // signer emits. Signed correctly; rejected anyway, because
+            // the receiver rebuilds five lines the signer never covered.
+            name: "leaner_component_list",
+            label: "sig1",
+            components: "\"@method\" \"@target-uri\" \"content-digest\"",
+            omit_content_digest: false,
+            expect: Err("signature invalid"),
+        },
+        Rfc9421Case {
+            // Strictly MORE components than we rebuild. The doc comment
+            // on `verify_signature_rfc9421` used to claim extras are
+            // fine; they are not — the base is fixed, not derived.
+            name: "extra_component_beyond_our_fixed_base",
+            label: "sig1",
+            components:
+                "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\" \"user-agent\"",
+            omit_content_digest: false,
+            expect: Err("signature invalid"),
+        },
+        Rfc9421Case {
+            // The receiver hard-requires the `sig1` label on both
+            // headers; any other label is an immediate rejection.
+            name: "signature_label_other_than_sig1",
+            label: "sig99",
+            components: "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\"",
+            omit_content_digest: false,
+            expect: Err("signature invalid"),
+        },
+        Rfc9421Case {
+            name: "content_digest_header_absent",
+            label: "sig1",
+            components: "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\"",
+            omit_content_digest: true,
+            expect: Err("missing content-digest"),
+        },
+    ];
+
+    /// Build and verify one RFC 9421 row.
+    fn run_rfc9421_case(case: &Rfc9421Case) {
+        let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
+        let content_digest = compute_content_digest(CASE_BODY);
+        let user_agent = "http.rb/5.1.1 (Mastodon/4.4.0)";
+        let sig_params = format!(
+            "({});created=1785000000;keyid=\"{CASE_KEY_ID}\";alg=\"rsa-v1_5-sha256\"",
+            case.components
+        );
+
+        // The signer's honest base: one line per declared component,
+        // then the parameter line.
+        let mut lines: Vec<String> = case
+            .components
+            .split_whitespace()
+            .map(|raw| {
+                let name = raw.trim_matches('"');
+                let value = match name {
+                    "@method" => "POST".to_owned(),
+                    "@target-uri" => format!("https://{CASE_PUBLIC_HOST}{CASE_PATH}"),
+                    "host" => CASE_PUBLIC_HOST.to_owned(),
+                    "date" => date.clone(),
+                    "content-digest" => content_digest.clone(),
+                    "user-agent" => user_agent.to_owned(),
+                    other => panic!("case `{}` covers unknown component `{other}`", case.name),
+                };
+                format!("\"{name}\": {value}")
+            })
+            .collect();
+        lines.push(format!("\"@signature-params\": {sig_params}"));
+        let sig = sign_b64(&lines.join("\n"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static(CASE_ORIGIN_HOST));
+        headers.insert("date", HeaderValue::from_str(&date).unwrap());
+        headers.insert("user-agent", HeaderValue::from_static(user_agent));
+        if !case.omit_content_digest {
+            headers.insert(
+                "content-digest",
+                HeaderValue::from_str(&content_digest).unwrap(),
+            );
+        }
+        headers.insert(
+            "signature-input",
+            HeaderValue::from_str(&format!("{}={sig_params}", case.label)).unwrap(),
+        );
+        headers.insert(
+            "signature",
+            HeaderValue::from_str(&format!("{}=:{sig}:", case.label)).unwrap(),
+        );
+
+        let (_, pubkey_pem) = test_signing_key();
+        let got =
+            verify_inbound_signature(&headers, "josh", pubkey_pem, CASE_BODY, CASE_PUBLIC_HOST);
+        assert_eq!(got, case.expect, "rfc9421 case `{}`", case.name);
+    }
+
+    #[test]
+    fn rfc9421_variation_map_matches_current_behaviour() {
+        for case in RFC9421_CASES {
+            run_rfc9421_case(case);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Signer-vs-author provenance.
+    //
+    // The 2026-08-05 incident: 27% of production deliveries 401'd
+    // because the verification key came from `activity.actor` while the
+    // signature was the FORWARDER's. `classify_provenance` is the whole
+    // decision that replaces that guess; the fetch around it cannot run
+    // hermetically (SSRF guard refuses loopback), so it is tested here
+    // in isolation.
+    // ---------------------------------------------------------------
+
+    fn url(s: &str) -> url::Url {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn signer_equal_to_actor_is_self_delivered() {
+        // Regression guard for every path that works today: a direct
+        // delivery must stay direct, so nothing about dispatch,
+        // storage, or the follow bindings changes.
+        let actor = url("https://fosstodon.org/users/happyborg");
+        assert_eq!(
+            classify_provenance(&actor, &actor),
+            Provenance::SelfDelivered
+        );
+    }
+
+    #[test]
+    fn cross_host_signer_is_forwarded() {
+        // The exact production shape: fosstodon.org signs a delivery of
+        // an activity authored on mastodon.online.
+        assert_eq!(
+            classify_provenance(
+                &url("https://fosstodon.org/users/happyborg"),
+                &url("https://mastodon.online/users/codechimp"),
+            ),
+            Provenance::Forwarded
+        );
+    }
+
+    #[test]
+    fn same_host_different_actor_needs_resolution() {
+        // Could be one account under two ids, or one user forwarding
+        // for another on the same instance. Undecidable from the URLs
+        // alone, so it must not shortcut either way.
+        assert_eq!(
+            classify_provenance(
+                &url("https://mastodon.social/users/alice"),
+                &url("https://mastodon.social/ap/users/116873305678992582"),
+            ),
+            Provenance::NeedsActorResolution
+        );
+    }
+
+    #[test]
+    fn same_host_same_account_via_alias_needs_resolution_not_rejection() {
+        // Mastodon serves one account at both `/users/<name>` and
+        // `/ap/users/<numeric>`. Classifying that pair as Forwarded
+        // outright would silently stop storing a working sender's DMs.
+        let signer = url("https://mastodon.social/users/alice");
+        let alias = url("https://mastodon.social/ap/users/116873305678992582");
+        assert_ne!(
+            classify_provenance(&signer, &alias),
+            Provenance::Forwarded,
+            "an alias must be resolved, never assumed hostile"
+        );
+    }
+
+    #[test]
+    fn differing_scheme_or_port_on_the_same_host_still_needs_resolution() {
+        assert_eq!(
+            classify_provenance(
+                &url("https://relay.example:8443/actor"),
+                &url("https://relay.example/actor"),
+            ),
+            Provenance::NeedsActorResolution
+        );
+    }
+
+    #[test]
+    fn hostless_urls_never_collapse_into_one_identity() {
+        // `host_str()` is None for non-network schemes; two of them
+        // must not be treated as "same host" and sent for resolution.
+        assert_eq!(
+            classify_provenance(&url("did:example:alice"), &url("did:example:bob")),
+            Provenance::Forwarded
+        );
+    }
+
+    #[test]
+    fn presented_key_id_drives_the_key_choice_for_both_wire_formats() {
+        // The gate and the rejection log must name the same key.
+        let (headers, _body, _pem) = mastodon_delivery();
+        let key_id = signature_meta::presented_key_id(&headers);
+        assert_eq!(key_id, "https://fosstodon.org/users/happyborg#main-key");
+        assert_eq!(
+            signature_meta::key_id_owner(&key_id),
+            "https://fosstodon.org/users/happyborg",
+            "the fetch target is the keyId without its fragment"
+        );
+    }
+
+    #[test]
+    fn absent_signature_yields_no_key_id() {
+        let headers = HeaderMap::new();
+        assert!(signature_meta::presented_key_id(&headers).is_empty());
     }
 
     const OURS: &str = "https://etchit.io/actors/josh";
