@@ -875,6 +875,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -971,6 +973,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_profile(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_report(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar(
 ): Short
@@ -1162,6 +1166,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uni
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_profile(`ptr`: Pointer,`target`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_report(`ptr`: Pointer,`actorUrl`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,`comment`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_self_avatar(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1437,7 +1443,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 12315.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar() != 42381.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar() != 37792.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar_cached() != 39356.toShort()) {
@@ -1498,6 +1504,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_report() != 16665.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar() != 38589.toShort()) {
@@ -1563,7 +1572,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnect_relay() != 52308.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnecting_groups() != 12997.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_reconnecting_groups() != 34284.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_remove_contact() != 56807.toShort()) {
@@ -2281,14 +2290,14 @@ public interface ChatClientInterface {
      * Cached avatar image bytes for the fediverse correspondent `label`
      * (`user@host`), or `None` when nothing is cached yet.
      *
-     * Bytes are the image exactly as the remote server served it — one of
+     * Bytes are the image exactly as the remote server served it -- one of
      * JPEG / PNG / WebP / GIF, capped at 512 KiB, fetched through the
      * fediverse SSRF guard. The engine never decodes them; the shell
      * decodes with its platform decoder, bounds-checked.
      *
      * A `None` is not final: it kicks off a background fetch (subject to a
      * 24h refresh window and a 1h failure backoff), so a later call for the
-     * same label can succeed. Nothing here blocks — an avatar is decoration,
+     * same label can succeed. Nothing here blocks -- an avatar is decoration,
      * and every fedi surface must render identically without one.
      *
      * Because a `None` can fetch, this call belongs to the FEDIVERSE
@@ -2550,6 +2559,35 @@ public interface ChatClientInterface {
      * fails before any delivery was attempted.
      */
     suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
+    
+    /**
+     * Report a fediverse account to the community trust service for
+     * moderator review.
+     *
+     * `actor_url` is the account's canonical actor URL (a profile
+     * sheet's `actorUrl`, a following row's `targetActorUrl`).
+     * `reason` is one of the `snake_case` report kinds -- `csam`,
+     * `violence_threat`, `harassment`, `spam`, `doxxing`,
+     * `abusive_content`, `other` -- and `comment` is the optional
+     * free text the reporter typed (empty string when they typed
+     * none).
+     *
+     * Reporting is NOT blocking: it asks moderators to look, and only
+     * a reviewer promotes an account onto the signed denylist. The
+     * local block affordance is the instant remedy and is unaffected.
+     *
+     * Like `fedi_profile`, this does not require a minted handle -- a
+     * user who has not opted in to posting must still be able to
+     * report what they are shown. The reporter's agent id rides along
+     * when chat state is wired.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] for an unknown `reason`, an actor URL
+     * that fails canonicalization, or an over-long comment;
+     * [`ChatFfiError`] when the trust service is unreachable or
+     * rejects the report.
+     */
+    suspend fun `fediReport`(`actorUrl`: kotlin.String, `reason`: kotlin.String, `comment`: kotlin.String)
     
     /**
      * The user's own profile picture, or `None` when they have not set
@@ -2841,7 +2879,7 @@ public interface ChatClientInterface {
      * Group ids currently in stale-epoch catch-up (#297 P1.4). The
      * shell polls this on its pump cadence and renders the quiet
      * "syncing…" affordance on matching conversations; empty when
-     * everything is Live. Never errors — a REST-only client simply has
+     * everything is Live. Never errors -- a REST-only client simply has
      * no recovering groups.
      */
     fun `reconnectingGroups`(): List<kotlin.String>
@@ -3475,14 +3513,14 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * Cached avatar image bytes for the fediverse correspondent `label`
      * (`user@host`), or `None` when nothing is cached yet.
      *
-     * Bytes are the image exactly as the remote server served it — one of
+     * Bytes are the image exactly as the remote server served it -- one of
      * JPEG / PNG / WebP / GIF, capped at 512 KiB, fetched through the
      * fediverse SSRF guard. The engine never decodes them; the shell
      * decodes with its platform decoder, bounds-checked.
      *
      * A `None` is not final: it kicks off a background fetch (subject to a
      * 24h refresh window and a 1h failure backoff), so a later call for the
-     * same label can succeed. Nothing here blocks — an avatar is decoration,
+     * same label can succeed. Nothing here blocks -- an avatar is decoration,
      * and every fedi surface must render identically without one.
      *
      * Because a `None` can fetch, this call belongs to the FEDIVERSE
@@ -4079,6 +4117,55 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePublishReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Report a fediverse account to the community trust service for
+     * moderator review.
+     *
+     * `actor_url` is the account's canonical actor URL (a profile
+     * sheet's `actorUrl`, a following row's `targetActorUrl`).
+     * `reason` is one of the `snake_case` report kinds -- `csam`,
+     * `violence_threat`, `harassment`, `spam`, `doxxing`,
+     * `abusive_content`, `other` -- and `comment` is the optional
+     * free text the reporter typed (empty string when they typed
+     * none).
+     *
+     * Reporting is NOT blocking: it asks moderators to look, and only
+     * a reviewer promotes an account onto the signed denylist. The
+     * local block affordance is the instant remedy and is unaffected.
+     *
+     * Like `fedi_profile`, this does not require a minted handle -- a
+     * user who has not opted in to posting must still be able to
+     * report what they are shown. The reporter's agent id rides along
+     * when chat state is wired.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] for an unknown `reason`, an actor URL
+     * that fails canonicalization, or an over-long comment;
+     * [`ChatFfiError`] when the trust service is unreachable or
+     * rejects the report.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediReport`(`actorUrl`: kotlin.String, `reason`: kotlin.String, `comment`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_report(
+                thisPtr,
+                FfiConverterString.lower(`actorUrl`),FfiConverterString.lower(`reason`),FfiConverterString.lower(`comment`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4741,7 +4828,7 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * Group ids currently in stale-epoch catch-up (#297 P1.4). The
      * shell polls this on its pump cadence and renders the quiet
      * "syncing…" affordance on matching conversations; empty when
-     * everything is Live. Never errors — a REST-only client simply has
+     * everything is Live. Never errors -- a REST-only client simply has
      * no recovering groups.
      */override fun `reconnectingGroups`(): List<kotlin.String> {
             return FfiConverterSequenceString.lift(
