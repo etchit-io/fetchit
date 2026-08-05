@@ -239,6 +239,27 @@ fn history_entry_to_ffi(
     }
 }
 
+/// Project a decrypted inbound DM into the FFI event stream.
+///
+/// The attachment is re-validated on the way through even though the
+/// inbound path already dropped a malformed one: this projection is the
+/// last place a shell-visible attachment is decided, and "a bad
+/// attachment is no attachment" must hold wherever the shell reads one.
+/// Pure so the projection is unit-tested without a live relay; the
+/// inbound pump calls it on the same path it ships (mirrors
+/// [`project_group_receive`]).
+fn project_dm_event(
+    sender_agent_id_hex: String,
+    payload: fetchit_chat::conversation::MessagePayload,
+) -> ChatEventFfi {
+    ChatEventFfi::Dm {
+        from_agent_id_hex: sender_agent_id_hex,
+        body: payload.body,
+        message_id: payload.message_id,
+        attachment: crate::attachment_ffi::attachment_to_ffi(payload.attachment.as_ref()),
+    }
+}
+
 /// Reject a send with nothing in it: no text AND no image.
 ///
 /// An image on its own IS a message (desktop's composer sends one), so the
@@ -3401,19 +3422,7 @@ async fn run_inbound_pump(
                         log::warn!("[chat_ffi] receipt send error: {e}");
                     }
                 }
-                let _ = tx.send(ChatEventFfi::Dm {
-                    from_agent_id_hex: sender_agent_id_hex,
-                    body: payload.body,
-                    message_id: payload.message_id,
-                    // Re-validated here even though the inbound path
-                    // already dropped a bad one: this projection also
-                    // serves bytes that were persisted by an older build,
-                    // and "a bad attachment is no attachment" must hold
-                    // wherever the shell reads one.
-                    attachment: crate::attachment_ffi::attachment_to_ffi(
-                        payload.attachment.as_ref(),
-                    ),
-                });
+                let _ = tx.send(project_dm_event(sender_agent_id_hex, payload));
             }
             InboundDispatch::Receipt { message_id, .. } => {
                 let _ = tx.send(ChatEventFfi::Receipt { message_id });
@@ -4175,6 +4184,83 @@ mod tests {
             state_changed_at_ms: 0,
         };
         assert!(history_entry_to_ffi(entry, REAL_HEX).attachment.is_none());
+    }
+
+    fn dm_payload(
+        body: &str,
+        attachment: Option<fetchit_chat::attachment::Attachment>,
+    ) -> fetchit_chat::conversation::MessagePayload {
+        fetchit_chat::conversation::MessagePayload {
+            sender_name: Some("alice".to_owned()),
+            body: body.to_owned(),
+            ts_ms: 1_700_000_000_000,
+            message_id: Some("mid-dm".to_owned()),
+            reply_to_message_id: None,
+            attachment,
+            advertised_relays: None,
+            hint_epoch_ms: None,
+        }
+    }
+
+    #[test]
+    fn project_dm_event_carries_the_attachment_as_raw_bytes() {
+        use fetchit_chat::attachment::Attachment;
+        let raw = vec![0x42u8; 128];
+        let payload = dm_payload(
+            "",
+            Some(Attachment::from_raw("image/png", 320, 200, &raw).expect("valid")),
+        );
+        match project_dm_event(REAL_HEX.to_owned(), payload) {
+            ChatEventFfi::Dm {
+                from_agent_id_hex,
+                body,
+                message_id,
+                attachment,
+            } => {
+                assert_eq!(from_agent_id_hex, REAL_HEX);
+                assert_eq!(body, "");
+                assert_eq!(message_id.as_deref(), Some("mid-dm"));
+                let att = attachment.expect("attachment must reach the shell");
+                assert_eq!(att.mime, "image/png");
+                assert_eq!(att.width, 320);
+                assert_eq!(att.height, 200);
+                assert_eq!(att.bytes, raw);
+            }
+            other => panic!("expected Dm, got {other:?}"),
+        }
+    }
+
+    /// A hostile sender's oversize / script-carrying attachment must reach
+    /// the shell as "no image", with the message itself intact.
+    #[test]
+    fn project_dm_event_drops_a_hostile_attachment() {
+        use fetchit_chat::attachment::Attachment;
+        let payload = dm_payload(
+            "look at this",
+            Some(Attachment {
+                mime: "image/svg+xml".to_owned(),
+                width: 8,
+                height: 8,
+                bytes_b64: "PHN2Zy8+".to_owned(),
+            }),
+        );
+        match project_dm_event(REAL_HEX.to_owned(), payload) {
+            ChatEventFfi::Dm {
+                body, attachment, ..
+            } => {
+                assert!(attachment.is_none());
+                assert_eq!(body, "look at this");
+            }
+            other => panic!("expected Dm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_dm_event_without_an_attachment_maps_to_none() {
+        match project_dm_event(REAL_HEX.to_owned(), dm_payload("hi", None)) {
+            ChatEventFfi::Dm { attachment, .. } => assert!(attachment.is_none()),
+            other => panic!("expected Dm, got {other:?}"),
+        }
     }
 
     #[test]
