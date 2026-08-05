@@ -626,7 +626,7 @@ pub struct GroupSendReceiptFfi {
 const FEDI_DOMAIN: &str = "etchit.io";
 
 /// Wall clock in unix milliseconds. A pre-epoch clock reads as 0, which
-/// the engine's skew window rejects — better than a wrapped stamp.
+/// the engine's skew window rejects -- better than a wrapped stamp.
 fn now_ms_u64() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1898,7 +1898,7 @@ impl ChatClient {
     ///
     /// `bytes` must already be the final image: the shell decodes the
     /// photo the user picked, crops and downscales it, and RE-ENCODES it
-    /// (which is what drops the EXIF — original camera metadata, GPS
+    /// (which is what drops the EXIF -- original camera metadata, GPS
     /// included, must never leave the device). Nothing below this call
     /// decodes or rewrites the image; the engine and the bridge both
     /// treat it as opaque bytes.
@@ -1906,8 +1906,8 @@ impl ChatClient {
     /// JPEG / PNG / WebP only, 512 KiB max. The engine hosts the bytes on
     /// our own bridge, publishes the `icon` on the actor document so
     /// Mastodon and friends show the picture, and pins a local copy so
-    /// every fetch>it surface — including the private ones, which may
-    /// never issue a request — can draw it.
+    /// every fetch>it surface -- including the private ones, which may
+    /// never issue a request -- can draw it.
     ///
     /// # Errors
     /// [`ChatFfiError`] when no public handle is minted, the image fails
@@ -1954,13 +1954,6 @@ impl ChatClient {
         self.inner.fedi_self_avatar(&handle, FEDI_DOMAIN)
     }
 
-    /// The minted public handle, or the error every avatar write needs
-    /// to report when there is none.
-    fn require_fedi_handle(&self) -> Result<String, ChatFfiError> {
-        self.fedi_actor_status().ok_or(ChatFfiError::Invalid {
-            reason: "no public handle minted".to_owned(),
-        })
-    }
 
     /// Mark the fediverse DM thread with `label` read up to its newest
     /// message: the row's unread count clears, durably (the mark is
@@ -3214,6 +3207,19 @@ async fn run_inbound_pump(
                 // effect; no FFI event needed.
             }
         }
+    }
+}
+
+/// Internal helpers. Deliberately OUTSIDE the `#[uniffi::export]` block:
+/// that attribute exports every method in its impl, private or not, so a
+/// helper left there would ship as a shell-callable binding.
+impl ChatClient {
+    /// The minted public handle, or the error every avatar write needs
+    /// to report when there is none.
+    fn require_fedi_handle(&self) -> Result<String, ChatFfiError> {
+        self.fedi_actor_status().ok_or(ChatFfiError::Invalid {
+            reason: "no public handle minted".to_owned(),
+        })
     }
 }
 

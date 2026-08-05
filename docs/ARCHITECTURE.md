@@ -294,6 +294,17 @@ owns the bounded on-disk cache (`<root>/fedi/avatars/`, 24h refresh, 1h failure
 backoff, oldest-first eviction past 32 entries / 8 MiB); avatars are
 best-effort and never block or fail follow, DM, or feed.
 
+The write half is the user's OWN picture. The shell crops, downscales and
+re-encodes the photo on the device (the re-encode is what drops the EXIF);
+`fetchit_chat::fedi_self_avatar` uploads it to the bridge under
+`bridge-auth-v1`, publishes the resulting URL as the actor document's `icon`,
+and pins a local copy. The bridge hosts the bytes itself
+(`crates/fetchit-bridge-server/src/store_avatar.rs` + `routes/avatar.rs`),
+serving them with the stored `Content-Type` and `nosniff`, and accepting an
+upload only when the declared type is in the allowlist AND the bytes carry
+that format's magic -- otherwise the endpoint would host arbitrary content
+under our own domain. Nothing on the server decodes the image either.
+
 A LIT contact linked to a fediverse identity reuses that identity's picture,
 and does so **cache-only**. `ChatClient::fedi_avatar` may spawn a background
 fetch on a miss and belongs to the fediverse surfaces; private surfaces call
@@ -304,14 +315,17 @@ would appear as a request in a fediverse server's access log. Android holds
 the same split in `FediAvatars` (separate in-flight / re-check lanes over one
 shared bitmap cache) so a private row's re-check can never land on the
 fetching call either. A stale face on a private row is the accepted cost.
+The user's own picture is the one cache entry marked `pinned` and exempt from
+eviction: it is drawn by those same private surfaces, which have no
+cache-only way to get it back.
 
 **Key entry points:** `fetchit_fedi::ssrf`,
 `fetchit_fedi::webfinger::resolve_handle`, `fetchit_fedi::actor::fetch_actor`,
 `fetchit_fedi::avatar::fetch_avatar`,
 `fetchit_fedi::signature::HttpSignatureKey`.
 
-<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=8ded009 -->
-_Last verified: 2026-08-04 (`8ded009`) -- bob._
+<!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=e771309 -->
+_Last verified: 2026-08-05 (`e771309`) -- bob._
 
 ## Android shell
 
@@ -379,17 +393,20 @@ A Cloudflare Worker that fronts the M4 ActivityPub bridge on the `etchit.io`
 zone (decision DP2), so the pretty handle `@<h>@etchit.io` resolves to the
 bridge's canonical actor documents without moving the static marketing site off
 GitHub Pages. It is route-bound to ONLY the fediverse paths (WebFinger, actor
-docs + collections, the `/v1/actors` register/rotate writes) and reverse-proxies
-them to `BRIDGE_ORIGIN`; every other path falls through to GitHub Pages and never
-reaches the Worker. The load-bearing guard is `classify()`, which pins the HTTP
-method per path so the route wildcards (needed so query-bearing WebFinger
-requests match) widen the route, not the proxy -- no open-proxy risk.
+docs + collections, the `/v1/actors` register/rotate writes, and the avatar
+route) and reverse-proxies them to `BRIDGE_ORIGIN`; every other path falls
+through to GitHub Pages and never reaches the Worker. The load-bearing guard is
+`classify()`, which pins the HTTP method per path so the route wildcards
+(needed so query-bearing WebFinger requests match) widen the route, not the
+proxy -- no open-proxy risk. Two `/actors/<h>/...` paths carry their own
+methods: `/inbox` (POST, inbound federation) and `/avatar` (public GET plus
+owner-authenticated POST/DELETE, which the bridge gates itself).
 
 **Key entry points:** `apps/fetchit-bridge-worker/src/worker.js`,
 `apps/fetchit-bridge-worker/wrangler.toml`.
 
-<!-- arch: id=bridge-worker glob=apps/fetchit-bridge-worker/** verified=c9bf634 -->
-_Last verified: 2026-06-14 (`c9bf634`) -- bob._
+<!-- arch: id=bridge-worker glob=apps/fetchit-bridge-worker/** verified=8197a79 -->
+_Last verified: 2026-08-05 (`8197a79`) -- bob._
 
 ## CI / release
 

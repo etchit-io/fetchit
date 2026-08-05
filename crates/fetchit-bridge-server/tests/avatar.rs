@@ -157,6 +157,12 @@ async fn set_serve_and_clear_the_owner_avatar() {
     assert_eq!(got.status(), 200);
     assert_eq!(got.headers()["content-type"], "image/png");
     assert_eq!(
+        got.headers().get_all("content-type").iter().count(),
+        1,
+        "exactly one content-type: a stray octet-stream beside it would \
+         make the served type ambiguous"
+    );
+    assert_eq!(
         got.headers()["x-content-type-options"],
         "nosniff",
         "a hosted upload must never be sniffed into markup"

@@ -27,14 +27,31 @@
             android:focusable="true"
             android:contentDescription="@string/chat_identity_badge_desc">
 
-            <TextView
-                android:id="@+id/chatIdentityAvatar"
+            <!-- Avatar slot: the initials TextView is the always-present
+                 fallback; the ImageView sits on top of it and is only made
+                 visible once the user's own picture is in the local cache
+                 (never fetched from this surface). -->
+            <FrameLayout
                 android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:gravity="center"
-                android:textColor="?attr/fetchitInk"
-                android:textStyle="bold"
-                android:textSize="14sp" />
+                android:layout_height="36dp">
+
+                <TextView
+                    android:id="@+id/chatIdentityAvatar"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:textColor="?attr/fetchitInk"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <ImageView
+                    android:id="@+id/chatIdentityAvatarImage"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:visibility="gone"
+                    android:importantForAccessibility="no" />
+            </FrameLayout>
 
             <TextView
                 android:id="@+id/chatIdentityName"

@@ -233,6 +233,26 @@
     <string name="chat_identity_name_message">This is the name people see on your messages.</string>
     <string name="chat_identity_name_hint">Your name</string>
     <string name="chat_identity_name_save">save</string>
+    <!-- Badge menu entry once a name exists (the "add" wording above would
+         be a lie by then). -->
+    <string name="chat_identity_change_name">Change your name</string>
+    <string name="chat_identity_share_code">Share my code</string>
+    <!-- Profile picture: the badge menu + the Settings row, and the
+         outcomes of setting or removing one. Deliberately says "photo"
+         rather than "avatar" — the user picked a photo. -->
+    <string name="profile_picture_title">Profile picture</string>
+    <string name="profile_picture_hint">The picture people see on your posts. Cropped square and re-saved on this phone, so the photo\'s location and camera details never leave it.</string>
+    <string name="profile_picture_set_action">Set profile picture</string>
+    <string name="profile_picture_remove_action">Remove picture</string>
+    <string name="profile_picture_remove_title">Remove your picture?</string>
+    <string name="profile_picture_remove_message">Your posts will show your initials again. You can set a new picture any time.</string>
+    <string name="profile_picture_working">preparing your picture…</string>
+    <string name="profile_picture_set">profile picture updated</string>
+    <string name="profile_picture_removed">profile picture removed</string>
+    <string name="profile_picture_unreadable">couldn\'t read that picture — try another</string>
+    <string name="profile_picture_failed">couldn\'t update your picture — try again</string>
+    <string name="profile_picture_offline">couldn\'t connect — try again</string>
+    <string name="profile_picture_needs_handle">get your @handle first, then add a picture</string>
     <string name="chat_share_my_code">share my code</string>
     <string name="chat_scan_a_code">scan a code</string>
     <string name="chat_add_contact">add contact</string>

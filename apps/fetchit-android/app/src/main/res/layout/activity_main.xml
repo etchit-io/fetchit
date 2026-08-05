@@ -664,6 +664,52 @@
                 android:padding="8dp"
                 android:imeOptions="actionDone" />
 
+            <!-- Profile picture — sits with the display name because the
+                 two together are "how people see me". Published on the
+                 fediverse actor document, so it needs a public handle. -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="@string/profile_picture_title"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="11sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/profile_picture_hint"
+                android:textColor="?attr/fetchitAsh"
+                android:textSize="12sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/profilePictureSetButton"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/profile_picture_set_action" />
+
+                <Button
+                    android:id="@+id/profilePictureRemoveButton"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/profile_picture_remove_action" />
+            </LinearLayout>
+
             <!-- Keep chat connected in the background -->
             <LinearLayout
                 android:layout_width="match_parent"

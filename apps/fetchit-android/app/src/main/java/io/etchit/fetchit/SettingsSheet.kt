@@ -30,6 +30,10 @@ class SettingsSheet(
     private val binding: ActivityMainBinding,
     private val activity: AppCompatActivity,
     private val onLaunchScanner: () -> Unit,
+    // The photo picker is registered on the activity (an activity-result
+    // contract must be); this sheet only asks for it.
+    private val onPickProfilePicture: () -> Unit = {},
+    private val onRemoveProfilePicture: () -> Unit = {},
 ) {
 
     private val store = SettingsStore(activity)
@@ -49,6 +53,7 @@ class SettingsSheet(
         bindThemePicker()
         observePeerCount()
         bindChatDisplayName()
+        bindProfilePicture()
         bindLinkDevice()
         bindChatKeepConnected()
     }
@@ -175,6 +180,19 @@ class SettingsSheet(
                 store.saveChatDisplayName(binding.chatDisplayNameEdit.text.toString())
             }
         }
+    }
+
+    /**
+     * Wire the profile-picture row, directly under the display name — the
+     * two together are "how people see me".
+     *
+     * The picture is published on the fediverse actor document, so both
+     * buttons hand off to the activity, which owns the picker contract and
+     * the engine calls.
+     */
+    private fun bindProfilePicture() {
+        binding.profilePictureSetButton.setOnClickListener { onPickProfilePicture() }
+        binding.profilePictureRemoveButton.setOnClickListener { onRemoveProfilePicture() }
     }
 
     /**

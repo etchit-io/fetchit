@@ -863,6 +863,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -922,6 +928,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar_cached(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_clear_avatar(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_ensure_v2(
@@ -953,6 +961,10 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_pending_invites(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_set_avatar(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox(
 ): Short
@@ -1101,6 +1113,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar(`ptr`: Pointer,`label`: 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_avatar_cached(`ptr`: Pointer,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_clear_avatar(`ptr`: Pointer,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_dm(`ptr`: Pointer,`target`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_ensure_v2(`ptr`: Pointer,
@@ -1132,6 +1146,10 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_pending_invites(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_self_avatar(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_set_avatar(`ptr`: Pointer,`bytes`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(`ptr`: Pointer,
 ): Long
@@ -1407,6 +1425,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_avatar_cached() != 39356.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_clear_avatar() != 45637.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_dm() != 53381.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1453,6 +1474,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar() != 38589.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_set_avatar() != 49582.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox() != 42525.toShort()) {
@@ -2257,6 +2284,17 @@ public interface ChatClientInterface {
     fun `fediAvatarCached`(`label`: kotlin.String): kotlin.ByteArray?
     
     /**
+     * Remove the user's own profile picture: the hosted bytes are
+     * deleted, the actor document stops publishing an `icon`, and the
+     * local copy is dropped.
+     *
+     * # Errors
+     * [`ChatFfiError`] when no public handle is minted or the bridge
+     * refuses the removal.
+     */
+    suspend fun `fediClearAvatar`()
+    
+    /**
      * Send a plaintext fediverse DM (`@user@instance`) from our minted
      * handle: sign a direct `Create(Note)` on the device and deliver it to
      * the recipient's inbox. Requires a minted handle. This message is
@@ -2439,6 +2477,40 @@ public interface ChatClientInterface {
      * fails before any delivery was attempted.
      */
     suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
+    
+    /**
+     * The user's own profile picture, or `None` when they have not set
+     * one (or have no handle yet).
+     *
+     * Cache-only, like [`Self::fedi_avatar_cached`] and for the same
+     * reason: the LIT chat header draws this, and that surface must
+     * never produce an observable request. The bytes are local because
+     * the set path put them there, so no fetch is ever needed.
+     */
+    fun `fediSelfAvatar`(): kotlin.ByteArray?
+    
+    /**
+     * Set the user's OWN profile picture.
+     *
+     * `bytes` must already be the final image: the shell decodes the
+     * photo the user picked, crops and downscales it, and RE-ENCODES it
+     * (which is what drops the EXIF -- original camera metadata, GPS
+     * included, must never leave the device). Nothing below this call
+     * decodes or rewrites the image; the engine and the bridge both
+     * treat it as opaque bytes.
+     *
+     * JPEG / PNG / WebP only, 512 KiB max. The engine hosts the bytes on
+     * our own bridge, publishes the `icon` on the actor document so
+     * Mastodon and friends show the picture, and pins a local copy so
+     * every fetch>it surface -- including the private ones, which may
+     * never issue a request -- can draw it.
+     *
+     * # Errors
+     * [`ChatFfiError`] when no public handle is minted, the image fails
+     * the format / size checks, or the bridge refuses the upload. The
+     * previously published picture is untouched on failure.
+     */
+    suspend fun `fediSetAvatar`(`bytes`: kotlin.ByteArray, `contentType`: kotlin.String)
     
     /**
      * Sync inbound fediverse messages (replies on the plaintext rails)
@@ -3361,6 +3433,37 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Remove the user's own profile picture: the hosted bytes are
+     * deleted, the actor document stops publishing an `icon`, and the
+     * local copy is dropped.
+     *
+     * # Errors
+     * [`ChatFfiError`] when no public handle is minted or the bridge
+     * refuses the removal.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediClearAvatar`() {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_clear_avatar(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Send a plaintext fediverse DM (`@user@instance`) from our minted
      * handle: sign a direct `Create(Note)` on the device and deliver it to
      * the recipient's inbox. Requires a minted handle. This message is
@@ -3800,6 +3903,70 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePublishReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The user's own profile picture, or `None` when they have not set
+     * one (or have no handle yet).
+     *
+     * Cache-only, like [`Self::fedi_avatar_cached`] and for the same
+     * reason: the LIT chat header draws this, and that surface must
+     * never produce an observable request. The bytes are local because
+     * the set path put them there, so no fetch is ever needed.
+     */override fun `fediSelfAvatar`(): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_self_avatar(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Set the user's OWN profile picture.
+     *
+     * `bytes` must already be the final image: the shell decodes the
+     * photo the user picked, crops and downscales it, and RE-ENCODES it
+     * (which is what drops the EXIF -- original camera metadata, GPS
+     * included, must never leave the device). Nothing below this call
+     * decodes or rewrites the image; the engine and the bridge both
+     * treat it as opaque bytes.
+     *
+     * JPEG / PNG / WebP only, 512 KiB max. The engine hosts the bytes on
+     * our own bridge, publishes the `icon` on the actor document so
+     * Mastodon and friends show the picture, and pins a local copy so
+     * every fetch>it surface -- including the private ones, which may
+     * never issue a request -- can draw it.
+     *
+     * # Errors
+     * [`ChatFfiError`] when no public handle is minted, the image fails
+     * the format / size checks, or the bridge refuses the upload. The
+     * previously published picture is untouched on failure.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediSetAvatar`(`bytes`: kotlin.ByteArray, `contentType`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_set_avatar(
+                thisPtr,
+                FfiConverterByteArray.lower(`bytes`),FfiConverterString.lower(`contentType`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
