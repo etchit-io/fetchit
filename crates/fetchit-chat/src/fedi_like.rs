@@ -172,9 +172,12 @@ impl Client {
         author_url: &str,
         now_ms: u64,
     ) -> Result<LikeReport> {
+        // Everything that can fail runs before the store is touched, so
+        // an error never leaves a recorded like the caller has already
+        // reverted on screen.
         self.gate_actor_url(author_url).await?;
-        let changed = self.set_liked(handle, object_url, true, now_ms)?;
         let identity = self.fedi_identity_for(handle).await?;
+        let changed = self.set_liked(handle, object_url, true, now_ms)?;
         let like = build_like(identity.actor_url.as_str(), object_url);
         let body = serde_json::to_vec(&like)
             .map_err(|e| ChatError::Invalid(format!("serialize Like: {e}")))?;
@@ -206,8 +209,8 @@ impl Client {
         author_url: &str,
         now_ms: u64,
     ) -> Result<LikeReport> {
-        let changed = self.set_liked(handle, object_url, false, now_ms)?;
         let identity = self.fedi_identity_for(handle).await?;
+        let changed = self.set_liked(handle, object_url, false, now_ms)?;
         let like = build_like(identity.actor_url.as_str(), object_url);
         let undo = build_undo_like(identity.actor_url.as_str(), &like);
         let body = serde_json::to_vec(&undo)
