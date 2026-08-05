@@ -12,10 +12,17 @@
 //! any surface issuing a request — the bytes never have to come back
 //! over HTTP because they started here.
 //!
-//! The order matters at both ends. On set, the upload comes first: an
-//! `icon` URL published before the bytes exist is a broken image on
-//! every timeline that renders it. On clear, the doc is re-registered
-//! after the delete for the same reason in reverse.
+//! The order matters, and it is NOT symmetric.
+//!
+//! On set, the upload comes first: an `icon` URL published before the
+//! bytes exist is a broken image on every timeline that renders it.
+//!
+//! On clear, the DELETE comes first, even though that briefly leaves a
+//! published `icon` pointing at bytes that are gone. "Remove my picture"
+//! is a privacy request, and honouring it means the bytes stop being
+//! retrievable at a public URL immediately -- a transient broken image
+//! is the smaller harm, and it self-heals, since the vault no longer
+//! carries an `icon` and the next ensure pass re-registers without one.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
