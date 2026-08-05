@@ -218,6 +218,18 @@ interface ChatGateway {
     suspend fun fediProfile(target: String): FediProfileFfi
 
     /**
+     * Report the account at [actorUrl] to the community trust service.
+     * [reason] is a snake_case report kind (`csam`, `violence_threat`,
+     * `harassment`, `spam`, `doxxing`, `abusive_content`, `other`) and
+     * [comment] is the optional free text the reporter typed.
+     *
+     * Reporting is not blocking — it asks moderators to look. Throws on
+     * an unknown reason, an unusable actor URL, or a service failure, so
+     * the caller can tell the user honestly whether it was sent.
+     */
+    suspend fun fediReport(actorUrl: String, reason: String, comment: String)
+
+    /**
      * Like the post [objectUrl] authored by [authorUrl]. Returns whether
      * the author's inbox accepted the activity — a false is not a
      * failure to act on, the like is recorded either way. Throws when no
@@ -490,6 +502,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.fediUnfollow(targetActorUrl)
     override suspend fun fediFeed(): List<FediPostFfi> = inner.fediFeed()
     override suspend fun fediProfile(target: String): FediProfileFfi = inner.fediProfile(target)
+    override suspend fun fediReport(actorUrl: String, reason: String, comment: String) =
+        inner.fediReport(actorUrl, reason, comment)
     override suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean =
         inner.fediLike(objectUrl, authorUrl)
     override suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean =

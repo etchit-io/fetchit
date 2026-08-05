@@ -68,6 +68,7 @@ pub mod recovery_phrase;
 pub mod rekey;
 pub mod relay_http;
 pub mod relay_transport;
+pub mod report;
 pub mod send_state;
 pub mod sibling_admission;
 pub mod transport;
