@@ -6756,12 +6756,11 @@ impl Client {
     /// [`ChatError::DeniedActor`] when `actor_url` is denylisted or
     /// fails canonicalization.
     pub(crate) async fn gate_actor_url(&self, actor_url: &str) -> Result<()> {
-        match self.denylist.as_ref() {
-            Some(denylist) => {
-                crate::public::check_actor_url_denylist(denylist.as_ref(), actor_url).await
-            }
-            None => Ok(()),
-        }
+        crate::public::check_optional_actor_url_denylist(
+            self.denylist.as_ref().map(AsRef::as_ref),
+            actor_url,
+        )
+        .await
     }
 
     pub(crate) async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {
