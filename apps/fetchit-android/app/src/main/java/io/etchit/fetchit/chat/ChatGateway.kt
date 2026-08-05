@@ -18,6 +18,7 @@ import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FediPersonLinkFfi
+import uniffi.fetchit_ffi.FediProfileFfi
 import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
@@ -205,6 +206,27 @@ interface ChatGateway {
      * an empty list is a valid (quiet) feed.
      */
     suspend fun fediFeed(): List<FediPostFfi>
+
+    /**
+     * Fetch any fediverse account's profile for the profile sheet.
+     * [target] accepts `@user@host`, `user@host`, or an actor URL, so a
+     * tapped author chip and a tapped @-mention take the same path.
+     *
+     * Deliberately NOT gated on a minted handle: reading a public
+     * profile is a read. The ACTIONS on the sheet still gate.
+     */
+    suspend fun fediProfile(target: String): FediProfileFfi
+
+    /**
+     * Like the post [objectUrl] authored by [authorUrl]. Returns whether
+     * the author's inbox accepted the activity — a false is not a
+     * failure to act on, the like is recorded either way. Throws when no
+     * handle is minted or the author is blocked.
+     */
+    suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean
+
+    /** Undo a like of [objectUrl]. Mirrors [fediLike]. */
+    suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean
 
     /**
      * Sync inbound fediverse replies from the bridge inbox into the
@@ -444,6 +466,11 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
         inner.fediUnfollow(targetActorUrl)
     override suspend fun fediFeed(): List<FediPostFfi> = inner.fediFeed()
+    override suspend fun fediProfile(target: String): FediProfileFfi = inner.fediProfile(target)
+    override suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean =
+        inner.fediLike(objectUrl, authorUrl)
+    override suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean =
+        inner.fediUnlike(objectUrl, authorUrl)
     override suspend fun fediSyncInbox(): UInt = inner.fediSyncInbox()
     override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> =
         inner.fediThreadsOverview()

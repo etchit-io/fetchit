@@ -1125,7 +1125,19 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             val json = JSONObject(String(ev.activityJson, Charsets.UTF_8))
             val content = json.optJSONObject("object")?.optString("content").orEmpty()
             val plain = htmlStripper(content)
-            if (plain.isEmpty()) null else FeedPost(ev.verifiedActorUrl, plain, System.currentTimeMillis())
+            if (plain.isEmpty()) {
+                null
+            } else {
+                // The relay-verified actor URL is the trustworthy identity;
+                // the label is derived from it for display and avatar keying.
+                FeedPost(
+                    authorLabel = fediActorDisplay(ev.verifiedActorUrl),
+                    body = plain,
+                    receivedAtMs = System.currentTimeMillis(),
+                    authorUrl = ev.verifiedActorUrl,
+                    objectUrl = json.optJSONObject("object")?.optString("id").orEmpty(),
+                )
+            }
         }.getOrNull()
 
         /**

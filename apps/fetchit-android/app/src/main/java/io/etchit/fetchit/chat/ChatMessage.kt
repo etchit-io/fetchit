@@ -37,5 +37,36 @@ data class ChatMessage(
     val senderName: String? = null,
 )
 
-/** One bridged fediverse post, already reduced to plain text. */
-data class FeedPost(val actorUrl: String, val body: String, val receivedAtMs: Long = 0L)
+/**
+ * One `@user@host` mention inside a feed post: the visible text and the
+ * actor URL behind it. Tapping the text opens that account's profile.
+ */
+data class FeedMention(val name: String, val href: String)
+
+/**
+ * One bridged fediverse post, already reduced to plain text.
+ *
+ * [authorLabel] is the display identity (`user@host` / `@user@host`) and
+ * is the only field older persisted records carry — it doubles as the
+ * avatar-cache key and the block key. [authorUrl] and [objectUrl] are
+ * the real identities the engine resolved: the author's actor URL and
+ * the post's URL on its home server. Both default to empty because a
+ * record restored from an older blob, or a post this device published
+ * itself, genuinely has neither — every consumer must treat blank as
+ * "not known" rather than assume.
+ */
+data class FeedPost(
+    val authorLabel: String,
+    val body: String,
+    val receivedAtMs: Long = 0L,
+    /** The author's canonical actor URL; empty when unknown. */
+    val authorUrl: String = "",
+    /** The post's URL on its home server — the dedup and like key; empty when unknown. */
+    val objectUrl: String = "",
+    /** The author's chosen display name, when their server publishes one. */
+    val authorName: String? = null,
+    /** `Mention` tags on the post, engine-capped. */
+    val mentions: List<FeedMention> = emptyList(),
+    /** This device has liked the post. */
+    val liked: Boolean = false,
+)

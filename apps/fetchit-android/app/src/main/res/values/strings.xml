@@ -307,6 +307,22 @@
     <string name="feed_posted">posted — everyone can see it</string>
     <string name="feed_post_failed">couldn\'t post — try again in a moment</string>
     <string name="feed_find_people_desc">find people</string>
+    <!-- Profile sheet: opened by tapping a post's author or an @-mention.
+         One place to see who someone is and act on it. -->
+    <string name="fedi_profile_open_desc">open %1$s\'s profile</string>
+    <string name="fedi_profile_loading">looking them up…</string>
+    <string name="fedi_profile_failed">couldn\'t load that profile — try again in a moment</string>
+    <string name="fedi_profile_follow">follow</string>
+    <string name="fedi_profile_requested">requested · tap to cancel</string>
+    <string name="fedi_profile_following">following ✓ · tap to unfollow</string>
+    <string name="fedi_profile_blocked_note">you\'ve blocked this account on this device.</string>
+    <!-- Like toggle on feed posts. The glyph is the control; the
+         content description is what a screen reader announces. -->
+    <string name="feed_like_glyph">♡</string>
+    <string name="feed_liked_glyph">♥</string>
+    <string name="feed_like_desc">like this post</string>
+    <string name="feed_unlike_desc">remove your like</string>
+    <string name="feed_like_failed">couldn\'t save that like — try again in a moment</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
     <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>
