@@ -171,8 +171,26 @@ user's other devices in a group they join with zero UI -- the sibling mints its
 own per-group `TreeKEM` `KeyPackage` and an already-in-group device verifies the
 request chains to the account and admits it via x0xd's invite-free direct-add.
 
+Denylist enforcement runs at every point a blocked identity could otherwise be
+reached, not only at the conversation anchor. A DM send gates the addressed
+agent, and then gates again after the device fan-out expands that agent into
+every device on the recipient's `PairRecordV4` -- each device is a separately
+blockable agent id, so without the second pass a blocked device kept receiving a
+sealed copy of every message sent to its siblings (#342); an expansion filtered
+to nothing raises the same `ChatError::Denied` the anchor check raises. The
+fediverse read feed gates each followed account BEFORE fetching its actor
+document, so a blocked server sees no request at all rather than being fetched
+and then filtered. Every gate composes one helper
+(`public::check_optional_actor_url_denylist`) and fails open when no consumer is
+installed. `crate::report` is the other half of moderation: a user-initiated
+`POST /v1/report` to the trust service naming an actor URL or agent id, a
+reason, and free text. Reporting never blocks or mutes -- the local block is the
+instant remedy, a report asks moderators to look -- and no message excerpt is
+ever attached without a separate explicit choice.
+
 **Key entry points:** `fetchit_chat::Client`, `fetchit_chat::ClientBuilder`,
-`fetchit_chat::Client::enqueue_dm`.
+`fetchit_chat::Client::enqueue_dm`,
+`fetchit_chat::Client::report_actor_url`.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
 schema it gates on: `crates/fetchit-trust-types/**`.
 
@@ -249,9 +267,23 @@ interval; the signing key is verified against a pinned public key. Per-kind
 canonicalization (hex agent ids, scheme-checked relay/actor URLs) is the
 load-bearing invariant so a blocked value matches regardless of formatting.
 
+Both ends of that loop now have callers. Reports arrive from the shells through
+`fetchit_chat::report`, and the `ActorUrl` list is consumed by every binary that
+terminates federation traffic: the relay-server's opt-in `/inbox`
+(`inbox/operator.rs`) and the bridge server, which gates
+`POST /actors/:handle/inbox` on the signature-verified sender before any store
+write and answers the same `403` the relay does. The bridge reuses
+`DenylistConsumer` as-is (cache hydrated synchronously at boot, poll loop
+detached) and is on by default against the production service --
+`FETCHIT_BRIDGE_DENYLIST_URL` set empty is the only way to disable it, which is
+how the hermetic tests run. Fail-open is uniform: no configured service, an
+empty index, or a failed poll all mean "not blocked", because a trust-service
+outage must never take federation down with it.
+
 **Key entry points:** `fetchit_trust_types::EntryKind`,
 `fetchit_trust_types::DenylistQuery`,
-`fetchit_trust_client::DenylistConsumer`.
+`fetchit_trust_client::DenylistConsumer`,
+`fetchit_bridge_server::denylist::is_blocked_actor`.
 
 <!-- arch: id=fetchit-trust glob=crates/fetchit-trust*/** verified=6321a28 -->
 _Last verified: 2026-07-08 (`6321a28`) -- bob._
@@ -337,10 +369,23 @@ unlike works on a device holding no record of the original like. There are no
 like COUNTS: no cheap ActivityPub source exists for a total, so v1 renders
 liked-state only rather than a number the project cannot stand behind.
 
+Outbound post bodies carry one piece of markup, and it is synthesised rather
+than passed through. `markdown_body_to_html` escapes every HTML metacharacter as
+before, then wraps each Autonomi content address in an anchor to
+`https://etchit.io/a/#<hex>` -- the funnel that turns a mention of an address on
+Mastodon into a tappable route into fetch>it, where before it was dead text. The
+token grammar mirrors the Android detector (`AutonomiRefs.kt`): optional
+`autonomi://`, optional `0x`, exactly 64 hex, and no word character adjacent on
+either side, so a 65-hex run never linkifies. The anchor TEXT is the matched
+token verbatim, so a fetch>it client reducing the HTML back to text with
+`fetchit_fedi::text::html_to_text` recovers exactly what the author typed and
+still grows its own content card.
+
 **Key entry points:** `fetchit_fedi::ssrf`,
 `fetchit_fedi::webfinger::resolve_handle`, `fetchit_fedi::actor::fetch_actor`,
 `fetchit_fedi::avatar::fetch_avatar`, `fetchit_fedi::lookup::RemoteActor`,
 `fetchit_fedi::activity::build_like`,
+`fetchit_fedi::activity::linkify_autonomi_addresses`,
 `fetchit_fedi::signature::HttpSignatureKey`.
 
 <!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=e771309 -->
