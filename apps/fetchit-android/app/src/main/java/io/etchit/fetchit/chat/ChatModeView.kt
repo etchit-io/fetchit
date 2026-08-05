@@ -3970,15 +3970,14 @@ class ChatModeView(
      * shows every pixel that was sent and pinch-zoom would only magnify
      * the encoder.
      */
-    private fun showChatImage(att: ChatAttachment) {
-        val key = attachmentKey(att)
+    private fun showChatImage(att: ChatAttachment, key: String?) {
         lifecycleScope.launch {
             // Normally already decoded by the row that was tapped; the
             // cold path still decodes off the main thread rather than
             // stalling the tap.
-            val bmp = attachThumbs.cached(key)
+            val bmp = key?.let { attachThumbs.cached(it) }
                 ?: withContext(Dispatchers.IO) { ChatImageAttachment.decodeForDisplay(att) }
-                    ?.also { attachThumbs.put(key, it) }
+                    ?.also { bmp -> key?.let { attachThumbs.put(it, bmp) } }
                 ?: return@launch
             val dialogView = LayoutInflater.from(context)
                 .inflate(R.layout.dialog_chat_image, null, false)
@@ -3997,13 +3996,15 @@ class ChatModeView(
     }
 
     /**
-     * Cache key for a decoded attachment. Identity of the byte array, not
-     * its contents: hashing 256 KiB on every bind would cost more than the
-     * decode it saves, and the one copy that flows from the engine to the
-     * row is the same object every time.
+     * Cache key for a message's decoded photo: the message's own identity,
+     * never a hash of the bytes. Hashing 256 KiB on every bind would cost
+     * more than the decode it saves, and an identity hash of the array
+     * could — however unlikely — collide, which would draw one person's
+     * picture in another's bubble. A message with neither id (there is no
+     * such inbound path today) simply goes uncached.
      */
-    private fun attachmentKey(att: ChatAttachment): String =
-        "${System.identityHashCode(att.bytes)}"
+    private fun attachmentKey(msg: ChatMessage): String? =
+        msg.messageId?.takeIf { it.isNotBlank() } ?: msg.outboxId
 
     /** Flush the outbox now, in response to a tap on a failed message bubble. */
     private fun retryOutbox() {
@@ -4279,10 +4280,10 @@ class ChatModeView(
                     image.setTag(R.id.messageImage, null)
                     return
                 }
-                val key = attachmentKey(att)
+                val key = attachmentKey(msg)
                 image.visibility = View.VISIBLE
                 image.contentDescription = context.getString(R.string.chat_attachment_desc)
-                image.setOnClickListener { showChatImage(att) }
+                image.setOnClickListener { showChatImage(att, key) }
                 val maxPx =
                     (BUBBLE_IMAGE_MAX_DP * itemView.resources.displayMetrics.density).toInt()
                 val w = minOf(maxPx, att.width).coerceAtLeast(1)
@@ -4295,8 +4296,11 @@ class ChatModeView(
                     width = w
                     height = h
                 }
-                image.setTag(R.id.messageImage, key)
-                val cached = attachThumbs.cached(key)
+                // The recycling guard: a decode that lands after this row
+                // has been rebound for another message paints nothing.
+                val guard = key ?: att.bytes
+                image.setTag(R.id.messageImage, guard)
+                val cached = key?.let { attachThumbs.cached(it) }
                 if (cached != null) {
                     image.setImageBitmap(cached)
                     return
@@ -4306,8 +4310,11 @@ class ChatModeView(
                     val bmp = withContext(Dispatchers.IO) {
                         ChatImageAttachment.decodeForDisplay(att)
                     } ?: return@launch
-                    attachThumbs.put(key, bmp)
-                    if (image.getTag(R.id.messageImage) == key) image.setImageBitmap(bmp)
+                    key?.let { attachThumbs.put(it, bmp) }
+                    // Structural for a message id, identity for the
+                    // byte-array fallback -- both are what "the same
+                    // message" means for that kind of key.
+                    if (image.getTag(R.id.messageImage) == guard) image.setImageBitmap(bmp)
                 }
             }
 
