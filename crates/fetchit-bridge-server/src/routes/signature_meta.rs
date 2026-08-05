@@ -1,5 +1,6 @@
-//! Why an inbound delivery's HTTP Signature was rejected, in one log
-//! line.
+//! What an inbound delivery's HTTP Signature headers SAY: the `keyId`
+//! the gate must verify against, and the field set that explains a
+//! rejection in one log line.
 //!
 //! A rejected federation delivery is close to undiagnosable from the
 //! bare reason string: `signature invalid` collapses "the sender used a
@@ -30,12 +31,18 @@
 //! carries a header VALUE breaks the contract — the presence map exists
 //! precisely so values never have to be logged.
 //!
-//! # Not a gate
+//! # Two consumers, one parser
 //!
-//! Nothing here participates in the accept/reject decision. It runs
-//! after the verifier has already returned `Err`, and its own parsing
-//! is deliberately lenient: a diagnostic that fails to parse a
-//! malformed header would blind us exactly when we most need to see.
+//! [`presented_key_id`] tells the gate WHICH key to verify against;
+//! [`SignatureDiagnostics`] tells the log what the sender presented.
+//! Both go through [`parse_presented`] on purpose — a rejection line
+//! naming a different `keyId` than the gate actually acted on would be
+//! worse than no line at all.
+//!
+//! The parsing itself never fails. Strictness belongs at the use site
+//! (the gate demands a non-empty, URL-shaped `keyId` and 401s
+//! otherwise), so a malformed header still yields a full diagnostic
+//! instead of blinding us exactly when we most need to see.
 
 use axum::http::HeaderMap;
 
@@ -60,9 +67,9 @@ pub(super) struct SignatureDiagnostics {
     /// equal the activity's `actor`? `yes`, `no`, or `unknown` when
     /// there is no parseable `keyId`.
     ///
-    /// The verifier derives its key from the ACTOR, not from `keyId`,
-    /// so a `no` here means we verified against a key the signer never
-    /// claimed to use.
+    /// A `no` means the request was FORWARDED: some third party signed
+    /// a delivery of an activity it did not author. The gate handles
+    /// that as its own case; it is never a signature failure.
     pub(super) key_id_owner_matches_actor: &'static str,
     /// The signer's declared `algorithm` (cavage) or `alg` (RFC 9421)
     /// token, verbatim. Empty when the signer omitted it.
@@ -104,53 +111,90 @@ impl SignatureDiagnostics {
         public_host: &str,
         activity_actor: &str,
     ) -> Self {
-        let request_path = format!("/actors/{handle}/inbox");
-        let host_candidates = host_candidates(headers, public_host);
-
-        // `Signature-Input` is the discriminator the verifier uses, so
-        // the diagnostic must branch on exactly the same condition.
-        let (format, label, key_id, algorithm, declared) =
-            if let Some(sig_input) = header(headers, "signature-input") {
-                let (label, components, params) = parse_signature_input(&sig_input);
-                (
-                    "rfc9421",
-                    label,
-                    param(&params, "keyid"),
-                    param(&params, "alg"),
-                    components,
-                )
-            } else if let Some(sig) = header(headers, "signature") {
-                let params = parse_quoted_params(&sig);
-                (
-                    "cavage",
-                    String::new(),
-                    param(&params, "keyId"),
-                    param(&params, "algorithm"),
-                    param(&params, "headers")
-                        .split_whitespace()
-                        .map(str::to_lowercase)
-                        .collect(),
-                )
-            } else {
-                (
-                    "none",
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    Vec::new(),
-                )
-            };
-
+        let presented = parse_presented(headers);
         Self {
-            format,
+            format: presented.format,
+            label: presented.label,
+            key_id_owner_matches_actor: owner_verdict(&presented.key_id, activity_actor),
+            key_id: presented.key_id,
+            algorithm: presented.algorithm,
+            signed_header_presence: presence_map(headers, &presented.declared),
+            signed_headers: presented.declared.join(" "),
+            host_candidates: host_candidates(headers, public_host),
+            request_path: format!("/actors/{handle}/inbox"),
+        }
+    }
+}
+
+/// The `keyId` the signer presented, or the empty string when the
+/// request carries none that can be parsed.
+///
+/// This is the identifier HTTP Signatures makes authoritative for key
+/// selection (RFC 9421 §3.2, draft-cavage §2.1.1): the verifier must
+/// use the key this names, not one inferred from the payload.
+pub(super) fn presented_key_id(headers: &HeaderMap) -> String {
+    parse_presented(headers).key_id
+}
+
+/// The actor a `keyId` belongs to: the URL with its `#fragment`
+/// removed.
+///
+/// Every Mastodon-family server publishes `<actor>#main-key`; some
+/// Pleroma forks publish a fragmentless key URL, which is returned
+/// unchanged and simply fails to match any actor — the honest outcome,
+/// since nothing then shows the key belongs to that actor.
+pub(super) fn key_id_owner(key_id: &str) -> &str {
+    key_id.split_once('#').map_or(key_id, |(base, _)| base)
+}
+
+/// What the signature headers claim, before anything is verified.
+struct PresentedSignature {
+    /// `rfc9421`, `cavage`, or `none`.
+    format: &'static str,
+    /// RFC 9421 signature label; empty on the cavage path.
+    label: String,
+    /// The presented `keyId`; empty when unparseable.
+    key_id: String,
+    /// The declared algorithm token; empty when omitted.
+    algorithm: String,
+    /// Declared covered components, lowercased.
+    declared: Vec<String>,
+}
+
+/// Parse whichever signature wire format the request used.
+///
+/// `Signature-Input` is the discriminator the verifier branches on, so
+/// this branches on exactly the same condition — otherwise the gate and
+/// the log could disagree about which format was taken.
+fn parse_presented(headers: &HeaderMap) -> PresentedSignature {
+    if let Some(sig_input) = header(headers, "signature-input") {
+        let (label, declared, params) = parse_signature_input(&sig_input);
+        PresentedSignature {
+            format: "rfc9421",
             label,
-            key_id_owner_matches_actor: owner_verdict(&key_id, activity_actor),
-            key_id,
-            algorithm,
-            signed_header_presence: presence_map(headers, &declared),
-            signed_headers: declared.join(" "),
-            host_candidates,
-            request_path,
+            key_id: param(&params, "keyid"),
+            algorithm: param(&params, "alg"),
+            declared,
+        }
+    } else if let Some(sig) = header(headers, "signature") {
+        let params = parse_quoted_params(&sig);
+        PresentedSignature {
+            format: "cavage",
+            label: String::new(),
+            key_id: param(&params, "keyId"),
+            algorithm: param(&params, "algorithm"),
+            declared: param(&params, "headers")
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect(),
+        }
+    } else {
+        PresentedSignature {
+            format: "none",
+            label: String::new(),
+            key_id: String::new(),
+            algorithm: String::new(),
+            declared: Vec::new(),
         }
     }
 }
@@ -177,8 +221,7 @@ fn owner_verdict(key_id: &str, activity_actor: &str) -> &'static str {
     if key_id.is_empty() {
         return "unknown";
     }
-    let owner = key_id.split_once('#').map_or(key_id, |(base, _)| base);
-    if owner == activity_actor {
+    if key_id_owner(key_id) == activity_actor {
         "yes"
     } else {
         "no"

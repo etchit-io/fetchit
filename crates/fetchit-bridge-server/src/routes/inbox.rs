@@ -7,6 +7,22 @@
 //! verify against the sender's fetched public key — exactly the
 //! Mastodon-federation contract.
 //!
+//! # Signer vs author
+//!
+//! The signature proves who DELIVERED a request; the activity's `actor`
+//! only claims who wrote it. They are the same for a direct delivery
+//! and different for a FORWARDED one — Mastodon forwards replies in
+//! threads its users are part of, signing with the forwarder's key
+//! while `actor` names the author on a third instance.
+//!
+//! So the verification key is fetched from the signature's `keyId`, and
+//! the two identities are compared afterwards. A forwarded activity is
+//! acknowledged (the delivery was valid) but its object is dropped
+//! unread: nothing in the request authenticates the embedded object, so
+//! trusting it would let any peer holding a key fabricate a message
+//! attributed to any actor. `docs/INBOX-KEYID.md` records the incident
+//! and what accepting forwarded objects would take.
+//!
 //! Accepted activities:
 //! * `Create(Note)` addressed to the recipient → stored as an inbox
 //!   message (the reply the app renders in the fedi thread). The Note's
@@ -40,7 +56,7 @@ use serde_json::{json, Value};
 use fetchit_fedi::actor::Actor;
 
 use crate::auth::{parse_headers, verify_request, AuthError};
-use crate::routes::signature_meta::SignatureDiagnostics;
+use crate::routes::signature_meta::{self, SignatureDiagnostics};
 use crate::server::BridgeState;
 use crate::store::{ActorRecord, InboxMessage};
 
@@ -75,18 +91,34 @@ pub async fn post_inbox(
     let Ok(activity) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, "malformed activity").into_response();
     };
-    // The signer is the activity's `actor`; fetch their key (SSRF-guarded)
-    // and verify the HTTP signature before trusting a single field.
-    let Some(sender_url) = activity.get("actor").and_then(Value::as_str) else {
+    // The CLAIMED author. Not yet trusted: an activity's `actor` is
+    // just a string in a body anyone can POST.
+    let Some(claimed_actor) = activity.get("actor").and_then(Value::as_str) else {
         return (StatusCode::BAD_REQUEST, "activity has no actor").into_response();
     };
-    let Ok(sender_actor_url) = sender_url.parse::<url::Url>() else {
+    let Ok(claimed_actor_url) = claimed_actor.parse::<url::Url>() else {
         return (StatusCode::BAD_REQUEST, "actor is not a url").into_response();
     };
-    let sender = match fetchit_fedi::lookup::fetch_remote_actor(&sender_actor_url).await {
+    // The verification key is the one the SIGNER names in `keyId`, not
+    // one inferred from the payload. Deriving it from `activity.actor`
+    // (as this route did until 2026-08-05) makes every FORWARDED
+    // delivery permanently unverifiable: Mastodon forwards replies in
+    // threads our user is part of, signed by the FORWARDER's key while
+    // `actor` names the reply's real author on a third instance. Those
+    // deliveries 401'd and were retried for days.
+    let key_id = signature_meta::presented_key_id(&headers);
+    let Ok(signer_url) = signature_meta::key_id_owner(&key_id).parse::<url::Url>() else {
+        let reason = if key_id.is_empty() {
+            "missing keyId"
+        } else {
+            "keyId is not a url"
+        };
+        return reject_signature(&state, &headers, &handle, claimed_actor, reason);
+    };
+    let signer = match fetchit_fedi::lookup::fetch_remote_actor(&signer_url).await {
         Ok(s) => s,
         Err(e) => {
-            // A Delete whose sender is AUTHORITATIVELY gone (account
+            // A Delete whose signer is AUTHORITATIVELY gone (account
             // erased — the 2026-08-02 drops were 410 tombstones) is
             // unverifiable BY DESIGN: the signing key died with the
             // account, and we hold no state for an unknown actor.
@@ -96,76 +128,177 @@ pub async fn post_inbox(
             // included — a momentary outage must never eat a delivery
             // (cross-review 2026-08-03 finding 3).
             if gone_delete_shortcut(&e, &activity) {
-                tracing::info!(handle, sender = %sender_actor_url, "unverifiable Delete from gone sender ignored");
+                tracing::info!(handle, signer = %signer_url, "unverifiable Delete from gone signer ignored");
                 return (StatusCode::ACCEPTED, "ignored").into_response();
             }
-            tracing::warn!(handle, sender = %sender_actor_url, error = %e, "inbox: could not fetch sender actor");
+            tracing::warn!(handle, signer = %signer_url, claimed_actor, error = %e, "inbox: could not fetch signer actor");
             return (StatusCode::BAD_GATEWAY, "could not fetch sender").into_response();
         }
     };
-    let Some(pubkey_pem) = sender.rsa_public_key_pem.as_deref() else {
-        tracing::warn!(handle, sender = %sender_actor_url, "inbox: sender has no key");
+    let Some(pubkey_pem) = signer.rsa_public_key_pem.as_deref() else {
+        tracing::warn!(handle, signer = %signer.id, "inbox: signer has no key");
         return (StatusCode::UNAUTHORIZED, "sender has no key").into_response();
     };
     if let Err(reason) =
         verify_inbound_signature(&headers, &handle, pubkey_pem, &body, &state.config.domain)
     {
-        // A rejected delivery is invisible to both ends without this line —
-        // the 2026-07-13 lost-Accept class was undiagnosable from logs.
-        // `reason` alone still buckets four distinct failures under
-        // "signature invalid", so the signature's own metadata rides
-        // along: wire format, declared component list and whether each
-        // component actually arrived, the signer's keyId and whether it
-        // is owned by the activity's actor, and the exact host
-        // candidates / path the base was rebuilt from. Header NAMES and
-        // identifiers only — never a header value, the body, or the
-        // signature bytes (see `signature_meta`'s privacy contract).
-        let diag =
-            SignatureDiagnostics::collect(&headers, &handle, &state.config.domain, sender_url);
-        tracing::warn!(
-            handle,
-            sender = %sender_actor_url,
-            reason,
-            sig_format = diag.format,
-            sig_label = diag.label.as_str(),
-            key_id = diag.key_id.as_str(),
-            key_id_owner_matches_actor = diag.key_id_owner_matches_actor,
-            algorithm = diag.algorithm.as_str(),
-            signed_headers = diag.signed_headers.as_str(),
-            signed_header_presence = diag.signed_header_presence.as_str(),
-            host_candidates = diag.host_candidates.as_str(),
-            request_path = diag.request_path.as_str(),
-            "inbox: signature rejected"
-        );
-        return (StatusCode::UNAUTHORIZED, reason).into_response();
+        return reject_signature(&state, &headers, &handle, claimed_actor, reason);
     }
 
-    // Signature verified. Dispatch on activity type.
+    // Authenticated. `signer.id` is who DELIVERED this request — not
+    // necessarily who authored the activity it carries.
     let activity_type = activity.get("type").and_then(Value::as_str);
-    tracing::info!(handle, sender = %sender_actor_url, activity_type, "inbox: verified delivery");
+    if is_forwarded(&state, &signer, &claimed_actor_url).await {
+        // A forwarded activity is hearsay: the forwarder proved only
+        // that IT sent the bytes, and the embedded object is signed by
+        // nothing we check. Trusting it would let any peer with a key
+        // fabricate a message attributed to any actor, so the object is
+        // dropped unread. 202 rather than 401 because the DELIVERY was
+        // valid — a 4xx here is what produced the multi-day retries.
+        state.metrics.inc_inbox_forwarded_ignored();
+        tracing::warn!(
+            handle,
+            signer = %signer.id,
+            claimed_actor,
+            activity_type,
+            "inbox: forwarded activity ignored (object not authenticated)"
+        );
+        return (StatusCode::ACCEPTED, "ignored (forwarded)").into_response();
+    }
+
+    // Self-delivered: the signer IS the claimed author, so every
+    // downstream `sender_id` binding means what it has always meant.
+    tracing::info!(handle, sender = %signer.id, activity_type, "inbox: verified delivery");
     match activity_type {
-        Some("Create") => match handle_create(&state, &rec, sender.id.as_str(), &activity).await {
+        Some("Create") => match handle_create(&state, &rec, signer.id.as_str(), &activity).await {
             Ok(()) => (StatusCode::ACCEPTED, "accepted").into_response(),
             Err(resp) => resp,
         },
         Some("Accept") => {
-            handle_accept(&state, &rec, sender.id.as_str(), &activity).await;
+            handle_accept(&state, &rec, signer.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         Some("Reject") => {
-            handle_reject(&state, sender.id.as_str(), &activity).await;
+            handle_reject(&state, signer.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         Some("Follow") => {
-            handle_follow(&state, &rec, &sender, &activity).await;
+            handle_follow(&state, &rec, &signer, &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         Some("Undo") => {
-            handle_undo(&state, &rec, sender.id.as_str(), &activity).await;
+            handle_undo(&state, &rec, signer.id.as_str(), &activity).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
         // Unknown/unhandled types are acknowledged, never rejected.
         _ => (StatusCode::ACCEPTED, "ignored").into_response(),
+    }
+}
+
+/// Log a signature rejection with everything needed to explain it, bump
+/// the counter, and build the 401.
+///
+/// `reason` alone buckets several distinct failures under "signature
+/// invalid", so the signature's own metadata rides along: wire format,
+/// declared component list and whether each component actually arrived,
+/// the presented `keyId` and whether it is owned by the activity's
+/// actor, and the exact host candidates / path the base was rebuilt
+/// from. Header NAMES and identifiers only — never a header value, the
+/// body, or the signature bytes (see `signature_meta`'s privacy
+/// contract).
+fn reject_signature(
+    state: &BridgeState,
+    headers: &HeaderMap,
+    handle: &str,
+    claimed_actor: &str,
+    reason: &'static str,
+) -> Response {
+    state.metrics.inc_inbox_signature_rejected();
+    let diag = SignatureDiagnostics::collect(headers, handle, &state.config.domain, claimed_actor);
+    tracing::warn!(
+        handle,
+        sender = claimed_actor,
+        reason,
+        sig_format = diag.format,
+        sig_label = diag.label.as_str(),
+        key_id = diag.key_id.as_str(),
+        key_id_owner_matches_actor = diag.key_id_owner_matches_actor,
+        algorithm = diag.algorithm.as_str(),
+        signed_headers = diag.signed_headers.as_str(),
+        signed_header_presence = diag.signed_header_presence.as_str(),
+        host_candidates = diag.host_candidates.as_str(),
+        request_path = diag.request_path.as_str(),
+        "inbox: signature rejected"
+    );
+    (StatusCode::UNAUTHORIZED, reason).into_response()
+}
+
+/// How an authenticated delivery relates its SIGNER to the activity's
+/// claimed `actor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Provenance {
+    /// The signer is the claimed author. Every existing binding holds.
+    SelfDelivered,
+    /// The signer authored nothing here — a third party delivered
+    /// someone else's activity.
+    Forwarded,
+    /// Same host, different URL. Mastodon serves an actor at more than
+    /// one id (`/users/<name>` and `/ap/users/<numeric>`), so this may
+    /// be one account under two spellings; only an authoritative
+    /// resolution of the claimed actor can tell.
+    NeedsActorResolution,
+}
+
+/// Classify a delivery from the two canonical URLs alone.
+///
+/// Split out from [`is_forwarded`] because it is the whole security
+/// decision and the network half around it cannot be exercised
+/// hermetically (the SSRF guard refuses loopback — see
+/// `tests/inbox_gone_sender.rs`).
+fn classify_provenance(signer_id: &url::Url, claimed_actor: &url::Url) -> Provenance {
+    if signer_id == claimed_actor {
+        Provenance::SelfDelivered
+    } else if signer_id.host_str().is_some() && signer_id.host_str() == claimed_actor.host_str() {
+        Provenance::NeedsActorResolution
+    } else {
+        Provenance::Forwarded
+    }
+}
+
+/// Did a third party deliver someone else's activity?
+///
+/// `signer.id` is canonical: [`fetchit_fedi::lookup::fetch_remote_actor`]
+/// re-fetches at any `id` that differs from the URL it fetched, so an
+/// aliased `keyId` already resolves to the account's real id. The
+/// claimed actor gets the same treatment — but only on the
+/// [`Provenance::NeedsActorResolution`] path, so the common case costs
+/// no extra fetch and a cross-host forward is settled without one.
+///
+/// Fails CLOSED: a claimed actor that cannot be resolved has not been
+/// shown to be the signer, so the activity counts as forwarded.
+async fn is_forwarded(
+    state: &BridgeState,
+    signer: &fetchit_fedi::lookup::RemoteActor,
+    claimed_actor_url: &url::Url,
+) -> bool {
+    match classify_provenance(&signer.id, claimed_actor_url) {
+        Provenance::SelfDelivered => false,
+        Provenance::Forwarded => true,
+        Provenance::NeedsActorResolution => {
+            match fetchit_fedi::lookup::fetch_remote_actor(claimed_actor_url).await {
+                Ok(resolved) => resolved.id != signer.id,
+                Err(e) => {
+                    state.metrics.inc_inbox_actor_resolution_failed();
+                    tracing::warn!(
+                        signer = %signer.id,
+                        claimed_actor = %claimed_actor_url,
+                        error = %e,
+                        "inbox: same-host actor unresolvable; treating as forwarded"
+                    );
+                    true
+                }
+            }
+        }
     }
 }
 
@@ -860,12 +993,12 @@ mod tests {
             signed_host: CASE_ORIGIN_HOST,
             expect: Ok(()),
         },
-        // The keyId rows below are the ones to read twice. The gate
-        // derives its verification key from the ACTIVITY's `actor` and
-        // never parses `keyId` at all, so a signature made with the
-        // actor's key is accepted no matter what key the signer claims
-        // to have used. Pinned as CURRENT behaviour, not as desired
-        // behaviour — see docs/INBOX-KEYID.md.
+        // `verify_inbound_signature` is handed a key and asked whether
+        // this request was signed with it; WHICH key that is belongs to
+        // `post_inbox` (which resolves it from `keyId`). These two rows
+        // pin that separation: the verifier does not second-guess the
+        // caller's key choice. `classify_provenance` is where a signer
+        // that is not the author gets caught.
         CavageCase {
             name: "key_id_owned_by_a_different_actor_is_still_accepted",
             declared: "(request-target) host date digest content-type",
@@ -1235,6 +1368,114 @@ mod tests {
         for case in RFC9421_CASES {
             run_rfc9421_case(case);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Signer-vs-author provenance.
+    //
+    // The 2026-08-05 incident: 27% of production deliveries 401'd
+    // because the verification key came from `activity.actor` while the
+    // signature was the FORWARDER's. `classify_provenance` is the whole
+    // decision that replaces that guess; the fetch around it cannot run
+    // hermetically (SSRF guard refuses loopback), so it is tested here
+    // in isolation.
+    // ---------------------------------------------------------------
+
+    fn url(s: &str) -> url::Url {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn signer_equal_to_actor_is_self_delivered() {
+        // Regression guard for every path that works today: a direct
+        // delivery must stay direct, so nothing about dispatch,
+        // storage, or the follow bindings changes.
+        let actor = url("https://fosstodon.org/users/happyborg");
+        assert_eq!(
+            classify_provenance(&actor, &actor),
+            Provenance::SelfDelivered
+        );
+    }
+
+    #[test]
+    fn cross_host_signer_is_forwarded() {
+        // The exact production shape: fosstodon.org signs a delivery of
+        // an activity authored on mastodon.online.
+        assert_eq!(
+            classify_provenance(
+                &url("https://fosstodon.org/users/happyborg"),
+                &url("https://mastodon.online/users/codechimp"),
+            ),
+            Provenance::Forwarded
+        );
+    }
+
+    #[test]
+    fn same_host_different_actor_needs_resolution() {
+        // Could be one account under two ids, or one user forwarding
+        // for another on the same instance. Undecidable from the URLs
+        // alone, so it must not shortcut either way.
+        assert_eq!(
+            classify_provenance(
+                &url("https://mastodon.social/users/alice"),
+                &url("https://mastodon.social/ap/users/116873305678992582"),
+            ),
+            Provenance::NeedsActorResolution
+        );
+    }
+
+    #[test]
+    fn same_host_same_account_via_alias_needs_resolution_not_rejection() {
+        // Mastodon serves one account at both `/users/<name>` and
+        // `/ap/users/<numeric>`. Classifying that pair as Forwarded
+        // outright would silently stop storing a working sender's DMs.
+        let signer = url("https://mastodon.social/users/alice");
+        let alias = url("https://mastodon.social/ap/users/116873305678992582");
+        assert_ne!(
+            classify_provenance(&signer, &alias),
+            Provenance::Forwarded,
+            "an alias must be resolved, never assumed hostile"
+        );
+    }
+
+    #[test]
+    fn differing_scheme_or_port_on_the_same_host_still_needs_resolution() {
+        assert_eq!(
+            classify_provenance(
+                &url("https://relay.example:8443/actor"),
+                &url("https://relay.example/actor"),
+            ),
+            Provenance::NeedsActorResolution
+        );
+    }
+
+    #[test]
+    fn hostless_urls_never_collapse_into_one_identity() {
+        // `host_str()` is None for non-network schemes; two of them
+        // must not be treated as "same host" and sent for resolution.
+        assert_eq!(
+            classify_provenance(&url("did:example:alice"), &url("did:example:bob")),
+            Provenance::Forwarded
+        );
+    }
+
+    #[test]
+    fn presented_key_id_drives_the_key_choice_for_both_wire_formats() {
+        // The gate and the rejection log must name the same key.
+        let (headers, _body, _pem) = mastodon_delivery();
+        let key_id = signature_meta::presented_key_id(&headers);
+        assert_eq!(key_id, "https://fosstodon.org/users/happyborg#main-key");
+        assert_eq!(
+            signature_meta::key_id_owner(&key_id),
+            "https://fosstodon.org/users/happyborg",
+            "the fetch target is the keyId without its fragment"
+        );
+    }
+
+    #[test]
+    fn absent_signature_yields_no_key_id() {
+        let headers = HeaderMap::new();
+        assert!(signature_meta::presented_key_id(&headers).is_empty());
     }
 
     const OURS: &str = "https://etchit.io/actors/josh";

@@ -4,7 +4,7 @@ pub mod actors;
 pub mod follow;
 pub mod health;
 pub mod inbox;
-/// Observability-only helper for [`inbox`]: explains a rejected
-/// signature. Not a route, and never part of an accept/reject decision.
+/// Signature-header parsing shared by [`inbox`]'s gate (which `keyId`
+/// to verify against) and its rejection log. Not a route.
 mod signature_meta;
 pub mod webfinger;
