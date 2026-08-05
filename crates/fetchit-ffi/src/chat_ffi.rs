@@ -1947,14 +1947,14 @@ impl ChatClient {
     /// Cached avatar image bytes for the fediverse correspondent `label`
     /// (`user@host`), or `None` when nothing is cached yet.
     ///
-    /// Bytes are the image exactly as the remote server served it — one of
+    /// Bytes are the image exactly as the remote server served it -- one of
     /// JPEG / PNG / WebP / GIF, capped at 512 KiB, fetched through the
     /// fediverse SSRF guard. The engine never decodes them; the shell
     /// decodes with its platform decoder, bounds-checked.
     ///
     /// A `None` is not final: it kicks off a background fetch (subject to a
     /// 24h refresh window and a 1h failure backoff), so a later call for the
-    /// same label can succeed. Nothing here blocks — an avatar is decoration,
+    /// same label can succeed. Nothing here blocks -- an avatar is decoration,
     /// and every fedi surface must render identically without one.
     ///
     /// Because a `None` can fetch, this call belongs to the FEDIVERSE
@@ -2086,7 +2086,7 @@ impl ChatClient {
     /// Group ids currently in stale-epoch catch-up (#297 P1.4). The
     /// shell polls this on its pump cadence and renders the quiet
     /// "syncing…" affordance on matching conversations; empty when
-    /// everything is Live. Never errors — a REST-only client simply has
+    /// everything is Live. Never errors -- a REST-only client simply has
     /// no recovering groups.
     pub fn reconnecting_groups(&self) -> Vec<String> {
         self.inner.reconnecting_groups()
@@ -3154,7 +3154,7 @@ fn spawn_inbound_pump(
 }
 
 /// Which inbound dispatch outcomes mean "this conversation is wedged"
-/// — feed the wedge clocks and trip recovery — and at what peer epoch.
+/// -- feed the wedge clocks and trip recovery -- and at what peer epoch.
 ///
 /// Extracted so the decision is unit-testable: it is the ONLY thing
 /// standing between a wedged mobile DM and a permanent silent failure.
@@ -3164,7 +3164,7 @@ fn spawn_inbound_pump(
 ///
 /// `AeadOpenFailed` counts even though it CONFIRMS delivery (the bytes
 /// are sealed to a key we will never hold, so redelivery is pointless
-/// and the relay's copy is released) — the frame is still proof the
+/// and the relay's copy is released) -- the frame is still proof the
 /// peer is live and our key state is wrong, which is exactly the wedge
 /// signature. `KemDecapFailed` is excluded: ML-KEM implicit rejection
 /// means a key mismatch does NOT surface there, so it indicates a
@@ -3326,7 +3326,7 @@ async fn run_inbound_pump(
                     }
                 }
                 // StaleEpoch-class decrypt failures: hold the ack so the
-                // relay redelivers after re-key / epoch catch-up — and
+                // relay redelivers after re-key / epoch catch-up -- and
                 // TRIGGER the recovery driver toward this frame's epoch.
                 // Without this the entire epoch-recovery subsystem is dead
                 // code on mobile: the only other trigger site lives in
@@ -3577,7 +3577,7 @@ pub async fn enroll_confirmed_device(
 mod tests {
 
     /// #326 regression. A wedged chat-v2 DM fails as an `Ok`-shaped
-    /// dispatch outcome, NOT in the x0xd group-decrypt error arm — and
+    /// dispatch outcome, NOT in the x0xd group-decrypt error arm -- and
     /// before this, nothing acted on it, so the re-key ladder never ran
     /// on Android. Device-proven 2026-08-03: the phone logged
     /// `aead-open-failed` on every inbound from a wedged peer and sat
