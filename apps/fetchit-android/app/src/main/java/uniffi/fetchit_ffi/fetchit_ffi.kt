@@ -877,6 +877,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -981,6 +983,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_set_avatar(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_thread_replies(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview(
 ): Short
@@ -1165,7 +1169,7 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uni
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_profile(`ptr`: Pointer,`target`: RustBuffer.ByValue,
 ): Long
-fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,`replyToObjectUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_report(`ptr`: Pointer,`actorUrl`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,`comment`: RustBuffer.ByValue,
 ): Long
@@ -1174,6 +1178,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_self_avatar(`ptr`: Pointer,unif
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_set_avatar(`ptr`: Pointer,`bytes`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(`ptr`: Pointer,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_thread_replies(`ptr`: Pointer,`objectUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_threads_overview(`ptr`: Pointer,
 ): Long
@@ -1503,7 +1509,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_profile() != 55266.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 38217.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_report() != 16665.toShort()) {
@@ -1516,6 +1522,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox() != 42525.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_thread_replies() != 5417.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview() != 46902.toShort()) {
@@ -2554,11 +2563,20 @@ public interface ChatClientInterface {
      * WebFinger and runs denylist gating before any delivery. Delivery is
      * best-effort: the report lists accepted + failed inboxes.
      *
+     * The two reply arguments do different jobs and both matter.
+     * `reply_to_actor_url` ADDRESSES the reply -- it is who the activity
+     * is delivered to and denylist-gated against. `reply_to_object_url`
+     * THREADS it -- it becomes the note's `inReplyTo`, which a receiving
+     * server dereferences to find the parent status. Passing an actor
+     * URL as the object would produce an `inReplyTo` that dereferences
+     * to a Person, so the reply would be delivered but never appear
+     * under the post it answers. Both are `None` for a top-level post.
+     *
      * # Errors
      * [`ChatFfiError::Invalid`] when no handle is minted, or the publish
      * fails before any delivery was attempted.
      */
-    suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
+    suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?, `replyToObjectUrl`: kotlin.String?): PublishReportFfi
     
     /**
      * Report a fediverse account to the community trust service for
@@ -2637,6 +2655,31 @@ public interface ChatClientInterface {
      * is unreachable.
      */
     suspend fun `fediSyncInbox`(): kotlin.UInt
+    
+    /**
+     * Pull the conversation under one post: GET the post at
+     * `object_url`, read the `replies` collection its own server
+     * publishes, and reduce every reply to the same row shape the feed
+     * uses. Replies come back oldest-first.
+     *
+     * Nothing is stored anywhere by this call -- not on the relay, not
+     * on the bridge, not on the device. It is the same device-side pull
+     * the feed already is, aimed at one post instead of an outbox, and
+     * it is capped hard engine-side (at most two collection pages,
+     * twenty dereferenced replies, fifty replies kept, and one
+     * wall-clock budget across the lot) so a hostile or enormous thread
+     * cannot hold the view open.
+     *
+     * Like `fedi_profile`, this does NOT require a minted handle --
+     * reading a public conversation is a read. Without one, every reply
+     * simply comes back `liked = false`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `object_url` is not a URL, or when
+     * the POST ITSELF could not be fetched. A thread that only partly
+     * loads is returned, not refused.
+     */
+    suspend fun `fediThreadReplies`(`objectUrl`: kotlin.String): FediThreadRepliesFfi
     
     /**
      * Every fediverse DM thread as a one-line summary, newest first, for
@@ -4098,18 +4141,27 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * WebFinger and runs denylist gating before any delivery. Delivery is
      * best-effort: the report lists accepted + failed inboxes.
      *
+     * The two reply arguments do different jobs and both matter.
+     * `reply_to_actor_url` ADDRESSES the reply -- it is who the activity
+     * is delivered to and denylist-gated against. `reply_to_object_url`
+     * THREADS it -- it becomes the note's `inReplyTo`, which a receiving
+     * server dereferences to find the parent status. Passing an actor
+     * URL as the object would produce an `inReplyTo` that dereferences
+     * to a Person, so the reply would be delivered but never appear
+     * under the post it answers. Both are `None` for a top-level post.
+     *
      * # Errors
      * [`ChatFfiError::Invalid`] when no handle is minted, or the publish
      * fails before any delivery was attempted.
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?) : PublishReportFfi {
+    override suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?, `replyToObjectUrl`: kotlin.String?) : PublishReportFfi {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(
                 thisPtr,
-                FfiConverterString.lower(`bodyMd`),FfiConverterOptionalString.lower(`replyToActorUrl`),
+                FfiConverterString.lower(`bodyMd`),FfiConverterOptionalString.lower(`replyToActorUrl`),FfiConverterOptionalString.lower(`replyToObjectUrl`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -4264,6 +4316,50 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_u32(future) },
         // lift function
         { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Pull the conversation under one post: GET the post at
+     * `object_url`, read the `replies` collection its own server
+     * publishes, and reduce every reply to the same row shape the feed
+     * uses. Replies come back oldest-first.
+     *
+     * Nothing is stored anywhere by this call -- not on the relay, not
+     * on the bridge, not on the device. It is the same device-side pull
+     * the feed already is, aimed at one post instead of an outbox, and
+     * it is capped hard engine-side (at most two collection pages,
+     * twenty dereferenced replies, fifty replies kept, and one
+     * wall-clock budget across the lot) so a hostile or enormous thread
+     * cannot hold the view open.
+     *
+     * Like `fedi_profile`, this does NOT require a minted handle --
+     * reading a public conversation is a read. Without one, every reply
+     * simply comes back `liked = false`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when `object_url` is not a URL, or when
+     * the POST ITSELF could not be fetched. A thread that only partly
+     * loads is returned, not refused.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediThreadReplies`(`objectUrl`: kotlin.String) : FediThreadRepliesFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_thread_replies(
+                thisPtr,
+                FfiConverterString.lower(`objectUrl`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeFediThreadRepliesFfi.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -6281,6 +6377,56 @@ public object FfiConverterTypeFediProfileFfi: FfiConverterRustBuffer<FediProfile
             FfiConverterOptionalString.write(value.`displayName`, buf)
             FfiConverterString.write(value.`bioText`, buf)
             FfiConverterOptionalString.write(value.`iconUrl`, buf)
+    }
+}
+
+
+
+/**
+ * The conversation under one post, pulled on demand from the post's
+ * own server. Returned by [`ChatClient::fedi_thread_replies`].
+ *
+ * A bare list could not carry the one distinction a thread view needs:
+ * a post nobody has answered and a post whose server does not publish
+ * replies both have zero replies, and they are not the same fact.
+ */
+data class FediThreadRepliesFfi (
+    /**
+     * Replies oldest-first -- a conversation reads down the page.
+     * Denylisted authors are already dropped.
+     */
+    var `replies`: List<FediPostFfi>, 
+    /**
+     * The post's home server published a `replies` collection we could
+     * read. `false` with an empty list means "this server does not tell
+     * us about replies"; `true` with an empty list means "nobody has
+     * replied yet". A view must say which.
+     */
+    var `repliesServed`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediThreadRepliesFfi: FfiConverterRustBuffer<FediThreadRepliesFfi> {
+    override fun read(buf: ByteBuffer): FediThreadRepliesFfi {
+        return FediThreadRepliesFfi(
+            FfiConverterSequenceTypeFediPostFfi.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediThreadRepliesFfi) = (
+            FfiConverterSequenceTypeFediPostFfi.allocationSize(value.`replies`) +
+            FfiConverterBoolean.allocationSize(value.`repliesServed`)
+    )
+
+    override fun write(value: FediThreadRepliesFfi, buf: ByteBuffer) {
+            FfiConverterSequenceTypeFediPostFfi.write(value.`replies`, buf)
+            FfiConverterBoolean.write(value.`repliesServed`, buf)
     }
 }
 

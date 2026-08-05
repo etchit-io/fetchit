@@ -21,6 +21,7 @@ import uniffi.fetchit_ffi.FediFollowingFfi
 import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.FediPersonLinkFfi
 import uniffi.fetchit_ffi.FediProfileFfi
+import uniffi.fetchit_ffi.FediThreadRepliesFfi
 import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
@@ -144,10 +145,19 @@ class FakeGateway : ChatGateway {
         lookedUpHandles += handle
         return lookupResult
     }
-    override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi {
+    override suspend fun fediPublish(
+        bodyMd: String,
+        replyToActorUrl: String?,
+        replyToObjectUrl: String?,
+    ): PublishReportFfi {
         publishedPosts += (bodyMd to replyToActorUrl)
+        publishedReplyTargets += (replyToActorUrl to replyToObjectUrl)
         return PublishReportFfi(delivered = emptyList(), failed = emptyList())
     }
+
+    /** `(actor url, object url)` per publish — the pair a reply must
+     *  carry BOTH halves of to be delivered AND threaded. */
+    val publishedReplyTargets = mutableListOf<Pair<String?, String?>>()
 
     override suspend fun fediFollow(target: String): FollowReportFfi =
         FollowReportFfi(
@@ -172,6 +182,8 @@ class FakeGateway : ChatGateway {
     override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
         UnfollowReportFfi(delivered = true, removed = true)
     override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
+    override suspend fun fediThreadReplies(objectUrl: String): FediThreadRepliesFfi =
+        FediThreadRepliesFfi(replies = emptyList(), repliesServed = true)
     override suspend fun fediProfile(target: String): FediProfileFfi =
         FediProfileFfi(target, target, null, "", null)
 
@@ -687,7 +699,11 @@ class ChatControllerTest {
                 MintOutcomeFfi("", MintRegistrationFfi.Registered)
             override suspend fun fediLookup(handle: String): LookupFfi =
                 LookupFfi(LookupKindFfi.NOT_FOUND, "", "", null, null, null, null, null)
-            override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
+            override suspend fun fediPublish(
+                bodyMd: String,
+                replyToActorUrl: String?,
+                replyToObjectUrl: String?,
+            ): PublishReportFfi =
                 PublishReportFfi(delivered = emptyList(), failed = emptyList())
             override suspend fun fediFollow(target: String): FollowReportFfi =
                 FollowReportFfi(target, "test-follow-id", delivered = true, recorded = true)
@@ -703,6 +719,8 @@ class ChatControllerTest {
             override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
                 UnfollowReportFfi(delivered = true, removed = true)
             override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
+            override suspend fun fediThreadReplies(objectUrl: String): FediThreadRepliesFfi =
+                throw UnsupportedOperationException()
             override suspend fun fediProfile(target: String): FediProfileFfi =
                 throw UnsupportedOperationException()
             override suspend fun fediReport(actorUrl: String, reason: String, comment: String): Unit =

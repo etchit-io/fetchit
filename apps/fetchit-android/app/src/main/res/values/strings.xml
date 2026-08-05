@@ -362,6 +362,22 @@
     <string name="feed_like_desc">like this post</string>
     <string name="feed_unlike_desc">remove your like</string>
     <string name="feed_like_failed">couldn\'t save that like — try again in a moment</string>
+    <!-- Post thread: the conversation under one feed post, pulled on
+         demand from the post's own server. Nothing is stored anywhere. -->
+    <string name="feed_replies_glyph">💬</string>
+    <string name="feed_replies_desc">open the conversation under this post</string>
+    <string name="feed_thread_title">conversation</string>
+    <string name="feed_thread_sub">replies · public</string>
+    <string name="feed_thread_loading">looking for replies…</string>
+    <string name="feed_thread_failed">couldn\'t load the replies — tap to try again</string>
+    <string name="feed_thread_empty">no replies yet — say the first thing</string>
+    <!-- Distinct from "no replies yet" on purpose: this server never told
+         us about replies, which is not the same as there being none. -->
+    <string name="feed_thread_not_published">this server doesn\'t share replies for this post — there may be some you can\'t see from here</string>
+    <string name="feed_thread_reply_hint">reply publicly as @%1$s</string>
+    <string name="feed_thread_reply_sent">reply sent — everyone can see it</string>
+    <string name="feed_thread_reply_failed">couldn\'t send that reply — try again in a moment</string>
+    <string name="feed_thread_needs_handle">create your @handle to reply</string>
     <string name="chat_connect_failed_generic">couldn\'t connect — check your internet and try again</string>
     <!-- Grandma-friendly mappings for raw FFI error reasons (raw text still goes to logcat). -->
     <string name="chat_error_invalid">that code doesn\'t look right — try scanning it again</string>

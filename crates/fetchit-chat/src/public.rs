@@ -184,6 +184,7 @@ pub(crate) mod tests {
             body_md: "body".to_owned(),
             created_at_ms: 0,
             reply_to_actor_url: reply_to.map(str::to_owned),
+            reply_to_object_url: None,
             mentions: vec!["@eve@attacker.example".to_owned()],
         }
     }

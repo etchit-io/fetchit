@@ -106,6 +106,12 @@ export function mountCompose(host: HTMLElement): ComposeApi {
         const report = await invoke<PublishReport>("fediverse_publish", {
           bodyMd,
           replyToActorUrl: replyTo,
+          // `inReplyTo` names the parent STATUS, and this composer only
+          // ever knows the parent's author. Sending the actor URL there
+          // would produce an inReplyTo that dereferences to a Person and
+          // threads nowhere, so the post goes out top-level and still
+          // reaches the person it answers.
+          replyToObjectUrl: null,
         });
         const total = report.delivered.length + report.failed.length;
         result.textContent =

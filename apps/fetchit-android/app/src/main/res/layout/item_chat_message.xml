@@ -83,6 +83,22 @@
             android:orientation="horizontal"
             android:gravity="center_vertical">
 
+            <!-- Open the conversation under a fediverse feed post. The
+                 body is tappable too, but a movement-method tap is
+                 invisible to TalkBack and to anyone who does not know it
+                 is there, so the action also gets a real control. Gone on
+                 every chat row and inside the thread view itself. -->
+            <TextView
+                android:id="@+id/messageReplies"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="48dp"
+                android:minHeight="32dp"
+                android:gravity="center"
+                android:textSize="15sp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:visibility="gone" />
+
             <!-- Like toggle for fediverse feed posts. Gone on every chat
                  row: LIT messages have no public reaction concept. -->
             <TextView

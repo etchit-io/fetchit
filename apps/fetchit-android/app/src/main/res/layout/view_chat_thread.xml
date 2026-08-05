@@ -183,6 +183,24 @@
         android:clipToPadding="false"
         android:padding="8dp" />
 
+    <!-- One honest line about what the list above is (or is not) showing:
+         loading, failed, nobody replied yet, or this server does not
+         publish replies. Sits BELOW the list, where the replies would
+         be, so it reads as the end of the thread rather than a banner
+         over the post it is about. Used by the post-thread screen; GONE
+         on DM, group and fediverse-DM threads, which speak through their
+         own banners. -->
+    <TextView
+        android:id="@+id/threadNotice"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="16dp"
+        android:gravity="center"
+        android:textColor="?attr/fetchitAsh"
+        android:textSize="13sp"
+        android:lineSpacingExtra="2dp"
+        android:visibility="gone" />
+
     <!-- Staged-image chip: the picture picked for the NEXT send, with its
          size and a remove X. Shown only while an image is staged; a
          private-group or feed screen never shows it (inline images ride
