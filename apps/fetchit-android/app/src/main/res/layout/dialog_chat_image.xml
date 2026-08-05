@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-screen viewer for an inline chat photo. Ink background so the
+  picture is judged on its own; one close X, like the QR share modal
+  (there is no tap-outside region in fullscreen). Pinch-zoom is not
+  offered in v1: the image is at most 1600px on its long edge, so
+  full-screen already shows every pixel that was sent.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0a0a0a">
+
+    <ImageView
+        android:id="@+id/chatImageFull"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_margin="8dp"
+        android:adjustViewBounds="true"
+        android:scaleType="fitCenter"
+        android:contentDescription="@string/chat_attachment_full_desc" />
+
+    <ImageButton
+        android:id="@+id/chatImageClose"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_gravity="end|top"
+        android:layout_margin="8dp"
+        android:src="@android:drawable/ic_menu_close_clear_cancel"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:tint="#f5f2eb"
+        android:contentDescription="@string/action_close" />
+
+</FrameLayout>

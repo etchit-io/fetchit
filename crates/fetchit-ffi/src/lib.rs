@@ -15,6 +15,7 @@
 //! types, error mapping, and the `cdylib` packaging that ships into
 //! `apps/fetchit-android/app/src/main/jniLibs/<arch>/`.
 
+mod attachment_ffi;
 mod chat_error;
 mod chat_ffi;
 mod error;
@@ -31,6 +32,7 @@ use fetchit_core::handlers::{default_registry, extract_entry};
 use fetchit_core::{Address, Hint, NetworkClient, RenderContext};
 use fetchit_net::{set_data_home as set_data_home_inner, AutonomiClient, DEFAULT_PEERS};
 
+pub use attachment_ffi::ChatAttachmentFfi;
 pub use chat_error::ChatFfiError;
 pub use chat_ffi::{
     ChatClient, ChatEventFfi, ChatHistoryMessageFfi, OutboxBubbleFfi, SendStateFfi,

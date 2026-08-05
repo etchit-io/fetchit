@@ -35,7 +35,47 @@ data class ChatMessage(
      * DMs and outbound messages.
      */
     val senderName: String? = null,
+    /**
+     * Inline image carried inside this message's sealed payload, or null
+     * for a text-only message. DM-only: the group wire has no attachment
+     * field, so a group message never has one.
+     */
+    val attachment: ChatAttachment? = null,
 )
+
+/**
+ * An inline image on a chat message: the decoded bytes plus the intrinsic
+ * dimensions that rode with them, so a row can reserve the right shape
+ * before anything decodes.
+ *
+ * Not a data class: [bytes] is up to a quarter of a megabyte, and the
+ * generated `equals` would either compare it by identity (surprising) or
+ * — if hand-written to compare contents — run a 256 KiB scan on every
+ * `DiffUtil` pass. Two attachments are the same when they carry the SAME
+ * byte array, which is exactly true for the one copy that flows from the
+ * engine to the row.
+ */
+class ChatAttachment(
+    val mime: String,
+    val width: Int,
+    val height: Int,
+    val bytes: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean =
+        this === other ||
+            (
+                other is ChatAttachment &&
+                    mime == other.mime &&
+                    width == other.width &&
+                    height == other.height &&
+                    bytes === other.bytes
+                )
+
+    override fun hashCode(): Int =
+        (((mime.hashCode() * 31) + width) * 31 + height) * 31 + System.identityHashCode(bytes)
+
+    override fun toString(): String = "ChatAttachment($mime, ${width}x$height, ${bytes.size}B)"
+}
 
 /**
  * One `@user@host` mention inside a feed post: the visible text and the

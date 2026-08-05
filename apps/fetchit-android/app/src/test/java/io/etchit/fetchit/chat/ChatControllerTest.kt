@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.fetchit_ffi.ChatAttachmentFfi
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
 import uniffi.fetchit_ffi.CreatedLinkOfferFfi
@@ -40,6 +41,9 @@ private fun stripHtml(html: String): String =
 class FakeGateway : ChatGateway {
     val events = Channel<ChatEventFfi?>(capacity = 8)
     val enqueued = mutableListOf<Triple<String, String, String>>()
+
+    /** Attachment passed with each [enqueueDm], positionally paired with [enqueued]. */
+    val enqueuedAttachments = mutableListOf<ChatAttachment?>()
     var startedOutbox: String? = null
     var retried = 0
     var snapshot: List<OutboxBubbleFfi> = emptyList()
@@ -90,8 +94,15 @@ class FakeGateway : ChatGateway {
     override fun pairPublishOutcome(): String? = "ok"
     override suspend fun pairShareUri() = "x0x://pair/${"f".repeat(64)}?r=relay"
     override suspend fun importPairUri(uri: String) {}
-    override suspend fun enqueueDm(to: String, body: String, senderName: String): String {
-        enqueued += Triple(to, body, senderName); return "outbox-${enqueued.size}"
+    override suspend fun enqueueDm(
+        to: String,
+        body: String,
+        senderName: String,
+        attachment: ChatAttachment?,
+    ): String {
+        enqueued += Triple(to, body, senderName)
+        enqueuedAttachments += attachment
+        return "outbox-${enqueued.size}"
     }
     override fun startOutbox(displayName: String) { startedOutbox = displayName }
     override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = snapshot
@@ -239,10 +250,89 @@ class ChatControllerTest {
         val gw = FakeGateway()
         val convo = ConversationStore()
         val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
-        gw.events.send(ChatEventFfi.Dm("a".repeat(64), "hello", "m9"))
+        gw.events.send(ChatEventFfi.Dm("a".repeat(64), "hello", "m9", null))
         gw.events.send(null) // pump exits on null
         pump.join()
         assertEquals("hello", convo.messagesFor("a".repeat(64)).value.single().body)
+    }
+
+    @Test
+    fun inboundDmCarriesItsInlineImage() = runTest {
+        val gw = FakeGateway()
+        val convo = ConversationStore()
+        val peer = "a".repeat(64)
+        val bytes = ByteArray(64) { 0x7f }
+        val pump = ChatController.pumpEvents(gw, convo, feed = FeedStore(), scope = this, htmlStripper = ::stripHtml)
+        gw.events.send(
+            ChatEventFfi.Dm(
+                peer,
+                "",
+                "m-att",
+                ChatAttachmentFfi("image/jpeg", 640u, 480u, bytes),
+            ),
+        )
+        gw.events.send(null)
+        pump.join()
+        val msg = convo.messagesFor(peer).value.single()
+        // An image with no words is a message: empty body, image present.
+        assertEquals("", msg.body)
+        val att = msg.attachment!!
+        assertEquals("image/jpeg", att.mime)
+        assertEquals(640, att.width)
+        assertEquals(480, att.height)
+        assertTrue(bytes.contentEquals(att.bytes))
+    }
+
+    @Test
+    fun inboundImageOnlyDmNotifiesWithTheGivenPhotoLabel() = runTest {
+        val gw = FakeGateway()
+        val seen = mutableListOf<String>()
+        val pump = ChatController.pumpEvents(
+            gw,
+            ConversationStore(),
+            feed = FeedStore(),
+            scope = this,
+            htmlStripper = ::stripHtml,
+            onInbound = { seen += it.body },
+            photoLabel = "Photo",
+        )
+        gw.events.send(
+            ChatEventFfi.Dm(
+                "a".repeat(64),
+                "   ",
+                "m-att",
+                ChatAttachmentFfi("image/png", 8u, 8u, ByteArray(4)),
+            ),
+        )
+        gw.events.send(ChatEventFfi.Dm("a".repeat(64), "words", "m-txt", null))
+        gw.events.send(null)
+        pump.join()
+        // A blank body with a picture is announced as a photo; text is
+        // announced as itself.
+        assertEquals(listOf("Photo", "words"), seen)
+    }
+
+    @Test
+    fun hydratedHistoryCarriesItsInlineImage() = runTest {
+        val bytes = ByteArray(32) { 0x11 }
+        val rows = ChatController.historyToMessages(
+            listOf(
+                historyMsg(
+                    body = "",
+                    sentAtMs = 5L,
+                    messageId = "h-att",
+                    outbound = true,
+                    attachment = ChatAttachmentFfi("image/webp", 100u, 200u, bytes),
+                ),
+                historyMsg(body = "plain", sentAtMs = 6L, messageId = "h-txt"),
+            ),
+        )
+        val att = rows[0].attachment!!
+        assertEquals("image/webp", att.mime)
+        assertEquals(100, att.width)
+        assertEquals(200, att.height)
+        assertTrue(bytes.contentEquals(att.bytes))
+        assertNull("a text-only entry has no image", rows[1].attachment)
     }
 
     @Test
@@ -571,7 +661,12 @@ class ChatControllerTest {
             override fun pairPublishOutcome(): String? = "ok"
             override suspend fun pairShareUri() = ""
             override suspend fun importPairUri(uri: String) {}
-            override suspend fun enqueueDm(to: String, body: String, senderName: String): String = ""
+            override suspend fun enqueueDm(
+                to: String,
+                body: String,
+                senderName: String,
+                attachment: ChatAttachment?,
+            ): String = ""
             override fun startOutbox(displayName: String) {}
             override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = emptyList()
             override fun retryOutbox() {}
@@ -871,6 +966,7 @@ class ChatControllerTest {
         fromAgentIdHex: String = "a".repeat(64),
         senderName: String? = null,
         delivered: Boolean = false,
+        attachment: ChatAttachmentFfi? = null,
     ) = ChatHistoryMessageFfi(
         outbound = outbound,
         fromAgentIdHex = fromAgentIdHex,
@@ -881,6 +977,7 @@ class ChatControllerTest {
         delivered = delivered,
         sendState = if (delivered) SendStateFfi.DELIVERED else SendStateFfi.SENT,
         stateChangedAtMs = sentAtMs.toULong(),
+        attachment = attachment,
     )
 
     private fun bubble(

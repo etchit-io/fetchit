@@ -875,8 +875,6 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
-
-
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -973,8 +971,6 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_profile(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
-): Short
-fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_report(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar(
 ): Short
@@ -1121,7 +1117,7 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_disconnect(`ptr`: Pointer,uniffi_out
 ): Unit
 fun uniffi_fetchit_ffi_fn_method_chatclient_drive_pending_joins_once(`ptr`: Pointer,
 ): Long
-fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
+fun uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`attachment`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_actor_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1166,8 +1162,6 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uni
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_profile(`ptr`: Pointer,`target`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
-): Long
-fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_report(`ptr`: Pointer,`actorUrl`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,`comment`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_self_avatar(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1221,7 +1215,7 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_rename_group(`ptr`: Pointer,`groupId
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_retry_outbox(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_fetchit_ffi_fn_method_chatclient_send_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
+fun uniffi_fetchit_ffi_fn_method_chatclient_send_dm(`ptr`: Pointer,`toAgentIdHex`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`attachment`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_send_group_message(`ptr`: Pointer,`groupId`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,
 ): Long
@@ -1437,7 +1431,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once() != 45686.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 61912.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 33041.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 12315.toShort()) {
@@ -1504,9 +1498,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_report() != 16665.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar() != 38589.toShort()) {
@@ -1587,7 +1578,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_retry_outbox() != 56685.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_dm() != 44912.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_dm() != 48185.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_send_group_message() != 57470.toShort()) {
@@ -2254,17 +2245,26 @@ public interface ChatClientInterface {
      * auto-resends on reconnect. `send_dm` stays for fire-and-forget sends
      * with no durability.
      *
-     * Attachments + reply-to are not yet carried over the FFI outbox; the
-     * bubble is body-only. The engine supports both -- wiring them through
-     * uniffi is a follow-up.
+     * `attachment` is an optional inline image, sealed inside the same
+     * payload as the body. A message may be an image with no text, but
+     * not empty on both counts.
+     *
+     * The image does NOT ride the durable bubble: `OutboxBubble` stores
+     * the body only, so an engine-driven RESEND of this message goes out
+     * as text (the same fidelity desktop's outbox driver has). The first
+     * send carries it; a shell that wants the optimistic echo to show the
+     * image holds its own copy until the bubble arrives.
+     *
+     * Reply-to is still not carried over the FFI outbox.
      *
      * # Errors
      *
-     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex
-     * or the client has no chat state.
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
+     * the client has no chat state, `body` is empty with no attachment, or
+     * the attachment fails the MIME / dimension / size checks.
      * [`ChatFfiError::Network`] on transport or relay failure.
      */
-    suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): kotlin.String
+    suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String, `attachment`: ChatAttachmentFfi?): kotlin.String
     
     /**
      * The active minted fediverse handle, or `None` when the user has not
@@ -2550,35 +2550,6 @@ public interface ChatClientInterface {
      * fails before any delivery was attempted.
      */
     suspend fun `fediPublish`(`bodyMd`: kotlin.String, `replyToActorUrl`: kotlin.String?): PublishReportFfi
-    
-    /**
-     * Report a fediverse account to the community trust service for
-     * moderator review.
-     *
-     * `actor_url` is the account's canonical actor URL (a profile
-     * sheet's `actorUrl`, a following row's `targetActorUrl`).
-     * `reason` is one of the `snake_case` report kinds -- `csam`,
-     * `violence_threat`, `harassment`, `spam`, `doxxing`,
-     * `abusive_content`, `other` -- and `comment` is the optional
-     * free text the reporter typed (empty string when they typed
-     * none).
-     *
-     * Reporting is NOT blocking: it asks moderators to look, and only
-     * a reviewer promotes an account onto the signed denylist. The
-     * local block affordance is the instant remedy and is unaffected.
-     *
-     * Like `fedi_profile`, this does not require a minted handle -- a
-     * user who has not opted in to posting must still be able to
-     * report what they are shown. The reporter's agent id rides along
-     * when chat state is wired.
-     *
-     * # Errors
-     * [`ChatFfiError::Invalid`] for an unknown `reason`, an actor URL
-     * that fails canonicalization, or an over-long comment;
-     * [`ChatFfiError`] when the trust service is unreachable or
-     * rejects the report.
-     */
-    suspend fun `fediReport`(`actorUrl`: kotlin.String, `reason`: kotlin.String, `comment`: kotlin.String)
     
     /**
      * The user's own profile picture, or `None` when they have not set
@@ -2933,12 +2904,19 @@ public interface ChatClientInterface {
      * Returns the message id on success (suitable for receipt correlation),
      * or `None` when the transport succeeded but no id was minted.
      *
+     * `attachment` is an optional inline image; it rides INSIDE the sealed
+     * payload, so it is end-to-end encrypted exactly like the body. A
+     * message may carry an image with an empty `body` (an image on its
+     * own is a message), but not both empty.
+     *
      * # Errors
      *
-     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex.
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
+     * when `body` is empty and there is no attachment, or when the
+     * attachment fails the MIME / dimension / size checks.
      * [`ChatFfiError::Network`] on transport or relay failure.
      */
-    suspend fun `sendDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String): kotlin.String?
+    suspend fun `sendDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String, `attachment`: ChatAttachmentFfi?): kotlin.String?
     
     /**
      * Send a message to a group, routing private/public via the engine's
@@ -3432,24 +3410,33 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * auto-resends on reconnect. `send_dm` stays for fire-and-forget sends
      * with no durability.
      *
-     * Attachments + reply-to are not yet carried over the FFI outbox; the
-     * bubble is body-only. The engine supports both -- wiring them through
-     * uniffi is a follow-up.
+     * `attachment` is an optional inline image, sealed inside the same
+     * payload as the body. A message may be an image with no text, but
+     * not empty on both counts.
+     *
+     * The image does NOT ride the durable bubble: `OutboxBubble` stores
+     * the body only, so an engine-driven RESEND of this message goes out
+     * as text (the same fidelity desktop's outbox driver has). The first
+     * send carries it; a shell that wants the optimistic echo to show the
+     * image holds its own copy until the bubble arrives.
+     *
+     * Reply-to is still not carried over the FFI outbox.
      *
      * # Errors
      *
-     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex
-     * or the client has no chat state.
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
+     * the client has no chat state, `body` is empty with no attachment, or
+     * the attachment fails the MIME / dimension / size checks.
      * [`ChatFfiError::Network`] on transport or relay failure.
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String) : kotlin.String {
+    override suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String, `attachment`: ChatAttachmentFfi?) : kotlin.String {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_enqueue_dm(
                 thisPtr,
-                FfiConverterString.lower(`toAgentIdHex`),FfiConverterString.lower(`body`),FfiConverterString.lower(`senderName`),
+                FfiConverterString.lower(`toAgentIdHex`),FfiConverterString.lower(`body`),FfiConverterString.lower(`senderName`),FfiConverterOptionalTypeChatAttachmentFfi.lower(`attachment`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -4092,55 +4079,6 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePublishReportFfi.lift(it) },
-        // Error FFI converter
-        ChatFfiException.ErrorHandler,
-    )
-    }
-
-    
-    /**
-     * Report a fediverse account to the community trust service for
-     * moderator review.
-     *
-     * `actor_url` is the account's canonical actor URL (a profile
-     * sheet's `actorUrl`, a following row's `targetActorUrl`).
-     * `reason` is one of the `snake_case` report kinds -- `csam`,
-     * `violence_threat`, `harassment`, `spam`, `doxxing`,
-     * `abusive_content`, `other` -- and `comment` is the optional
-     * free text the reporter typed (empty string when they typed
-     * none).
-     *
-     * Reporting is NOT blocking: it asks moderators to look, and only
-     * a reviewer promotes an account onto the signed denylist. The
-     * local block affordance is the instant remedy and is unaffected.
-     *
-     * Like `fedi_profile`, this does not require a minted handle -- a
-     * user who has not opted in to posting must still be able to
-     * report what they are shown. The reporter's agent id rides along
-     * when chat state is wired.
-     *
-     * # Errors
-     * [`ChatFfiError::Invalid`] for an unknown `reason`, an actor URL
-     * that fails canonicalization, or an over-long comment;
-     * [`ChatFfiError`] when the trust service is unreachable or
-     * rejects the report.
-     */
-    @Throws(ChatFfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fediReport`(`actorUrl`: kotlin.String, `reason`: kotlin.String, `comment`: kotlin.String) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_report(
-                thisPtr,
-                FfiConverterString.lower(`actorUrl`),FfiConverterString.lower(`reason`),FfiConverterString.lower(`comment`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -4945,19 +4883,26 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * Returns the message id on success (suitable for receipt correlation),
      * or `None` when the transport succeeded but no id was minted.
      *
+     * `attachment` is an optional inline image; it rides INSIDE the sealed
+     * payload, so it is end-to-end encrypted exactly like the body. A
+     * message may carry an image with an empty `body` (an image on its
+     * own is a message), but not both empty.
+     *
      * # Errors
      *
-     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex.
+     * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
+     * when `body` is empty and there is no attachment, or when the
+     * attachment fails the MIME / dimension / size checks.
      * [`ChatFfiError::Network`] on transport or relay failure.
      */
     @Throws(ChatFfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String) : kotlin.String? {
+    override suspend fun `sendDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String, `attachment`: ChatAttachmentFfi?) : kotlin.String? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_send_dm(
                 thisPtr,
-                FfiConverterString.lower(`toAgentIdHex`),FfiConverterString.lower(`body`),FfiConverterString.lower(`senderName`),
+                FfiConverterString.lower(`toAgentIdHex`),FfiConverterString.lower(`body`),FfiConverterString.lower(`senderName`),FfiConverterOptionalTypeChatAttachmentFfi.lower(`attachment`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -5525,6 +5470,66 @@ public object FfiConverterTypeArchiveEntryFFI: FfiConverterRustBuffer<ArchiveEnt
 
 
 /**
+ * An inline image carried inside a sealed (end-to-end encrypted) DM.
+ *
+ * `width` / `height` are the image's intrinsic pixel dimensions, carried
+ * alongside the bytes so a shell can reserve the right amount of layout
+ * before it decodes anything.
+ */
+data class ChatAttachmentFfi (
+    /**
+     * MIME type; one of [`fetchit_chat::attachment::ALLOWED_ATTACHMENT_MIMES`].
+     */
+    var `mime`: kotlin.String, 
+    /**
+     * Intrinsic width in pixels.
+     */
+    var `width`: kotlin.UInt, 
+    /**
+     * Intrinsic height in pixels.
+     */
+    var `height`: kotlin.UInt, 
+    /**
+     * RAW (already base64-decoded) image bytes, at most
+     * [`fetchit_chat::attachment::MAX_ATTACHMENT_BYTES`].
+     */
+    var `bytes`: kotlin.ByteArray
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatAttachmentFfi: FfiConverterRustBuffer<ChatAttachmentFfi> {
+    override fun read(buf: ByteBuffer): ChatAttachmentFfi {
+        return ChatAttachmentFfi(
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ChatAttachmentFfi) = (
+            FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterUInt.allocationSize(value.`width`) +
+            FfiConverterUInt.allocationSize(value.`height`) +
+            FfiConverterByteArray.allocationSize(value.`bytes`)
+    )
+
+    override fun write(value: ChatAttachmentFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterUInt.write(value.`width`, buf)
+            FfiConverterUInt.write(value.`height`, buf)
+            FfiConverterByteArray.write(value.`bytes`, buf)
+    }
+}
+
+
+
+/**
  * One persisted message in a conversation transcript, surfaced to the shell
  * for reload-on-open from the encrypted at-rest vault.
  *
@@ -5579,7 +5584,15 @@ data class ChatHistoryMessageFfi (
      * Unix-ms of the last `send_state` transition, for the same
      * "still sending" affordance the outbox bubble carries.
      */
-    var `stateChangedAtMs`: kotlin.ULong
+    var `stateChangedAtMs`: kotlin.ULong, 
+    /**
+     * Inline image persisted with this message, already validated and
+     * base64-decoded. Unlike a reply reference (which the shell can
+     * rebuild from local history), image bytes cannot be re-derived, so
+     * they ride the vault and come back on every reload. Always `None`
+     * on a group entry -- the group wire carries no attachment.
+     */
+    var `attachment`: ChatAttachmentFfi?
 ) {
     
     companion object
@@ -5600,6 +5613,7 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterBoolean.read(buf),
             FfiConverterTypeSendStateFfi.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterOptionalTypeChatAttachmentFfi.read(buf),
         )
     }
 
@@ -5612,7 +5626,8 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterBoolean.allocationSize(value.`delivered`) +
             FfiConverterTypeSendStateFfi.allocationSize(value.`sendState`) +
-            FfiConverterULong.allocationSize(value.`stateChangedAtMs`)
+            FfiConverterULong.allocationSize(value.`stateChangedAtMs`) +
+            FfiConverterOptionalTypeChatAttachmentFfi.allocationSize(value.`attachment`)
     )
 
     override fun write(value: ChatHistoryMessageFfi, buf: ByteBuffer) {
@@ -5625,6 +5640,7 @@ public object FfiConverterTypeChatHistoryMessageFfi: FfiConverterRustBuffer<Chat
             FfiConverterBoolean.write(value.`delivered`, buf)
             FfiConverterTypeSendStateFfi.write(value.`sendState`, buf)
             FfiConverterULong.write(value.`stateChangedAtMs`, buf)
+            FfiConverterOptionalTypeChatAttachmentFfi.write(value.`attachment`, buf)
     }
 }
 
@@ -6944,13 +6960,19 @@ sealed class ChatEventFfi {
          */
         val `fromAgentIdHex`: kotlin.String, 
         /**
-         * Message body.
+         * Message body. May be empty when the message is an image alone.
          */
         val `body`: kotlin.String, 
         /**
          * Optional dedupe id for the message; used to correlate receipts.
          */
-        val `messageId`: kotlin.String?) : ChatEventFfi() {
+        val `messageId`: kotlin.String?, 
+        /**
+         * Inline image the sender attached, already validated and
+         * base64-decoded. `None` on a text-only message, and on one whose
+         * attachment failed validation (it is dropped, never surfaced).
+         */
+        val `attachment`: ChatAttachmentFfi?) : ChatEventFfi() {
         companion object
     }
     
@@ -7006,6 +7028,12 @@ sealed class ChatEventFfi {
      * [`fetchit_chat::messages::PrivateGroupReceive::Persisted`] frames;
      * replays are dropped. Carries no delivery receipt -- the engine's
      * group path sends none (mirrors `peer.rs` + the desktop seam).
+     *
+     * Carries no attachment either: a group message is sealed as
+     * `encode_group_plaintext(sender_name, body, seq)`, which has no
+     * attachment field, so inline images are a DM capability only. The
+     * shells hide the attach affordance on group threads rather than
+     * promise a send the wire would silently drop.
      */
     data class GroupMessage(
         /**
@@ -7046,6 +7074,7 @@ public object FfiConverterTypeChatEventFfi : FfiConverterRustBuffer<ChatEventFfi
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
+                FfiConverterOptionalTypeChatAttachmentFfi.read(buf),
                 )
             2 -> ChatEventFfi.Receipt(
                 FfiConverterString.read(buf),
@@ -7076,6 +7105,7 @@ public object FfiConverterTypeChatEventFfi : FfiConverterRustBuffer<ChatEventFfi
                 + FfiConverterString.allocationSize(value.`fromAgentIdHex`)
                 + FfiConverterString.allocationSize(value.`body`)
                 + FfiConverterOptionalString.allocationSize(value.`messageId`)
+                + FfiConverterOptionalTypeChatAttachmentFfi.allocationSize(value.`attachment`)
             )
         }
         is ChatEventFfi.Receipt -> {
@@ -7120,6 +7150,7 @@ public object FfiConverterTypeChatEventFfi : FfiConverterRustBuffer<ChatEventFfi
                 FfiConverterString.write(value.`fromAgentIdHex`, buf)
                 FfiConverterString.write(value.`body`, buf)
                 FfiConverterOptionalString.write(value.`messageId`, buf)
+                FfiConverterOptionalTypeChatAttachmentFfi.write(value.`attachment`, buf)
                 Unit
             }
             is ChatEventFfi.Receipt -> {
@@ -8263,6 +8294,38 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeChatAttachmentFfi: FfiConverterRustBuffer<ChatAttachmentFfi?> {
+    override fun read(buf: ByteBuffer): ChatAttachmentFfi? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeChatAttachmentFfi.read(buf)
+    }
+
+    override fun allocationSize(value: ChatAttachmentFfi?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeChatAttachmentFfi.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ChatAttachmentFfi?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeChatAttachmentFfi.write(value, buf)
         }
     }
 }

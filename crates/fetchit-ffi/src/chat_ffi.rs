@@ -27,10 +27,14 @@ pub enum ChatEventFfi {
     Dm {
         /// Hex-encoded sender agent id (64 lowercase hex chars).
         from_agent_id_hex: String,
-        /// Message body.
+        /// Message body. May be empty when the message is an image alone.
         body: String,
         /// Optional dedupe id for the message; used to correlate receipts.
         message_id: Option<String>,
+        /// Inline image the sender attached, already validated and
+        /// base64-decoded. `None` on a text-only message, and on one whose
+        /// attachment failed validation (it is dropped, never surfaced).
+        attachment: Option<crate::attachment_ffi::ChatAttachmentFfi>,
     },
     /// A delivery receipt for a previously sent message.
     Receipt {
@@ -63,6 +67,12 @@ pub enum ChatEventFfi {
     /// [`fetchit_chat::messages::PrivateGroupReceive::Persisted`] frames;
     /// replays are dropped. Carries no delivery receipt -- the engine's
     /// group path sends none (mirrors `peer.rs` + the desktop seam).
+    ///
+    /// Carries no attachment either: a group message is sealed as
+    /// `encode_group_plaintext(sender_name, body, seq)`, which has no
+    /// attachment field, so inline images are a DM capability only. The
+    /// shells hide the attach affordance on group threads rather than
+    /// promise a send the wire would silently drop.
     GroupMessage {
         /// 64-hex group id the message belongs to.
         group_id: String,
@@ -196,6 +206,12 @@ pub struct ChatHistoryMessageFfi {
     /// Unix-ms of the last `send_state` transition, for the same
     /// "still sending" affordance the outbox bubble carries.
     pub state_changed_at_ms: u64,
+    /// Inline image persisted with this message, already validated and
+    /// base64-decoded. Unlike a reply reference (which the shell can
+    /// rebuild from local history), image bytes cannot be re-derived, so
+    /// they ride the vault and come back on every reload. Always `None`
+    /// on a group entry -- the group wire carries no attachment.
+    pub attachment: Option<crate::attachment_ffi::ChatAttachmentFfi>,
 }
 
 /// Map one persisted [`HistoryEntry`](fetchit_chat::conversation::HistoryEntry)
@@ -208,6 +224,7 @@ fn history_entry_to_ffi(
     local_agent_id_hex: &str,
 ) -> ChatHistoryMessageFfi {
     let progress = entry.send_progress();
+    let attachment = crate::attachment_ffi::attachment_to_ffi(entry.attachment.as_ref());
     ChatHistoryMessageFfi {
         outbound: entry.sender_agent_id_hex == local_agent_id_hex,
         from_agent_id_hex: entry.sender_agent_id_hex,
@@ -218,7 +235,49 @@ fn history_entry_to_ffi(
         delivered: progress.state == fetchit_chat::send_state::SendState::Delivered,
         send_state: progress.state.into(),
         state_changed_at_ms: progress.changed_at_ms,
+        attachment,
     }
+}
+
+/// Project a decrypted inbound DM into the FFI event stream.
+///
+/// The attachment is re-validated on the way through even though the
+/// inbound path already dropped a malformed one: this projection is the
+/// last place a shell-visible attachment is decided, and "a bad
+/// attachment is no attachment" must hold wherever the shell reads one.
+/// Pure so the projection is unit-tested without a live relay; the
+/// inbound pump calls it on the same path it ships (mirrors
+/// [`project_group_receive`]).
+fn project_dm_event(
+    sender_agent_id_hex: String,
+    payload: fetchit_chat::conversation::MessagePayload,
+) -> ChatEventFfi {
+    ChatEventFfi::Dm {
+        from_agent_id_hex: sender_agent_id_hex,
+        body: payload.body,
+        message_id: payload.message_id,
+        attachment: crate::attachment_ffi::attachment_to_ffi(payload.attachment.as_ref()),
+    }
+}
+
+/// Reject a send with nothing in it: no text AND no image.
+///
+/// An image on its own IS a message (desktop's composer sends one), so the
+/// guard is on the pair, not on the body. Kept here rather than in the
+/// engine so both FFI send paths refuse identically.
+///
+/// # Errors
+/// [`ChatFfiError::Invalid`] when both are absent.
+fn require_sendable(
+    body: &str,
+    attachment: Option<&fetchit_chat::attachment::Attachment>,
+) -> Result<(), ChatFfiError> {
+    if body.is_empty() && attachment.is_none() {
+        return Err(ChatFfiError::Invalid {
+            reason: "message has neither text nor an image".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// The client's conversation registry, or the "no chat state" error the
@@ -1424,24 +1483,34 @@ impl ChatClient {
     /// Returns the message id on success (suitable for receipt correlation),
     /// or `None` when the transport succeeded but no id was minted.
     ///
+    /// `attachment` is an optional inline image; it rides INSIDE the sealed
+    /// payload, so it is end-to-end encrypted exactly like the body. A
+    /// message may carry an image with an empty `body` (an image on its
+    /// own is a message), but not both empty.
+    ///
     /// # Errors
     ///
-    /// [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex.
+    /// [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
+    /// when `body` is empty and there is no attachment, or when the
+    /// attachment fails the MIME / dimension / size checks.
     /// [`ChatFfiError::Network`] on transport or relay failure.
     pub async fn send_dm(
         &self,
         to_agent_id_hex: String,
         body: String,
         sender_name: String,
+        attachment: Option<crate::attachment_ffi::ChatAttachmentFfi>,
     ) -> Result<Option<String>, ChatFfiError> {
         let id = fetchit_chat::identity::AgentId::parse(to_agent_id_hex).map_err(|e| {
             ChatFfiError::Invalid {
                 reason: e.to_string(),
             }
         })?;
+        let attachment = crate::attachment_ffi::attachment_from_ffi(attachment.as_ref())?;
+        require_sendable(&body, attachment.as_ref())?;
         self.inner
             .messages()
-            .send(&id, &body, &sender_name, None, None)
+            .send(&id, &body, &sender_name, None, attachment.as_ref())
             .await
             .map_err(ChatFfiError::from)
     }
@@ -1995,7 +2064,6 @@ impl ChatClient {
         let handle = self.fedi_actor_status()?;
         self.inner.fedi_self_avatar(&handle, FEDI_DOMAIN)
     }
-
 
     /// Mark the fediverse DM thread with `label` read up to its newest
     /// message: the row's unread count clears, durably (the mark is
@@ -2809,6 +2877,10 @@ impl ChatClient {
                             SendStateFfi::Queued
                         },
                         state_changed_at_ms: at_ms,
+                        // The open fediverse rails carry no inline
+                        // attachment: an image there would be a public
+                        // media upload, not a sealed one.
+                        attachment: None,
                     }
                 })
                 .collect());
@@ -2950,28 +3022,40 @@ impl ChatClient {
     /// auto-resends on reconnect. `send_dm` stays for fire-and-forget sends
     /// with no durability.
     ///
-    /// Attachments + reply-to are not yet carried over the FFI outbox; the
-    /// bubble is body-only. The engine supports both -- wiring them through
-    /// uniffi is a follow-up.
+    /// `attachment` is an optional inline image, sealed inside the same
+    /// payload as the body. A message may be an image with no text, but
+    /// not empty on both counts.
+    ///
+    /// The image does NOT ride the durable bubble: `OutboxBubble` stores
+    /// the body only, so an engine-driven RESEND of this message goes out
+    /// as text (the same fidelity desktop's outbox driver has). The first
+    /// send carries it; a shell that wants the optimistic echo to show the
+    /// image holds its own copy until the bubble arrives.
+    ///
+    /// Reply-to is still not carried over the FFI outbox.
     ///
     /// # Errors
     ///
-    /// [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex
-    /// or the client has no chat state.
+    /// [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
+    /// the client has no chat state, `body` is empty with no attachment, or
+    /// the attachment fails the MIME / dimension / size checks.
     /// [`ChatFfiError::Network`] on transport or relay failure.
     pub async fn enqueue_dm(
         &self,
         to_agent_id_hex: String,
         body: String,
         sender_name: String,
+        attachment: Option<crate::attachment_ffi::ChatAttachmentFfi>,
     ) -> Result<String, ChatFfiError> {
         let id = fetchit_chat::identity::AgentId::parse(to_agent_id_hex).map_err(|e| {
             ChatFfiError::Invalid {
                 reason: e.to_string(),
             }
         })?;
+        let attachment = crate::attachment_ffi::attachment_from_ffi(attachment.as_ref())?;
+        require_sendable(&body, attachment.as_ref())?;
         self.inner
-            .enqueue_dm(&id, &body, &sender_name, None, None)
+            .enqueue_dm(&id, &body, &sender_name, None, attachment.as_ref())
             .await
             .map_err(ChatFfiError::from)
     }
@@ -3375,11 +3459,7 @@ async fn run_inbound_pump(
                         log::warn!("[chat_ffi] receipt send error: {e}");
                     }
                 }
-                let _ = tx.send(ChatEventFfi::Dm {
-                    from_agent_id_hex: sender_agent_id_hex,
-                    body: payload.body,
-                    message_id: payload.message_id,
-                });
+                let _ = tx.send(project_dm_event(sender_agent_id_hex, payload));
             }
             InboundDispatch::Receipt { message_id, .. } => {
                 let _ = tx.send(ChatEventFfi::Receipt { message_id });
@@ -4067,5 +4147,173 @@ mod tests {
         assert_eq!(ffi.send_state, SendStateFfi::Queued);
         assert_eq!(ffi.state_changed_at_ms, 1_700_000_000_400);
         assert!(!ffi.delivered);
+    }
+
+    /// A persisted attachment comes back as RAW bytes: base64 is the
+    /// payload's wire encoding and must not leak past this boundary.
+    #[test]
+    fn history_entry_carries_its_attachment_as_raw_bytes() {
+        use fetchit_chat::attachment::Attachment;
+        use fetchit_chat::conversation::HistoryEntry;
+        let raw = vec![0x89u8; 256];
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: None,
+            body: String::new(),
+            ts_ms: 1_700_000_000_001,
+            message_id: "mid-att".to_owned(),
+            attachment: Some(
+                Attachment::from_raw("image/jpeg", 800, 600, &raw).expect("valid attachment"),
+            ),
+            delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
+        };
+        let ffi = history_entry_to_ffi(entry, REAL_HEX);
+        let att = ffi.attachment.expect("attachment must survive the mapping");
+        assert_eq!(att.mime, "image/jpeg");
+        assert_eq!(att.width, 800);
+        assert_eq!(att.height, 600);
+        assert_eq!(att.bytes, raw);
+        // An image with no words is a message; the body stays empty.
+        assert_eq!(ffi.body, "");
+    }
+
+    /// A vault entry whose attachment does not validate must render as a
+    /// message without an image, never as a bad one.
+    #[test]
+    fn history_entry_drops_an_invalid_attachment() {
+        use fetchit_chat::attachment::Attachment;
+        use fetchit_chat::conversation::HistoryEntry;
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: None,
+            body: "look".to_owned(),
+            ts_ms: 1,
+            message_id: "mid-bad".to_owned(),
+            attachment: Some(Attachment {
+                mime: "image/svg+xml".to_owned(),
+                width: 4,
+                height: 4,
+                bytes_b64: "PHN2Zy8+".to_owned(),
+            }),
+            delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
+        };
+        let ffi = history_entry_to_ffi(entry, REAL_HEX);
+        assert!(ffi.attachment.is_none());
+        assert_eq!(ffi.body, "look", "the message itself still renders");
+    }
+
+    #[test]
+    fn history_entry_without_an_attachment_maps_to_none() {
+        use fetchit_chat::conversation::HistoryEntry;
+        let entry = HistoryEntry {
+            sender_agent_id_hex: REAL_HEX.to_owned(),
+            sender_name: None,
+            body: "text only".to_owned(),
+            ts_ms: 1,
+            message_id: "mid-plain".to_owned(),
+            attachment: None,
+            delivered_at_ms: None,
+            send_state: None,
+            state_changed_at_ms: 0,
+        };
+        assert!(history_entry_to_ffi(entry, REAL_HEX).attachment.is_none());
+    }
+
+    fn dm_payload(
+        body: &str,
+        attachment: Option<fetchit_chat::attachment::Attachment>,
+    ) -> fetchit_chat::conversation::MessagePayload {
+        fetchit_chat::conversation::MessagePayload {
+            sender_name: Some("alice".to_owned()),
+            body: body.to_owned(),
+            ts_ms: 1_700_000_000_000,
+            message_id: Some("mid-dm".to_owned()),
+            reply_to_message_id: None,
+            attachment,
+            advertised_relays: None,
+            hint_epoch_ms: None,
+        }
+    }
+
+    #[test]
+    fn project_dm_event_carries_the_attachment_as_raw_bytes() {
+        use fetchit_chat::attachment::Attachment;
+        let raw = vec![0x42u8; 128];
+        let payload = dm_payload(
+            "",
+            Some(Attachment::from_raw("image/png", 320, 200, &raw).expect("valid")),
+        );
+        match project_dm_event(REAL_HEX.to_owned(), payload) {
+            ChatEventFfi::Dm {
+                from_agent_id_hex,
+                body,
+                message_id,
+                attachment,
+            } => {
+                assert_eq!(from_agent_id_hex, REAL_HEX);
+                assert_eq!(body, "");
+                assert_eq!(message_id.as_deref(), Some("mid-dm"));
+                let att = attachment.expect("attachment must reach the shell");
+                assert_eq!(att.mime, "image/png");
+                assert_eq!(att.width, 320);
+                assert_eq!(att.height, 200);
+                assert_eq!(att.bytes, raw);
+            }
+            other => panic!("expected Dm, got {other:?}"),
+        }
+    }
+
+    /// A hostile sender's oversize / script-carrying attachment must reach
+    /// the shell as "no image", with the message itself intact.
+    #[test]
+    fn project_dm_event_drops_a_hostile_attachment() {
+        use fetchit_chat::attachment::Attachment;
+        let payload = dm_payload(
+            "look at this",
+            Some(Attachment {
+                mime: "image/svg+xml".to_owned(),
+                width: 8,
+                height: 8,
+                bytes_b64: "PHN2Zy8+".to_owned(),
+            }),
+        );
+        match project_dm_event(REAL_HEX.to_owned(), payload) {
+            ChatEventFfi::Dm {
+                body, attachment, ..
+            } => {
+                assert!(attachment.is_none());
+                assert_eq!(body, "look at this");
+            }
+            other => panic!("expected Dm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_dm_event_without_an_attachment_maps_to_none() {
+        match project_dm_event(REAL_HEX.to_owned(), dm_payload("hi", None)) {
+            ChatEventFfi::Dm { attachment, .. } => assert!(attachment.is_none()),
+            other => panic!("expected Dm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_sendable_rejects_an_empty_message() {
+        assert!(require_sendable("", None).is_err());
+    }
+
+    #[test]
+    fn require_sendable_accepts_an_image_with_no_words() {
+        use fetchit_chat::attachment::Attachment;
+        let att = Attachment::from_raw("image/png", 2, 2, b"pixels").expect("valid");
+        assert!(require_sendable("", Some(&att)).is_ok());
+    }
+
+    #[test]
+    fn require_sendable_accepts_text_alone() {
+        assert!(require_sendable("hello", None).is_ok());
     }
 }

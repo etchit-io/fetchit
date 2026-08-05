@@ -1,6 +1,7 @@
 package io.etchit.fetchit.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -86,5 +87,114 @@ class ConversationStoreTest {
         s.append(key, ChatMessage(outbound = false, body = "x", sentAtMs = 1L, messageId = "m1"))
         s.mergeHistory(key, emptyList())
         assertEquals(1, s.messagesFor(key).value.size)
+    }
+
+    // ── staged outbound images ────────────────────────────────────────
+    // The engine bubble carries the body only, so the shell bridges the
+    // picture across the send. These are the rules that bridge obeys.
+
+    private fun attachment(tag: Byte) =
+        ChatAttachment("image/jpeg", 4, 3, ByteArray(2) { tag })
+
+    private fun upsert(s: ConversationStore, peer: String, id: String, delivered: Boolean = false) =
+        s.upsertOutbox(
+            peerAgentIdHex = peer,
+            outboxId = id,
+            body = "",
+            sentAtMs = 1L,
+            messageId = null,
+            delivered = delivered,
+            failed = false,
+            lastError = null,
+        )
+
+    @Test
+    fun theFirstBubbleClaimsTheStagedImage() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val att = attachment(1)
+        s.stageOutboundAttachment(peer, att)
+        upsert(s, peer, "b1")
+        assertEquals(att, s.messagesFor(peer).value.single().attachment)
+    }
+
+    @Test
+    fun aLaterStateOfTheSameBubbleKeepsItsImage() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val att = attachment(1)
+        s.stageOutboundAttachment(peer, att)
+        upsert(s, peer, "b1")
+        // Delivered transition: same bubble, nothing left staged to claim.
+        upsert(s, peer, "b1", delivered = true)
+        val msg = s.messagesFor(peer).value.single()
+        assertTrue(msg.delivered)
+        assertEquals(att, msg.attachment)
+    }
+
+    @Test
+    fun stagedImagesLineUpWithTheirOwnSends() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val first = attachment(1)
+        val second = attachment(2)
+        s.stageOutboundAttachment(peer, first)
+        s.stageOutboundAttachment(peer, second)
+        upsert(s, peer, "b1")
+        upsert(s, peer, "b2")
+        val msgs = s.messagesFor(peer).value
+        assertEquals(first, msgs[0].attachment)
+        assertEquals(second, msgs[1].attachment)
+    }
+
+    @Test
+    fun aTextOnlySendAfterAnImageSendGetsNoImage() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val att = attachment(1)
+        s.stageOutboundAttachment(peer, att)
+        upsert(s, peer, "b1")
+        upsert(s, peer, "b2")
+        val msgs = s.messagesFor(peer).value
+        assertEquals(att, msgs[0].attachment)
+        assertNull(msgs[1].attachment)
+    }
+
+    @Test
+    fun discardingAStagedImageKeepsItOffTheNextMessage() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        // A send that failed before the engine echoed: no bubble will ever
+        // arrive to claim this, and it must not attach itself to the next.
+        val token = s.stageOutboundAttachment(peer, attachment(1))
+        s.discardStagedAttachment(peer, token)
+        upsert(s, peer, "b1")
+        assertNull(s.messagesFor(peer).value.single().attachment)
+    }
+
+    @Test
+    fun discardingOneStagedImageLeavesTheOthers() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val kept = attachment(1)
+        val orphan = attachment(2)
+        s.stageOutboundAttachment(peer, kept)
+        val token = s.stageOutboundAttachment(peer, orphan)
+        s.discardStagedAttachment(peer, token)
+        upsert(s, peer, "b1")
+        assertEquals(kept, s.messagesFor(peer).value.single().attachment)
+    }
+
+    @Test
+    fun aStagedImageNeverCrossesToAnotherPeer() {
+        val s = ConversationStore()
+        val alice = "a".repeat(64)
+        val bob = "b".repeat(64)
+        val att = attachment(1)
+        s.stageOutboundAttachment(alice, att)
+        upsert(s, bob, "b1")
+        assertNull(s.messagesFor(bob).value.single().attachment)
+        upsert(s, alice, "b2")
+        assertEquals(att, s.messagesFor(alice).value.single().attachment)
     }
 }

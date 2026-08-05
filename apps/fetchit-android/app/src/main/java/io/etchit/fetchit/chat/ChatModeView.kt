@@ -84,6 +84,11 @@ class ChatModeView(
     // "set my picture" behaves identically wherever it is reached from.
     private val onPickProfilePicture: () -> Unit = {},
     private val onRemoveProfilePicture: () -> Unit = {},
+    // Same reason as the profile picture: the system photo picker is an
+    // activity-result contract. The DM composer asks; the activity
+    // launches it, prepares the bytes off the main thread, and hands the
+    // result back through [onChatImagePrepared] / [onChatImageRejected].
+    private val onPickChatImage: () -> Unit = {},
 ) {
 
     // The dedicated screen-swap surface inside chatContainer.
@@ -179,6 +184,15 @@ class ChatModeView(
     private val fediAvatars = FediAvatars(
         (AVATAR_TARGET_DP * context.resources.displayMetrics.density).toInt(),
     )
+
+    /** Decoded inline chat photos, so scrolling doesn't re-decode them. */
+    private val attachThumbs = ChatImageAttachment.Thumbs()
+
+    /** The photo picked for the next DM send, or null. DM threads only. */
+    private var stagedAttachment: ChatAttachment? = null
+
+    /** Re-runs the active DM thread's send-enabled check. Null off a DM. */
+    private var attachSyncSend: (() -> Unit)? = null
 
     // ── fediverse avatars ──────────────────────────────────────────────
 
@@ -2536,29 +2550,42 @@ class ChatModeView(
 
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
         val sendButton = view.findViewById<View>(R.id.sendButton)
-        bindSendEnabled(messageInput, sendButton)
+        // A picture on its own IS a message, so send stays live with an
+        // empty box while one is staged (desktop composer parity).
+        val syncSend = bindSendEnabled(messageInput, sendButton) { stagedAttachment != null }
+        bindAttachAffordance(view, syncSend)
         sendButton.setOnClickListener {
             val body = messageInput.text.toString().trim()
-            if (body.isEmpty()) return@setOnClickListener
+            val attachment = stagedAttachment
+            if (body.isEmpty() && attachment == null) return@setOnClickListener
             messageInput.text.clear()
+            clearStagedAttachment(view, syncSend)
             sendJob?.cancel()
             sendJob = lifecycleScope.launch {
                 val gw = controller.gateway() ?: run {
                     // Only restore text if this thread is still the active screen.
                     if (screenStack.lastOrNull() == Screen.Thread(peer)) {
                         messageInput.setText(body)
+                        attachment?.let { stageAttachment(view, it, syncSend) }
                     }
                     snackbar(context.getString(R.string.chat_not_connected))
                     return@launch
                 }
                 val senderName = displayNameOrDefault(gw)
+                // The engine bubble carries the body only, so the picture is
+                // staged here first: the optimistic echo claims it when the
+                // pump projects the new bubble, and a send that never
+                // reached the engine discards its own entry below.
+                val token = attachment?.let { controller.stageOutboundAttachment(peer, it) }
                 // Enqueue into the durable outbox: the optimistic Sending bubble
                 // and its Delivered/Failed transitions arrive as Outbox events
                 // through the pump, so there is no local append here.
-                runCatching { gw.enqueueDm(peer, body, senderName) }.onFailure { e ->
+                runCatching { gw.enqueueDm(peer, body, senderName, attachment) }.onFailure { e ->
+                    token?.let { controller.discardStagedAttachment(peer, it) }
                     // Only restore text if this thread is still the active screen.
                     if (screenStack.lastOrNull() == Screen.Thread(peer)) {
                         messageInput.setText(body)
+                        attachment?.let { stageAttachment(view, it, syncSend) }
                     }
                     snackbar(userFacingError(e, "enqueueDm", R.string.thread_send_failed))
                 }
@@ -2673,6 +2700,9 @@ class ChatModeView(
         view.findViewById<TextView>(R.id.threadPeerShortId).text = "${groupId.take(8)}…"
         view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
         view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+        // A group message is sealed without an attachment field, so the
+        // shared layout's attach controls stay hidden here.
+        hideAttachAffordance(view)
 
         // Group member list + moderation entry. Visible on a group thread only
         // (DM/feed headers hide it). The members button opens the roster dialog;
@@ -3421,6 +3451,8 @@ class ChatModeView(
         val messageInput = view.findViewById<EditText>(R.id.messageInput)
         val sendButton = view.findViewById<View>(R.id.sendButton)
         view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+        // The open-fediverse rail carries no inline attachment either.
+        hideAttachAffordance(view)
         messageInput.hint = context.getString(R.string.chat_fedi_thread_hint, handle)
         bindSendEnabled(messageInput, sendButton)
         sendButton.setOnClickListener {
@@ -3926,10 +3958,19 @@ class ChatModeView(
      * Enable the send button only while [input] holds non-blank text, so an
      * empty tap can't silently no-op; dim it when disabled for a clear
      * affordance.
+     *
+     * [alsoEnabledWhen] lets a screen keep send live with an empty box for
+     * something other than text -- a staged photo, on a DM thread. The
+     * returned lambda re-runs the check, for callers whose extra condition
+     * changes without the text changing.
      */
-    private fun bindSendEnabled(input: EditText, button: View) {
-        fun sync() {
-            val on = input.text.isNotBlank()
+    private fun bindSendEnabled(
+        input: EditText,
+        button: View,
+        alsoEnabledWhen: () -> Boolean = { false },
+    ): () -> Unit {
+        val sync: () -> Unit = {
+            val on = input.text.isNotBlank() || alsoEnabledWhen()
             button.isEnabled = on
             button.alpha = if (on) 1f else 0.4f
         }
@@ -3939,7 +3980,135 @@ class ChatModeView(
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) { sync() }
         })
+        return sync
     }
+
+    // ── inline photo attachments (DM only) ────────────────────────────
+
+    /**
+     * Show the attach affordance on a DM thread and wire it: the button
+     * asks the activity for the system photo picker, and the chip shows
+     * whatever is staged for the next send with a way to drop it.
+     *
+     * Called from the DM bind only. Group and fediverse threads reuse this
+     * layout, so they call [hideAttachAffordance] instead -- their wire
+     * carries no attachment, and a control that silently drops the picture
+     * would be a lie.
+     */
+    private fun bindAttachAffordance(view: View, syncSend: () -> Unit) {
+        val button = view.findViewById<ImageButton>(R.id.threadAttachButton)
+        button.visibility = View.VISIBLE
+        button.setOnClickListener { onPickChatImage() }
+        view.findViewById<ImageButton>(R.id.threadAttachRemove).setOnClickListener {
+            clearStagedAttachment(view, syncSend)
+        }
+        // A staged picture belongs to the thread it was picked in.
+        clearStagedAttachment(view, syncSend)
+        attachSyncSend = syncSend
+    }
+
+    /** Hide every attach control on a screen whose wire carries no image. */
+    private fun hideAttachAffordance(view: View) {
+        view.findViewById<ImageButton>(R.id.threadAttachButton).visibility = View.GONE
+        view.findViewById<View>(R.id.threadAttachChip).visibility = View.GONE
+        stagedAttachment = null
+        attachSyncSend = null
+    }
+
+    /** Put [att] in the chip as the image the next send will carry. */
+    private fun stageAttachment(view: View, att: ChatAttachment, syncSend: () -> Unit) {
+        stagedAttachment = att
+        val chip = view.findViewById<View>(R.id.threadAttachChip)
+        val thumb = view.findViewById<ImageView>(R.id.threadAttachThumb)
+        val label = view.findViewById<TextView>(R.id.threadAttachLabel)
+        // Chip-sized decode, not a full-size one: the subsample keeps this
+        // off the "picked a photo, UI hitched" path.
+        val thumbPx = (ATTACH_CHIP_DP * context.resources.displayMetrics.density).toInt()
+        thumb.setImageBitmap(FediAvatars.decodeBounded(att.bytes, thumbPx))
+        label.text = context.getString(
+            R.string.chat_attachment_staged,
+            att.width,
+            att.height,
+            att.bytes.size / 1024,
+        )
+        chip.visibility = View.VISIBLE
+        syncSend()
+    }
+
+    /** Drop the staged image and hide the chip. */
+    private fun clearStagedAttachment(view: View, syncSend: () -> Unit) {
+        stagedAttachment = null
+        view.findViewById<View>(R.id.threadAttachChip).visibility = View.GONE
+        view.findViewById<ImageView>(R.id.threadAttachThumb).setImageDrawable(null)
+        syncSend()
+    }
+
+    /**
+     * The activity finished preparing a picked photo: [att] is already
+     * downscaled, re-encoded (which is what strips its EXIF) and under the
+     * engine's cap. Staged for the next send if the user is still on a DM
+     * thread; dropped otherwise, since a picture belongs to the
+     * conversation it was picked in.
+     */
+    fun onChatImagePrepared(att: ChatAttachment) {
+        val view = threadView ?: return
+        val sync = attachSyncSend ?: return
+        if (screenStack.lastOrNull() !is Screen.Thread) return
+        stageAttachment(view, att, sync)
+    }
+
+    /** Preparing the picked photo failed; say which way it failed. */
+    fun onChatImageRejected(tooBig: Boolean) {
+        snackbar(
+            context.getString(
+                if (tooBig) R.string.chat_attachment_too_big
+                else R.string.chat_attachment_unreadable,
+            ),
+        )
+    }
+
+    /**
+     * Open [att] full-screen. Deliberately simple (a dialog + one close X,
+     * the [io.etchit.fetchit.showQrPreviewDialog] idiom): the image is at
+     * most 1600px on its long edge, so a fitted full-screen view already
+     * shows every pixel that was sent and pinch-zoom would only magnify
+     * the encoder.
+     */
+    private fun showChatImage(att: ChatAttachment, key: String?) {
+        lifecycleScope.launch {
+            // Normally already decoded by the row that was tapped; the
+            // cold path still decodes off the main thread rather than
+            // stalling the tap.
+            val bmp = key?.let { attachThumbs.cached(it) }
+                ?: withContext(Dispatchers.IO) { ChatImageAttachment.decodeForDisplay(att) }
+                    ?.also { bmp -> key?.let { attachThumbs.put(it, bmp) } }
+                ?: return@launch
+            val dialogView = LayoutInflater.from(context)
+                .inflate(R.layout.dialog_chat_image, null, false)
+            dialogView.findViewById<ImageView>(R.id.chatImageFull).setImageBitmap(bmp)
+            val dialog = android.app.Dialog(context, R.style.Theme_Fetchit_PhotoDialog).apply {
+                setContentView(dialogView)
+                window?.setLayout(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+            }
+            dialogView.findViewById<ImageButton>(R.id.chatImageClose)
+                .setOnClickListener { dialog.dismiss() }
+            dialog.show()
+        }
+    }
+
+    /**
+     * Cache key for a message's decoded photo: the message's own identity,
+     * never a hash of the bytes. Hashing 256 KiB on every bind would cost
+     * more than the decode it saves, and an identity hash of the array
+     * could — however unlikely — collide, which would draw one person's
+     * picture in another's bubble. A message with neither id (there is no
+     * such inbound path today) simply goes uncached.
+     */
+    private fun attachmentKey(msg: ChatMessage): String? =
+        msg.messageId?.takeIf { it.isNotBlank() } ?: msg.outboxId
 
     /** Flush the outbox now, in response to a tap on a failed message bubble. */
     private fun retryOutbox() {
@@ -4110,6 +4279,7 @@ class ChatModeView(
             private val cards: LinearLayout = itemView.findViewById(R.id.messageCards)
             private val meta: TextView = itemView.findViewById(R.id.messageMeta)
             private val like: TextView = itemView.findViewById(R.id.messageLike)
+            private val image: ImageView = itemView.findViewById(R.id.messageImage)
 
             fun bindDm(
                 msg: ChatMessage,
@@ -4180,6 +4350,14 @@ class ChatModeView(
                     // Clear any retry listener left by a recycled outbound bubble.
                     itemView.setOnClickListener(null)
                 }
+                // The inline photo, above the words on either side of the
+                // conversation. Text-only messages hide the slot; a
+                // recycled row must never show the previous message's
+                // picture.
+                bindAttachmentImage(msg)
+                // An image sent on its own carries no text: collapse the
+                // empty body so the bubble hugs the picture.
+                bubble.visibility = if (msg.body.isEmpty()) View.GONE else View.VISIBLE
                 // A content card per address the body mentions, on both sides
                 // of the conversation — what you shared is a thing, not a hex
                 // string. Renders from the address alone; the preview fetch
@@ -4187,7 +4365,71 @@ class ChatModeView(
                 addressCards.bind(cards, msg.body)
             }
 
+            /**
+             * Draw the message's inline photo, or clear the slot.
+             *
+             * The row's shape is reserved from the width/height that rode
+             * with the bytes BEFORE anything decodes, so a thread does not
+             * jump as pictures land. The decode itself runs off the main
+             * thread and is cached; a tag guard keeps a slow decode from
+             * painting into a row that has since been recycled.
+             */
+            private fun bindAttachmentImage(msg: ChatMessage) {
+                val att = msg.attachment
+                if (att == null) {
+                    image.visibility = View.GONE
+                    image.setImageDrawable(null)
+                    image.setOnClickListener(null)
+                    image.contentDescription = null
+                    image.setTag(R.id.messageImage, null)
+                    return
+                }
+                val key = attachmentKey(msg)
+                image.visibility = View.VISIBLE
+                image.contentDescription = context.getString(R.string.chat_attachment_desc)
+                image.setOnClickListener { showChatImage(att, key) }
+                val maxPx =
+                    (BUBBLE_IMAGE_MAX_DP * itemView.resources.displayMetrics.density).toInt()
+                val w = minOf(maxPx, att.width).coerceAtLeast(1)
+                val h = if (att.width > 0) {
+                    ((w.toLong() * att.height) / att.width).toInt().coerceAtLeast(1)
+                } else {
+                    w
+                }
+                image.layoutParams = image.layoutParams.apply {
+                    width = w
+                    height = h
+                }
+                // The recycling guard: a decode that lands after this row
+                // has been rebound for another message paints nothing.
+                val guard = key ?: att.bytes
+                image.setTag(R.id.messageImage, guard)
+                val cached = key?.let { attachThumbs.cached(it) }
+                if (cached != null) {
+                    image.setImageBitmap(cached)
+                    return
+                }
+                image.setImageDrawable(null)
+                lifecycleScope.launch {
+                    val bmp = withContext(Dispatchers.IO) {
+                        ChatImageAttachment.decodeForDisplay(att)
+                    } ?: return@launch
+                    key?.let { attachThumbs.put(it, bmp) }
+                    // Structural for a message id, identity for the
+                    // byte-array fallback -- both are what "the same
+                    // message" means for that kind of key.
+                    if (image.getTag(R.id.messageImage) == guard) image.setImageBitmap(bmp)
+                }
+            }
+
             fun bindPost(post: FeedPost) {
+                // A recycled DM row must not leak its photo onto a feed
+                // post: fediverse posts arrive as plain text here.
+                image.visibility = View.GONE
+                image.setImageDrawable(null)
+                image.setOnClickListener(null)
+                image.setTag(R.id.messageImage, null)
+                bubble.visibility = View.VISIBLE
                 // Actor attribution from the resolved actor URL (never a
                 // body-asserted actor), formatted as a readable @user@domain in
                 // the fediverse (copper) hue. A record with no URL — our own
@@ -4573,6 +4815,13 @@ class ChatModeView(
         // Avatar edge on the People rows and feed post rows — smaller than
         // the 36dp chat-list circle so a dense list stays scannable.
         private const val PEOPLE_AVATAR_DP = 28
+
+        // Widest an inline photo is drawn in a bubble. Matches the bubble
+        // text's own maxWidth so a picture and a paragraph line up.
+        private const val BUBBLE_IMAGE_MAX_DP = 280
+
+        // Edge of the composer's staged-photo thumbnail (view_chat_thread).
+        private const val ATTACH_CHIP_DP = 40
 
         // Decode target for the header badge's own picture. The published
         // image is at most 512px square, so this only ever subsamples a

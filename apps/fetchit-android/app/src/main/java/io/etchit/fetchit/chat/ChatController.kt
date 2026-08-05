@@ -1,6 +1,7 @@
 package io.etchit.fetchit.chat
 
 import android.content.Context
+import io.etchit.fetchit.R
 import io.etchit.fetchit.SettingsStore
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
@@ -379,6 +380,7 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                             scope.launch { refreshUnread(inbound.convKey) }
                         }
                     },
+                    photoLabel = appContext.getString(R.string.chat_photo_notify),
                 )
                 // Durable-join resume pump: advance any pending join on a timer so a
                 // join that could not converge now (owner offline) auto-completes
@@ -609,6 +611,23 @@ class ChatController(private val appContext: Context, private val scope: Corouti
      */
     suspend fun hydrateConversation(convKey: String) {
         hydrateConversationVia(gateway, convKey, conversations)
+    }
+
+    /**
+     * Stage [attachment] as the image belonging to the next DM sent to
+     * [peerAgentIdHex], so the optimistic bubble shows the picture the
+     * moment the user hits send. Call it immediately BEFORE the send;
+     * returns the token [discardStagedAttachment] takes.
+     */
+    fun stageOutboundAttachment(peerAgentIdHex: String, attachment: ChatAttachment): Long =
+        conversations.stageOutboundAttachment(peerAgentIdHex, attachment)
+
+    /**
+     * Drop a staged image whose send never reached the engine, so it does
+     * not attach itself to the next message to that peer.
+     */
+    fun discardStagedAttachment(peerAgentIdHex: String, token: Long) {
+        conversations.discardStagedAttachment(peerAgentIdHex, token)
     }
 
     /**
@@ -909,6 +928,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
             // Invoked ONLY through [notifySink], never directly: the sink is a
             // bystander and must not be able to kill delivery.
             onInbound: (io.etchit.fetchit.chat.notify.InboundNotify) -> Unit = {},
+            // What a notification says for a DM that is a picture and no
+            // words. Passed in (rather than read from resources) so the
+            // pump stays free of framework types and JVM-testable.
+            photoLabel: String = "Photo",
         ): Job = scope.launch {
             // The pump is the sole feed for the conversation stores, so an
             // exception escaping the notification sink stops inbound chat dead
@@ -944,6 +967,10 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                                 body = ev.body,
                                 sentAtMs = System.currentTimeMillis(),
                                 messageId = ev.messageId,
+                                // Inline image, already validated by the
+                                // engine; a sender's malformed one arrives
+                                // null and the text still renders.
+                                attachment = ev.attachment?.toModel(),
                             ),
                         )
                         notifySink(
@@ -952,7 +979,13 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                                 kind = io.etchit.fetchit.chat.notify.InboundKind.DM,
                                 senderAgentIdHex = ev.fromAgentIdHex,
                                 senderLabel = null,
-                                body = ev.body,
+                                // A picture sent on its own has no text; say
+                                // so rather than raise a blank notification.
+                                body = if (ev.body.isBlank() && ev.attachment != null) {
+                                    photoLabel
+                                } else {
+                                    ev.body
+                                },
                                 messageId = ev.messageId.orEmpty(),
                             ),
                         )
@@ -1172,6 +1205,11 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                         h.fromAgentIdHex.takeIf { it.isNotBlank() }
                     },
                     senderName = if (h.outbound) null else h.senderName,
+                    // Image bytes cannot be rebuilt from anything else, so
+                    // they ride the vault and come back on every reload --
+                    // on this device's own sent messages as well as the
+                    // ones it received.
+                    attachment = h.attachment?.toModel(),
                 )
             }
 

@@ -26,6 +26,21 @@ class ConversationStore {
     private val lock = Any()
     private val byKey = mutableMapOf<String, MutableStateFlow<List<ChatMessage>>>()
 
+    /** One staged image waiting for the engine bubble it belongs to. */
+    private data class Staged(val token: Long, val attachment: ChatAttachment)
+
+    /**
+     * Per-peer FIFO of images staged for outbound DMs that are in flight.
+     * The engine's [OutboxBubble] carries the body only, so the shell
+     * bridges the picture across the send itself: [stageOutboundAttachment]
+     * pushes one entry per send and [upsertOutbox] pops one the first time
+     * it sees each new bubble, which lines the entries up with the engine's
+     * optimistic-echo order. Same bridge desktop's `stageOutboundMeta`
+     * builds, for the same reason.
+     */
+    private val stagedOutbound = mutableMapOf<String, ArrayDeque<Staged>>()
+    private var nextStageToken = 0L
+
     /**
      * Observable message list for conversation [key] (a [convKeyDm] or
      * [convKeyGroup] value). Creates an empty flow on first access so callers
@@ -67,10 +82,42 @@ class ConversationStore {
     }
 
     /**
+     * Stage [attachment] as the image belonging to the NEXT outbound bubble
+     * for [peerAgentIdHex]. Call it immediately before the send so the
+     * queue order matches the engine's echo order. Returns a token for
+     * [discardStagedAttachment].
+     */
+    fun stageOutboundAttachment(peerAgentIdHex: String, attachment: ChatAttachment): Long =
+        synchronized(lock) {
+            val token = nextStageToken++
+            stagedOutbound.getOrPut(peerAgentIdHex) { ArrayDeque() }
+                .addLast(Staged(token, attachment))
+            token
+        }
+
+    /**
+     * Drop the entry [stageOutboundAttachment] returned [token] for, for a
+     * send that failed BEFORE the engine echoed anything -- no bubble will
+     * ever arrive to pop it, and an orphan left in the queue would attach
+     * itself to the next message sent to that peer.
+     */
+    fun discardStagedAttachment(peerAgentIdHex: String, token: Long) {
+        synchronized(lock) {
+            val q = stagedOutbound[peerAgentIdHex] ?: return
+            q.removeAll { it.token == token }
+            if (q.isEmpty()) stagedOutbound.remove(peerAgentIdHex)
+        }
+    }
+
+    /**
      * Insert or update the outbound message backed by outbox bubble [outboxId]
      * in the thread for [peerAgentIdHex]. Keyed by [outboxId] so the optimistic
      * `Sending` echo, the `Delivered` transition, and a `Failed` terminal all
      * land on the same bubble instead of stacking duplicates.
+     *
+     * A bubble seen for the first time claims the head of this peer's staged
+     * image queue, if any; later states of the same bubble keep the image
+     * already on the message.
      */
     fun upsertOutbox(
         peerAgentIdHex: String,
@@ -91,6 +138,13 @@ class ConversationStore {
             // downgrade today, but a reordered or duplicated event must not flip a
             // delivered bubble back to Sending or Failed.
             if (idx >= 0 && list[idx].delivered && !delivered) return
+            val attachment = if (idx >= 0) {
+                list[idx].attachment
+            } else {
+                stagedOutbound[peerAgentIdHex]?.let { q ->
+                    q.removeFirstOrNull()?.also { if (q.isEmpty()) stagedOutbound.remove(peerAgentIdHex) }
+                }?.attachment
+            }
             val msg = ChatMessage(
                 outbound = true,
                 body = body,
@@ -100,6 +154,7 @@ class ConversationStore {
                 failed = failed,
                 outboxId = outboxId,
                 lastError = lastError,
+                attachment = attachment,
             )
             flow.value = if (idx >= 0) {
                 list.toMutableList().also { it[idx] = msg }
