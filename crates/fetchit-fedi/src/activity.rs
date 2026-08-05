@@ -338,6 +338,89 @@ pub fn build_undo_follow(actor_url: &str, follow: &FollowActivity) -> UndoFollow
     }
 }
 
+/// An `ActivityStreams` `Like` — a favourite of one post. `object` is
+/// the target Note's URL, not an embedded object: that is the shape
+/// Mastodon-family servers accept, and it keeps the activity a fixed
+/// size regardless of what is being liked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LikeActivity {
+    /// JSON-LD `@context` — the activitystreams vocabulary URL.
+    #[serde(rename = "@context")]
+    pub context: String,
+    /// Activity id — `<actor_url>/likes/<unique>`; the `Undo` echoes it.
+    pub id: String,
+    /// Always `"Like"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The liking actor's URL (us, outbound).
+    pub actor: String,
+    /// URL of the post being liked.
+    pub object: String,
+}
+
+/// An `Undo` wrapping the `Like` it retracts (unlike).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoLikeActivity {
+    /// JSON-LD `@context`.
+    #[serde(rename = "@context")]
+    pub context: String,
+    /// Activity id — `<like id>/undo`.
+    pub id: String,
+    /// Always `"Undo"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The actor retracting its like.
+    pub actor: String,
+    /// The original `Like`, echoed in full.
+    pub object: LikeActivity,
+}
+
+/// Build the outbound `Like` for `actor_url` → `object_url`.
+///
+/// The activity id is derived from `object_url`'s hash rather than a
+/// clock, so liking the same post twice mints the SAME id: a re-send
+/// after a failed delivery is idempotent on the receiving server, and
+/// [`build_undo_like`] can retract a like this device no longer has any
+/// record of.
+#[must_use]
+pub fn build_like(actor_url: &str, object_url: &str) -> LikeActivity {
+    LikeActivity {
+        context: "https://www.w3.org/ns/activitystreams".to_owned(),
+        id: format!("{actor_url}/likes/{}", stable_object_tag(object_url)),
+        kind: "Like".to_owned(),
+        actor: actor_url.to_owned(),
+        object: object_url.to_owned(),
+    }
+}
+
+/// Build the `Undo(Like)` retracting `like` (unlike).
+#[must_use]
+pub fn build_undo_like(actor_url: &str, like: &LikeActivity) -> UndoLikeActivity {
+    UndoLikeActivity {
+        context: "https://www.w3.org/ns/activitystreams".to_owned(),
+        id: format!("{}/undo", like.id),
+        kind: "Undo".to_owned(),
+        actor: actor_url.to_owned(),
+        object: like.clone(),
+    }
+}
+
+/// A stable, URL-path-safe tag for `object_url`: the lowercase hex of
+/// its FNV-1a 64 hash. Deterministic across devices and restarts, and
+/// free of any character that would need escaping in an activity id.
+///
+/// Not a security primitive — a collision costs two posts one shared
+/// like-activity id on our own server's namespace, nothing more — so a
+/// dependency-free hash is the right size for the job.
+fn stable_object_tag(object_url: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in object_url.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// Render a post's markdown body to the HTML that goes in `Note.content`.
 ///
 /// Intentionally minimal and **XSS-safe by construction**: every HTML
@@ -639,6 +722,62 @@ mod tests {
             v["object"]["object"],
             "https://fosstodon.org/users/happyborg"
         );
+    }
+
+    #[test]
+    fn like_wire_shape_and_undo_echo() {
+        let me = "https://bridge.example/actors/josh";
+        let post = "https://fosstodon.org/@happyborg/12345";
+        let like = build_like(me, post);
+
+        let v = serde_json::to_value(&like).unwrap();
+        assert_eq!(v["type"], "Like");
+        assert_eq!(v["actor"], me);
+        assert_eq!(v["object"], post, "object is the post URL, not the author");
+        assert_eq!(v["@context"], "https://www.w3.org/ns/activitystreams");
+        assert!(v["id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{me}/likes/")));
+        let back: LikeActivity = serde_json::from_value(v).unwrap();
+        assert_eq!(back, like);
+
+        let undo = build_undo_like(me, &like);
+        let uv = serde_json::to_value(&undo).unwrap();
+        assert_eq!(uv["type"], "Undo");
+        assert_eq!(uv["id"], format!("{}/undo", like.id));
+        assert_eq!(uv["object"]["id"], like.id);
+        assert_eq!(uv["object"]["object"], post);
+    }
+
+    #[test]
+    fn like_id_is_stable_per_post_and_distinct_across_posts() {
+        // Re-liking the same post must mint the SAME id: a retry after a
+        // failed delivery is then idempotent remotely, and an Undo can be
+        // built from the object URL alone with no local like record.
+        let me = "https://bridge.example/actors/josh";
+        let a = build_like(me, "https://fosstodon.org/@happyborg/1");
+        let again = build_like(me, "https://fosstodon.org/@happyborg/1");
+        assert_eq!(a.id, again.id);
+        let b = build_like(me, "https://fosstodon.org/@happyborg/2");
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn like_id_is_path_safe_for_any_object_url() {
+        // Object URLs carry slashes, query strings, and unicode; the id
+        // segment they produce must stay a bare hex token.
+        let me = "https://bridge.example/actors/josh";
+        for url in [
+            "https://h/@u/1?x=1&y=2#frag",
+            "https://h/users/ünicode/statuses/9",
+            "",
+        ] {
+            let id = build_like(me, url).id;
+            let tag = id.rsplit('/').next().unwrap();
+            assert_eq!(tag.len(), 16);
+            assert!(tag.chars().all(|c| c.is_ascii_hexdigit()));
+        }
     }
 
     #[test]

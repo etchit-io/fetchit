@@ -28,3 +28,25 @@ fun fediActorDisplay(actorUrl: String): String {
         .removePrefix("@")
     return if (user.isEmpty()) host else "@$user@$host"
 }
+
+/**
+ * The `@user@host` a feed row shows for [post]'s author.
+ *
+ * The resolved actor URL wins because it is the identity the engine
+ * verified; a post with none — one this device published, or one
+ * restored from a blob written before URLs were carried — falls back to
+ * the stored label so an old feed still reads correctly.
+ */
+fun authorHandle(post: FeedPost): String =
+    if (post.authorUrl.isNotEmpty()) fediActorDisplay(post.authorUrl) else post.authorLabel
+
+/**
+ * What to hand the engine's profile lookup for [post]'s author.
+ *
+ * The actor URL is preferred: it resolves without a `WebFinger`
+ * round-trip and cannot be ambiguous. Only a post that carries no URL
+ * falls back to the handle form, which the engine's lookup entrance
+ * normalizes anyway.
+ */
+fun profileTarget(post: FeedPost): String =
+    if (post.authorUrl.isNotEmpty()) post.authorUrl else post.authorLabel

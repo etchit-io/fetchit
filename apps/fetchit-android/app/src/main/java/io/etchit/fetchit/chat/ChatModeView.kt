@@ -3006,8 +3006,15 @@ class ChatModeView(
                 // Posts carry the published stamp (0 when the remote date
                 // failed to parse), so undated posts simply sit under the
                 // day above them rather than minting a header.
+                // Block on EVERY identity the row carries: entries live on
+                // this device under whichever form the blocking surface
+                // held (a `user@host` label, an `@handle`), and a post now
+                // also knows its author's actor URL. Checking one field
+                // would orphan the others' entries.
                 val rows = rowsWithDays(
-                    posts.filterNot { blockStore.isBlocked(it.actorUrl) },
+                    posts.filterNot {
+                        blockStore.isAnyBlocked(it.authorLabel, fediActorDisplay(it.authorUrl))
+                    },
                     { it.receivedAtMs },
                     { MessageRow.Post(it) },
                 )
@@ -3035,9 +3042,14 @@ class ChatModeView(
                     controller.feed.mergeRemote(
                         posts.map {
                             FeedPost(
-                                actorUrl = it.authorLabel,
+                                authorLabel = it.authorLabel,
                                 body = it.text,
                                 receivedAtMs = parseIsoToMs(it.published),
+                                authorUrl = it.authorUrl,
+                                objectUrl = it.objectUrl,
+                                authorName = it.authorName,
+                                mentions = it.mentions.map { m -> FeedMention(m.name, m.href) },
+                                liked = it.liked,
                             )
                         },
                     )
@@ -3049,6 +3061,219 @@ class ChatModeView(
     /** ISO-8601 → epoch ms, best-effort (0 sorts a stampless post oldest). */
     private fun parseIsoToMs(iso: String): Long =
         runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrDefault(0L)
+
+    /**
+     * Flip the like on a feed post, optimistically.
+     *
+     * The store is what the list renders from, so the heart flips there
+     * and not on the view holder — a recycled row would otherwise redraw
+     * the pre-tap state. A thrown FFI error puts it back; a `delivered ==
+     * false` does NOT, because the engine recorded the like and will
+     * re-assert it (the activity id is derived from the post URL, so a
+     * re-send is idempotent remotely).
+     */
+    private fun toggleFeedLike(post: FeedPost) {
+        if (post.objectUrl.isEmpty() || post.authorUrl.isEmpty()) return
+        if (!requireMintedHandle()) return
+        val want = !post.liked
+        if (!controller.feed.setLiked(post.objectUrl, want)) return
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                controller.feed.setLiked(post.objectUrl, !want)
+                return@launch
+            }
+            runCatching {
+                if (want) {
+                    gw.fediLike(post.objectUrl, post.authorUrl)
+                } else {
+                    gw.fediUnlike(post.objectUrl, post.authorUrl)
+                }
+            }.onFailure { e ->
+                controller.feed.setLiked(post.objectUrl, !want)
+                snackbar(userFacingError(e, "fediLike", R.string.feed_like_failed))
+            }
+        }
+    }
+
+    /**
+     * Profile sheet for an arbitrary fediverse account — the answer to
+     * "who is this?" from a tapped author chip or @-mention.
+     *
+     * [target] is whatever the tap carried (an actor URL from a post or a
+     * mention's href, or a handle); the engine's lookup entrance accepts
+     * all of them. [fallbackLabel] is what the sheet shows while the
+     * fetch is in flight, so it opens instantly with the name the user
+     * just tapped rather than an empty box.
+     */
+    private fun showFediProfileSheet(target: String, fallbackLabel: String) {
+        if (target.isBlank()) return
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(context)
+        val px16 = (16 * context.resources.displayMetrics.density).toInt()
+        val px8 = px16 / 2
+        val root = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(px16, px16, px16, px16)
+        }
+
+        val avatar = fediAvatarSlot(fallbackLabel, PROFILE_AVATAR_DP)
+        val nameView = TextView(context).apply {
+            text = fallbackLabel
+            textSize = 18f
+            setTextColor(themeColor(R.attr.fetchitBone))
+        }
+        val handleView = TextView(context).apply {
+            text = fallbackLabel
+            textSize = 13f
+            setTextColor(themeColor(R.attr.fetchitCopper))
+        }
+        root.addView(
+            android.widget.LinearLayout(context).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                addView(avatar)
+                addView(
+                    android.widget.LinearLayout(context).apply {
+                        orientation = android.widget.LinearLayout.VERTICAL
+                        addView(nameView)
+                        addView(handleView)
+                    },
+                )
+            },
+        )
+
+        val bioView = TextView(context).apply {
+            textSize = 14f
+            setTextColor(themeColor(R.attr.fetchitBone))
+            setPadding(0, px8, 0, px8)
+            visibility = View.GONE
+        }
+        root.addView(bioView)
+
+        val statusView = TextView(context).apply {
+            text = context.getString(R.string.fedi_profile_loading)
+            textSize = 13f
+            setTextColor(themeColor(R.attr.fetchitAsh))
+            setPadding(0, px8, 0, px8)
+        }
+        root.addView(statusView)
+
+        val actions = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(actions)
+
+        dialog.setContentView(android.widget.ScrollView(context).apply { addView(root) })
+        dialog.show()
+
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse {
+                statusView.text = context.getString(R.string.chat_connect_failed_generic)
+                return@launch
+            }
+            val profile = runCatching { gw.fediProfile(target) }.getOrElse { e ->
+                statusView.text =
+                    userFacingError(e, "fediProfile", R.string.fedi_profile_failed)
+                return@launch
+            }
+            statusView.visibility = View.GONE
+            val atHandle = "@${canonicalFediHandle(profile.label)}"
+            nameView.text = profile.displayName?.takeIf { it.isNotBlank() } ?: atHandle
+            handleView.text = atHandle
+            // Re-key the face on the canonical label now it is known — the
+            // fallback may have been a mention's display text.
+            bindFediAvatar(avatar, profile.label)
+            if (profile.bioText.isNotBlank()) {
+                bioView.text = profile.bioText
+                bioView.visibility = View.VISIBLE
+            }
+            // Ground truth for follow state is the directory; the local
+            // record overlays it so a follow sent moments ago still reads
+            // as pending before their accept lands.
+            val follows = runCatching { gw.fediFollowing() }.getOrNull().orEmpty()
+            renderProfileActions(dialog, actions, profile, follows, atHandle)
+        }
+    }
+
+    /** The action stack on a profile sheet: follow/unfollow, message, block. */
+    private fun renderProfileActions(
+        dialog: com.google.android.material.bottomsheet.BottomSheetDialog,
+        box: android.widget.LinearLayout,
+        profile: uniffi.fetchit_ffi.FediProfileFfi,
+        follows: List<uniffi.fetchit_ffi.FediFollowingFfi>,
+        atHandle: String,
+    ) {
+        box.removeAllViews()
+        val canonical = canonicalFediHandle(profile.label)
+        val entry = follows.firstOrNull { canonicalFediHandle(it.label) == canonical }
+        // A directory row is authoritative; the device's own record is the
+        // optimistic overlay for a follow whose accept hasn't landed.
+        val followingLabel = when {
+            entry?.state == "accepted" -> R.string.fedi_profile_following
+            entry != null || followStore.isFollowing(canonical) -> R.string.fedi_profile_requested
+            else -> R.string.fedi_profile_follow
+        }
+        val alreadyFollowing = followingLabel != R.string.fedi_profile_follow
+
+        fun action(label: String, run: () -> Unit) = android.widget.Button(
+            context,
+            null,
+            android.R.attr.borderlessButtonStyle,
+        ).apply {
+            text = label
+            gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+            setOnClickListener { run() }
+        }
+
+        // Same two forms the feed filter checks — a raw actor URL never
+        // canonicalises to a stored `user@host` entry, so it goes through
+        // the display reduction first.
+        val blocked = blockStore.isAnyBlocked(canonical, fediActorDisplay(profile.actorUrl))
+        if (blocked) {
+            box.addView(
+                TextView(context).apply {
+                    text = context.getString(R.string.fedi_profile_blocked_note)
+                    textSize = 13f
+                    setTextColor(themeColor(R.attr.fetchitAsh))
+                },
+            )
+        }
+
+        box.addView(
+            action(context.getString(followingLabel)) {
+                if (!requireMintedHandle()) return@action
+                if (alreadyFollowing) {
+                    // Unfollow needs the actor URL; follow needs the handle.
+                    // The sheet holds both, so neither path re-resolves.
+                    unfollowFedi(entry?.targetActorUrl ?: profile.actorUrl, atHandle) {
+                        dialog.dismiss()
+                    }
+                } else {
+                    dialog.dismiss()
+                    followFedi(atHandle)
+                }
+            },
+        )
+        box.addView(
+            action(context.getString(R.string.chat_fedi_dm)) {
+                dialog.dismiss()
+                openFediThread(atHandle)
+            },
+        )
+        box.addView(
+            action(
+                context.getString(if (blocked) R.string.fedi_unblock else R.string.fedi_block),
+            ) {
+                if (blocked) {
+                    blockStore.unblock(canonical)
+                    snackbar(context.getString(R.string.fedi_unblocked, atHandle))
+                } else {
+                    blockStore.block(canonical)
+                    snackbar(context.getString(R.string.fedi_blocked, atHandle))
+                }
+                dialog.dismiss()
+            },
+        )
+    }
 
     // ── fediverse thread (plaintext rails) ─────────────────────────────
 
@@ -3328,9 +3553,11 @@ class ChatModeView(
                 }
                 runCatching { gw.fediPublish(body, null) }
                     .onSuccess {
+                        // Our own post: no object URL comes back from the
+                        // publish call, so it stays a body-keyed record.
                         controller.feed.append(
                             FeedPost(
-                                actorUrl = "@$handle@$HOME_INSTANCE",
+                                authorLabel = "@$handle@$HOME_INSTANCE",
                                 body = body,
                                 receivedAtMs = System.currentTimeMillis(),
                             ),
@@ -3472,6 +3699,17 @@ class ChatModeView(
         val tv = android.util.TypedValue()
         context.theme.resolveAttribute(attr, tv, true)
         return tv.data
+    }
+
+    /**
+     * Resolve a theme drawable attribute (e.g. `selectableItemBackground`)
+     * to a resource id, or `0` when the theme declares none — which
+     * `setBackgroundResource` reads as "no background".
+     */
+    private fun themeResource(attr: Int): Int {
+        val tv = android.util.TypedValue()
+        context.theme.resolveAttribute(attr, tv, true)
+        return tv.resourceId
     }
 
     private fun showConnecting(visible: Boolean) {
@@ -3682,9 +3920,16 @@ class ChatModeView(
                         else -> o.sentAtMs == n.sentAtMs && o.body == n.body
                     }
                 }
+                // A post's own URL is its identity when the engine gave us
+                // one, so an edit (or a like flip) updates the row in place
+                // instead of arriving as a second bubble.
                 old is MessageRow.Post && new is MessageRow.Post ->
-                    old.post.actorUrl == new.post.actorUrl &&
-                        old.post.body == new.post.body
+                    if (old.post.objectUrl.isNotEmpty() || new.post.objectUrl.isNotEmpty()) {
+                        old.post.objectUrl == new.post.objectUrl
+                    } else {
+                        old.post.authorLabel == new.post.authorLabel &&
+                            old.post.body == new.post.body
+                    }
                 old is MessageRow.Divider && new is MessageRow.Divider ->
                     old.text == new.text
                 old is MessageRow.DaySeparator && new is MessageRow.DaySeparator ->
@@ -3760,16 +4005,21 @@ class ChatModeView(
             private val bubble: TextView = itemView.findViewById(R.id.messageBubble)
             private val cards: LinearLayout = itemView.findViewById(R.id.messageCards)
             private val meta: TextView = itemView.findViewById(R.id.messageMeta)
+            private val like: TextView = itemView.findViewById(R.id.messageLike)
 
             fun bindDm(
                 msg: ChatMessage,
                 onLinkTap: (String) -> Unit,
                 prevSenderAgentIdHex: String?,
             ) {
-                // A recycled feed row must not leak its author's face onto a
-                // LIT message: LIT has no avatar concept.
+                // A recycled feed row must not leak its author's face, its
+                // profile tap target, or its like control onto a LIT
+                // message: LIT has neither avatars nor public reactions.
                 sender.setCompoundDrawablesRelative(null, null, null, null)
                 sender.setTag(R.id.messageSender, null)
+                clearAuthorChip()
+                like.visibility = View.GONE
+                like.setOnClickListener(null)
                 if (msg.outbound) {
                     // Self keeps the copper out-bubble; the who-is-who accent is
                     // inbound-only, so no sender label or identity tint here.
@@ -3834,25 +4084,77 @@ class ChatModeView(
             }
 
             fun bindPost(post: FeedPost) {
-                // Actor attribution from the relay-verified URL (never a
+                // Actor attribution from the resolved actor URL (never a
                 // body-asserted actor), formatted as a readable @user@domain in
-                // the fediverse (copper) hue.
+                // the fediverse (copper) hue. A record with no URL — our own
+                // post, or one restored from a pre-URL blob — keeps its label.
                 sender.visibility = View.VISIBLE
-                val display = fediActorDisplay(post.actorUrl)
-                sender.text = display
+                val handle = authorHandle(post)
+                val name = post.authorName?.takeIf { it.isNotBlank() }
+                sender.text = if (name == null) handle else "$name · $handle"
                 sender.setTextColor(themeColor(R.attr.fetchitCopper))
                 // `fediActorDisplay` renders "@user@host"; the engine keys
                 // avatars on the bare canonical label.
-                bindFediAvatarInline(sender, display, PEOPLE_AVATAR_DP)
+                bindFediAvatarInline(sender, handle, PEOPLE_AVATAR_DP)
+                // The author line is a door to the person, not decoration —
+                // an unmarked name reads as static text, so it gets a real
+                // touch target and an announced action.
+                sender.isClickable = true
+                sender.minHeight = (MIN_TOUCH_DP * itemView.resources.displayMetrics.density).toInt()
+                sender.gravity = android.view.Gravity.CENTER_VERTICAL
+                sender.setBackgroundResource(themeResource(android.R.attr.selectableItemBackground))
+                sender.contentDescription =
+                    context.getString(R.string.fedi_profile_open_desc, handle)
+                sender.setOnClickListener { showFediProfileSheet(profileTarget(post), handle) }
+
                 bubbleFrame.setBackgroundResource(R.drawable.bg_bubble_in)
                 (itemView as? LinearLayout)?.gravity = android.view.Gravity.START
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                 // Feed body is plain text (HTML stripped by the pump); linkify any
-                // autonomi:// addresses so they open in the reader, like DM bubbles.
-                applyAutonomiLinkedText(bubble, post.body, onLinkTap)
+                // autonomi:// addresses so they open in the reader, like DM
+                // bubbles, plus every @-mention the post carried.
+                applyLinkedText(bubble, post.body, onLinkTap, post.mentions) { m ->
+                    showFediProfileSheet(m.href, m.name)
+                }
                 addressCards.bind(cards, post.body)
+                bindLike(post)
                 // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
                 meta.text = context.getString(R.string.chat_feed_post_public_badge)
+            }
+
+            /** Undo everything [bindPost] does to the sender line. */
+            private fun clearAuthorChip() {
+                sender.isClickable = false
+                sender.minHeight = 0
+                sender.gravity = android.view.Gravity.START or android.view.Gravity.TOP
+                sender.background = null
+                sender.contentDescription = null
+                sender.setOnClickListener(null)
+            }
+
+            /**
+             * The like toggle. Shown only when the post carries both the
+             * URLs the engine needs to act — our own posts and pre-URL
+             * records can't be liked, and offering a control that would
+             * fail is worse than not offering it.
+             */
+            private fun bindLike(post: FeedPost) {
+                if (post.objectUrl.isEmpty() || post.authorUrl.isEmpty()) {
+                    like.visibility = View.GONE
+                    like.setOnClickListener(null)
+                    return
+                }
+                like.visibility = View.VISIBLE
+                like.text = context.getString(
+                    if (post.liked) R.string.feed_liked_glyph else R.string.feed_like_glyph,
+                )
+                like.setTextColor(
+                    themeColor(if (post.liked) R.attr.fetchitCopper else R.attr.fetchitAsh),
+                )
+                like.contentDescription = context.getString(
+                    if (post.liked) R.string.feed_unlike_desc else R.string.feed_like_desc,
+                )
+                like.setOnClickListener { toggleFeedLike(post) }
             }
 
             /**
@@ -3865,9 +4167,37 @@ class ChatModeView(
                 bubble: TextView,
                 body: String,
                 onLink: (String) -> Unit,
+            ) = applyLinkedText(bubble, body, onLink, emptyList()) {}
+
+            /**
+             * [applyAutonomiLinkedText] plus a tappable span over each
+             * [mentions] entry found in the body.
+             *
+             * Autonomi links are placed first and their ranges are handed to
+             * the mention matcher as off-limits, so the two span kinds can
+             * never overlap on the same characters — two ClickableSpans on one
+             * range makes which one fires a matter of insertion order.
+             */
+            private fun applyLinkedText(
+                bubble: TextView,
+                body: String,
+                onLink: (String) -> Unit,
+                mentions: List<FeedMention>,
+                onMention: (FeedMention) -> Unit,
             ) {
                 val addresses = ChatUris.autonomiAddresses(body)
-                if (addresses.isEmpty()) {
+                val linkRanges = ArrayList<IntRange>()
+                addresses.forEach { addr ->
+                    val fullLink = "autonomi://$addr"
+                    var start = body.indexOf(fullLink)
+                    while (start >= 0) {
+                        val end = start + fullLink.length
+                        linkRanges.add(start until end)
+                        start = body.indexOf(fullLink, end)
+                    }
+                }
+                val mentionSpans = mentionRanges(body, mentions, linkRanges)
+                if (linkRanges.isEmpty() && mentionSpans.isEmpty()) {
                     bubble.text = body
                     bubble.movementMethod = null
                     return
@@ -3890,6 +4220,18 @@ class ChatModeView(
                         )
                         start = body.indexOf(fullLink, end)
                     }
+                }
+                mentionSpans.forEach { span ->
+                    spannable.setSpan(
+                        object : ClickableSpan() {
+                            override fun onClick(widget: View) {
+                                onMention(span.mention)
+                            }
+                        },
+                        span.start,
+                        span.endExclusive,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
                 }
                 bubble.text = spannable
                 bubble.movementMethod = LinkMovementMethod.getInstance()
@@ -4132,5 +4474,13 @@ class ChatModeView(
         // image is at most 512px square, so this only ever subsamples a
         // source that was already small.
         private const val SELF_AVATAR_TARGET_PX = 144
+
+        // Avatar edge on the profile sheet — the one surface where the
+        // face is the subject rather than a row marker.
+        private const val PROFILE_AVATAR_DP = 56
+
+        // Material's minimum touch target. Applied to the feed author
+        // chip, which is a text line doing a button's job.
+        private const val MIN_TOUCH_DP = 48
     }
 }

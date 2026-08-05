@@ -944,6 +944,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_following(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_go_private_invite(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_like(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_linked_label_for_agent(
@@ -960,6 +962,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_pending_invites(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links(
 ): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_profile(
+): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_self_avatar(
@@ -971,6 +975,8 @@ fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_sync_inbox(
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_threads_overview(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow(
+): Short
+fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unlike(
 ): Short
 fun uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unlink_person(
 ): Short
@@ -1129,6 +1135,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_following(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_go_private_invite(`ptr`: Pointer,`target`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,
 ): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_like(`ptr`: Pointer,`objectUrl`: RustBuffer.ByValue,`authorUrl`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_link_person(`ptr`: Pointer,`target`: RustBuffer.ByValue,`agentIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_linked_label_for_agent(`ptr`: Pointer,`agentIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1145,6 +1153,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_pending_invites(`ptr`: Pointer,
 ): RustBuffer.ByValue
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_person_links(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_profile(`ptr`: Pointer,`target`: RustBuffer.ByValue,
+): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_publish(`ptr`: Pointer,`bodyMd`: RustBuffer.ByValue,`replyToActorUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_self_avatar(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1156,6 +1166,8 @@ fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_sync_inbox(`ptr`: Pointer,
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_threads_overview(`ptr`: Pointer,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unfollow(`ptr`: Pointer,`targetActorUrl`: RustBuffer.ByValue,
+): Long
+fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unlike(`ptr`: Pointer,`objectUrl`: RustBuffer.ByValue,`authorUrl`: RustBuffer.ByValue,
 ): Long
 fun uniffi_fetchit_ffi_fn_method_chatclient_fedi_unlink_person(`ptr`: Pointer,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1449,6 +1461,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_go_private_invite() != 5912.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_like() != 34289.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_link_person() != 55120.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1473,6 +1488,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_person_links() != 49751.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_profile() != 55266.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_publish() != 9832.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1489,6 +1507,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unfollow() != 48078.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unlike() != 23892.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_unlink_person() != 17151.toShort()) {
@@ -2379,6 +2400,22 @@ public interface ChatClientInterface {
     suspend fun `fediGoPrivateInvite`(`target`: kotlin.String, `displayName`: kotlin.String): GoPrivateReportFfi
     
     /**
+     * Like the feed post at `object_url`, authored by `author_url`:
+     * record it durably on this device and deliver a signed `Like` to
+     * the author's inbox. Requires a minted handle.
+     *
+     * Returns whether the author's inbox accepted the activity. A
+     * `false` is NOT a failure to act on -- the like is recorded, the
+     * heart stays filled, and the activity id is derived from the post
+     * URL so a later re-send is idempotent remotely.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; a denylisted
+     * author errors before anything is recorded or sent.
+     */
+    suspend fun `fediLike`(`objectUrl`: kotlin.String, `authorUrl`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Link a fediverse `target` to a PQ `agent_id_hex` -- the manual
      * "Same person?" confirm. Local only; never published.
      *
@@ -2467,6 +2504,27 @@ public interface ChatClientInterface {
     fun `fediPersonLinks`(): List<FediPersonLinkFfi>
     
     /**
+     * Fetch the profile of any fediverse account, for the profile
+     * sheet a tapped author chip or @-mention opens.
+     *
+     * `target` accepts every form a tap can produce: `@user@host`,
+     * `user@host`, or an actor URL (a mention tag's `href`, a post's
+     * `authorUrl`). Resolution rides the same SSRF-guarded,
+     * denylist-gated path as `fediFollow`.
+     *
+     * Unlike the other fedi calls this does NOT require a minted
+     * handle -- reading a public profile is a read, and gating it on
+     * minting would hide the sheet from a user who has not opted in to
+     * posting yet. The ACTIONS on the sheet (follow, message) still
+     * gate shell-side.
+     *
+     * # Errors
+     * [`ChatFfiError`] when the target is blocked, unresolvable, or
+     * serves no decodable actor document.
+     */
+    suspend fun `fediProfile`(`target`: kotlin.String): FediProfileFfi
+    
+    /**
      * Publish a public post as the active minted handle. `@user@host`
      * mentions are extracted from `body_md`; the engine resolves them via
      * WebFinger and runs denylist gating before any delivery. Delivery is
@@ -2548,6 +2606,18 @@ public interface ChatClientInterface {
      * returned [`UnfollowReportFfi`], not errored.
      */
     suspend fun `fediUnfollow`(`targetActorUrl`: kotlin.String): UnfollowReportFfi
+    
+    /**
+     * Undo a like: drop the durable record and deliver the signed
+     * `Undo(Like)` to the author's inbox. Requires a minted handle.
+     *
+     * Works even if this device has no record of the original like --
+     * the retracted activity's id is a pure function of `object_url`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted.
+     */
+    suspend fun `fediUnlike`(`objectUrl`: kotlin.String, `authorUrl`: kotlin.String): kotlin.Boolean
     
     /**
      * Drop the link for a fediverse `target`.
@@ -3681,6 +3751,41 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Like the feed post at `object_url`, authored by `author_url`:
+     * record it durably on this device and deliver a signed `Like` to
+     * the author's inbox. Requires a minted handle.
+     *
+     * Returns whether the author's inbox accepted the activity. A
+     * `false` is NOT a failure to act on -- the like is recorded, the
+     * heart stays filled, and the activity id is derived from the post
+     * URL so a later re-send is idempotent remotely.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted; a denylisted
+     * author errors before anything is recorded or sent.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediLike`(`objectUrl`: kotlin.String, `authorUrl`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_like(
+                thisPtr,
+                FfiConverterString.lower(`objectUrl`),FfiConverterString.lower(`authorUrl`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Link a fediverse `target` to a PQ `agent_id_hex` -- the manual
      * "Same person?" confirm. Local only; never published.
      *
@@ -3879,6 +3984,46 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
 
     
     /**
+     * Fetch the profile of any fediverse account, for the profile
+     * sheet a tapped author chip or @-mention opens.
+     *
+     * `target` accepts every form a tap can produce: `@user@host`,
+     * `user@host`, or an actor URL (a mention tag's `href`, a post's
+     * `authorUrl`). Resolution rides the same SSRF-guarded,
+     * denylist-gated path as `fediFollow`.
+     *
+     * Unlike the other fedi calls this does NOT require a minted
+     * handle -- reading a public profile is a read, and gating it on
+     * minting would hide the sheet from a user who has not opted in to
+     * posting yet. The ACTIONS on the sheet (follow, message) still
+     * gate shell-side.
+     *
+     * # Errors
+     * [`ChatFfiError`] when the target is blocked, unresolvable, or
+     * serves no decodable actor document.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediProfile`(`target`: kotlin.String) : FediProfileFfi {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_profile(
+                thisPtr,
+                FfiConverterString.lower(`target`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeFediProfileFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Publish a public post as the active minted handle. `@user@host`
      * mentions are extracted from `body_md`; the engine resolves them via
      * WebFinger and runs denylist gating before any delivery. Delivery is
@@ -4061,6 +4206,37 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
         { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeUnfollowReportFfi.lift(it) },
+        // Error FFI converter
+        ChatFfiException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Undo a like: drop the durable record and deliver the signed
+     * `Undo(Like)` to the author's inbox. Requires a minted handle.
+     *
+     * Works even if this device has no record of the original like --
+     * the retracted activity's id is a pure function of `object_url`.
+     *
+     * # Errors
+     * [`ChatFfiError::Invalid`] when no handle is minted.
+     */
+    @Throws(ChatFfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fediUnlike`(`objectUrl`: kotlin.String, `authorUrl`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_fetchit_ffi_fn_method_chatclient_fedi_unlike(
+                thisPtr,
+                FfiConverterString.lower(`objectUrl`),FfiConverterString.lower(`authorUrl`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_fetchit_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         ChatFfiException.ErrorHandler,
     )
@@ -5652,6 +5828,49 @@ public object FfiConverterTypeFediFollowingFfi: FfiConverterRustBuffer<FediFollo
 
 
 /**
+ * One `@user@host` mention on a feed post: the visible text plus the
+ * actor URL behind it. A shell makes the text tappable and opens
+ * [`ChatClient::fedi_profile`] for the URL.
+ */
+data class FediMentionFfi (
+    /**
+     * Mention text as written in the body, e.g. `@alice@mastodon.example`.
+     */
+    var `name`: kotlin.String, 
+    /**
+     * Actor URL the authoring server resolved the mention to.
+     */
+    var `href`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediMentionFfi: FfiConverterRustBuffer<FediMentionFfi> {
+    override fun read(buf: ByteBuffer): FediMentionFfi {
+        return FediMentionFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediMentionFfi) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`href`)
+    )
+
+    override fun write(value: FediMentionFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`href`, buf)
+    }
+}
+
+
+
+/**
  * One fediverse↔LIT person link -- mirrors
  * [`fetchit_chat::fedi_link::PersonLink`] plus its canonical label.
  */
@@ -5729,6 +5948,11 @@ data class FediPostFfi (
      */
     var `authorLabel`: kotlin.String, 
     /**
+     * The author's chosen display name when they publish one; `None`
+     * means render `author_label` alone.
+     */
+    var `authorName`: kotlin.String?, 
+    /**
      * Post body as plain text.
      */
     var `text`: kotlin.String, 
@@ -5739,7 +5963,16 @@ data class FediPostFfi (
     /**
      * Link to the post on its home server.
      */
-    var `objectUrl`: kotlin.String
+    var `objectUrl`: kotlin.String, 
+    /**
+     * `Mention` tags on the post (engine-capped).
+     */
+    var `mentions`: List<FediMentionFfi>, 
+    /**
+     * This device has liked the post. Device state, not a remote
+     * count -- v1 renders the toggle and no number.
+     */
+    var `liked`: kotlin.Boolean
 ) {
     
     companion object
@@ -5753,26 +5986,105 @@ public object FfiConverterTypeFediPostFfi: FfiConverterRustBuffer<FediPostFfi> {
         return FediPostFfi(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterSequenceTypeFediMentionFfi.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: FediPostFfi) = (
             FfiConverterString.allocationSize(value.`authorUrl`) +
             FfiConverterString.allocationSize(value.`authorLabel`) +
+            FfiConverterOptionalString.allocationSize(value.`authorName`) +
             FfiConverterString.allocationSize(value.`text`) +
             FfiConverterString.allocationSize(value.`published`) +
-            FfiConverterString.allocationSize(value.`objectUrl`)
+            FfiConverterString.allocationSize(value.`objectUrl`) +
+            FfiConverterSequenceTypeFediMentionFfi.allocationSize(value.`mentions`) +
+            FfiConverterBoolean.allocationSize(value.`liked`)
     )
 
     override fun write(value: FediPostFfi, buf: ByteBuffer) {
             FfiConverterString.write(value.`authorUrl`, buf)
             FfiConverterString.write(value.`authorLabel`, buf)
+            FfiConverterOptionalString.write(value.`authorName`, buf)
             FfiConverterString.write(value.`text`, buf)
             FfiConverterString.write(value.`published`, buf)
             FfiConverterString.write(value.`objectUrl`, buf)
+            FfiConverterSequenceTypeFediMentionFfi.write(value.`mentions`, buf)
+            FfiConverterBoolean.write(value.`liked`, buf)
+    }
+}
+
+
+
+/**
+ * One remote account as a profile sheet renders it. Fetched by
+ * [`ChatClient::fedi_profile`] from the account's actor document.
+ *
+ * No follow-state field: the shell already knows what it follows (its
+ * own record plus [`ChatClient::fedi_following`]), so folding it in
+ * here would mean a directory round-trip on every profile open.
+ */
+data class FediProfileFfi (
+    /**
+     * Canonical actor URL -- what `fediUnfollow` takes.
+     */
+    var `actorUrl`: kotlin.String, 
+    /**
+     * `user@host` label -- the avatar key and the `fediFollow` /
+     * `fediDm` argument once prefixed with `@`.
+     */
+    var `label`: kotlin.String, 
+    /**
+     * The account's chosen display name, when it publishes one.
+     */
+    var `displayName`: kotlin.String?, 
+    /**
+     * Bio as PLAIN TEXT (remote HTML already reduced engine-side).
+     * Empty when there is no bio.
+     */
+    var `bioText`: kotlin.String, 
+    /**
+     * Avatar URL as served; the engine's avatar cache is the only
+     * thing that should fetch it.
+     */
+    var `iconUrl`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFediProfileFfi: FfiConverterRustBuffer<FediProfileFfi> {
+    override fun read(buf: ByteBuffer): FediProfileFfi {
+        return FediProfileFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FediProfileFfi) = (
+            FfiConverterString.allocationSize(value.`actorUrl`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterOptionalString.allocationSize(value.`displayName`) +
+            FfiConverterString.allocationSize(value.`bioText`) +
+            FfiConverterOptionalString.allocationSize(value.`iconUrl`)
+    )
+
+    override fun write(value: FediProfileFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`actorUrl`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterOptionalString.write(value.`displayName`, buf)
+            FfiConverterString.write(value.`bioText`, buf)
+            FfiConverterOptionalString.write(value.`iconUrl`, buf)
     }
 }
 
@@ -8062,6 +8374,34 @@ public object FfiConverterSequenceTypeFediFollowingFfi: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFediFollowingFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFediMentionFfi: FfiConverterRustBuffer<List<FediMentionFfi>> {
+    override fun read(buf: ByteBuffer): List<FediMentionFfi> {
+        val len = buf.getInt()
+        return List<FediMentionFfi>(len) {
+            FfiConverterTypeFediMentionFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FediMentionFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFediMentionFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FediMentionFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFediMentionFfi.write(it, buf)
         }
     }
 }

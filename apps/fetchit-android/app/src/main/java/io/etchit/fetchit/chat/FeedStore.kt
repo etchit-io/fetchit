@@ -7,6 +7,26 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * De-dup identity for a feed post. A structural key rather than a joined
+ * string: any separator character could in principle appear inside a post
+ * body, and two different posts colliding because a field boundary landed
+ * in a different place would silently swallow one of them.
+ */
+private data class FeedKey(val objectUrl: String, val authorLabel: String, val body: String)
+
+/**
+ * Identity for merge purposes: the post's own URL when the engine
+ * supplied one, otherwise the author and body together. Only a record
+ * with no URL — one this device published, or one restored from a blob
+ * written before URLs were carried — needs the fallback.
+ */
+private fun feedKey(p: FeedPost): FeedKey = if (p.objectUrl.isNotEmpty()) {
+    FeedKey(p.objectUrl, "", "")
+} else {
+    FeedKey("", p.authorLabel, p.body)
+}
+
+/**
  * Bridged fediverse posts plus the user's own published posts, persisted so
  * the feed survives an app restart. Own posts are delivered to *other*
  * servers, never echoed back to their author, so without local persistence
@@ -41,21 +61,45 @@ class FeedStore(
 
     /**
      * Merge a pulled batch of remote posts into the feed. Pulls repeat on
-     * every refresh, so entries already present (same author + body) are
-     * dropped; the merged feed is re-sorted oldest-first (the list renders
+     * every refresh, so entries already present ([feedKey]) are dropped;
+     * the merged feed is re-sorted oldest-first (the list renders
      * top-to-bottom) and capped keeping the NEWEST posts.
+     *
+     * Keying on the post's own URL is what makes an EDITED post merge onto
+     * its original row instead of arriving as a duplicate.
      */
     fun mergeRemote(remote: List<FeedPost>) {
         if (remote.isEmpty()) return
         val current = _posts.value
-        val seen = current.mapTo(HashSet()) { it.actorUrl to it.body }
-        val fresh = remote.filter { (it.actorUrl to it.body) !in seen }
+        val seen = current.mapTo(HashSet(), ::feedKey)
+        // Added to as we go, so a batch that repeats a post inside itself
+        // contributes it once.
+        val fresh = remote.filter { seen.add(feedKey(it)) }
         if (fresh.isEmpty()) return
         val next = (current + fresh)
             .sortedBy { it.receivedAtMs }
             .takeLast(MAX_POSTS)
         _posts.value = next
         save(next)
+    }
+
+    /**
+     * Set the like flag on the post with [objectUrl]. Returns whether a
+     * row actually changed, so an optimistic flip that matched nothing
+     * doesn't churn the persisted blob.
+     *
+     * The store is the single source the feed list renders from, so the
+     * heart flips here rather than on the view holder — a recycled row
+     * would otherwise redraw the pre-tap state.
+     */
+    fun setLiked(objectUrl: String, liked: Boolean): Boolean {
+        if (objectUrl.isEmpty()) return false
+        val current = _posts.value
+        if (current.none { it.objectUrl == objectUrl && it.liked != liked }) return false
+        val next = current.map { if (it.objectUrl == objectUrl) it.copy(liked = liked) else it }
+        _posts.value = next
+        save(next)
+        return true
     }
 
     private companion object {
@@ -67,17 +111,31 @@ class FeedStore(
  * JSON serde for the persisted feed (a single prefs key). Decode is
  * fail-soft: a corrupt or missing blob yields an empty feed, never a crash —
  * the feed is a cache of public content, always safe to drop.
+ *
+ * Records written before the author URL / post URL / mentions / like
+ * state were carried stored the display identity under `actorUrl`, so
+ * decode reads [FeedPost.authorLabel] from `authorLabel` falling back to
+ * that legacy key; every field added since defaults to "not known".
  */
 object FeedSerde {
 
     fun encode(posts: List<FeedPost>): String {
         val arr = JSONArray()
         posts.forEach { p ->
+            val mentions = JSONArray()
+            p.mentions.forEach { m ->
+                mentions.put(JSONObject().put("name", m.name).put("href", m.href))
+            }
             arr.put(
                 JSONObject()
-                    .put("actorUrl", p.actorUrl)
+                    .put("authorLabel", p.authorLabel)
                     .put("body", p.body)
-                    .put("receivedAtMs", p.receivedAtMs),
+                    .put("receivedAtMs", p.receivedAtMs)
+                    .put("authorUrl", p.authorUrl)
+                    .put("objectUrl", p.objectUrl)
+                    .put("authorName", p.authorName)
+                    .put("mentions", mentions)
+                    .put("liked", p.liked),
             )
         }
         return arr.toString()
@@ -88,10 +146,29 @@ object FeedSerde {
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             FeedPost(
-                actorUrl = o.optString("actorUrl"),
+                authorLabel = o.optString("authorLabel").ifEmpty { o.optString("actorUrl") },
                 body = o.optString("body"),
                 receivedAtMs = o.optLong("receivedAtMs"),
+                authorUrl = o.optString("authorUrl"),
+                objectUrl = o.optString("objectUrl"),
+                authorName = if (o.isNull("authorName")) {
+                    null
+                } else {
+                    o.optString("authorName").ifEmpty { null }
+                },
+                mentions = decodeMentions(o.optJSONArray("mentions")),
+                liked = o.optBoolean("liked"),
             )
         }
     }.getOrDefault(emptyList())
+
+    private fun decodeMentions(arr: JSONArray?): List<FeedMention> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val name = o.optString("name")
+            val href = o.optString("href")
+            if (name.isEmpty() || href.isEmpty()) null else FeedMention(name, href)
+        }
+    }
 }

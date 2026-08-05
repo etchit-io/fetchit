@@ -803,6 +803,17 @@ pub struct UnfollowReportFfi {
     pub removed: bool,
 }
 
+/// One `@user@host` mention on a feed post: the visible text plus the
+/// actor URL behind it. A shell makes the text tappable and opens
+/// [`ChatClient::fedi_profile`] for the URL.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediMentionFfi {
+    /// Mention text as written in the body, e.g. `@alice@mastodon.example`.
+    pub name: String,
+    /// Actor URL the authoring server resolved the mention to.
+    pub href: String,
+}
+
 /// One post in the pulled read feed (text only; wire HTML is reduced
 /// engine-side, so shells render this as plain text).
 #[derive(Debug, Clone, uniffi::Record)]
@@ -811,12 +822,43 @@ pub struct FediPostFfi {
     pub author_url: String,
     /// Short author label -- `user@host`.
     pub author_label: String,
+    /// The author's chosen display name when they publish one; `None`
+    /// means render `author_label` alone.
+    pub author_name: Option<String>,
     /// Post body as plain text.
     pub text: String,
     /// ISO-8601 publish stamp as served (may be empty).
     pub published: String,
     /// Link to the post on its home server.
     pub object_url: String,
+    /// `Mention` tags on the post (engine-capped).
+    pub mentions: Vec<FediMentionFfi>,
+    /// This device has liked the post. Device state, not a remote
+    /// count -- v1 renders the toggle and no number.
+    pub liked: bool,
+}
+
+/// One remote account as a profile sheet renders it. Fetched by
+/// [`ChatClient::fedi_profile`] from the account's actor document.
+///
+/// No follow-state field: the shell already knows what it follows (its
+/// own record plus [`ChatClient::fedi_following`]), so folding it in
+/// here would mean a directory round-trip on every profile open.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediProfileFfi {
+    /// Canonical actor URL -- what `fediUnfollow` takes.
+    pub actor_url: String,
+    /// `user@host` label -- the avatar key and the `fediFollow` /
+    /// `fediDm` argument once prefixed with `@`.
+    pub label: String,
+    /// The account's chosen display name, when it publishes one.
+    pub display_name: Option<String>,
+    /// Bio as PLAIN TEXT (remote HTML already reduced engine-side).
+    /// Empty when there is no bio.
+    pub bio_text: String,
+    /// Avatar URL as served; the engine's avatar cache is the only
+    /// thing that should fetch it.
+    pub icon_url: Option<String>,
 }
 
 /// Result of [`ChatClient::fedi_ensure_v2`]: the hub-open upgrade pass. Never
@@ -2236,11 +2278,115 @@ impl ChatClient {
             .map(|p| FediPostFfi {
                 author_url: p.author_url,
                 author_label: p.author_label,
+                author_name: p.author_name,
                 text: p.text,
                 published: p.published,
                 object_url: p.object_url,
+                mentions: p
+                    .mentions
+                    .into_iter()
+                    .map(|m| FediMentionFfi {
+                        name: m.name,
+                        href: m.href,
+                    })
+                    .collect(),
+                liked: p.liked,
             })
             .collect())
+    }
+
+    /// Fetch the profile of any fediverse account, for the profile
+    /// sheet a tapped author chip or @-mention opens.
+    ///
+    /// `target` accepts every form a tap can produce: `@user@host`,
+    /// `user@host`, or an actor URL (a mention tag's `href`, a post's
+    /// `authorUrl`). Resolution rides the same SSRF-guarded,
+    /// denylist-gated path as `fediFollow`.
+    ///
+    /// Unlike the other fedi calls this does NOT require a minted
+    /// handle -- reading a public profile is a read, and gating it on
+    /// minting would hide the sheet from a user who has not opted in to
+    /// posting yet. The ACTIONS on the sheet (follow, message) still
+    /// gate shell-side.
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] when the target is blocked, unresolvable, or
+    /// serves no decodable actor document.
+    pub async fn fedi_profile(&self, target: String) -> Result<FediProfileFfi, ChatFfiError> {
+        let profile = self
+            .inner
+            .fetch_fedi_profile(&target)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(FediProfileFfi {
+            actor_url: profile.actor_url,
+            label: profile.label,
+            display_name: profile.display_name,
+            bio_text: profile.bio_text,
+            icon_url: profile.icon_url,
+        })
+    }
+
+    /// Like the feed post at `object_url`, authored by `author_url`:
+    /// record it durably on this device and deliver a signed `Like` to
+    /// the author's inbox. Requires a minted handle.
+    ///
+    /// Returns whether the author's inbox accepted the activity. A
+    /// `false` is NOT a failure to act on -- the like is recorded, the
+    /// heart stays filled, and the activity id is derived from the post
+    /// URL so a later re-send is idempotent remotely.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted; a denylisted
+    /// author errors before anything is recorded or sent.
+    pub async fn fedi_like(
+        &self,
+        object_url: String,
+        author_url: String,
+    ) -> Result<bool, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .like_fedi_post(&handle, &object_url, &author_url, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(report.delivered)
+    }
+
+    /// Undo a like: drop the durable record and deliver the signed
+    /// `Undo(Like)` to the author's inbox. Requires a minted handle.
+    ///
+    /// Works even if this device has no record of the original like --
+    /// the retracted activity's id is a pure function of `object_url`.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when no handle is minted.
+    pub async fn fedi_unlike(
+        &self,
+        object_url: String,
+        author_url: String,
+    ) -> Result<bool, ChatFfiError> {
+        let handle = self
+            .fedi_actor_status()
+            .ok_or_else(|| ChatFfiError::Invalid {
+                reason: "no public handle minted".to_owned(),
+            })?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let report = self
+            .inner
+            .unlike_fedi_post(&handle, &object_url, &author_url, now_ms)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(report.delivered)
     }
 
     /// Run the v2 upgrade + re-register pass, called when the fedi hub opens

@@ -32,6 +32,20 @@ class FediBlockStore(context: Context) {
     /** Whether [handle] is blocked on this device. */
     fun isBlocked(handle: String): Boolean = canonicalFediHandle(handle) in handles()
 
+    /**
+     * Whether ANY of [candidates] is blocked, skipping blanks.
+     *
+     * A blocked account can reach a surface under more than one name:
+     * a feed row knows the author both as a `user@host` label and as an
+     * actor URL, and entries already on this device were stored under
+     * whichever form the blocking surface happened to hold. Matching on
+     * a single field would silently orphan those entries and let a
+     * blocked account's posts reappear, so every form a caller has goes
+     * through the same check.
+     */
+    fun isAnyBlocked(vararg candidates: String): Boolean =
+        candidates.any { it.isNotBlank() && isBlocked(it) }
+
     /** All blocked handles, sorted for stable display. */
     fun blocked(): List<String> = handles().sorted()
 

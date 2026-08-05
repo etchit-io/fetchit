@@ -55,20 +55,44 @@
             android:orientation="vertical"
             android:visibility="gone" />
 
-        <!-- Time (+ send state on outbound), bottom-end inside the bubble —
-             the standard messenger placement. Always end-aligned, inbound and
-             outbound alike, so the eye finds it in one place. -->
-        <TextView
-            android:id="@+id/messageMeta"
+        <!-- Bottom line inside the bubble: post actions, then the time
+             (+ send state on outbound). Kept wrap_content and gravity=end
+             so the bubble still hugs its text — a match_parent row here
+             would stretch every bubble to the full screen width. The
+             action slot is gone unless the row is a fediverse feed post. -->
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="end"
             android:layout_marginTop="3dp"
             android:layout_marginStart="16dp"
-            android:maxWidth="280dp"
-            android:textColor="?attr/fetchitAsh"
-            android:fontFamily="monospace"
-            android:textSize="10sp" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <!-- Like toggle for fediverse feed posts. Gone on every chat
+                 row: LIT messages have no public reaction concept. -->
+            <TextView
+                android:id="@+id/messageLike"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="48dp"
+                android:minHeight="32dp"
+                android:gravity="center"
+                android:textSize="15sp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/messageMeta"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:maxWidth="280dp"
+                android:textAlignment="textEnd"
+                android:textColor="?attr/fetchitAsh"
+                android:fontFamily="monospace"
+                android:textSize="10sp" />
+
+        </LinearLayout>
 
     </LinearLayout>
 

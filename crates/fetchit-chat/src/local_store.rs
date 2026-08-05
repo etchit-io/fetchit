@@ -146,6 +146,19 @@ impl StoreLayout {
             .join(format!("{handle}.json.enc"))
     }
 
+    /// Sealed liked-post store for the minted `handle`
+    /// (`<root>/fedi/likes/<handle>.json.enc`) — which posts this device
+    /// has favourited, so a heart stays filled across a restart. Nested
+    /// like `threads/` and `links/` so
+    /// [`crate::fedi_vault::list_actor_handles`]'s `fedi/*.json.enc`
+    /// scan never mistakes it for a minted identity.
+    #[must_use]
+    pub fn fedi_likes_path(&self, handle: &str) -> PathBuf {
+        self.fedi_dir
+            .join("likes")
+            .join(format!("{handle}.json.enc"))
+    }
+
     /// Path of the handle-resolution continuity ledger (M5.1): a JSON
     /// map of canonical fediverse handle to the agent id it last
     /// verifiably resolved to. Plaintext: every value in it is public

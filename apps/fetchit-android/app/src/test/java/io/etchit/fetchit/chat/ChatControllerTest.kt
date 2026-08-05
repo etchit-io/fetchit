@@ -19,6 +19,7 @@ import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FediFollowingFfi
 import uniffi.fetchit_ffi.FediPostFfi
 import uniffi.fetchit_ffi.FediPersonLinkFfi
+import uniffi.fetchit_ffi.FediProfileFfi
 import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
@@ -160,6 +161,10 @@ class FakeGateway : ChatGateway {
     override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
         UnfollowReportFfi(delivered = true, removed = true)
     override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
+    override suspend fun fediProfile(target: String): FediProfileFfi =
+        FediProfileFfi(target, target, null, "", null)
+    override suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean = true
+    override suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean = true
     override suspend fun fediSyncInbox(): UInt = 0u
     override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> = emptyList()
     override suspend fun fediFollowers(): List<String> = emptyList()
@@ -538,13 +543,19 @@ class ChatControllerTest {
         val gw = FakeGateway()
         val feed = FeedStore()
         val pump = ChatController.pumpEvents(gw, ConversationStore(), feed, scope = this, htmlStripper = ::stripHtml)
-        val activity = """{"object":{"content":"<p>hi <b>there</b></p>"}}""".toByteArray()
+        val activity =
+            """{"object":{"id":"https://m.example/u/x/1","content":"<p>hi <b>there</b></p>"}}"""
+                .toByteArray()
         gw.events.send(ChatEventFfi.PublicPost("https://m.example/u/x", activity))
         gw.events.send(null)
         pump.join()
         val post = feed.posts.value.single()
         assertEquals("hi there", post.body)
-        assertEquals("https://m.example/u/x", post.actorUrl)
+        // The relay-VERIFIED actor url is kept as the identity; the label
+        // is derived from it, so a tap has a real actor to open.
+        assertEquals("https://m.example/u/x", post.authorUrl)
+        assertEquals("@x@m.example", post.authorLabel)
+        assertEquals("https://m.example/u/x/1", post.objectUrl)
     }
 
     @Test
@@ -591,6 +602,10 @@ class ChatControllerTest {
             override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
                 UnfollowReportFfi(delivered = true, removed = true)
             override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
+            override suspend fun fediProfile(target: String): FediProfileFfi =
+                throw UnsupportedOperationException()
+            override suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean = true
+            override suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean = true
             override suspend fun fediSyncInbox(): UInt = 0u
             override suspend fun fediThreadsOverview(): List<FediThreadSummaryFfi> = emptyList()
             override suspend fun fediFollowers(): List<String> = emptyList()

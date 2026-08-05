@@ -319,9 +319,28 @@ The user's own picture is the one cache entry marked `pinned` and exempt from
 eviction: it is drawn by those same private surfaces, which have no
 cache-only way to get it back.
 
+The read path carries the identity a social surface needs.
+`fetchit_fedi::lookup::RemoteActor` decodes `name` and `summary` beside the
+identity pair, and `RemotePost` carries the Note's `Mention` tags (capped at 32
+per post). `fetchit_chat::fedi_profile::Client::fetch_fedi_profile` projects one
+actor document into a profile card, accepting `@user@host`, `user@host`, or an
+actor URL -- handle forms resolve through the denylist-gated mention path, URLs
+through its URL-form twin -- and reduces the bio with `fetchit_fedi::text` so no
+remote markup can reach a renderer.
+
+`Like` / `Undo(Like)` ride the same signed-delivery shape as `Follow`.
+`fetchit_chat::fedi_like` owns the driver plus a sealed, bounded liked-set
+(`<root>/fedi/likes/<handle>.json.enc`, oldest-first eviction past 2000 posts)
+joined against the feed when it is built. The like activity id is derived from
+the post URL, so a re-send after a failed delivery is idempotent remotely and an
+unlike works on a device holding no record of the original like. There are no
+like COUNTS: no cheap ActivityPub source exists for a total, so v1 renders
+liked-state only rather than a number the project cannot stand behind.
+
 **Key entry points:** `fetchit_fedi::ssrf`,
 `fetchit_fedi::webfinger::resolve_handle`, `fetchit_fedi::actor::fetch_actor`,
-`fetchit_fedi::avatar::fetch_avatar`,
+`fetchit_fedi::avatar::fetch_avatar`, `fetchit_fedi::lookup::RemoteActor`,
+`fetchit_fedi::activity::build_like`,
 `fetchit_fedi::signature::HttpSignatureKey`.
 
 <!-- arch: id=fetchit-fedi glob=crates/fetchit-fedi/** verified=e771309 -->
