@@ -637,7 +637,7 @@ fn check_date_skew(date: &str) -> Result<(), ()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+    use axum::http::{HeaderName, HeaderValue};
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
     use rsa::pkcs1v15::SigningKey;
@@ -645,16 +645,35 @@ mod tests {
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::RsaPrivateKey;
     use sha2::Sha256;
+    use std::sync::OnceLock;
+
+    /// One RSA-2048 keypair for the whole module: keygen costs ~200 ms
+    /// and the tables below would otherwise pay it two dozen times over.
+    fn test_signing_key() -> &'static (SigningKey<Sha256>, String) {
+        static KEY: OnceLock<(SigningKey<Sha256>, String)> = OnceLock::new();
+        KEY.get_or_init(|| {
+            let priv_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+            let pubkey_pem = priv_key
+                .to_public_key()
+                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+            (SigningKey::<Sha256>::new(priv_key), pubkey_pem)
+        })
+    }
+
+    /// RSA-SHA256 over `base`, base64 — the payload of a `signature=`
+    /// parameter.
+    fn sign_b64(base: &str) -> String {
+        let (key, _) = test_signing_key();
+        B64.encode(key.sign(base.as_bytes()).to_bytes())
+    }
 
     /// A request exactly as prod receives a Mastodon delivery: signed
     /// over the PUBLIC domain and Mastodon's 5-header list, arriving
     /// with the edge-worker's ORIGIN vhost in `Host`.
     fn mastodon_delivery() -> (HeaderMap, Vec<u8>, String) {
-        let priv_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
-        let pubkey_pem = priv_key
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
+        let (_, pubkey_pem) = test_signing_key();
+        let pubkey_pem = pubkey_pem.clone();
         let body = br#"{"type":"Create","actor":"https://fosstodon.org/users/happyborg"}"#.to_vec();
         let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
         let digest = compute_digest_cavage(&body);
@@ -665,8 +684,7 @@ mod tests {
              digest: {digest}\n\
              content-type: application/activity+json"
         );
-        let signing_key = SigningKey::<Sha256>::new(priv_key);
-        let sig = B64.encode(signing_key.sign(base.as_bytes()).to_bytes());
+        let sig = sign_b64(&base);
         let signature = format!(
             "keyId=\"https://fosstodon.org/users/happyborg#main-key\",\
              algorithm=\"rsa-sha256\",\
@@ -713,6 +731,510 @@ mod tests {
         let err = verify_inbound_signature(&headers, "josh", &pubkey_pem, b"{}", "etchit.io")
             .unwrap_err();
         assert_eq!(err, "digest mismatch");
+    }
+
+    // ---------------------------------------------------------------
+    // Inbound-signature variation map.
+    //
+    // The fixtures above model ONE sender shape — the fosstodon.org
+    // delivery that works in production. The fediverse is not that
+    // uniform: senders differ in which components they cover, how they
+    // spell them, whether they name an algorithm, and whether the
+    // `keyId` they sign with is even owned by the activity's actor.
+    //
+    // The two tables below are an executable map of what this gate
+    // ACCEPTS, not an argument that any given row should flip. Each row
+    // pins CURRENT behaviour, so a change to the verifier has to change
+    // a row and say why.
+    // ---------------------------------------------------------------
+
+    /// The body every table row signs over.
+    const CASE_BODY: &[u8] = br#"{"type":"Create","actor":"https://mastodon.social/users/alice"}"#;
+    /// `keyId` of the actor whose key the rows are verified against.
+    const CASE_KEY_ID: &str = "https://mastodon.social/users/alice#main-key";
+    /// Inbox path the rows are delivered to.
+    const CASE_PATH: &str = "/actors/josh/inbox";
+    /// The public fediverse domain remote signers see and sign.
+    const CASE_PUBLIC_HOST: &str = "etchit.io";
+    /// The vhost the edge worker forwards to, i.e. the `Host` we
+    /// actually receive.
+    const CASE_ORIGIN_HOST: &str = "bridge-origin.etchit.io";
+
+    /// One point in the inbound draft-cavage variation space.
+    struct CavageCase {
+        /// Row label, echoed on assertion failure.
+        name: &'static str,
+        /// `headers="..."` exactly as it goes on the wire, case
+        /// preserved — signers do not all lowercase. The signing base
+        /// is always built from the lowercased names, which is what
+        /// draft-cavage §2.3 requires of a signer.
+        declared: &'static str,
+        /// Request headers beyond the four every Mastodon delivery
+        /// carries (`host`, `date`, `digest`, `content-type`). Visible
+        /// to the signer too.
+        extra: &'static [(&'static str, &'static str)],
+        /// Headers the signer covered that never reach us — a hop in
+        /// front of the origin stripped them.
+        stripped: &'static [&'static str],
+        /// `algorithm="..."`; `None` omits the parameter entirely.
+        algorithm: Option<&'static str>,
+        /// `keyId="..."` as the signer writes it.
+        key_id: &'static str,
+        /// The host the signer bound into its `host:` line.
+        signed_host: &'static str,
+        /// `Ok(())`, or the exact reason string the 401 body carries.
+        expect: Result<(), &'static str>,
+    }
+
+    const CAVAGE_CASES: &[CavageCase] = &[
+        // -- expected-pass ------------------------------------------
+        CavageCase {
+            name: "mastodon_classic_five_components",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "minimal_four_components_no_content_type",
+            declared: "(request-target) host date digest",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "user_agent_covered_and_delivered",
+            declared: "(request-target) host date digest content-type user-agent",
+            extra: &[("user-agent", "http.rb/5.1.1 (Mastodon/4.3.1)")],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "accept_encoding_covered_and_delivered",
+            declared: "(request-target) host date digest accept-encoding",
+            extra: &[("accept-encoding", "gzip")],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "component_names_upper_cased_on_the_wire",
+            declared: "(request-target) Host Date Digest Content-Type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "algorithm_parameter_omitted",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: None,
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "signed_over_the_received_origin_vhost",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            // Second host candidate: a sender that reached the origin
+            // directly signed the vhost, not the public domain.
+            signed_host: CASE_ORIGIN_HOST,
+            expect: Ok(()),
+        },
+        // The keyId rows below are the ones to read twice. The gate
+        // derives its verification key from the ACTIVITY's `actor` and
+        // never parses `keyId` at all, so a signature made with the
+        // actor's key is accepted no matter what key the signer claims
+        // to have used. Pinned as CURRENT behaviour, not as desired
+        // behaviour — see docs/INBOX-KEYID.md.
+        CavageCase {
+            name: "key_id_owned_by_a_different_actor_is_still_accepted",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: "https://relay.example/actor#main-key",
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        CavageCase {
+            name: "empty_key_id_is_still_accepted",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: "",
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Ok(()),
+        },
+        // -- expected-fail ------------------------------------------
+        CavageCase {
+            name: "content_type_covered_but_stripped_in_transit",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["content-type"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signed header missing from request"),
+        },
+        CavageCase {
+            name: "user_agent_covered_but_stripped_in_transit",
+            declared: "(request-target) host date digest user-agent",
+            extra: &[("user-agent", "http.rb/5.1.1 (Mastodon/4.3.1)")],
+            stripped: &["user-agent"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signed header missing from request"),
+        },
+        CavageCase {
+            // hs2019 signers carry `(created)`/`(expires)` in the
+            // signature PARAMETERS, not as HTTP headers. The verifier
+            // resolves every declared name through the header map, so
+            // these can only ever come back missing.
+            name: "created_and_expires_pseudo_components",
+            declared: "(request-target) (created) (expires) host date digest",
+            extra: &[],
+            stripped: &[],
+            algorithm: None,
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signed header missing from request"),
+        },
+        CavageCase {
+            name: "algorithm_hs2019_rejected_before_any_verify",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("hs2019"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("unsupported algorithm"),
+        },
+        CavageCase {
+            name: "request_target_not_covered",
+            declared: "host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            name: "digest_not_covered",
+            declared: "(request-target) host date content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            name: "host_not_covered",
+            declared: "(request-target) date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            name: "date_not_covered",
+            declared: "(request-target) host digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("signature invalid"),
+        },
+        CavageCase {
+            // RFC 9530 naming without RFC 9421 framing: no
+            // `Signature-Input`, so the cavage branch runs and demands
+            // the legacy `Digest` header regardless of what was covered.
+            name: "content_digest_header_instead_of_digest",
+            declared: "(request-target) host date content-digest",
+            extra: &[(
+                "content-digest",
+                "sha-256=:uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=:",
+            )],
+            stripped: &["digest"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing digest"),
+        },
+        CavageCase {
+            name: "digest_header_stripped",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["digest"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing digest"),
+        },
+        CavageCase {
+            name: "date_header_stripped",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["date"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing date"),
+        },
+        CavageCase {
+            name: "host_header_stripped",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &["host"],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: CASE_PUBLIC_HOST,
+            expect: Err("missing host"),
+        },
+        CavageCase {
+            name: "signed_over_a_host_we_never_advertise",
+            declared: "(request-target) host date digest content-type",
+            extra: &[],
+            stripped: &[],
+            algorithm: Some("rsa-sha256"),
+            key_id: CASE_KEY_ID,
+            signed_host: "evil.example",
+            expect: Err("signature invalid"),
+        },
+    ];
+
+    /// Build and verify one draft-cavage row.
+    fn run_cavage_case(case: &CavageCase) {
+        let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
+        let digest = compute_digest_cavage(CASE_BODY);
+        // Everything the SIGNER can see, before the stripping hop.
+        let mut visible: Vec<(String, String)> = vec![
+            ("host".to_owned(), CASE_ORIGIN_HOST.to_owned()),
+            ("date".to_owned(), date),
+            ("digest".to_owned(), digest),
+            (
+                "content-type".to_owned(),
+                "application/activity+json".to_owned(),
+            ),
+        ];
+        for (k, v) in case.extra {
+            visible.push(((*k).to_owned(), (*v).to_owned()));
+        }
+
+        let lines: Vec<String> = case
+            .declared
+            .split_whitespace()
+            .map(|raw| {
+                let name = raw.to_lowercase();
+                let value = match name.as_str() {
+                    "(request-target)" => format!("post {CASE_PATH}"),
+                    "host" => case.signed_host.to_owned(),
+                    // hs2019 signature parameters, echoed into the base
+                    // the way an hs2019 signer would.
+                    "(created)" => "1785000000".to_owned(),
+                    "(expires)" => "1785003600".to_owned(),
+                    other => {
+                        let Some((_, value)) = visible.iter().find(|(k, _)| k == other) else {
+                            panic!("case `{}` covers unknown header `{other}`", case.name)
+                        };
+                        value.clone()
+                    }
+                };
+                format!("{name}: {value}")
+            })
+            .collect();
+        let sig = sign_b64(&lines.join("\n"));
+
+        let mut parts = vec![format!("keyId=\"{}\"", case.key_id)];
+        if let Some(algorithm) = case.algorithm {
+            parts.push(format!("algorithm=\"{algorithm}\""));
+        }
+        parts.push(format!("headers=\"{}\"", case.declared));
+        parts.push(format!("signature=\"{sig}\""));
+        let params = parts.join(",");
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in &visible {
+            if case.stripped.contains(&name.as_str()) {
+                continue;
+            }
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers.insert("signature", HeaderValue::from_str(&params).unwrap());
+
+        let (_, pubkey_pem) = test_signing_key();
+        let got =
+            verify_inbound_signature(&headers, "josh", pubkey_pem, CASE_BODY, CASE_PUBLIC_HOST);
+        assert_eq!(got, case.expect, "cavage case `{}`", case.name);
+    }
+
+    #[test]
+    fn cavage_variation_map_matches_current_behaviour() {
+        for case in CAVAGE_CASES {
+            run_cavage_case(case);
+        }
+    }
+
+    /// One point in the inbound RFC 9421 variation space.
+    ///
+    /// Rows always sign HONESTLY — the signing base is rebuilt from the
+    /// components the row declares. That is what makes the table
+    /// meaningful: the receiver reconstructs a FIXED five-component
+    /// base regardless of what was declared, so any row whose component
+    /// list is not exactly our own shape cannot verify.
+    struct Rfc9421Case {
+        /// Row label, echoed on assertion failure.
+        name: &'static str,
+        /// Signature label — the `sig1` in `sig1=(...)`.
+        label: &'static str,
+        /// Covered components, verbatim, including the quotes.
+        components: &'static str,
+        /// Drop the `Content-Digest` header from the request.
+        omit_content_digest: bool,
+        /// `Ok(())`, or the exact reason string the 401 body carries.
+        expect: Result<(), &'static str>,
+    }
+
+    const RFC9421_CASES: &[Rfc9421Case] = &[
+        Rfc9421Case {
+            // The one shape this receiver can reconstruct: our own
+            // emitter's component list, in our own order.
+            name: "our_own_five_component_shape",
+            label: "sig1",
+            components: "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\"",
+            omit_content_digest: false,
+            expect: Ok(()),
+        },
+        Rfc9421Case {
+            // A leaner covered set — the shape a proxy-tolerant RFC 9421
+            // signer emits. Signed correctly; rejected anyway, because
+            // the receiver rebuilds five lines the signer never covered.
+            name: "leaner_component_list",
+            label: "sig1",
+            components: "\"@method\" \"@target-uri\" \"content-digest\"",
+            omit_content_digest: false,
+            expect: Err("signature invalid"),
+        },
+        Rfc9421Case {
+            // Strictly MORE components than we rebuild. The doc comment
+            // on `verify_signature_rfc9421` used to claim extras are
+            // fine; they are not — the base is fixed, not derived.
+            name: "extra_component_beyond_our_fixed_base",
+            label: "sig1",
+            components:
+                "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\" \"user-agent\"",
+            omit_content_digest: false,
+            expect: Err("signature invalid"),
+        },
+        Rfc9421Case {
+            // The receiver hard-requires the `sig1` label on both
+            // headers; any other label is an immediate rejection.
+            name: "signature_label_other_than_sig1",
+            label: "sig99",
+            components: "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\"",
+            omit_content_digest: false,
+            expect: Err("signature invalid"),
+        },
+        Rfc9421Case {
+            name: "content_digest_header_absent",
+            label: "sig1",
+            components: "\"@method\" \"@target-uri\" \"host\" \"date\" \"content-digest\"",
+            omit_content_digest: true,
+            expect: Err("missing content-digest"),
+        },
+    ];
+
+    /// Build and verify one RFC 9421 row.
+    fn run_rfc9421_case(case: &Rfc9421Case) {
+        let date = fetchit_fedi::transport::format_imf_fixdate(std::time::SystemTime::now());
+        let content_digest = compute_content_digest(CASE_BODY);
+        let user_agent = "http.rb/5.1.1 (Mastodon/4.4.0)";
+        let sig_params = format!(
+            "({});created=1785000000;keyid=\"{CASE_KEY_ID}\";alg=\"rsa-v1_5-sha256\"",
+            case.components
+        );
+
+        // The signer's honest base: one line per declared component,
+        // then the parameter line.
+        let mut lines: Vec<String> = case
+            .components
+            .split_whitespace()
+            .map(|raw| {
+                let name = raw.trim_matches('"');
+                let value = match name {
+                    "@method" => "POST".to_owned(),
+                    "@target-uri" => format!("https://{CASE_PUBLIC_HOST}{CASE_PATH}"),
+                    "host" => CASE_PUBLIC_HOST.to_owned(),
+                    "date" => date.clone(),
+                    "content-digest" => content_digest.clone(),
+                    "user-agent" => user_agent.to_owned(),
+                    other => panic!("case `{}` covers unknown component `{other}`", case.name),
+                };
+                format!("\"{name}\": {value}")
+            })
+            .collect();
+        lines.push(format!("\"@signature-params\": {sig_params}"));
+        let sig = sign_b64(&lines.join("\n"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static(CASE_ORIGIN_HOST));
+        headers.insert("date", HeaderValue::from_str(&date).unwrap());
+        headers.insert("user-agent", HeaderValue::from_static(user_agent));
+        if !case.omit_content_digest {
+            headers.insert(
+                "content-digest",
+                HeaderValue::from_str(&content_digest).unwrap(),
+            );
+        }
+        headers.insert(
+            "signature-input",
+            HeaderValue::from_str(&format!("{}={sig_params}", case.label)).unwrap(),
+        );
+        headers.insert(
+            "signature",
+            HeaderValue::from_str(&format!("{}=:{sig}:", case.label)).unwrap(),
+        );
+
+        let (_, pubkey_pem) = test_signing_key();
+        let got =
+            verify_inbound_signature(&headers, "josh", pubkey_pem, CASE_BODY, CASE_PUBLIC_HOST);
+        assert_eq!(got, case.expect, "rfc9421 case `{}`", case.name);
+    }
+
+    #[test]
+    fn rfc9421_variation_map_matches_current_behaviour() {
+        for case in RFC9421_CASES {
+            run_rfc9421_case(case);
+        }
     }
 
     const OURS: &str = "https://etchit.io/actors/josh";

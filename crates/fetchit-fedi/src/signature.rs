@@ -333,12 +333,15 @@ impl SignatureVerifyError {
 /// the same way the signer did — see Mastodon's `host_from_url`
 /// rule preserved by [`HttpSignatureKey::sign_post_rfc9421`].
 ///
-/// The covered-component list embedded in `signature_input` MUST
-/// include `("@method" "@target-uri" "host" "date" "content-digest")`;
-/// the receiver does not currently allow leaner subsets. Stricter
-/// (more components) is fine — extras don't break verification
-/// because the signing base is reconstructed verbatim from the
-/// parameter portion.
+/// The covered-component list embedded in `signature_input` MUST be
+/// EXACTLY `("@method" "@target-uri" "host" "date" "content-digest")`,
+/// in that order. The signing base is a fixed five-line shape
+/// (`build_signature_base`), not one derived from the declared list, so
+/// a leaner subset AND a stricter superset both fail: whatever the
+/// signer covered, this receiver rebuilds those five lines and no
+/// others. Only the `@signature-params` line is taken verbatim from
+/// the header. Pinned by the `rfc9421_variation_map_matches_current_behaviour`
+/// table in `fetchit-bridge-server`'s inbox route.
 ///
 /// `Content-Digest` is checked against `body`'s SHA-256 before the
 /// RSA verify so a missing/incorrect digest fails fast with a
